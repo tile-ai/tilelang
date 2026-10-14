@@ -155,7 +155,7 @@ def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(over
                 a,
                 src_shape=[48 if overlap else 32, 64],
                 dst_shape=[declared_rows, 64],
-                annotations={"stride": tirx.IntImm("int32", 4)},
+                annotations={"l0_pitch": tirx.IntImm("int32", 4)},
             ),
             core=2,
         ),
@@ -167,7 +167,7 @@ def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(over
                 dst_indices=[32, 0],
                 src_shape=[32, 64],
                 dst_shape=[32, 64],
-                annotations={"stride": tirx.IntImm("int32", 4)},
+                annotations={"l0_pitch": tirx.IntImm("int32", 4)},
             ),
             core=2,
         ),
@@ -220,7 +220,7 @@ def test_different_l0_pitches_conflict_within_same_plane(transposed, plane, mn_s
                 src_shape=shape,
                 dst_shape=[1, *shape],
                 dst_indices=[plane, *start],
-                annotations={"stride": tirx.IntImm("int32", 4)},
+                annotations={"l0_pitch": tirx.IntImm("int32", 4)},
             ),
             core=2,
         ),
@@ -251,7 +251,7 @@ def test_partial_l0_copies_require_provably_equal_pitches(pitch_relation):
                     dst_indices=[start, 0],
                     src_shape=[32, 64],
                     dst_shape=[32, 64],
-                    annotations={"stride": pitch},
+                    annotations={"l0_pitch": pitch},
                 ),
                 core=2,
             )
@@ -276,7 +276,7 @@ def test_l0_copy_pitch_is_instantiated_per_iteration(varying_pitch):
         a,
         dst_indices=[16 * i, 16 * (1 - i)],
         dst_shape=[16, 16],
-        annotations={"stride": 1 + i if varying_pitch else tirx.IntImm("int32", 2)},
+        annotations={"l0_pitch": 1 + i if varying_pitch else tirx.IntImm("int32", 2)},
     )
     body = unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, unit(load, core=2)), core=None)
     layouts = {src: make_ascend_major_k_layout(src), a: make_ascend_major_k_layout(a)}
@@ -299,7 +299,7 @@ def test_atomic_l0_copies_require_a_uniform_pitch(overlap, unroll, varying_pitch
         a,
         dst_indices=[0, 16 * (i + 1)],
         dst_shape=[16, 16],
-        annotations={"stride": 1 + i if varying_pitch else tirx.IntImm("int32", 1)},
+        annotations={"l0_pitch": 1 + i if varying_pitch else tirx.IntImm("int32", 1)},
     )
     lhs = tirx.BufferRegion(a, [tvm.ir.Range.from_min_extent(0, e) for e in (16, 32 if overlap else 16)])
     # Mixed pitches conservatively conflict even when the K regions are disjoint.

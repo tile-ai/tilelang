@@ -165,7 +165,7 @@ def test_nonrepresentable_dma_geometry_is_rejected(scope):
         _lower(src, dst, dst_region=_region(dst, [6, 4] if scope == "shared.l1" else [2, 3, 4]), layouts=layout)
 
 
-@pytest.mark.parametrize("explicit", [False, True], ids=["compact-default", "explicit-stride"])
+@pytest.mark.parametrize("explicit", [False, True], ids=["compact-default", "explicit-l0-pitch"])
 @pytest.mark.parametrize("symbolic", [False, True], ids=["static-region", "dynamic-region"])
 @pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
 def test_l1_to_l0_compact_pitch_can_be_overridden(explicit, symbolic, scope):
@@ -178,7 +178,7 @@ def test_l1_to_l0_compact_pitch_can_be_overridden(explicit, symbolic, scope):
         _region(src, [m, k]),
         _region(dst, [m, k]),
         layouts={src: make_ascend_nz_layout(src), dst: make_ascend_major_k_layout(dst)},
-        stride=4 if explicit else None,
+        l0_pitch=4 if explicit else None,
     )
     (copy,) = calls(after, "tl.ascend_load_cbuf_to_ca" if scope.endswith("a") else "tl.ascend_load_cbuf_to_cb")
     _equal(copy.args[4:8], [T.ceildiv(m, 16), T.ceildiv(k, 16), 4, 4 if explicit else T.ceildiv(m, 16)])
@@ -210,7 +210,7 @@ def test_partial_l0_copy_uses_full_pitch_and_mapped_destination_origin(dtype, ma
         _region(dst, [1] * len(plane) + (shape[::-1] if transpose else shape), index + (origin[::-1] if transpose else origin)),
         layouts={src: make_ascend_major_k_layout(src), dst: (make_ascend_major_mn_layout if major_mn else make_ascend_major_k_layout)(dst)},
         transpose=transpose,
-        stride=geometry[5],
+        l0_pitch=geometry[5],
     )
     (load,) = calls(after, "tl.ascend_load_cbuf_to_cb")
     base = 5 * rows * 128 if leading else 0
@@ -219,9 +219,9 @@ def test_partial_l0_copy_uses_full_pitch_and_mapped_destination_origin(dtype, ma
 
 
 @pytest.mark.parametrize(
-    "src_min,dst_min,extent,stride,diagnostic",
+    "src_min,dst_min,extent,l0_pitch,diagnostic",
     [
-        ([0, 0], [32, 0], [32, 32], None, "requires an explicit stride"),
+        ([0, 0], [32, 0], [32, 32], None, "requires an explicit l0_pitch"),
         ([0, 0], [8, 0], [16, 32], 4, "destination row16 origin"),
         ([0, 0], [16, 8], [16, 32], 4, "destination C0 origin"),
         ([8, 0], [16, 0], [16, 32], 4, "source row16 origin"),
@@ -230,7 +230,7 @@ def test_partial_l0_copy_uses_full_pitch_and_mapped_destination_origin(dtype, ma
         ([0, 0], [16, 0], [24, 32], 4, "source row16 extent"),
     ],
 )
-def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_min, extent, stride, diagnostic):
+def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_min, extent, l0_pitch, diagnostic):
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
     with pytest.raises(tvm.error.InternalError, match=diagnostic):
@@ -240,7 +240,7 @@ def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_m
             _region(src, extent, src_min),
             _region(dst, extent, dst_min),
             layouts={src: make_ascend_major_k_layout(src), dst: make_ascend_major_k_layout(dst)},
-            stride=stride,
+            l0_pitch=l0_pitch,
         )
 
 
@@ -249,7 +249,7 @@ def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_m
     [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
     ids=["q-compact-m", "v-compact-n", "oversized", "full-m-partial-drain"],
 )
-def test_explicit_stride_controls_offsets_and_keeps_plane_capacity(v_layout, oversized, full_m):
+def test_explicit_l0_pitch_controls_offsets_and_keeps_plane_capacity(v_layout, oversized, full_m):
     src = tirx.decl_buffer((2, 64, 64), "bfloat16", name="src", scope="shared.l1")
     a = tirx.decl_buffer((2, 64, 64), "bfloat16", name="a", scope="shared.l0a")
     b = tirx.decl_buffer((2, 64, 64), "bfloat16", name="b", scope="shared.l0b")
@@ -264,9 +264,9 @@ def test_explicit_stride_controls_offsets_and_keeps_plane_capacity(v_layout, ove
     for part in range(2):
         origin = [1, part * 32, 0] if v_layout else [1, 0, part * 32]
         region = [1, 64 if oversized or full_m else 32, 32]
-        statements.append(tirx.Evaluate(T.copy(_region(src, region, origin), _region(dst, region, origin), stride=pitch)))
+        statements.append(tirx.Evaluate(T.copy(_region(src, region, origin), _region(dst, region, origin), l0_pitch=pitch)))
     if not v_layout:
-        statements.append(tirx.Evaluate(T.copy(_region(c, [1, 16, 64], [1, 0, 0]), ub, stride=pitch)))
+        statements.append(tirx.Evaluate(T.copy(_region(c, [1, 16, 64], [1, 0, 0]), ub, l0_pitch=pitch)))
     mod = kernel(
         tirx.SeqStmt(statements),
         buffers=[src, a, b, c, ub],
@@ -281,7 +281,7 @@ def test_explicit_stride_controls_offsets_and_keeps_plane_capacity(v_layout, ove
     )
     with tvm.target.Target("ascend"):
         if oversized:
-            with pytest.raises(tvm.error.InternalError, match="stride"):
+            with pytest.raises(tvm.error.InternalError, match="l0_pitch"):
                 transform.AscendLowerTileOp()(mod)
             return
         after = transform.AscendLowerTileOp()(mod)
@@ -292,10 +292,10 @@ def test_explicit_stride_controls_offsets_and_keeps_plane_capacity(v_layout, ove
     assert math.prod(int(x) for x in allocated_buffer(after, dst.name).shape) == 2 * 64 * 64
     if not v_layout:
         (drain,) = calls(after, "tl.ascend_copy_matrix_cc_to_ub")
-        _equal([drain.args[6]], [pitch * 16])  # Only 16 rows are drained; stride describes the larger tile.
+        _equal([drain.args[6]], [pitch * 16])  # Only 16 rows are drained; l0_pitch describes the larger tile.
 
 
-def test_explicit_dynamic_stride_maps_each_iteration_independently():
+def test_explicit_dynamic_l0_pitch_maps_each_iteration_independently():
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
     i = tirx.Var("i", "int32")
@@ -305,26 +305,26 @@ def test_explicit_dynamic_stride_maps_each_iteration_independently():
         _region(src, [32 + 16 * i, 32], [0, 32]),
         _region(dst, [32 + 16 * i, 32], [0, 32]),
         layouts={src: make_ascend_major_k_layout(src), dst: make_ascend_major_k_layout(dst)},
-        stride=2 + i,
+        l0_pitch=2 + i,
         wrap=lambda body: tirx.For(i, 0, 3, tirx.ForKind.SERIAL, body),
     )
     (load,) = calls(after, "tl.ascend_load_cbuf_to_ca")
     _equal([load.args[7], load.args[0].args[2]], [2 + i, 2 * (2 + i) * 256])
 
 
-@pytest.mark.parametrize("stride,error", [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)])
-def test_copy_stride_rejects_invalid_values(stride, error):
+@pytest.mark.parametrize("l0_pitch,error", [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)])
+def test_copy_l0_pitch_rejects_invalid_values(l0_pitch, error):
     src = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l1")
     dst = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l0a")
-    with pytest.raises(error, match="stride"):
-        T.copy(src, dst, stride=stride)
+    with pytest.raises(error, match="l0_pitch"):
+        T.copy(src, dst, l0_pitch=l0_pitch)
 
 
-def test_copy_stride_is_only_supported_on_l0_paths():
+def test_copy_l0_pitch_is_only_supported_on_l0_paths():
     src = tirx.decl_buffer((64, 64), "bfloat16")
     dst = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l1")
-    with pytest.raises(ValueError, match="stride is supported only"):
-        T.copy(src, dst, stride=4)
+    with pytest.raises(ValueError, match="l0_pitch is supported only"):
+        T.copy(src, dst, l0_pitch=4)
 
 
 def test_pad_value_is_set_before_the_padded_dma():

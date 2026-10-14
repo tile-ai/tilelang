@@ -56,9 +56,9 @@ inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
                                            const LayoutMap &layouts) {
   Map<Var, PrimExpr> result;
   auto record = [&](const BufferRegion &region, size_t mn_axis,
-                    Optional<PrimExpr> stride = std::nullopt) {
+                    Optional<PrimExpr> l0_pitch = std::nullopt) {
     PrimExpr pitch =
-        stride.value_or(floordiv(region->region[mn_axis]->extent + 15, 16));
+        l0_pitch.value_or(floordiv(region->region[mn_axis]->extent + 15, 16));
     result.Set(region->buffer->data, pitch);
   };
   if (IsAscendCopyCall(call.get())) {
@@ -73,10 +73,10 @@ inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
         record(BufferRegion(copy->dst, copy->dst_range),
                copy->dst_range.size() - 2 +
                    (info.row16_axis == LogicalAxis::kCol),
-               copy->stride);
+               copy->l0_pitch);
     } else if (IsL0CBuffer(copy->src)) {
       record(BufferRegion(copy->src, copy->src_range),
-             copy->src_range.size() - 2, copy->stride);
+             copy->src_range.size() - 2, copy->l0_pitch);
     }
   } else if (call->op.same_as(Op::Get("tl.tileop.gemm"))) {
     Gemm gemm(call->args, call->annotations);
@@ -1040,14 +1040,14 @@ private:
 
     if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
       AscendCopy copy(op->args, op->annotations);
-      if (copy->stride.defined() ||
+      if (copy->l0_pitch.defined() ||
           (IsL1Buffer(copy->src) &&
            (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)))) {
         StmtExprVisitor::VisitExpr_(op);
         auto record = [&](const BufferRegion &region, bool is_read) {
           bool l0 = IsL0ABuffer(region->buffer) ||
                     IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer);
-          bool compact = copy->stride.defined();
+          bool compact = copy->l0_pitch.defined();
           for (size_t i = region->region.size() - 2; i < region->region.size();
                ++i)
             compact |= !ana_.CanProveEqual(region->region[i]->extent,

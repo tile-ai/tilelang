@@ -1,4 +1,4 @@
-"""Explicit copy stride assembles L0 tiles across compact tails and ring reuse."""
+"""Explicit copy l0_pitch assembles L0 tiles across compact tails and ring reuse."""
 
 import pytest
 import torch
@@ -35,17 +35,17 @@ def _partial_copy_kernel(mode, dtype, versions):
                 T.copy(B[e, :, :], b_l1)
                 if mode == "overwrite":
                     T.copy(a_l1, a)
-                    T.copy(a_l1[:32, :], a[32:64, :], stride=T.ceildiv(effective_m, 16))
+                    T.copy(a_l1[:32, :], a[32:64, :], l0_pitch=T.ceildiv(effective_m, 16))
                 elif mode in ("m-tail", "dynamic-tail"):
-                    T.copy(a_l1[:16, :], a[:16, :], stride=T.ceildiv(effective_m, 16))
-                    T.copy(a_l1[16:padded_m, :], a[16:padded_m, :], stride=T.ceildiv(effective_m, 16))
+                    T.copy(a_l1[:16, :], a[:16, :], l0_pitch=T.ceildiv(effective_m, 16))
+                    T.copy(a_l1[16:padded_m, :], a[16:padded_m, :], l0_pitch=T.ceildiv(effective_m, 16))
                 else:
                     for part in T.serial(2):
                         p = 1 - part if mode == "reverse" else part
                         if mode == "k-tail":
-                            T.copy(a_l1[:, p * 32 : (p + 1) * 32], a[:, p * 32 : (p + 1) * 32], stride=T.ceildiv(effective_m, 16))
+                            T.copy(a_l1[:, p * 32 : (p + 1) * 32], a[:, p * 32 : (p + 1) * 32], l0_pitch=T.ceildiv(effective_m, 16))
                         else:
-                            T.copy(a_l1[p * 32 : (p + 1) * 32, :], a[p * 32 : (p + 1) * 32, :], stride=T.ceildiv(effective_m, 16))
+                            T.copy(a_l1[p * 32 : (p + 1) * 32, :], a[p * 32 : (p + 1) * 32, :], l0_pitch=T.ceildiv(effective_m, 16))
                 for part in T.serial(2):
                     # B is [K,N] for V, [N,K] otherwise. GEMM anchors the
                     # MajorMN/MajorK layout; the copy has no explicit transpose.
@@ -53,10 +53,10 @@ def _partial_copy_kernel(mode, dtype, versions):
                         T.copy(
                             b_l1[part * 32 : (part + 1) * 32, :padded_n],
                             b[part * 32 : (part + 1) * 32, :padded_n],
-                            stride=T.ceildiv(effective_n, 16),
+                            l0_pitch=T.ceildiv(effective_n, 16),
                         )
                     else:
-                        T.copy(b_l1[part * 32 : (part + 1) * 32, :], b[part * 32 : (part + 1) * 32, :], stride=T.ceildiv(effective_n, 16))
+                        T.copy(b_l1[part * 32 : (part + 1) * 32, :], b[part * 32 : (part + 1) * 32, :], l0_pitch=T.ceildiv(effective_n, 16))
                 if v_layout:
                     T.gemm(a[:effective_m, :k], b[:k, :effective_n], acc[:effective_m, :effective_n], clear_accum=True)
                 else:
@@ -65,7 +65,7 @@ def _partial_copy_kernel(mode, dtype, versions):
                 T.copy(
                     acc[:drain_m, :effective_n],
                     C[e, :drain_m, :effective_n],
-                    stride=T.ceildiv(effective_m, 16) if mode == "partial-drain" else None,
+                    l0_pitch=T.ceildiv(effective_m, 16) if mode == "partial-drain" else None,
                 )
 
     return main
@@ -139,19 +139,21 @@ def test_manual_partial_copies_with_branch_specific_gemm_pitch(v_layout):
                     T.ascend_wait_flag("MTE2_MTE1", 0)
                     for part in T.serial(2):
                         T.copy(
-                            a_l1[:padded_m, part * 32 : (part + 1) * 32], a[:padded_m, part * 32 : (part + 1) * 32], stride=T.ceildiv(m, 16)
+                            a_l1[:padded_m, part * 32 : (part + 1) * 32],
+                            a[:padded_m, part * 32 : (part + 1) * 32],
+                            l0_pitch=T.ceildiv(m, 16),
                         )
                         if v_layout:
                             T.copy(
                                 b_l1[part * 32 : (part + 1) * 32, :padded_n],
                                 b[part * 32 : (part + 1) * 32, :padded_n],
-                                stride=T.ceildiv(n, 16),
+                                l0_pitch=T.ceildiv(n, 16),
                             )
                         else:
                             T.copy(
                                 b_l1[:padded_n, part * 32 : (part + 1) * 32],
                                 b[:padded_n, part * 32 : (part + 1) * 32],
-                                stride=T.ceildiv(n, 16),
+                                l0_pitch=T.ceildiv(n, 16),
                             )
                     T.ascend_set_flag("MTE1_M", 0)
                     T.ascend_wait_flag("MTE1_M", 0)

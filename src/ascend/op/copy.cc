@@ -446,7 +446,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     PrimExpr m_step = src_region.outer1->extent;
     PrimExpr k_step = src_region.outer0->extent;
     PrimExpr src_stride = src_info.outer1;
-    PrimExpr dst_stride = op.stride.value_or(dst_region.outer1->extent);
+    PrimExpr dst_stride = op.l0_pitch.value_or(dst_region.outer1->extent);
     Call ptr = Downcast<Call>(dst_ptr);
     ptr.CopyOnWrite()->annotations.Set(attr::kL0AccessPitch, dst_stride);
     dst_ptr = ptr;
@@ -455,7 +455,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     ICHECK(analyzer->CanProve(dst_stride > 0) &&
            analyzer->CanProve(dst_stride <= dst_info.outer1,
                               arith::ProofStrength::kSymbolicBound))
-        << "Ascend L1->L0 stride must be positive and fit destination capacity";
+        << "Ascend L1->L0 l0_pitch must be positive and fit destination "
+           "capacity";
     auto require_multiple = [&](const PrimExpr &value, int multiple,
                                 const char *parameter) {
       ICHECK(analyzer->CanProveEqual(
@@ -469,9 +470,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     bool nonzero_destination = false;
     for (size_t i = dst_range.size() - 2; i < dst_range.size(); ++i)
       nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->min, 0);
-    ICHECK(!nonzero_destination || op.stride.defined())
+    ICHECK(!nonzero_destination || op.l0_pitch.defined())
         << "Ascend partial L1->L0 copy with a nonzero destination origin "
-           "requires an explicit stride";
+           "requires an explicit l0_pitch";
     auto check_region = [&](const Buffer &buffer, const Array<Range> &ranges,
                             const AscendFractalLayoutInfo &info,
                             const AscendFractalRegionInfo &region,
@@ -540,7 +541,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
            analyzer->CanProve(dst_region.outer1->min + written_outer1 <=
                               dst_stride))
         << "Ascend L1->L0 copy exceeds the physical L0 allocation "
-        << "or stride of " << op.dst->name;
+        << "or l0_pitch of " << op.dst->name;
     if (nonzero_destination) {
       ICHECK(
           analyzer->CanProveEqual(written_outer0, dst_region.outer0->extent) &&
@@ -585,14 +586,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
-    if (op.stride.defined()) {
-      PrimExpr compact_pitch = op.stride.value();
+    if (op.l0_pitch.defined()) {
+      PrimExpr compact_pitch = op.l0_pitch.value();
       With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
       ICHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
                                 compact_pitch) &&
              analyzer->CanProve(compact_pitch <= info.outer1,
                                 arith::ProofStrength::kSymbolicBound))
-          << "Ascend L0C copy stride must cover the source region and fit "
+          << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
     }
@@ -714,14 +715,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->GM source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
-    if (op.stride.defined()) {
-      PrimExpr compact_pitch = op.stride.value();
+    if (op.l0_pitch.defined()) {
+      PrimExpr compact_pitch = op.l0_pitch.value();
       With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
       ICHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
                                 compact_pitch) &&
              analyzer->CanProve(compact_pitch <= info.outer1,
                                 arith::ProofStrength::kSymbolicBound))
-          << "Ascend L0C copy stride must cover the source region and fit "
+          << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
     }
@@ -1045,19 +1046,19 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   if (auto val = node->annotations.Get("sub_blockid")) {
     node->sub_blockid = Downcast<PrimExpr>(val.value());
   }
-  node->stride = std::nullopt;
-  if (auto val = node->annotations.Get("stride")) {
-    node->stride = Downcast<PrimExpr>(val.value());
-    ICHECK(node->stride.value().dtype().is_scalar() &&
-           (node->stride.value().dtype().is_int() ||
-            node->stride.value().dtype().is_uint()))
-        << "Ascend copy stride must be a scalar integer";
+  node->l0_pitch = std::nullopt;
+  if (auto val = node->annotations.Get("l0_pitch")) {
+    node->l0_pitch = Downcast<PrimExpr>(val.value());
+    ICHECK(node->l0_pitch.value().dtype().is_scalar() &&
+           (node->l0_pitch.value().dtype().is_int() ||
+            node->l0_pitch.value().dtype().is_uint()))
+        << "Ascend copy l0_pitch must be a scalar integer";
     auto path = ascend::GetDMAPath(node->src, node->dst);
     ICHECK(path == ascend::DMAPath::kL1ToL0A ||
            path == ascend::DMAPath::kL1ToL0B ||
            path == ascend::DMAPath::kL0CToUB ||
            path == ascend::DMAPath::kL0CToGM)
-        << "Ascend copy stride is supported only for L1->L0A/L0B and "
+        << "Ascend copy l0_pitch is supported only for L1->L0A/L0B and "
            "L0C->UB/GM";
   }
   node->pad_value = std::nullopt;

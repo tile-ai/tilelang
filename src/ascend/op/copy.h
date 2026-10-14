@@ -39,7 +39,7 @@ public:
   PrimExpr unit_flag_ctl;          // "unit_flag_ctrl", defaults to 0
   PrimExpr sub_blockid;            // "sub_blockid", defaults to 0
   Optional<Integer> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
-  Optional<PrimExpr> stride;    // "stride": L0 matrix pitch in fractal blocks
+  Optional<PrimExpr> l0_pitch;  // "l0_pitch": L0 matrix pitch in fractal blocks
   Optional<PrimExpr> pad_value; // "pad_value": GM->UB pad fill value
 
   /*!

@@ -233,7 +233,7 @@ def copy(  # noqa: A001
     *,
     coalesced_width: int | None = None,
     transpose: bool = False,
-    stride: int | tirx.PrimExpr | None = None,
+    l0_pitch: int | tirx.PrimExpr | None = None,
     l2_cache_ctrl: int | str | None = None,
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     sub_blockid: int | tirx.PrimExpr | None = None,
@@ -248,10 +248,10 @@ def copy(  # noqa: A001
 
     L1-to-L0A/L0B copies default to a compact tile whose pitch comes from
     the destination region. When assembling a tile with multiple copies,
-    pass ``stride`` on each copy to specify the full tile's fractal pitch.
-    Nonzero matrix origins require ``stride`` and complete, aligned fractals
+    pass ``l0_pitch`` on each copy to specify the full tile's fractal pitch.
+    Nonzero matrix origins require ``l0_pitch`` and complete, aligned fractals
     (including any transpose groups). The allocation and version spacing
-    remain unchanged. Stride is explicit and independent of auto-scheduling;
+    remain unchanged. The pitch is explicit and independent of auto-scheduling;
     the caller must match the consuming GEMM's effective M/N.
     Whole buffers must have equal element counts, but their shapes may differ
     for Ascend format conversion and transpose paths (for example, copying
@@ -276,7 +276,7 @@ def copy(  # noqa: A001
             memory access. Defaults to None.
         transpose (bool, keyword-only): Ascend GM→L1 only. Emit dn2nz (which
             transposes the N/D mapping) instead of nd2nz. Defaults to False.
-        stride (int | PrimExpr | None, keyword-only): L0 matrix pitch in
+        l0_pitch (int | PrimExpr | None, keyword-only): L0 matrix pitch in
             16-element M/N fractal blocks, not bytes or an inter-block gap.
             For L1→L0A/L0B, overrides the destination pitch; for L0C→UB/GM,
             overrides the source pitch. Use ``ceildiv(M, 16)`` for A/C and
@@ -324,16 +324,16 @@ def copy(  # noqa: A001
 
     ann = _normalize_annotations(annotations)
 
-    if stride is not None and "stride" not in ann:
-        ann["stride"] = stride
-    if "stride" in ann:
-        value = ann["stride"]
+    if l0_pitch is not None and "l0_pitch" not in ann:
+        ann["l0_pitch"] = l0_pitch
+    if "l0_pitch" in ann:
+        value = ann["l0_pitch"]
         if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
-            raise TypeError("Ascend T.copy stride must be an integer or integer PrimExpr")
+            raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
         if isinstance(value, tirx.PrimExpr) and not str(value.dtype).startswith(("int", "uint")):
-            raise TypeError("Ascend T.copy stride must be an integer or integer PrimExpr")
+            raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
         if isinstance(value, (int, tirx.IntImm)) and int(value) <= 0:
-            raise ValueError("Ascend T.copy stride must be positive")
+            raise ValueError("Ascend T.copy l0_pitch must be positive")
         src_buf = src if isinstance(src, tirx.Buffer) else src.buffer
         dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.buffer
         if not (
@@ -342,7 +342,7 @@ def copy(  # noqa: A001
             or src_buf.scope() == "shared.l0c"
             and dst_buf.scope() in ("shared", "shared.dyn", "global")
         ):
-            raise ValueError("Ascend T.copy stride is supported only for L1→L0A/L0B and L0C→UB/GM")
+            raise ValueError("Ascend T.copy l0_pitch is supported only for L1→L0A/L0B and L0C→UB/GM")
 
     # Ascend GM→L1: use dn2nz (transpose N/D mapping) instead of nd2nz
     if transpose and "transpose" not in ann:

@@ -817,7 +817,7 @@ def test_padded_copy_coalesced_aligned_rows_allow_reuse():
 
 @pytest.mark.parametrize("compact", [False, True])
 def test_compact_l0_drain_preserves_ub_write_coverage(compact):
-    stride = 1 if compact else None
+    l0_pitch = 1 if compact else None
 
     @T.prim_func
     def main(scratch: T.Tensor((16, 16), "float32"), out: T.Tensor((16, 16), "float32")):
@@ -838,7 +838,7 @@ def test_compact_l0_drain_preserves_ub_write_coverage(compact):
                 T.copy(l1, rhs)
                 T.gemm(lhs, rhs, acc[:16, :], transpose_B=True, clear_accum=True)
                 # A compact source pitch must not hide the full UB write.
-                T.copy(acc[:16, :], a, stride=stride)
+                T.copy(acc[:16, :], a, l0_pitch=l0_pitch)
                 T.copy(a, out)
 
     assert ("a", "b") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
