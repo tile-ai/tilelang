@@ -109,8 +109,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
                     const ConflictHintList &root_conflicts = {});
 
 // Check whether two task regions may overlap under their respective symbolic
-// contexts, including independent repeats of their last conflict axis. Only a
-// proof of disjointness removes a conflict; solver unknowns remain conflicts.
+// contexts. Only a proof of disjointness removes a conflict.
 // `offset == 0` compares accesses in the same iteration. A positive
 // offset constrains the current consumer loop coordinate to equal the producer
 // coordinate plus that offset. A negative offset denotes an automatic
@@ -121,11 +120,13 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // an identically-shaped iteration in another owner can still be a distinct
 // epoch. Shared by scheduling-time IRStructure analysis and the scheduled-TIR
 // synchronization pass.
-bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
-                        const ConstrSet &b_ctx, const MemoryAccess &b_access,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
+                        const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners = 0,
-                        const ConflictHintList &root_conflicts = {});
+                        const ConflictHintList &root_conflicts = {},
+                        Optional<PrimExpr> a_pitch = std::nullopt,
+                        Optional<PrimExpr> b_pitch = std::nullopt);
 
 } // namespace ascend
 } // namespace tl

@@ -38,6 +38,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include "ascend/layout/ascend_layouts.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
@@ -112,13 +113,13 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
   return {controls.begin() + first, controls.end()};
 }
 
-bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
-                        const ConstrSet &b_ctx, const MemoryAccess &b_access,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
+                        const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
-                        const ConflictHintList &root_conflicts) {
-  const BufferRegion &a_region = a_access.logical;
-  const BufferRegion &b_region = b_access.logical;
+                        const ConflictHintList &root_conflicts,
+                        Optional<PrimExpr> a_pitch,
+                        Optional<PrimExpr> b_pitch) {
   const bool cross = offset != 0;
   if (cross && loop == nullptr)
     return false;
@@ -152,8 +153,8 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
   if (!a_region->buffer.same_as(b_region->buffer))
     return true;
 
-  const Array<Range> &a_rng = a_access.bounds;
-  const Array<Range> &b_rng = b_access.bounds;
+  Array<Range> a_rng = ExpandAscendFractalMayAccess(a_region)->region;
+  Array<Range> b_rng = ExpandAscendFractalMayAccess(b_region)->region;
   if (a_rng.size() != b_rng.size())
     return true; // shape mismatch — be safe
   const size_t ndim = a_rng.size();
@@ -210,59 +211,27 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
   }
   loop_ctx.Merge(a_local_ctx).Merge(b_local_ctx).Populate(ana);
 
-  // Snapshot bounds, repeat, and stride together on each side. Identical
-  // mutable reads at two access points need not have the same value.
   FreshenMutableReads freshen_a(FreshenMutableReads::Mode::kSnapshot);
   FreshenMutableReads freshen_b(FreshenMutableReads::Mode::kSnapshot);
-  // Internal task loops are independent access choices on the two sides.
-  // Rename them together with their bounds and pitch before adding domains.
-  auto bind_domains = [&](const MemoryAccess &access, Map<Var, PrimExpr> *sub,
-                          FreshenMutableReads &freshen, const char *suffix) {
-    for (const auto &[var, range] : access.domains)
-      sub->Set(var, var.copy_with_suffix(suffix));
-    for (const auto &[var, range] : access.domains) {
-      PrimExpr index = freshen(Substitute(var, *sub));
-      PrimExpr min = freshen(Substitute(range->min, *sub));
-      PrimExpr extent = freshen(Substitute(range->extent, *sub));
-      ana.EnterConstraint(index >= min &&
-                          cast(DataType::Int(64), index) <
-                              cast(DataType::Int(64), min) +
-                                  cast(DataType::Int(64), extent));
+  size_t compared_dims = ndim;
+  const Buffer &buffer = a_region->buffer;
+  if (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer)) {
+    bool same_pitch = false;
+    if (a_pitch.defined() && b_pitch.defined()) {
+      PrimExpr equal = freshen_a(Substitute(a_pitch.value(), a_sub)) ==
+                       freshen_b(Substitute(b_pitch.value(), b_sub));
+      same_pitch = ana.CanProve(equal) || ana.z3_prover.CanProve(equal);
     }
-  };
-  bind_domains(a_access, &a_sub, freshen_a, "_access_p");
-  bind_domains(b_access, &b_sub, freshen_b, "_access_c");
-  PrimExpr a_repeat = freshen_a(Substitute(a_access.repeat, a_sub));
-  PrimExpr b_repeat = freshen_b(Substitute(b_access.repeat, b_sub));
-
-  // Each side chooses an independent interval from its repeated last axis.
-  // Proving disjointness for every permitted pair is equivalent to proving
-  // that no pair overlaps; no enumeration or explicit quantifier is needed.
-  auto repeat_min = [&](PrimExpr min, const PrimExpr &repeat,
-                        const PrimExpr &stride, const char *name) -> PrimExpr {
-    if (is_one(ana.Simplify(repeat)))
-      return min;
-    // Widen before multiplying so int32 counts/pitches do not truncate the
-    // address calculation. Zero and negative strides need no special case.
-    Var index(name, DataType::Int(64));
-    ana.EnterConstraint(index >= 0 && index < cast(index.dtype(), repeat));
-    return cast(index.dtype(), min) + index * cast(index.dtype(), stride);
-  };
-
-  PrimExpr any_dim_disjoint = (a_repeat <= 0) || (b_repeat <= 0);
-  for (size_t i = 0; i < ndim; ++i) {
+    // L0 matrix regions may overlap unless their pitches are provably equal.
+    if (!same_pitch)
+      compared_dims = ndim > 2 ? ndim - 2 : 0;
+  }
+  PrimExpr any_dim_disjoint = Bool(false);
+  for (size_t i = 0; i < compared_dims; ++i) {
     PrimExpr a_min = freshen_a(Substitute(a_rng[i]->min, a_sub));
     PrimExpr a_extent = freshen_a(Substitute(a_rng[i]->extent, a_sub));
     PrimExpr b_min = freshen_b(Substitute(b_rng[i]->min, b_sub));
     PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
-    if (i + 1 == ndim) {
-      a_min = repeat_min(a_min, a_repeat,
-                         freshen_a(Substitute(a_access.stride, a_sub)),
-                         "region_repeat_p");
-      b_min = repeat_min(b_min, b_repeat,
-                         freshen_b(Substitute(b_access.stride, b_sub)),
-                         "region_repeat_c");
-    }
     // A half-open endpoint can exceed the int32 index range by one even
     // for an ordinary single-element access.
     PrimExpr a_end =
@@ -302,7 +271,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
 
   struct RegionAccess {
     TaskNode *task;
-    MemoryAccess region;
+    BufferRegion region;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -313,9 +282,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(nodes[i], tasks);
     for (TaskNode *task : tasks) {
-      for (const MemoryAccess &region : task->GetReadAccesses())
+      for (const BufferRegion &region : task->GetReadRegions())
         accesses[i].reads.push_back({task, region});
-      for (const MemoryAccess &region : task->GetWriteAccesses())
+      for (const BufferRegion &region : task->GetWriteRegions())
         accesses[i].writes.push_back({task, region});
     }
   }
@@ -420,8 +389,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                           const std::vector<RegionAccess> &rhs_accesses) {
         for (const RegionAccess &lhs : lhs_accesses) {
           for (const RegionAccess &rhs : rhs_accesses) {
-            const Var &lhs_storage = lhs.region.logical->buffer->data;
-            const Var &rhs_storage = rhs.region.logical->buffer->data;
+            const Var &lhs_storage = lhs.region->buffer->data;
+            const Var &rhs_storage = rhs.region->buffer->data;
             ffi::Optional<Var> storage;
             if (lhs_storage.same_as(rhs_storage))
               storage = lhs_storage;
@@ -437,8 +406,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
                 if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                        rhs.task->outer_ctx, rhs.region, loop, d,
-                                       /*num_storage_owners=*/0,
-                                       root_conflicts)) {
+                                       /*num_storage_owners=*/0, root_conflicts,
+                                       lhs.task->GetL0Pitch(lhs_storage),
+                                       rhs.task->GetL0Pitch(rhs_storage))) {
                   add_pair(storage, d, lhs.task, rhs.task);
                   break;
                 }
@@ -453,7 +423,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
               if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                      rhs.task->outer_ctx, rhs.region, loop,
                                      distance, get_num_storage_owners(storage),
-                                     root_conflicts)) {
+                                     root_conflicts,
+                                     lhs.task->GetL0Pitch(lhs_storage),
+                                     rhs.task->GetL0Pitch(rhs_storage))) {
                 add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
                          rhs.task,
                          owner_exclusion ? DependencyKind::kOwnerExclusion

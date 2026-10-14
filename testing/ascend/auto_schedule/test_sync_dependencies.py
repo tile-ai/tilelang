@@ -136,22 +136,25 @@ def test_dma_row_writes_only_serialize_overlapping_regions(overlap):
     tvm.ir.assert_structural_equal(releases[0].args[1], waits[0].args[1])
 
 
-@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint-halves", "overwrite-middle"])
-def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(overlap):
+@pytest.mark.parametrize(
+    "overlap, declared_rows",
+    [(False, 32), (False, 48), (True, 48)],
+    ids=["disjoint-halves", "declared-overlap", "overwrite-middle"],
+)
+def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(overlap, declared_rows):
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     a = tirx.decl_buffer((64, 64), "bfloat16", name="a", scope="shared.l0a")
     b = tirx.decl_buffer((64, 64), "bfloat16", name="b", scope="shared.l0b")
     c = tirx.decl_buffer((64, 64), "float32", name="c", scope="shared.l0c")
     # B and the L1 source are already prepared at this pass boundary.
-    # The first destination can hold 48 rows; its actual write covers only
-    # the source's 32 or 48 rows. Only the latter overlaps the next copy.
+    # Dependencies conservatively cover the declared destination region.
     body = seq(
         unit(
             copy(
                 src,
                 a,
                 src_shape=[48 if overlap else 32, 64],
-                dst_shape=[48, 64],
+                dst_shape=[declared_rows, 64],
                 annotations={"stride": tirx.IntImm("int32", 4)},
             ),
             core=2,
@@ -173,7 +176,7 @@ def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(over
     layouts = {src: make_ascend_major_k_layout(src), a: make_ascend_major_k_layout(a)}
     after = transform.InsertSync()(kernel(body, buffers=[src, a, b, c], annotations={"layout_map": layouts}))
     barriers = [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE1"]
-    assert bool(barriers) == overlap
+    assert bool(barriers) == (declared_rows > 32)
     releases, waits = _events(after, "set", "MTE1_M"), _events(after, "wait", "MTE1_M")
     assert releases and waits
     for release in releases:
@@ -189,10 +192,10 @@ def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(over
 @pytest.mark.parametrize("transposed", [False, True], ids=["major-k", "major-mn"])
 @pytest.mark.parametrize(
     "plane, mn_start, k_start, mn_size, k_size, overlap",
-    [(1, 32, 0, 32, 64, False), (0, 32, 0, 32, 64, True), (0, 48, 48, 16, 16, False)],
-    ids=["separate-planes", "physical-overlap", "physical-disjoint"],
+    [(1, 32, 0, 32, 64, False), (0, 32, 0, 32, 64, True), (0, 48, 48, 16, 16, True)],
+    ids=["separate-planes", "physical-overlap", "different-pitch-disjoint-regions"],
 )
-def test_different_l0_pitches_order_physical_overlap(transposed, plane, mn_start, k_start, mn_size, k_size, overlap):
+def test_different_l0_pitches_conflict_within_same_plane(transposed, plane, mn_start, k_start, mn_size, k_size, overlap):
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     a = tirx.decl_buffer((2, 64, 64), "bfloat16", name="a", scope="shared.l0b" if transposed else "shared.l0a")
     b = tirx.decl_buffer((64, 64), "bfloat16", name="b", scope="shared.l0a" if transposed else "shared.l0b")
@@ -231,6 +234,36 @@ def test_different_l0_pitches_order_physical_overlap(transposed, plane, mn_start
     assert bool(_events(after, "wait", "M_MTE1")) == overlap
 
 
+@pytest.mark.parametrize("pitch_relation", ["same", "equivalent", "unknown"])
+def test_partial_l0_copies_require_provably_equal_pitches(pitch_relation):
+    src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
+    a = tirx.decl_buffer((80, 64), "bfloat16", name="a", scope="shared.l0a")
+    p, q = tirx.Var("p", "int32"), tirx.Var("q", "int32")
+    first_pitch = 4 + p % 2
+    second_pitch = {"same": first_pitch, "equivalent": 5 - (1 - p % 2), "unknown": 4 + q % 2}[pitch_relation]
+    body = seq(
+        *(
+            unit(
+                copy(
+                    src,
+                    a,
+                    src_indices=[start, 0],
+                    dst_indices=[start, 0],
+                    src_shape=[32, 64],
+                    dst_shape=[32, 64],
+                    annotations={"stride": pitch},
+                ),
+                core=2,
+            )
+            for start, pitch in [(0, first_pitch), (32, second_pitch)]
+        )
+    )
+    layouts = {src: make_ascend_major_k_layout(src), a: make_ascend_major_k_layout(a)}
+    after = transform.InsertSync()(kernel(body, buffers=[src, a], params=[p, q], annotations={"layout_map": layouts}))
+    barriers = [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE1"]
+    assert bool(barriers) == (pitch_relation == "unknown")
+
+
 @pytest.mark.parametrize("varying_pitch", [False, True], ids=["disjoint", "overlap-after-pitch-change"])
 def test_l0_copy_pitch_is_instantiated_per_iteration(varying_pitch):
     src = tirx.decl_buffer((16, 16), "bfloat16", name="src", scope="shared.l1")
@@ -254,22 +287,22 @@ def test_l0_copy_pitch_is_instantiated_per_iteration(varying_pitch):
 
 @pytest.mark.parametrize("overlap", [False, True], ids=["disjoint", "overlap"])
 @pytest.mark.parametrize("unroll", [False, True], ids=["internal-loop", "multiple-calls"])
-def test_atomic_l0_copies_keep_address_and_pitch_correlated(overlap, unroll):
+@pytest.mark.parametrize("varying_pitch", [False, True], ids=["same-pitch", "mixed-pitches"])
+def test_atomic_l0_copies_require_a_uniform_pitch(overlap, unroll, varying_pitch):
     src = tirx.decl_buffer((16, 16), "bfloat16", name="src", scope="shared.l1")
-    a = tirx.decl_buffer((32, 32), "bfloat16", name="a", scope="shared.l0a")
+    a = tirx.decl_buffer((32, 48), "bfloat16", name="a", scope="shared.l0a")
     b = tirx.decl_buffer((16, 32 if overlap else 16), "bfloat16", name="b", scope="shared.l0b")
     c = tirx.decl_buffer((16, 16), "float32", name="c", scope="shared.l0c")
     i = tirx.Var("i", "int32")
     load = copy(
         src,
         a,
-        dst_indices=[16 * i, 16 * (1 - i)],
+        dst_indices=[0, 16 * (i + 1)],
         dst_shape=[16, 16],
-        annotations={"stride": 1 + i},
+        annotations={"stride": 1 + i if varying_pitch else tirx.IntImm("int32", 1)},
     )
     lhs = tirx.BufferRegion(a, [tvm.ir.Range.from_min_extent(0, e) for e in (16, 32 if overlap else 16)])
-    # Both loop iterations write block 1. The consumer reads block 0 or
-    # blocks [0,2); taking the logical loop hull loses this distinction.
+    # Mixed pitches conservatively conflict even when the K regions are disjoint.
     loads = (
         seq(*(tirx.stmt_functor.substitute(load, {i: value}) for value in (0, 1)))
         if unroll
@@ -281,8 +314,8 @@ def test_atomic_l0_copies_keep_address_and_pitch_correlated(overlap, unroll):
     )
     layouts = {src: make_ascend_major_k_layout(src), a: make_ascend_major_k_layout(a)}
     after = transform.InsertSync()(kernel(body, buffers=[src, a, b, c], annotations={"layout_map": layouts}))
-    assert bool(_events(after, "set", "MTE1_M")) == overlap
-    assert bool(_events(after, "wait", "MTE1_M")) == overlap
+    assert bool(_events(after, "set", "MTE1_M")) == (overlap or varying_pitch)
+    assert bool(_events(after, "wait", "MTE1_M")) == (overlap or varying_pitch)
 
 
 def test_equivalent_lexical_epoch_serializes_counter_ring():

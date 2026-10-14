@@ -221,8 +221,7 @@ private:
     bool changed = false;
     for (const Var &var : accesses.read_vars)
       changed |= AddDemand(&var_demand_, var, mask);
-    for (const ascend::MemoryAccess &access : accesses.read_regions) {
-      const BufferRegion &region = access.logical;
+    for (const BufferRegion &region : accesses.read_regions) {
       if (IsRegisterRegion(region))
         changed |= AddDemand(&register_demand_, region->buffer->data, mask);
     }
