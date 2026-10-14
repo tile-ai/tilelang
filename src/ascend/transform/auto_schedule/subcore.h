@@ -389,10 +389,15 @@ private:
   Var VarFor(const Var &var, int p) {
     if (!varying_.count(var))
       return var;
-    auto [it, inserted] = vars_[p].emplace(var, Var());
-    if (inserted)
-      it->second = var.copy_with_suffix("_aiv" + std::to_string(p));
-    return it->second;
+    auto it = vars_[p].find(var);
+    if (it != vars_[p].end())
+      return it->second;
+    Var result = var.copy_with_suffix("_aiv" + std::to_string(p));
+    vars_[p].emplace(var, result);
+    // Enclosing controls revisit projected children. Keep the same identity
+    // when their loop binders are encountered again on this subcore.
+    vars_[p].emplace(result, result);
+    return result;
   }
 
   Buffer BufferFor(const Buffer &buffer, int p) {
@@ -416,6 +421,8 @@ private:
     writer->strides = buffer->strides.Map(rewrite);
     writer->elem_offset = rewrite(buffer->elem_offset);
     buffers_[p].emplace(buffer, result);
+    // A projected view may still depend on a projected loop binder.
+    buffers_[p].emplace(result, result);
     if (IsSharedBuffer(buffer) && varying_.count(buffer->data))
       ub_sids_.Set(result->data, Integer(p));
     return result;

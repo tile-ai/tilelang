@@ -257,6 +257,52 @@ def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
+def test_nested_subcore_projection_reuses_binders_and_views(field):
+    sid, outer, middle = (tirx.Var(name, "int32") for name in ("sid", "outer", "middle"))
+    # A source name may already have this suffix; projection must use identity.
+    i, value = tirx.Var("i_aiv0", "int32"), tirx.Var("value", "int32")
+    storage = tirx.decl_buffer((64,), "int32", name="storage", scope="shared.dyn")
+    view = tirx.decl_buffer(
+        (i + 1 if field == "shape" else 1,),
+        "int32",
+        name="view",
+        data=storage.data,
+        scope="shared.dyn",
+        strides=[i + 1 if field == "strides" else 1],
+        elem_offset=i if field == "elem_offset" else 0,
+    )
+    body = seq(tirx.Bind(value, i + outer + middle + sid), tirx.DeclBuffer(view), tirx.BufferStore(view, value, [0]))
+    inner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"test.buffer_metadata": {view: view}})
+    nested = unit(tirx.For(middle, 0, 2, tirx.ForKind.SERIAL, unit(inner, core=0)), core=None)
+    before = kernel(unit(tirx.For(outer, 0, sid + 1, tirx.ForKind.SERIAL, nested), core=None), buffers=[storage])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+
+    after = transform.AssignCore()(before)
+    assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
+    loops = nodes(after, tirx.For)
+    assert len(loops) == 6
+    assert {loop.loop_var.name for loop in loops} == {f"{var.name}_aiv{p}" for var in (outer, middle, i) for p in range(2)}
+    tasks = _tasks(after)
+    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 1]
+    for task in tasks:
+        owner = int(task.node["subcore"])
+        (loop,) = nodes(task.body, tirx.For)
+        (binding,) = nodes(task.body, tirx.Bind)
+        (definition,) = nodes(task.body, tirx.DeclBuffer)
+        (store,) = nodes(task.body, tirx.BufferStore)
+        result = definition.buffer
+        assert binding.var.name == f"value_aiv{owner}"
+        assert store.value.same_as(binding.var)
+        assert result.name == f"view_aiv{owner}"
+        assert store.buffer.same_as(result)
+        assert loop.annotations["test.buffer_metadata"][result].same_as(result)
+        assert result.data.same_as(allocated_buffer(after, f"storage_aiv{owner}").data)
+        expression = result.elem_offset if field == "elem_offset" else getattr(result, field)[0]
+        tvm.ir.assert_structural_equal(expression, loop.loop_var if field == "elem_offset" else loop.loop_var + 1)
+
+
+@pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
 @pytest.mark.parametrize("scope", ["global", "shared.l1"])
 def test_subcore_view_metadata_projects_without_cloning_common_storage(field, scope):
     from tilelang.layout import Layout
