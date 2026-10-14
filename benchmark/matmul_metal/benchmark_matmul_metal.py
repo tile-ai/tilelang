@@ -32,7 +32,7 @@ def matmul_simdgroup(M, N, K, block_M=64, block_N=64, block_K=32, dtype=T.float1
     def gemm_kernel(
         A: T.Tensor((M, K), dtype),
         B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), accum_dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared")
@@ -64,7 +64,7 @@ def matmul_cooperative_tensor_shared_c(
     def gemm_kernel(
         A: T.Tensor((M, K), dtype),
         B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), accum_dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared")
@@ -91,6 +91,7 @@ def matmul_cooperative_tensor_global(
     swizzle_panel=0,
     swizzle_order="row",
     dtype=T.float16,
+    # gemm lowering path for global C internally instantiates a T.float32 tensor for accumulation
     accum_dtype=T.float32,
 ):
 
@@ -98,7 +99,7 @@ def matmul_cooperative_tensor_global(
     def gemm_kernel(
         A: T.Tensor((M, K), dtype),
         B: T.Tensor((K, N), dtype),
-        C: T.Tensor((M, N), accum_dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         tiles_n = T.ceildiv(N, block_N)
         tiles_m = T.ceildiv(M, block_M)
@@ -181,18 +182,19 @@ def bench_mlx(M, N, K, warmup, repeats):
 
 
 def bench_tilelang(mode, M, N, K, block_M, block_N, block_K, threads, swizzle_panel, swizzle_order, warmup, repeats):
-    output_dtype = T.float16
+    # Accumulate in fp32 (documented Metal GEMM contract: fp16 in, fp16 out, fp32
+    # accumulation). Outputs stay fp16 so the numbers are comparable to the fp16
+    # torch/MLX references.
+    accum_dtype = T.float32
     if mode == "ct_shared":
-        kernel = matmul_cooperative_tensor_shared_c(M, N, K, block_M, block_N, block_K, accum_dtype=output_dtype)
+        kernel = matmul_cooperative_tensor_shared_c(M, N, K, block_M, block_N, block_K, accum_dtype=accum_dtype)
     elif mode == "ct_global":
-        kernel = matmul_cooperative_tensor_global(
-            M, N, K, block_M, block_N, threads, swizzle_panel, swizzle_order, accum_dtype=output_dtype
-        )
+        kernel = matmul_cooperative_tensor_global(M, N, K, block_M, block_N, threads, swizzle_panel, swizzle_order, accum_dtype=accum_dtype)
     else:
-        kernel = matmul_simdgroup(M, N, K, block_M, block_N, block_K, accum_dtype=output_dtype)
+        kernel = matmul_simdgroup(M, N, K, block_M, block_N, block_K, accum_dtype=accum_dtype)
     a = torch.randn(M, K, dtype=torch.float16, device="mps")
     b = torch.randn(K, N, dtype=torch.float16, device="mps")
-    c = torch.zeros(M, N, dtype=output_dtype.as_torch(), device="mps")
+    c = torch.zeros(M, N, dtype=torch.float16, device="mps")
     avg_s = _bench(lambda: kernel(a, b, c), warmup, repeats)
     return _tflops(M, N, K, avg_s)
 
