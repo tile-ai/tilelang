@@ -337,9 +337,9 @@ def copy(  # noqa: A001
         src_buf = src if isinstance(src, tirx.Buffer) else src.buffer
         dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.buffer
         if not (
-            src_buf.scope() == "shared.l1"
-            and dst_buf.scope() in ("shared.l0a", "shared.l0b")
-            or src_buf.scope() == "shared.l0c"
+            src_buf.scope() in ("shared.l1", "shared.l1.dyn")
+            and dst_buf.scope() in ("shared.l0a", "shared.l0a.dyn", "shared.l0b", "shared.l0b.dyn")
+            or src_buf.scope() in ("shared.l0c", "shared.l0c.dyn")
             and dst_buf.scope() in ("shared", "shared.dyn", "global")
         ):
             raise ValueError("Ascend T.copy l0_pitch is supported only for L1→L0A/L0B and L0C→UB/GM")

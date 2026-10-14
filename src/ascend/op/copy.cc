@@ -433,7 +433,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         TryExtractAscendFractalLayout(dst_layout.value(), op.dst, &dst_info) &&
         IsAscendMajorKind(src_info.kind) && IsAscendMajorKind(dst_info.kind))
         << "Ascend L1->L0 lowering requires canonical MajorK/MajorMN layouts";
-    ICHECK(op.src->dtype == op.dst->dtype)
+    TVM_FFI_CHECK(op.src->dtype == op.dst->dtype, ValueError)
         << "Ascend L1->L0 copy requires matching source/destination dtypes";
 
     AscendFractalRegionInfo src_region, dst_region;
@@ -452,15 +452,18 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     dst_ptr = ptr;
 
     With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-    ICHECK(analyzer->CanProve(dst_stride > 0) &&
-           analyzer->CanProve(dst_stride <= dst_info.outer1,
-                              arith::ProofStrength::kSymbolicBound))
+    TVM_FFI_CHECK(analyzer->CanProve(dst_stride > 0) &&
+                      analyzer->CanProve(dst_stride <= dst_info.outer1,
+                                         arith::ProofStrength::kSymbolicBound),
+                  ValueError)
         << "Ascend L1->L0 l0_pitch must be positive and fit destination "
            "capacity";
     auto require_multiple = [&](const PrimExpr &value, int multiple,
                                 const char *parameter) {
-      ICHECK(analyzer->CanProveEqual(
-          FloorMod(value, make_const(value.dtype(), multiple)), 0))
+      TVM_FFI_CHECK(
+          analyzer->CanProveEqual(
+              FloorMod(value, make_const(value.dtype(), multiple)), 0),
+          ValueError)
           << "Ascend L1->L0 copy of " << op.src->name << " (" << op.src->dtype
           << ") requires " << parameter << " to be divisible by " << multiple
           << ", got " << value
@@ -470,7 +473,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     bool nonzero_destination = false;
     for (size_t i = dst_range.size() - 2; i < dst_range.size(); ++i)
       nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->min, 0);
-    ICHECK(!nonzero_destination || op.l0_pitch.defined())
+    TVM_FFI_CHECK(!nonzero_destination || op.l0_pitch.defined(), ValueError)
         << "Ascend partial L1->L0 copy with a nonzero destination origin "
            "requires an explicit l0_pitch";
     auto check_region = [&](const Buffer &buffer, const Array<Range> &ranges,
@@ -496,19 +499,23 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                          source ? "source C0 extent" : "destination C0 extent");
       }
       for (size_t i = 0; i + 2 < ranges.size(); ++i) {
-        ICHECK(analyzer->CanProve(ranges[i]->min >= 0) &&
-               analyzer->CanProve(ranges[i]->min + ranges[i]->extent <=
-                                  buffer->shape[i]))
+        TVM_FFI_CHECK(
+            analyzer->CanProve(ranges[i]->min >= 0) &&
+                analyzer->CanProve(ranges[i]->min + ranges[i]->extent <=
+                                   buffer->shape[i]),
+            ValueError)
             << "Ascend L1->L0 leading plane is outside buffer " << buffer->name;
       }
-      ICHECK(analyzer->CanProve(region.outer0->min >= 0) &&
-             analyzer->CanProve(region.outer1->min >= 0) &&
-             analyzer->CanProve(region.outer0->min + region.outer0->extent <=
-                                    info.outer0,
-                                arith::ProofStrength::kSymbolicBound) &&
-             analyzer->CanProve(region.outer1->min + region.outer1->extent <=
-                                    info.outer1,
-                                arith::ProofStrength::kSymbolicBound))
+      TVM_FFI_CHECK(
+          analyzer->CanProve(region.outer0->min >= 0) &&
+              analyzer->CanProve(region.outer1->min >= 0) &&
+              analyzer->CanProve(region.outer0->min + region.outer0->extent <=
+                                     info.outer0,
+                                 arith::ProofStrength::kSymbolicBound) &&
+              analyzer->CanProve(region.outer1->min + region.outer1->extent <=
+                                     info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
           << "Ascend L1->L0 " << (source ? "source" : "destination")
           << " region exceeds or cannot be proved within the physical "
              "allocation of "
@@ -529,23 +536,29 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       written_outer0 = FloorDiv(m_step * 16, c0);
       written_outer1 = FloorDiv(k_step * c0, 16);
     }
-    ICHECK(analyzer->CanProve(written_outer0 <= dst_region.outer0->extent) &&
-           analyzer->CanProve(written_outer1 <= dst_region.outer1->extent))
+    TVM_FFI_CHECK(
+        analyzer->CanProve(written_outer0 <= dst_region.outer0->extent) &&
+            analyzer->CanProve(written_outer1 <= dst_region.outer1->extent),
+        ValueError)
         << "Ascend L1->L0 copy writes " << written_outer0 << "x"
         << written_outer1 << " fractals, but destination region "
         << op.dst->name << " only covers " << dst_region.outer0->extent << "x"
         << dst_region.outer1->extent
         << ". Pad the allocation and copy region; use effective K in T.gemm.";
-    ICHECK(analyzer->CanProve(dst_region.outer0->min + written_outer0 <=
-                              dst_info.outer0) &&
-           analyzer->CanProve(dst_region.outer1->min + written_outer1 <=
-                              dst_stride))
+    TVM_FFI_CHECK(
+        analyzer->CanProve(dst_region.outer0->min + written_outer0 <=
+                           dst_info.outer0) &&
+            analyzer->CanProve(dst_region.outer1->min + written_outer1 <=
+                               dst_stride),
+        ValueError)
         << "Ascend L1->L0 copy exceeds the physical L0 allocation "
         << "or l0_pitch of " << op.dst->name;
     if (nonzero_destination) {
-      ICHECK(
+      TVM_FFI_CHECK(
           analyzer->CanProveEqual(written_outer0, dst_region.outer0->extent) &&
-          analyzer->CanProveEqual(written_outer1, dst_region.outer1->extent))
+              analyzer->CanProveEqual(written_outer1,
+                                      dst_region.outer1->extent),
+          ValueError)
           << "Ascend partial L1->L0 copy requires matching physical source and "
              "destination extents";
     }
@@ -589,10 +602,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     if (op.l0_pitch.defined()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
       With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-      ICHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
-                                compact_pitch) &&
-             analyzer->CanProve(compact_pitch <= info.outer1,
-                                arith::ProofStrength::kSymbolicBound))
+      TVM_FFI_CHECK(
+          analyzer->CanProve(compact_src_region.outer1->extent <=
+                             compact_pitch) &&
+              analyzer->CanProve(compact_pitch <= info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -718,10 +733,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     if (op.l0_pitch.defined()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
       With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-      ICHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
-                                compact_pitch) &&
-             analyzer->CanProve(compact_pitch <= info.outer1,
-                                arith::ProofStrength::kSymbolicBound))
+      TVM_FFI_CHECK(
+          analyzer->CanProve(compact_src_region.outer1->extent <=
+                             compact_pitch) &&
+              analyzer->CanProve(compact_pitch <= info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -1049,15 +1066,17 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   node->l0_pitch = std::nullopt;
   if (auto val = node->annotations.Get("l0_pitch")) {
     node->l0_pitch = Downcast<PrimExpr>(val.value());
-    ICHECK(node->l0_pitch.value().dtype().is_scalar() &&
-           (node->l0_pitch.value().dtype().is_int() ||
-            node->l0_pitch.value().dtype().is_uint()))
+    TVM_FFI_CHECK(node->l0_pitch.value().dtype().is_scalar() &&
+                      (node->l0_pitch.value().dtype().is_int() ||
+                       node->l0_pitch.value().dtype().is_uint()),
+                  ValueError)
         << "Ascend copy l0_pitch must be a scalar integer";
     auto path = ascend::GetDMAPath(node->src, node->dst);
-    ICHECK(path == ascend::DMAPath::kL1ToL0A ||
-           path == ascend::DMAPath::kL1ToL0B ||
-           path == ascend::DMAPath::kL0CToUB ||
-           path == ascend::DMAPath::kL0CToGM)
+    TVM_FFI_CHECK(path == ascend::DMAPath::kL1ToL0A ||
+                      path == ascend::DMAPath::kL1ToL0B ||
+                      path == ascend::DMAPath::kL0CToUB ||
+                      path == ascend::DMAPath::kL0CToGM,
+                  ValueError)
         << "Ascend copy l0_pitch is supported only for L1->L0A/L0B and "
            "L0C->UB/GM";
   }
