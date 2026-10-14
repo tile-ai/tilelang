@@ -439,9 +439,9 @@ private:
       }
     });
     ICHECK(!external_effect)
-        << "Dynamic Fixpipe routing in a projected T.Task with external side "
-           "effects is not supported: projection would repeat those effects. "
-           "Move the side effects into a separate T.Task and snapshot the "
+        << "Fixpipe routing in a projected T.Task with external side effects "
+           "is not supported: projection may repeat those effects. Move the "
+           "side effects into a separate T.Task and snapshot any dynamic "
            "route before the Fixpipe task";
   }
 
@@ -475,6 +475,10 @@ private:
         : owner_(owner), p_(p), conditional_depth_(allow_constants ? 0 : 1) {}
 
     bool HasLocalCopyGuard() const { return has_local_copy_guard_; }
+
+    bool CanReplayFixpipe() const {
+      return has_implicit_copy_ || has_local_copy_guard_;
+    }
 
     Any RewriteMetadata(const Any &value) {
       if (auto buffer = value.try_cast<Buffer>())
@@ -568,8 +572,7 @@ private:
         per_core_->routed |= !is_one(active);
       }
       has_local_copy_guard_ |= rewriter.HasLocalCopyGuard();
-      per_core_->replays_fixpipe |=
-          rewriter.has_implicit_copy_ || rewriter.HasLocalCopyGuard();
+      per_core_->replays_fixpipe |= rewriter.CanReplayFixpipe();
       // An enclosing loop can revisit an already projected candidate. Its
       // explicit route now names p_, while the original guard is outside it.
       // Ordinary AIV candidates execute on distinct physical subcores; only
@@ -909,7 +912,7 @@ private:
           PrimExpr active = analyzer.Simplify(rewriter.active_);
           if (is_zero(active))
             continue;
-          if (node->IsTask() && rewriter.HasLocalCopyGuard())
+          if (node->IsTask() && rewriter.CanReplayFixpipe())
             replay_check_origins_.insert(origin);
           if (!is_one(active))
             body = IfThenElse(active, body);

@@ -388,22 +388,33 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
         tvm.ir.assert_structural_equal(branch.condition, expected == int(operation.annotations["sub_blockid"]))
 
 
-@pytest.mark.parametrize("effect", ["store", "extern", "route-call", "gm-copy", "pure-call"])
 @pytest.mark.parametrize(
-    "routing, context",
+    "effect, routing, context",
     [
-        ("dynamic", "task"),
-        ("dynamic", "loop"),
-        ("dynamic", "nested-loop"),
-        ("constant", "task"),
-        ("constant", "loop"),
-        ("constant", "nested-loop"),
-        ("single-projection", "task"),
-        ("single-projection", "loop"),
-        ("single-projection", "nested-loop"),
-        # Only single-projection routing adds an enclosing guard; otherwise
-        # guarded-loop produces exactly the same input as loop.
-        ("single-projection", "guarded-loop"),
+        (effect, routing, context)
+        for effect in ("store", "extern", "route-call", "gm-copy", "pure-call")
+        for routing, context in (
+            ("dynamic", "task"),
+            ("dynamic", "loop"),
+            ("dynamic", "nested-loop"),
+            ("constant", "task"),
+            ("constant", "loop"),
+            ("constant", "nested-loop"),
+            ("single-projection", "task"),
+            ("single-projection", "loop"),
+            ("single-projection", "nested-loop"),
+            # Only single-projection routing adds an enclosing guard; otherwise
+            # guarded-loop produces exactly the same input as loop.
+            ("single-projection", "guarded-loop"),
+        )
+    ]
+    + [
+        ("gm-copy", "implicit", "task"),
+        ("gm-copy", "implicit", "nested-loop"),
+        ("gm-copy", "implicit-single-projection", "task"),
+        ("gm-copy", "implicit-single-projection", "guarded-loop"),
+        ("pure-call", "implicit", "task"),
+        ("gm-copy", "implicit", "separate"),
     ],
 )
 def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing, context):
@@ -422,21 +433,28 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
         side_effect = tirx.Evaluate(0)
     else:
         side_effect = tirx.Evaluate(tirx.call_extern("int32", "record_route", route))
+    implicit = routing.startswith("implicit")
+    single_projection = "single-projection" in routing
     target = tirx.IntImm("int32", 0) if routing == "constant" else route
     if effect == "route-call" and routing != "constant":
         target = tirx.call_extern("int32", "next_route")
     elif effect == "pure-call" and routing != "constant":
         target = tirx.call_pure_extern("int32", "read_route", routes[0])
-    body = seq(tirx.Bind(route, routes[0] % 2), side_effect, copy(accum, ub, annotations={"sub_blockid": target}))
-    body = unit(body, core=0, guard=sid == 0 if routing == "single-projection" and context != "guarded-loop" else None)
-    if context != "task":
+    fix = copy(accum, ub, annotations={} if implicit else {"sub_blockid": target})
+    if context == "separate":
+        body = seq(unit(fix, core=0), unit(side_effect, core=0))
+    else:
+        effects = (fix, side_effect) if implicit else (side_effect, fix)
+        body = seq(tirx.Bind(route, routes[0] % 2), *effects)
+        body = unit(body, core=0, guard=sid == 0 if single_projection and context != "guarded-loop" else None)
+    if context not in ("task", "separate"):
         i = tirx.Var("i", "int32")
         if context == "nested-loop":
             body = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, body), core=None)
         body = unit(
             tirx.For(i, 0, sid + 2, tirx.ForKind.SERIAL, body),
             core=None,
-            guard=sid == 0 if routing == "single-projection" and context == "guarded-loop" else None,
+            guard=sid == 0 if single_projection and context == "guarded-loop" else None,
         )
     before = kernel(
         body,
@@ -445,12 +463,16 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     )
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
-    if routing == "dynamic" and effect != "pure-call":
-        with pytest.raises(tvm.error.InternalError, match="Dynamic Fixpipe routing.*external side effects.*separate T.Task"):
+    if routing in ("dynamic", "implicit") and context != "separate" and effect != "pure-call":
+        with pytest.raises(tvm.error.InternalError, match="Fixpipe routing.*external side effects.*separate T.Task"):
             transform.AssignCore()(before)
     else:
         after = transform.AssignCore()(before)
-        assert len(_tasks(after)) == (2 if routing == "dynamic" else 1)
+        expected_tasks = 3 if context == "separate" else 2 if routing in ("dynamic", "implicit") else 1
+        assert len(_tasks(after)) == expected_tasks
+        if effect == "gm-copy":
+            gm_copies = [call for call in calls(after, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(out)]
+            assert len(gm_copies) == 1
 
 
 @pytest.mark.parametrize(

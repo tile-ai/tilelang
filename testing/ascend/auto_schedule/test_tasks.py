@@ -113,7 +113,7 @@ def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, 
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
     if side_effect and routing == "local":
-        with pytest.raises(tvm.error.InternalError, match="Dynamic Fixpipe routing.*external side effects"):
+        with pytest.raises(tvm.error.InternalError, match="Fixpipe routing.*external side effects"):
             transform.AssignCore()(before)
         return
     after = transform.AssignCore()(before)
