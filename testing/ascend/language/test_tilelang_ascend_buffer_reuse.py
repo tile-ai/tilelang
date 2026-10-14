@@ -305,7 +305,7 @@ def test_nd2nz_post_copy_preserves_data_beyond_its_base_element(disable_reuse):
                         b[i] = T.float16(200)
                 out_b[0] = b[32]
                 a[0] = T.float16(300)
-                T.ascend_nd2nz_post_copy(dst[0, 0], a[0], 16, 32, 16, "half")
+                T.ascend_nd2nz_post_copy(dst[0, 0], a[0], 16, 32, src_pitch=17, dst_pitch=16, dtype="float16")
             T.copy(B, rhs)
             T.gemm(dst, rhs, accum, clear_accum=True, transpose_B=True)
             T.copy(accum, out)

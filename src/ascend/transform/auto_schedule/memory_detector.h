@@ -708,7 +708,7 @@ private:
   void VisitNd2NzCall(const CallNode *op, bool scatter) {
     std::optional<int64_t> source_bytes;
     std::optional<int64_t> destination_bytes;
-    if (op->args.size() == 6) {
+    if (op->args.size() == 7) {
       const auto *rows = op->args[2].as<IntImmNode>();
       const auto *cols = op->args[3].as<IntImmNode>();
       auto element_bytes = [&](size_t index) -> int64_t {
@@ -721,7 +721,7 @@ private:
       };
       if (rows && cols && rows->value > 0 && cols->value > 0 &&
           rows->value < std::numeric_limits<int64_t>::max()) {
-        int64_t dst_bytes = element_bytes(scatter ? 4 : 5);
+        int64_t dst_bytes = element_bytes(6);
         if (scatter) {
           int64_t src_bytes = element_bytes(5);
           auto source_row = PhysicalSpan(cols->value, src_bytes, 0);
@@ -733,21 +733,28 @@ private:
             if (auto last_row = PhysicalSpan(vectors, 256, 0))
               source_bytes =
                   PhysicalSpan(rows->value - 1, *source_row, *last_row);
-            destination_bytes =
-                PhysicalSpan(rows->value + 1, *destination_row, 0);
+            const auto *pitch = op->args[4].as<IntImmNode>();
+            if (pitch && cols->value % (32 / dst_bytes) == 0) {
+              int64_t bursts = cols->value / (32 / dst_bytes);
+              if (auto blocks =
+                      PhysicalSpan(bursts - 1, pitch->value, rows->value))
+                destination_bytes = PhysicalSpan(*blocks, 32, 0);
+            }
           }
         } else {
-          const auto *full_rows = op->args[4].as<IntImmNode>();
-          if (dst_bytes && full_rows && full_rows->value >= rows->value &&
+          const auto *src_pitch = op->args[4].as<IntImmNode>();
+          const auto *dst_pitch = op->args[5].as<IntImmNode>();
+          if (dst_bytes && src_pitch && dst_pitch &&
+              src_pitch->value >= rows->value &&
+              dst_pitch->value >= rows->value &&
               cols->value % (32 / dst_bytes) == 0) {
             int64_t bursts = cols->value / (32 / dst_bytes);
-            // Match EmitNd2NzPostCopy_: 32-byte DMA blocks, one source-gap
-            // row, and full_rows - rows destination-gap rows per burst.
+            // Match lowering: both pitches are explicit 32-byte block strides.
             if (auto blocks =
-                    PhysicalSpan(bursts - 1, rows->value + 1, rows->value))
+                    PhysicalSpan(bursts - 1, src_pitch->value, rows->value))
               source_bytes = PhysicalSpan(*blocks, 32, 0);
             if (auto blocks =
-                    PhysicalSpan(bursts - 1, full_rows->value, rows->value))
+                    PhysicalSpan(bursts - 1, dst_pitch->value, rows->value))
               destination_bytes = PhysicalSpan(*blocks, 32, 0);
           }
         }
@@ -886,18 +893,42 @@ private:
     static const auto reduce_op = Op::Get("tl.tileop.reduce");
     static const auto tl_access_ptr_op = Op::Get("tl.access_ptr");
 
-    if (mode_ == AccessMode::kLogical &&
-        op->op.same_as(tl::ascend_nd2nz_post_copy()) && op->args.size() == 6) {
-      const auto *pointer = op->args[0].as<CallNode>();
-      const auto *load = pointer && pointer->op.same_as(tl_access_ptr_op) &&
-                                 pointer->args.size() == 3
-                             ? pointer->args[0].as<BufferLoadNode>()
-                             : nullptr;
-      if (load && load->indices.size() >= 2 &&
-          load->indices.size() == load->buffer->shape.size()) {
-        // The DMA parameters retain the rectangular destination even when
-        // rows is dynamic. A flat access_ptr extent would lose the two AIVs'
-        // disjoint row prefixes and create a spurious cross-AIV WAW edge.
+    if (mode_ == AccessMode::kLogical && op->args.size() == 7 &&
+        (op->op.same_as(tl::ascend_nd2nz_post_copy()) ||
+         op->op.same_as(tl::ascend_nd2nz_scatter()))) {
+      bool scatter = op->op.same_as(tl::ascend_nd2nz_scatter());
+      for (size_t arg = 0; arg < op->args.size(); ++arg) {
+        const auto *pointer = arg < 2 ? op->args[arg].as<CallNode>() : nullptr;
+        const auto *load = pointer && pointer->op.same_as(tl_access_ptr_op) &&
+                                   pointer->args.size() == 3
+                               ? pointer->args[0].as<BufferLoadNode>()
+                               : nullptr;
+        if (!load) {
+          VisitExpr(op->args[arg]);
+          continue;
+        }
+        bool is_read = arg == (scatter ? 0U : 1U);
+        bool logical = load->indices.size() >= 2 &&
+                       load->indices.size() == load->buffer->shape.size() &&
+                       (!is_read || scatter ||
+                        op->annotations.count("nd2nz_logical_regions"));
+        if (!logical) {
+          // Opaque physical views do not expose logical matrix axes. Their
+          // base-element access_ptr is not a footprint; retain the whole view
+          // for synchronization. Physical lifetime analysis below uses pitches.
+          std::vector<arith::IntSet> region;
+          for (const PrimExpr &extent : load->buffer->shape)
+            region.push_back(arith::IntSet::FromRange(Range(0, extent)));
+          if (is_read)
+            Update(&read_buffers_, &read_regions_, load->buffer, region);
+          else
+            Update(&write_buffers_, &write_regions_, load->buffer, region);
+          for (const PrimExpr &index : load->indices)
+            VisitExpr(index);
+          continue;
+        }
+        // Keep the logical rectangle on both sides. A physical bounding span
+        // contains gaps and would merge disjoint AIV row slices.
         Array<Range> ranges;
         size_t ndim = load->indices.size();
         for (size_t i = 0; i < ndim; ++i) {
@@ -907,14 +938,13 @@ private:
           ranges.push_back(Range::FromMinExtent(load->indices[i], extent));
           VisitExpr(load->indices[i]);
         }
-        RecordBufferRegion(BufferRegion(load->buffer, ranges), false);
-        for (size_t i = 1; i < op->args.size(); ++i)
-          VisitExpr(op->args[i]);
-        for (const auto &[key, value] : op->annotations)
-          if (auto expr = value.as<PrimExpr>())
-            VisitExpr(expr.value());
-        return;
+        RecordBufferRegion(BufferRegion(load->buffer, ranges),
+                           arg == (scatter ? 0U : 1U));
       }
+      for (const auto &[key, value] : op->annotations)
+        if (auto expr = value.as<PrimExpr>())
+          VisitExpr(expr.value());
+      return;
     }
 
     if (mode_ == AccessMode::kPhysical &&

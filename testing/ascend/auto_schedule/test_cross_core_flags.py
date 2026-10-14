@@ -85,8 +85,8 @@ def test_unbounded_explicit_flag_is_rejected():
 @pytest.mark.parametrize("overlap", [False, True])
 def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
     rows = tirx.Var("rows", "int32")
-    l1 = tirx.decl_buffer((32, 64), "float8_e4m3fn", name="l1", scope="shared.l1")
-    nz = [tirx.decl_buffer((17, 64), "float8_e4m3fn", name=f"nz{sid}", scope="shared.dyn") for sid in range(2)]
+    l1 = tirx.decl_buffer((32, 64), "bfloat16", name="l1", scope="shared.l1")
+    nz = [tirx.decl_buffer((17, 64), "bfloat16", name=f"nz{sid}", scope="shared.dyn") for sid in range(2)]
     copies = []
     for sid in range(2):
         offset = 0 if overlap else sid * 16
@@ -95,8 +95,9 @@ def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
             T.access_ptr(nz[sid][0, 0], "r", 17, 64),
             rows,
             64,
-            32,
-            "float8_e4m3_t",
+            src_pitch=17,
+            dst_pitch=32,
+            dtype="bfloat16",
         )
         copies.append(unit(tirx.Evaluate(call), core=1 if sid == 0 else 4))
     before = kernel(

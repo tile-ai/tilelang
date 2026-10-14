@@ -9,6 +9,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ascend/layout/ascend_layouts.h"
 #include "layout/layout.h"
@@ -80,6 +81,101 @@ Layout MakeTaggedAscendFractalLayout(Array<PrimExpr> input_size,
       std::move(input_size), std::move(forward_index), kind);
   return Layout(std::move(node));
 }
+
+// Padding is allocation metadata until NormalizeAscendFractalStorage consumes
+// it. The ordinary compact storage map alone cannot account for a trailing gap.
+class AscendCompactNZLayoutNode : public LayoutNode {
+public:
+  AscendCompactNZLayoutNode() = default;
+  AscendCompactNZLayoutNode(const Layout &layout, int padding)
+      : LayoutNode(layout->InputShape(), layout->GetForwardIndex()),
+        padding(padding) {
+    for (size_t i = 0; i < InputDim(); ++i)
+      input_vars.push_back(InputPlaceholder(i));
+  }
+
+  int padding{0};
+  // Serialize the actual variables with the map. Generic Layout uses global
+  // placeholders, whose object identities do not survive a JSON round trip.
+  Array<Var> input_vars;
+
+  Array<PrimExpr> GetForwardVars() const final {
+    Array<PrimExpr> vars;
+    for (const Var &var : input_vars)
+      vars.push_back(var);
+    return vars;
+  }
+  Map<Var, Range> GetVarMap() const final {
+    Map<Var, Range> map;
+    for (size_t i = 0; i < InputDim(); ++i)
+      map.Set(input_vars[i], Range(0, InputShape()[i]));
+    return map;
+  }
+  Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const final {
+    ICHECK_EQ(vars.size(), input_vars.size());
+    Map<Var, PrimExpr> replacements;
+    for (size_t i = 0; i < vars.size(); ++i)
+      replacements.Set(input_vars[i], vars[i]);
+    return Substitute(GetForwardIndex(), replacements);
+  }
+  Array<Range> MapRegionBounds(const Array<Range> &region) const final {
+    return CanonicalMap()->MapRegionBounds(region);
+  }
+  Layout Repeat(int dim, int factor) const final {
+    TVM_FFI_THROW(ValueError) << "Compact NZ repeat must be expressed in the "
+                                 "allocation shape before annotation";
+    return Layout();
+  }
+  Layout CanonicalMap() const {
+    Array<PrimExpr> vars;
+    for (size_t i = 0; i < InputDim(); ++i)
+      vars.push_back(InputPlaceholder(i));
+    return Layout(InputShape(), Forward(vars));
+  }
+
+  bool IsEqual(const LayoutNode *other, bool skip_index = false) const final {
+    const auto *compact =
+        other->IsInstance<AscendCompactNZLayoutNode>()
+            ? static_cast<const AscendCompactNZLayoutNode *>(other)
+            : nullptr;
+    return compact && padding == compact->padding &&
+           CanonicalMap()->IsEqual(compact->CanonicalMap().get(), skip_index);
+  }
+  Layout Expand(const Array<PrimExpr> &leading_shape) const final {
+    Layout expanded = CanonicalMap()->Expand(leading_shape);
+    return Layout(make_object<AscendCompactNZLayoutNode>(expanded, padding));
+  }
+  Layout Reshape(const Array<PrimExpr> &shape, arith::Analyzer *analyzer,
+                 const PrimExpr rescale_num,
+                 const PrimExpr rescale_den) const final {
+    arith::Analyzer local;
+    if (!analyzer)
+      analyzer = &local;
+    const auto &input = InputShape();
+    if (shape.size() < 2 ||
+        !analyzer->CanProveEqual(rescale_num, rescale_den) ||
+        !analyzer->CanProveEqual(shape[shape.size() - 2],
+                                 input[input.size() - 2]) ||
+        !analyzer->CanProveEqual(shape.back(), input.back())) {
+      TVM_FFI_THROW(ValueError)
+          << "Compact NZ aliases must preserve trailing matrix shape and "
+             "element width; use an explicit physical view and post-copy "
+             "pitches";
+    }
+    Layout reshaped =
+        CanonicalMap()->Reshape(shape, analyzer, rescale_num, rescale_den);
+    return Layout(make_object<AscendCompactNZLayoutNode>(reshaped, padding));
+  }
+  static void RegisterReflection() {
+    reflection::ObjectDef<AscendCompactNZLayoutNode>()
+        .def_ro("padding", &AscendCompactNZLayoutNode::padding)
+        .def_ro("input_vars", &AscendCompactNZLayoutNode::input_vars);
+  }
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AscendCompactNZLayout",
+                                    AscendCompactNZLayoutNode, LayoutNode);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
+};
 
 std::pair<LogicalAxis, LogicalAxis> GetAxesForKind(AscendFractalKind kind) {
   ICHECK(kind == AscendFractalKind::kMajorK ||
@@ -199,7 +295,7 @@ Layout MakeAscendNZLayout(const Buffer &buffer) {
   return MakeAscendMajorKLayout(buffer);
 }
 
-Layout MakeAscendCompactNZLayout(const Buffer &buffer) {
+Layout MakeAscendCompactNZStorageLayout(const Buffer &buffer) {
   if (!buffer.defined() || buffer->shape.size() < 2) {
     TVM_FFI_THROW(ValueError)
         << "Compact Ascend NZ layout expects a rank >= 2 buffer";
@@ -237,6 +333,19 @@ Layout MakeAscendCompactNZLayout(const Buffer &buffer) {
                             FloorMod(col, c0_expr)});
 }
 
+Layout MakeAscendCompactNZLayout(const Buffer &buffer, int padding) {
+  if (padding < 0)
+    TVM_FFI_THROW(ValueError) << "Compact NZ padding must be non-negative";
+  return Layout(make_object<AscendCompactNZLayoutNode>(
+      MakeAscendCompactNZStorageLayout(buffer), padding));
+}
+
+std::optional<int> GetAscendCompactNZPadding(const Layout &layout) {
+  if (const auto *node = layout.as<AscendCompactNZLayoutNode>())
+    return node->padding;
+  return std::nullopt;
+}
+
 bool IsAscendCompactNZLayout(const Layout &layout, const Buffer &buffer) {
   if (!layout.defined() || !buffer.defined() || buffer->shape.size() < 2) {
     return false;
@@ -247,7 +356,9 @@ bool IsAscendCompactNZLayout(const Layout &layout, const Buffer &buffer) {
   const int64_t *cols = as_const_int(buffer->shape.back());
   if (cols == nullptr || *cols % AscendC0(bits) != 0)
     return false;
-  Layout expected = MakeAscendCompactNZLayout(buffer);
+  if (GetAscendCompactNZPadding(layout).has_value())
+    return true;
+  Layout expected = MakeAscendCompactNZStorageLayout(buffer);
   return layout->IsEqual(expected.get());
 }
 
@@ -449,6 +560,7 @@ tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   AscendFractalLayoutNode::RegisterReflection();
+  AscendCompactNZLayoutNode::RegisterReflection();
   refl::GlobalDef()
       .def("tl.make_ascend_major_k_layout",
            [](const Buffer &buffer, int k_align) {
@@ -465,8 +577,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.make_ascend_nz_layout",
            [](const Buffer &buffer) { return MakeAscendNZLayout(buffer); })
       .def("tl.make_ascend_compact_nz_layout",
-           [](const Buffer &buffer) {
-             return MakeAscendCompactNZLayout(buffer);
+           [](const Buffer &buffer, int padding) {
+             return MakeAscendCompactNZLayout(buffer, padding);
            })
       .def("tl.try_extract_fractal_layout",
            [](Layout layout, const Buffer &buf) -> Optional<Map<String, Any>> {

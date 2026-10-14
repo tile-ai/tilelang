@@ -28,7 +28,7 @@ def nd2nz_scatter_test(sd: torch.dtype, dd: torch.dtype, rows: int, cols: int, i
     ):
         with T.Kernel(1):
             src_ub = T.alloc_shared((rows, cols), sd)  # ND layout
-            dst_ub = T.alloc_shared((rows + 1, cols), dd)  # NZ layout
+            dst_ub = T.alloc_shared((rows, cols), dd)  # NZ layout
             T.annotate_layout({dst_ub: make_ascend_compact_nz_layout(dst_ub)})
             T.copy(input_gm, src_ub)
             if inside_vf:
@@ -36,7 +36,18 @@ def nd2nz_scatter_test(sd: torch.dtype, dd: torch.dtype, rows: int, cols: int, i
                     T.copy(src_ub, dst_ub[0:rows, 0:cols])
             else:
                 T.copy(src_ub, dst_ub[0:rows, 0:cols])
-            T.copy(dst_ub, output_gm)
+            T.call_intrin(
+                "void",
+                tvm.ir.Op.get("tl.ascend_copy_ubuf_to_gm"),
+                T.access_ptr(output_gm[0, 0], "w", extent=(rows + 1) * cols),
+                T.access_ptr(dst_ub[0, 0], "r", extent=(rows + 1) * cols),
+                0,
+                1,
+                (rows + 1) * cols * (4 if dd == torch.float32 else 2),
+                0,
+                0,
+                0,
+            )
 
     return main
 
@@ -50,7 +61,7 @@ def _manual_compact_nz_dual_copy():
     def main():
         with T.Kernel(1):
             x_l1 = T.alloc_l1((64, COLS), "float32")
-            x_nz = T.alloc_shared((33, COLS), "float32")
+            x_nz = T.alloc_shared((32, COLS), "float32")
             T.annotate_layout(
                 {
                     x_l1: make_ascend_nz_layout(x_l1),

@@ -1683,6 +1683,10 @@ std::string FragmentNode::DebugOutput() const {
 }
 
 bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
+  // Let semantic subclasses compare metadata in either operand order.
+  if (type_index() == LayoutNode::RuntimeTypeIndex() &&
+      other->type_index() != LayoutNode::RuntimeTypeIndex())
+    return other->IsEqual(this, skip_index);
   bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
   if (!ret) {

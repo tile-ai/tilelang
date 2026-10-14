@@ -576,7 +576,7 @@ def test_nd2nz_post_copy_uses_its_dma_read_span():
                 b[16] = T.float32(200)
                 out[0] = b[16]
                 a[0] = T.float32(300)
-                T.ascend_nd2nz_post_copy(dst[0], a[0], 1, 16, 1, "float")
+                T.ascend_nd2nz_post_copy(dst[0], a[0], 1, 16, src_pitch=2, dst_pitch=1, dtype="float32")
 
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
 
@@ -614,8 +614,8 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
     def main(x: T.Tensor((16, 64), "float32"), out: T.Tensor((1,), "bfloat16")):
         with T.Kernel(1):
             src = T.alloc_shared((16, 64), "float32")
-            nz = T.alloc_shared((17, 64), "bfloat16")
-            other = T.alloc_shared((17, 64), "bfloat16")
+            nz = T.alloc_shared((16, 64), "bfloat16")
+            other = T.alloc_shared((16, 64), "bfloat16")
             T.annotate_layout({nz: make_ascend_compact_nz_layout(nz)})
             with T.Stage(0):
                 T.fill(nz, T.bfloat16(0))
@@ -629,21 +629,23 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
 
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
 @pytest.mark.parametrize("footprint", ["base", "short", "exact", "padded"])
-def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint):
+@pytest.mark.parametrize("src_pitch", [2, 64])
+def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint, src_pitch):
     cols = 16 if dtype == "float32" else 32
-    required = 24 if dtype == "float32" else 48
-    extent = {"base": 1, "short": required - 1, "exact": required, "padded": 2 * cols}[footprint]
+    required = (src_pitch + 1) * (cols // 2)
+    capacity = (src_pitch + 2) * (cols // 2)
+    extent = {"base": 1, "short": required - 1, "exact": required, "padded": capacity}[footprint]
     dtype_name = "float" if dtype == "float32" else "half"
 
     @T.prim_func
     def main(out: T.Tensor((1,), dtype)):
         with T.Kernel(1):
-            a = T.alloc_shared((2 * cols,), dtype)
-            b = T.alloc_shared((2 * cols,), dtype)
+            a = T.alloc_shared((capacity,), dtype)
+            b = T.alloc_shared((capacity,), dtype)
             dst = T.alloc_l1((cols,), dtype)
             with T.Stage(0):
                 with T.Task():
-                    for i in T.serial(2 * cols):
+                    for i in T.serial(capacity):
                         a[i] = T.cast(100, dtype)
                 b[required - 1] = T.cast(200, dtype)
                 out[0] = b[required - 1]
@@ -655,8 +657,9 @@ def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint):
                     T.access_ptr(a[0], "r", extent=extent),
                     1,
                     cols,
-                    1,
-                    dtype_name,
+                    src_pitch=src_pitch,
+                    dst_pitch=1,
+                    dtype=dtype_name,
                 )
 
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
@@ -685,8 +688,9 @@ def test_nd2nz_scatter_checks_the_full_vector_read_footprint():
                             T.access_ptr(dst[0], "w", extent=17 * 64),
                             T.int32(16),
                             T.int32(64),
-                            tvm.tirx.StringImm("bfloat16_t"),
+                            T.int32(17),
                             tvm.tirx.StringImm("float"),
+                            tvm.tirx.StringImm("bfloat16_t"),
                         ],
                     )
                 )

@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "ascend/op/nd2nz.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1615,44 +1616,40 @@ void CodeGenTileLangAscend::EmitUbufToL1Copy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitNd2NzScatter_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_scatter";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const std::string dst_dtype = GetStringImmArg(op, 4, kIntrinsic, "dst_dtype");
-  const std::string src_dtype = GetStringImmArg(op, 5, kIntrinsic, "src_dtype");
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
+  const std::string src_dtype =
+      GetStringImmArg(op, 5, "tl.ascend_nd2nz_scatter", "src_dtype");
+  const std::string dst_dtype =
+      GetStringImmArg(op, 6, "tl.ascend_nd2nz_scatter", "dst_dtype");
 
   std::ostringstream function_name;
   function_name << (IsInsideSimdVF() ? "ascend_nd2nz_scatter_callee"
                                      : "ascend_nd2nz_scatter")
-                << "<" << rows << ", " << cols << ", " << src_dtype << ", "
-                << dst_dtype << ">";
+                << "<" << rows << ", " << cols << ", " << geometry.dst_pitch
+                << ", " << src_dtype << ", " << dst_dtype << ">";
   EmitCApiCall_(function_name.str(),
                 {{op->args[0], "(__ubuf__ " + src_dtype + "*)(", ")"},
                  {op->args[1], "(__ubuf__ " + dst_dtype + "*)(", ")"}});
 }
 
 void CodeGenTileLangAscend::EmitNd2NzPostCopy_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_post_copy";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const int64_t full_rows = GetIntImmArg(op, 4, kIntrinsic, "full_rows");
-  const std::string dst_dtype = GetStringImmArg(op, 5, kIntrinsic, "dst_dtype");
-
-  const int64_t element_bytes = dst_dtype == "float" ? 4 : 2;
-  const int64_t elements_per_c0 = 32 / element_bytes;
-  const int64_t burst_num = cols / elements_per_c0;
-  const int64_t burst_len = rows;
-  constexpr int64_t kSourceGap = 1;
-  const int64_t destination_gap = full_rows - rows;
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
+  const int64_t burst_num = geometry.Bursts();
+  const int64_t burst_len = geometry.rows;
+  const int64_t source_gap = geometry.src_pitch - geometry.rows;
+  const int64_t destination_gap = geometry.dst_pitch - geometry.rows;
   const std::string destination = PrintExpr(op->args[0]);
   const std::string source = PrintExpr(op->args[1]);
 
   PrintIndent();
   stream << "asc_copy_ub2l1((__cbuf__ void*)(" << destination
          << "), (__ubuf__ void*)(" << source << "), " << burst_num << ", "
-         << burst_len << ", " << kSourceGap << ", " << destination_gap
+         << burst_len << ", " << source_gap << ", " << destination_gap
          << ");\n";
 }
 
