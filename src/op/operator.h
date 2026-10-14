@@ -176,6 +176,11 @@ struct LayoutInferArgs {
   // the vectorizer's width; scalar reducer-root attempts pass one. This is
   // a search option, not operator state or a constraint on inferred layouts.
   int candidate_vector_size_limit = 0;
+  // Whether the current TileOp sits inside a PTO SIMD_VF block whose parallel
+  // loops are vectorized over logical lanes instead of SIMT threads. When
+  // true, thread_bounds is the [0, L) lane range from tl.simdvf_lanes and
+  // ParallelOp must build its lane Fragment with vectorize_size=1.
+  bool in_pto_simd_vf = false;
 };
 
 class TileOperator;
