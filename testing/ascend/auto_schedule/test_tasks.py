@@ -191,10 +191,13 @@ def test_per_core_vector_candidates_project_to_distinct_aivs(direction):
         ("mixed", True, 2, False),
         ("implicit", True, 2, False),
         ("local", True, 2, False),
+        ("sid", True, 2, False),
+        ("sid-expression", True, 2, False),
         ("mixed", True, 2, True),
         ("explicit", True, 2, False),
         ("parameter", True, 2, False),
         ("mixed", False, 2, False),
+        ("sid", False, 2, False),
         ("implicit", True, 1, False),
     ],
 )
@@ -210,7 +213,11 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
     for index in range(2):
         target = (block // 2 + index) % 2 if routing == "parameter" else tirx.IntImm("int32", index)
         annotations, prefix = {}, []
-        if routing == "local":
+        if routing == "sid":
+            target = sid
+        elif routing == "sid-expression":
+            target = tirx.if_then_else(block // 2 % 2 == 0, sid, 1 - sid)
+        elif routing == "local":
             route = tirx.Var(f"route{index}", "int32")
             prefix.append(tirx.Bind(route, (block // 2 + index) % 2))
             target = route
@@ -226,7 +233,7 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
     before = kernel(body, buffers=[accum, ub], params=[block], annotations={"vector_count": tirx.IntImm("int32", sids)})
     thread = tirx.IterVar(tvm.ir.Range(0, sids), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", sids, before["main"].body))})
-    if sync_inside and sids == 2 and routing in ("mixed", "implicit", "local"):
+    if sync_inside and sids == 2 and routing in ("mixed", "implicit", "local", "sid", "sid-expression"):
         with pytest.raises(tvm.error.InternalError, match="PerCoreTask.*explicit synchronization.*Fixpipe.*outside"):
             transform.AssignCore()(before)
         return

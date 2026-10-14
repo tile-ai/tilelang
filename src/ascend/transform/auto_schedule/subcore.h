@@ -484,7 +484,7 @@ private:
     bool HasLocalCopyGuard() const { return has_local_copy_guard_; }
 
     bool CanReplayFixpipe() const {
-      return has_implicit_copy_ || has_local_copy_guard_;
+      return has_varying_copy_route_ || has_local_copy_guard_;
     }
 
     Any RewriteMetadata(const Any &value) {
@@ -584,7 +584,7 @@ private:
       // explicit route now names p_, while the original guard is outside it.
       // Ordinary AIV candidates execute on distinct physical subcores; only
       // Fixpipe candidates can replay their effects on the same AIC.
-      if (rewriter.HasLocalCopyGuard() ||
+      if (rewriter.CanReplayFixpipe() ||
           (!origin && rewriter.copy_target_.defined() && is_one(active)))
         owner_->replay_check_origins_.insert(origin_id);
       if (is_zero(active))
@@ -631,17 +631,17 @@ private:
         per_core_ = &routing;
         attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
         per_core_ = nullptr;
-        // Broadcast copies and task-local routes can execute the group more
+        // Subcore-dependent and task-local routes can execute the group more
         // than once on AIC. Its explicit synchronization is a single protocol
         // whose participation and execution counts must not follow that replay.
         ICHECK(owner_->count_ == 1 || !routing.replays_fixpipe ||
                !HasCrossCoreSync(attr->body))
             << "Subcore projection of T.PerCoreTask with explicit "
-               "synchronization and implicit or task-local Fixpipe routing "
-               "is not supported: projection may change synchronization "
-               "participation or execution counts. Move the synchronization "
-               "outside T.PerCoreTask, or give every candidate an explicit "
-               "sub_blockid computed before T.PerCoreTask";
+               "synchronization and subcore-dependent or task-local Fixpipe "
+               "routing is not supported: projection may change the "
+               "synchronization participation or execution counts. Move it "
+               "outside T.PerCoreTask, or compute each explicit sub_blockid "
+               "before T.PerCoreTask using subcore-uniform values";
         if (routing.routed)
           active_ = active_ && GetPerCoreActiveGuard(attr, routing.active);
       } else {
@@ -768,8 +768,6 @@ private:
       PrimExpr target = Integer(p_);
       if (auto explicit_sid = annotations.Get("sub_blockid"))
         target = Downcast<PrimExpr>(explicit_sid.value());
-      else
-        has_implicit_copy_ = true;
       // Keep a single routing target for each projected atomic task.
       if (copy_target_.defined()) {
         ICHECK(analyzer_.CanProveEqual(target, copy_target_.value()))
@@ -785,6 +783,12 @@ private:
       if (auto origin = owner_->copy_origins_.find(source);
           origin != owner_->copy_origins_.end())
         source = origin->second;
+      // Classify the original route: projection can turn sid and its aliases
+      // into constants even though multiple copies execute on the same AIC.
+      auto source_route = source->annotations.Get("sub_blockid");
+      has_varying_copy_route_ |=
+          !source_route ||
+          owner_->Varies(Downcast<PrimExpr>(source_route.value()));
       owner_->copy_origins_.emplace(call, std::move(source));
 
       PrimExpr condition = analyzer_.Simplify(target == p_);
@@ -814,7 +818,7 @@ private:
     PerCoreRouting *per_core_{nullptr};
     VarSet local_vars_;
     Optional<PrimExpr> copy_target_;
-    bool has_implicit_copy_{false};
+    bool has_varying_copy_route_{false};
     bool has_local_copy_guard_{false};
     arith::Analyzer analyzer_;
   };

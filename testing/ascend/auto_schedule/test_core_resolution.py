@@ -461,6 +461,13 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
         ("gm-copy", "implicit-single-projection", "guarded-loop"),
         ("pure-call", "implicit", "task"),
         ("gm-copy", "implicit", "separate"),
+        ("gm-copy", "sid", "task"),
+        ("gm-copy", "sid", "nested-loop"),
+        ("gm-copy", "sid-expression", "task"),
+        ("gm-copy", "sid-alias", "task"),
+        ("gm-copy", "sid-single-projection", "guarded-loop"),
+        ("gm-copy", "sid", "separate"),
+        ("pure-call", "sid", "task"),
     ],
 )
 def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing, context):
@@ -469,6 +476,8 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     out = tirx.decl_buffer((16, 16), "float32", name="out")
     routes = tirx.decl_buffer((1,), "int32", name="routes")
     sid, route = tirx.Var("sid", "int32"), tirx.Var("route", "int32")
+    selector = tirx.Var("selector", "int32")
+    sid_alias = tirx.Var("sid_alias", "int32")
     if effect == "store":
         side_effect = tirx.BufferStore(routes, routes[0] + 1, [0])
     elif effect == "gm-copy":
@@ -480,9 +489,16 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     else:
         side_effect = tirx.Evaluate(tirx.call_extern("int32", "record_route", route))
     implicit = routing.startswith("implicit")
+    sid_routing = routing.startswith("sid")
     single_projection = "single-projection" in routing
     target = tirx.IntImm("int32", 0) if routing == "constant" else route
-    if effect == "route-call" and routing != "constant":
+    if sid_routing:
+        target = sid
+        if routing == "sid-expression":
+            target = tirx.if_then_else(selector % 2 == 0, sid, 1 - sid)
+        elif routing == "sid-alias":
+            target = sid_alias
+    elif effect == "route-call" and routing != "constant":
         target = tirx.call_extern("int32", "next_route")
     elif effect == "pure-call" and routing != "constant":
         target = tirx.call_pure_extern("int32", "read_route", routes[0])
@@ -490,9 +506,11 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     if context == "separate":
         body = seq(unit(fix, core=0), unit(side_effect, core=0))
     else:
-        effects = (fix, side_effect) if implicit else (side_effect, fix)
+        effects = (fix, side_effect) if implicit or sid_routing else (side_effect, fix)
         body = seq(tirx.Bind(route, routes[0] % 2), *effects)
         body = unit(body, core=0, guard=sid == 0 if single_projection and context != "guarded-loop" else None)
+    if routing == "sid-alias":
+        body = seq(unit(tirx.Bind(sid_alias, sid), core=0), body)
     if context not in ("task", "separate"):
         i = tirx.Var("i", "int32")
         if context == "nested-loop":
@@ -505,16 +523,17 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     before = kernel(
         body,
         buffers=[accum, ub],
-        params=[routes, out],
+        params=[routes, out] + ([selector] if routing == "sid-expression" else []),
     )
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
-    if routing in ("dynamic", "implicit") and context != "separate" and effect != "pure-call":
+    repeated = (routing in ("dynamic", "implicit") or sid_routing) and not single_projection
+    if repeated and context != "separate" and effect != "pure-call":
         with pytest.raises(tvm.error.InternalError, match="Fixpipe routing.*external side effects.*separate T.Task"):
             transform.AssignCore()(before)
     else:
         after = transform.AssignCore()(before)
-        expected_tasks = 3 if context == "separate" else 2 if routing in ("dynamic", "implicit") else 1
+        expected_tasks = 3 if context == "separate" else 2 if repeated else 1
         assert len(_tasks(after)) == expected_tasks
         if effect == "gm-copy":
             gm_copies = [call for call in calls(after, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(out)]
