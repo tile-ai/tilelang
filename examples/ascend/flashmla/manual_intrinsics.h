@@ -26,12 +26,6 @@ __aicore__ inline void fm_q_load(__cbuf__ bfloat16_t *dst,
                                  __gm__ bfloat16_t *src, uint32_t stride) {
   asc_copy_gm2l1_nd2nz(dst, src, stride, 0u, 32u, 512u, 0u, false);
 }
-__aicore__ inline void fm_pair(__ubuf__ bfloat16_t *dst, __gm__ bfloat16_t *src,
-                               uint32_t count, int64_t stride) {
-  asc_copy_gm2ub_align(dst, src, count, 1024u, 0, 0, false,
-                       asc_load_l2_cache_mode::NORMAL_LAST_VICTIM, stride,
-                       1024ul);
-}
 __aicore__ inline void fm_kv_push(__cbuf__ bfloat16_t *dst,
                                   __ubuf__ bfloat16_t *src) {
   asc_copy_ub2l1(dst, src, 32u, 32u, 1u, 0u);
@@ -71,13 +65,4 @@ __aicore__ inline void fm_write_o(__gm__ bfloat16_t *dst,
   asc_copy_ub2gm_align(dst, src, 32u, 256u,
                        asc_store_l2_cache_mode::NORMAL_FIRST_VICTIM, 1024ul,
                        2048ul);
-}
-__aicore__ inline void fm_pair_bytes(__ubuf__ uint8_t *dst, __gm__ uint8_t *src,
-                                     uint32_t count, int64_t stride,
-                                     uint32_t bytes, uint32_t pitch,
-                                     uint32_t cache) {
-  asc_copy_gm2ub_align(dst, src, count, bytes, 0, 0, false,
-                       cache ? asc_load_l2_cache_mode::NORMAL_LAST_VICTIM
-                             : asc_load_l2_cache_mode::NOTALLOC_CLEAN,
-                       stride, pitch);
 }
