@@ -7467,8 +7467,14 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     if (scope == "local.fragment" || scope == "local") {
-      os << "pto.load(" << GetVarID(op->buffer->data.get()) << ", " << index_str
-         << ", contiguous=" << lanes << ")";
+      std::string value = "pto.load(" + GetVarID(op->buffer->data.get()) +
+                          ", " + index_str +
+                          ", contiguous=" + std::to_string(lanes) + ")";
+      // Local integer storage is signless; restore the authored signedness.
+      os << (IsInteger32(element_dtype)
+                 ? ScalarCastExpr(value, element_dtype,
+                                  "PTO SIMT local vector load")
+                 : value);
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {

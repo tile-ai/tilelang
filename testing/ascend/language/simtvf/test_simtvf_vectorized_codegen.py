@@ -227,6 +227,56 @@ def test_vector_local_slots_observe_mutation(lanes, unrolled, target):
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+def _unsigned_local_min_max_kernel(vector_elements):
+    shape = (2,) if vector_elements else (4,)
+    dtype = "uint32x2" if vector_elements else "uint32"
+
+    @T.prim_func
+    def main(a: T.Tensor((4,), T.int32), out: T.Tensor((4,), T.int32)):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((4,), T.int32)
+            out_ub = T.alloc_shared((4,), T.int32)
+            T.copy(a, a_ub)
+            with T.SimtVF(threads=1):
+                vals = T.alloc_local(shape, dtype)
+                if vector_elements:
+                    vals[0] = T.Cast("uint32x2", a_ub[T.Ramp(0, 1, 2)])
+                    vals[1] = T.Cast("uint32x2", a_ub[T.Ramp(2, 1, 2)])
+                    out_ub[T.Ramp(0, 1, 2)] = T.Cast("int32x2", T.min(vals[0], vals[1]))
+                    out_ub[T.Ramp(2, 1, 2)] = T.Cast("int32x2", T.max(vals[0], vals[1]))
+                else:
+                    vals[T.Ramp(0, 1, 2)] = T.Cast("uint32x2", a_ub[T.Ramp(0, 1, 2)])
+                    vals[T.Ramp(2, 1, 2)] = T.Cast("uint32x2", a_ub[T.Ramp(2, 1, 2)])
+                    out_ub[T.Ramp(0, 1, 2)] = T.Cast("int32x2", T.min(vals[T.Ramp(0, 1, 2)], vals[T.Ramp(2, 1, 2)]))
+                    out_ub[T.Ramp(2, 1, 2)] = T.Cast("int32x2", T.max(vals[T.Ramp(0, 1, 2)], vals[T.Ramp(2, 1, 2)]))
+            T.copy(out_ub, out)
+
+    return main
+
+
+@pytest.mark.parametrize("vector_elements", [False, True], ids=["scalar-elements", "vector-elements"])
+def test_pto_local_vector_load_restores_unsigned_type(vector_elements):
+    source = tilelang.lower(_unsigned_local_min_max_kernel(vector_elements), target="pto", enable_device_compile=False).kernel_source
+    assert "pto.alloc_buffer((4,), pto.i32)" in source
+    for offset in (0, 2):
+        assert f"pto.cast(pto.load(vals, {offset}, contiguous=2), pto.ui32)" in source
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("vector_elements", [False, True], ids=["scalar-elements", "vector-elements"])
+def test_unsigned_local_vector_min_max(vector_elements, target):
+    import torch
+
+    # Use int32 tensors to transport uint32 bit patterns without uint32 NPU ops.
+    a = torch.tensor([-2147483648, -1, 1, 1], dtype=torch.int32, device="npu")
+    kernel = tilelang.compile(_unsigned_local_min_max_kernel(vector_elements), target=target, out_idx=-1)
+    result = kernel(a)
+    torch.npu.synchronize()
+    expected = torch.tensor([1, 1, -2147483648, -1], dtype=torch.int32)
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
 def test_vector_min_max_and_mod_are_scalarized():
     source = _source(_vector_min_max_mod_kernel(), target="ascend")
     assert source.count(".x = min(") == 2
