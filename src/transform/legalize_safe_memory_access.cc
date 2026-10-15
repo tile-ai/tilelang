@@ -616,8 +616,13 @@ private:
   // When tvm_access_ptr annotates a different element type than the backing
   // buffer, interpret offset/extent in annotation-dtype units, convert to a
   // bit range, and compare against the backing buffer's bit size.
-  Array<PrimExpr> CollectAnnotatedByteRangeConditions(const AccessPtrInfo &info,
-                                                      bool is_load) {
+  //
+  // `transfer_bits`, when set, is the size of the actual memory transfer
+  // (e.g. the cp.async byte count). A hand-written tvm_access_ptr may declare
+  // an extent smaller than the transfer, so both ranges are checked.
+  Array<PrimExpr> CollectAnnotatedByteRangeConditions(
+      const AccessPtrInfo &info, bool is_load,
+      std::optional<PrimExpr> transfer_bits = std::nullopt) {
     Array<PrimExpr> conditions;
     ICHECK(info.annotated_offset.has_value() &&
            info.annotated_extent.has_value())
@@ -637,9 +642,8 @@ private:
         << "tvm_access_ptr buffer element width must be positive";
 
     DataType address_dtype = DataType::Int(64);
-    PrimExpr bit_begin =
-        Cast(address_dtype, info.annotated_offset.value()) *
-        IntImm(address_dtype, pointer_elem_bits);
+    PrimExpr bit_begin = Cast(address_dtype, info.annotated_offset.value()) *
+                         IntImm(address_dtype, pointer_elem_bits);
     PrimExpr bit_end =
         bit_begin + Cast(address_dtype, info.annotated_extent.value()) *
                         IntImm(address_dtype, pointer_elem_bits);
@@ -647,8 +651,7 @@ private:
     Buffer flat = buffer.GetFlattenedBuffer();
     PrimExpr flat_extent = Cast(address_dtype, flat->shape[0]);
     for (size_t i = 1; i < flat->shape.size(); ++i) {
-      flat_extent =
-          flat_extent * Cast(address_dtype, flat->shape[i]);
+      flat_extent = flat_extent * Cast(address_dtype, flat->shape[i]);
     }
     PrimExpr buffer_bits =
         flat_extent * IntImm(address_dtype, buffer_elem_bits);
@@ -657,6 +660,11 @@ private:
     (void)is_load;
     checker.PushCondition(bit_begin >= make_zero(bit_begin.dtype()));
     checker.PushCondition(bit_end <= buffer_bits);
+    if (transfer_bits.has_value()) {
+      PrimExpr transfer_end =
+          bit_begin + Cast(address_dtype, transfer_bits.value());
+      checker.PushCondition(transfer_end <= buffer_bits);
+    }
     return checker.GetConditions();
   }
 
@@ -667,9 +675,8 @@ private:
     }
     int pointer_elem_bits =
         info.element_dtype.bits() * info.element_dtype.lanes();
-    int buffer_elem_bits =
-        info.base_load->buffer->dtype.bits() *
-        info.base_load->buffer->dtype.lanes();
+    int buffer_elem_bits = info.base_load->buffer->dtype.bits() *
+                           info.base_load->buffer->dtype.lanes();
     return pointer_elem_bits != buffer_elem_bits;
   }
 
@@ -720,7 +727,20 @@ private:
     }
 
     if (NeedsAnnotatedByteRangeCheck(src_info)) {
-      return CollectAnnotatedByteRangeConditions(src_info, /*is_load=*/true);
+      // Normalize the transfer size to bits: tirx.ptx_cp_async takes a byte
+      // count, tl.ptx_cp_async takes a count of source access-ptr elements.
+      DataType address_dtype = DataType::Int(64);
+      PrimExpr count = Cast(address_dtype, call->args[2]);
+      PrimExpr transfer_bits;
+      if (call->op.same_as(tl::ptx_cp_async())) {
+        int src_elem_bits =
+            src_info.element_dtype.bits() * src_info.element_dtype.lanes();
+        transfer_bits = count * IntImm(address_dtype, src_elem_bits);
+      } else {
+        transfer_bits = count * IntImm(address_dtype, 8);
+      }
+      return CollectAnnotatedByteRangeConditions(src_info, /*is_load=*/true,
+                                                 transfer_bits);
     }
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);

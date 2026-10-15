@@ -625,12 +625,8 @@ def test_tvm_access_ptr_uint8_over_float32_in_bounds_no_false_oob():
     analyzer = tvm.arith.Analyzer()
     b_var = main.params[-1]
     for block_idx in range(blocks):
-        substituted = analyzer.simplify(
-            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
-        )
-        assert analyzer.can_prove(substituted), (
-            f"in-bounds block {block_idx} was predicated off; predicate={predicate}"
-        )
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} was predicated off; predicate={predicate}"
 
 
 def test_tvm_access_ptr_uint8_over_float32_oob_keeps_guard():
@@ -665,20 +661,56 @@ def test_tvm_access_ptr_uint8_over_float32_oob_keeps_guard():
     b_var = main.params[-1]
     # First two rows are still in-bounds (32 bytes).
     for block_idx in (0, 1):
-        substituted = analyzer.simplify(
-            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
-        )
-        assert analyzer.can_prove(substituted), (
-            f"in-bounds block {block_idx} should pass; predicate={predicate}"
-        )
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} should pass; predicate={predicate}"
     # Later rows exceed the 32-byte buffer.
     for block_idx in range(2, blocks):
-        substituted = analyzer.simplify(
-            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
-        )
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
         assert analyzer.can_prove(tvm.tirx.Not(substituted)) or not analyzer.can_prove(substituted), (
             f"OOB block {block_idx} should not be unconditionally true; predicate={predicate}"
         )
+
+
+def test_tvm_access_ptr_short_extent_checks_cp_async_transfer_range():
+    """A tvm_access_ptr extent smaller than the cp.async byte count must not hide OOB.
+
+    The uint8 pointer declares extent 1, but cp.async copies 16 bytes. On a
+    32-byte float32 buffer, byte offset 4*b + 16 is in bounds only for b <= 4.
+    """
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((2, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 4, 1, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in range(8):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        if block_idx <= 4:
+            assert analyzer.can_prove(substituted), f"in-bounds b={block_idx} was predicated off; predicate={predicate}"
+        else:
+            assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
+                f"b={block_idx} reads past the buffer but was not guarded; predicate={predicate}"
+            )
 
 
 def test_cp_async_access_ptr_oob():
