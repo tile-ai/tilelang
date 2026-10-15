@@ -997,6 +997,37 @@ private:
     static const auto reduce_op = Op::Get("tl.tileop.reduce");
     static const auto tl_access_ptr_op = Op::Get("tl.access_ptr");
 
+    if (mode_ == AccessMode::kLogical &&
+        op->op.same_as(tl::ascend_nd2nz_post_copy()) && op->args.size() == 6) {
+      const auto *pointer = op->args[0].as<CallNode>();
+      const auto *load = pointer && pointer->op.same_as(tl_access_ptr_op) &&
+                                 pointer->args.size() == 3
+                             ? pointer->args[0].as<BufferLoadNode>()
+                             : nullptr;
+      if (load && load->indices.size() >= 2 &&
+          load->indices.size() == load->buffer->shape.size()) {
+        // The DMA parameters retain the rectangular destination even when
+        // rows is dynamic. A flat access_ptr extent would lose the two AIVs'
+        // disjoint row prefixes and create a spurious cross-AIV WAW edge.
+        Array<Range> ranges;
+        size_t ndim = load->indices.size();
+        for (size_t i = 0; i < ndim; ++i) {
+          PrimExpr extent = i + 2 == ndim   ? op->args[2]
+                            : i + 1 == ndim ? op->args[3]
+                                            : Integer(1);
+          ranges.push_back(Range::FromMinExtent(load->indices[i], extent));
+          VisitExpr(load->indices[i]);
+        }
+        RecordBufferRegion(BufferRegion(load->buffer, ranges), false);
+        for (size_t i = 1; i < op->args.size(); ++i)
+          VisitExpr(op->args[i]);
+        for (const auto &[key, value] : op->annotations)
+          if (auto expr = value.as<PrimExpr>())
+            VisitExpr(expr.value());
+        return;
+      }
+    }
+
     if (mode_ == AccessMode::kPhysical &&
         (op->op.same_as(tl::ascend_nd2nz_scatter()) ||
          op->op.same_as(tl::ascend_nd2nz_post_copy()))) {

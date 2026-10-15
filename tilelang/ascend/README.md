@@ -52,6 +52,31 @@ USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 
 ## Quick Start
 
+### Selecting AscendC or PTO code generation
+
+The execution backend selects the Ascend target variant during JIT compilation:
+
+```python
+# Default AscendC code generation.
+kernel = tilelang.compile(func, target="ascend", execution_backend="auto")
+
+# PTO execution and PTO device code generation (codegen_pto.cc).
+kernel = tilelang.compile(func, target="ascend", execution_backend="pto")
+```
+
+The PTO form specializes the native `ascend` target with the `pto` target key,
+selects the `pto` backend module, and dispatches device code generation through
+`target.build.tilelang_pto_without_compile`. The existing `target="pto"` shorthand
+remains supported.
+
+The same selection can be made through defaults used by `@tilelang.jit` and
+`tilelang.compile(..., target=None, execution_backend=None)`:
+
+```bash
+export TILELANG_DEFAULT_TARGET=ascend
+export TILELANG_EXECUTION_BACKEND=pto
+```
+
 The following example implements the same GEMM with a fused ReLU epilogue as
 the [main README](../../README.md#quick-start), while using Huawei Ascend 950
 features such as SIMT vector programming and direct Cube-to-Vector data
@@ -127,6 +152,23 @@ print("GEMM + ReLU passed.")
   for cache policies in optimized matrix kernels.
 
 ## Writing Ascend Kernels
+
+### Selecting PTO code generation
+
+Pass `target="pto"` to `@tilelang.jit` or `tilelang.compile` to generate
+PTODSL instead of Ascend C. The same Ascend lowering pipeline runs for both
+targets; the PTO target selects a different device code generator and the PTO
+execution adapter. For example, change the Quick Start decorator to
+`@tilelang.jit(target="pto")` to select PTO for that kernel. Leave
+`execution_backend` at its default `"auto"`: the PTO target selects the PTO
+execution backend automatically. Setting only `execution_backend="pto"` on an
+`"ascend"` target does not select PTO code generation and is rejected.
+
+For source-only inspection, call `tilelang.lower(kernel, target="pto")` and
+read its `kernel_source`. PTO JIT compilation additionally requires PTODSL,
+`ptoas`, and `bisheng`; running the result requires the Ascend runtime and NPU.
+Automatic target detection selects the regular Ascend target, so specify
+`target="pto"` explicitly when PTO is required.
 
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
 - Ascend supports mixing SIMT and SIMD code within a single kernel, so
