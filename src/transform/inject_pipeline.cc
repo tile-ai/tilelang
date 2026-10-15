@@ -3069,13 +3069,14 @@ PipelineRewriteResult RewritePipeline(
 }
 
 /*!
- * \brief Reconcile pipeline buffer views at their allocation scope.
- * Expanded views keep their loop-local version indices. Unexpanded accesses
- * use slot zero of the shared multi-version allocation.
+ * \brief Reconcile pipeline buffer views with their final allocation.
+ * Preserve loop-local version indices and use slot zero for unexpanded
+ * accesses. Update buffer regions and annotated layouts to match the
+ * allocation.
  */
-class BufferReplacer : public StmtExprMutator {
+class PipelineBufferReconciler : public StmtExprMutator {
 public:
-  explicit BufferReplacer(const Map<Buffer, Buffer> &replacements)
+  explicit PipelineBufferReconciler(const Map<Buffer, Buffer> &replacements)
       : replacements_(replacements) {
     for (const auto &[old_buffer, new_buffer] : replacements_) {
       if (old_buffer->shape.size() < new_buffer->shape.size()) {
@@ -3505,7 +3506,7 @@ private:
     }
     Stmt result = SeqStmt(seq, op->span);
     if (!replacements.empty()) {
-      result = BufferReplacer(replacements)(std::move(result));
+      result = PipelineBufferReconciler(replacements)(std::move(result));
     }
     return result;
   }
@@ -4056,7 +4057,8 @@ private:
     }
 
     if (!replacements.empty()) {
-      block = Downcast<SBlock>(BufferReplacer(replacements)(std::move(block)));
+      block = Downcast<SBlock>(
+          PipelineBufferReconciler(replacements)(std::move(block)));
     }
 
     bool modified = children_modified || allocs_changed || layout_changed;
