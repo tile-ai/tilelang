@@ -58,6 +58,19 @@ public:
     }
   }
 
+  /*! \brief Whether an expression contains an access awaiting guard rewriting.
+   */
+  bool HasPromotedAccess(const PrimExpr &expr) const {
+    if (access_promotions_.empty()) {
+      return false;
+    }
+    bool found = false;
+    tirx::PostOrderVisit(expr, [this, &found](const ffi::ObjectRef &node) {
+      found |= access_promotions_.count(node) != 0;
+    });
+    return found;
+  }
+
   tirx::Stmt Rewrite(const tirx::Stmt &stmt) {
     return access_promotions_.empty() ? stmt : VisitStmt(stmt);
   }
@@ -70,8 +83,16 @@ private:
 
     PrimExpr VisitExpr(const PrimExpr &expr) final {
       auto it = promotions_.find(expr);
-      return it != promotions_.end() ? it->second
-                                     : DataTypeLegalizer::VisitExpr(expr);
+      if (it != promotions_.end()) {
+        return it->second;
+      }
+      // Match complete integer producers used by promoted addresses. Recursing
+      // into other integer arithmetic could change an unpromoted address or a
+      // business condition which merely contains the same index subexpression.
+      if (!expr.dtype().is_bool() && !expr.as<tirx::CastNode>()) {
+        return expr;
+      }
+      return DataTypeLegalizer::VisitExpr(expr);
     }
 
   private:
@@ -234,15 +255,20 @@ private:
   }
 
   tirx::Stmt VisitStmt_(const tirx::SeqStmtNode *op) final {
-    // An assertion controls only the subsequent statements in this sequence.
-    // Reverse traversal collects those accesses without including earlier ones.
-    PromotionMap suffix;
+    // Visit definitions before uses so the mutator's buffer remapping remains
+    // valid when a buffer's shape, strides, or elem_offset changes.
     ffi::Array<tirx::Stmt> seq = op->seq;
+    std::vector<PromotionMap> promotions;
+    promotions.reserve(seq.size());
+    for (size_t i = 0; i < seq.size(); ++i) {
+      seq.Set(i, VisitStmt(op->seq[i]));
+      promotions.push_back(last_promotions_);
+    }
+    // Only suffix analysis runs backwards; this does not revisit buffer fields.
+    PromotionMap suffix;
     for (size_t i = seq.size(); i > 0; --i) {
-      tirx::Stmt stmt = VisitStmt(op->seq[i - 1]);
-      PromotionMap promotions = last_promotions_;
-      seq.Set(i - 1, RewriteDominatingAssertions_(stmt, suffix));
-      Merge_(suffix, promotions);
+      seq.Set(i - 1, RewriteDominatingAssertions_(seq[i - 1], suffix));
+      Merge_(suffix, promotions[i - 1]);
     }
     return tirx::SeqStmt(seq, op->span);
   }
@@ -288,10 +314,13 @@ private:
     PromotionMap promotions = last_promotions_;
     PrimExpr false_value = VisitExpr(op->args[2]);
     Merge_(promotions, last_promotions_);
-    return tirx::Call(
-        op->dtype, op->op,
-        {RewritePredicate_(condition, promotions), true_value, false_value},
-        op->annotations, op->span);
+    condition = RewritePredicate_(condition, promotions);
+    if (condition.same_as(op->args[0]) && true_value.same_as(op->args[1]) &&
+        false_value.same_as(op->args[2])) {
+      return ffi::GetRef<PrimExpr>(op);
+    }
+    return tirx::Call(op->dtype, op->op, {condition, true_value, false_value},
+                      op->annotations, op->span);
   }
 
   std::unordered_map<ffi::ObjectRef, PromotionMap, ffi::ObjectPtrHash,

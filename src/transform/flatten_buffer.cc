@@ -162,7 +162,12 @@ private:
     }
     // canonicalize shape
     for (size_t i = 0; i < flattened->shape.size(); ++i) {
-      writer->shape.Set(i, analyzer_->canonical_simplify(flattened->shape[i]));
+      const PrimExpr &shape = flattened->shape[i];
+      // Preserve recorded access nodes until their guards have been rewritten.
+      // The simplifier can clone loads while canonicalizing this metadata.
+      if (!index_predicate_rewriter_.HasPromotedAccess(shape)) {
+        writer->shape.Set(i, analyzer_->canonical_simplify(shape));
+      }
     }
     // Flattened indices already include buf->elem_offset (see
     // VisitBufferAccess). Zero elem_offset so later passes (e.g.
