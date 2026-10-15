@@ -75,7 +75,7 @@ def bench_with_cuda_events(
 
     # Run benchmark iterations
     for i in range(n_repeat):
-        cache.zero_()  # Clear L2 cache
+        cache.sum(dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer
         start_events[i].record()
         fn()
         end_events[i].record()
@@ -116,11 +116,11 @@ def bench_with_cupti(
             for _ in range(2):
                 for _ in range(n_repeat):
                     with torch.profiler.record_function(_CACHE_FLUSH_ID):
-                        cache.zero_()
+                        cache.sum(dtype=cache.dtype)
                     fn()
                 profiler.step()
 
-    # `cache.zero_()` and user code such as `torch.zeros` can share the same
+    # The cache sum and user reductions can share the same
     # generated kernel name, so exclude only the annotated cache flush range.
     def is_cuda_event(event):
         return getattr(getattr(event, "device_type", None), "name", "") == "CUDA"
@@ -174,7 +174,7 @@ def bench_with_cudagraph(
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         for i in range(n_retries):
-            cache.zero_()  # Clear L2 cache before replay
+            cache.sum(dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer before replay
             start_events[i].record()
             g.replay()
             end_events[i].record()
