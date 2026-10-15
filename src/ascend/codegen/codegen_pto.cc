@@ -6540,6 +6540,20 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
   os << "(" << PrintExpr_(lhs) << " " << opstr << " " << PrintExpr_(rhs) << ")";
 }
 
+void CodeGenTileLangPTO::VisitExpr_(const RampNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // A Ramp used as a value must be a typed vector, not a Python tuple.
+  os << "tl.vector_from_list(" << DataTypeName(op->dtype.element_of()) << ", (";
+  for (int lane = 0; lane < op->dtype.lanes(); ++lane) {
+    if (lane != 0) {
+      os << ", ";
+    }
+    os << "(" << PrintExpr_(op->base) << ")+(" << PrintExpr_(op->stride) << "*"
+       << lane << ")";
+  }
+  os << "))";
+}
+
 void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,
                                     std::ostream &os) { // NOLINT(*)
   DataType elem_dtype = op->value.dtype();
