@@ -2653,18 +2653,20 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
 
   if (scope == "local.fragment" || scope == "local") {
     if (inside_simtvf_body_) {
-      ICHECK(IsSupportedSIMTLocalScalarAccessType(buffer->dtype))
+      // The index addresses scalar storage, including lanes of vector locals.
+      DataType dtype = buffer->dtype.element_of();
+      ICHECK(IsSupportedSIMTLocalScalarAccessType(dtype))
           << "PTO SIMT local scalar store supports float16, bfloat16, "
              "float32, int8, uint8, int32, uint32, and FP8 only, got "
-          << buffer->dtype;
+          << dtype;
       std::string store_value = value;
-      if (tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      if (tl::IsAscendVectorizableFP8(dtype)) {
         stream << "tl.fp8_byte_store(" << store_value << ", "
                << GetVarID(buffer->data.get()) << ", " << index_str << ", "
-               << FP8TypeName(buffer->dtype) << ")\n";
+               << FP8TypeName(dtype) << ")\n";
         return;
       }
-      if (IsInteger32(buffer->dtype)) {
+      if (IsInteger32(dtype)) {
         store_value = "pto.cast(" + store_value + ", pto.i32)";
       }
       stream << "pto.store(" << store_value << ", "
@@ -7651,7 +7653,7 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
         << "PTO SIMT vector BufferStore expects the value element dtype to "
            "match the buffer element dtype, got "
         << value_dtype << " vs " << buffer_dtype;
-    if (TryEmitRngBroadcastStore(op)) {
+    if (TryEmitRngBroadcastStore(op, index)) {
       return;
     }
     ICHECK(!tl::IsAscendVectorizableFP8(buffer_dtype) ||
@@ -7734,7 +7736,8 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   LOG(FATAL) << "PTO non-SIMT vector BufferStore is not supported yet";
 }
 
-bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
+bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op,
+                                                  const PrimExpr &index) {
   const auto *broadcast = op->value.as<BroadcastNode>();
   if (broadcast == nullptr) {
     return false;
@@ -7757,9 +7760,9 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
       << "PTO RNG broadcast store currently supports exactly 2 lanes, got "
       << broadcast->dtype;
 
-  PrimExpr base_index = op->indices[0];
+  PrimExpr base_index = index;
   if (const auto *ramp = base_index.as<RampNode>()) {
-    CheckContiguousRampStride(op->indices[0], "store");
+    CheckContiguousRampStride(index, "store");
     base_index = ramp->base;
   }
 
