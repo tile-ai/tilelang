@@ -48,8 +48,10 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
     ordinary automatic cross-core synchronization. Direct AIV peer dependencies
     require explicit synchronization, as with other shared storage. Manual
     kernels must supply their own publication and slot-reuse protocol.
-    SS is scalar-only:
-    VF access, DMA, atomics and automatic multibuffering are not supported.
+    Automatic multibuffering uses the same ownership and version annotations
+    as L1. All views share one version clock; every version counts toward the
+    group's 3072-byte capacity. SS is scalar-only: VF access, DMA and atomics
+    are not supported.
     """
     dtype = DataType(dtype)
     if str(dtype) not in ("uint32", "uint64"):

@@ -9,31 +9,62 @@ import tilelang
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
+from testing.ascend._ir import allocated_buffer, nodes
 
 
-def _publish_to_cube(rounds=8, stage=0):
+def _publish_to_cube(rounds=8, stage=0, versions=2, version_mode="auto"):
     @T.prim_func
     def main(seed: T.Tensor((16, 16), "float16"), out: T.Tensor((rounds, 1), "uint64")):
         with T.MixedKernel(1) as (_, sid):
-            words = T.alloc_ss((2, 2), "uint32")
-            packed = T.view(words, shape=(2,), dtype="uint64")
+            words = T.alloc_ss((2,), "uint32")
+            packed = T.view(words, shape=(1,), dtype="uint64")
+            if versions is not None:
+                T.annotate_buffer_versions({words: (versions, version_mode)})
             cube = T.alloc_l1((16, 16), "float16")
             # Include Cube work so the uniform scalar consumer runs on AIC.
             T.copy(seed, cube)
-            for i in T.serial(rounds):
-                if stage is None:
-                    words[i % 2, sid] = T.Cast("uint32", (i % 3) * (100 + sid))
-                    out[i, 0] = packed[i % 2]
+            for i in T.Pipelined(rounds, num_stages=versions or 3, annotations={"enable_offset": True}):
+                if version_mode != "counter" or i % 2 == 0:
+                    if stage is None:
+                        words[sid] = T.Cast("uint32", (i + 1) * (100 + sid))
+                        out[i, 0] = packed[0]
+                    else:
+                        with T.Stage(0):
+                            words[sid] = T.Cast("uint32", (i + 1) * (100 + sid))
+                        with T.Stage(stage):
+                            out[i, 0] = packed[0]
                 else:
-                    with T.Stage(stage):
-                        words[i % 2, sid] = T.Cast("uint32", (i % 3) * (100 + sid))
-                        out[i, 0] = packed[i % 2]
+                    out[i, 0] = T.uint64(0)
 
     return main
 
 
-def test_ss_codegen_emits_volatile_views_and_uses_mode4():
-    source = tilelang.lower(_publish_to_cube(), target="ascend").kernel_source
+@pytest.mark.parametrize("versions,stage,version_mode", [(None, 2, "auto"), (2, None, "auto"), (3, 2, "iteration"), (3, 0, "counter")])
+def test_ss_codegen_materializes_versions_and_uses_mode4(versions, stage, version_mode):
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.MaterializeMultiBuffer":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        source = tilelang.lower(_publish_to_cube(versions=versions, stage=stage, version_mode=version_mode), target="ascend").kernel_source
+    materialized = snapshots["tl.MaterializeMultiBuffer"]
+    words = allocated_buffer(materialized, "words")
+    actual_versions = int(words.shape[0])
+    assert (2 <= actual_versions <= 3) if versions is None else actual_versions == versions
+    assert tuple(int(dim) for dim in words.shape) == (actual_versions, 2)
+    accesses = [
+        access
+        for kind in (tirx.BufferLoad, tirx.BufferStore)
+        for access in nodes(materialized, kind)
+        if access.buffer.data.same_as(words.data)
+    ]
+    assert {access.buffer.dtype for access in accesses} == {"uint32", "uint64"}
+    assert all(len(access.indices) == 2 for access in accesses)
+    assert all(int(access.buffer.strides[0]) == (2 if access.buffer.dtype == "uint32" else 1) for access in accesses)
     assert "volatile __ssbuf__" in source
     assert "(volatile __ssbuf__ uint32_t *)0" in source
     assert re.search(r"volatile __ssbuf__ uint64_t\s*\*", source)
@@ -129,7 +160,7 @@ def _three_readers(rounds):
                     T.ascend_cross_core_set_flag(4, "PIPE_S", 1)
                     T.ascend_cross_core_set_flag(4, "PIPE_S", 17)
                 with T.Vector() as sid:
-                    words[sid] = T.Cast("uint32", (i % 3) * (100 + sid))
+                    words[sid] = T.Cast("uint32", (i + 1) * (100 + sid))
                     T.ascend_cross_core_set_flag(4, "PIPE_S", 0)
                     T.ascend_cross_core_wait_flag(4, "PIPE_S", 0)
                     out[i, sid] = packed[0]
@@ -139,7 +170,7 @@ def _three_readers(rounds):
     return main
 
 
-@pytest.mark.parametrize("mode", ["auto", "staged", "manual"])
+@pytest.mark.parametrize("mode", ["inferred", "auto", "staged", "counter", "manual"])
 def test_ss_publication_and_slot_reuse(mode):
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
@@ -147,13 +178,23 @@ def test_ss_publication_and_slot_reuse(mode):
     rounds = 32
     manual = mode == "manual"
     kernel = tilelang.compile(
-        _three_readers(rounds) if manual else _publish_to_cube(rounds, stage=0 if mode == "staged" else None),
+        _three_readers(rounds)
+        if manual
+        else _publish_to_cube(
+            rounds,
+            stage=2 if mode in ("inferred", "staged") else (0 if mode == "counter" else None),
+            versions=None if mode == "inferred" else (2 if mode == "auto" else 3),
+            version_mode="counter" if mode == "counter" else "auto",
+        ),
         out_idx=-1,
         target="ascend",
         pass_configs={"tl.enable_auto_schedule": not manual},
     )
     readers = 3 if manual else 1
-    expected = torch.tensor([[(i % 3) * 100 + (((i % 3) * 101) << 32)] * readers for i in range(rounds)], dtype=torch.uint64)
+    expected = torch.tensor(
+        [[0 if mode == "counter" and i % 2 else (i + 1) * 100 + (((i + 1) * 101) << 32)] * readers for i in range(rounds)],
+        dtype=torch.uint64,
+    )
     args = [] if manual else [torch.zeros((16, 16), dtype=torch.float16, device="npu")]
     for _ in range(10):
         actual = kernel(*args)

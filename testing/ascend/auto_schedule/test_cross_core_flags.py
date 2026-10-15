@@ -236,7 +236,8 @@ def test_alternating_aiv_writers_without_cube_ordering_are_rejected(scope):
 
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("to_cube", [False, True], ids=["cube-to-aivs", "aivs-to-cube"])
-def test_ss_uses_standard_cross_core_sync(packed, to_cube):
+@pytest.mark.parametrize("versions", [1, 3], ids=["publication", "ring-reuse"])
+def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
     ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
     view = tirx.decl_buffer((1,), "uint64", data=ss.data) if packed else ss
     out = tirx.decl_buffer((2,), "uint32", name="out")
@@ -248,7 +249,13 @@ def test_ss_uses_standard_cross_core_sync(packed, to_cube):
         writes = [tirx.BufferStore(view, tirx.const(7, view.dtype), [i]) for i in range(1 if packed else 2)]
         tasks = [unit(seq(*writes), core=2)]
         tasks += [unit(tirx.BufferStore(out, ss[sid], [sid]), core=core) for sid, core in enumerate((1, 4))]
-    before = kernel(seq(*tasks), buffers=[ss], params=[out], annotations={"tl.split_subcores": True})
+    body = seq(*tasks)
+    annotations = {"tl.split_subcores": True}
+    i = tirx.Var("i", "int32")
+    if versions > 1:
+        body = unit(tirx.For(i, 0, 8, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ss.data]}), core=None)
+        annotations["tl.buffer_versions_map"] = {ss.data: versions}
+    before = kernel(body, buffers=[ss], params=[out], annotations=annotations)
     after = transform.InsertSync()(before)
     endpoints = {"set": [], "wait": []}
     for task in nodes(after, tirx.AttrStmt):
@@ -257,7 +264,26 @@ def test_ss_uses_standard_cross_core_sync(packed, to_cube):
         for operation, events in endpoints.items():
             for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
                 assert int(call.args[0]) == 4 and call.args[1].value == "PIPE_S"
-                events.append((int(task.node["core_mask"]), int(tvm.arith.Analyzer().simplify(call.args[2]))))
+                events.append((int(task.node["core_mask"]), tvm.arith.Analyzer().simplify(call.args[2])))
+    if versions > 1:
+        initial, drained = (
+            {int(slot) + (16 if core == 4 else 0) for core, slot in endpoints[operation] if isinstance(slot, tirx.IntImm)}
+            for operation in ("set", "wait")
+        )
+        assert initial == drained and len(initial) == 2 * versions
+        for operation, events in endpoints.items():
+            dynamic = [(core, slot) for core, slot in events if not isinstance(slot, tirx.IntImm)]
+            assert len(dynamic) == 4  # Publication and reuse, separately for both AIVs.
+            bases = [(core, tvm.arith.Analyzer().simplify(slot - i % versions)) for core, slot in dynamic]
+            assert all(isinstance(base, tirx.IntImm) for _, base in bases)
+            endpoints[operation] = [(core, int(base)) for core, base in bases]
+        for sid, core in enumerate((1, 4)):
+            for operation, peer in (("set", "wait"), ("wait", "set")):
+                vector = {slot + 16 * sid for endpoint, slot in endpoints[operation] if endpoint == core}
+                cube = {slot for endpoint, slot in endpoints[peer] if endpoint == 2 and 16 * sid <= slot < 16 * (sid + 1)}
+                assert vector == cube and len(vector) == 1
+        return
+    endpoints = {operation: [(core, int(slot)) for core, slot in events] for operation, events in endpoints.items()}
     vectors = endpoints["set" if to_cube else "wait"]
     cube = endpoints["wait" if to_cube else "set"]
     assert {core for core, _ in vectors} == {1, 4}

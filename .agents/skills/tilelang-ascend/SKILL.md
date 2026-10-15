@@ -290,7 +290,11 @@ removed. Publication and slot-reuse order come from synchronization.
 The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use ordinary
 mode-4 synchronization, with each AIV tracked independently. Direct AIV peer
 dependencies require explicit synchronization, as with other shared storage.
-SS accesses are scalar-only; VF, DMA, atomics, and automatic multibuffering are
+SS supports automatic multibuffering with the same owner and version annotations
+as L1. The uint32/uint64 views share a version clock and byte pitch, and all
+versions count toward the group's 3072-byte pool. Each epoch must write the
+data consumed in that epoch; disjoint AIV writes must still publish the same
+logical generation. SS accesses are scalar-only; VF, DMA and atomics are
 unsupported.
 With AutoSchedule disabled, supply the publication and reuse handshakes
 explicitly; see `testing/ascend/language/test_tilelang_ascend_ss.py`.

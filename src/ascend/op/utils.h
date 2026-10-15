@@ -71,7 +71,7 @@ inline bool IsL0CBuffer(const Buffer &buffer) {
 
 inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
   return IsSharedBuffer(buffer) || IsL1Buffer(buffer) || IsL0ABuffer(buffer) ||
-         IsL0BBuffer(buffer) || IsL0CBuffer(buffer);
+         IsL0BBuffer(buffer) || IsL0CBuffer(buffer) || IsSSBuffer(buffer);
 }
 
 /*!

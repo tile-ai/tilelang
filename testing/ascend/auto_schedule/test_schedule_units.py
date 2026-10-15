@@ -151,6 +151,39 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
         assert int(versions[ub.data]) == 1
 
 
+@pytest.mark.parametrize("fixed", [False, True], ids=["inferred", "fixed"])
+@pytest.mark.parametrize("size", [96, 100], ids=["fits", "exceeds-pool"])
+def test_ss_versions_share_capacity_across_aivs(fixed, size):
+    buffers = [tirx.decl_buffer((size,), "uint64", name=f"ss{sid}", scope="shared.ss") for sid in range(2)]
+    out = tirx.decl_buffer((4, 2), "uint64", name="out")
+    i = tirx.Var("i", "int32")
+    tasks = []
+    for sid, (buffer, core) in enumerate(zip(buffers, (1, 4))):
+        tasks.append(unit(tirx.BufferStore(buffer, tirx.Cast("uint64", i), [0]), core=core, cost=(1, 1)))
+        tasks.append(unit(tirx.BufferStore(out, buffer[0], [i, sid]), core=2, stage=2, cost=(1, 1)))
+    loop = tirx.For(
+        i,
+        0,
+        4,
+        tirx.ForKind.SERIAL,
+        seq(*tasks),
+        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [buffer.data for buffer in buffers]},
+    )
+    annotations = {"tl.split_subcores": True}
+    if fixed:
+        annotations["tl.buffer_versions_map"] = {buffer.data: 2 for buffer in buffers}
+    before = kernel(unit(loop, core=None), buffers=buffers, params=[out], annotations=annotations)
+    if size == 100:
+        with pytest.raises(RuntimeError, match="shared.ss|Manual schedule constraints are infeasible"):
+            ascend_transform.AutoSchedule()(before)
+        return
+    after = ascend_transform.AutoSchedule()(before)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    versions = root.annotations["tl.buffer_versions_map"]
+    # Both AIVs consume the same 3 KiB pool. Two versions of each fit exactly.
+    assert all(int(versions[buffer.data]) == 2 for buffer in buffers)
+
+
 def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():
     # The consumer is two stages later. A one-version SF recurrence cannot
     # satisfy this manual schedule; it must use the group's requested ring.
