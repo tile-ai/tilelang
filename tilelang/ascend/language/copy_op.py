@@ -252,8 +252,8 @@ def copy(  # noqa: A001
 
     A UB-to-UB copy from a dense source into a destination annotated with
     ``make_ascend_compact_nz_layout`` lowers to the ND-to-NZ scatter. The
-    destination shape is logical; the layout's ``padding`` (default 1) reserves
-    extra storage rows. ``T.copy(src, dst)`` copies logical elements only.
+    destination allocation includes any desired padding rows, and the copied
+    region excludes them (for example, ``T.copy(src, dst[:rows, :])``).
     Partial NZ-to-L1 copies derive both pitches from the complete layouts.
 
     A copy whose destination is an MX scale-factor handle

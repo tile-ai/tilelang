@@ -64,8 +64,7 @@ private:
 // Every alias has the same padded matrix shape and canonical layout. Its old
 // reshape is absorbed into indices/regions here, not a special layout or hidden
 // pitch. Ordinary capacity accounting and version expansion therefore see the
-// complete storage through every alias. Compact NZ padding is consumed here
-// too.
+// complete storage through every alias. GM/UB and compact NZ are untouched.
 class FractalStorageNormalizer : public arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Rewrite(PrimFunc func) {
@@ -76,24 +75,12 @@ public:
     FractalStorageNormalizer rewriter(&analyzer);
     rewriter.MarkBufferMapShapes(func);
     for (const auto &[buffer, layout] : collector.layouts) {
-      bool compact = GetAscendCompactNZPadding(layout).has_value();
-      if (compact) {
-        ICHECK(IsSharedBuffer(buffer) && collector.owners.count(buffer->data))
-            << "Compact NZ padding requires a UB allocation owner: "
-            << buffer->name;
-      } else if (!IsAscendFractalLayout(layout) ||
-                 !(IsL1Buffer(buffer) || IsL0ABuffer(buffer) ||
-                   IsL0BBuffer(buffer) || IsL0CBuffer(buffer)) ||
-                 !collector.owners.count(buffer->data)) {
+      if (!IsAscendFractalLayout(layout) ||
+          !(IsL1Buffer(buffer) || IsL0ABuffer(buffer) || IsL0BBuffer(buffer) ||
+            IsL0CBuffer(buffer)) ||
+          !collector.owners.count(buffer->data))
         continue;
-      }
       if (auto anchor = rewriter.anchors_.Get(buffer->data)) {
-        if (compact) {
-          ICHECK(collector.layouts[anchor.value()]->IsEqual(
-              layout->Reshape(anchor.value()->shape, &analyzer).get()))
-              << "Conflicting compact NZ views of " << buffer->name;
-          continue;
-        }
         AscendFractalLayoutInfo lhs, rhs;
         ICHECK(TryExtractAscendFractalLayout(collector.layouts[anchor.value()],
                                              anchor.value(), &lhs));
@@ -157,30 +144,6 @@ private:
     logical_maps_.Set(
         buffer,
         Layout(anchor->shape, identity)->Reshape(buffer->shape, analyzer_));
-    if (auto padding = GetAscendCompactNZPadding(layout)) {
-      // Reject alias reinterpretation before changing the allocation capacity.
-      layout->Reshape(buffer->shape, analyzer_);
-      Array<PrimExpr> shape = anchor->shape;
-      size_t row_axis = shape.size() - 2;
-      if (const int64_t *rows = as_const_int(shape[row_axis]);
-          rows && (*rows < 0 || *rows > INT32_MAX - padding.value()))
-        TVM_FFI_THROW(ValueError)
-            << "Compact NZ padded row extent exceeds int32 range: "
-            << anchor->name;
-      shape.Set(row_axis,
-                analyzer_->Simplify(shape[row_axis] + padding.value()));
-      Buffer padded = canonical_buffers_.Get(buffer->data).value_or(owner);
-      if (!StructuralEqual()(padded->shape, shape) ||
-          !padded->strides.empty()) {
-        padded.CopyOnWrite()->shape = shape;
-        padded.CopyOnWrite()->strides = {};
-      }
-      buffers_.Set(buffer, padded);
-      canonical_buffers_.Set(buffer->data, padded);
-      layouts_.Set(buffer, MakeAscendCompactNZStorageLayout(padded));
-      compact_buffers_.insert(buffer);
-      return;
-    }
     AscendFractalLayoutInfo info;
     ICHECK(TryExtractAscendFractalLayout(layout, anchor, &info));
     Array<PrimExpr> shape = anchor->shape;
@@ -432,23 +395,6 @@ private:
     }
     if (IsAscendCopyCall(op)) {
       Copy copy(op->args, op->annotations);
-      // Storage padding must not turn an out-of-bounds logical copy into a
-      // legal one. Check against the original shape before remapping regions.
-      auto check_logical_region = [&](const Buffer &buffer,
-                                      const Array<Range> &ranges) {
-        if (!compact_buffers_.count(buffer))
-          return;
-        for (size_t i = 0; i < ranges.size(); ++i) {
-          if (!analyzer_->CanProve(
-                  ranges[i]->min >= 0 && ranges[i]->extent >= 0 &&
-                  ranges[i]->min + ranges[i]->extent <= buffer->shape[i]))
-            TVM_FFI_THROW(ValueError)
-                << "Compact NZ copy region must be within the logical shape of "
-                << buffer->name << ": " << ranges;
-        }
-      };
-      check_logical_region(copy->src, copy->src_range);
-      check_logical_region(copy->dst, copy->dst_range);
       Call call = Downcast<Call>(Parent::VisitExpr_(op));
       if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst))
         return NormalizeFixpipeCopy_(call);
@@ -528,7 +474,6 @@ private:
     }
     return block;
   }
-  std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> compact_buffers_;
   Map<Var, Buffer> anchors_;
   Map<Var, Buffer> canonical_buffers_;
   Map<Buffer, Buffer> buffers_;

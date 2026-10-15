@@ -305,8 +305,8 @@ def flash_attention_bwd_fused_dq_atomic_staged(
 
             S_ub = T.alloc_shared((ROWS, BR), accum_dtype)
             dP_ub = T.alloc_shared((ROWS, BR), accum_dtype)
-            P_nz_ub = T.alloc_shared((ROWS, BR), dtype)
-            dS_nz_ub = T.alloc_shared((ROWS, BR), dtype)
+            P_nz_ub = T.alloc_shared((ROWS + 1, BR), dtype)
+            dS_nz_ub = T.alloc_shared((ROWS + 1, BR), dtype)
             T.annotate_layout(
                 {
                     P_nz_ub: make_ascend_compact_nz_layout(P_nz_ub),

@@ -10,7 +10,6 @@
 #define TVM_TL_ASCEND_LAYOUT_ASCEND_LAYOUTS_H_
 
 #include "layout/layout.h"
-#include <optional>
 
 namespace tvm {
 namespace tl {
@@ -30,12 +29,7 @@ Layout MakeAscendNZLayout(const tirx::Buffer &buffer);
 // Compact padded-NZ layout used by software UB ND->NZ scatter:
 // [leading..., row, col] -> [flatten(leading...) * (cols/C0) + col/C0,
 //                            row, col%C0].
-// Public logical layout: reserve padding rows per C0 group during
-// normalization.
-Layout MakeAscendCompactNZLayout(const tirx::Buffer &buffer, int padding = 1);
-// Internal physical layout: buffer shape already includes all reserved storage.
-Layout MakeAscendCompactNZStorageLayout(const tirx::Buffer &buffer);
-std::optional<int> GetAscendCompactNZPadding(const Layout &layout);
+Layout MakeAscendCompactNZLayout(const tirx::Buffer &buffer);
 bool IsAscendCompactNZLayout(const Layout &layout, const tirx::Buffer &buffer);
 
 // Ascend NZ column fractal C0 = 32 bytes / element_size = 256 / element_bits

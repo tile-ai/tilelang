@@ -614,8 +614,8 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
     def main(x: T.Tensor((16, 64), "float32"), out: T.Tensor((1,), "bfloat16")):
         with T.Kernel(1):
             src = T.alloc_shared((16, 64), "float32")
-            nz = T.alloc_shared((16, 64), "bfloat16")
-            other = T.alloc_shared((16, 64), "bfloat16")
+            nz = T.alloc_shared((17, 64), "bfloat16")
+            other = T.alloc_shared((17, 64), "bfloat16")
             T.annotate_layout({nz: make_ascend_compact_nz_layout(nz)})
             with T.Stage(0):
                 T.fill(nz, T.bfloat16(0))

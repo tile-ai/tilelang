@@ -36,27 +36,26 @@ def make_ascend_nz_layout(buffer: BufferLikeType):
     return _ffi_api.make_ascend_nz_layout(buf)
 
 
-@tvm_ffi.register_object("tl.AscendCompactNZLayout")
-class _AscendCompactNZLayout(Layout):
-    """Logical compact NZ layout carrying unconsumed allocation padding."""
+def make_ascend_compact_nz_layout(buffer: BufferLikeType):
+    """Create a compact staged-NZ layout for a pre-packed UB buffer.
 
+    Unlike :func:`make_ascend_nz_layout`, this layout does not round the row
+    extent of every leading stage up to 16.  A logical
+    ``[..., rows, cols]`` buffer is stored as consecutive
+    ``[C0-group, rows, C0]`` blocks, with all leading dimensions flattened
+    into the C0-group axis.  The allocated row extent determines the pitch in 32-byte blocks,
+    including any trailing gap rows. Partial copies retain that pitch.
 
-def make_ascend_compact_nz_layout(buffer: BufferLikeType, padding: int = 1):
-    """Store a logical UB matrix in compact NZ order with reserved gap rows.
-
-    A logical ``[..., rows, cols]`` allocation occupies
-    ``[prod(leading) * cols / C0, rows + padding, C0]`` elements, where
-    ``C0 = 32 / sizeof(dtype)``. Padding reserves storage; it is not zero-filled.
-    Copy regions use logical rows. Partial copies retain the full buffer pitch.
-
-    Existing code allocating ``rows + 1`` must instead allocate ``rows`` and
-    use ``padding=1``. For existing physical views, use explicit post-copy
-    pitches rather than annotating the view as a new padded allocation.
+    This layout is intended for UB data that is produced directly in NZ order
+    (for example with ``vsstb`` or a layout-driven ``T.copy``) and then copied
+    to L1. It is not an L1 Cube operand layout. For an ND-to-NZ ``T.copy``, the
+    allocation's row extent includes any desired padding, for example
+    ``(tile_rows + 1, cols)``. Copy only the valid region with
+    ``T.copy(src, dst[:tile_rows, :])``; gap rows are not initialized.
     """
-    if not isinstance(padding, int) or isinstance(padding, bool) or padding < 0:
-        raise ValueError("Compact NZ padding must be a non-negative integer")
+
     buf, _, _ = _get_buffer_info(buffer)
-    return _ffi_api.make_ascend_compact_nz_layout(buf, padding)
+    return _ffi_api.make_ascend_compact_nz_layout(buf)
 
 
 def make_ascend_major_k_layout(buffer: BufferLikeType, k_align: int = 1):

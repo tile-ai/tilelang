@@ -11,7 +11,7 @@ from testing.ascend._ir import calls
 def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape=False, vf=None):
     src = tirx.decl_buffer((2, rows, cols) if staged else (rows, cols), "bfloat16", name="src", scope="shared.dyn", strides=strides)
     owner = tirx.decl_buffer((rows // 2, cols * 2), "bfloat16", name="storage", scope="shared.dyn", data=src.data) if reshape else src
-    dst = tirx.decl_buffer((2, rows, cols) if staged else (rows, cols), "float32", name="dst", scope="shared.dyn")
+    dst = tirx.decl_buffer((2, rows + padding, cols) if staged else (rows + padding, cols), "float32", name="dst", scope="shared.dyn")
     i = tirx.Var("stage", "int32")
 
     def region(buffer):
@@ -30,7 +30,7 @@ def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape
         "root",
         body,
         alloc_buffers=[owner, dst],
-        annotations={"layout_map": {dst: make_ascend_compact_nz_layout(dst, padding=padding)}},
+        annotations={"layout_map": {dst: make_ascend_compact_nz_layout(dst)}},
     )
     return tvm.IRModule({"main": tirx.PrimFunc([], tirx.SBlockRealize([], True, root))})
 
@@ -38,7 +38,6 @@ def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape
 @pytest.mark.parametrize("case", ["plain", "staged", "reshape", "simd", "simt"])
 def test_scatter_regions_and_vf_boundary(case):
     before = _module(staged=case == "staged", reshape=case == "reshape", vf={"simd": "SIMD_VF", "simt": "SIMT_VF"}.get(case))
-    before = transform.NormalizeAscendFractalStorage()(before)
     after = transform.InsertNd2Nz()(before)
     if case == "simt":
         tvm.ir.assert_structural_equal(after, before)
@@ -67,7 +66,7 @@ def test_scatter_regions_and_vf_boundary(case):
     ],
 )
 def test_scatter_storage_requirements(kwargs, error):
-    before = transform.NormalizeAscendFractalStorage()(_module(**kwargs))
+    before = _module(**kwargs)
     if error:
         with pytest.raises(ValueError, match=error):
             transform.InsertNd2Nz()(before)
@@ -81,7 +80,7 @@ def test_partial_nz_copy_uses_complete_storage_pitches(padding, parts):
     from tilelang.layout import make_ascend_nz_layout
     from testing.ascend._ir import copy, kernel, seq
 
-    nz = tirx.decl_buffer((2, 64, 128), "bfloat16", name="nz", scope="shared.dyn")
+    nz = tirx.decl_buffer((2, 64 + padding, 128), "bfloat16", name="nz", scope="shared.dyn")
     dst = tirx.decl_buffer((2, 64, 128), "bfloat16", name="dst", scope="shared.l1")
     rows = 64 // parts
     before = kernel(
@@ -92,9 +91,9 @@ def test_partial_nz_copy_uses_complete_storage_pitches(padding, parts):
             ]
         ),
         buffers=[nz, dst],
-        annotations={"layout_map": {nz: make_ascend_compact_nz_layout(nz, padding), dst: make_ascend_nz_layout(dst)}},
+        annotations={"layout_map": {nz: make_ascend_compact_nz_layout(nz), dst: make_ascend_nz_layout(dst)}},
     )
-    after = transform.InsertNd2Nz()(transform.NormalizeAscendFractalStorage()(before))
+    after = transform.InsertNd2Nz()(before)
     copies = calls(after, "tl.ascend_nd2nz_post_copy")
     assert len(copies) == parts
     for i, call in enumerate(copies):
@@ -109,13 +108,13 @@ def test_partial_scatter_uses_destination_storage_pitch(padding):
     from testing.ascend._ir import copy, kernel
 
     src = tirx.decl_buffer((16, 128), "bfloat16", scope="shared.dyn")
-    dst = tirx.decl_buffer((64, 256), "bfloat16", scope="shared.dyn")
+    dst = tirx.decl_buffer((64 + padding, 256), "bfloat16", scope="shared.dyn")
     before = kernel(
         copy(src, dst, dst_indices=[32, 16], dst_shape=[16, 128]),
         buffers=[src, dst],
-        annotations={"layout_map": {dst: make_ascend_compact_nz_layout(dst, padding)}},
+        annotations={"layout_map": {dst: make_ascend_compact_nz_layout(dst)}},
     )
-    after = transform.InsertNd2Nz()(transform.NormalizeAscendFractalStorage()(before))
+    after = transform.InsertNd2Nz()(before)
     (scatter,) = calls(after, "tl.ascend_nd2nz_scatter")
     assert [int(x) for x in scatter.args[2:5]] == [16, 128, 64 + padding]
     assert [int(x) for x in scatter.args[1].args[0].indices] == [32, 16]
@@ -124,7 +123,7 @@ def test_partial_scatter_uses_destination_storage_pitch(padding):
 @pytest.mark.parametrize(
     "case,error",
     [
-        ("logical-oob", "within the logical shape"),
+        ("out-of-bounds", "provably in bounds"),
         ("column-start", "C0-aligned"),
         ("column-width", "C0-aligned"),
         ("dtype", "dtype conversion"),
@@ -137,7 +136,7 @@ def test_invalid_partial_nz_regions(case, error):
 
     src = tirx.decl_buffer((64, 128), "bfloat16", scope="shared.dyn")
     dst = tirx.decl_buffer((64, 128), "float16" if case == "dtype" else "bfloat16", scope="shared.l1")
-    rows = 65 if case == "logical-oob" else 32
+    rows = 65 if case == "out-of-bounds" else 32
     cols = 63 if case == "column-width" else 64
     before = kernel(
         copy(src, dst, src_indices=[0, 1 if case == "column-start" else 0], src_shape=[rows, cols], dst_shape=[rows, cols]),
@@ -150,7 +149,7 @@ def test_invalid_partial_nz_regions(case, error):
         },
     )
     with pytest.raises(ValueError, match=error):
-        transform.InsertNd2Nz()(transform.NormalizeAscendFractalStorage()(before))
+        transform.InsertNd2Nz()(before)
 
 
 @pytest.mark.parametrize("parts", [1, 2, 4])
@@ -158,7 +157,7 @@ def test_explicit_physical_view_pitch_does_not_depend_on_partition(parts):
     from testing.ascend._ir import kernel, seq
 
     # The BF16 view retains the 8192-byte FP32 owner's capacity and 64-block
-    # C0-group stride. Padding metadata would allocate new storage incorrectly.
+    # C0-group stride without allocating additional storage.
     owner = tirx.decl_buffer((32, 64), "float32", name="owner", scope="shared.dyn")
     view = tirx.decl_buffer((4096,), "bfloat16", data=owner.data, scope="shared.dyn")
     dst = tirx.decl_buffer((4096,), "bfloat16", scope="shared.l1")

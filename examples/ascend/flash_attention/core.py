@@ -356,7 +356,7 @@ def flash_attention_fwd(
                 pv_acc_l0c = T.alloc_l0c((BR, D), accum_dtype)
 
                 S_ub = T.alloc_shared((ROWS, BC), accum_dtype)
-                P_nz_ub = T.alloc_shared((ROWS, BC), dtype)
+                P_nz_ub = T.alloc_shared((ROWS + 1, BC), dtype)
                 T.annotate_layout({P_nz_ub: make_ascend_compact_nz_layout(P_nz_ub)})
                 O_tmp_ub = T.alloc_shared((ROWS, D), accum_dtype)
                 O_ub = T.alloc_shared((ROWS, D), accum_dtype)
@@ -447,7 +447,7 @@ def flash_attention_fwd(
             pv_acc_l0c = T.alloc_l0c((BR, D), accum_dtype)
 
             S_ub = T.alloc_shared((ROWS, BC), accum_dtype)
-            P_nz_ub = T.alloc_shared((ROWS, BC), dtype)
+            P_nz_ub = T.alloc_shared((ROWS + 1, BC), dtype)
             T.annotate_layout({P_nz_ub: make_ascend_compact_nz_layout(P_nz_ub)})
             O_tmp_ub = T.alloc_shared((ROWS, D), accum_dtype)
             O_ub = T.alloc_shared((ROWS, D), accum_dtype)

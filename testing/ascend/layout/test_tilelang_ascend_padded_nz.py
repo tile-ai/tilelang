@@ -20,20 +20,16 @@ def _copy_to_l1(mode):
         x: T.Tensor((input_rows * 2, COLS), "bfloat16"),
         out: T.Tensor((ROWS * 2, COLS), "float32"),
     ):
-        with T.MixedKernel(1) as (_, sid):
+        with T.Kernel(1):
             identity_l1 = T.alloc_l1((COLS, COLS), "bfloat16")
             x_l1 = T.alloc_l1((ROWS * 2, COLS), "bfloat16")
             result = T.alloc_l0c((ROWS * 2, COLS), "float32")
             src = T.alloc_shared((input_rows, COLS), "bfloat16")
-            T.dual_copy(x, src)
             if mode == "prepacked":
-                # The GM input already contains physical gap rows. Import it
-                # as raw storage and pass its pitches explicitly.
-                T.ascend_nd2nz_post_copy(
-                    x_l1[sid * ROWS, 0], src[0, 0], ROWS, COLS, src_pitch=PADDED_ROWS, dst_pitch=2 * ROWS, dtype="bfloat16"
-                )
-            elif mode == "explicit":
-                packed = T.alloc_shared((ROWS, COLS), "bfloat16")
+                T.annotate_layout({src: make_ascend_compact_nz_layout(src)})
+            T.dual_copy(x, src)
+            if mode == "explicit":
+                packed = T.alloc_shared((PADDED_ROWS, COLS), "bfloat16")
                 T.annotate_layout({packed: make_ascend_compact_nz_layout(packed)})
                 T.copy(src, packed[:ROWS, :])
                 T.dual_copy(packed[:ROWS, :], x_l1)
@@ -47,13 +43,12 @@ def _copy_to_l1(mode):
 
 
 def test_compact_nz_layout_keeps_stages_tightly_packed():
-    buffer = tirx.decl_buffer((2, ROWS, 256), "float32", name="A", scope="shared")
+    buffer = tirx.decl_buffer((2, PADDED_ROWS, 256), "float32", name="A", scope="shared")
     layout = make_ascend_compact_nz_layout(buffer)
-    assert layout.padding == 1
-    mapped = layout.map_forward_index([tirx.IntImm("int32", value) for value in (1, ROWS - 1, 255)])
+    mapped = layout.map_forward_index([tirx.IntImm("int32", value) for value in (1, PADDED_ROWS - 1, 255)])
 
-    assert [int(value) for value in layout.get_output_shape()] == [64, ROWS, 8]
-    assert [int(value) for value in mapped] == [63, ROWS - 1, 7]
+    assert [int(value) for value in layout.get_output_shape()] == [64, PADDED_ROWS, 8]
+    assert [int(value) for value in mapped] == [63, PADDED_ROWS - 1, 7]
 
 
 @pytest.mark.parametrize("mode", ["inserted", "explicit", "prepacked"])
@@ -96,12 +91,12 @@ def _partial_copy_to_l1(padding, parts, physical_view=False, staged=False):
                     )
             else:
                 nd = T.alloc_shared((rows, cols), "bfloat16")
-                nz = T.alloc_shared((2, rows, cols) if staged else (rows, cols), "bfloat16")
-                T.annotate_layout({nz: make_ascend_compact_nz_layout(nz, padding)})
+                nz = T.alloc_shared((2, rows + padding, cols) if staged else (rows + padding, cols), "bfloat16")
+                T.annotate_layout({nz: make_ascend_compact_nz_layout(nz)})
                 if sid == 0:
                     T.copy(x, nd)
                     if staged:
-                        T.copy(nd, nz[1, :, :])
+                        T.copy(nd, nz[1, :rows, :])
                         for part in T.unroll(parts):
                             T.copy(nz[1, part * chunk : (part + 1) * chunk, :], x_l1[part * chunk : (part + 1) * chunk, :])
                     else:

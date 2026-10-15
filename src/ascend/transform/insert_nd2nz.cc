@@ -233,9 +233,6 @@ private:
     if (!layout.defined() || !IsNZBuffer(buffer))
       TVM_FFI_THROW(ValueError)
           << "NZ copy requires a compact NZ or MajorK layout: " << buffer->name;
-    if (GetAscendCompactNZPadding(layout.value()).has_value())
-      TVM_FFI_THROW(ValueError)
-          << "NormalizeAscendFractalStorage must run before InsertNd2Nz";
     ValidateRegionInBounds(buffer, ranges, "NZ");
     for (size_t i = 0; i + 2 < ranges.size(); ++i)
       if (!analyzer_->CanProveEqual(ranges[i]->extent, 1))
@@ -432,8 +429,8 @@ private:
       return make_post_copy(src_ptr, rows);
     auto [src_dtype, checked_dst_dtype] =
         ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i);
-    // This temporary is created after storage normalization and already has
-    // its complete physical capacity. It is not a new logical compact layout.
+    // A fresh scratch buffer uses one extra row per C0 group. Existing NZ
+    // buffers instead retain the pitch of their complete storage layout.
     PrimExpr scratch_pitch = rows + 1;
     PrimExpr scratch_extent = analyzer_->Simplify(scratch_pitch * cols);
     Buffer scratch = decl_buffer({scratch_extent}, copy.dst->dtype,
