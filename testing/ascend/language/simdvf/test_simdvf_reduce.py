@@ -25,24 +25,12 @@ SHAPES = [(4, 64), (4, 128)]
 ATOL = 1e-3
 
 
-def reduce_kernel(rows, cols):
-    """``A(rows, cols) -> S(rows,)`` sum along ``dim=1``, overwriting ``S``."""
+def reduce_kernel(rows, cols, clear=True):
+    """``A(rows, cols) -> S(rows,)`` sum along ``dim=1``.
 
-    @T.prim_func
-    def kernel(A: T.Tensor((rows, cols), "float32"), S: T.Tensor((rows,), "float32")):
-        with T.Kernel(1):
-            a_ub = T.alloc_shared((rows, cols), "float32")
-            s_ub = T.alloc_shared((rows,), "float32")
-            T.copy(A, a_ub)
-            with T.SimdVF():
-                T.reduce_sum(a_ub, s_ub, dim=1, clear=True)
-            T.copy(s_ub, S)
-
-    return kernel
-
-
-def accumulate_kernel(rows, cols):
-    """Same, but ``clear=False``: ``S[row] = Init[row] + sum(A[row, :])``."""
+    ``clear=True`` overwrites ``S`` (``Init`` is ignored); ``clear=False`` accumulates
+    onto it -- ``S[row] = Init[row] + sum(A[row, :])``.
+    """
 
     @T.prim_func
     def kernel(A: T.Tensor((rows, cols), "float32"), Init: T.Tensor((rows,), "float32"), S: T.Tensor((rows,), "float32")):
@@ -52,7 +40,7 @@ def accumulate_kernel(rows, cols):
             T.copy(A, a_ub)
             T.copy(Init, s_ub)
             with T.SimdVF():
-                T.reduce_sum(a_ub, s_ub, dim=1, clear=False)
+                T.reduce_sum(a_ub, s_ub, dim=1, clear=clear)
             T.copy(s_ub, S)
 
     return kernel
@@ -70,11 +58,12 @@ def test_simdvf_reduce_dim1_store(rows, cols):
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("rows,cols", SHAPES)
 def test_simdvf_reduce_dim1_sum(rows, cols):
-    """Every row sum must land at ``S[row]``."""
+    """Every row sum must land at ``S[row]``, ignoring ``Init``."""
     kernel = tilelang.compile(reduce_kernel(rows, cols), target="ascend")
     a = torch.randn(rows, cols, dtype=torch.float32, device="npu")
-    s = torch.full((rows,), -123.0, dtype=torch.float32, device="npu")
-    kernel(a, s)
+    init = torch.full((rows,), -123.0, dtype=torch.float32, device="npu")
+    s = torch.zeros(rows, dtype=torch.float32, device="npu")
+    kernel(a, init, s)
     torch.npu.synchronize()
 
     # The summation order differs from torch's, so compare with a tolerance.
@@ -85,7 +74,7 @@ def test_simdvf_reduce_dim1_sum(rows, cols):
 @pytest.mark.parametrize("rows,cols", SHAPES)
 def test_simdvf_reduce_dim1_accumulate(rows, cols):
     """``clear=False`` accumulates onto its own row (the ``BRC_B32`` reload path)."""
-    kernel = tilelang.compile(accumulate_kernel(rows, cols), target="ascend")
+    kernel = tilelang.compile(reduce_kernel(rows, cols, clear=False), target="ascend")
     a = torch.randn(rows, cols, dtype=torch.float32, device="npu")
     init = torch.arange(1, rows + 1, dtype=torch.float32, device="npu")
     s = torch.zeros(rows, dtype=torch.float32, device="npu")
