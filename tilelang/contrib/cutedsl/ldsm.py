@@ -25,6 +25,9 @@ __all__ = [
     "ptx_ldmatrix_x1_trans",
     "ptx_ldmatrix_x2_trans",
     "ptx_ldmatrix_x4_trans",
+    "ptx_ldmatrix_b4x16_p64_x1",
+    "ptx_ldmatrix_b4x16_p64_x2",
+    "ptx_ldmatrix_b4x16_p64_x4",
     "ptx_stmatrix_x1",
     "ptx_stmatrix_x2",
     "ptx_stmatrix_x4",
@@ -52,6 +55,33 @@ def _ldmatrix(smem_ptr, local_ptr, num, transpose, loc=None, ip=None):
     else:
         for i in range(num):
             out[i] = cute.Int32(out_i32[i])
+
+
+def _ldmatrix_b4x16_p64(smem_ptr, local_ptr, num, loc=None, ip=None):
+    """Expanding load of 4-bit E2M1 rows into 8-bit MMA containers.
+
+    Each 16-byte shared-memory row holds 16 packed values followed by 8 bytes
+    of padding (float4_e2m1_unpacked storage). ldmatrix leaves each value in
+    bits [3:0], whereas mma kind::f8f6f4/mxf8f6f4 reads E2M1 from bits [5:2],
+    so the containers are shifted left by two.
+    """
+    assert num in [1, 2, 4]
+    ptr = smem_ptr.llvm_ptr if hasattr(smem_ptr, "llvm_ptr") else smem_ptr
+    out_i32 = prims.ldmatrix(
+        ptr,
+        num=num,
+        layout=prims.MMALayout.ROW,
+        shape=prims.LoadShape.M8N16,
+        src_format=prims.LoadSrcFormat.B4X16_P64,
+        loc=loc,
+        ip=ip,
+    )
+    out = cute.make_tensor(cute.recast_ptr(local_ptr, dtype=cute.Int32), num)
+    if num == 1:
+        out[0] = cute.Int32(out_i32) << 2
+    else:
+        for i in range(num):
+            out[i] = cute.Int32(out_i32[i]) << 2
 
 
 def _stmatrix(smem_ptr, values, transpose, loc=None, ip=None):
@@ -102,6 +132,24 @@ def ldmatrix_x2_trans(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=Non
 def ldmatrix_x4_trans(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None) -> None:
     """Load 4 matrices (8x8 each) with transpose from shared memory"""
     _ldmatrix(smem_ptr, local_ptr, 4, True, loc, ip)
+
+
+@dsl_user_op
+def ptx_ldmatrix_b4x16_p64_x1(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None) -> None:
+    """Load 1 padded E2M1 matrix (8x16) into 8-bit MMA containers (SM100/SM120 family)"""
+    _ldmatrix_b4x16_p64(smem_ptr, local_ptr, 1, loc, ip)
+
+
+@dsl_user_op
+def ptx_ldmatrix_b4x16_p64_x2(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None) -> None:
+    """Load 2 padded E2M1 matrices (8x16 each) into 8-bit MMA containers (SM100/SM120 family)"""
+    _ldmatrix_b4x16_p64(smem_ptr, local_ptr, 2, loc, ip)
+
+
+@dsl_user_op
+def ptx_ldmatrix_b4x16_p64_x4(smem_ptr: Pointer, local_ptr: Pointer, *, loc=None, ip=None) -> None:
+    """Load 4 padded E2M1 matrices (8x16 each) into 8-bit MMA containers (SM100/SM120 family)"""
+    _ldmatrix_b4x16_p64(smem_ptr, local_ptr, 4, loc, ip)
 
 
 # ============================================================================

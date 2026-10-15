@@ -28,6 +28,7 @@ from .gemm_v1 import *  # noqa: F401,F403
 from .reduce import *  # noqa: F401,F403
 from .ldsm import *  # noqa: F401,F403
 from .ptx_mma import *  # noqa: F401,F403
+from .mma_block_scale import *  # noqa: F401,F403
 from .math import *  # noqa: F401,F403
 from .threadblock_swizzle import *  # noqa: F401,F403
 from .atomic import *  # noqa: F401,F403
