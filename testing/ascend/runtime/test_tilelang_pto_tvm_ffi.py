@@ -2,7 +2,8 @@
 
 Covers the execution semantics of ``target="pto"`` with
 ``execution_backend="tvm_ffi"``: callee-allocated outputs, dynamic shapes,
-multiple device kernels, dynamic shared memory, and mixed cube/vector kernels.
+multiple device kernels, dynamic shared memory, mixed cube/vector kernels,
+exported-library round-trips, and device kernels under host control flow.
 """
 
 import pytest
@@ -11,6 +12,7 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang.ascend import language as T
+from tilelang.ascend.torch_exchange import install_torch_npu_stream_exchange
 
 
 pytestmark = pytest.mark.pto
@@ -90,6 +92,21 @@ def dynamic_shared_copy():
             T.copy(ub[:n], dst)
 
     return copy
+
+
+def accumulate(n: int, tile: int, iters: int):
+    @T.prim_func
+    def main(
+        a: T.Tensor((n,), T.float32),
+        out: T.Tensor((n,), T.float32),
+    ):
+        for _ in T.serial(iters):
+            with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+                for i in T.Parallel(tile):
+                    idx = bx * tile + i
+                    out[idx] = out[idx] + a[idx]
+
+    return main
 
 
 def mixed_gemm(m_dim: int, k_dim: int, n_dim: int):
@@ -278,6 +295,51 @@ def test_pto_tvm_ffi_source_accessors():
 
     host_source = kernel.get_host_source()
     assert host_source and "target" in host_source
+
+
+def test_pto_tvm_ffi_export_library_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
+
+    n, tile = 64 * 2048, 2048
+    kernel = tilelang.compile(vector_add(n, tile), target="pto", out_idx=-1, execution_backend="tvm_ffi")
+
+    a = torch.randn(n, device="npu")
+    b = torch.randn(n, device="npu")
+    direct = kernel(a, b)
+    torch.npu.synchronize()
+
+    library = tmp_path / "kernel.so"
+    kernel.export_library(str(library))
+
+    module = tilelang.tvm.runtime.load_module(str(library))
+    entry = module.get_function("main", query_imports=True)
+    install_torch_npu_stream_exchange()
+    # The callee-allocated-output ABI takes the inputs plus one extra Torch
+    # tensor that anchors output allocation to Torch's allocator.
+    loaded = entry(a, b, a)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(loaded.cpu(), direct.cpu(), rtol=0, atol=0)
+
+
+def test_pto_tvm_ffi_kernel_call_in_host_loop(tmp_path, monkeypatch):
+    monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
+
+    n, tile, iters = 64 * 2048, 2048, 3
+    kernel = tilelang.compile(accumulate(n, tile, iters), target="pto", out_idx=None, execution_backend="tvm_ffi")
+
+    a = torch.randn(n, device="npu")
+    init = torch.randn(n, device="npu")
+    out = init.clone()
+    kernel(a, out)
+    torch.npu.synchronize()
+
+    # Accumulating is non-idempotent, so matching the sequential reference
+    # proves every launch in the host loop ran.
+    expected = init.cpu()
+    for _ in range(iters):
+        expected = expected + a.cpu()
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
