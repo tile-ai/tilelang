@@ -1,6 +1,6 @@
 """Lower PTODSL kernels to MLIR text.
 
-Usage: python ptodsl_compile.py <src.ptodsl.py> <kernel-names.json> <out.pto>
+Usage: python -m tilelang.contrib.ptodsl_compile <src.ptodsl.py> <kernel-names.json> <out.pto>
 """
 
 import importlib.util

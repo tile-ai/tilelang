@@ -84,8 +84,19 @@ def _compile_ptodsl_to_pto(
     """
     Path(src_path).write_text(ptodsl_source, encoding="utf-8")
 
-    compile_script = Path(__file__).with_name("ptodsl_compile.py")
-    command = [sys.executable, str(compile_script), str(src_path), json.dumps(kernel_names), str(out_path)]
+    # Launch as a module, never by script path: a script path puts
+    # tilelang/contrib first on the subprocess sys.path, where the ptodsl
+    # compat package shadows the installed PTODSL frontend that the
+    # generated source imports. Inheriting the parent cwd keeps tilelang
+    # importable in dev checkouts that rely on the cwd.
+    command = [
+        sys.executable,
+        "-m",
+        "tilelang.contrib.ptodsl_compile",
+        str(src_path),
+        json.dumps(kernel_names),
+        str(out_path),
+    ]
     if verbose:
         print(f"PTODSL compile command: {' '.join(command)}")
     result = subprocess.run(command, text=True, capture_output=True)
@@ -174,17 +185,67 @@ def _first_output_line(command: list[str]) -> str:
 
 @functools.cache
 def toolchain_stamp() -> dict[str, str]:
-    """Identity of the tools that produce a PTO aibin, for cache keys."""
-    from tilelang.contrib.bisheng import find_bisheng_path
+    """Identity of the tools that produce a PTO aibin, for cache keys.
 
+    ptoas compiles the device object with the toolchain it resolves from
+    ASCEND_HOME_PATH, so the CANN identity (which includes the bisheng and
+    the CCE linker inside that install, and the version ptoas gates its ABI
+    on) is recorded.
+    """
     ptoas_path = shutil.which("ptoas")
     if ptoas_path is None:
         raise RuntimeError("Cannot find the ptoas assembler. Install ptoas-vmi and make sure `ptoas` is on PATH.")
-    bisheng_path = find_bisheng_path()
     return {
         "ptoas": _first_output_line([ptoas_path, "--version"]),
-        "bisheng": _first_output_line([bisheng_path, "--version"]),
+        "cann": _cann_identity(),
     }
+
+
+# Where ptoas itself probes for the CANN version, in its order of preference.
+_CANN_VERSION_RELPATHS = (
+    "compiler/version.info",
+    "x86_64-linux/ascend_toolkit_install.info",
+    "x86_64-linux/ascend_all_cann_install.info",
+    "aarch64-linux/ascend_toolkit_install.info",
+    "aarch64-linux/ascend_all_cann_install.info",
+    "ascend_toolkit_install.info",
+    "ascend_all_cann_install.info",
+    "opp/version.info",
+)
+
+
+def _first_version_line(path: Path) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in content.splitlines():
+        line = line.strip()
+        for key in ("Version=", "version="):
+            if line.startswith(key):
+                value = line[len(key) :].strip().strip('"')
+                if value:
+                    return value
+    return ""
+
+
+def _cann_identity() -> str:
+    """Identity of the CANN install ptoas compiles against.
+
+    ptoas selects its device compiler, CCE linker, and CANN libraries from
+    ASCEND_HOME_PATH, so switching installs changes the produced ELF and
+    must miss the cache even when the ptoas and bisheng binaries are
+    unchanged.
+    """
+    home = os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME")
+    if not home:
+        return ""
+    home = str(Path(home).resolve())
+    for relpath in _CANN_VERSION_RELPATHS:
+        version = _first_version_line(Path(home, relpath))
+        if version:
+            return f"{home} ({version})"
+    return home
 
 
 def compile_ptodsl_to_aibin(
