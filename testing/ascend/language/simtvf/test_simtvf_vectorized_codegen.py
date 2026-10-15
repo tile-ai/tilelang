@@ -171,7 +171,28 @@ def _ramp_value_kernel(explicit):
 def test_pto_ramp_value_is_one_vector_argument(explicit):
     source = _source(_ramp_value_kernel(explicit), target={"kind": "ascend", "keys": ["pto", "ascend"]})
     lanes = 4 if explicit else 2
-    assert re.search(rf"pto\.store\(tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
+    assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
+
+
+def test_pto_ramp_operands_are_evaluated_once():
+    @T.prim_func
+    def main():
+        with T.Kernel(1), T.SimtVF(threads=1):
+            T.evaluate(
+                T.call_extern(
+                    "int32",
+                    "consume",
+                    T.Ramp(
+                        T.call_extern("int32", "next_base"),
+                        T.call_extern("int32", "next_stride"),
+                        4,
+                    ),
+                )
+            )
+
+    source = _source(main, target={"kind": "ascend", "keys": ["pto", "ascend"]})
+    for operand in ("next_base", "next_stride"):
+        assert source.count(f"{operand}()") == 1
 
 
 @tilelang.testing.requires_ascend

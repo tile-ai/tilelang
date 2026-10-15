@@ -6542,16 +6542,17 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
 
 void CodeGenTileLangPTO::VisitExpr_(const RampNode *op,
                                     std::ostream &os) { // NOLINT(*)
-  // A Ramp used as a value must be a typed vector, not a Python tuple.
-  os << "tl.vector_from_list(" << DataTypeName(op->dtype.element_of()) << ", (";
+  // Keep operands expression-local and evaluate each once, even for effectful
+  // calls. A Ramp used as a value must remain a typed vector.
+  os << "(lambda _ramp_base, _ramp_stride: tl.vector_from_list("
+     << DataTypeName(op->dtype.element_of()) << ", (";
   for (int lane = 0; lane < op->dtype.lanes(); ++lane) {
     if (lane != 0) {
       os << ", ";
     }
-    os << "(" << PrintExpr_(op->base) << ")+(" << PrintExpr_(op->stride) << "*"
-       << lane << ")";
+    os << "(_ramp_base)+(_ramp_stride*" << lane << ")";
   }
-  os << "))";
+  os << ")))(" << PrintExpr_(op->base) << ", " << PrintExpr_(op->stride) << ")";
 }
 
 void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,
