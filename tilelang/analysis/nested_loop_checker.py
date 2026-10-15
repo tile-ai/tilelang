@@ -11,12 +11,16 @@ from tvm.tirx.transform import prim_func_pass
 def is_pipelined_for(op: For) -> bool:
     """Check if a for loop is pipelined."""
 
-    anno_keys = ["num_stages", "tl_pipeline_order", "tl_pipeline_stage", "tl_pipeline_group"]
+    anno_keys = ["num_stages", "tl_pipeline_order", "tl_pipeline_stage"]
     return any(key in op.annotations for key in anno_keys)
 
 
 def is_tile_op(op: Call) -> bool:
-    """Check if a call is a tile-op"""
+    """Check if a call is a tile-op (must not appear inside T.Parallel).
+
+    Per-iteration intrinsics like `tl.reducer_update` are plain builtins
+    (no TLOpBuilder), so they pass this check by construction.
+    """
 
     return op.op.get_attr("TLOpBuilder") is not None
 

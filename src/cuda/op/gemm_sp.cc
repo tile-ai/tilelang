@@ -6,10 +6,11 @@
 #include "op/gemm.h"
 #include "support/check.h"
 
-#include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
+#include "span_utils.h"
 
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
@@ -68,19 +69,18 @@ bool CheckWGMMA(const GemmSPNode &op) {
 
 // TODO @botbw: support tcgen5mma.sp for sparse inputs when it's available
 bool AllowTcgen5Mma(const GemmSPNode &op, Target target) {
-  bool scope_ok = (IsSharedBuffer(op.A) || op.A.scope() == "shared.tmem") &&
-                  IsSharedBuffer(op.B) && op.C.scope() == "shared.tmem";
+  bool scope_ok = (IsSharedBuffer(op.A) || IsTmemBuffer(op.A)) &&
+                  IsSharedBuffer(op.B) && IsTmemBuffer(op.C);
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype =
-      (op.A.scope() == "shared.tmem") ? op.B->dtype : op.A->dtype;
+  DataType ab_dtype = IsTmemBuffer(op.A) ? op.B->dtype : op.A->dtype;
   return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C->dtype).first;
 }
 
 bool AllowWgmma(const GemmSPNode &op, int block_size, Target target) {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
-  int warp_size = TargetGetWarpSize(target);
+  int warp_size = TargetCudaGetWarpSize(target);
   int num_warps = block_size / warp_size;
   return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
          TargetIsHopper(target) && op.M >= 64 && num_warps % 4 == 0 &&
@@ -94,18 +94,22 @@ void FatalWgmmaUnavailable(const GemmSPNode &op, Target target) {
              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
              << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
-             << ", K=" << op.K << ".";
+             << ", K=" << op.K << "."
+             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
 }
 
 void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
-  LOG(FATAL) << "tcgen5";
-  //   LOG(FATAL) << "T.tcgen05_gemm() requires Blackwell TCGEN5MMA lowering, "
-  //                 "but constraints were not satisfied. Got target="
-  //              << target << ", A(scope=" << op.A.scope()
-  //              << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
-  //              << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-  //              << ", dtype=" << op.C->dtype << "), M=" << op.M
-  //              << ", N=" << op.N << ", K=" << op.K << ".";
+  LOG(FATAL) << "T.tcgen05_gemm_sp() requires Blackwell TCGEN5MMA sparse "
+                "lowering, but sparse TCGEN5MMA lowering is not yet available. "
+                "Got target="
+             << target << ", A(scope=" << op.A.scope()
+             << ", dtype=" << op.A->dtype << "), E(scope=" << op.E.scope()
+             << ", dtype=" << op.E->dtype << "), B(scope=" << op.B.scope()
+             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
+             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
+             << ", K=" << op.K << "."
+             << SpanHintSuffix(
+                    {op.A->span, op.E->span, op.B->span, op.C->span});
 }
 
 std::pair<int, int>
@@ -119,7 +123,7 @@ ComputeDefaultWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
   ICHECK(N % k_n_per_warp == 0)
       << "N must be divisible by " << k_n_per_warp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * kMPerWarp) != 0) {
@@ -129,7 +133,7 @@ ComputeDefaultWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * k_n_per_warp) != 0) {
@@ -139,7 +143,7 @@ ComputeDefaultWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
@@ -196,7 +200,7 @@ ComputeWgmmaWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
   m_warp = kGroup;
   n_warp = num_warps / m_warp;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
       if (M % (cand * kMPerWarp) == 0) {
         m_warp = cand;
@@ -204,7 +208,7 @@ ComputeWgmmaWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
         break;
       }
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     int cand_n = n_warp;
     if (N % (cand_n * kNPerWarp) != 0) {
       int max_n = N / kNPerWarp;
@@ -216,7 +220,7 @@ ComputeWgmmaWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
         }
       }
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m = M / kMPerWarp;
     int max_n = N / kNPerWarp;
 
@@ -289,7 +293,7 @@ struct GemmSP {
   static std::pair<int, int>
   ComputeWarpPartition(const GemmSPWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, String gemm_inst) {
-    int num_warps = block_size / TargetGetWarpSize(target);
+    int num_warps = block_size / TargetCudaGetWarpSize(target);
     if (gemm_inst == kCudaTCGEN05SP) {
       policy.m_warp = 1;
       policy.n_warp = num_warps;
@@ -305,19 +309,6 @@ struct GemmSP {
 
   static bool ReuseExistingSharedLayout(String gemm_inst) {
     return gemm_inst == kCudaMMASP;
-  }
-
-  static String InstructionKind(String gemm_inst) {
-    if (gemm_inst == kCudaWGMMASP) {
-      return "wgmma.sp";
-    }
-    if (gemm_inst == kCudaTCGEN05SP) {
-      return "tcgen5mma.sp";
-    }
-    if (gemm_inst == kCudaMMASP) {
-      return "mma.sp";
-    }
-    return "unknown";
   }
 };
 
@@ -336,7 +327,6 @@ bool RegisterCudaGemmSP() {
       cuda::GemmSP::SelectInst,
       cuda::GemmSP::ComputeWarpPartition,
       cuda::GemmSP::ReuseExistingSharedLayout,
-      cuda::GemmSP::InstructionKind,
   });
   return true;
 }

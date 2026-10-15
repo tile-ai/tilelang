@@ -14,7 +14,7 @@ from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.target import determine_target, normalize_cutedsl_target
+from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
 
+        from tilelang.cuda.target import normalize_cutedsl_target
+
         adapter.target = normalize_cutedsl_target(target) or Target(determine_target(target))
         adapter.verbose = verbose
         adapter.lib_generator = CuTeDSLLibraryGenerator(adapter.target, adapter.verbose)
@@ -180,6 +182,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         The mapping encodes:
         - id=0: shape var -> (0, buffer_param_index, dim_index)
         - id=1: stride var -> (1, buffer_param_index, stride_index)
+        - id=2: explicit scalar -> (2, scalar_param_index, -1)
 
         Returns:
             (dynamic_symbolic_map, dynamic_symbolic_order)
@@ -189,6 +192,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int]] = {}
         dynamic_symbolic_order: list[tirx.Var] = []
+        self._dynamic_symbolic_candidates_map: dict[tirx.Var, list[tuple[int, int, int]]] = {}
+        self._dynamic_symbolic_name_candidates_map: dict[str, list[tuple[int, int, int]]] = {}
         # Secondary index by variable name for fallback lookup when tirx.Var
         # object identity differs (e.g. params created from a different
         # PrimFunc instance than the one stored in ir_module).
@@ -196,11 +201,20 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         def unique_push_back(v: tirx.Var, entry: tuple[int, int, int]):
             """Append one symbolic variable unless it has already been seen."""
+            self._dynamic_symbolic_candidates_map.setdefault(v, []).append(entry)
+            self._dynamic_symbolic_name_candidates_map.setdefault(v.name, []).append(entry)
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
-            dynamic_symbolic_order.append(v)
+            if v not in params:
+                dynamic_symbolic_order.append(v)
             self._dynamic_symbolic_name_map[v.name] = entry
+
+        # Explicit scalars already occupy a primary wrapper argument. They
+        # can supply a buffer's dynamic shape without being appended again.
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                unique_push_back(param, (2, i, -1))
 
         # 1) Shapes
         for i, param in enumerate(params):
@@ -234,8 +248,68 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if v in self.dynamic_symbolic_map:
             return self.dynamic_symbolic_map[v]
         if v.name in self._dynamic_symbolic_name_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
+
+    def _lookup_dynamic_symbolic_candidates(self, v: tirx.Var) -> list[tuple[int, int, int]]:
+        """Return all shape/stride sources for a dynamic symbolic variable."""
+        if v in self._dynamic_symbolic_candidates_map:
+            return self._dynamic_symbolic_candidates_map[v]
+        if v.name in self._dynamic_symbolic_name_candidates_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
+            return self._dynamic_symbolic_name_candidates_map[v.name]
+        raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
+
+    def _resolve_dynamic_symbolic_value(
+        self,
+        v: tirx.Var,
+        param_values: list[Any],
+        *,
+        require_live_shape: bool = True,
+    ) -> int:
+        """Resolve a dynamic shape/stride variable from the first live tensor source."""
+        candidates = self._lookup_dynamic_symbolic_candidates(v)
+        non_tensor_values: list[tuple[int, Any]] = []
+        has_shape_candidate = False
+        has_stride_candidate = False
+        for ref_id, buffer_idx, dim_idx in candidates:
+            if ref_id == 0:
+                has_shape_candidate = True
+            elif ref_id == 1:
+                has_stride_candidate = True
+            elif ref_id == 2:
+                value = param_values[buffer_idx]
+                if value is not None:
+                    return value
+                non_tensor_values.append((buffer_idx, value))
+                continue
+            else:
+                raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
+
+            ref_val = param_values[buffer_idx]
+            if not isinstance(ref_val, torch.Tensor):
+                non_tensor_values.append((buffer_idx, ref_val))
+                continue
+            if ref_id == 0:
+                return ref_val.shape[dim_idx]
+            if ref_id == 1:
+                return ref_val.stride()[dim_idx]
+
+        # Optional tensors can be absent from a lowered kernel variant while
+        # their dynamic shape/stride remains in the host wrapper ABI. Output
+        # allocation still calls this helper in the default strict mode, so a
+        # live tensor remains required for any shape symbol that materializes a
+        # result tensor.
+        if has_stride_candidate and not has_shape_candidate:
+            return 0
+        if has_shape_candidate and not require_live_shape:
+            return 0
+
+        details = ", ".join(f"param {buffer_idx}: {type(ref_val).__name__}" for buffer_idx, ref_val in non_tensor_values)
+        raise TypeError(f"Dynamic symbolic var {v} has no live tensor source among candidates ({details})")
 
     def get_host_source(self) -> str | None:
         """Get the cached host-side source code."""
@@ -298,8 +372,10 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if cache_path is None:
             return
 
+        import contextlib
         import os
         import shutil
+        import uuid
 
         # Source cubin path (in temp directory)
         src_py_path = self.libpath
@@ -316,12 +392,22 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if os.path.exists(dst_cubin_path):
             return
 
-        # Copy cubin to cache
+        # Copy cubin to cache through a fsynced temporary sibling: this writes
+        # into an already-published cache directory, so a partial copy must
+        # never become visible under the final name.
+        temp_cubin_path = os.path.join(cache_path, f".kernel.{os.getpid()}_{uuid.uuid4().hex}.tmp.cubin")
         try:
-            shutil.copy2(src_cubin_path, dst_cubin_path)
+            with open(src_cubin_path, "rb") as src, open(temp_cubin_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(temp_cubin_path, dst_cubin_path)
             logger.debug(f"Saved CuTeDSL cubin to cache: {dst_cubin_path}")
         except Exception as e:
             logger.warning(f"Failed to save cubin to cache: {e}", exc_info=True)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_cubin_path)
 
     def _wrap_forward_from_prebuild_lib(self, *ins: Any, stream: int | None = None):
         """High-level wrapper for kernel execution.
@@ -367,17 +453,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tirx.Var):
-                        ref_id, ref_param_idx, ref_dim_idx = self._lookup_dynamic_symbolic(s)
-                        ref_val = param_values[ref_param_idx]
-                        if not isinstance(ref_val, torch.Tensor):
-                            raise TypeError(f"Dynamic shape/stride var {s} refers to a non-tensor param at index {ref_param_idx}")
-                        if ref_id == 0:
-                            shape.append(ref_val.shape[ref_dim_idx])
-                        elif ref_id == 1:
-                            # Stride vars are not expected in output shapes, but handle defensively.
-                            shape.append(ref_val.stride()[ref_dim_idx])
-                        else:
-                            raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
+                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
                 tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
@@ -388,16 +464,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # dynamic symbolics
         for sym in self.dynamic_symbolic_order:
-            ref_id, buffer_idx, dim_idx = self.dynamic_symbolic_map[sym]
-            ref_val = param_values[buffer_idx]
-            if not isinstance(ref_val, torch.Tensor):
-                raise TypeError(f"Dynamic symbolic var {sym} refers to a non-tensor param at index {buffer_idx}")
-            if ref_id == 0:
-                args.append(ref_val.shape[dim_idx])
-            elif ref_id == 1:
-                args.append(ref_val.stride()[dim_idx])
-            else:
-                raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
+            args.append(self._resolve_dynamic_symbolic_value(sym, param_values, require_live_shape=False))
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:

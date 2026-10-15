@@ -15,17 +15,18 @@ using namespace tirx;
 namespace cpu {
 
 struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
+  static LayoutMap InferLayout(const CopyNode &op,
+                               const LayoutInferArgs &layout_args,
                                InferLevel level) {
     (void)op;
-    (void)T;
+    (void)layout_args;
     (void)level;
     return {};
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    return LowerNormalCopy(op, T, analyzer);
+    return LowerNormalCopy(op, lower_args, analyzer);
   }
 };
 

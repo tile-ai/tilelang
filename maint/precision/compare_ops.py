@@ -18,7 +18,7 @@ import tilelang
 import tilelang.language as T
 
 from tilelang.contrib import nvcc
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 # GPU configuration setup
 target = determine_target(return_object=True)

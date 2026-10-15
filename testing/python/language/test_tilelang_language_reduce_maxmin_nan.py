@@ -3,6 +3,8 @@ reduce_absmax for float16 and bfloat16 buffers (CUDA only)."""
 
 import math
 
+import pytest
+
 import torch
 
 import tilelang
@@ -101,6 +103,105 @@ def test_reduce_min_runtime_nan_behavior():
 
         assert not math.isnan(k_default(a).float().item())
         assert math.isnan(k_nan(a).float().item())
+
+
+# ---------------------------------------------------------------------------
+# clear=False path: the write-back merge (MakeUpdate) must also honor
+# nan_propagate.  See GH-2697.
+# ---------------------------------------------------------------------------
+
+
+def _make_reduce_clear_false_kernel(reduce_fn, length, dtype, *, nan_propagate):
+
+    @T.prim_func
+    def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=32):
+            frag = T.alloc_fragment((length,), dtype)
+            out_frag = T.alloc_fragment((1,), dtype)
+            T.copy(a, frag)
+            # Seed the output fragment with -1 so the NaN test is meaningful.
+            out_frag[0] = -1.0
+            reduce_fn(frag, out_frag, clear=False, nan_propagate=nan_propagate)
+            T.copy(out_frag, out)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_max_clear_false_nan_propagate():
+    """clear=False + nan_propagate=True must yield NaN (GH-2697)."""
+    for _, tl_dtype, torch_dtype in _DTYPES:
+        length = 64
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a[7] = float("nan")
+
+        k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_max, length, tl_dtype, nan_propagate=True))
+        out = k_nan(a)
+        assert math.isnan(out.float().item()), f"{tl_dtype}: reduce_max clear=False nan_propagate=True should return NaN, got {out.item()}"
+
+        k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_max, length, tl_dtype, nan_propagate=False))
+        out = k_default(a)
+        assert not math.isnan(out.float().item()), f"{tl_dtype}: reduce_max clear=False nan_propagate=False should not return NaN"
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_min_clear_false_nan_propagate():
+    for _, tl_dtype, torch_dtype in _DTYPES:
+        length = 64
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a[13] = float("nan")
+
+        k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_min, length, tl_dtype, nan_propagate=True))
+        out = k_nan(a)
+        assert math.isnan(out.float().item()), f"{tl_dtype}: reduce_min clear=False nan_propagate=True should return NaN, got {out.item()}"
+
+        k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_min, length, tl_dtype, nan_propagate=False))
+        out = k_default(a)
+        assert not math.isnan(out.float().item())
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_absmax_clear_false_nan_propagate():
+    for _, tl_dtype, torch_dtype in _DTYPES:
+        length = 64
+        a = torch.arange(length, dtype=torch.float32).to(torch_dtype).cuda()
+        a[13] = float("nan")
+
+        k_nan = _compile(_make_reduce_clear_false_kernel(T.reduce_absmax, length, tl_dtype, nan_propagate=True))
+        out = k_nan(a)
+        assert math.isnan(out.float().item()), (
+            f"{tl_dtype}: reduce_absmax clear=False nan_propagate=True should return NaN, got {out.item()}"
+        )
+
+        k_default = _compile(_make_reduce_clear_false_kernel(T.reduce_absmax, length, tl_dtype, nan_propagate=False))
+        out = k_default(a)
+        assert not math.isnan(out.float().item())
+
+
+@pytest.mark.parametrize("reduce_fn", [T.reduce_max, T.reduce_min, T.reduce_absmax])
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.float64, T.int32])
+@pytest.mark.parametrize("clear", [False, True])
+@pytest.mark.parametrize("nan_propagate", [False, True])
+def test_reduce_nan_dtype_contract(reduce_fn, dtype, clear, nan_propagate):
+    @T.prim_func
+    def kernel(a: T.Tensor((4, 64), dtype), out: T.Tensor((4,), dtype)):
+        with T.Kernel(1, threads=32):
+            values = T.alloc_local((4, 64), dtype)
+            result = T.alloc_local((4,), dtype)
+            T.copy(a, values)
+            T.fill(result, 0)
+            reduce_fn(values, result, clear=clear, nan_propagate=nan_propagate)
+            T.copy(result, out)
+
+    target = tilelang.tvm.target.Target("c")
+    mod = tilelang.tvm.IRModule({"main": kernel})
+    mod = tilelang.tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    if nan_propagate and dtype not in (T.float16, T.bfloat16):
+        with pytest.raises(ValueError, match=f"nan_propagate=True requires float16 or bfloat16 output, got {dtype}"):
+            tilelang.transform.LayoutInference()(mod)
+    else:
+        tilelang.transform.LayoutInference()(mod)
 
 
 if __name__ == "__main__":

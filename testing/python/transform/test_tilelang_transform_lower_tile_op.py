@@ -1,24 +1,26 @@
-"""Tests for TileLang `LowerTileOp` copy annotations affecting cp.async sync."""
+"""Tests for TileLang `LowerTileOp` synchronization and copy lowering."""
 
+from collections import Counter
+
+import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
 
 
 def _count_calls(func: tvm.tirx.PrimFunc):
-    counts = {}
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
-            name = str(node.op.name)
-            counts[name] = counts.get(name, 0) + 1
-
-    post_order_visit(func.body, _visit)
-    return counts
+    return Counter(str(call.op.name) for call in collect_nodes(func, tvm.tirx.Call) if isinstance(call.op, tvm.ir.Op))
 
 
+def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
+    loops = [loop for loop in collect_nodes(func, tvm.tirx.For) if annotation in loop.annotations]
+    assert len(loops) == 1, f"Expected one loop with {annotation}, got {len(loops)}"
+    return loops[0]
+
+
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -48,6 +50,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -75,6 +78,155 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) == 0
     assert calls.get("tirx.ptx_wait_group", 0) == 0
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("enable_let_inline", [False, True])
+@pytest.mark.parametrize(
+    "cols,vector_size,dtype",
+    [(1024, 8, "bfloat16"), (1024, 4, "bfloat16"), (1024, 4, "float32"), (3072, 8, "bfloat16")],
+)
+def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dtype, enable_let_inline):
+    """Simplify inverse-layout indices enough to prove cp.async contiguity."""
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    layout = T.Fragment(
+        (4, cols),
+        forward_fn=lambda i, j: (
+            i * 64 + (j // vector_size) % 64,
+            j % vector_size + (j // (64 * vector_size)) * vector_size,
+        ),
+    )
+
+    @T.prim_func
+    def main(A: T.Tensor((4, cols), dtype), B: T.Tensor((4, cols), dtype)):
+        with T.Kernel(1, threads=256):
+            shared = T.alloc_shared((4, cols), dtype)
+            T.async_copy(A, shared, loop_layout=layout)
+            T.ptx_wait_group(0)
+            T.sync_threads()
+            T.copy(shared, B)
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: enable_let_inline}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    _assert_no_unexpected_free_vars(func)
+    assert_call_count(func, op="tl.ptx_cp_async", count=1)
+    async_vector_loops = [
+        loop
+        for loop in collect_nodes(func, tvm.tirx.For)
+        if loop.kind == tvm.tirx.ForKind.VECTORIZED and collect_calls(loop, op="tl.ptx_cp_async")
+    ]
+    assert len(async_vector_loops) == 1
+    assert int(async_vector_loops[0].extent) == vector_size
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(num_stages):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((9, 16), T.float16),
+        B: T.Tensor((9, 16), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((16,), T.float16)
+            for i in T.serial(
+                3,
+                9,
+                annotations={
+                    "software_pipeline_stage": [0, num_stages - 1],
+                    "software_pipeline_order": [0, 1],
+                    "tl_pipelined_num_stages": T.int32(num_stages),
+                },
+            ):
+                T.copy(A[i, 0:16], shared, prefer_instruction="tma")
+                T.copy(shared, B[i, 0:16], prefer_instruction="sync")
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target:
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        copy_calls = collect_calls(mod["main"], op="tl.tileop.copy")
+        assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
+    loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
+
+    assert len(waits) == num_stages
+    assert len(loop_waits) == 1
+    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
+    assert sorted(barrier_indices) == list(range(num_stages))
+    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    assert constant_phases == [0] * (num_stages - 1)
+    expected = (loop.loop_var - loop.min) % 2
+    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((9, 16), T.float16),
+        B: T.Tensor((9, 16), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((16,), T.float16)
+            mbar = T.alloc_barrier(1)
+            for i in T.serial(
+                3,
+                9,
+                annotations={
+                    "software_pipeline_stage": [0, num_stages - 1],
+                    "software_pipeline_order": [0, 1],
+                    "tl_pipelined_num_stages": T.int32(num_stages),
+                },
+            ):
+                T.copy(
+                    A[i, 0:16],
+                    shared,
+                    prefer_instruction="tma",
+                    annotations={"barrier": mbar[0]},
+                )
+                T.copy(shared, B[i, 0:16], prefer_instruction="sync")
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target:
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
+    loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
+
+    assert len(waits) == num_stages
+    assert len(loop_waits) == 1
+    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
+    assert barrier_indices == [0] * num_stages
+    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    assert constant_phases == [i % 2 for i in range(num_stages - 1)]
+    logical_epoch = loop.loop_var - loop.min + num_stages - 1
+    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
 
 
 def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
@@ -107,6 +259,32 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
+@tilelang.testing.requires_cuda
+def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
+    """Reject #2948 instead of silently dropping a fragment index rotation."""
+    size = 128
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((size,), T.int32),
+        B: T.Tensor((size,), T.int32),
+    ):
+        with T.Kernel(1, threads=size):
+            fragment = T.alloc_fragment((size,), T.int32)
+            T.copy(A, fragment)
+            for i in T.Parallel(size):
+                B[i] = fragment[(i + 1) % size]
+
+    mod = tvm.IRModule.from_expr(before)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        with pytest.raises(Exception, match="non-round-tripping inverse"):
+            tl.transform.LowerTileOp()(mod)
+
+
 def test_lower_tile_op_preserves_ragged_parallel_padding_guard():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -123,6 +301,303 @@ def test_lower_tile_op_preserves_ragged_parallel_padding_guard():
         mod = tl.transform.LayoutInference()(mod)
         assert "parallel_loop_requires_padding_guard" in mod.script(show_meta=True)
         tl.transform.LowerTileOp()(mod)
+
+
+def _var_name(var) -> str:
+    if hasattr(var, "name_hint"):
+        return var.name_hint
+    if hasattr(var, "name"):
+        return var.name
+    return str(var).split(":")[0].strip()
+
+
+def _vars_of(node) -> list:
+    """Collect all Var objects referenced by an expression or statement."""
+    return collect_nodes(node, tvm.tirx.Var)
+
+
+def _collect_var_names(func: tvm.tirx.PrimFunc):
+    return {_var_name(var) for var in _vars_of(func.body)}
+
+
+def _for_predicate_annotations(func: tvm.tirx.PrimFunc) -> list:
+    """Every parallel_loop_predicate annotation expression in the function.
+
+    Generic statement visitors do not traverse annotation payloads, so the
+    annotation expressions are read out explicitly here.
+    """
+    predicates = []
+    for loop in collect_nodes(func, tvm.tirx.For):
+        predicate = loop.annotations.get("parallel_loop_predicate", None)
+        if predicate is not None:
+            predicates.append(predicate)
+    return predicates
+
+
+def _thread_extent_vars(func: tvm.tirx.PrimFunc) -> list:
+    """Vars bound by threadIdx.x thread_extent AttrStmts (real thread bindings)."""
+    return [
+        attr.node.var
+        for attr in collect_nodes(func, tvm.tirx.AttrStmt)
+        if attr.attr_key == "thread_extent" and attr.node.thread_tag == "threadIdx.x"
+    ]
+
+
+def _assert_no_unexpected_free_vars(func: tvm.tirx.PrimFunc):
+    """Every free var must be a buffer_map data var; nothing synthetic may leak.
+
+    Right after LowerTileOp/SplitHostDevice the buffer data vars still appear
+    "undefined" to var-use analysis (they are declared via match_buffer and
+    lowered later), so the assertion filters them out — by object identity,
+    not by name — and checks that no *other* free variable (e.g. a synthetic
+    thread placeholder) survives.
+    """
+    buffer_data_vars = [buffer.data for buffer in func.buffer_map.values()]
+    unexpected = [
+        var
+        for var in tvm.tirx.analysis.undefined_vars(func.body, func.params)
+        if not any(var.same_as(data_var) for data_var in buffer_data_vars)
+    ]
+    assert not unexpected, f"unexpected free variables: {unexpected}"
+
+
+def _cpu_target(with_host: bool = False) -> tvm.target.Target:
+    host = tvm.target.Target("llvm") if with_host else None
+    return tvm.target.Target("c", host) if with_host else tvm.target.Target("c")
+
+
+@pytest.mark.parametrize("target_kind", ["cuda", "hip"])
+@pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
+def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, thread_start):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
+    size = 2 * rows * cols + 8
+
+    @T.prim_func
+    def main(A: T.Tensor((size,), T.int32), B: T.Tensor((size,), T.int32)):
+        with T.Kernel(2, threads=threads) as bx:
+            if T.get_thread_binding() >= thread_start:
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = A[idx] * 3 + idx
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = B[idx] + 5
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: False}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    _assert_no_unexpected_free_vars(mod["main"])
+
+
+def _cpu_while_kernel_module(with_host: bool = False):
+    """The while + fragment kernel from issue #2202, on a CPU `c` target.
+
+    Returns (module, target); run subsequent passes inside `with target:` —
+    parallel-loop lowering queries Target::Current().
+    """
+
+    @T.prim_func
+    def main(flag: T.Tensor((1,), "int32"), out: T.Tensor((1,), "int32")):
+        with T.Kernel(1):
+            state = T.alloc_fragment((1,), "int32")
+            state[0] = 0
+
+            with T.While(state[0] == 0):
+                state[0] = flag[0]
+
+            out[0] = state[0]
+
+    mod = tvm.IRModule.from_expr(main)
+    target = _cpu_target(with_host)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    return mod, target
+
+
+def _cpu_parallel_kernel_module():
+    """A CPU `c` target module with T.Parallel loops and a fragment buffer.
+
+    Unlike the while repro, this exercises the thread-oriented helper paths
+    directly: `ParallelOpNode::GetPredicate` during LayoutInference and
+    `LowerParallelLoop`/`LowerArgs.thread_index` during LowerTileOp.
+
+    Returns (module, target); run subsequent passes inside `with target:`.
+    """
+
+    @T.prim_func
+    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((16,), "int32")):
+        with T.Kernel(1):
+            frag = T.alloc_fragment((16,), "int32")
+            for i in T.Parallel(16):
+                frag[i] = A[i]
+            for i in T.Parallel(16):
+                B[i] = frag[i]
+
+    mod = tvm.IRModule.from_expr(main)
+    target = _cpu_target()
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    return mod, target
+
+
+def test_layout_inference_cpu_parallel_predicate_is_ground():
+    """Producer-level regression for issue #2226 at the LayoutInference boundary.
+
+    With a real thread binding absent, LayoutInference must materialize
+    parallel-loop predicates with the constant 0 thread index. The historical
+    LowerTileOp canonicalizer would rewrite a leaked `v_thread` only at the
+    end of LowerTileOp, so checking right after LayoutInference is what
+    distinguishes a producer-level fix from the old compatibility cleanup:
+    the old code would leave `v_thread >= 0 && v_thread < 1` in the
+    annotation here.
+    """
+    mod, target = _cpu_parallel_kernel_module()
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+    func = mod["main"]
+
+    # CPU predicates substitute the constant 0 thread index, so they simplify
+    # away; any surviving annotation expression must be ground (Var-free).
+    for predicate in _for_predicate_annotations(func):
+        assert _vars_of(predicate) == [], f"CPU predicate must be ground, got: {predicate}"
+    assert "v_thread" not in _collect_var_names(func)
+
+
+def test_layout_inference_metal_parallel_predicate_uses_real_thread_var():
+    """Targets with a real thread binding keep the bound threadIdx.x in predicates.
+
+    Companion to the CPU boundary test: the logical thread index must remain
+    the real threadIdx.x Var (same object as the thread_extent binding) when
+    one exists.
+    """
+
+    @T.prim_func
+    def main(A: T.Tensor((8,), "float32"), B: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(8):
+                B[i] = A[i] * 2.0
+
+    mod = tvm.IRModule.from_expr(main)
+    target = tvm.target.Target("metal")
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+    func = mod["main"]
+
+    thread_vars = _thread_extent_vars(func)
+    assert len(thread_vars) == 1, "expected exactly one threadIdx.x binding"
+    predicates = _for_predicate_annotations(func)
+    assert predicates, "expected a parallel_loop_predicate annotation"
+    for predicate in predicates:
+        predicate_vars = _vars_of(predicate)
+        assert predicate_vars, f"predicate should reference threadIdx.x: {predicate}"
+        for var in predicate_vars:
+            assert any(var.same_as(tv) for tv in thread_vars), f"predicate variable {var} is not the bound threadIdx.x"
+
+
+def test_lower_tile_op_cpu_no_synthetic_thread_var():
+    """CPU lowering must not materialize a synthetic thread placeholder.
+
+    Historical end-to-end regression for https://github.com/tile-ai/tilelang/issues/2226
+    using the issue #2202 while + fragment kernel.
+    """
+    mod, target = _cpu_while_kernel_module()
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    assert "v_thread" not in _collect_var_names(func)
+    _assert_no_unexpected_free_vars(func)
+
+
+def test_lower_tile_op_cpu_parallel_loop_no_synthetic_thread_var():
+    """CPU parallel-loop lowering receives constant 0 as the thread index (#2226)."""
+    mod, target = _cpu_parallel_kernel_module()
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    assert "v_thread" not in _collect_var_names(func)
+    _assert_no_unexpected_free_vars(func)
+
+
+def test_split_host_device_cpu_device_abi_is_clean():
+    """SplitHostDevice must never see a synthetic CPU thread placeholder.
+
+    See https://github.com/tile-ai/tilelang/issues/2226: a leaked `v_thread`
+    would be picked up by SplitHostDevice's use-def analysis and become an
+    unexpected device ABI parameter. Uses a device+host target pair (as the
+    production lowering does) so AnnotateDeviceRegions/SplitHostDevice really
+    extract a device function, then compares the exact device signature.
+    """
+    mod, target = _cpu_while_kernel_module(with_host=True)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+        mod = tl.transform.AnnotateDeviceRegions()(mod)
+        mod = tl.transform.SplitHostDevice()(mod)
+
+    host_func = None
+    device_func = None
+    for gvar, func in mod.functions.items():
+        if "kernel" in gvar.name_hint:
+            device_func = func
+        else:
+            host_func = func
+
+    assert host_func is not None, "expected the original host function"
+    assert device_func is not None, "expected SplitHostDevice to extract a device function"
+
+    # The device signature is exactly the two buffer parameters the kernel
+    # reads/writes — any leaked synthetic scalar would show up as an extra
+    # parameter here.
+    device_param_names = {_var_name(param) for param in device_func.params}
+    assert device_param_names == {"flag", "out"}, f"unexpected device ABI: {device_param_names}"
+    _assert_no_unexpected_free_vars(device_func)
+
+
+def test_cpu_legitimate_v_thread_param_is_preserved():
+    """A user variable named `v_thread` must survive lowering untouched.
+
+    The old name-based canonicalizer rewrote *any* same-named variable to 0
+    (see issue #2226). A legitimate scalar parameter with that name must keep
+    its identity and its uses through LayoutInference and LowerTileOp.
+    """
+
+    @T.prim_func
+    def main(v_thread: T.int32, out: T.Tensor((1,), "int32")):
+        with T.Kernel(1):
+            state = T.alloc_fragment((1,), "int32")
+            state[0] = v_thread
+            out[0] = state[0]
+
+    original_param = main.params[0]
+    mod = tvm.IRModule.from_expr(main)
+    target = _cpu_target()
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    matching_params = [p for p in func.params if _var_name(p) == "v_thread"]
+    assert len(matching_params) == 1, "the legitimate v_thread parameter must remain"
+    assert matching_params[0].same_as(original_param)
+    body_refs = [var for var in _vars_of(func.body) if _var_name(var) == "v_thread"]
+    assert body_refs, "the body must still read the v_thread parameter"
+    assert all(var.same_as(original_param) for var in body_refs)
 
 
 if __name__ == "__main__":

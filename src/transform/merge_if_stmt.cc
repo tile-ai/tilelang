@@ -59,12 +59,14 @@ private:
     // condition.
     Array<Stmt> new_seq;
     PrimExpr current_condition;
+    Span current_span;
     Array<Stmt> current_if_bodies;
 
     for (const Stmt &stmt : flat_seq) {
       if (const auto *if_node = stmt.as<IfThenElseNode>()) {
         if (!if_node->else_case.defined()) {
           if (current_condition.defined() &&
+              SideEffect(current_condition) <= CallEffectKind::kPure &&
               ExprDeepEqual()(current_condition, if_node->condition)) {
             current_if_bodies.push_back(if_node->then_case);
             continue;
@@ -75,12 +77,13 @@ private:
                              current_if_bodies.size() == 1
                                  ? current_if_bodies[0]
                                  : this->VisitStmt(SeqStmt(current_if_bodies)),
-                             Stmt());
+                             Stmt(), current_span);
               new_seq.push_back(if_stmt);
               current_if_bodies.clear();
             }
 
             current_condition = if_node->condition;
+            current_span = if_node->span;
             current_if_bodies.push_back(if_node->then_case);
             continue;
           }
@@ -93,7 +96,7 @@ private:
                        current_if_bodies.size() == 1
                            ? current_if_bodies[0]
                            : this->VisitStmt(SeqStmt(current_if_bodies)),
-                       Stmt());
+                       Stmt(), current_span);
         new_seq.push_back(if_stmt);
         current_condition = PrimExpr();
         current_if_bodies.clear();
@@ -108,11 +111,11 @@ private:
                      current_if_bodies.size() == 1
                          ? current_if_bodies[0]
                          : this->VisitStmt(SeqStmt(current_if_bodies)),
-                     Stmt());
+                     Stmt(), current_span);
       new_seq.push_back(if_stmt);
     }
 
-    return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
+    return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq, op->span);
   }
 };
 

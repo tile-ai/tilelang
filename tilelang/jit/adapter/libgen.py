@@ -12,17 +12,16 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import (
+    format_target_code_for_gencode,
     get_cuda_library_dirs,
     get_nvcc_compiler,
-    get_target_arch,
-    get_target_compute_version,
+    get_target_arch_and_code,
 )
-from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
+from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
-from tilelang.utils.target import target_get_mcpu
 from tilelang.contrib.hip_resource_info import filter_and_record
 
-from .utils import is_cpu_target, is_cuda_target, is_hip_target
+from .utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +59,12 @@ class LibraryGenerator:
     def compile_lib(self, timeout: float = None):
         target = self.target
         verbose = self.verbose
+        extra_compile_options = [item for flag in (self.compile_flags or []) for item in flag.split()]
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
             _lib_ext = ".dll" if sys.platform == "win32" else ".so"
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
-            target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", _lib_ext)
 
             enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
@@ -73,8 +72,16 @@ class LibraryGenerator:
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
             if ptxas_usage_level is not None:
                 ptxas_usage_level = int(ptxas_usage_level)
-            verbose_ptxas_output = self.pass_configs.get(PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
             cuda_library_flags = [f"-L{lib_dir}" for lib_dir in get_cuda_library_dirs()]
+            target_arch, target_code = get_target_arch_and_code(target)
+            gencode_code = format_target_code_for_gencode(target_code)
+            if gencode_code is None:
+                gencode_code = f"sm_{target_arch}"
+            # CUDA 13.1 expands `nvcc --shared -arch=sm_90a` through an sm_90
+            # PTX pass, which rejects Hopper-only instructions such as
+            # setmaxnreg. Use explicit gencode so shared-library compilation
+            # preserves the requested accelerated target.
+            arch_flags = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
 
             command = [
                 get_nvcc_compiler(),
@@ -90,8 +97,7 @@ class LibraryGenerator:
                 src.name,
                 *cuda_library_flags,
                 "-lcuda",
-                "-gencode",
-                f"arch=compute_{target_arch},code=sm_{target_arch}",
+                *arch_flags,
             ]
             if sys.platform == "win32":
                 # /Zc:__cplusplus forces MSVC to report the actual C++ standard
@@ -106,22 +112,24 @@ class LibraryGenerator:
             if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
-                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
-            if verbose_ptxas_output:
+                command += [f"--ptxas-options=--register-usage-level={int(ptxas_usage_level)}"]
+            if self.verbose:
                 command += ["--ptxas-options=--verbose"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
 
         elif is_hip_target(target):
-            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_HIP_SAVE_TEMP_FILES
+            from tilelang.rocm.target import target_get_mcpu
+
+            from tilelang.env import TILELANG_HIP_SAVE_TEMP_FILES
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = target_get_mcpu(target) or get_rocm_arch(rocm_path)
             command = [
-                "hipcc",
+                find_hipcc(),
                 "-std=c++17",
                 "-fPIC",
                 f"--offload-arch={arch}",
@@ -129,13 +137,38 @@ class LibraryGenerator:
                 src.name,
                 "-Rpass-analysis=kernel-resource-usage",
             ]
-            command += [
-                "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
-            ]
             if TILELANG_HIP_SAVE_TEMP_FILES != "0":
                 command += ["--save-temps", "-g"]
+        elif is_ascend_target(target):
+            from tilelang.contrib.bisheng import (
+                find_bisheng_path,
+                get_bisheng_compile_options,
+                get_target_npu_arch,
+                normalize_options,
+            )
+
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".asc", delete=False)  # noqa: SIM115
+            libpath = src.name.replace(".asc", ".so")
+
+            npu_arch = get_target_npu_arch(target)
+            configured_options = normalize_options((self.pass_configs or {}).get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
+            explicit_options = normalize_options(self.compile_flags)
+            # Keep repeated option/value pairs such as -mllvm intact and ordered.
+            # Merge here to bypass the token deduplication below.
+            extra_compile_options = []
+            command = [
+                find_bisheng_path(),
+                *get_bisheng_compile_options(npu_arch),
+                *configured_options,
+                *explicit_options,
+                # Avoid using mmap to write linker output, thus more friendly for distributed FS
+                "-Wl,--no-mmap-output-file",
+                "--shared",
+                src.name,
+            ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
+            from tilelang.cpu.toolchain import get_compile_flags
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
@@ -144,6 +177,7 @@ class LibraryGenerator:
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
+            command += get_compile_flags(target, self.pass_configs, execution_backend="cython")
         else:
             raise ValueError(f"Unsupported target: {target}")
 
@@ -151,8 +185,7 @@ class LibraryGenerator:
             "-I" + TILELANG_TEMPLATE_PATH,
         ]
 
-        if self.compile_flags:
-            command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
+        command += [item for item in extra_compile_options if item not in command]
 
         command += ["-o", libpath]
 

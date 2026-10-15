@@ -21,6 +21,7 @@
  */
 
 #include "support/check.h"
+#include <algorithm>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
@@ -31,18 +32,21 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
+#include <utility>
 
 #include "backend/common/target_utils.h"
+#include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
+#include "layout/cute_layout.h"
 #include "multi_version_buffer_rewriter.h"
-#include "op/builtin.h"
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
+#include "ws_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -98,80 +102,66 @@ struct PhaseCounter {
     return SeqStmt({AllocBuffer(buf), body});
   }
 
+  Stmt AllocOnly() const { return AllocBuffer(buf); }
+  Stmt InitStmt() const { return Init(); }
+
   PrimExpr StageExpr(int num_stages) const {
-    if (num_stages == 1)
-      return IntImm(DataType::Int(32), 0);
-    return FloorMod(Load(), num_stages);
+    return FloorMod(Load(), IntImm(DataType::Int(32), num_stages));
   }
 
   PrimExpr ParityExpr(int num_stages) const {
-    if (num_stages == 1)
-      return FloorMod(Load(), 2);
-    return FloorMod(FloorDiv(Load(), num_stages), 2);
+    PrimExpr stages = IntImm(DataType::Int(32), num_stages);
+    return FloorMod(FloorDiv(Load(), stages), IntImm(DataType::Int(32), 2));
   }
 };
 
 // ---------------------------------------------------------------------------
-// StageExprReplacer: rewrite loop-var-based stage indexing to counter-based
+// MVBStageIndexReplacer: rewrite compiler-generated version indices
 // ---------------------------------------------------------------------------
-class StageExprReplacer : public StmtExprMutator {
+class MVBStageIndexReplacer : public StmtExprMutator {
 public:
-  static Stmt Replace(const Stmt &stmt, Var loop_var, PrimExpr loop_min,
-                      int num_stages, PrimExpr replacement) {
-    StageExprReplacer r(std::move(loop_var), std::move(loop_min), num_stages,
-                        std::move(replacement));
+  static Stmt Replace(const Stmt &stmt, Optional<PrimExpr> replacement) {
+    MVBStageIndexReplacer r(std::move(replacement));
     return r.VisitStmt(stmt);
   }
 
 private:
-  StageExprReplacer(Var loop_var, PrimExpr loop_min, int num_stages,
-                    PrimExpr replacement)
-      : loop_var_(std::move(loop_var)), loop_min_(std::move(loop_min)),
-        num_stages_(num_stages), replacement_(std::move(replacement)) {}
+  explicit MVBStageIndexReplacer(Optional<PrimExpr> replacement)
+      : replacement_(std::move(replacement)) {}
 
-  PrimExpr VisitExpr_(const FloorModNode *op) final {
-    if (is_const_int(op->b, num_stages_) && MatchLinearIdx(op->a)) {
-      return replacement_;
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(mvb_stage_index())) {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "tl.mvb_stage_index expects one argument";
+      if (replacement_.defined()) {
+        PrimExpr repl = replacement_.value();
+        if (repl.dtype() != op->dtype) {
+          repl = tvm::cast(op->dtype, repl);
+        }
+        return repl;
+      }
+      return VisitExpr(op->args[0]);
     }
     return StmtExprMutator::VisitExpr_(op);
   }
 
-  bool MatchLinearIdx(const PrimExpr &expr) const {
-    if (expr.same_as(loop_var_))
-      return true;
-    if (const auto *sub = expr.as<SubNode>()) {
-      if (sub->a.same_as(loop_var_)) {
-        if (is_const_int(sub->b, 0))
-          return true;
-        if (sub->b.same_as(loop_min_))
-          return true;
-      }
-    }
-    return false;
-  }
-
-  Var loop_var_;
-  PrimExpr loop_min_;
-  int num_stages_;
-  PrimExpr replacement_;
+  Optional<PrimExpr> replacement_;
 };
 
 // ---------------------------------------------------------------------------
 // Statement classification
 // ---------------------------------------------------------------------------
 
+// BufferLayoutMap / TileStmtKind and the statement classifiers live in
+// ws_analysis.h, shared with the automatic schedulers.
 using BufferDataToBufferMap =
     std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-using BufferMap =
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarExprMap =
     std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 using StmtRewriteMap =
     std::unordered_map<Stmt, Stmt, ObjectPtrHash, ObjectPtrEqual>;
-using BufferLayoutMap = std::unordered_map<Var, std::pair<Buffer, Layout>,
-                                           ObjectPtrHash, ObjectPtrEqual>;
 
 struct LocalAccessSummary {
   BufferSet read_buffers;
@@ -229,144 +219,6 @@ static Buffer CloneBranchPrivateBuffer(const Buffer &buffer,
                 buffer->elem_offset, buffer->name + suffix,
                 buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
-}
-
-class BufferRemapper : public StmtExprMutator {
-public:
-  static Stmt Rewrite(const Stmt &stmt, const BufferMap &buffer_remap) {
-    if (buffer_remap.empty()) {
-      return stmt;
-    }
-    BufferRemapper remapper(buffer_remap);
-    return remapper.VisitStmt(stmt);
-  }
-
-private:
-  explicit BufferRemapper(const BufferMap &buffer_remap)
-      : buffer_remap_(buffer_remap) {
-    for (const auto &[old_buf, new_buf] : buffer_remap_) {
-      var_remap_.emplace(old_buf->data, new_buf->data);
-    }
-  }
-
-  Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
-      return it->second;
-    }
-    return buffer;
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = var_remap_.find(ffi::GetRef<Var>(op));
-    if (it != var_remap_.end()) {
-      return it->second;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    Buffer new_buffer = RemapBuffer(load->buffer);
-    if (!new_buffer.same_as(load->buffer)) {
-      return BufferLoad(new_buffer, load->indices, load->predicate, load->span);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    Buffer new_buffer = RemapBuffer(store->buffer);
-    if (!new_buffer.same_as(store->buffer)) {
-      return BufferStore(new_buffer, store->value, store->indices,
-                         store->predicate, store->span);
-    }
-    return store;
-  }
-
-  const BufferMap &buffer_remap_;
-  VarExprMap var_remap_;
-};
-
-enum class TileStmtKind {
-  kTmaProducer,     // TMA load producer (global->shared)
-  kCpAsyncProducer, // Explicit cp.async / commit / wait_group producer stmt
-  kSimtProducer, // Non-tile-op SIMT copy: For loop writing shared from global
-  kConsumer,     // Compute (gemm, reduce, element-wise, etc.)
-  kOther         // Unclassified
-};
-
-/// Detect if a statement is a SIMT global-to-shared memory copy.
-/// Matches any statement that writes to shared memory and reads from global
-/// memory, without reading shared or local buffers (which would indicate
-/// consumer-side compute).  This is intentionally broader than "pure direct
-/// copy" so that T.Parallel with complex indexing / if_then_else (later
-/// lowered to cp.async) is also captured.
-class SimtProducerDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const Stmt &stmt) {
-    SimtProducerDetector d;
-    d(stmt);
-    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
-  }
-
-private:
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsSharedBuffer(op->buffer)) {
-      writes_shared_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsGlobalBuffer(op->buffer)) {
-      reads_global_ = true;
-    }
-    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
-      reads_shared_local_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  bool writes_shared_{false};
-  bool reads_global_{false};
-  bool reads_shared_local_{false};
-};
-
-class EvaluateCallInSimpleWrapperExtractor
-    : public StmtFunctor<Optional<Call>(const Stmt &)> {
-public:
-  Optional<Call> VisitStmt_(const EvaluateNode *op) final {
-    return op->value.as<Call>();
-  }
-
-  Optional<Call> VisitStmt_(const IfThenElseNode *op) final {
-    if (op->else_case.defined()) {
-      return Optional<Call>();
-    }
-    return VisitStmt(op->then_case);
-  }
-
-  Optional<Call> VisitStmt_(const AttrStmtNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockRealizeNode *op) final {
-    return VisitStmt(op->block->body);
-  }
-
-  Optional<Call> VisitStmtDefault_(const Object *) final {
-    return Optional<Call>();
-  }
-};
-
-static Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
-  EvaluateCallInSimpleWrapperExtractor extractor;
-  return extractor(stmt);
 }
 
 class BufferDataToBufferCollector : public StmtExprVisitor {
@@ -480,6 +332,57 @@ private:
         }
         return;
       }
+      if (const auto *gemm = tile_op.as<GemmNode>()) {
+        // Mirrors GemmNode::GetAccessRegions(): a_/b_ (and the optional MX
+        // scale-factor regions) are reads, c_ is always a write and also a
+        // read unless clearAccum_ clears it first. Region mins/extents are
+        // revisited (rather than just offsetA_/offsetB_/cCoords_) so any
+        // loop-variable dependency in a sliced operand or accumulator
+        // sub-block is still captured after the early return below.
+        if (IsBranchPrivateBuffer(gemm->aRegion_->buffer)) {
+          summary_.read_buffers.insert(gemm->aRegion_->buffer);
+        }
+        for (const auto &range : gemm->aRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        if (IsBranchPrivateBuffer(gemm->bRegion_->buffer)) {
+          summary_.read_buffers.insert(gemm->bRegion_->buffer);
+        }
+        for (const auto &range : gemm->bRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        if (IsBranchPrivateBuffer(gemm->cRegion_->buffer)) {
+          summary_.write_buffers.insert(gemm->cRegion_->buffer);
+          if (!is_one(gemm->clearAccum_)) {
+            summary_.read_buffers.insert(gemm->cRegion_->buffer);
+          }
+        }
+        for (const auto &range : gemm->cRegion_->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        if (const auto *bs = AsGemmBlockScaled(*gemm)) {
+          if (IsBranchPrivateBuffer(bs->sfaRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfaRegion_->buffer);
+          }
+          for (const auto &range : bs->sfaRegion_->region) {
+            VisitExpr(range->min);
+            VisitExpr(range->extent);
+          }
+          if (IsBranchPrivateBuffer(bs->sfbRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfbRegion_->buffer);
+          }
+          for (const auto &range : bs->sfbRegion_->region) {
+            VisitExpr(range->min);
+            VisitExpr(range->extent);
+          }
+          VisitExpr(bs->sfKStart_);
+        }
+        VisitExpr(gemm->clearAccum_);
+        return;
+      }
     }
 
     if (op->op.same_as(tl::access_ptr())) {
@@ -572,59 +475,9 @@ ClassifyPreludeStmt(const Stmt &stmt, const BufferDataToBufferMap &buffer_map,
   return PreludeStmtPlacement::kKeepSharedPrelude;
 }
 
-static bool ContainsPtxCpAsync(const Stmt &stmt) {
-  bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = node.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        found = true;
-      }
-    }
-  });
-  return found;
-}
-
-static bool IsPtxCommitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() &&
-         call.value()->op.same_as(builtin::ptx_commit_group());
-}
-
-static bool IsPtxWaitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() && call.value()->op.same_as(builtin::ptx_wait_group());
-}
-
-static bool IsBarrierOrTmaControlCall(const CallNode *call) {
-  return call->op.same_as(mbarrier_wait_parity()) ||
-         call->op.same_as(mbarrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier()) ||
-         call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-         call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
-         call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-         call->op.same_as(tma_store()) ||
-         call->op.same_as(tma_store_arrive()) ||
-         call->op.same_as(tma_store_wait()) ||
-         call->op.same_as(builtin::tvm_storage_sync());
-}
-
 static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
   return copy != nullptr && IsGlobalBuffer(copy->src) &&
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
-}
-
-static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
-                                                           Target target) {
-  if (copy == nullptr) {
-    return {cuda::CopyInst::kNormal, true, ""};
-  }
-  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
 }
 
 static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
@@ -649,9 +502,11 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
 
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  cuda::CopyInstSelection result =
+      cuda::ClassifyWarpSpecializedCopy(*copy, target);
   return HasGlobalToSharedCopyShape(copy) && result.supported &&
-         !cuda::CopyInstIsTMA(result.inst) &&
+         !cuda::CopyInstIsTMALoad(result.inst) &&
+         !cuda::CopyInstIsTMAStore(result.inst) &&
          !cuda::CopyInstIsCPAsync(result.inst);
 }
 
@@ -700,63 +555,6 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
     }
   });
   return has_allowed_work && !has_disallowed;
-}
-
-/// Classify a tile-op copy as TMA load producer, cp.async producer, or
-/// consumer using coarse pre-layout checks.
-static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
-  if (copy == nullptr) {
-    return TileStmtKind::kConsumer;
-  }
-
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
-  if (cuda::CopyInstIsTMA(result.inst)) {
-    return TileStmtKind::kTmaProducer;
-  }
-  if (cuda::CopyInstIsCPAsync(result.inst)) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-
-  return TileStmtKind::kConsumer;
-}
-
-/// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
-  // Tile-op Calls: classify directly via CopyNode checks.
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (tile_op.defined()) {
-        if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target);
-        }
-        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
-        // producer so it goes to the producer warp group.
-        if (tile_op.as<Im2ColOpNode>()) {
-          if (TargetIsHopper(target)) {
-            return TileStmtKind::kTmaProducer;
-          }
-        }
-        return TileStmtKind::kConsumer; // non-copy tile-op
-      }
-    }
-  }
-  // Explicit cp.async producer-side statements are already low-level builtins.
-  if (ContainsPtxCpAsync(stmt) || IsPtxCommitGroup(stmt) ||
-      IsPtxWaitGroup(stmt)) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-  // Non-tile-op: check for SIMT global-to-shared copy.
-  if (SimtProducerDetector::Detect(stmt)) {
-    return TileStmtKind::kSimtProducer;
-  }
-  return TileStmtKind::kConsumer;
-}
-
-bool IsProducer(TileStmtKind kind) {
-  return kind == TileStmtKind::kTmaProducer ||
-         kind == TileStmtKind::kCpAsyncProducer ||
-         kind == TileStmtKind::kSimtProducer;
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,10 +1033,12 @@ private:
     const SBlock &orig_block = op->block;
 
     // Find the pipelined loop.
-    Optional<For> pipeline_loop_opt = FindPipelineLoop(orig_block->body);
-    if (!pipeline_loop_opt.defined())
+    PipelineLoopFinder::Result loop_result =
+        FindPipelineLoopWithNesting(orig_block->body);
+    if (!loop_result.pipeline_loop.defined())
       return StmtExprMutator::VisitStmt_(op);
-    For pipeline_loop = pipeline_loop_opt.value();
+    For pipeline_loop = loop_result.pipeline_loop.value();
+    bool pipeline_under_outer_for = loop_result.under_outer_for;
 
     auto num_stages_anno = pipeline_loop->annotations.Get("num_stages");
     if (!num_stages_anno)
@@ -1331,7 +1131,7 @@ private:
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
                         kinds, outer_leading_bindings, inner_leading_bindings,
-                        loop_body_condition);
+                        loop_body_condition, pipeline_under_outer_for);
   }
 
   Stmt BuildWSBlock(
@@ -1340,19 +1140,36 @@ private:
       const std::vector<TileStmtKind> &kinds,
       const std::vector<std::pair<Var, PrimExpr>> &outer_leading_bindings,
       const std::vector<std::pair<Var, PrimExpr>> &inner_leading_bindings,
-      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>()) {
+      Optional<PrimExpr> loop_body_condition = Optional<PrimExpr>(),
+      bool pipeline_under_outer_for = false) {
     Var loop_var = pipeline_loop->loop_var;
     PrimExpr loop_min = pipeline_loop->min;
     PrimExpr loop_extent = pipeline_loop->extent;
-    PrimExpr linear_idx = loop_var - loop_min;
+    DataType pipeline_iter_dtype = loop_var.dtype();
+    PrimExpr linear_idx = loop_var - tvm::cast(pipeline_iter_dtype, loop_min);
+    PrimExpr stages = make_const(linear_idx.dtype(), num_stages);
+    PrimExpr base_stage_expr =
+        tvm::cast(DataType::Int(32), FloorMod(linear_idx, stages));
+    PrimExpr two = make_const(linear_idx.dtype(), 2);
+    PrimExpr base_parity_expr = tvm::cast(
+        DataType::Int(32), FloorMod(FloorDiv(linear_idx, stages), two));
 
-    PrimExpr base_stage_expr = FloorMod(linear_idx, num_stages);
-    PrimExpr base_parity_expr = FloorMod(FloorDiv(linear_idx, num_stages), 2);
-
-    // When the loop body is conditionally guarded, use PhaseCounters
-    // instead of the loop variable for barrier stage/parity.  This
-    // ensures parity stays correct when iterations are skipped.
-    bool needs_phase_counter = loop_body_condition.defined();
+    // When to switch from loop-var-based to counter-based stage/parity:
+    //   (a) `loop_body_condition.defined()`: the pipeline body is guarded
+    //       and some iterations may skip barrier arrive/wait entirely, so
+    //       the loop variable no longer counts real transactions.
+    //   (b) `pipeline_under_outer_for`: the pipeline loop is nested
+    //       inside an outer `T.Persistent` / `T.serial` scheduler.  The
+    //       block-scoped mbarrier phase persists across outer iterations
+    //       while the inner loop variable resets every iteration, so a
+    //       counter that is live across the whole `SBlock` is required
+    //       to keep barrier parity consistent (see PR discussion).
+    // When (b) triggers, the counter's allocation is hoisted out of the
+    // inner pipeline loop into `SBlock::alloc_buffers` and its `Init()`
+    // becomes a one-shot prelude at the top of the block body — see the
+    // assembly block near the end of this function.
+    bool needs_phase_counter =
+        loop_body_condition.defined() || pipeline_under_outer_for;
     Optional<PhaseCounter> producer_phase_counter;
     Optional<PhaseCounter> consumer_phase_counter;
     PrimExpr p_stage_expr = base_stage_expr;
@@ -1380,7 +1197,7 @@ private:
         ++num_producer_groups;
       if (k == TileStmtKind::kSimtProducer)
         has_simt_producer = true;
-      if (k == TileStmtKind::kCpAsyncProducer)
+      if (k == TileStmtKind::kCpAsyncProducer || k == TileStmtKind::kCpAsyncRaw)
         has_cp_async_producer = true;
     }
 
@@ -1476,7 +1293,8 @@ private:
       int earliest_async_read = static_cast<int>(consumer_compute_stmts.size());
       for (size_t i = 0; i < flat_stmts.size(); ++i) {
         if (kinds[i] != TileStmtKind::kSimtProducer &&
-            kinds[i] != TileStmtKind::kCpAsyncProducer) {
+            kinds[i] != TileStmtKind::kCpAsyncProducer &&
+            kinds[i] != TileStmtKind::kCpAsyncRaw) {
           continue;
         }
         int first_read = FindFirstAsyncProducerConsumerRead(
@@ -1536,12 +1354,23 @@ private:
         continue;
       }
       bool all_movable = true;
+      LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        const LocalAccessSummary &summary = consumer_compute_summaries[ci];
+        if (consumer_compute_stmts[ci].as<BindNode>()) {
+          if (!movable_probe_live.NeedsAnyDef(summary)) {
+            all_movable = false;
+            break;
+          }
+          movable_probe_live.AddUses(summary);
+          continue;
+        }
         if (!IsProducerMovableLoopPrefixStmt(consumer_compute_stmts[ci],
                                              target_)) {
           all_movable = false;
           break;
         }
+        movable_probe_live.AddUses(summary);
       }
       if (all_movable) {
         std::vector<bool> add_to_producer(consumer_compute_stmts.size(), false);
@@ -1635,10 +1464,13 @@ private:
 
     std::vector<Array<Stmt>> prelude_waits_before_consumer(
         consumer_compute_stmts.size());
-    PrimExpr prelude_wait_guard =
-        needs_phase_counter ? EQ(consumer_phase_counter.value().Load(),
-                                 IntImm(DataType::Int(32), 0))
-                            : EQ(loop_var, loop_min);
+    PrimExpr prelude_wait_guard;
+    if (needs_phase_counter) {
+      prelude_wait_guard = EQ(consumer_phase_counter.value().Load(),
+                              IntImm(DataType::Int(32), 0));
+    } else {
+      prelude_wait_guard = EQ(loop_var, tvm::cast(loop_var.dtype(), loop_min));
+    }
     int prelude_barrier_base = num_fwd + num_bp;
     for (size_t i = 0; i < prelude_tma_plans.size(); ++i) {
       PrimExpr barrier_id = IntImm(DataType::Int(32), prelude_barrier_base + i);
@@ -1670,7 +1502,8 @@ private:
         // commit+wait — the WS pass will emit its own commit+barrier_noinc.
         simt_producer_stmts.push_back(
             SimtProducerAnnotator::Annotate(flat_stmts[i], target_));
-      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
+      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer ||
+                 kinds[i] == TileStmtKind::kCpAsyncRaw) {
         simt_producer_stmts.push_back(flat_stmts[i]);
       }
     }
@@ -1860,16 +1693,21 @@ private:
     producer_body = prepend_bindings(producer_body, outer_leading_bindings);
     consumer_body = prepend_bindings(consumer_body, outer_leading_bindings);
 
-    // Rewrite shared-buffer stage indices from loop-var-based to
-    // counter-based so they stay in sync with barrier parity.
+    // Rewrite only the shared-buffer version indices marked by MVB. User
+    // expressions that happen to depend on the loop variable must retain their
+    // original semantics.
+    Optional<PrimExpr> producer_stage_replacement;
+    Optional<PrimExpr> consumer_stage_replacement;
     if (needs_phase_counter) {
-      producer_body = StageExprReplacer::Replace(
-          producer_body, loop_var, loop_min, num_stages,
-          producer_phase_counter.value().StageExpr(num_stages));
-      consumer_body = StageExprReplacer::Replace(
-          consumer_body, loop_var, loop_min, num_stages,
-          consumer_phase_counter.value().StageExpr(num_stages));
+      producer_stage_replacement =
+          producer_phase_counter.value().StageExpr(num_stages);
+      consumer_stage_replacement =
+          consumer_phase_counter.value().StageExpr(num_stages);
     }
+    producer_body = MVBStageIndexReplacer::Replace(
+        producer_body, std::move(producer_stage_replacement));
+    consumer_body = MVBStageIndexReplacer::Replace(
+        consumer_body, std::move(consumer_stage_replacement));
     producer_body =
         TileOpMbarPhaseAnnotator::Annotate(producer_body, p_parity_expr);
     consumer_body =
@@ -1896,7 +1734,8 @@ private:
     // Wrap loops with phase counter allocation when needed.
     Stmt final_producer_loop = producer_loop;
     Stmt final_consumer_loop = consumer_loop;
-    if (needs_phase_counter) {
+    if (needs_phase_counter && !pipeline_under_outer_for) {
+      // Local scope: alloc + init live right around the pipeline loop.
       final_producer_loop =
           producer_phase_counter.value().WrapLoopWithAlloc(producer_loop);
       final_consumer_loop =
@@ -1949,7 +1788,7 @@ private:
     // LayoutInference: a single fragment layout cannot represent both thread
     // ranges. Clone every branch-private buffer touched by the producer so
     // LayoutInference can infer an independent producer-side thread range.
-    BufferMap producer_buffer_remap;
+    BufferRemap producer_buffer_remap;
     Array<Buffer> producer_private_buffers;
     {
       BufferSet block_alloc_buffers;
@@ -1983,11 +1822,11 @@ private:
     }
     if (!producer_buffer_remap.empty()) {
       rewritten_producer =
-          BufferRemapper::Rewrite(rewritten_producer, producer_buffer_remap);
+          RemapBuffers(rewritten_producer, producer_buffer_remap);
       Array<Stmt> remapped_producer_init;
       for (const auto &stmt : extracted_producer_init_) {
         remapped_producer_init.push_back(
-            BufferRemapper::Rewrite(stmt, producer_buffer_remap));
+            RemapBuffers(stmt, producer_buffer_remap));
       }
       extracted_producer_init_ = remapped_producer_init;
     }
@@ -2050,6 +1889,14 @@ private:
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
         replaced_stmt, thread_iv_->var, producer_extent);
 
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      Array<Stmt> block_prelude;
+      block_prelude.push_back(producer_phase_counter.value().InitStmt());
+      block_prelude.push_back(consumer_phase_counter.value().InitStmt());
+      block_prelude.push_back(new_block_body);
+      new_block_body = SeqStmt(block_prelude);
+    }
+
     // --- Update block ---
     SBlock new_block = orig_block;
     auto *block_ptr = new_block.CopyOnWrite();
@@ -2060,6 +1907,10 @@ private:
 
     // Add barrier buffer to alloc_buffers.
     block_ptr->alloc_buffers.push_back(barrier_buf);
+    if (needs_phase_counter && pipeline_under_outer_for) {
+      block_ptr->alloc_buffers.push_back(producer_phase_counter.value().buf);
+      block_ptr->alloc_buffers.push_back(consumer_phase_counter.value().buf);
+    }
 
     // Add barrier_init annotation.
     Map<Var, Array<PrimExpr>> barrier_init_map;
@@ -2088,10 +1939,15 @@ private:
 
   class PipelineLoopFinder : public StmtVisitor {
   public:
-    static Optional<For> Find(const Stmt &stmt) {
+    struct Result {
+      Optional<For> pipeline_loop;
+      bool under_outer_for = false;
+    };
+
+    static Result Find(const Stmt &stmt) {
       PipelineLoopFinder finder;
       finder(stmt);
-      return finder.pipeline_loop_;
+      return {finder.pipeline_loop_, finder.under_outer_for_};
     }
 
   private:
@@ -2107,13 +1963,23 @@ private:
         pipeline_loop_ = ffi::GetRef<For>(op);
         return;
       }
+      bool prev_under_outer = under_outer_for_;
+      under_outer_for_ = true;
       StmtVisitor::VisitStmt_(op);
+      if (!pipeline_loop_.defined()) {
+        under_outer_for_ = prev_under_outer;
+      }
     }
 
     Optional<For> pipeline_loop_;
+    bool under_outer_for_ = false;
   };
 
   Optional<For> FindPipelineLoop(const Stmt &stmt) {
+    return PipelineLoopFinder::Find(stmt).pipeline_loop;
+  }
+
+  PipelineLoopFinder::Result FindPipelineLoopWithNesting(const Stmt &stmt) {
     return PipelineLoopFinder::Find(stmt);
   }
 
@@ -2312,6 +2178,8 @@ private:
       return op->else_case.defined() && VisitStmt(op->else_case.value());
     }
 
+    bool VisitStmt_(const ForNode *op) final { return VisitStmt(op->body); }
+
     bool VisitStmtDefault_(const Object *) final { return false; }
 
   private:
@@ -2422,6 +2290,16 @@ private:
       Stmt new_then =
           then_result.defined() ? then_result.value() : op->then_case;
       return IfThenElse(op->condition, new_then, new_else, op->span);
+    }
+
+    Optional<Stmt> VisitStmt_(const ForNode *op) final {
+      Optional<Stmt> body = VisitStmt(op->body);
+      if (!body.defined()) {
+        return Optional<Stmt>();
+      }
+      For new_for = GetRef<For>(op);
+      new_for.CopyOnWrite()->body = body.value();
+      return new_for;
     }
 
     Optional<Stmt> VisitStmtDefault_(const Object *) final {
@@ -2578,48 +2456,9 @@ private:
 // Detect if manual WS is already present (skip if so)
 // ---------------------------------------------------------------------------
 
-class ManualWSDetector : public StmtExprVisitor {
-public:
-  static bool HasManualWS(const Stmt &stmt) {
-    ManualWSDetector d;
-    d(stmt);
-    return d.found_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    // Detect both the T.ws() language-level attr ("warp_specialize") and
-    // the compiler-level attr (kWarpSpecializationScope).
-    if (op->attr_key == "warp_specialize" ||
-        op->attr_key == attr::kWarpSpecializationScope) {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
-};
-
 /// Quick pre-scan: check if the function contains a pipelined loop (num_stages
 /// >= 1) with at least one TMA load producer tile op and no manual layout
 /// annotations (which are incompatible with early MVB expansion).
-/// Check whether a layout annotation on a shared buffer is compatible with
-/// TMA.  TMA supports identity (linear) layouts and the three standard
-/// swizzle modes (32B / 64B / 128B).  Any other layout (e.g. padded,
-/// Volta-style) cannot be used with TMA.
-static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
-  // Recognised swizzle → TMA with swizzle.
-  if (DetectSwizzleMode(layout, buffer) != SwizzleMode::kNone) {
-    return true;
-  }
-  // Identity / row-major linear → TMA without swizzle.
-  if (StructuralEqual()(layout, makeLinearLayout(buffer->shape))) {
-    return true;
-  }
-  return false;
-}
-
 class TiledWSCandidate : public StmtExprVisitor {
 public:
   static bool Check(const Stmt &stmt, Target target) {
@@ -2664,26 +2503,7 @@ private:
 
   void VisitStmt_(const SBlockNode *op) final {
     // Collect layout_map entries so we can cross-check TMA copy targets.
-    if (op->annotations.count("layout_map")) {
-      auto anno = op->annotations.Get("layout_map");
-      if (auto gmap = anno->as<Map<ObjectRef, ObjectRef>>(); gmap.has_value()) {
-        for (const auto &[key, val] : gmap.value()) {
-          Layout layout;
-          if (auto l = val.as<Layout>(); l.has_value())
-            layout = l.value();
-          if (auto buf = key.as<Buffer>(); buf.has_value()) {
-            layout_map_[buf.value()->data] = {buf.value(), layout};
-          } else if (auto var = key.as<Var>(); var.has_value()) {
-            for (const auto &buf : op->alloc_buffers) {
-              if (buf->data.same_as(var.value())) {
-                layout_map_[buf->data] = {buf, layout};
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
+    CollectAnnotatedLayouts(GetRef<SBlock>(op), layout_map_);
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -2724,7 +2544,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       return f;
     }
     // Skip if the function already has manual WS.
-    if (ManualWSDetector::HasManualWS(f->body)) {
+    if (HasManualWarpSpecialization(f->body)) {
       return f;
     }
     // Skip if TMA is not available.
@@ -2772,6 +2592,9 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       fn->body = stripped;
       return original_f;
     }
+    Stmt cleaned_body =
+        MVBStageIndexReplacer::Replace(result->body, Optional<PrimExpr>());
+    result.CopyOnWrite()->body = std::move(cleaned_body);
     DLOG(WARNING) << "[WS] transformation applied successfully";
     return result;
   };
@@ -2783,9 +2606,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef().def("tl.cuda.transform.ProducerConsumerWarpSpecialized",
                         ProducerConsumerWarpSpecialized);
-  refl::GlobalDef().def(
-      "tl.cuda.transform.ProducerConsumerWarpSpecializedTiled",
-      ProducerConsumerWarpSpecialized);
 }
 
 } // namespace tl

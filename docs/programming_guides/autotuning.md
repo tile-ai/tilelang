@@ -21,6 +21,7 @@ values from your config space.
 import tilelang
 import tilelang.language as T
 
+
 def matmul_configs(M, N, K):
     # Example space — tailor to your target
     tiles = [64, 128]
@@ -35,17 +36,24 @@ def matmul_configs(M, N, K):
         for TH in threads
     ]
 
+
 @tilelang.autotune(configs=matmul_configs, warmup=25, rep=100, timeout=60)
 @tilelang.jit(out_idx=[-1])
-def matmul(M: int, N: int, K: int,
-           block_M: int = 128, block_N: int = 128, block_K: int = 32,
-           threads: int = 128, num_stages: int = 3,
-           dtype: str = 'float16', accum_dtype: str = 'float32'):
+def matmul(
+    M: int,
+    N: int,
+    K: int,
+    block_M: int = 128,
+    block_N: int = 128,
+    block_K: int = 32,
+    threads: int = 128,
+    num_stages: int = 3,
+    dtype: str = "float16",
+    accum_dtype: str = "float32",
+):
 
     @T.prim_func
-    def kernel(A: T.Tensor((M, K), dtype),
-               B: T.Tensor((K, N), dtype),
-               C: T.Tensor((M, N), dtype)):
+    def kernel(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype), C: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_s = T.alloc_shared((block_M, block_K), dtype)
             B_s = T.alloc_shared((block_K, block_N), dtype)
@@ -61,18 +69,21 @@ def matmul(M: int, N: int, K: int,
 
     return kernel
 
+
 # Usage
 # Provide inputs via context (recommended for reproducibility across configs)
 import torch
+
 M = N = K = 1024
-A = torch.randn(M, K, device='cuda', dtype=torch.float16)
-B = torch.randn(K, N, device='cuda', dtype=torch.float16)
-C = torch.empty(M, N, device='cuda', dtype=torch.float16)
+A = torch.randn(M, K, device="cuda", dtype=torch.float16)
+B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+C = torch.empty(M, N, device="cuda", dtype=torch.float16)
 
 from tilelang.autotuner import set_autotune_inputs
+
 with set_autotune_inputs(A, B, C):
-    tuned_kernel = matmul(M, N, K)   # compiles, tunes, returns best kernel
-    tuned_kernel(A, B, C)            # run best kernel
+    tuned_kernel = matmul(M, N, K)  # compiles, tunes, returns best kernel
+    tuned_kernel(A, B, C)  # run best kernel
 ```
 
 Notes
@@ -94,28 +105,66 @@ kernel_factory = matmul  # the function above (already @tilelang.jit)
 tuner = AutoTuner.from_kernel(kernel_factory(M, N, K), configs=matmul_configs(M, N, K))
 
 tuner.set_profile_args(
-    warmup=25, rep=100, timeout=60,
+    warmup=25,
+    rep=100,
+    timeout=60,
     supply_type=tilelang.TensorSupplyType.Auto,  # or provide supply_prog/ref_prog
     ref_prog=lambda A, B, C: torch.allclose(C, (A @ B).to(C.dtype), rtol=1e-2, atol=1e-2),
 )
 
 tuner.set_compile_args(
-    target='auto',                  # or 'cuda'/'hip'/'metal'
-    execution_backend='auto',       # resolves per-target
-    out_idx=[-1],                   # which outputs to return if multiple
-    pass_configs={                  # optional TVM passes/flags
+    target="auto",  # or 'cuda'/'hip'/'metal'
+    execution_backend="auto",  # resolves per-target
+    out_idx=[-1],  # which outputs to return if multiple
+    pass_configs={  # optional TVM passes/flags
         # tilelang.PassConfigKey.EXAMPLE_KEY: value,
     },
 )
 
-artifact = tuner.run()             # compiles + runs + validates all configs
-best_kernel = artifact.kernel      # JITKernel
+artifact = tuner.run()  # compiles + runs + validates all configs
+best_kernel = artifact.kernel  # JITKernel
 best_latency = artifact.latency
 best_config = artifact.config
 
 # Reuse best kernel
 best_kernel(A, B, C)
 ```
+
+### Observe trial outcomes (experimental)
+
+The programmatic `AutoTuner.run` method accepts an optional synchronous
+`on_trial` callback. For example, after configuring `tuner` as above:
+
+```python
+trial_records = []
+artifact = tuner.run(on_trial=trial_records.append)
+for record in trial_records:
+    print(record["index"], record["status"], record["latency_ms"])
+```
+
+Each record is a dictionary with `status`, `index`, `config`, `latency_ms`,
+`validation`, and `error`. The config is a detached, JSON-compatible copy;
+`error` is a string truncated to 2048 characters or `None`. Successful trials
+use `status="ok"` and report latency in milliseconds. Compilation failures use
+`compile_error`; benchmark failures use `benchmark_error`; timed-out benchmarks
+use `timeout`. Failed trials have no latency. `validation` is `passed` only
+when reference validation ran successfully, `not_run` when it was skipped or
+not configured, and `unknown` for benchmark failures and timeouts.
+
+For a healthy, uncached tuning run with JSON-compatible configs, the callback
+receives one terminal outcome per configuration. Records arrive in aggregation
+order, which may differ from configuration index order. A cache hit emits only
+one `cache_hit` marker; a direct JIT path emits only one `direct_jit` marker.
+Both markers have `index`, `config`, and `latency_ms` set to `None` and do not
+reconstruct trial history. The callback is not part of the cache identity.
+
+Callbacks run synchronously on the aggregation thread. Keep them fast; do not
+mutate or re-enter the tuner from a callback. An ordinary `Exception` raised
+by the callback or while serializing a record disables reporting for the rest
+of that run while tuning continues. `on_trial` with `early_stop=True` is
+currently unsupported and raises `ValueError`. This option is available on
+`AutoTuner.run` only, not the `@tilelang.autotune` decorator, and it does not
+create a persistent trial history in the cache.
 
 ### Example Gallery (in repo)
 - examples/gdn/example_chunk_delta_h.py:101 — uses `@autotune` to sweep configs
@@ -144,6 +193,7 @@ def supply_prog(signature):
     # signature holds KernelParam objects describing shapes/dtypes
     # Return a list of torch tensors matching the kernel’s arguments
     return [A, B, C]
+
 
 tuner.set_profile_args(supply_prog=supply_prog)
 ```
@@ -192,7 +242,10 @@ them with a per‑config timeout. On CUDA, each worker sets the current device t
 avoid context issues.
 
 Notes
-- `timeout` uses POSIX signals; on non‑Unix systems, it may not take effect.
+- `timeout` is enforced portably by running each benchmark call in a daemon
+  thread and waiting for at most the configured duration. A timed-out native or
+  CUDA call cannot be forcibly stopped, so its daemon thread may continue until
+  the underlying call returns.
 - Logs are written to `autotuner.log` in the working directory.
 
 ## Caching
@@ -205,11 +258,10 @@ The autotuner caches best artifacts both in‑memory (per process) and on disk u
 Disk cache contents (per key)
 - Best config and latency: `best_config.json`, `latency.json`
 - Kernel sources and library: `device_kernel.cu`, `host_kernel.cu`, `kernel_lib.so` (or `kernel.cubin`/`executable.so` depending on backend)
-- Function and params: `function.pkl`, `params.pkl`
+- Function and params: `function.pkl`, `params.json`
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
-- `TILELANG_TMP_DIR` (default `$TILELANG_CACHE_DIR/tmp`)
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
 
@@ -220,7 +272,7 @@ CPU worker control
 
 Backend notes
 - NVRTC backend persists `.cubin` and a Python launcher.
-- Torch/DLPack backend may not save artifacts to disk; in this case, only
+- Torch backend may not save artifacts to disk; in this case, only
   in‑memory caching applies and a warning is logged.
 
 ## Alternative: Manual Sweeps with par_compile
@@ -232,11 +284,10 @@ configs and drive your own benchmarking:
 @tilelang.jit
 def factory(M, N, K, block_M=128, block_N=128, block_K=32):
     @T.prim_func
-    def k(A: T.Tensor((M, K), 'float16'),
-           B: T.Tensor((K, N), 'float16'),
-           C: T.Tensor((M, N), 'float16')):
-        ...
+    def k(A: T.Tensor((M, K), "float16"), B: T.Tensor((K, N), "float16"), C: T.Tensor((M, N), "float16")): ...
+
     return k
+
 
 impl = factory  # JITImpl
 cfgs = [
@@ -257,18 +308,20 @@ artifact = tuner.run()  # AutotuneResult
 
 # Save to disk
 from pathlib import Path
-save_dir = Path('out/best/matmul_1024')
+
+save_dir = Path("out/best/matmul_1024")
 artifact.save_to_disk(save_dir, verbose=True)
 
 # Reload later
 from tilelang.autotuner.param import AutotuneResult, CompileArgs
+
 restored = AutotuneResult.load_from_disk(save_dir, CompileArgs())
 best = restored.kernel
 best(A, B, C)
 ```
 
 Notes
-- DLPack/Torch execution backend may not persist compiled binaries; in that
+- Torch execution backend may not persist compiled binaries; in that
   case, re‑compilation is needed on load or use a different backend.
 - The directory contains human‑readable JSONs (best config/latency) and sources.
 
@@ -285,8 +338,7 @@ def matmul_configs(M, N, K):
             for BK in [32, 64]:
                 for S in [2, 3]:
                     for TH in [128, 256]:
-                        yield dict(block_M=BM, block_N=BN, block_K=BK,
-                                    num_stages=S, threads=TH)
+                        yield dict(block_M=BM, block_N=BN, block_K=BK, num_stages=S, threads=TH)
 ```
 
 ## Device and Backend Selection

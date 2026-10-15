@@ -27,7 +27,7 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "apache-tvm-ffi~=0.1.0,>=0.1.10",
+    "apache-tvm-ffi>=0.1.11,<0.1.13",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
     "torch-c-dlpack-ext; python_version < '3.14'",
@@ -58,7 +58,7 @@ nvcc = [
     # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
     # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
     "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
-    # cuRAND is required when kernels use tilelang.language.random
+    # cuRAND is required when kernels use tilelang.cuda.language.random
     "nvidia-curand>=10.4; platform_system == 'Windows'",
 ]
 
@@ -93,7 +93,7 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.py-api = "cp38"
+wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
@@ -123,6 +123,7 @@ include = [
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "tilelang/jit/adapter/pto/cython_wrapper.pyx",
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
@@ -132,9 +133,6 @@ include = [
     # CUTLASS
     "3rdparty/cutlass/include",
     "3rdparty/cutlass/tools",
-    # Composable Kernel
-    "3rdparty/composable_kernel/include",
-    "3rdparty/composable_kernel/library",
     # Vendored HIP headers (build-time only) so source builds work on hosts
     # without a ROCm install. Not mapped into the wheel at runtime.
     "3rdparty/hip-headers/include",
@@ -164,9 +162,6 @@ tilelang = "tilelang"
 # CUTLASS
 "tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"
 "tilelang/3rdparty/cutlass/tools" = "3rdparty/cutlass/tools"
-# Composable Kernel
-"tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
-"tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
 
 
@@ -247,6 +242,18 @@ filterwarnings = ["always"]
 markers = [
     "perf: benchmark and performance API tests skipped by default",
     "slow: long-running correctness sweeps",
+    # Feature markers emitted by vendored TVM's tvm.testing.utils requires_*
+    # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers
+    # these via its own conftest, but tilelang only imports the decorators, so
+    # they must be registered here to avoid PytestUnknownMarkWarning.
+    "pto: tests for the PTO backend",
+    "cpu: Mark a test as running on CPU",
+    "gpu: Mark a test as using a GPU",
+    "multi_gpu: Mark a test as using multiple GPUs",
+    "cuda: Mark a test as using CUDA",
+    "llvm: Mark a test as using LLVM",
+    "metal: Mark a test as using Metal",
+    "rocm: Mark a test as using ROCm",
 ]
 
 [tool.cibuildwheel]
@@ -276,13 +283,13 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-# Build a fat wheel that supports both CUDA and ROCm at runtime. ROCm sources
-# compile against the vendored HIP headers under 3rdparty/hip-headers/include
-# and link to libhip_stub (dlopen-based), so no ROCm runtime is required in
-# the cibuildwheel manylinux container. The resulting wheel still requires
-# a real ROCm runtime to be present at execution time on AMD hosts.
+# Build a wheel with CUDA, ROCm, and Ascend support. ROCm uses vendored HIP
+# headers and Ascend uses local ACL declarations; both link to runtime stubs,
+# so the manylinux container only needs the CUDA toolkit. Execution still
+# requires the selected backend's real runtime and device.
 environment.USE_CUDA = "ON"
 environment.USE_ROCM = "ON"
+environment.USE_ASCEND = "ON"
 manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
 manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library
@@ -295,11 +302,11 @@ uname -a
 
 case "$(uname -m)" in
     "x86_64")
-        DEFAULT_CUDA_VERSION="12.8"
+        DEFAULT_CUDA_VERSION="13.0"
         dnf config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
         ;;
     "aarch64")
-        DEFAULT_CUDA_VERSION="12.8"
+        DEFAULT_CUDA_VERSION="13.0"
         dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
         ;;
     *)

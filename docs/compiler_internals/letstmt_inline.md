@@ -133,9 +133,7 @@ TileLang exposes an explicit pass configuration key, `tilelang.PassConfigKey.TL_
 from tilelang import transform
 from tilelang.engine.phase import LowerAndLegalize
 
-with transform.PassContext(
-    config={transform.PassConfigKey.TL_FORCE_LET_INLINE: True}
-):
+with transform.PassContext(config={transform.PassConfigKey.TL_FORCE_LET_INLINE: True}):
     lowered_mod = LowerAndLegalize(input_mod, target)
 ```
 

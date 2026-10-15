@@ -40,6 +40,7 @@ def _find_first_for(stmt: tvm.tirx.Stmt) -> tvm.tirx.For:
     return loops[0]
 
 
+@tilelang.testing.requires_cuda
 def test_plan_update_keeps_loop_header_local_var_outside_loop_body():
     @T.prim_func
     def func(x: T.Tensor((256,), "int64")):

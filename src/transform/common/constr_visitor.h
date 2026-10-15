@@ -4,7 +4,11 @@
 #include "support/check.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ir/expr.h"
+#include <cstdint>
+#include <functional>
 #include <ostream>
+#include <string>
+#include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
@@ -15,8 +19,85 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace tvm::tl {
+
+/*!
+ * \brief Replace mutable reads with unknown variables.
+ *
+ * `Analyzer::Bind` installs a rewrite `var -> value`, so a definition reading
+ * mutable state would outlive a store this does not track, and would make two
+ * instances agree where two threads read two different registers.
+ *
+ * By default, every occurrence gets an independent variable. Snapshot mode
+ * reuses variables for structurally equal reads within this mutator instance.
+ * Use it only when repeated expressions describe the same captured value, such
+ * as the bounds of one access region, and use separate instances for distinct
+ * access points. This models a snapshot; it does not capture values at runtime.
+ */
+class FreshenMutableReads : public tirx::ExprMutator {
+public:
+  using tirx::ExprMutator::operator();
+
+  /*! \brief Whether repeated reads denote separate evaluations or one snapshot.
+   */
+  enum class Mode {
+    kPerOccurrence,
+    kSnapshot,
+  };
+
+  explicit FreshenMutableReads(Mode mode = Mode::kPerOccurrence)
+      : mode_(mode) {}
+
+private:
+  /*!
+   * \brief Replace \p e according to the caller's evaluation model.
+   *
+   * An opaque call need not return the same value twice (`f() - f()` is not
+   * zero), and two reads of one location may be separated by a store. Sharing
+   * would assert an equality that need not hold, so reuse requires explicit
+   * snapshot mode.
+   */
+  PrimExpr Fresh(const PrimExpr &e) {
+    if (mode_ == Mode::kSnapshot) {
+      auto it = memo_.find(e);
+      if (it != memo_.end())
+        return it->second;
+    }
+    tirx::Var fresh("free" + std::to_string(count_++), e.dtype());
+    if (mode_ == Mode::kSnapshot)
+      memo_.emplace(e, fresh);
+    return fresh;
+  }
+
+  PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) override {
+    return Fresh(ffi::GetRef<PrimExpr>(op));
+  }
+  PrimExpr VisitExpr_(const tirx::ProducerLoadNode *op) override {
+    return Fresh(ffi::GetRef<PrimExpr>(op));
+  }
+  PrimExpr VisitExpr_(const tirx::ReduceNode *op) override {
+    return Fresh(ffi::GetRef<PrimExpr>(op));
+  }
+  PrimExpr VisitExpr_(const tirx::CallNode *op) override {
+    // `SideEffect` covers the arguments as well, so a call reading state
+    // anywhere below it becomes a single unknown; only a wholly pure one
+    // recurses.
+    if (tirx::SideEffect(ffi::GetRef<PrimExpr>(op)) >
+        tirx::CallEffectKind::kPure)
+      return Fresh(ffi::GetRef<PrimExpr>(op));
+    return tirx::ExprMutator::VisitExpr_(op);
+  }
+
+  Mode mode_;
+  int count_{0};
+  std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
+                     tirx::ExprDeepEqual>
+      memo_;
+};
 
 struct Constr {
 
@@ -42,7 +123,7 @@ struct Constr {
   Constr(Constr &&other) = default;
   Constr &operator=(const Constr &other) = default;
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "Constr(kind=";
     switch (kind) {
     case kConstr:
@@ -72,6 +153,9 @@ struct Constr {
     case kConstr:
       return value;
     case kBindValue:
+      // A vector-typed bind cannot be stated as an equality.
+      if (var.dtype().is_vector())
+        return Bool(true);
       return var == value;
     case kBindRange:
       return tirx::And(var >= range->min, var < (range->min + range->extent));
@@ -79,19 +163,74 @@ struct Constr {
     LOG(FATAL) << "Unreachable";
     return PrimExpr();
   }
+  /*!
+   * \brief Rewrite through \p subs, keeping the kind whenever possible, so that
+   *        renaming one side of a two-instance comparison keeps its binds.
+   */
   Constr Substitute(ffi::Map<tirx::Var, PrimExpr> subs) const {
-    return Constr(tirx::Substitute(ToGenericConstr(), subs));
-  }
-  void Populate(arith::Analyzer &analyzer) const {
     switch (kind) {
     case kConstr:
-      analyzer.EnterConstraint(value);
+      return Constr(tirx::Substitute(value, subs), is_assume);
+    case kBindValue:
+    case kBindRange: {
+      auto it = subs.find(var);
+      const auto *new_var =
+          it == subs.end() ? var.get() : (*it).second.as<tirx::VarNode>();
+      // A bind remapped onto a non-variable is only expressible as a predicate.
+      if (new_var == nullptr)
+        return Constr(tirx::Substitute(ToGenericConstr(), subs), is_assume);
+      if (kind == kBindValue)
+        return Constr(ffi::GetRef<tirx::Var>(new_var),
+                      tirx::Substitute(value, subs));
+      return Constr(
+          ffi::GetRef<tirx::Var>(new_var),
+          Range::FromMinExtent(tirx::Substitute(range->min, subs),
+                               tirx::Substitute(range->extent, subs)));
+    }
+    }
+    LOG(FATAL) << "Unreachable";
+    return Constr();
+  }
+  /*!
+   * \brief A copy whose definition no longer reads mutable state.
+   *
+   * Only a bind needs it: `Bind` installs a rewrite, so `v == A[i]` would keep
+   * being substituted after a store invalidated it. A predicate states a fact
+   * that held on entry and stays usable as a premise inside the scope it
+   * guards.
+   *
+   * Every consumer goes through here, so no path can miss the substitution.
+   */
+  Constr FreshenReads() const {
+    FreshenMutableReads freshen;
+    switch (kind) {
+    case kConstr:
+      return *this;
+    case kBindValue:
+      return Constr(var, freshen(value));
+    case kBindRange:
+      return Constr(var, Range::FromMinExtent(freshen(range->min),
+                                              freshen(range->extent)));
+    }
+    LOG(FATAL) << "Unreachable";
+    return Constr();
+  }
+  void Populate(arith::Analyzer &analyzer) const {
+    Constr c = FreshenReads();
+    switch (c.kind) {
+    case kConstr:
+      // Simplify against the binds already installed, so a predicate held
+      // in a bound boolean var (`cond` where `cond = (i < n)` is a bind)
+      // expands into the condition it represents before the analyzer
+      // digests it. EnterConstraint evaluates eagerly, exactly like Bind:
+      // an opaque boolean entered as-is contributes nothing.
+      analyzer.EnterConstraint(analyzer.Simplify(c.value), c.is_assume);
       break;
     case kBindValue:
-      analyzer.Bind(var, value);
+      analyzer.Bind(c.var, c.value);
       break;
     case kBindRange:
-      analyzer.Bind(var, range);
+      analyzer.Bind(c.var, c.range);
       break;
     default:
       LOG(FATAL) << "Unreachable";
@@ -107,10 +246,190 @@ struct ConstrSet {
     }
     return new_set;
   }
+  /*!
+   * \brief Rename \p from and every bind defined at or after it by appending
+   *        \p suffix; binds defined before \p from stay shared.
+   *
+   * Used when one set is instantiated twice in a single analyzer to model two
+   * concurrent executions: two threads in ThreadSync, two logical iterations in
+   * VerifyParallelLoop. Sharing a variable private to an execution turns
+   * `v == f(a)` and `v == f(b)` into `f(a) == f(b)`, contradicting `a != b` for
+   * an injective `f` and leaving a set under which every query holds vacuously.
+   *
+   * \p subs accumulates the renames, so the caller can apply the same map to
+   * expressions held outside the set. \p from has to be an `Optional`, as
+   * `tirx::Var()` builds a real variable named "v". Pass \p rename_ranges false
+   * to keep iteration variables shared, as ThreadSync's loop-carry model needs.
+   */
+  ConstrSet RenameFrom(const std::string &suffix,
+                       ffi::Map<tirx::Var, PrimExpr> &subs,
+                       const ffi::Optional<tirx::Var> &from = std::nullopt,
+                       bool rename_ranges = true) const {
+    bool active = !from.has_value();
+    for (const Constr &c : constrs_) {
+      if (c.kind != Constr::kBindValue && c.kind != Constr::kBindRange)
+        continue;
+      if (from.has_value() && c.var.same_as(from.value()))
+        active = true;
+      if (!rename_ranges && c.kind == Constr::kBindRange)
+        continue;
+      if (active && !subs.count(c.var))
+        subs.Set(c.var, tirx::Var(c.var->name_hint + suffix, c.var.dtype()));
+    }
+    return Substitute(subs);
+  }
+
+  /*!
+   * \brief Union with \p other, dropping duplicates.
+   *
+   * A variable bound to conflicting values on the two sides is a caller error
+   * -- it should have been renamed per side -- and is reported rather than
+   * merged. `is_assume` is cleared: an assume is trusted only where it was
+   * stated, and being trusted it may reference mutable reads.
+   */
+  ConstrSet Merge(const ConstrSet &other) const {
+    ConstrSet out = *this;
+    std::unordered_map<const tirx::VarNode *, Constr> bound;
+    std::unordered_set<PrimExpr, ffi::StructuralHash, tirx::ExprDeepEqual>
+        preds;
+    for (const Constr &c : out.constrs_) {
+      if (c.kind == Constr::kConstr)
+        preds.insert(c.value);
+      else
+        bound.emplace(c.var.get(), c);
+    }
+    for (const Constr &c : other.constrs_) {
+      if (c.kind == Constr::kConstr) {
+        if (preds.insert(c.value).second)
+          out.constrs_.push_back(c);
+        continue;
+      }
+      auto it = bound.find(c.var.get());
+      if (it == bound.end()) {
+        bound.emplace(c.var.get(), c);
+        out.constrs_.push_back(c);
+      } else if (it->second.kind != c.kind ||
+                 !tirx::ExprDeepEqual()(it->second.ToGenericConstr(),
+                                        c.ToGenericConstr())) {
+        LOG(WARNING) << "ConstrSet::Merge: var '" << c.var->name_hint
+                     << "' bound to conflicting values across merged sets; "
+                        "caller should rename per-side-varying vars. Dropping "
+                        "the incoming bind. existing="
+                     << it->second.ToGenericConstr()
+                     << " incoming=" << c.ToGenericConstr();
+      }
+    }
+    for (Constr &c : out.constrs_) {
+      c.is_assume = false;
+    }
+    return out.Normalized();
+  }
+
+  /*!
+   * \brief Restore the bind-before-use invariant after concatenation.
+   *
+   * Lexical collection emits a bind before every entry that reads its
+   * var, so a single set never needs this. `Merge` concatenates two such
+   * sets, and an entry of the first set may read a bind var the second
+   * set defines: replaying that order digests the predicate before the
+   * definition exists, and the fact is lost -- `EnterConstraint`
+   * evaluates eagerly, exactly like `Bind` (see the ordering discussion
+   * in issue #3220).
+   *
+   * Entries stay in their current order, except that a bind is hoisted
+   * (with the binds its own definition reads, recursively) directly
+   * before the first entry that reads its var. Within one
+   * lexically-collected set no entry reads a later bind, so this is a
+   * no-op there and the program-order guarantee of #2805 stays intact.
+   * A hoisted bind can still miss bounds that a first-set predicate
+   * would have tightened; that residue is inherent to eager `Bind` and
+   * only a lazily-evaluated bind (issue #3220, option 3) removes it.
+   */
+  ConstrSet Normalized() const {
+    std::unordered_map<const tirx::VarNode *, size_t> bind_at;
+    for (size_t i = 0; i < constrs_.size(); ++i) {
+      const Constr &c = constrs_[i];
+      if ((c.kind == Constr::kBindValue || c.kind == Constr::kBindRange) &&
+          !bind_at.count(c.var.get())) {
+        bind_at.emplace(c.var.get(), i);
+      }
+    }
+    enum : uint8_t { kNew = 0, kVisiting = 1, kEmitted = 2 };
+    std::vector<uint8_t> state(constrs_.size(), kNew);
+    ConstrSet out;
+    out.constrs_.reserve(constrs_.size());
+    std::function<void(size_t)> emit = [&](size_t index) {
+      if (state[index] == kEmitted) {
+        return;
+      }
+      if (state[index] == kVisiting) {
+        // SSA-form collection cannot produce a definition cycle; if one
+        // arrives anyway, keep the current relative order instead of
+        // crashing the compile.
+        LOG(WARNING) << "ConstrSet::Normalized: cyclic bind definitions; "
+                        "keeping collection order";
+        return;
+      }
+      state[index] = kVisiting;
+      for (const tirx::Var &var : ReadVars(constrs_[index])) {
+        auto it = bind_at.find(var.get());
+        if (it != bind_at.end() && it->second != index) {
+          emit(it->second);
+        }
+      }
+      state[index] = kEmitted;
+      out.constrs_.push_back(constrs_[index]);
+    };
+    for (size_t i = 0; i < constrs_.size(); ++i) {
+      emit(i);
+    }
+    return out;
+  }
+
+  /*!
+   * \brief Lower every bind to a predicate, leaving predicates as they are.
+   *
+   * Use this when the analyzer binds one of the shared variables itself: a
+   * second `Bind` of it trips the re-bind check, while predicates coexist with
+   * any bind.
+   */
+  ConstrSet ToConstraints() const {
+    ConstrSet out;
+    out.constrs_.reserve(constrs_.size());
+    for (const Constr &c : constrs_)
+      out.constrs_.push_back(
+          Constr(c.FreshenReads().ToGenericConstr(), c.is_assume));
+    return out;
+  }
+
   void Populate(arith::Analyzer &analyzer) const {
+    // Keep program order: `Analyzer::Bind` evaluates the bounds and modular set
+    // of the value at bind time, so entering the binds first would widen them
+    // -- a `v = tx` inside `if tx < 64` would lose its upper bound. Merged
+    // sets are additionally normalized (see `Normalized`) so a bind always
+    // precedes the entries that read its var.
     for (const auto &c : constrs_) {
       c.Populate(analyzer);
     }
+  }
+
+  /*! \brief Free vars an entry's definition or predicate reads (the bind's
+   *  own var excluded by construction: it does not occur in its value). */
+  static ffi::Array<tirx::Var> ReadVars(const Constr &c) {
+    switch (c.kind) {
+    case Constr::kConstr:
+    case Constr::kBindValue:
+      return tirx::UndefinedVars(c.value);
+    case Constr::kBindRange: {
+      ffi::Array<tirx::Var> vars = tirx::UndefinedVars(c.range->min);
+      for (const tirx::Var &var : tirx::UndefinedVars(c.range->extent)) {
+        vars.push_back(var);
+      }
+      return vars;
+    }
+    }
+    LOG(FATAL) << "Unreachable";
+    return {};
   }
   bool CanProve(const PrimExpr &expr) const {
     arith::Analyzer analyzer;
@@ -119,11 +438,6 @@ struct ConstrSet {
   }
   template <typename... Args> void AddConstr(Args... args) {
     constrs_.push_back(Constr(args...));
-  }
-  void Extend(const ConstrSet &other) {
-    for (const auto &c : other.constrs_) {
-      constrs_.push_back(c);
-    }
   }
 
   /*! \brief Convert the constraint set to a conjunction (AND) of all
@@ -138,11 +452,11 @@ struct ConstrSet {
     return result;
   }
 
-  void format(std::ostream &os) const {
+  void Format(std::ostream &os) const {
     os << "ConstrSet(size=" << constrs_.size() << ") {\n";
     for (size_t i = 0; i < constrs_.size(); ++i) {
       os << "  [" << i << "] ";
-      constrs_[i].format(os);
+      constrs_[i].Format(os);
       os << "\n";
     }
     os << "}";
@@ -183,9 +497,28 @@ public:
       Base::VisitExpr(false_value);
     }
   }
-  void VisitStmt_(const tirx::BindNode *op) override {
-    auto guard = MakeGuard(op->var, op->value);
-    Base::VisitStmt_(op);
+  void VisitStmt_(const tirx::BindNode *op) override { Base::VisitStmt_(op); }
+  void VisitStmt_(const tirx::SeqStmtNode *op) override {
+    size_t old_size = constr_stack_.size();
+    for (const tirx::Stmt &stmt : op->seq) {
+      Base::VisitStmt(stmt);
+      if (const auto *bind = stmt.as<tirx::BindNode>()) {
+        // A flat Bind defines its variable for following statements in this
+        // sequence, but not while its own value is being evaluated.
+        constr_stack_.emplace_back(bind->var, bind->value);
+      } else if (const auto *assert_stmt = stmt.as<tirx::AssertStmtNode>()) {
+        // A tirx AssertStmt carries no body, so it sits next to the statements
+        // it guards; control reaches them only once it has passed. Pure
+        // conditions only: unlike an assume it states what held at that point,
+        // so one reading mutable state may be falsified by a later store,
+        // untracked here.
+        if (tirx::SideEffect(assert_stmt->condition) <=
+            tirx::CallEffectKind::kPure) {
+          constr_stack_.emplace_back(assert_stmt->condition);
+        }
+      }
+    }
+    constr_stack_.resize(old_size);
   }
   void VisitStmt_(const tirx::AttrStmtNode *op) override {
     if (op->attr_key == tirx::attr::tilelang_assume) {
@@ -202,10 +535,6 @@ public:
     } else {
       Base::VisitStmt_(op);
     }
-  }
-  void VisitStmt_(const tirx::AssertStmtNode *op) override {
-    auto guard = MakeGuard(op->condition);
-    Base::VisitStmt_(op);
   }
   void VisitStmt_(const tirx::IfThenElseNode *op) override {
     {
@@ -229,18 +558,10 @@ public:
     }
   }
   void VisitStmt_(const tirx::ForNode *op) override {
-    if (op->kind == tirx::ForKind::kParallel ||
-        op->kind == tirx::ForKind::kVectorized) {
-      auto guard_1 =
-          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-      auto guard_2 = MakeGuard(op->extent > 0);
-      Base::VisitStmt_(op);
-    } else {
-      auto guard_1 =
-          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-      auto guard_2 = MakeGuard(op->extent > 0);
-      Base::VisitStmt_(op);
-    }
+    auto guard_1 =
+        MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+    auto guard_2 = MakeGuard(op->extent > 0);
+    Base::VisitStmt_(op);
   }
   void VisitStmt_(const tirx::WhileNode *op) override {
     {

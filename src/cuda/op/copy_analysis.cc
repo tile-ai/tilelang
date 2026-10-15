@@ -5,11 +5,10 @@
 
 #include "cuda/op/copy.h"
 #include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 #include "op/utils.h"
 
 #include <tvm/tirx/transform.h>
@@ -88,6 +87,10 @@ bool GetIsAsyncCopy(const CopyNode &op) {
 
 bool GetNoImplicitAsyncCommitWait(const CopyNode &op) {
   return GetBoolAnnotation(op, attr::kAsyncCopyNoImplicitCommitWait);
+}
+
+bool GetTmaDescriptorBaseIsDeviceBound(const CopyNode &op) {
+  return GetBoolAnnotation(op, attr::kTmaDescriptorBaseIsDeviceBound);
 }
 
 enum class PreferredCopyInstruction {
@@ -265,6 +268,61 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
 }
 
+bool IsSemanticallyLinearLayout(const Layout &layout,
+                                const Array<PrimExpr> &shape,
+                                arith::Analyzer *analyzer) {
+  Array<PrimExpr> input_shape = layout->InputShape();
+  if (input_shape.size() != shape.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (!analyzer->CanProveEqual(input_shape[i], shape[i])) {
+      return false;
+    }
+  }
+
+  Layout linear_layout = MakeLinearLayout(shape);
+  return analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                 linear_layout->GetLinearizedForwardIndex());
+}
+
+bool IsContiguousGlobalRegion(const Buffer &global_tensor,
+                              const Array<Range> &global_range,
+                              arith::Analyzer *analyzer) {
+  ICHECK_EQ(global_range.size(), global_tensor->shape.size());
+  ICHECK(global_tensor->strides.empty() ||
+         global_tensor->strides.size() == global_tensor->shape.size());
+
+  // Pointer-based 1D TMA can coalesce multiple logical dimensions only when
+  // every varying dimension is packed directly after its contiguous suffix.
+  bool non_full_dim_encountered = false;
+  PrimExpr expected_stride = 1;
+  for (int i = static_cast<int>(global_range.size()) - 1; i >= 0; --i) {
+    bool is_singleton = analyzer->CanProve(
+        global_range[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
+    if (!non_full_dim_encountered) {
+      if (!is_singleton && !global_tensor->strides.empty() &&
+          !analyzer->CanProveEqual(global_tensor->strides[i],
+                                   expected_stride)) {
+        return false;
+      }
+
+      bool is_full_dim = analyzer->CanProve(
+          global_range[i]->extent == global_tensor->shape[i] &&
+              global_range[i]->min == 0,
+          arith::ProofStrength::kSymbolicBound);
+      if (is_full_dim) {
+        expected_stride *= global_tensor->shape[i];
+      } else {
+        non_full_dim_encountered = true;
+      }
+    } else if (!is_singleton) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
@@ -273,40 +331,57 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
-    Layout linear_layout = makeLinearLayout(shared_tensor->shape);
-    shared_is_contiguous = StructuralEqual()(existing, linear_layout);
+    shared_is_contiguous =
+        IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
   }
 
-  bool global_is_contiguous = true;
-  bool global_not_full_dim_encounter = false;
-  for (int i = global_range.size() - 1; i >= 0; i--) {
-    if (!global_not_full_dim_encounter) {
-      if (!analyzer->CanProve(global_range[i]->extent ==
-                                      global_tensor->shape[i] &&
-                                  global_range[i]->min == 0,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_not_full_dim_encounter = true;
-      }
-    } else {
-      if (!analyzer->CanProve(global_range[i]->extent == 1,
-                              arith::ProofStrength::kSymbolicBound)) {
-        global_is_contiguous = false;
-        break;
-      }
-    }
-  }
+  bool global_is_contiguous =
+      IsContiguousGlobalRegion(global_tensor, global_range, analyzer);
 
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
     shared_elements *= shared_range[i]->extent;
   }
+
   PrimExpr global_elements = 1;
   for (size_t i = 0; i < global_range.size(); i++) {
     global_elements *= global_range[i]->extent;
   }
+
   bool element_match =
       analyzer->CanProveEqual(shared_elements, global_elements);
-  return shared_is_contiguous && global_is_contiguous && element_match;
+
+  PrimExpr total_bits = shared_elements * shared_tensor->dtype.bits();
+
+  // Reject only when the total transfer size is provably not 16-byte
+  // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
+  // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
+  bool total_16b_aligned = !analyzer->CanProve(
+      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+
+  return shared_is_contiguous && global_is_contiguous && element_match &&
+         total_16b_aligned;
+}
+
+bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
+                            arith::Analyzer *analyzer) {
+  if (buffer->shape.size() != region.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < region.size(); ++i) {
+    PrimExpr min = region[i]->min;
+    PrimExpr extent = region[i]->extent;
+    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer->shape[i],
+                            arith::ProofStrength::kSymbolicBound)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
+  return CanProveRegionInBounds(op.src, op.src_range, analyzer) &&
+         CanProveRegionInBounds(op.dst, op.dst_range, analyzer);
 }
 
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
@@ -340,13 +415,13 @@ bool CheckSTSMCopy(const CopyNode &op, Target target) {
 }
 
 bool CheckTMemLoad(const CopyNode &op, Target target) {
-  return TargetHasTmem(target) && op.src.scope() == "shared.tmem" &&
+  return TargetHasTmem(target) && IsTmemBuffer(op.src) &&
          IsFragmentBuffer(op.dst);
 }
 
 bool CheckTMemStore(const CopyNode &op, Target target) {
   return TargetHasTmem(target) && IsFragmentBuffer(op.src) &&
-         op.dst.scope() == "shared.tmem";
+         IsTmemBuffer(op.dst);
 }
 
 bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
@@ -356,7 +431,7 @@ bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
 
 bool CheckCPAsyncCopy(const CopyNode &op, Target target,
                       const LayoutMap &layout_map, arith::Analyzer *analyzer) {
-  if (!TargetHasAsyncCopy(target)) {
+  if (!TargetCudaHasAsyncCopy(target)) {
     return false;
   }
   if (!CheckCPAsyncCopyPreconditions(op)) {
@@ -402,9 +477,12 @@ const char *CopyInstToString(CopyInst inst) {
   }
 }
 
-bool CopyInstIsTMA(CopyInst inst) {
-  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkStore ||
-         inst == CopyInst::kBulkLoad1D || inst == CopyInst::kBulkStore1D;
+bool CopyInstIsTMALoad(CopyInst inst) {
+  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkLoad1D;
+}
+
+bool CopyInstIsTMAStore(CopyInst inst) {
+  return inst == CopyInst::kBulkStore || inst == CopyInst::kBulkStore1D;
 }
 
 bool CopyInstIsCPAsync(CopyInst inst) { return inst == CopyInst::kCPAsync; }
@@ -419,6 +497,7 @@ struct CopyFacts {
   bool explicit_tma = false;
   bool explicit_cp_async = false;
   bool no_implicit_async_commit_wait = false;
+  bool tma_descriptor_base_is_device_bound = false;
   PreferredCopyInstruction prefer_instruction = PreferredCopyInstruction::kAuto;
   bool disable_tma = false;
   int64_t cluster_mask = 0;
@@ -451,6 +530,15 @@ CopyInstSelection Unsupported(std::string reason) {
 
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
+  if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+    const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
+    oss << "Descriptor-based TMA cannot use global base pointer `"
+        << global_buffer->data->name_hint
+        << "` because it is bound inside the device function body. "
+           "TensorMap descriptors are encoded on the host; use plain T.copy "
+           "to allow a descriptorless or synchronous fallback.";
+    return oss.str();
+  }
   if (op.src->dtype.is_float4_e2m1_unpacked() ||
       op.dst->dtype.is_float4_e2m1_unpacked()) {
     oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
@@ -472,7 +560,7 @@ std::string MakeAsyncUnavailableReason(const CopyNode &op, Target target) {
   std::ostringstream oss;
   if (!target.defined()) {
     oss << "T.async_copy requires a defined target.";
-  } else if (!TargetHasAsyncCopy(target)) {
+  } else if (!TargetCudaHasAsyncCopy(target)) {
     oss << "T.async_copy is only supported on targets with cp.async support "
            "(SM80+). Got target="
         << target;
@@ -544,6 +632,8 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.explicit_tma = GetIsTmaCopy(op);
   facts.explicit_cp_async = GetIsAsyncCopy(op);
   facts.no_implicit_async_commit_wait = GetNoImplicitAsyncCommitWait(op);
+  facts.tma_descriptor_base_is_device_bound =
+      GetTmaDescriptorBaseIsDeviceBound(op);
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
@@ -566,7 +656,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
   bool is_cutedsl = TargetIsCuTeDSL(ctx.target);
   facts.layout_dependent_tma_available =
-      facts.has_layout_map && !is_cutedsl && !ctx.buffer_oob;
+      facts.has_layout_map && !is_cutedsl && CanProveCopyInBounds(op, analyzer);
 
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =
@@ -594,15 +684,15 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
     facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                       ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer,
+                       /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);
@@ -610,6 +700,14 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.can_stsm = CheckSTSMCopy(op, ctx.target);
   facts.can_tmem_load = CheckTMemLoad(op, ctx.target);
   facts.can_tmem_store = CheckTMemStore(op, ctx.target);
+  if (facts.tma_descriptor_base_is_device_bound) {
+    // BulkLoad1D/BulkStore1D pass the device-computed address directly and do
+    // not create a host-side TensorMap descriptor, so keep those facts intact.
+    facts.can_bulk_load = false;
+    facts.can_bulk_store = false;
+    facts.can_bulk_load_ignore_last_dim = false;
+    facts.can_bulk_store_ignore_last_dim = false;
+  }
   return facts;
 }
 
@@ -621,9 +719,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   // The IR carries explicit row indices via annotations and must always be
   // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
   if (GetBoolAnnotation(op, "is_gather4")) {
+    if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+      return Unsupported(MakeTmaUnavailableReason(op));
+    }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
+    if (GetTmaDescriptorBaseIsDeviceBound(op)) {
+      return Unsupported(MakeTmaUnavailableReason(op));
+    }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
 
@@ -703,43 +807,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-std::string ClassifyCopyForInstructionAnnotation(const CopyNode &op,
-                                                 Target target,
-                                                 bool in_pipeline) {
+CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
+                                              Target target) {
   CopyAnalysisContext ctx;
   ctx.target = target;
-  CopyFacts facts = AnalyzeCopyFacts(op, ctx);
-  if (!facts.cuda_like_target) {
-    return "sync";
+
+  if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+    return SelectCopyInstForLowering(op, ctx);
   }
 
-  if (facts.cluster_mask != 0) {
-    return facts.can_bulk_load ? "tma" : "sync";
-  }
-
-  if (facts.explicit_tma) {
-    CopyInst inst =
-        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
-                      /*check_last_dim=*/false);
-    return CopyInstIsTMA(inst) ? "tma" : "sync";
-  }
-
-  if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
-    return facts.can_cp_async ? "cp_async" : "sync";
-  }
-
-  if (in_pipeline && IsAutoAsyncCopyEnabled(/*default_enabled=*/false) &&
-      facts.can_cp_async) {
-    return "cp_async";
-  }
-
-  return "sync";
-}
-
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
-  CopyAnalysisContext ctx;
-  ctx.target = target;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);
@@ -762,6 +838,44 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
     return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
                               : Unsupported(facts.async_unavailable_reason);
+  }
+
+  // Honor prefer_instruction like SelectCopyInstForLowering, restricted to
+  // producer-side loads.
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be "
+                             "honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with "
+          "pass config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction="
+                             "\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
   }
 
   if (!facts.disable_tma) {

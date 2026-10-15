@@ -37,7 +37,7 @@ namespace tl {
 
 using namespace tirx;
 
-For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
+For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
                   const Fragment &loop_layout,
                   bool require_padding_guard = false);
 
@@ -58,23 +58,21 @@ For PragmaUnrollLoop(For stmt);
  *
  * \param loop The parallel For loop to lower.
  * \param loop_layout The Fragment layout for partitioning.
- * \param thread_var The thread variable for partitioning.
+ * \param thread_index The logical thread index expression for partitioning
+ *        (the real threadIdx.x Var on GPU, constant 0 without thread
+ *        bindings).
  * \param analyzer The arithmetic analyzer.
  * \param predicate ffi::Optional predicate to wrap the loop with IfThenElse.
  * \param parallel_loop Whether this is a true parallel loop requiring thread
  *        partitioning. False for loops that only operate on local/register
  *        buffers. (default true)
- * \param should_vectorize Whether to vectorize the loop. False when reducers
- *        are present or when there are no non-local buffer accesses.
- *        (default true)
  * \return The lowered statement.
  */
 Stmt LowerParallelLoop(
-    For loop, const Fragment &loop_layout, Var thread_var,
+    For loop, const Fragment &loop_layout, PrimExpr thread_index,
     arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-    bool parallel_loop = true, bool should_vectorize = true,
-    bool require_padding_guard = false);
+    bool parallel_loop = true, bool require_padding_guard = false);
 
 } // namespace tl
 } // namespace tvm

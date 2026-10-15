@@ -36,6 +36,11 @@ After:
         cast_buf[vec_copy] = b[vec_copy]                      # copy from memory
     for vec in T.vectorized(16):
         a_frag[vec] = T.cast(cast_buf[vec], "float32")        # compute
+
+The staging cast buffers together with the transformed loops are wrapped in
+an opaque block annotated with `lexical_alloc_scope`, so their allocations
+stay lexically scoped to the use site (see LowerOpaqueBlock / StorageRewrite)
+instead of being hoisted to the kernel entry.
 """
 
 from __future__ import annotations
@@ -58,6 +63,8 @@ from tvm.tirx import (
     Evaluate,
     PrimFunc,
     PyStmtExprVisitor,
+    SBlock,
+    SBlockRealize,
     SeqStmt,
     Stmt,
     Var,
@@ -68,14 +75,21 @@ from tvm.tirx.transform import prim_func_pass
 # Cache the Op for if_then_else to avoid repeated lookups
 _IF_THEN_ELSE_OP = Op.get("tirx.if_then_else")
 
-from tilelang.utils.language import is_fragment, is_global, is_local, is_local_var, is_shared, is_metal_simdgroup
+from tilelang.ir import get_stmt_span, stamp_stmt_spans
+from tilelang.utils.language import (
+    is_fragment,
+    is_global,
+    is_local,
+    is_local_var,
+    is_shared,
+)
 
 
 def is_local_buffer(buffer: Buffer) -> bool:
-    """Check if a buffer is local (register-level), including local.var and metal.simdgroup."""
+    """Check if a buffer is local/register-level."""
     if buffer is None:
         return False
-    return is_local(buffer) or is_fragment(buffer) or is_local_var(buffer) or is_metal_simdgroup(buffer)
+    return is_local(buffer) or is_fragment(buffer) or is_local_var(buffer)
 
 
 def is_global_or_shared_buffer(buffer: Buffer) -> bool:
@@ -238,7 +252,9 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
                 result.append(normalized)
         if not result:
             return None
-        return SeqStmt(result) if len(result) > 1 else result[0]
+        normalized = SeqStmt(result) if len(result) > 1 else result[0]
+        stamp_stmt_spans(normalized, get_stmt_span(stmt))
+        return normalized
 
     if isinstance(stmt, IfThenElse):
         condition = _substitute_bind_env(stmt.condition, env)
@@ -247,15 +263,17 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
         normalized_else = None
         if stmt.else_case:
             normalized_else = else_case if else_case is not None else Evaluate(0)
-        return IfThenElse(
+        normalized_if = IfThenElse(
             condition,
             then_case if then_case is not None else Evaluate(0),
             normalized_else,
         )
+        stamp_stmt_spans(normalized_if, get_stmt_span(stmt))
+        return normalized_if
 
     if isinstance(stmt, For):
         body = _normalize_flat_binds(stmt.body, dict(env))
-        return For(
+        new_for = For(
             stmt.loop_var,
             _substitute_bind_env(stmt.min, env),
             _substitute_bind_env(stmt.extent, env),
@@ -265,8 +283,13 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
             stmt.annotations,
             _substitute_bind_env(stmt.step, env),
         )
+        stamp_stmt_spans(new_for, get_stmt_span(stmt))
+        return new_for
 
-    return _substitute_bind_env(stmt, env)
+    result = _substitute_bind_env(stmt, env)
+    # `substitute` rebuilds any node referencing a bind var, dropping its span.
+    stamp_stmt_spans(result, get_stmt_span(stmt))
+    return result
 
 
 def normalize_flat_binds(stmt: Stmt) -> Stmt:
@@ -346,7 +369,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
     def _make_for(self, original: For, new_body: Stmt) -> For:
         """Create a new For node with updated body, preserving other attributes."""
-        return For(
+        new_for = For(
             original.loop_var,
             original.min,
             original.extent,
@@ -356,6 +379,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             original.annotations,
             original.step,
         )
+        stamp_stmt_spans(new_for, get_stmt_span(original))
+        return new_for
 
     # ----- entry point for each For loop -----
 
@@ -382,6 +407,17 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # A common frontend pattern is SeqStmt(Bind(...), BufferStore(...)),
         # which is still a single compute statement after substitution.
         if _contains_seq_stmt(normalized_body):
+            return self._make_for(op, new_body) if new_body is not op.body else op
+
+        # Skip Evaluate roots. Decoupling splits the value edge of a BufferStore
+        # to insert a staging buffer; an Evaluate discards its result and stores
+        # nothing, so that edge does not exist and the transform is undefined.
+        # Opaque intrinsic statements such as `tl.ptx_cp_async(...)` land here,
+        # and their operands are address arguments with address-space
+        # constraints (dst must be shared, src must be global) that rewriting to
+        # local staging buffers would violate.
+        _, root_stmt = extract_if_condition(normalized_body)
+        if isinstance(root_stmt, Evaluate):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Collect all shared/global stores and loads
@@ -445,6 +481,10 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # Wrap with buffer declarations and allocations
         result = self._wrap_with_allocations(result, store_entries + load_entries)
 
+        # The replacement subtree inherits the original loop's span. Nodes
+        # already stamped above (compute loop, normalized body) keep their own
+        # spans; the staging copies and the alloc-scope wrapper get stamped too.
+        stamp_stmt_spans(result, get_stmt_span(op))
         return result
 
     # ----- helpers -----
@@ -474,7 +514,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
     def _make_vectorized_loop(self, original: For, body: Stmt) -> For:
         """Create a vectorized For loop based on the original."""
-        return For(
+        new_for = For(
             original.loop_var,
             original.min,
             original.extent,
@@ -484,6 +524,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             original.annotations,
             original.step,
         )
+        stamp_stmt_spans(new_for, get_stmt_span(original))
+        return new_for
 
     def _create_copy_loops(
         self,
@@ -539,12 +581,27 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         return copy_loops
 
     def _wrap_with_allocations(self, body: Stmt, entries: list[CastEntry]) -> Stmt:
-        """Wrap statement with buffer declarations and allocations."""
-        alloc_stmts = []
-        for _, _, cast_buffer in entries:
-            alloc_stmts.append(AllocBuffer(cast_buffer))
+        """Wrap statement with buffer allocations inside a lexical alloc scope.
+
+        The cast buffers are tiny per-site staging arrays. Placing them in an
+        opaque block annotated with `lexical_alloc_scope` makes LowerOpaqueBlock
+        materialize a scope boundary, so StorageRewrite keeps the allocations
+        next to their use site instead of hoisting them to the kernel entry,
+        and codegen emits a `{ ... }` scope with the declarations inside.
+        """
+        if not entries:
+            return body
+        alloc_stmts: list[Stmt] = [AllocBuffer(cast_buffer) for _, _, cast_buffer in entries]
         alloc_stmts.append(body)
-        return SeqStmt(alloc_stmts)
+        block = SBlock(
+            iter_vars=[],
+            reads=[],
+            writes=[],
+            name_hint="decoupled_cast",
+            body=SeqStmt(alloc_stmts),
+            annotations={"lexical_alloc_scope": 1},
+        )
+        return SBlockRealize([], True, block)
 
     def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var) -> Stmt:
         """Replace memory accesses with cast buffer accesses."""
@@ -601,6 +658,6 @@ def DecoupleTypeCast():
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
         mutator = DecoupleTypeCastMutator()
         new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body)
+        return func.with_body(new_body, span=func.span)
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return prim_func_pass(pass_fn, opt_level=0, name="tl.DecoupleTypeCast")

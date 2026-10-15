@@ -4,7 +4,7 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
-from tilelang.utils.target import target_get_mcpu, target_get_rdna_generation
+from tilelang.rocm.target import target_get_mcpu, target_get_rdna_generation
 
 _RDNA_DEFAULT_LDS_SIZE = 64 * 1024
 _RDNA_TENSOR_INSTRUCTIONS = {
@@ -61,7 +61,7 @@ def is_rdna_arch(arch: TileDevice) -> bool:
 class RDNA(TileDevice):
     def __init__(self, target: Target | str):
         if isinstance(target, str):
-            from tilelang.utils.target import determine_target
+            from tilelang.backend.target import determine_target
 
             target = determine_target(target, return_object=True)
         self.target = target

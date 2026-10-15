@@ -14,15 +14,14 @@
 #include <string>
 #include <unordered_map>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangHIP final : public CodeGenC {
+class CodeGenTileLangHIP final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangHIP();
-  std::string Finish();
   void SetTarget(Target target) { target_ = std::move(target); }
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -50,6 +49,8 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const NotNode *op, std::ostream &os) final;
+  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
@@ -59,6 +60,7 @@ public:
   void AddFunction(const PrimFunc &f);
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,

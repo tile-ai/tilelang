@@ -1,8 +1,10 @@
 __all__ = [
+    "abs2",
     "exp",
     "exp2",
     "exp10",
     "log",
+    "log1p",
     "log2",
     "log10",
     "tan",
@@ -11,19 +13,26 @@ __all__ = [
     "sqrt",
     "rsqrt",
     "fabsf",
+    "max2",
+    "min2",
     "copysignf",
     "divf",
+    "isfinite",
+    "__habs",
+    "__float2half_rz",
     "tanh",
 ]
 
+import cutlass
+import cutlass.cute as cute
+import cutlass.cute.math as cute_math
+
 from cutlass.cute.typing import Union, Numeric
 from cutlass.cute.tensor import TensorSSA
-from cutlass._mlir.dialects import arith, math
-from cutlass.cute.math import _math_op as _cute_math_op
 
-from cutlass._mlir.dialects import llvm
-from cutlass.base_dsl.typing import Float32, Uint32
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.experimental import primitives as prims
+from cutlass.base_dsl.typing import BFloat16, Float16, Float32, Uint16, Uint32
+from cutlass.cutlass_dsl import dsl_user_op
 
 
 def _scalar_arg_type(arg):
@@ -54,69 +63,51 @@ def _scalar_result_type(*args):
 
 
 def _tl_math_op(func, fastmath: bool, *args, **kwargs):
-    if any(isinstance(arg, TensorSSA) for arg in args):
-        return _cute_math_op(func, fastmath, *args, **kwargs)
-
-    result_type = _scalar_result_type(*args)
-    if not result_type.is_float:
-        raise TypeError(f"Expected scalar float inputs, but got {result_type}")
-
-    ir_args = []
-    for arg in args:
-        if isinstance(arg, Numeric):
-            if not type(arg).is_float:
-                raise TypeError(f"Expected scalar float inputs, but got {type(arg)}")
-            if type(arg) is result_type:
-                ir_args.append(arg.ir_value())
-            else:
-                ir_args.append(result_type(arg).ir_value())
-        elif hasattr(arg, "ir_value"):
-            ir_args.append(result_type(arg.ir_value()).ir_value())
-        else:
-            ir_args.append(result_type(arg).ir_value())
-
-    fastmath_flag = arith.FastMathFlags.fast if fastmath else arith.FastMathFlags.none
-    return result_type(func(*ir_args, fastmath=fastmath_flag, **kwargs))
+    return func(*args, fastmath=fastmath, **kwargs)
 
 
 def exp(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.exp, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.exp, fastmath, x, **kwargs)
 
 
 def exp2(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.exp2, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.exp2, fastmath, x, **kwargs)
 
 
 def log(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.log, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.log, fastmath, x, **kwargs)
+
+
+def log1p(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
+    return _tl_math_op(cute_math.log1p, fastmath, x, **kwargs)
 
 
 def log2(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.log2, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.log2, fastmath, x, **kwargs)
 
 
 def log10(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.log10, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.log10, fastmath, x, **kwargs)
 
 
 def tan(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.tan, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.tan, fastmath, x, **kwargs)
 
 
 def cos(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.cos, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.cos, fastmath, x, **kwargs)
 
 
 def sin(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.sin, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.sin, fastmath, x, **kwargs)
 
 
 def sqrt(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.sqrt, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.sqrt, fastmath, x, **kwargs)
 
 
 def rsqrt(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.rsqrt, fastmath, x, **kwargs)
+    return _tl_math_op(cute_math.rsqrt, fastmath, x, **kwargs)
 
 
 def exp10(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
@@ -126,12 +117,28 @@ def exp10(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorS
 
 
 def fabsf(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(math.absf, fastmath, x)
+    return _tl_math_op(cute_math.absf, fastmath, x)
+
+
+def abs2(x: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    return fabsf(x)
+
+
+def max2(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    if any(isinstance(arg, TensorSSA) for arg in (x, y)):
+        return cute.where(x > y, x, y)
+    return cutlass.max(x, y)
+
+
+def min2(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric]) -> Union[TensorSSA, Numeric]:
+    if any(isinstance(arg, TensorSSA) for arg in (x, y)):
+        return cute.where(x < y, x, y)
+    return cutlass.min(x, y)
 
 
 def copysignf(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     if any(isinstance(arg, TensorSSA) for arg in (x, y)):
-        return _cute_math_op(math.copysign, fastmath, x, y)
+        return cute_math.copysign(x, y, fastmath=fastmath)
 
     result_type = _scalar_result_type(x, y)
     if result_type is not Float32:
@@ -144,25 +151,47 @@ def copysignf(x: Union[TensorSSA, Numeric], y: Union[TensorSSA, Numeric], fastma
     return (magnitude | sign).bitcast(Float32)
 
 
+def isfinite(x: Numeric) -> cutlass.Boolean:
+    return cute_math.isfinite(x)
+
+
 def divf(
     x: Union[TensorSSA, Numeric],
     y: Union[TensorSSA, Numeric],
     fastmath: bool = False,
 ) -> Union[TensorSSA, Numeric]:
-    return _tl_math_op(arith.divf, fastmath, x, y)
+    return _tl_math_op(cute_math.div, fastmath, x, y)
+
+
+def __habs(x: Numeric) -> Numeric:
+    result_type = _scalar_result_type(x)
+    if result_type not in (Float16, BFloat16):
+        raise TypeError(f"__habs expects Float16 or BFloat16 input, but got {_scalar_type_name(result_type)}")
+
+    bits = result_type(x).bitcast(Uint16)
+    return (bits & Uint16(0x7FFF)).bitcast(result_type)
+
+
+@dsl_user_op
+def __float2half_rz(x: Union[float, Float32], *, loc=None, ip=None) -> Float16:
+    return Float16(
+        prims.inline_ptx(
+            "cvt.rz.f16.f32 {$w0}, {$r0};",
+            write_only_types=[Float16],
+            read_only_args=[Float32(x)],
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 @dsl_user_op
 def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32:
     return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(x).ir_value()],
-            "tanh.approx.f32 $0, $1;",
-            "=f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
+        prims.inline_ptx(
+            "tanh.approx.f32 {$w0}, {$r0};",
+            write_only_types=[Float32],
+            read_only_args=[Float32(x)],
             loc=loc,
             ip=ip,
         )
@@ -170,5 +199,4 @@ def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32
 
 
 def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
-    tanh_op = __tanhf if fastmath else math.tanh
-    return _tl_math_op(tanh_op, False, x)
+    return cute_math.tanh(x, fastmath=fastmath)

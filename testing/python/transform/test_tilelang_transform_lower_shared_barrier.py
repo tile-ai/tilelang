@@ -1,9 +1,10 @@
 # ruff: noqa
 from tilelang import tvm as tvm
 import tilelang as tl
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -13,51 +14,36 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedBarrier()(mod)
     return mod
 
 
-def _collect_calls(stmt, op_name: str | set[str]):
-    op_names = {op_name} if isinstance(op_name, str) else op_name
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and str(node.op.name) in op_names:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
-
-
 def _collect_storage_syncs(stmt):
-    return _collect_calls(stmt, "tirx.tvm_storage_sync")
+    return collect_calls(stmt, op="tirx.tvm_storage_sync")
 
 
 def _collect_init_barrier_calls(stmt):
-    return _collect_calls(stmt, "tirx.ptx_init_barrier_thread_count")
+    return collect_calls(stmt, op="tirx.ptx_init_barrier_thread_count")
 
 
 def _collect_fence_barrier_init(stmt):
-    return _collect_calls(stmt, "tl.ptx_fence_barrier_init")
+    return collect_calls(stmt, op="tl.ptx_fence_barrier_init")
 
 
 def _collect_shuffle_elect(stmt):
-    return _collect_calls(stmt, "tl.tl_shuffle_elect")
+    return collect_calls(stmt, op="tl.tl_shuffle_elect")
 
 
 def _collect_barrier_blocks(stmt):
-    blocks = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            barrier_bufs = [buf for buf in node.alloc_buffers if buf.scope() in ("shared.barrier", "shared.cluster_barrier")]
-            if barrier_bufs:
-                blocks.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return blocks
+    return [
+        block
+        for block in collect_nodes(stmt, tvm.tirx.SBlock)
+        if any(buf.scope() in ("shared.barrier", "shared.cluster_barrier") for buf in block.alloc_buffers)
+    ]
 
 
+@tilelang.testing.requires_cuda
 def test_single_barrier():
     """Single barrier with one arrive count."""
 
@@ -78,6 +64,7 @@ def test_single_barrier():
     assert init_call.args[1].value == 128
 
 
+@tilelang.testing.requires_cuda
 def test_multiple_barriers():
     """Multiple barriers with different arrive counts."""
 
@@ -104,6 +91,7 @@ def test_multiple_barriers():
     assert len(syncs) >= 1
 
 
+@tilelang.testing.requires_cuda
 def test_no_barrier_is_noop():
     """Pass should be a no-op when no barrier buffers are present."""
 
@@ -120,6 +108,7 @@ def test_no_barrier_is_noop():
     assert len(_collect_fence_barrier_init(body)) == 0
 
 
+@tilelang.testing.requires_cuda
 def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
     """Regression for tcgen05 no-TMA kernels after pass reordering."""
 

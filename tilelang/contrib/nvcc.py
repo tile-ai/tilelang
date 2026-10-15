@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import warnings
 import contextlib
@@ -17,6 +18,8 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+from tilelang import logger
+from .cc import get_cplus_compiler
 
 
 def get_nvcc_subprocess_env() -> dict[str, str] | None:
@@ -33,6 +36,10 @@ def get_nvcc_subprocess_env() -> dict[str, str] | None:
     return get_msvc_subprocess_env()
 
 
+def _get_compile_timeout_seconds() -> float | None:
+    return env.get_compile_timeout_seconds()
+
+
 def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=None):
     if kernels_output_dir is None:
         return temp.relpath(f"{file_name}.cu"), temp.relpath(f"{file_name}.{target_format}")
@@ -43,6 +50,46 @@ def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=N
     file_stem, _ = os.path.splitext(os.path.basename(temp_code))
     temp_target = os.path.join(kernels_output_dir, f"{file_stem}.{target_format}")
     return temp_code, temp_target
+
+
+def get_target_arch_and_code(target: Target | None = None) -> tuple[str, list[str] | None]:
+    """Return the CUDA target arch suffix and optional NVCC code targets."""
+    target = target or Target.current(allow_none=True)
+    target_code = get_target_code_list(target.attrs["code"]) if target is not None and "code" in target.attrs else None
+
+    if target is not None and "arch" in target.attrs:
+        arch = str(target.attrs["arch"])
+        if arch.startswith("sm_"):
+            return arch.removeprefix("sm_"), target_code
+        raise ValueError("CUDA target arch must be an exact SM token such as 'sm_90' or 'sm_100f'.")
+
+    return get_target_arch(get_target_compute_version(target)), target_code
+
+
+def get_target_code_list(target_code: object | None) -> list[str]:
+    if target_code is None:
+        return []
+    if isinstance(target_code, str):
+        raise ValueError('CUDA target code must be a list of exact SM code tokens, for example ["sm_100a", "sm_103a"].')
+    try:
+        code_list = list(target_code)
+    except TypeError as err:
+        raise ValueError('CUDA target code must be a list of exact SM code tokens, for example ["sm_100a", "sm_103a"].') from err
+    if not code_list:
+        raise ValueError("CUDA target code must be a non-empty list of SM code tokens")
+
+    cuda_code_re = re.compile(r"^sm_[A-Za-z0-9]+$")
+    for code in code_list:
+        if not isinstance(code, str) or not cuda_code_re.fullmatch(code):
+            raise ValueError("CUDA target code entries must be exact SM code tokens such as 'sm_100a' or 'sm_103a'.")
+    return code_list
+
+
+def format_target_code_for_gencode(target_code: object | None) -> str | None:
+    code_list = get_target_code_list(target_code)
+    if not code_list:
+        return None
+    return code_list[0] if len(code_list) == 1 else f"[{','.join(code_list)}]"
 
 
 def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False):
@@ -67,24 +114,31 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     Return
     ------
-    cubin : bytearray
-        The bytearray of the cubin
+    data : bytearray
+        The compiled output bytes.
     """
+    target_code = None
     if arch is None:
         # If None, then it will use `tvm.target.Target.current().arch`.
-        # Target arch could be a str like "sm_xx", or a list, such as
-        # [
-        #   "-gencode", "arch=compute_52,code=sm_52",
-        #   "-gencode", "arch=compute_70,code=sm_70"
-        # ]
-        compute_version = get_target_compute_version(Target.current(allow_none=True))
-        target_arch = get_target_arch(compute_version)
-        arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
+        target_arch, target_code = get_target_arch_and_code(Target.current(allow_none=True))
+        gencode_code = format_target_code_for_gencode(target_code)
+        if gencode_code is None:
+            arch = [f"-arch=sm_{target_arch}"]
+        else:
+            arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+        if target_format == "cubin" and len(get_target_code_list(target_code)) > 1:
+            warnings.warn(
+                "NVCC does not allow '--cubin' with multiple code targets; using '--fatbin' instead.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            target_format = "fatbin"
 
     temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
+
     pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
     kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
     temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)
@@ -93,7 +147,20 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
+    compiler_env = get_nvcc_subprocess_env()
+    if os.name == "nt":
+        from tilelang.contrib.msvc import get_env_path, get_msvc_environment_error
+
+        # NVCC on Windows requires MSVC, even when host libraries use clang-cl.
+        host_compiler = shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
+        if host_compiler is None:
+            detail = get_msvc_environment_error()
+            raise RuntimeError("NVCC requires MSVC cl.exe on Windows." + (f" {detail}" if detail else ""))
+    else:
+        host_compiler = get_cplus_compiler()
     cmd = [get_nvcc_compiler()]
+    if host_compiler is not None:
+        cmd += [f"-ccbin={host_compiler}"]
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]
@@ -122,16 +189,29 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
-    compiler_env = get_nvcc_subprocess_env()
     if compiler_env is None:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     else:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=compiler_env)
 
-    (out, _) = proc.communicate()
+    timeout = _get_compile_timeout_seconds()
+    try:
+        (out, _) = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        try:
+            out, _ = proc.communicate()
+        except Exception:
+            out = exc.output or b""
+        captured = py_str(out or b"")
+        msg = f"NVCC compilation timed out after {timeout} seconds.\nCommand: {' '.join(cmd)}\nSource: {temp_code}\nTarget: {file_target}\n"
+        if captured:
+            msg += f"Output:\n{captured}\n"
+        raise RuntimeError(msg) from exc
 
     if verbose:
-        print(py_str(out))
+        logger.info("NVCC compilation command: %s", " ".join(cmd))
+        logger.info("PTXAS verbose output:\n%s", py_str(out))
 
     if proc.returncode != 0:
         msg = f"{code}\nCompilation error:\n{py_str(out)}\nCommand: {' '.join(cmd)}\n"
@@ -588,6 +668,19 @@ def is_hopper(target):
 
 
 def have_pdl(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major >= 9
+
+
+def have_mbarrier(target):
+    """Whether hardware mbarrier support (the cutlass Barrier type,
+    tl_shuffle_elect, fence_barrier_init) is available on the target.
+
+    Available on Hopper (sm_90) and later architectures.
+    """
     if target.kind.name != "cuda":
         return False
     compute_version = get_target_compute_version(target)

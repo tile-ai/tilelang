@@ -1,5 +1,6 @@
 from __future__ import annotations
-from tvm import arith, DataType
+from tvm import DataType
+from tvm.tirx import IndexMap
 import tilelang.language as T
 
 
@@ -37,6 +38,22 @@ def ldmatrix_32x16_to_shared_16x32_layout_b(thread_id, local_id):
     row = (thread_id // 16) * 8 + (thread_id % 8)
     col = local_id + 16 * ((thread_id % 16) // 8)
     return row, col
+
+
+def metal_ct_store_32x16_to_16x32_layout(thread_id, local_id):
+    lane = thread_id % 32
+    qid = lane >> 2
+    base_row = (qid & 4) | ((lane >> 1) & 3)
+    base_col = ((qid & 2) | (lane & 1)) * 4
+    frag = local_id // 8
+    frag_local = local_id % 8
+    row = base_row + (frag_local // 4) * 8
+    col = base_col + frag * 16 + frag_local % 4
+    return row, col
+
+
+def metal_ct_store_index_map():
+    return IndexMap.from_func(metal_ct_store_32x16_to_16x32_layout, index_dtype=T.int32)
 
 
 def mma_store_32x8_to_shared_16x16_layout(thread_id, local_id):
@@ -188,6 +205,81 @@ def mma_load_b_32x8_to_shared_16x16_layout(thread_id, local_id):
     return row, col
 
 
+def shared_16x64_to_mma_a_32x32_layout(i, j):
+    """A fragment layout for m16n8k64 e2m1 row-major operand."""
+    thread_id = 4 * (i % 8) + (j % 32) // 8
+    local_id = 16 * (i // 8) + 8 * (j // 32) + j % 8
+    return thread_id, local_id
+
+
+def shared_64x16_to_mma_a_32x32_layout_trans(i, j):
+    return shared_16x64_to_mma_a_32x32_layout(j, i)
+
+
+def shared_8x64_to_mma_b_32x16_layout(i, j):
+    """B fragment layout for m16n8k64 e2m1 col-major operand."""
+    thread_id = 4 * i + (j % 32) // 8
+    local_id = 8 * (j // 32) + j % 8
+    return thread_id, local_id
+
+
+def shared_64x8_to_mma_b_32x16_layout_trans(i, j):
+    return shared_8x64_to_mma_b_32x16_layout(j, i)
+
+
+shared_16x64_to_mma_32x32_layout_sr_a = shared_16x64_to_mma_a_32x32_layout
+shared_16x64_to_mma_32x32_layout_rs_a = shared_64x16_to_mma_a_32x32_layout_trans
+shared_8x64_to_mma_32x16_layout_sr_b = shared_8x64_to_mma_b_32x16_layout
+shared_8x64_to_mma_32x16_layout_rs_b = shared_64x8_to_mma_b_32x16_layout_trans
+
+
+def ldmatrix_32x32_to_shared_16x64_layout_a(thread_id):
+    """Row-start addresses for ldmatrix.x4 loading A m16k64 e2m1."""
+    row = thread_id % 16
+    col = (thread_id // 16) * 32
+    return row, col
+
+
+def ldmatrix_32x32_to_shared_16x64_layout_b(thread_id):
+    """Row-start addresses for ldmatrix.x4 loading B n16k64 e2m1."""
+    row = (thread_id // 16) * 8 + (thread_id % 8)
+    col = ((thread_id % 16) // 8) * 32
+    return row, col
+
+
+def ldmatrix_32x16_to_shared_8x64_layout_b(thread_id):
+    """Row-start addresses for ldmatrix.x2 loading B n8k64 e2m1."""
+    row = thread_id % 8
+    col = ((thread_id // 8) % 2) * 32
+    return row, col
+
+
+def mma_load_a_32x32_to_shared_16x64_layout(thread_id, local_id):
+    """Inverse: (thread_id, local_id) -> (m, k) for A m16k64 e2m1.
+
+    Matches CUTLASS/CuTe SM120 ALayout:
+    Layout<Shape<Shape<_4,_8>, Shape<_8,_2,_2>>,
+           Stride<Stride<_128,_1>, Stride<_16,_8,_512>>>.
+    """
+    tid_m = thread_id % 4
+    tid_k = thread_id // 4
+    val_k8 = local_id % 8
+    val_m8 = (local_id // 8) % 2
+    val_k32 = local_id // 16
+    row = tid_k + 8 * val_m8
+    col = tid_m * 8 + val_k8 + 32 * val_k32
+    return row, col
+
+
+def mma_load_b_32x16_to_shared_8x64_layout(thread_id, local_id):
+    """Inverse: (thread_id, local_id) -> (n, k) for B n8k64 e2m1."""
+    group_id = thread_id // 4
+    tid_in_group = thread_id % 4
+    row = group_id
+    col = tid_in_group * 8 + (local_id % 8) + 32 * (local_id // 8)
+    return row, col
+
+
 def shared_16x16_to_mma_32x8_smoothlayout(i, j):
     return (i * 2 + j // 8, j % 8)
 
@@ -201,7 +293,6 @@ def shared_32x16_to_mma_32x16_smoothlayout(i, j):
 
 
 def get_swizzle_layout(row_idx, col_idx, row_size, dtype: DataType | str, swizzle_bytes=None):
-    ana = arith.Analyzer()
     if isinstance(dtype, str):
         dtype = DataType(dtype)
     row_bytes = dtype.bits * row_size // 8
@@ -220,22 +311,26 @@ def get_swizzle_layout(row_idx, col_idx, row_size, dtype: DataType | str, swizzl
     #   0  1  2  3  4  5  6  7    ==>    6  7  4  5  2  3  0  1
     #   0  1  2  3  4  5  6  7    ==>    7  6  5  4  3  2  1  0
     # 64B swizzle
-    #  Use 8 * 4 permuted layout
-    #  Every number below corresponds to 16B
-    #  0  1  2  3  4  0  1  2  3    ==>    0  1  2  3  0  1  2  3
-    #  0  1  2  3  4  0  1  2  3    ==>    1  0  3  2  1  0  3  2
-    #  0  1  2  3  4  0  1  2  3    ==>    2  3  0  1  2  3  0  1
-    #  0  1  2  3  4  0  1  2  3    ==>    3  2  1  0  3  2  1  0
+    #   Use 8 * 4 permuted layout
+    #   Every number below corresponds to 16B
+    #   0  1  2  3  0  1  2  3    ==>    0  1  2  3  0  1  2  3
+    #   0  1  2  3  0  1  2  3    ==>    1  0  3  2  1  0  3  2
+    #   0  1  2  3  0  1  2  3    ==>    2  3  0  1  2  3  0  1
+    #   0  1  2  3  0  1  2  3    ==>    3  2  1  0  3  2  1  0
     # 32B swizzle
-    #  Use 8 * 2 permuted layout
-    #  Every number below corresponds to 16B
-    #  0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
-    #  0  1  2  3  4  5  6  7    ==>    1  0  3  2  5  4  7  6
+    #   Use 8 * 2 permuted layout
+    #   Every number below corresponds to 16B
+    #   0  1  0  1  0  1  0  1    ==>    0  1  0  1  0  1  0  1
+    #   0  1  0  1  0  1  0  1    ==>    1  0  1  0  1  0  1  0
     elem_per_16B = 128 // dtype.bits
+    swizzle_vectors = int(swizzle_bytes) // 16
     col_idx_16B = col_idx // elem_per_16B
     col_idx_in_16B = col_idx % elem_per_16B
-    new_col_idx_16B = col_idx_16B ^ (row_idx % (swizzle_bytes // 16))
-    return row_idx, ana.simplify(new_col_idx_16B * elem_per_16B + col_idx_in_16B)
+    col_tile = col_idx_16B // swizzle_vectors
+    c = col_idx_16B % swizzle_vectors
+    src = (row_idx % 8) // (8 // swizzle_vectors)
+    swizzled_col = (c ^ src) * elem_per_16B + col_idx_in_16B
+    return col_tile, row_idx, swizzled_col
 
 
 def make_mma_swizzle_layout(shared_buf, is_smooth: bool = False):
@@ -248,7 +343,6 @@ def make_mma_swizzle_layout(shared_buf, is_smooth: bool = False):
 
     def transform_func(*args):
         i, j = args[-2:]
-        new_warp_i, new_warp_j = get_swizzle_layout(i, j, shape[-1], dtype)
-        return [*args[:-2], new_warp_i, new_warp_j]
+        return [*args[:-2], *get_swizzle_layout(i, j, shape[-1], dtype)]
 
     return T.Layout(shape, transform_func)

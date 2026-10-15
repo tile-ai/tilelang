@@ -18,7 +18,7 @@ namespace tl {
 namespace cpu {
 
 struct Transpose {
-  static Stmt Lower(const TransposeNode &op, const LowerArgs &T,
+  static Stmt Lower(const TransposeNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (!(IsLocalBuffer(op.src, true) || IsGlobalBuffer(op.src)) ||
         !(IsLocalBuffer(op.dst, true) || IsGlobalBuffer(op.dst))) {
@@ -28,7 +28,7 @@ struct Transpose {
     }
     auto simt_loop = op.MakeSIMTLoop(analyzer);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-    return VectorizeLoop(fused_loop, T.layout_map);
+    return VectorizeLoop(fused_loop, lower_args.layout_map);
   }
 };
 

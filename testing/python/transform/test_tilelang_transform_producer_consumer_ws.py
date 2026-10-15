@@ -1,11 +1,13 @@
 """Tests for the warp-specialized producer/consumer pass."""
 
+import re
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.layout import make_swizzled_layout
-from tilelang.utils.target import determine_target
+from tilelang.backend.target import determine_target
 
 
 def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="float16", threads=128):
@@ -32,6 +34,79 @@ def matmul_pipelined(M, N, K, block_M, block_K, block_N, num_stages, dtype="floa
                 T.copy(B[ko * block_K, bx * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
 
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def device_bound_copy_pipelined(size=16, dtype="float16", threads=128):
+    """A TMA-shaped copy whose global base comes from a pointer table."""
+
+    @T.prim_func
+    def main(
+        src_ptrs: T.Tensor((1,), T.ptr),
+        out: T.Tensor((size, size), dtype),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.make_tensor(src_ptrs[0], (size, size), dtype)
+            shared = T.alloc_shared((size, size), dtype)
+            for _ in T.Pipelined(1, num_stages=1):
+                T.copy(src, shared)
+                T.copy(shared, out)
+
+    return main
+
+
+def dual_gemm_shared_accumulator(
+    M,
+    N,
+    K0,
+    K1,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    dtype="float16",
+    threads=128,
+):
+    """A prelude GEMM and a pipelined-loop GEMM accumulating into the same
+    fragment, mirroring the #2547 `example_mamba_chunk_scan.py` pattern:
+    `T.gemm(A0, B0, acc)` runs once before the loop, then
+    `T.gemm(A1_k, B1_k, acc)` accumulates into the same `acc` inside a
+    `T.Pipelined` loop. Under warp specialization, the prelude GEMM must be
+    classified consumer-only so both GEMMs share one thread_range for `acc`.
+    """
+
+    @T.prim_func
+    def main(
+        A0: T.Tensor((M, K0), dtype),
+        B0: T.Tensor((K0, N), dtype),
+        A1: T.Tensor((M, K1), dtype),
+        B1: T.Tensor((K1, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+            bx,
+            by,
+        ):
+            acc = T.alloc_fragment((block_M, block_N), "float32")
+            A0_shared = T.alloc_shared((block_M, K0), dtype)
+            B0_shared = T.alloc_shared((K0, block_N), dtype)
+            A1_shared = T.alloc_shared((block_M, block_K), dtype)
+            B1_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), dtype)
+
+            T.clear(acc)
+            T.copy(A0[by * block_M, 0], A0_shared)
+            T.copy(B0[0, bx * block_N], B0_shared)
+            T.gemm(A0_shared, B0_shared, acc)  # prelude GEMM -> acc
+
+            for ko in T.Pipelined(T.ceildiv(K1, block_K), num_stages=num_stages):
+                T.copy(A1[by * block_M, ko * block_K], A1_shared)
+                T.copy(B1[ko * block_K, bx * block_N], B1_shared)
+                T.gemm(A1_shared, B1_shared, acc)  # loop GEMM -> same acc
+
+            T.copy(acc, C_local)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -300,6 +375,29 @@ def _find_after(src, needle, start=0):
     return pos
 
 
+def _count_device_bound_copy_annotations(func):
+    annotated = 0
+    total = 0
+
+    def _visit(node):
+        nonlocal annotated, total
+        if not isinstance(node, tvm.tirx.Call) or not isinstance(node.op, tvm.ir.Op):
+            return
+        if str(node.op.name) not in {
+            "tl.tileop.copy",
+            "tl.tileop.async_copy",
+            "tl.tileop.tma_copy",
+        }:
+            return
+        total += 1
+        value = node.annotations.get("tma_descriptor_base_is_device_bound") if node.annotations else None
+        if isinstance(value, tvm.tirx.IntImm) and int(value.value) != 0:
+            annotated += 1
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
+    return annotated, total
+
+
 def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, block_N=64, block_K=32):
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     func = grouped_gemm_padded_pipelined(batch_sizes, K, N, block_M, block_N, block_K)
@@ -307,6 +405,25 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
     return kernel, batch_sizes
 
 
+@tilelang.testing.requires_cuda
+def test_tiled_ws_skips_device_bound_tma_descriptor_base():
+    func = device_bound_copy_pipelined().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+
+    annotated, total = _count_device_bound_copy_annotations(mod["main"])
+    assert (annotated, total) == (1, 2)
+
+    script = mod["main"].script()
+    assert "tl_tiled_ws_applied" not in script
+    assert "T.tma_copy" not in script
+
+
+@tilelang.testing.requires_cuda
 def test_tiled_ws_places_producer_in_first_warp_group():
     """Auto-WS should put the producer in the low threadIdx.x partition."""
 
@@ -314,6 +431,7 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -325,6 +443,31 @@ def test_tiled_ws_places_producer_in_first_warp_group():
 
     assert branch < producer_tma < consumer_branch < consumer_gemm
     assert "if 128 <= tx:" not in script
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_accepts_int64_pipeline_indices():
+    """Inductor-style TIR may use int64 shapes and loop extents."""
+
+    func = matmul_pipelined(
+        T.int64(32),
+        T.int64(1024),
+        T.int64(256),
+        T.int64(32),
+        T.int64(64),
+        T.int64(128),
+        num_stages=4,
+        dtype="bfloat16",
+    ).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    assert "T.tma_copy" in script
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
@@ -416,6 +559,71 @@ def test_tiled_ws_stage3():
     C = kernel(A, B)
 
     ref = A.float() @ B.float()
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_dual_gemm_shared_accumulator_correctness():
+    """Regression test for #2547.
+
+    A prelude GEMM and a pipelined-loop GEMM accumulate into the same
+    fragment. Before the fix, `LocalAccessCollector` never recorded the
+    prelude GEMM's write to `acc`, so it was misclassified as
+    `kKeepSharedPrelude` and stayed in the shared `[0, 2*threads)` prelude,
+    while the loop GEMM ran consumer-only in `[threads, 2*threads)`.
+    `LayoutInference` then aborted with "Get different layout for acc"
+    because the two GEMMs disagreed on `acc`'s thread_range.
+    """
+    import torch
+
+    M, N, K0, K1 = 64, 64, 64, 128
+    block_M, block_N, block_K = 64, 64, 64
+    func = dual_gemm_shared_accumulator(M, N, K0, K1, block_M, block_N, block_K, num_stages=2)
+    target = determine_target()
+    kernel = tilelang.compile(func, target=target, out_idx=[4])
+
+    A0 = torch.randn(M, K0, dtype=torch.float16, device="cuda")
+    B0 = torch.randn(K0, N, dtype=torch.float16, device="cuda")
+    A1 = torch.randn(M, K1, dtype=torch.float16, device="cuda")
+    B1 = torch.randn(K1, N, dtype=torch.float16, device="cuda")
+    C = kernel(A0, B0, A1, B1)
+
+    ref = A0.float() @ B0.float() + A1.float() @ B1.float()
+    torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_dual_gemm_shared_accumulator_disable_wgmma():
+    """Same dual-GEMM-into-one-accumulator pattern, with WGMMA disabled.
+
+    #2547 showed the crash was gated purely by warp specialization, not by
+    WGMMA instruction selection: `tl.disable_wgmma=True` (WS still on) hit
+    the identical thread_range conflict on an MMA-shaped fragment, so this
+    is not an "accumulator unsupported" guard but a thread-range bookkeeping
+    defect in the WS pass itself.
+    """
+    import torch
+
+    M, N, K0, K1 = 64, 64, 64, 128
+    block_M, block_N, block_K = 64, 64, 64
+    func = dual_gemm_shared_accumulator(M, N, K0, K1, block_M, block_N, block_K, num_stages=2)
+    target = determine_target()
+    kernel = tilelang.compile(
+        func,
+        target=target,
+        out_idx=[4],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WGMMA: True},
+    )
+
+    A0 = torch.randn(M, K0, dtype=torch.float16, device="cuda")
+    B0 = torch.randn(K0, N, dtype=torch.float16, device="cuda")
+    A1 = torch.randn(M, K1, dtype=torch.float16, device="cuda")
+    B1 = torch.randn(K1, N, dtype=torch.float16, device="cuda")
+    C = kernel(A0, B0, A1, B1)
+
+    ref = A0.float() @ B0.float() + A1.float() @ B1.float()
     torch.testing.assert_close(C.float(), ref, rtol=1e-2, atol=1e-2)
 
 
@@ -541,6 +749,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     assert k_load < v_load < branch < first_wait
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     """Explicit cp.async destinations must pull the consumer wait earlier."""
 
@@ -548,6 +757,7 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -579,6 +789,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
     assert start_bind < k_load < branch
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     """Outer scalar binds used by nested post-loop consumers must stay shared."""
 
@@ -586,6 +797,7 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     mod = tvm.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
@@ -629,14 +841,95 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
     _run_grouped_gemm_ws(kernel, batch_sizes)
 
 
+def _wide_linear_reduce_kernel(rows, mids, width, batches, rows_per_batch, dtype, num_stages=2):
+    """A grad_w-style batched reduction: each pipelined iteration TMA-loads a
+    (rows_per_batch, width) slice (fixed middle index, strided rows) into a
+    linear-layout shared buffer and accumulates it into a fragment."""
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((rows, mids, width), dtype),
+        out: T.Tensor((mids, width), "float32"),
+    ):
+        with T.Kernel(mids, threads=128) as bx:
+            smem = T.alloc_shared((rows_per_batch, width), dtype)
+            acc = T.alloc_fragment((width,), "float32")
+            T.clear(acc)
+            for k in T.Pipelined(batches, num_stages=num_stages):
+                T.copy(src[k * rows_per_batch : (k + 1) * rows_per_batch, bx, :], smem)
+                for i in T.Serial(rows_per_batch):
+                    for j in T.Parallel(width):
+                        acc[j] += smem[i, j]
+            T.copy(acc, out[bx, :])
+
+    return main
+
+
+def _run_wide_linear_reduce(kernel, rows, mids, width, dtype):
+    import torch
+
+    torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[dtype]
+    src = torch.randn(rows, mids, width, device="cuda", dtype=torch_dtype)
+    out = torch.zeros(mids, width, device="cuda", dtype=torch.float32)
+    kernel(src, out)
+    ref = src.float().sum(dim=0)
+    torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma():
+    """A multi-versioned linear shared buffer with a >256-element row must
+    stay a TMA producer: the version axis stays outside the per-copy TMA tile,
+    while the width quotient stays outside its 256-element box. Pins the fix
+    for the gapped-slice bijection ICHECK."""
+    func = _wide_linear_reduce_kernel(rows=128, mids=4, width=512, batches=4, rows_per_batch=32, dtype="float32")
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load(" in src
+    assert "cp_async" not in src
+    assert re.search(r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+    _run_wide_linear_reduce(kernel, 128, 4, 512, "float32")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_wide_linear_smem_multi_way_box_split():
+    """1024 bf16 columns force a (256, 4) split of the contiguous box mode."""
+    func = _wide_linear_reduce_kernel(rows=64, mids=2, width=1024, batches=4, rows_per_batch=16, dtype="bfloat16")
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load(" in src
+    _run_wide_linear_reduce(kernel, 64, 2, 1024, "bfloat16")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_wide_linear_smem_three_stages():
+    """Three versions interleave the ring dimension above the 256-splits."""
+    func = _wide_linear_reduce_kernel(rows=48, mids=2, width=768, batches=3, rows_per_batch=16, dtype="float32", num_stages=3)
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "cp_async" not in src
+    assert re.search(r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+    _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
+
+
 if __name__ == "__main__":
+    test_tiled_ws_skips_device_bound_tma_descriptor_base()
     test_tiled_ws_places_producer_in_first_warp_group()
+    test_tiled_ws_accepts_int64_pipeline_indices()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()
     test_tiled_ws_stage3()
+    test_tiled_ws_dual_gemm_shared_accumulator_correctness()
+    test_tiled_ws_dual_gemm_shared_accumulator_disable_wgmma()
     test_tiled_ws_swizzled_layout_allows_ws()
     test_tiled_ws_incompatible_layout_blocks_ws()
     test_tiled_ws_sinks_preloop_tma_waits_into_consumer()
     test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read()
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()
+    test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
+    test_tiled_ws_wide_linear_smem_multi_way_box_split()
+    test_tiled_ws_wide_linear_smem_three_stages()

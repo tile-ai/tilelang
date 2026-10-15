@@ -154,7 +154,7 @@ def matmul(
     B_dequantize_shared_shape = (block_N, block_K)
     assert K % (block_K * split) == 0
 
-    from tilelang.quantize import get_mxfp_intrin_group
+    from quantize import get_mxfp_intrin_group
 
     # fast_dequant_bf16_fp4_twiddling
     mxfp_intrin_info = get_mxfp_intrin_group(
@@ -253,7 +253,7 @@ def matmul(
                 )
 
                 # Finally, store the dequantized data to shared memory.
-                for v in T.Parallel(local_size):
+                for v in T.vectorized(local_size):
                     B_dequantize_local_thread[v] *= Scale_local_thread_exponent[0]
 
                 for v in T.vectorized(0, local_size):

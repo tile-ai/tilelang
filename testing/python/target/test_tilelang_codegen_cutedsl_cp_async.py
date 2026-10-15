@@ -6,7 +6,8 @@ import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower
-from tilelang.utils.target import determine_target, normalize_cutedsl_target
+from tilelang.backend.target import determine_target
+from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):

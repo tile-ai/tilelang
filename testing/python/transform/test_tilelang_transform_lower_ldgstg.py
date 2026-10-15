@@ -6,10 +6,13 @@ Pass configurations:
 - tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering (default: OFF)
 """
 
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.transform import PassConfigKey
 from tvm import tirx
 
@@ -29,18 +32,89 @@ def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
     return mod
 
 
-def _check_has_intrinsic(mod, intrinsic_name):
-    """Check if the module contains a specific intrinsic call."""
-    found = [False]
-
-    def visitor(obj):
-        if isinstance(obj, tirx.Call) and hasattr(obj.op, "name") and intrinsic_name in obj.op.name:
-            found[0] = True
-
-    tirx.stmt_functor.post_order_visit(mod["main"].body, visitor)
-    return found[0]
+requires_ldgstg = pytest.mark.skipif(
+    tvm.get_global_func("tl.cuda.transform.LowerLDGSTG", allow_missing=True) is None,
+    reason="LowerLDGSTG is not compiled into this build",
+)
 
 
+def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
+    """Check this pass's pointer, packed value and predicate contract."""
+    op_name = f"tl.{direction}{bits}"
+    assert_call_count(func, op=op_name, count=1)
+    call = collect_calls(func, op=op_name)[0]
+    is_load = direction == "ldg"
+    assert len(call.args) == (1 if is_load else 2) + (predicate is not None)
+    packed_dtype = "uint32" if bits == 32 else f"uint32x{bits // 32}"
+    assert (call.dtype if is_load else call.args[1].dtype) == packed_dtype
+    ptr = call.args[0]
+    assert isinstance(ptr, tirx.Call) and ptr.op.same_as(tvm.ir.Op.get("tirx.tvm_access_ptr"))
+    buffer = func.buffer_map[func.params[buffer_index]]
+    assert ptr.args[1].same_as(buffer.data)
+    assert ptr.args[4].value == (1 if is_load else 2)
+    if predicate is not None:
+        tvm.ir.assert_structural_equal(call.args[-1], predicate)
+    return call
+
+
+def _assert_no_global_intrinsics(func):
+    for direction in ("ldg", "stg"):
+        for bits in (32, 64, 128, 256):
+            assert_call_count(func, op=f"tl.{direction}{bits}", count=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("lanes", [1, 2, 4, 8])
+@pytest.mark.parametrize("enable_non_predicated", [False, True])
+@pytest.mark.parametrize("enclosing_store", [False, True])
+def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicated, enclosing_store):
+    """A nested load must retain both predicates, for scalar and vector widths."""
+    iterator = T.serial if lanes == 1 else T.vectorized
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), outer: T.int32, inner: T.int32):
+        for i in T.thread_binding(128 // lanes, "threadIdx.x"):
+            for j in iterator(lanes):
+                if enclosing_store:
+                    with T.If(outer > 0), T.Then():
+                        B[i * lanes + j] = T.if_then_else(inner > 0, A[i * lanes + j], T.float32(0))
+                else:
+                    B[i * lanes + j] = T.if_then_else(inner > 0, A[i * lanes + j], T.float32(0))
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    lowered = _apply_passes(mod, enable_non_predicated=enable_non_predicated, enable_predicated=True)
+    loads = collect_calls(lowered, function="main", op=f"tl.ldg{32 * lanes}")
+    stores = collect_calls(lowered, function="main", op=f"tl.stg{32 * lanes}")
+    assert len(loads) == 1
+    outer, inner = func.params[2:]
+    expected = tirx.And(outer > 0, inner > 0) if enclosing_store else inner > 0
+    tvm.ir.assert_structural_equal(loads[0].args[-1], expected)
+    if enclosing_store:
+        assert len(stores) == 1
+        tvm.ir.assert_structural_equal(stores[0].args[-1], outer > 0)
+
+
+@tilelang.testing.requires_cuda
+def test_nested_predicated_load_does_not_leak_store_guard():
+    """A subsequent load uses its own condition, not a preceding store guard."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), outer: T.int32, inner: T.int32):
+        for i in T.thread_binding(128, "threadIdx.x"):
+            with T.If(outer > 0), T.Then():
+                B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
+            B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    lowered = _apply_passes(mod, enable_predicated=True)
+    predicates = [call.args[-1] for call in collect_calls(lowered, op="tl.ldg32", function="main")]
+    assert len(predicates) == 2
+    outer, inner = func.params[2:]
+    tvm.ir.assert_structural_equal(predicates[0], tirx.And(outer > 0, inner > 0))
+    tvm.ir.assert_structural_equal(predicates[1], inner > 0)
+
+
+@requires_ldgstg
 def test_lower_ldg32_default_off():
     """Test that non-predicated ldg/stg lowering is OFF by default."""
 
@@ -54,10 +128,10 @@ def test_lower_ldg32_default_off():
     print("=== test_lower_ldg32_default_off ===")
     print(mod)
     # By default, non-predicated lowering is OFF
-    assert not _check_has_intrinsic(mod, "ldg32"), "Non-predicated ldg should be OFF by default"
-    assert not _check_has_intrinsic(mod, "stg32"), "Non-predicated stg should be OFF by default"
+    _assert_no_global_intrinsics(mod["main"])
 
 
+@requires_ldgstg
 def test_lower_ldg32_enabled():
     """Test that ldg32/stg32 works when enabled."""
 
@@ -70,10 +144,11 @@ def test_lower_ldg32_enabled():
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg32_enabled ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg32"), "Expected ldg32 when enabled"
-    assert _check_has_intrinsic(mod, "stg32"), "Expected stg32 when enabled"
+    _assert_global_access(mod["main"], "ldg", 32, 0)
+    _assert_global_access(mod["main"], "stg", 32, 1)
 
 
+@requires_ldgstg
 def test_lower_ldg64_enabled():
     """Test that ldg64/stg64 works when enabled."""
 
@@ -87,10 +162,11 @@ def test_lower_ldg64_enabled():
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg64_enabled ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg64"), "Expected ldg64 when enabled"
-    assert _check_has_intrinsic(mod, "stg64"), "Expected stg64 when enabled"
+    _assert_global_access(mod["main"], "ldg", 64, 0)
+    _assert_global_access(mod["main"], "stg", 64, 1)
 
 
+@requires_ldgstg
 def test_lower_ldg128_enabled():
     """Test that ldg128/stg128 works when enabled."""
 
@@ -104,10 +180,11 @@ def test_lower_ldg128_enabled():
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg128_enabled ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg128"), "Expected ldg128 when enabled"
-    assert _check_has_intrinsic(mod, "stg128"), "Expected stg128 when enabled"
+    _assert_global_access(mod["main"], "ldg", 128, 0)
+    _assert_global_access(mod["main"], "stg", 128, 1)
 
 
+@requires_ldgstg
 def test_lower_ldg256_enabled():
     """Test that ldg256/stg256 works when enabled."""
 
@@ -121,10 +198,11 @@ def test_lower_ldg256_enabled():
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg256_enabled ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg256"), "Expected ldg256 when enabled"
-    assert _check_has_intrinsic(mod, "stg256"), "Expected stg256 when enabled"
+    _assert_global_access(mod["main"], "ldg", 256, 0)
+    _assert_global_access(mod["main"], "stg", 256, 1)
 
 
+@requires_ldgstg
 def test_lower_ldg32_predicated():
     """Test predicated ldg32 for single element load."""
 
@@ -135,12 +213,13 @@ def test_lower_ldg32_predicated():
             B[i] = T.if_then_else(pred > 0, A[i], T.float32(0))
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_ldg32_predicated ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg32"), "Expected predicated ldg32"
+    _assert_global_access(mod["main"], "ldg", 32, 0, predicate=mod["main"].params[-1] > 0)
 
 
+@requires_ldgstg
 def test_lower_stg32_predicated():
     """Test predicated stg32 for single element store."""
 
@@ -152,12 +231,13 @@ def test_lower_stg32_predicated():
                 B[i] = A[i]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_stg32_predicated ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "stg32"), "Expected predicated stg32"
+    _assert_global_access(mod["main"], "stg", 32, 1, predicate=mod["main"].params[-1] > 0)
 
 
+@requires_ldgstg
 def test_lower_ldg128_predicated():
     """Test predicated ldg128 for vectorized load."""
 
@@ -169,12 +249,13 @@ def test_lower_ldg128_predicated():
                 B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_ldg128_predicated ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "ldg128"), "Expected predicated ldg128"
+    _assert_global_access(mod["main"], "ldg", 128, 0, predicate=mod["main"].params[-1] > 0)
 
 
+@requires_ldgstg
 def test_lower_stg128_predicated():
     """Test predicated stg128 for vectorized store."""
 
@@ -187,12 +268,13 @@ def test_lower_stg128_predicated():
                     B[i * 4 + j] = A[i * 4 + j]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = _apply_passes(mod, enable_predicated=True)  # Default: predicated is ON
+    mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_stg128_predicated ===")
     print(mod)
-    assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
+    _assert_global_access(mod["main"], "stg", 128, 1, predicate=mod["main"].params[-1] > 0)
 
 
+@requires_ldgstg
 def test_predicated_store_with_load():
     """Test that when a predicated store contains a load, the load also gets predicated.
 
@@ -213,10 +295,13 @@ def test_predicated_store_with_load():
     print("=== test_predicated_store_with_load ===")
     print(mod)
     # Both load and store should be predicated
-    assert _check_has_intrinsic(mod, "ldg128"), "Expected predicated ldg128 for load inside predicated store"
-    assert _check_has_intrinsic(mod, "stg128"), "Expected predicated stg128"
+    load = _assert_global_access(mod["main"], "ldg", 128, 0, predicate=mod["main"].params[-1] > 0)
+    store = _assert_global_access(mod["main"], "stg", 128, 1, predicate=mod["main"].params[-1] > 0)
+    stored_loads = collect_calls(store.args[1], op="tl.ldg128")
+    assert len(stored_loads) == 1 and stored_loads[0].same_as(load)
 
 
+@requires_ldgstg
 def test_predicated_store_with_shared_load_keeps_explicit_guard():
     """Do not hoist shared-memory loads out of a predicated global store."""
 
@@ -233,17 +318,25 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     print("=== test_predicated_store_with_shared_load_keeps_explicit_guard ===")
     print(mod)
 
-    has_if = [False]
+    func = mod["main"]
+    guards = collect_nodes(func, tirx.IfThenElse)
+    assert len(guards) == 1
+    guard = guards[0]
+    tvm.ir.assert_structural_equal(guard.condition, func.params[-1] > 0)
+    shared_loads = [load for load in collect_nodes(func, tirx.BufferLoad) if load.buffer.scope() == "shared"]
+    assert shared_loads, "Expected a shared-memory load"
+    guarded_loads = collect_nodes(guard.then_case, tirx.BufferLoad)
+    assert all(any(load.same_as(guarded) for guarded in guarded_loads) for load in shared_loads)
+    stores = collect_nodes(func, tirx.BufferStore)
+    guarded_stores = collect_nodes(guard.then_case, tirx.BufferStore)
+    assert len(stores) == len(guarded_stores) == 1
+    assert stores[0].same_as(guarded_stores[0])
+    # FlattenBuffer can create a new Buffer handle for the same storage.
+    assert stores[0].buffer.data.same_as(func.buffer_map[func.params[0]].data)
+    _assert_no_global_intrinsics(mod["main"])
 
-    def visitor(obj):
-        if isinstance(obj, tirx.IfThenElse):
-            has_if[0] = True
 
-    tirx.stmt_functor.post_order_visit(mod["main"].body, visitor)
-    assert has_if[0], "Expected explicit IfThenElse to keep shared load guarded"
-    assert not _check_has_intrinsic(mod, "stg128"), "Predicated stg128 would evaluate the shared load before the predicate"
-
-
+@requires_ldgstg
 def test_predicated_disabled():
     """Test that predicated lowering can be disabled."""
 
@@ -256,12 +349,33 @@ def test_predicated_disabled():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=False)
-    print("=== test_predicated_disabled ===")
-    print(mod)
-    # When disabled, no predicated ldg/stg should be generated
-    # This just verifies the configuration works
+    _assert_no_global_intrinsics(mod["main"])
+    assert collect_nodes(mod["main"], tirx.BufferLoad)
+    assert collect_nodes(mod["main"], tirx.BufferStore)
 
 
+@requires_ldgstg
+def test_predicated_option_controls_eligible_load():
+    """Disabling the option must change an otherwise eligible lowering."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+        for i in T.thread_binding(32, "threadIdx.x"):
+            for j in T.vectorized(4):
+                B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    # Establish that this same input is eligible when the option is enabled.
+    enabled = _apply_passes(mod, enable_predicated=True)
+    _assert_global_access(enabled["main"], "ldg", 128, 0, predicate=enabled["main"].params[-1] > 0)
+    mod = _apply_passes(mod, enable_predicated=False)
+    # Both lowering options are disabled; the original memory operations remain.
+    _assert_no_global_intrinsics(mod["main"])
+    assert collect_nodes(mod["main"], tirx.BufferLoad)
+    assert collect_nodes(mod["main"], tirx.BufferStore)
+
+
+@requires_ldgstg
 def test_non_cuda_target_skip():
     """Test that the pass is skipped for non-CUDA targets."""
 
@@ -282,8 +396,7 @@ def test_non_cuda_target_skip():
     print("=== test_non_cuda_target_skip ===")
     print(mod)
     # The load should NOT be lowered to ldg because target is not CUDA
-    assert not _check_has_intrinsic(mod, "ldg"), "Non-CUDA targets should NOT use ldg intrinsics"
-    assert not _check_has_intrinsic(mod, "stg"), "Non-CUDA targets should NOT use stg intrinsics"
+    _assert_no_global_intrinsics(mod["main"])
 
 
 @tilelang.testing.requires_cuda

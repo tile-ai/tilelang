@@ -86,3 +86,24 @@ def test_lower_access_ptr_rewrites_to_tvm_access_ptr():
     assert int(extent.value) == 20
     assert isinstance(acc.args[4], tirx.IntImm)
     assert int(acc.args[4].value) == 2
+
+
+def test_lower_access_ptr_preserves_buffer_element_offset():
+    elem_offset = tirx.IntImm("int32", 5)
+    buf = tirx.decl_buffer((8, 8), "float16", name="A", elem_offset=elem_offset)
+    load = tirx.BufferLoad(buf, [tirx.IntImm("int32", 2), tirx.IntImm("int32", 3)])
+    ptr = T.access_ptr(load, "r", 1)
+
+    func = tirx.PrimFunc([buf.data], tirx.Evaluate(ptr), buffer_map={buf.data: buf})
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    lowered = tilelang.transform.LowerAccessPtr()(mod)
+
+    calls = []
+    tirx.stmt_functor.post_order_visit(
+        lowered["main"].body,
+        lambda expr: calls.append(expr) if isinstance(expr, tirx.Call) else None,
+    )
+    acc = [call for call in calls if call.op.same_as(op.Op.get("tirx.tvm_access_ptr"))][0]
+    offset = arith.Analyzer().simplify(acc.args[2])
+    assert isinstance(offset, tirx.IntImm)
+    assert int(offset.value) == 24

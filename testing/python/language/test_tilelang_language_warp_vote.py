@@ -8,6 +8,7 @@ T.ballot_sync       – __ballot_sync→uint64 (CUDA, zero-ext) / __ballot uint6
 T.ballot            – full-warp ballot_sync / __ballot uint64 (HIP, all lanes)
 T.activemask        – __activemask→uint64 (CUDA, zero-ext) / __ballot(1) uint64 (HIP, all lanes)
 T.__ffs             – __ffs / __ffsll (CUDA)
+T.__fns             – __fns (CUDA)
 T.syncthreads_count – __syncthreads_count
 T.syncthreads_and   – __syncthreads_and
 T.syncthreads_or    – __syncthreads_or
@@ -15,8 +16,36 @@ T.syncthreads_or    – __syncthreads_or
 
 import tilelang
 import tilelang.language as T
+import pytest
 import torch
 import tilelang.testing
+
+
+PREDICATE_INTRINSICS = [
+    T.any_sync,
+    T.all_sync,
+    T.ballot_sync,
+    T.ballot,
+    T.syncthreads_count,
+    T.syncthreads_and,
+    T.syncthreads_or,
+]
+
+
+@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
+def test_predicate_intrinsics_reject_float(intrinsic):
+    predicate = tilelang.tvm.tirx.FloatImm("float32", 0.5)
+
+    with pytest.raises(TypeError, match="requires an integer or boolean predicate"):
+        intrinsic(predicate)
+
+
+@pytest.mark.parametrize("predicate", [1, True], ids=["integer", "boolean"])
+@pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
+def test_predicate_intrinsics_accept_integer_or_boolean(intrinsic, predicate):
+    result = intrinsic(predicate)
+
+    assert isinstance(result, tilelang.tvm.tirx.Call)
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +209,38 @@ def test_ffs_ballot_sync():
     assert "__ffsll" in src, f"Expected __ffsll for uint64 ballot mask in source:\n{src}"
     kernel(b)
     assert torch.all(b == 7), f"Expected all lanes to find lane 7, got {b}"
+
+
+# ---------------------------------------------------------------------------
+# __fns
+# ---------------------------------------------------------------------------
+
+
+@tilelang.jit
+def kernel_fns_ballot_sync():
+    """Find the third active lane in a ballot mask."""
+
+    @T.prim_func
+    def main(
+        B: T.Tensor((32,), "int32"),
+    ):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            mask = T.cast(T.ballot_sync(tx >= 7), "uint32")
+            B[tx] = T.cast(T.__fns(mask, 0, 3), "int32")
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_fns_ballot_sync():
+    b = torch.zeros((32,), device="cuda", dtype=torch.int32)
+    kernel = kernel_fns_ballot_sync()
+    src = kernel.get_kernel_source()
+    assert "__ballot_sync" in src, f"Expected __ballot_sync in source:\n{src}"
+    assert "__fns(" in src, f"Expected __fns in source:\n{src}"
+    kernel(b)
+    assert torch.all(b == 9), f"Expected all lanes to find lane 9, got {b}"
 
 
 # ---------------------------------------------------------------------------

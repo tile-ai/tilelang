@@ -4,7 +4,7 @@
  */
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
 #include "tvm/ir/type.h"

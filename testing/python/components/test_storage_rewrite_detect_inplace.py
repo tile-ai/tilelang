@@ -1,11 +1,11 @@
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tilelang import language as T, tvm
 
 
 @tilelang.jit
 def _compile_kernel_without_inplace():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
@@ -26,7 +26,7 @@ def _compile_kernel_without_inplace():
     },
 )
 def _compile_kernel_with_inplace():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
@@ -42,14 +42,16 @@ def _compile_kernel_with_inplace():
 
 
 def _get_device_kernel_script(detect_inplace: bool) -> str:
+    kernel = _compile_kernel_with_inplace if detect_inplace else _compile_kernel_without_inplace
+    pass_configs = {}
     if detect_inplace:
-        kernel = _compile_kernel_with_inplace()
-    else:
-        kernel = _compile_kernel_without_inplace()
-    source = kernel.get_kernel_source()
-    return source
+        pass_configs[tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE] = True
+    with tvm.transform.PassContext(config=pass_configs):
+        artifact = tilelang.lower(kernel.get_tir(), target="cuda")
+    return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)

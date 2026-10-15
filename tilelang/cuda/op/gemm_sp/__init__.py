@@ -5,7 +5,7 @@ from __future__ import annotations
 from tilelang.tileop.gemm_sp.registry import register_gemm_sp_impl
 from tilelang.cuda.op.gemm_sp.gemm_sp_mma import GEMM_SP_INST_MMA_SP, GemmSPMMA
 from tilelang.cuda.op.gemm_sp.gemm_sp_wgmma import GEMM_SP_INST_WGMMA_SP, GemmSPWGMMA
-from tilelang.utils.target import target_is_cuda, target_is_turing, target_is_volta
+from tilelang.cuda.target import target_is_cuda, target_is_turing, target_is_volta
 
 
 def _match_mma(target) -> bool:

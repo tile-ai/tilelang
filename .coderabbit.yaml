@@ -1,0 +1,478 @@
+language: en-US
+
+reviews:
+  suggested_labels: true
+  auto_apply_labels: true
+  labeling_instructions:
+    - label: bug
+      instructions: |
+        Apply when the changes fix an identifiable defect, incorrect result,
+        crash, regression, or unintended behavior in existing functionality.
+        Base the decision on the actual fix, not just a BugFix title or an
+        incidental mention of a bug. New capabilities alone are not bug fixes.
+
+    - label: enhancement
+      instructions: |
+        Apply for new capabilities, supported use cases, or substantive
+        performance and API improvements beyond correcting faulty behavior.
+        Do not apply to routine maintenance, mechanical refactoring, dependency
+        bumps, or documentation-only changes without a separate enhancement.
+
+    - label: documentation
+      instructions: |
+        Apply for substantive user or developer documentation, tutorials, API
+        documentation, or documentation build and navigation changes.
+        Do not apply merely because a PR updates its description, code comments,
+        or an example kernel without changing its explanatory documentation.
+
+    - label: dependencies
+      instructions: |
+        Apply when external dependency versions, package requirements, lockfiles,
+        vendored libraries, or third-party submodule pins change.
+        Include dependency resolution and compatibility fixes. Merely using an
+        existing dependency or documenting an installation command is not enough.
+
+    - label: github_actions
+      instructions: |
+        Apply when GitHub Actions workflows, reusable actions, runner selection,
+        permissions, caching, or CI orchestration change, including scripts
+        changed specifically for those workflows. Do not apply to CodeRabbit
+        configuration, local tooling, or tests alone without an Actions change.
+
+    - label: python
+      instructions: |
+        Apply for substantive Python implementation or API changes, interpreter
+        compatibility, Python packaging, or Python-package dependency updates.
+        Do not apply merely because a PR contains a Python reproducer, version
+        metadata, or a regression test for an otherwise backend-only fix.
+
+    - label: arith
+      instructions: |
+        Apply when symbolic integer or index arithmetic, expression simplification,
+        bounds analysis, divisibility, or compiler proof logic changes.
+        Do not apply to ordinary arithmetic inside kernels or tensor operations
+        unless the compiler's arithmetic analysis or rewriting also changes.
+
+    - label: tools
+      instructions: |
+        Apply for developer tooling such as program reducers, IR inspection,
+        pass timing, debugging utilities, lint/style audits, maintenance
+        automation, or development CLIs. Core lowering, scheduling, and runtime
+        changes alone are not tooling changes.
+
+    - label: UX
+      instructions: |
+        Apply when the substantive change improves user-facing API ergonomics,
+        actionable error messages, diagnostics, or developer usability.
+        Do not apply to every bug fix or optimization merely because users
+        benefit; the usability improvement must itself be part of the change.
+
+    - label: ascend
+      instructions: |
+        Apply for substantive Huawei Ascend/CANN backend, NPU execution, kernel,
+        integration, or backend-specific test/example changes.
+        A shared fix can qualify when it addresses a demonstrated Ascend issue.
+        Incidental mentions or a generic all-backend enumeration are not enough.
+
+    - label: metal
+      instructions: |
+        Apply for substantive Apple Metal GPU backend, code generation, runtime,
+        kernel, or backend-specific test/example changes.
+        Do not infer Metal involvement solely from macOS, Apple host hardware,
+        or a macOS CI runner when Metal execution is not affected.
+
+    - label: cpu
+      instructions: |
+        Apply when CPU execution targets, CPU code generation, CPU kernels, or
+        CPU-specific architecture configuration and tests change.
+        This includes CPU targets such as RISC-V. Do not apply merely because
+        host-side code runs on a CPU or launches work on a GPU/NPU.
+
+    - label: windows
+      instructions: |
+        Apply for substantive Windows support or compatibility changes, including
+        Windows toolchains, DLL loading, platform paths, and Windows CI behavior.
+        Do not apply for incidental Windows mentions or generic build changes
+        without an identified Windows-specific effect.
+
+  suggested_reviewers: true
+  auto_assign_reviewers: true
+  suggested_reviewers_instructions:
+    - reviewers:
+        - handle: LeiWang1999
+          type: user
+      instructions: |
+        Primary scope: Project-wide architecture, shared backend/runtime contracts,
+        cross-backend correctness, and release or dependency compatibility.
+        Suggest when: A change has substantial cross-cutting design or compatibility
+        consequences, or needs architectural escalation across multiple subsystems.
+        Base the suggestion on the change's impact, not a broad path match.
+        Do not suggest: As a default reviewer for every PR, for routine backend-local
+        work, or for ordinary documentation, tests, and examples. Prefer oraluben for
+        routine packaging or host-toolchain work without release-wide compatibility
+        implications. Never suggest the PR author.
+        Path hints: Shared interfaces in src/backend/, tilelang/engine/, and
+        tilelang/jit/; dependency, build, and release metadata in CMakeLists.txt,
+        cmake/, pyproject.toml, and .github/workflows/. Paths alone are insufficient.
+
+    - reviewers:
+        - handle: SiriusNEO
+          type: user
+      instructions: |
+        Primary scope: Shared IR, language/frontend, layout and compiler-pass
+        architecture and integration, plus shared compilation, JIT, and profiler
+        infrastructure.
+        Suggest when: Changes alter common semantics, pass composition, or shared
+        compiler/runtime integration beyond a single specialist's subsystem, or
+        require core compiler design triage.
+        Do not suggest: As a mandatory second reviewer. Prefer the relevant
+        specialists for compiler tools, vectorization, CUDA scheduling, backend-local
+        Ascend/ROCm/Metal work, and backend-specific JIT adapters unless shared
+        architecture also changes materially. Never suggest the PR author.
+        Path hints: src/ir.*, src/layout/, src/transform/, tilelang/language/,
+        tilelang/engine/, tilelang/jit/, and shared profiler infrastructure. Inspect
+        the actual shared semantic or architectural impact, not just the directory.
+
+    - reviewers:
+        - handle: chengyupku
+          type: user
+      instructions: |
+        Primary scope: Attention and sequence-model kernels (FlashAttention,
+        GQA/MHA, MLA decoding, and related Mamba workloads), plus kernel/compiler
+        co-design for software pipelines, warp specialization, producer/consumer
+        synchronization, persistent loops, and loop unswitching.
+        Suggest when: Changes materially affect attention/decoding algorithm
+        correctness, kernel schedules or performance, or the compiler mechanisms
+        enabling these kernels. Also suggest for foundational pipeline/warp-specialization
+        correctness, TMA/WGMMA synchronization, multiversion-buffer stage/phase
+        indexing, logical iteration versus physical pipeline counters,
+        nested/persistent-loop semantics, or loop-unswitching changes, even when
+        the reproducer is a GEMM rather than an attention kernel.
+        Do not suggest: Solely because of original-author status, for all examples,
+        or as a default reviewer for every CUDA/compiler PR. Prefer Yongqi-Zhuo for
+        isolated CuTe/layout algebra or automatic schedule construction without
+        substantive kernel/pipeline semantic changes; prefer Rachmanino for isolated
+        ISA exposure, architecture guards, physical TMEM/cluster constraints, or CLC
+        scheduler primitives. Suggest multiple reviewers for substantive cross-layer
+        changes, not overlapping terminology alone. Prefer backend specialists for
+        ROCm/Metal/Ascend-local work. Never suggest the PR author.
+        Path hints: examples/flash_attention/, examples/flash_attention_sm100/,
+        examples/flash_decoding/, examples/deepseek_mla/,
+        src/transform/pipeline_planning.cc, src/transform/inject_pipeline.cc,
+        src/transform/common/warp_specialize.h,
+        src/cuda/transform/materialize_ws_schedule.cc,
+        src/cuda/transform/lower_hopper_intrin.cc,
+        tilelang/language/warp_specialize.py, and src/transform/loop_unswitching.cc.
+        Match algorithm/pipeline intent, not directory membership alone.
+
+    - reviewers:
+        - handle: Yongqi-Zhuo
+          type: user
+      instructions: |
+        Primary scope: CuTe/layout algebra, logical SMEM/TMEM layout mapping,
+        copy/GEMM/TMA/GMMA/UMMA lowering, and compiler-driven automatic warp
+        specialization, role analysis, schedule materialization, and pipeline
+        organization.
+        Suggest when: Changes affect layout inference, logical tile/memory mapping,
+        data-movement or tensor-core lowering, automatic warp-role assignment, or
+        compiler-generated pipelines. Also suggest Rachmanino for substantial
+        instruction or hardware-execution changes, or LJC00118 for substantial
+        vectorization/cast/pack changes; overlap alone does not require both.
+        Do not suggest: For CUDA/TMA/TMEM keywords alone. Prefer Rachmanino for pure
+        instruction wrappers, architecture guards, physical TMEM allocation/access
+        constraints, or kernel-level persistent/CLC tile scheduling. Prefer
+        lucifer1004 for CuTeDSL execution-backend-only work. Never suggest the PR author.
+        Path hints: src/layout/cute_layout.*, src/layout/tcgen05_layout.*,
+        src/cuda/op/tma_layout.*, src/cuda/op/copy_analysis.cc,
+        src/cuda/transform/auto_schedule.cc, src/cuda/transform/auto_schedule/,
+        src/cuda/transform/materialize_ws_schedule.cc, and logical mapping changes in
+        src/cuda/transform/lower_shared_tmem.cc. Match intent, not paths alone.
+
+    - reviewers:
+        - handle: oraluben
+          type: user
+      instructions: |
+        Primary scope: Metal backend, build and packaging, host toolchains, and
+        Windows portability.
+        Suggest when: Changes affect Metal lowering/execution, package or wheel
+        construction, host compiler integration, or platform-specific build behavior.
+        Windows HIP changes fit here when they concern build/toolchain integration
+        rather than AMD device execution semantics.
+        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 for HIP
+        execution semantics, AMD intrinsics, and wavefront algorithms; involve
+        LeiWang1999 for substantive release-wide or cross-backend compatibility
+        decisions rather than routine packaging. Never suggest the PR author.
+        Path hints: src/metal/, tilelang/metal/, cmake/, CMakeLists.txt,
+        pyproject.toml, .github/workflows/dist.yml, and tilelang/contrib/msvc.py.
+        Build and workflow paths require a relevant packaging or toolchain change.
+
+    - reviewers:
+        - handle: silentCoder-dev
+          type: user
+      instructions: |
+        Primary scope: Ascend backend lowering, synchronization, scheduling, and
+        code generation, plus substantial shared ThreadSync/synchronization
+        algorithm changes.
+        Suggest when: A change affects Ascend execution or lowering correctness,
+        Ascend synchronization/scheduling, or shared synchronization analysis and
+        insertion algorithms with substantive correctness implications.
+        Do not suggest: For the word "schedule" alone, unrelated CUDA scheduling,
+        or diagnostic-only synchronization error reporting. Prefer Yongqi-Zhuo for
+        compiler-driven CUDA automatic warp specialization and penguin-wwy for
+        diagnostics without synchronization algorithm changes. Never suggest the PR author.
+        Path hints: src/ascend/, tilelang/ascend/, testing/ascend/,
+        examples/ascend/, and relevant algorithm changes in
+        src/transform/thread_storage_sync.cc. Distinguish semantics from diagnostics.
+
+    - reviewers:
+        - handle: andyluo7
+          type: user
+      instructions: |
+        Primary scope: ROCm/HIP, AMD kernel behavior, wavefront and intrinsic
+        portability, and AMD-specific examples and validation.
+        Suggest when: Changes affect HIP execution semantics, AMD device code,
+        wavefront-dependent algorithms, backend portability, or AMD-specific kernel
+        correctness and performance validation.
+        Do not suggest: For generic CUDA changes, every example/test, or a ROCm
+        keyword without AMD execution or portability impact. Prefer oraluben for
+        host Windows/toolchain-only changes, including HIP build integration with
+        no device-semantic change. Never suggest the PR author.
+        Path hints: src/rocm/, tilelang/rocm/, src/tl_templates/hip/, and
+        AMD-specific portions of examples/ and testing/. Inspect backend behavior
+        rather than relying on directory membership alone.
+
+    - reviewers:
+        - handle: lucifer1004
+          type: user
+      instructions: |
+        Primary scope: CuTeDSL and NVRTC execution backends and their JIT adapters,
+        including compilation, launch, cache/context handling, thread safety, and
+        backend integration.
+        Suggest when: Changes affect CuTeDSL/NVRTC backend code generation,
+        compilation or runtime integration, adapter lifecycle, launch behavior,
+        caching, context management, or concurrency correctness.
+        Do not suggest: For every CUDA or generic JIT change, or for CuTe layout
+        algebra merely because it shares the CuTe name. Prefer Yongqi-Zhuo for
+        layout algebra and logical copy/GEMM mapping without execution-backend
+        integration changes. Never suggest the PR author.
+        Path hints: tilelang/cuda/cutedsl_backend.py, tilelang/contrib/cutedsl/,
+        tilelang/contrib/nvrtc.py, tilelang/jit/adapter/cutedsl/,
+        tilelang/jit/adapter/nvrtc/, src/cuda/codegen/codegen_cutedsl.*,
+        src/cuda/codegen/rt_mod_cutedsl.cc, src/cuda/stubs/nvrtc.cc, and
+        src/tl_templates/cuda/nvrtc_std.h. Match execution-backend intent.
+
+    - reviewers:
+        - handle: Rachmanino
+          type: user
+      instructions: |
+        Primary scope: CUDA intrinsic/ISA exposure, architecture guards, Tensor Core
+        instruction interfaces, physical TMEM allocation/arena packing and load/store
+        shape constraints, cluster/2-SM mechanisms, kernel-level persistent/CLC tile
+        scheduling, optimized CUDA kernels, and GPU execution profiling. This scope
+        is not limited to Blackwell.
+        Suggest when: Changes add or correct CUDA instructions, architecture-specific
+        constraints, physical TMEM storage/access, inter-CTA execution, persistent
+        tile scheduling, or kernel execution/performance analysis. Also suggest
+        Yongqi-Zhuo only when logical layouts, lowering, or compiler-driven automatic
+        scheduling change substantially.
+        Do not suggest: For every CUDA PR or TMA/TMEM keyword. Prefer Yongqi-Zhuo for
+        pure CuTe algebra, logical layout mapping, or compiler automatic warp-role
+        scheduling; prefer penguin-wwy for compile-time pass timing rather than GPU
+        execution profiling. Never suggest the PR author.
+        Path hints: src/tl_templates/cuda/instruction/,
+        tilelang/cuda/intrinsics/macro/tcgen05_macro_generator.py,
+        src/cuda/transform/lower_blackwell_2sm.cc,
+        src/cuda/transform/annotate_warp_group_reg_alloc.cc,
+        physical allocation/access changes in src/cuda/transform/lower_shared_tmem.cc,
+        tilelang/language/tile_schedule.py, and tilelang/tools/cuda/iket/.
+        Paths are contextual hints, not automatic matches.
+
+    - reviewers:
+        - handle: LJC00118
+          type: user
+      instructions: |
+        Primary scope: TileKernels-related compiler requirements, vectorization
+        planning/legality/scalarization, low-precision vector cast/pack, and vectorized
+        memory accesses. TileKernels denotes a workload/project context, not a
+        TileLang source directory.
+        Suggest when: Changes materially affect vectorization decisions, legal
+        vector widths, scalarization, low-precision vector conversion/packing, or
+        vectorized memory correctness/performance, including requirements exposed
+        by TileKernels workloads.
+        Do not suggest: As a generic Frontend/Simplify/compiler owner, or solely
+        because a transform/codegen file changes. Prefer penguin-wwy for source
+        mapping and diagnostics alone, and Yongqi-Zhuo for overall layout/copy/GEMM
+        or compiler warp scheduling without substantial vectorization changes.
+        Never suggest the PR author.
+        Path hints: src/transform/loop_vectorize.*, src/transform/vectorize_loop.cc,
+        src/transform/legalize_vectorized_loop.cc,
+        src/transform/common/loop_vectorization_utils.h, and vector cast/pack/memory
+        portions of src/cuda/codegen/ and src/tl_templates/cuda/. Match the changed
+        vectorization semantics, not all edits in these paths.
+
+    - reviewers:
+        - handle: penguin-wwy
+          type: user
+      instructions: |
+        Primary scope: Compiler developer tools and observability: compiler-pass
+        timing, source spans/locations, generated-code source mapping and #line
+        directives, diagnostics, debugging aids, and IR testing helpers.
+        Suggest when: Changes add or correct developer-facing compiler instrumentation,
+        error reporting, source mapping, debugging support, or reusable IR test
+        utilities. A pass/codegen edit fits when its intent is tooling/observability
+        rather than changing compilation semantics.
+        Do not suggest: As a general transform/codegen owner, for all tools/ or tests,
+        or for GPU runtime profiling. Prefer LJC00118 for vector cast/pack or
+        vectorization semantics, Rachmanino for GPU execution profiling, and the
+        relevant compiler/backend specialist for lowering or synchronization
+        algorithm changes. Never suggest the PR author.
+        Path hints: tilelang/tools/pass_timing.py, src/span_utils.*,
+        src/backend/common/codegen/codegen_c_line_directives.h, tilelang/errors.py,
+        tilelang/testing/ir.py, and source-mapping/diagnostic portions of codegen
+        and compiler passes. Match tooling intent, not filenames alone.
+
+  high_level_summary_instructions: |
+    Add a short "C++ style / lint notes" section when the PR changes C++, CI,
+    lint tooling, or C++ style documentation.
+
+    In that section:
+    - Mention whether the PR touches rules documented in docs/developer_guide/cpp_style.md.
+    - Mention the "C++ API Style Audit (warning only)" CI step when relevant.
+    - Focus on warnings introduced or touched by this PR; do not treat historical backlog as blocking.
+    - Clearly separate correctness, build, and test issues from warning-only style suggestions.
+    - Do not recommend blocking merge for advisory TLCPP003/TLCPP004 findings unless the PR
+      introduces a clear API, FFI, or maintainability risk.
+
+  path_instructions:
+    - path: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
+      instructions: |
+        Review changed C++ against docs/developer_guide/cpp_style.md.
+
+        Pay attention to:
+        - Regular C++ APIs should use PascalCase function and method names.
+        - TIR/TileLang registered op accessors may intentionally use lower_snake to mirror registry names.
+        - Parameters and local variables should use descriptive lower_snake names; avoid ambiguous `T`
+          for API parameters.
+        - Public reflected ObjectNode fields are FFI-visible; do not recommend renaming without
+          compatibility notes.
+        - Shared headers should avoid broad `using namespace`; internal .cc/local helper code may
+          follow local TVM style.
+        - Existing warning-only audit findings are advisory unless this PR introduces or worsens them.
+
+    - path: "maint/scripts/audit_cpp_api_style.py"
+      instructions: |
+        Review this audit script as an advisory lint tool, not a hard gate.
+
+        Ensure new checks avoid broad path-specific hacks, support explicit suppressions like NOLINT
+        where appropriate, and do not turn existing TLCPP003/TLCPP004 backlog into CI failures.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        For C++ style audit CI changes, verify the audit remains warning-only unless the PR explicitly
+        changes policy.
+
+        Do not suggest failing CI for existing advisory backlog.
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: |
+          Apply when an issue reports a concrete defect, incorrect result, crash,
+          regression, or unexpected behavior relative to an existing expectation.
+          This classifies the report, not whether maintainers have confirmed it.
+          General usage questions and requests for new capabilities are not bugs.
+
+      - label: enhancement
+        instructions: |
+          Apply when the primary request is a new capability, supported use case,
+          or substantive performance/API improvement to otherwise valid behavior.
+          Do not use merely because fixing a reported defect would improve the
+          project, or when the issue only asks how to use existing functionality.
+
+      - label: documentation
+        instructions: |
+          Apply when the issue identifies missing, incorrect, outdated, or unclear
+          documentation, tutorials, examples' explanations, or API references,
+          or explicitly requests their improvement. Do not apply just because
+          a bug report links to documentation or includes an explanatory snippet.
+
+      - label: question
+        instructions: |
+          Apply when the primary purpose is a how-to question, conceptual
+          explanation, or help using existing functionality without a clear
+          defect report or feature request. A question mark or the phrase
+          "please help" alone must not turn a concrete bug report into a question.
+
+      - label: dependencies
+        instructions: |
+          Apply when the issue primarily concerns external package versions,
+          dependency resolution, vendored libraries, third-party submodules,
+          or dependency compatibility and installation constraints.
+          Do not infer a dependency problem from a generic build or runtime error.
+
+      - label: github_actions
+        instructions: |
+          Apply when the issue concerns GitHub Actions workflows, runners,
+          permissions, caches, or CI orchestration and infrastructure.
+          Do not apply just because a compiler/runtime bug was observed in CI,
+          and do not treat CodeRabbit configuration as a GitHub Actions workflow.
+
+      - label: python
+        instructions: |
+          Apply when the issue concerns the Python implementation or API layer,
+          interpreter compatibility, Python packaging, or Python-package versions.
+          A Python code sample, stack trace, or version in the environment section
+          alone is not enough when the substantive problem is in another layer.
+
+      - label: arith
+        instructions: |
+          Apply for issues about symbolic integer/index expressions, simplification,
+          bounds or divisibility analysis, and compiler arithmetic proofs such as
+          proving memory accesses stay in bounds. Ordinary numerical kernel math
+          alone is not an arithmetic-analysis issue.
+
+      - label: tools
+        instructions: |
+          Apply for developer-tool issues or requests involving program reduction,
+          IR inspection, pass timing, debugging utilities, lint/style audits,
+          maintenance automation, or development CLIs. A core compiler or runtime
+          problem does not qualify merely because tooling exposed it.
+
+      - label: UX
+        instructions: |
+          Apply when the issue specifically concerns confusing APIs, unhelpful
+          diagnostics, error-message quality, or avoidable user workflow friction.
+          Do not apply merely because a bug, slow kernel, or unsupported feature
+          is frustrating; the usability problem should be explicitly described.
+
+      - label: ascend
+        instructions: |
+          Apply when Huawei Ascend/CANN or NPU execution is substantively involved
+          in the reported behavior, compatibility problem, usage question, or
+          requested feature. Ignore incidental mentions and unselected template
+          options; do not infer an Ascend-specific issue from generic host details.
+
+      - label: metal
+        instructions: |
+          Apply when Metal GPU execution, its backend, or its integration is central
+          to the report, usage question, or feature request.
+          macOS or Apple host hardware in an environment table alone is not enough
+          when the issue does not concern Metal.
+
+      - label: cpu
+        instructions: |
+          Apply when CPU execution as the compilation target, CPU code generation,
+          CPU kernels, or CPU-target architecture support is central to the issue.
+          This includes targets such as RISC-V. Do not infer this label from the
+          host CPU listed in a GPU/NPU issue's environment information.
+
+      - label: windows
+        instructions: |
+          Apply for reported Windows-specific compatibility, installation,
+          toolchain, DLL/path behavior, usage, or platform-support requests.
+          An incidental Windows mention or an unselected operating-system option
+          in a template is not enough to establish Windows relevance.

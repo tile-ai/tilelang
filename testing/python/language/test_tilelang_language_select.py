@@ -71,5 +71,68 @@ def test_select_codegen_no_if():
     assert "if (" not in source
 
 
+@tilelang.jit
+def get_parallel_select_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor[(1024,), T.float32],
+        B: T.Tensor[(1024,), T.float32],
+    ):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(1024):
+                B[i] = T.Select(i < 512, A[i], 0.0)
+
+    return main
+
+
+def test_parallel_select_uniform_condition():
+    kernel = get_parallel_select_kernel()
+    source = kernel.get_kernel_source()
+
+    assert "if (" not in source
+    assert ") ? " in source
+    assert "*(float4*)" in source or "load_global_256" in source
+
+    A = torch.randn((1024,), dtype=torch.float32, device="cuda")
+    B = torch.empty_like(A)
+
+    kernel(A, B)
+
+    expected = torch.zeros_like(A)
+    expected[:512] = A[:512]
+    torch.testing.assert_close(B, expected)
+
+
+@tilelang.jit
+def get_parallel_data_dependent_select_kernel():
+    @T.prim_func
+    def main(
+        A: T.Tensor[(256,), T.float32],
+        B: T.Tensor[(256,), T.float32],
+    ):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(256):
+                B[i] = T.Select(A[i] > T.float32(0), A[i], T.float32(0))
+
+    return main
+
+
+def test_parallel_data_dependent_select_disables_auto_vectorization():
+    kernel = get_parallel_data_dependent_select_kernel()
+    source = kernel.get_kernel_source()
+
+    assert "if (" not in source
+    assert ") ? " in source
+    assert "*(float4*)" not in source
+    assert "load_global_256" not in source
+
+    A = torch.randn((256,), dtype=torch.float32, device="cuda")
+    B = torch.empty_like(A)
+    kernel(A, B)
+
+    expected = torch.where(A > 0, A, torch.zeros_like(A))
+    torch.testing.assert_close(B, expected)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

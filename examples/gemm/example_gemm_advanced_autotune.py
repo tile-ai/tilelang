@@ -216,7 +216,7 @@ def _build_autotuner(
             execution_backend=execution_backend,
         )
         .set_profile_args(
-            supply_type=tl.TensorSupplyType.Integer,
+            supply_type=tl.TensorSupplyType.Auto,
             ref_prog=None if skip_check else ref_program,
             skip_check=skip_check,
             cache_input_tensors=cache_input_tensors,

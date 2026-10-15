@@ -3,7 +3,7 @@ from typing import Optional
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang.utils.target import check_hip_availability
+from tilelang.rocm.target import check_hip_availability
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 _DEFAULT_WARPS_PER_GROUP = 4

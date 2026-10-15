@@ -16,17 +16,6 @@ def get_pass_context():
     return PassContext.current()
 
 
-def ClusterPlanning():
-    """ClusterPlanning
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.ClusterPlanning()  # type: ignore
-
-
 def PipelinePlanning():
     """infer the fragment/shared memory layout
 
@@ -36,22 +25,6 @@ def PipelinePlanning():
         The result pass
     """
     return _ffi_api.PipelinePlanning()  # type: ignore
-
-
-def InstructionAnnotation():
-    """Annotate tile operations with coarse-grained instruction kind.
-
-    This pass runs before LayoutInference and LowerTileOp.  It adds a
-    ``tl_instruction_kind`` annotation to each tile-op Call node indicating
-    the instruction category ("tma", "cp_async", "sync", "wgmma", etc.)
-    that will be selected during lowering.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.InstructionAnnotation()  # type: ignore
 
 
 def LayoutInference():
@@ -119,6 +92,17 @@ def VerifyParallelLoop():
         The result pass
     """
     return _ffi_api.VerifyParallelLoop()  # type: ignore
+
+
+def VerifyBufferInit():
+    """Warn when a non-global-scope buffer is read before anything writes it.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The registered pass. It inspects the IR and returns it unchanged.
+    """
+    return _ffi_api.VerifyBufferInit()  # type: ignore
 
 
 def ThreadSync(storage_scope: str):
@@ -214,6 +198,79 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
+DEFAULT_SIMT_THREADS = 128
+
+
+def MaterializeKernelLaunch(
+    lower_thread_binding: bool = True,
+    default_threads: int | list[int] | tuple | None = DEFAULT_SIMT_THREADS,
+    unsupported_annotations: list[str] | tuple[str, ...] | None = None,
+    *,
+    lower_grid_binding: bool | None = None,
+    launch_dim_tags: list[str] | tuple[str, ...] | None = None,
+):
+    """Materialize the target-neutral kernel launch nest emitted by T.Kernel
+    into a backend-specific form. Each backend pipeline decides the mode for
+    itself; this is where the target-dependent parts of a launch (whether a
+    program-index space exists, whether threads exist and how many run by
+    default) are decided.
+
+    Parameters
+    ----------
+    lower_thread_binding : bool
+        If True (SIMT backends, e.g. CUDA/ROCm/Metal), bind the thread
+        placeholders as threadIdx.* thread_extent scopes.
+        If False (backends without SIMT, e.g. CPU and Ascend), drop the thread
+        placeholders. A body that references a thread index is rejected on such
+        targets. Ascend pairs this with ``lower_grid_binding=True``: its NPU
+        launch is a real 1-D core grid, while thread domains only exist inside
+        ``T.SimtVF``, which emits its own thread scopes below the launch nest.
+    default_threads : int | list[int] | tuple | None
+        Thread-block extents used by SIMT backends when T.Kernel was called
+        without ``threads=``. Ignored when ``lower_thread_binding`` is False.
+        None means the backend has no default and ``threads=`` is required.
+    unsupported_annotations : list[str] | None
+        Launch annotations (keys on the ``tilelang_root`` block, e.g.
+        ``cluster_dims``) that have no meaning on this backend. A launch
+        carrying one is rejected here instead of being silently ignored by
+        later passes.
+    lower_grid_binding : bool | None
+        Keyword-only. If True (targets with a real block/core-level launch,
+        e.g. CUDA, Ascend), lower the launch loops (blockIdx.* grid axes and
+        any tag in ``launch_dim_tags``) into thread_extent AttrStmts carrying
+        each loop's own thread tag.
+        If False (targets with no program-index space, e.g. CPU), lower those
+        loops into plain serial For loops.
+        If None (the default), follow ``lower_thread_binding``: a backend with
+        SIMT threads has a program-index space too, and a backend without them
+        has none. Pass this explicitly to decouple the two, as Ascend does.
+    launch_dim_tags : list[str] | None
+        Keyword-only. Extra thread_binding tags that belong to the launch
+        nest rather than to the thread domain, so a backend can extend the
+        launch vocabulary without this pass knowing about it. Ascend passes
+        ``["cthread"]`` for ``T.MixedKernel``'s sub-block-id dimension.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    if lower_grid_binding is None:
+        lower_grid_binding = lower_thread_binding
+    if default_threads is not None:
+        if isinstance(default_threads, int):
+            default_threads = [default_threads, 1, 1]
+        else:
+            default_threads = list(default_threads) + [1] * (3 - len(default_threads))
+    if unsupported_annotations is not None:
+        unsupported_annotations = list(unsupported_annotations)
+    if launch_dim_tags is not None:
+        launch_dim_tags = list(launch_dim_tags)
+    return _ffi_api.MaterializeKernelLaunch(  # type: ignore
+        lower_grid_binding, lower_thread_binding, default_threads, unsupported_annotations, launch_dim_tags
+    )
+
+
 def AnnotateDeviceRegions():
     """AnnotateDeviceRegions
 
@@ -260,30 +317,6 @@ def VectorizeLoop(enable_vectorize: bool = True):
         The result pass
     """
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
-
-
-def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
-
-    When enabled (pass config `tl.enable_async_copy`, default True), this pass
-    may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
-    `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
-    semantics for normal stores. If explicit commit/wait intrinsics already
-    exist, the pass avoids duplicating them (and may insert a missing commit
-    immediately before an existing wait to cover injected `cp.async`).
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
-
-
-def InjectPTXAsyncCopy():
-    """Deprecated alias of `LowerPTXAsyncCopy`."""
-    return LowerPTXAsyncCopy()
 
 
 def ConfigIndexBitwidth():
@@ -385,16 +418,54 @@ def LowerDeviceKernelLaunch():
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
-def LayoutReducer():
-    """
-    Return a TVM transform pass that performs layout reduction/normalization.
+def CanonicalizeLegacyReducer():
+    """Rewrite legacy (v1) reducer syntax into first-class reducer v2 ops.
 
-    This wrapper delegates to the underlying FFI implementation and returns a pass object suitable for use in a PassContext or pass pipeline. The pass is intended to simplify or reduce tensor/layout-related representations during relay/tile transformations.
+    Deprecation shim: ``T.clear`` + read-modify-write stores + in-place
+    ``T.finalize_reducer(acc)`` become ``reducer_init``/``reducer_update``/
+    out-of-place finalize with a fresh destination fragment. Unrecognized
+    access patterns are compile errors, never silently accepted.
 
     Returns:
-        The transform pass object produced by the FFI backend.
+        tvm.transform.Pass: The canonicalization pass.
     """
-    return _ffi_api.LayoutReducer()  # type: ignore
+    return _ffi_api.CanonicalizeLegacyReducer()  # type: ignore
+
+
+def VerifyReducerEpoch():
+    """Verify lifecycle and access rules of reducer v2 epochs.
+
+    Enforces that every ``T.alloc_reducer`` has exactly one
+    ``T.reducer_init``, updates only inside ``T.Parallel`` between init and
+    finalize, exactly one out-of-place ``T.finalize_reducer(acc, dst)``, and
+    no ordinary reads/writes/aliasing of the reducer handle.
+
+    Returns:
+        tvm.transform.Pass: The verification pass.
+    """
+    return _ffi_api.VerifyReducerEpoch()  # type: ignore
+
+
+def ReducerPlanAndMaterialize():
+    """Plan physical storage/communication for reducer v2 epochs.
+
+    Runs after LayoutInference (loop layouts are read-only inputs) and
+    materializes the first-class reducer ops into ordinary fragment storage,
+    guarded read-modify-write updates, and an explicit finalize plan.
+
+    Returns:
+        tvm.transform.Pass: The planning/materialization pass.
+    """
+    return _ffi_api.ReducerPlanAndMaterialize()  # type: ignore
+
+
+def VerifyReducerConsumed():
+    """Assert no reducer v2 construct survives past materialization.
+
+    Returns:
+        tvm.transform.Pass: The verification pass.
+    """
+    return _ffi_api.VerifyReducerConsumed()  # type: ignore
 
 
 def UnrollLoop():

@@ -5,9 +5,8 @@ import tilelang.testing
 from tilelang import tvm as tvm
 from tvm.target import Target
 
-import tilelang.utils.target as target_utils
-from tilelang.utils.target import (
-    determine_target,
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import (
     normalize_rocm_arch,
     rocm_warp_size_for_arch,
     target_get_mcpu,
@@ -55,16 +54,30 @@ def test_determine_target_rejects_legacy_option_string():
         determine_target("hip -mcpu=gfx1151", return_object=True)
 
 
-def test_auto_target_prefers_rocm_pytorch_over_cuda_toolkit(monkeypatch):
-    monkeypatch.setattr(target_utils.torch.version, "hip", "test", raising=False)
-    monkeypatch.setattr(target_utils, "check_hip_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(target_utils, "_detect_torch_rocm_arch", lambda: "gfx1151")
+def test_auto_target_uses_registered_detector_order_for_rocm():
+    import tilelang.backend.target as target_registry
 
-    target = determine_target("auto", return_object=True)
-    assert target.kind.name == "hip"
-    assert target_get_mcpu(target) == "gfx1151"
-    assert int(target.attrs["thread_warp_size"]) == 32
+    old_detectors = dict(target_registry._TARGET_DETECTORS)
+    try:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry.register_target_detector(
+            "unit-hip",
+            lambda: Target({"kind": "hip", "mcpu": "gfx1151"}),
+            override=True,
+        )
+        target_registry.register_target_detector(
+            "unit-cuda",
+            lambda: Target({"kind": "cuda", "arch": "sm_90"}),
+            override=True,
+        )
+
+        target = determine_target("auto", return_object=True)
+        assert target.kind.name == "hip"
+        assert target_get_mcpu(target) == "gfx1151"
+        assert int(target.attrs["thread_warp_size"]) == 32
+    finally:
+        target_registry._TARGET_DETECTORS.clear()
+        target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
 def test_rdna_gfx1151_target_classification():
@@ -101,17 +114,21 @@ def test_carver_rejects_unsupported_rdna_generations(monkeypatch):
     def fake_cdna(target):
         return ("cdna", target)
 
+    # gfx11 and gfx12 are the only generations `target_is_rdna` reports, so the
+    # unsupported-generation guard is unreachable without forcing the value.
     monkeypatch.setattr(arch_mod, "CDNA", fake_cdna)
-    with pytest.raises(ValueError, match="gfx11 targets only"):
+    monkeypatch.setattr(arch_mod, "target_get_rdna_generation", lambda target: 10)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
         arch_mod.get_arch(_hip_target("gfx1200"))
 
 
 @tilelang.testing.requires_rocm
-def test_rdna_device_model_rejects_gfx12_before_device_probe():
-    from tilelang.carver.arch.rdna import RDNA
+def test_rdna_device_model_rejects_unsupported_generation_before_device_probe(monkeypatch):
+    from tilelang.carver.arch import rdna as rdna_mod
 
-    with pytest.raises(ValueError, match="gfx11 targets only"):
-        RDNA(_hip_target("gfx1200"))
+    monkeypatch.setattr(rdna_mod, "target_get_rdna_generation", lambda target: 10)
+    with pytest.raises(ValueError, match="gfx11/gfx12 targets only"):
+        rdna_mod.RDNA(_hip_target("gfx1200"))
 
 
 @tilelang.testing.requires_rocm
@@ -119,11 +136,12 @@ def test_rdna_tensor_instruction_lookup_is_generation_aware():
     from tilelang.carver.arch.rdna import RDNA
 
     arch = RDNA.__new__(RDNA)
-    arch.rdna_generation = 11
-    assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
-    assert isinstance(arch.available_tensor_instructions, list)
+    for generation in (11, 12):
+        arch.rdna_generation = generation
+        assert arch.get_avaliable_tensorintrin_shapes() == [[16, 16]]
+        assert isinstance(arch.available_tensor_instructions, list)
 
-    arch.rdna_generation = 12
+    arch.rdna_generation = 10
     with pytest.raises(ValueError, match="Unsupported RDNA generation"):
         arch.get_avaliable_tensorintrin_shapes()
 

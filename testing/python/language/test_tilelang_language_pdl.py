@@ -292,7 +292,7 @@ def _lower_cutedsl_for_pdl(program):
         from cutlass.cute import arch as cute_arch
         from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
         from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
-        from tilelang.utils.target import determine_target
+        from tilelang.backend.target import determine_target
 
         check_cutedsl_available()
     except (ImportError, ModuleNotFoundError, RuntimeError) as err:

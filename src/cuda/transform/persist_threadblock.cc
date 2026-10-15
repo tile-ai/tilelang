@@ -9,7 +9,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 
 namespace tvm {
 namespace tl {

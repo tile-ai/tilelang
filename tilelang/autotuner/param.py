@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import tilelang
 from tilelang import tvm as tvm
 from tvm.tirx import PrimFunc
 from tvm.target import Target
-from typing import Literal, Any
+from typing import TYPE_CHECKING, Literal, Any
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,13 +18,15 @@ from tilelang.jit.adapter.base import CachedTextSource
 import cloudpickle
 import os
 import shutil
-from tilelang.engine.param import KernelParam
+from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang import logger
 import json
 import hashlib
 import uuid
-from tilelang import env
 from tvm.runtime import Executable
+
+if TYPE_CHECKING:
+    from tilelang.backend.module import BackendContext
 
 BEST_CONFIG_PATH = "best_config.json"
 FUNCTION_PATH = "function.pkl"
@@ -37,7 +40,8 @@ EXECUTABLE_PATH = "executable.so"
 KERNEL_LIB_PATH = "kernel_lib.so"
 KERNEL_CUBIN_PATH = "kernel.cubin"
 KERNEL_PY_PATH = "kernel.py"
-PARAMS_PATH = "params.pkl"
+PARAMS_PATH = "params.json"
+TargetLike = str | dict[str, object] | Target
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,7 @@ class CompileArgs:
     Attributes:
         out_idx: List of output tensor indices.
         execution_backend: Execution backend to use for kernel execution (default: "auto").
-        target: Compilation target, either as a string or a TVM Target object (default: "auto").
+        target: Compilation target, either as a string, config dict, or a TVM Target object (default: "auto").
         target_host: Target host for cross-compilation (default: None).
         verbose: Whether to enable verbose output (default: False).
         pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
@@ -54,9 +58,9 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto"
-    target: Literal["auto", "cuda", "hip"] = "auto"
-    target_host: str | Target = None
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] = "auto"
+    target: TargetLike = "auto"
+    target_host: TargetLike | None = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
 
@@ -74,14 +78,19 @@ class CompileArgs:
 
     def __hash__(self):
         """Return a stable hash for cache key construction."""
+        from tilelang.transform.pass_config import normalize_pass_configs
+
+        # Resolve env-var-derived pass-config defaults so a changed environment
+        # does not silently reuse tuning results produced under another one.
+        pass_configs = normalize_pass_configs(self.pass_configs)
         data = {
+            "out_idx": self.out_idx,
             "execution_backend": self.execution_backend,
             "target": str(self.target),
             "target_host": str(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
-            "pass_configs": json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
+            "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
         }
-
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
 
@@ -94,7 +103,7 @@ class ProfileArgs:
         warmup: Number of warmup iterations.
         rep: Number of repetitions for timing.
         timeout: Maximum time per configuration.
-        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+        backend: Profiler backend - "event", "cupti", or "cudagraph".
         supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.
@@ -135,6 +144,8 @@ class ProfileArgs:
             "rtol": self.rtol,
             "atol": self.atol,
             "max_mismatched_ratio": self.max_mismatched_ratio,
+            "skip_check": self.skip_check,
+            "cache_input_tensors": self.cache_input_tensors,
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
@@ -170,23 +181,35 @@ class AutotuneResult:
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable[[Any], None]):
         """Atomically write one cache file through a temporary sibling file."""
-        # Random a temporary file within the same FS as the cache directory
-        tmp_dir = env.TILELANG_TMP_DIR
-        os.makedirs(tmp_dir, exist_ok=True)
-        temp_path = os.path.join(tmp_dir, f"{os.getpid()}_{uuid.uuid4()}")
-        with open(temp_path, mode) as temp_file:
-            operation(temp_file)
-        # Use atomic POSIX replace, so other processes cannot see a partial write
-        os.replace(temp_path, path)
+        directory, filename = os.path.split(path)
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, mode) as temp_file:
+                operation(temp_file)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated file.
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str):
         """Atomically export one runtime executable to disk."""
-        tmp_dir = env.TILELANG_TMP_DIR
-        os.makedirs(tmp_dir, exist_ok=True)
-        temp_path = os.path.join(tmp_dir, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path)
-        os.replace(temp_path, path)
+        directory, filename = os.path.split(path)
+        stem, suffix = os.path.splitext(filename)
+        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
+        try:
+            executable.export_library(temp_path)
+            # Flush exported data before the rename publishes the file.
+            with open(temp_path, "rb+") as temp_file:
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel, verbose: bool = False):
         """
@@ -202,7 +225,7 @@ class AutotuneResult:
             - kernel.cu: The compiled kernel source code
             - wrapped_kernel.cu: The wrapped kernel source code
             - kernel_lib.so: The compiled kernel library
-            - params.pkl: The serialized kernel parameters
+            - params.json: The serialized kernel parameters
         """
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists.
 
@@ -249,7 +272,7 @@ class AutotuneResult:
                     logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
                 self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
             else:
-                executable = kernel.adapter.executable
+                executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
                 self._safe_write_executable(executable, kernel_lib_path)
@@ -288,15 +311,13 @@ class AutotuneResult:
         params_path = os.path.join(cache_path, PARAMS_PATH)
         if verbose:
             logger.debug(f"Saving kernel parameters to disk: {params_path}")
-        self._safe_write_file(params_path, "wb", lambda f: cloudpickle.dump(kernel.params, f))
+        self._safe_write_file(params_path, "w", lambda f: f.write(dump_kernel_params(kernel.params)))
 
     def _load_kernel_from_disk(
         self,
         cache_path: Path,
-        target: str | Target = "auto",
-        target_host: str | Target = None,
+        backend_context: BackendContext,
         out_idx: list[int] | int | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
         func: Callable = None,
@@ -307,10 +328,8 @@ class AutotuneResult:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, Target], optional): Host target platform.
+            backend_context: Resolved backend state for this compilation.
             out_idx (List[int], optional): Indices specifying which outputs to return.
-            execution_backend (Literal): Backend type for execution. Defaults to "cython".
             pass_configs (dict, optional): Configuration for compiler passes.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
@@ -323,6 +342,7 @@ class AutotuneResult:
             return None
 
         # Resolve backend to pick correct file names
+        execution_backend = backend_context.execution_backend.name
         kernel_lib_file = self._get_kernel_lib_file(execution_backend)
 
         device_kernel_path = os.path.join(cache_path, DEVICE_KERNEL_PATH)
@@ -360,8 +380,8 @@ class AutotuneResult:
         try:
             if verbose:
                 logger.debug(f"Loading kernel parameters from file: {params_path}")
-            with open(params_path, "rb") as f:
-                kernel_params = cloudpickle.load(f)
+            with open(params_path) as f:
+                kernel_params = load_kernel_params(f.read())
         except Exception as e:
             logger.error(f"Error loading kernel parameters from disk: {e}")
 
@@ -372,12 +392,13 @@ class AutotuneResult:
                 device_kernel_source=CachedTextSource(text=device_kernel_source),
                 kernel_lib_path=kernel_lib_path,
                 params=kernel_params,
-                target=target,
-                target_host=target_host,
+                target=backend_context.target,
+                target_host=backend_context.target_host,
                 out_idx=out_idx,
                 execution_backend=execution_backend,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
         else:
             return None
@@ -454,6 +475,13 @@ class AutotuneResult:
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
 
+            # Durability barrier: keep the staged data ahead of the rename so a
+            # crash cannot publish a truncated cache entry.
+            for entry in os.scandir(staging_path):
+                if entry.is_file(follow_symlinks=False):
+                    with open(entry.path, "rb+") as staged_file:
+                        os.fsync(staged_file.fileno())
+
             # Atomic rename — directory becomes visible in one step.
             try:
                 os.rename(str(staging_path), str(path))
@@ -473,13 +501,14 @@ class AutotuneResult:
             return None
 
         verbose = compile_args.verbose
-        # Normalize target and resolve execution backend for loading
-        from tilelang.utils.target import determine_target as _determine_target
-        from tilelang.jit.execution_backend import resolve_execution_backend
+        from tilelang.backend.module import create_backend_context
 
-        norm_target = _determine_target(compile_args.target, return_object=True)
         requested_backend = compile_args.execution_backend
-        resolved_backend = resolve_execution_backend(requested_backend, norm_target)
+        backend_context = create_backend_context(
+            compile_args.target,
+            compile_args.target_host,
+            requested_backend,
+        )
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
@@ -511,10 +540,8 @@ class AutotuneResult:
         kernel = cls._load_kernel_from_disk(
             cls,
             path,
-            norm_target,
-            compile_args.target_host,
+            backend_context,
             out_idx_override if out_idx_override is not None else compile_args.out_idx,
-            resolved_backend,
             compile_args.pass_configs,
             None,  # compile_flags not tracked here
             func,

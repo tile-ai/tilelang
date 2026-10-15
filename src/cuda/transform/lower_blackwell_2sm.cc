@@ -46,7 +46,7 @@ static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
       if (block->annotations.count("cluster_dims")) {
         if (auto arr = block->annotations.Get("cluster_dims")
                            ->try_cast<Array<Integer>>()) {
-          if (arr.value().size() >= 3) {
+          if (arr.value().size() == 3) {
             int64_t x = arr.value()[0]->value;
             int64_t y = arr.value()[1]->value;
             int64_t z = arr.value()[2]->value;
@@ -83,9 +83,10 @@ private:
           if (const auto *imm = val.as<IntImmNode>()) {
             if (imm->value) {
               if (!cluster_dims_valid_) {
-                LOG(WARNING) << "Invalid cluster_dims disables 2CTA "
-                                "TCGEN5MMA, use 1CTA variant instead.";
-                return StmtExprMutator::VisitStmt_(op);
+                LOG(FATAL) << "T.tcgen05_gemm(use_2cta=True) requires "
+                              "cluster_dims (2,1,1) or (1,2,1); a one-CTA "
+                              "fallback is not valid for rank-sharded "
+                              "operands.";
               }
               has_2sm_tcgen5mma_ = true;
             }
