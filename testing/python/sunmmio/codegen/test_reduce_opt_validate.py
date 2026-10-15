@@ -605,7 +605,7 @@ def test_reduce_keepdim_leading_unit_destination_axis_lowers_strict(tmp_path):
     )
     assert "!suvm.memtensor<1x128xf32" in src
     assert re.search(
-        r"suvm\.tile\.reduce\s+sum, .*\{axis = 0 : i64\}.*"
+        r"suvm\.tile\.reduce\s+sum, .*<axis = 0>.*"
         r"-> !suvm\.tile<1x\d+xf32>",
         src,
     )
@@ -625,7 +625,7 @@ def test_reduce_dynamic_k_is_preserved_in_raw_suvm(tmp_path):
     )
     assert re.search(r"func\.func .*\bi32\b", src)
     assert re.search(r"scf\.for .*%arg\d+", src)
-    assert_source_contains(src, ("suvm.tile.select", "suvm.tile.reduce  sum"))
+    assert_source_contains(src, ("suvm.tile.select", "suvm.tile.reduce sum"))
     assert re.search(r"suvm\.tile\.reduce\s+sum, .*: !suvm\.tile<\d+x32xf32>", src)
 
 
@@ -671,7 +671,7 @@ def test_reduce_row_major_covered_tail_identity_precedes_raw_suvm_reduce(tmp_pat
         reduce_row_major_covered_tail_kernel_builder(reduce_op),
         tmp_path,
         mlir_filename=f"reduce_row_major_covered_tail_{reduce_op}_suvm.mlir",
-        expected_tokens=("suvm.tile.select", f"suvm.tile.reduce  {reduce_op}"),
+        expected_tokens=("suvm.tile.select", f"suvm.tile.reduce {reduce_op}"),
     )
     assert_source_contains(src, ("!suvm.tile<1024xbf16>", identity))
     assert_source_contains(
@@ -684,10 +684,10 @@ def test_reduce_row_major_covered_tail_identity_precedes_raw_suvm_reduce(tmp_pat
         ),
     )
     select_pos = src.index("suvm.tile.select")
-    reduce_pos = src.index(f"suvm.tile.reduce  {reduce_op}")
+    reduce_pos = src.index(f"suvm.tile.reduce {reduce_op}")
     assert src.rfind(identity, 0, select_pos) >= 0
     assert select_pos < reduce_pos
-    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*\{{axis = 1 : i64\}}", src)
+    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*<axis = 1>", src)
 
 
 @pytest.mark.parametrize("reduce_op", ["sum", "max", "min"])
@@ -705,7 +705,7 @@ def test_reduce_rank1_lowers_via_rank2_carrier(tmp_path, reduce_op):
     )
     assert "!suvm.tile<1x32x" in src
     assert "!suvm.tile<1x1x" in src
-    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*\{{axis = 1 : i64\}}", src)
+    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*<axis = 1>", src)
     assert "suvm.tile.pick" in src
     assert "suvm.tile.set" in src
 
@@ -737,7 +737,7 @@ def test_reduce_rank1_clear_false_combines_and_stores_scalar(
     )
     assert "!suvm.tile<1x32x" in src
     assert "!suvm.tile<1x1x" in src
-    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*\{{axis = 1 : i64\}}", src)
+    assert re.search(rf"suvm\.tile\.reduce\s+{reduce_op}, .*<axis = 1>", src)
     assert "suvm.tile.pick" in src
     assert "suvm.tile.set" in src
 
@@ -755,9 +755,9 @@ def test_reduce_clear_false_combines_destination_once_in_raw_suvm(tmp_path, redu
         reduce_clear_false_kernel_builder(reduce_op),
         tmp_path,
         mlir_filename=f"reduce_clear_false_{reduce_op}_suvm.mlir",
-        expected_tokens=(f"suvm.tile.reduce  {reduce_op}", combine_op),
+        expected_tokens=(f"suvm.tile.reduce {reduce_op}", combine_op),
     )
-    reduce_pos = src.index(f"suvm.tile.reduce  {reduce_op}")
+    reduce_pos = src.index(f"suvm.tile.reduce {reduce_op}")
     combine_positions = [match.start() for match in re.finditer(re.escape(combine_op), src)]
     assert len(combine_positions) == 2
     assert combine_positions[0] < reduce_pos < combine_positions[1]
@@ -778,7 +778,7 @@ def test_reduce_rank3_keepdim_projects_raw_suvm_destination(tmp_path, reduce_axi
     expected_tile_axis = reduce_axis - 1
     assert f"!suvm.memtensor<{expected_out_shape}xf32" in src
     assert re.search(
-        rf"suvm\.tile\.reduce\s+sum, .*\{{axis = {expected_tile_axis} : i64\}}",
+        rf"suvm\.tile\.reduce\s+sum, .*<axis = {expected_tile_axis}>",
         src,
     )
 
@@ -887,7 +887,7 @@ def test_reduce_tail_region_codegen_uses_identity_select(tmp_path):
         tmp_path,
         mlir_filename="reduce_tail_region_suvm.mlir",
         expected_tokens=(
-            "suvm.tile.reduce  max",
+            "suvm.tile.reduce max",
             "suvm.tile.select",
             "0xFF80",
             "suvm.tile.insert_slice",

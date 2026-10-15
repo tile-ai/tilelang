@@ -68,11 +68,15 @@ jobs:
     name: Require trusted SunMMIO validation
     if: |
       github.event_name == 'pull_request' &&
-      !github.event.pull_request.draft &&
-      github.event.pull_request.head.repo.full_name != github.repository
+      !github.event.pull_request.draft
     runs-on: ubuntu-latest
     steps:
+      - name: Confirm trusted in-repository PR
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: echo "PR source is inside SUNMMIO/Tilelang; self-hosted validation is allowed."
+
       - name: Reject fork PR without self-hosted validation
+        if: github.event.pull_request.head.repo.full_name != github.repository
         run: |
           echo "::error::SunMMIO build and codegen tests cannot run for fork pull requests."
           echo "::error::Mirror this commit to a branch in SUNMMIO/Tilelang and rerun the required CI before merging."

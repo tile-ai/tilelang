@@ -84,10 +84,7 @@ jobs:
 
   build-wheels:
     name: Build SunMMIO wheel for Python 3.12 on Linux x86_64
-    if: |
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      github.actor != 'dependabot[bot]'
+    if: github.event_name != 'pull_request'
     needs: [validate-version]
     timeout-minutes: 180
     runs-on: [self-hosted, Linux, CUDA-rtx3080]

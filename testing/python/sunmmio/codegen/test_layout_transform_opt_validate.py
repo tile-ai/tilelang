@@ -59,7 +59,7 @@ def test_layout_transform_codegen_validates_with_npuir_opt(tmp_path):
     assert "!suvm.token" not in src
     transform_lines = find_async_op_lines(src, "suvm.transform_layout_async")
     assert len(transform_lines) >= 2
-    assert all("#suvm.unit<odma1>" in line for line in transform_lines)
+    assert all("<unit = odma1>" in line for line in transform_lines)
     assert "sunmmio.fake" not in src
 
 

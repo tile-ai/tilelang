@@ -128,7 +128,7 @@ def test_mx_gemm_only_b_codegen_validates(tmp_path, b_dtype, mx_token, n, block_
         mlir_filename=f"{_dtype_filename(b_dtype)}_only_b_matmul_suvm.mlir",
         expected_tokens=(
             mx_token,
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.tc.mma",
             "#suvm.memory_space<asram>",
             "#suvm.memory_space<wsram>",
@@ -136,7 +136,7 @@ def test_mx_gemm_only_b_codegen_validates(tmp_path, b_dtype, mx_token, n, block_
     )
 
     assert "sunmmio.fake" not in src
-    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma", "suvm.sync"))
+    assert_source_contains(src, (mx_token, "suvm.mcast_async", "suvm.tc.mma", "suvm.sync"))
 
 
 @pytest.mark.parametrize("a_dtype,mx_token,n,block_n", MX_DTYPE_CASES)
@@ -156,7 +156,7 @@ def test_mx_gemm_row_major_a_uses_layout_transform_codegen_validates(tmp_path, a
         expected_tokens=(
             mx_token,
             "suvm.transform_layout_async",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.tc.mma",
             "#suvm.memory_space<asram>",
             "#suvm.memory_space<rsram>",
@@ -184,7 +184,7 @@ def test_mx_gemm_both_a_b_codegen_validates(tmp_path, mx_dtype, mx_token, n, blo
         mlir_filename=f"{_dtype_filename(mx_dtype)}_both_a_b_matmul_suvm.mlir",
         expected_tokens=(
             mx_token,
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.tc.mma",
             "suvm.copy_async",
             "#suvm.memory_space<asram>",
@@ -193,7 +193,7 @@ def test_mx_gemm_both_a_b_codegen_validates(tmp_path, mx_dtype, mx_token, n, blo
     )
 
     assert "sunmmio.fake" not in src
-    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma", "suvm.sync"))
+    assert_source_contains(src, (mx_token, "suvm.mcast_async", "suvm.tc.mma", "suvm.sync"))
 
 
 if __name__ == "__main__":

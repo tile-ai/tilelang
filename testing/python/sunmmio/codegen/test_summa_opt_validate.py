@@ -110,14 +110,14 @@ def test_summa_matmul_codegen_validates_with_npuir_opt(tmp_path, M, N, K):
         mlir_filename=f"summa_matmul_m{M}_n{N}_k{K}_suvm.mlir",
         expected_tokens=(
             "suvm.copy_async",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.tc.mma",
             "suvm.sync",
         ),
     )
 
     assert "sunmmio.fake" not in src
-    assert src.count("suvm.mcast_tok") >= 2
+    assert src.count("suvm.mcast_async") >= 2
     assert src.count("suvm.tc.mma") >= 1
     assert src.count("suvm.sync") >= 3
     assert "!suvm.token" not in src
@@ -131,7 +131,7 @@ def test_summa_matmul_codegen_contains_broadcast_sync_sequence(tmp_path):
         expected_tokens=(
             "suvm.barrier.init",
             "suvm.barrier.arrive_and_wait",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.tc.mma",
             "suvm.copy_async",
         ),

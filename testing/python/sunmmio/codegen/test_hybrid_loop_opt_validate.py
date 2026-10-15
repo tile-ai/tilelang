@@ -107,13 +107,13 @@ def test_simple_global_copy_gemm_codegen_validates_with_npuir_opt(tmp_path, monk
         expected_tokens=(
             "suvm.copy_async",
             "suvm.tile.reduce",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.sync",
         ),
     )
     assert_source_contains(
         src,
-        ("suvm.tile.reduce", "suvm.tile.exp", "suvm.tile.ln", "suvm.mcast_tok"),
+        ("suvm.tile.reduce", "suvm.tile.exp", "suvm.tile.ln", "suvm.mcast_async"),
     )
     coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
     main = coverage["main"]

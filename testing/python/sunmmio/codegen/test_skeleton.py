@@ -476,8 +476,8 @@ def test_sunmmio_codegen_lowers_dynamic_broadcast_mask():
     src = build_sunmmio_source_without_compile(make_dynamic_broadcast_mask_kernel())
     assert "arith.shli" in src
     assert "arith.ori" in src
-    assert "suvm.mcast_tok" in src
-    assert "suvm.sync  hlink" in src
+    assert "suvm.mcast_async" in src
+    assert "suvm.sync hlink" in src
     assert "sunmmio.fake" not in src
 
 

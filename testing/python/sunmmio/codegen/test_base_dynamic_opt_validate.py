@@ -239,7 +239,7 @@ def test_dynamic_allocate_copy_mma_codegen_validates_with_npuir_opt(tmp_path):
         expected_tokens=(
             "suvm.bind_layout",
             "suvm.alloc",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.sync",
             "suvm.copy_async",
             "suvm.tc.mma",

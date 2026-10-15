@@ -179,12 +179,12 @@ def test_broadcast_static_mask_codegen_validates_with_npuir_pipeline(tmp_path):
         tmp_path,
         params=params,
         mlir_filename="broadcast_static_mask_suvm.mlir",
-        expected_fragments=("suvm.get_partitioned_tile_view", "suvm.mcast_tok", "suvm.sync"),
+        expected_fragments=("suvm.get_partitioned_tile_view", "suvm.mcast_async", "suvm.sync"),
         opt_args=MCAST_VERIFY_ARGS,
     )
-    assert src.count("suvm.mcast_tok") == 1
+    assert src.count("suvm.mcast_async") == 1
     barrier_indices = [i for i, line in enumerate(src.splitlines()) if "suvm.barrier.arrive_and_wait" in line]
-    mcast_index = next(i for i, line in enumerate(src.splitlines()) if "suvm.mcast_tok" in line)
+    mcast_index = next(i for i, line in enumerate(src.splitlines()) if "suvm.mcast_async" in line)
     sync_index = next(i for i, line in enumerate(src.splitlines()) if "suvm.sync" in line)
     assert len(barrier_indices) == 8
     assert max(barrier_indices[:4]) < mcast_index < sync_index < min(barrier_indices[4:])
@@ -226,14 +226,14 @@ def test_independent_row_col_broadcasts_complete_separately(tmp_path):
         tmp_path,
         params=[src0_data, dst0_data, src1_data, dst1_data],
         mlir_filename="independent_row_col_broadcast_suvm.mlir",
-        expected_fragments=("suvm.mcast_tok", "suvm.sync"),
+        expected_fragments=("suvm.mcast_async", "suvm.sync"),
         opt_args=("--verify-each", "--suvm-to-llvm-pipeline"),
     )
     sync_lines = [line for line in src.splitlines() if "suvm.sync" in line]
     assert len(sync_lines) == 2
     assert "hlink" in sync_lines[0]
     assert "vlink" in sync_lines[1]
-    assert src.count("suvm.mcast_tok") == 2
+    assert src.count("suvm.mcast_async") == 2
     assert src.count("suvm.barrier.arrive_and_wait") == 16
 
 
@@ -256,7 +256,7 @@ def test_broadcast_dynamic_mask_codegen_validates_with_npuir_pipeline(tmp_path):
         tmp_path,
         params=[src_data, dst_data],
         mlir_filename="broadcast_dynamic_mask_suvm.mlir",
-        expected_fragments=("scf.for", "arith.shli", "arith.ori", "suvm.mcast_tok", "suvm.sync"),
+        expected_fragments=("scf.for", "arith.shli", "arith.ori", "suvm.mcast_async", "suvm.sync"),
         opt_args=MCAST_VERIFY_ARGS,
     )
 
@@ -285,13 +285,13 @@ def test_broadcast_with_src_core_keeps_sync_in_guarded_branch(tmp_path):
         tmp_path,
         params=params,
         mlir_filename="broadcast_src_core_guard_suvm.mlir",
-        expected_fragments=("suvm.get_core_id", "arith.cmpi eq", "scf.if", "suvm.mcast_tok", "suvm.sync"),
+        expected_fragments=("suvm.get_core_id", "arith.cmpi eq", "scf.if", "suvm.mcast_async", "suvm.sync"),
         opt_args=MCAST_VERIFY_ARGS,
     )
     lines = src.splitlines()
     barrier_indices = [i for i, line in enumerate(lines) if "suvm.barrier.arrive_and_wait" in line]
     if_index = next(i for i, line in enumerate(lines) if "scf.if" in line)
-    mcast_index = next(i for i, line in enumerate(lines) if "suvm.mcast_tok" in line)
+    mcast_index = next(i for i, line in enumerate(lines) if "suvm.mcast_async" in line)
     sync_index = next(i for i, line in enumerate(lines) if "suvm.sync" in line)
     assert len(barrier_indices) == 2
     assert barrier_indices[0] < if_index < mcast_index < sync_index < barrier_indices[1]

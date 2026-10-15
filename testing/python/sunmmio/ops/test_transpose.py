@@ -165,7 +165,7 @@ def test_transpose_codegen_matrix(
 
     transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
     assert len(transpose_lines) == 1
-    assert "#suvm.unit<odma1>" in transpose_lines[0]
+    assert "<unit = odma1>" in transpose_lines[0]
 
 
 @pytest.mark.parametrize("enable_region_validation", [True, False], ids=["region_validation_on", "region_validation_off"])
@@ -197,7 +197,7 @@ def test_transpose_loop_codegen(
 
     transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
     assert len(transpose_lines) == 2
-    assert all("#suvm.unit<odma1>" in line for line in transpose_lines)
+    assert all("<unit = odma1>" in line for line in transpose_lines)
 
 
 @pytest.mark.parametrize(
@@ -222,7 +222,7 @@ def test_transpose_layout_inference_is_order_independent(
 
     transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
     assert len(transpose_lines) == 2
-    assert all("#suvm.unit<odma1>" in line for line in transpose_lines)
+    assert all("<unit = odma1>" in line for line in transpose_lines)
 
 
 def test_transpose_rejects_vector_element_dtype():

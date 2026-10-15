@@ -206,7 +206,7 @@ SunmmioMlirCall::MXUnpack(const std::string &scale_name,
   mlir::SmallVector<mlir::Type, 2> result_types;
   mlir::LogicalResult inferred = mlir::suvm::UnpackOp::inferReturnTypes(
       &ctx_.mlir_ctx, loc, mlir::ValueRange{mx_value}, mlir::DictionaryAttr(),
-      nullptr, mlir::RegionRange(), result_types);
+      mlir::PropertyRef(), mlir::RegionRange(), result_types);
   ICHECK(mlir::succeeded(inferred))
       << "Failed to infer suvm.unpack result types from MX memtensor";
   ICHECK_EQ(result_types.size(), 2U)
@@ -505,7 +505,7 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     ICHECK(dst_ty) << "tl.dma_copy expects destination to be a suvm.tile_view";
 
     auto copy_op = mlir::suvm::CopyAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("dma_copy"), mlir::Type(), src, dst,
+        ctx_.builder, type.MakeDebugLoc("dma_copy"), src, dst,
         require_odma_unit());
     VerifyAsyncOp(copy_op, "tl.dma_copy");
     ctx_.AddPendingSyncUnits(copy_op.getUnit() == mlir::suvm::Unit::Odma0
@@ -534,8 +534,8 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
                       "suvm.tile_view";
 
     auto transform_op = mlir::suvm::TransformAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"),
-        mlir::Type(), src, dst, mlir::suvm::PadModeAttr{}, require_odma_unit());
+        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"), src, dst,
+        mlir::suvm::PadModeAttr{}, require_odma_unit());
     VerifyAsyncOp(transform_op, "tl.sunmmio_layout_transform");
     ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::odma1);
 
@@ -560,8 +560,8 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
         << "tl.sunmmio_transpose expects destination to be a suvm.tile_view";
 
     auto transpose_op = mlir::suvm::TransposeAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), mlir::Type(), src,
-        dst, require_odma_unit());
+        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), src, dst,
+        require_odma_unit());
     VerifyAsyncOp(transpose_op, "tl.sunmmio_transpose");
     ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::odma1);
 
@@ -598,9 +598,9 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
                                              : mlir::suvm::McastDirection::col;
 
     auto create_mcast = [&]() {
-      auto mcast_op = mlir::suvm::MulticastTokOp::create(
-          ctx_.builder, type.MakeDebugLoc("broadcast"), mlir::Type(), src, dst,
-          mask, direction, require_odma_unit());
+      auto mcast_op = mlir::suvm::MulticastAsyncOp::create(
+          ctx_.builder, type.MakeDebugLoc("broadcast"), src, dst, mask,
+          direction, require_odma_unit());
       VerifyA4EMulticastOp(mcast_op, "tl.broadcast_");
     };
     auto emit_link_sync = [&]() {
@@ -684,8 +684,8 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
         trans_b ? ctx_.builder.getUnitAttr() : mlir::UnitAttr();
 
     auto mma_op = mlir::suvm::TcMmaOp::create(
-        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), mlir::Type(), c, a, w,
-        c, accumulate, trans_attr);
+        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), c, a, w, c, accumulate,
+        trans_attr);
     VerifyAsyncOp(mma_op, "tl.mma_sunmmio");
     ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::tc);
 

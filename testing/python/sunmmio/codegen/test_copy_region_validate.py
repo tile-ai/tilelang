@@ -292,14 +292,14 @@ def test_singleton_dimension_broadcast_codegen_passes(tmp_path):
         mlir_filename="singleton_dimension_broadcast.mlir",
         expected_tokens=(
             "suvm.get_partitioned_tile_view",
-            "suvm.mcast_tok",
+            "suvm.mcast_async",
             "suvm.sync",
         ),
         opt_args=LOOSE_OPT_ARGS,
     )
     assert "!suvm.tile_view<32x32xbf16>" in src
     assert "tiled_dims = [1, 2]" in src
-    assert src.count("suvm.mcast_tok") >= 1
+    assert src.count("suvm.mcast_async") >= 1
     assert "sunmmio.fake" not in src
 
 
