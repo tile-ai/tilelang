@@ -33,8 +33,14 @@ def _guarded_access(kind, index_scale=1, guard="upper"):
         body = tirx.IfThenElse(condition, tirx.BufferStore(buffer, 1, [index]), None)
     elif kind == "likely":
         body = tirx.IfThenElse(tirx.call_intrin("bool", "tirx.likely", condition), tirx.Evaluate(load), None)
-    elif kind == "assert":
+    elif kind.endswith("assert"):
         assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("IndexError"), [], None)
+        if kind == "attr_seq_assert":
+            assertion = tirx.SeqStmt([tirx.Evaluate(0), assertion])
+        if kind != "assert":
+            assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
+        if kind == "nested_attr_assert":
+            assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
         body = tirx.SeqStmt([assertion, tirx.Evaluate(load)])
     elif kind == "block":
         region = tirx.BufferRegion(buffer, [tvm.ir.Range(0, 16)])
@@ -60,7 +66,7 @@ def _guarded_access(kind, index_scale=1, guard="upper"):
 
 
 def _condition(func, kind):
-    if kind == "assert":
+    if kind.endswith("assert"):
         return _nodes(func.body, tirx.AssertStmt)[0].condition
     if kind == "block":
         return _nodes(func.body, tirx.SBlockRealize)[0].predicate
@@ -87,7 +93,22 @@ def _compile_predicate(condition, params):
 @pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
 @pytest.mark.parametrize(
     "kind",
-    ["load", "store", "likely", "assert", "block", "while", "widening_cast", "if_then_else", "select", "load_predicate", "store_predicate"],
+    [
+        "load",
+        "store",
+        "likely",
+        "assert",
+        "attr_assert",
+        "nested_attr_assert",
+        "attr_seq_assert",
+        "block",
+        "while",
+        "widening_cast",
+        "if_then_else",
+        "select",
+        "load_predicate",
+        "store_predicate",
+    ],
 )
 def test_index_promotion_updates_matching_guard_arithmetic(pass_name, kind):
     before, i, j = _guarded_access(kind)
@@ -105,11 +126,11 @@ def test_index_promotion_updates_matching_guard_arithmetic(pass_name, kind):
 
 @tilelang.testing.requires_llvm
 @pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("kind,guard", [("load", "upper"), ("load", "lower"), ("widening_cast", "upper")])
+@pytest.mark.parametrize("kind,guard", [("load", "upper"), ("load", "lower"), ("widening_cast", "upper"), ("attr_assert", "upper")])
 def test_overflowing_guard_rejects_wide_address(pass_name, kind, guard):
     before, i, j = _guarded_access(kind, guard=guard)
     after = _apply(before, pass_name)
-    executable = _compile_predicate(_condition(after, "load"), [i, j])
+    executable = _compile_predicate(_condition(after, kind), [i, j])
     assert executable(1, 4) == 1
     assert executable(4, 4) == (guard == "lower")
     assert executable(1 << 30, 4) == (guard == "lower")
@@ -262,14 +283,90 @@ def test_clz_guard_does_not_open_after_index_promotion(pass_name, selector):
 
 
 @pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_accesses_before_assert_do_not_widen_it(pass_name):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_accesses_before_assert_do_not_widen_it(pass_name, wrapped):
     before, i, j = _guarded_access("load")
     condition = i * j < 16
     assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("ValueError"), [], None)
+    if wrapped:
+        assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
     before = before.with_body(tirx.SeqStmt([*before.body.seq, assertion]))
     after = _apply(before, pass_name)
     tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, condition)
     assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+
+
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+def test_wrapped_assert_preserves_data_conditions_and_value_boundaries(pass_name):
+    condition, i, j = _fixed_boundary_condition("clz")
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    data = tirx.Select(i * j < 16, 7, 9)
+    assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("ValueError"), [], None)
+    wrapped = tirx.AttrStmt(0, "lexical_alloc_scope", 1, tirx.SeqStmt([tirx.Evaluate(data), assertion]))
+    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), wrapped, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j]))])
+    func = tirx.PrimFunc([buffer.data, i, j], body, buffer_map={buffer.data: buffer})
+    after = _apply(func, pass_name)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, condition)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.Select)[0], data)
+    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+
+
+@pytest.mark.parametrize("wrapper", ["if", "for", "while", "thread_extent", "virtual_thread"])
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+def test_conditional_assert_does_not_guard_access_after_wrapper(pass_name, wrapper):
+    before, i, j = _guarded_access("attr_assert")
+    assertion = before.body.seq[1]
+    flag = tirx.Var("flag", "bool")
+    if wrapper == "if":
+        assertion = tirx.IfThenElse(flag, assertion, None)
+    elif wrapper == "for":
+        assertion = tirx.For(tirx.Var("k", "int32"), 0, 0, tirx.ForKind.SERIAL, assertion)
+    elif wrapper == "while":
+        assertion = tirx.While(flag, assertion)
+    else:
+        thread = tirx.IterVar(None, tirx.Var("tx", "int32"), tirx.IterVar.ThreadIndex, "threadIdx.x")
+        assertion = tirx.AttrStmt(thread, wrapper, 0, assertion)
+    body = tirx.SeqStmt([before.body.seq[0], assertion, before.body.seq[-1]])
+    before = tirx.PrimFunc([*before.params, flag], body, buffer_map=before.buffer_map)
+    after = _apply(before, pass_name)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, i * j < 16)
+    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+
+
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+def test_wrapped_sequence_assert_combines_local_and_following_accesses(pass_name):
+    i, j, k = [tirx.Var(name, "int32") for name in ("i", "j", "k")]
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    condition = tirx.And(i * j < 16, k * j < 16)
+    assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("IndexError"), [], None)
+    inner = tirx.SeqStmt([assertion, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j]))])
+    wrapped = tirx.AttrStmt(0, "lexical_alloc_scope", 1, inner)
+    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), wrapped, tirx.Evaluate(tirx.BufferLoad(buffer, [k * j]))])
+    before = tirx.PrimFunc([buffer.data, i, j, k], body, buffer_map={buffer.data: buffer})
+    after = _apply(before, pass_name)
+    multiplications = _nodes(_nodes(after.body, tirx.AssertStmt)[0].condition, tirx.Mul)
+    assert len(multiplications) == 2 and all(expr.dtype == "int64" for expr in multiplications)
+
+
+def test_cpu_lowering_keeps_wrapped_assert_consistent_with_address():
+    @T.prim_func
+    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((1,), "int32"), i: T.int32, j: T.int32):
+        with T.Kernel(1, threads=1):
+            with T.attr(0, "lexical_alloc_scope", 1):
+                assert i * j < 16, "index exceeds buffer size"
+            B[0] = A[i * j]
+
+    target = tvm.target.Target("c")
+    with target:
+        artifact = tilelang.lower(main, target=target, target_host="c")
+    functions = list(artifact.device_mod.functions.values())
+    assertions = [stmt for func in functions for stmt in _nodes(func.body, tirx.AssertStmt)]
+    assert assertions
+    for assertion in assertions:
+        multiplications = _nodes(assertion.condition, tirx.Mul)
+        assert multiplications and all(expr.dtype == "int64" for expr in multiplications)
+    addresses = [load.indices[0] for func in functions for load in _nodes(func.body, tirx.BufferLoad)]
+    assert addresses and all(index.dtype == "int64" for index in addresses)
 
 
 @pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])

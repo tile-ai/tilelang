@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -139,6 +140,50 @@ private:
     return legalizer(predicate);
   }
 
+  tirx::Stmt RewriteDominatingAssertions_(const tirx::Stmt &stmt,
+                                          const PromotionMap &suffix) {
+    if (suffix.empty()) {
+      return stmt;
+    }
+    if (auto assertion = stmt.as<tirx::AssertStmt>()) {
+      PrimExpr condition =
+          RewritePredicate_(assertion.value()->condition, suffix);
+      if (!condition.same_as(assertion.value()->condition)) {
+        tirx::AssertStmt updated = assertion.value();
+        updated.CopyOnWrite()->condition = condition;
+        return updated;
+      }
+    } else if (auto attr = stmt.as<tirx::AttrStmt>()) {
+      // Thread launches may execute the body zero times. Other attributes are
+      // annotations whose body executes before the enclosing sequence resumes.
+      if (attr.value()->attr_key == tirx::attr::thread_extent ||
+          attr.value()->attr_key == s_tir::attr::virtual_thread) {
+        return stmt;
+      }
+      tirx::Stmt body =
+          RewriteDominatingAssertions_(attr.value()->body, suffix);
+      if (!body.same_as(attr.value()->body)) {
+        tirx::AttrStmt updated = attr.value();
+        updated.CopyOnWrite()->body = body;
+        return updated;
+      }
+    } else if (auto sequence = stmt.as<tirx::SeqStmt>()) {
+      // Local suffixes were already handled by VisitStmt_. Every straight-line
+      // assertion here also controls the suffix outside this nested sequence.
+      ffi::Array<tirx::Stmt> seq =
+          sequence.value()->seq.Map([&](const tirx::Stmt &child) {
+            return RewriteDominatingAssertions_(child, suffix);
+          });
+      if (!seq.same_as(sequence.value()->seq)) {
+        tirx::SeqStmt updated = sequence.value();
+        updated.CopyOnWrite()->seq = seq;
+        return updated;
+      }
+    }
+    // Branches, loops, and block predicates can skip their bodies.
+    return stmt;
+  }
+
   const PromotionMap &AccessPromotions_(const ffi::ObjectRef &access) const {
     auto it = access_promotions_.find(access);
     return it != access_promotions_.end() ? it->second : empty_promotions_;
@@ -196,16 +241,7 @@ private:
     for (size_t i = seq.size(); i > 0; --i) {
       tirx::Stmt stmt = VisitStmt(op->seq[i - 1]);
       PromotionMap promotions = last_promotions_;
-      if (auto assertion = stmt.as<tirx::AssertStmt>()) {
-        PrimExpr condition =
-            RewritePredicate_(assertion.value()->condition, suffix);
-        if (!condition.same_as(assertion.value()->condition)) {
-          tirx::AssertStmt updated = assertion.value();
-          updated.CopyOnWrite()->condition = condition;
-          stmt = updated;
-        }
-      }
-      seq.Set(i - 1, stmt);
+      seq.Set(i - 1, RewriteDominatingAssertions_(stmt, suffix));
       Merge_(suffix, promotions);
     }
     return tirx::SeqStmt(seq, op->span);
