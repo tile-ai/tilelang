@@ -273,5 +273,50 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
+def test_if_stmt_binding_keeps_bind_before_atomic_via_address_of():
+    """Regression for issue #2594 residual: atomic_*_elem_op(address_of(...)).
+
+    #2651 taught the collector to honor access_ptr / tvm_access_ptr write
+    masks. The language frontend uses access_ptr("rw"), but a destination
+    formed with address_of still only recorded a read, so a scalar bind of
+    the pre-atomic value was inlined past the RMW and observed the
+    post-atomic value. Plain BufferStore controls stay correct because
+    BufferStore already adds a write.
+    """
+
+    @T.prim_func
+    def before(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A[0]),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    @T.prim_func
+    def expected(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A[0]),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
