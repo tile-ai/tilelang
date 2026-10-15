@@ -705,6 +705,46 @@ private:
     opaque_pointer_context_ = previous_context;
   }
 
+  void VisitNZPhysicalPointer(const CallNode *op, size_t index,
+                              std::optional<int64_t> bytes, int mask) {
+    const PrimExpr &pointer = op->args[index];
+    const auto *call = pointer.as<CallNode>();
+    const auto *load =
+        call && call->op.same_as(tl::access_ptr()) && call->args.size() == 3
+            ? call->args[0].as<BufferLoadNode>()
+            : nullptr;
+    if (load && load->buffer->shape.size() >= 2) {
+      size_t ndim = load->buffer->shape.size();
+      if (op->args.size() == 7 && bytes && *bytes > 0 &&
+          op->annotations.count("nd2nz_logical_regions") &&
+          load->indices.size() == ndim) {
+        // InsertNd2Nz proved that these logical axes map to the NZ DMA
+        // blocks. Its access_ptr extent is a physical span including gaps;
+        // interpreting it as a row-major run can omit rows of a column slice.
+        std::vector<arith::IntSet> region;
+        for (size_t i = 0; i < ndim; ++i) {
+          PrimExpr extent = i + 2 == ndim   ? op->args[2]
+                            : i + 1 == ndim ? op->args[3]
+                                            : Integer(1);
+          region.push_back(RelaxAccessIndex(load->indices[i], extent));
+          VisitExpr(load->indices[i]);
+        }
+        if (mask & 1)
+          Update(&read_buffers_, &read_regions_, load->buffer, region);
+        if (mask & 2)
+          // Keep pointer writes as may-write regions, excluding DMA gaps.
+          Update(&write_buffers_, &write_regions_, load->buffer, region);
+        VisitExpr(call->args[1]);
+        return;
+      }
+      // An explicit pitch does not establish how physical blocks map back
+      // to this multidimensional view. Retain flat pointer span handling,
+      // but exclude this storage from reuse without a layout proof.
+      UpdateOpaqueAccessVar(load->buffer->data);
+    }
+    VisitPhysicalPointer(pointer, bytes, mask);
+  }
+
   void VisitNd2NzCall(const CallNode *op, bool scatter) {
     std::optional<int64_t> source_bytes;
     std::optional<int64_t> destination_bytes;
@@ -761,10 +801,12 @@ private:
       }
     }
     for (size_t i = 0; i < op->args.size(); ++i) {
-      if (i == (scatter ? 0U : 1U))
+      if (scatter && i == 0)
         VisitPhysicalPointer(op->args[i], source_bytes, 1);
+      else if (!scatter && i == 1)
+        VisitNZPhysicalPointer(op, i, source_bytes, 1);
       else if (i == (scatter ? 1U : 0U))
-        VisitPhysicalPointer(op->args[i], destination_bytes, 2);
+        VisitNZPhysicalPointer(op, i, destination_bytes, 2);
       else
         VisitExpr(op->args[i]);
     }

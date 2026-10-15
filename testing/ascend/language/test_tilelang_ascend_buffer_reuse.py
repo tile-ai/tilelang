@@ -323,5 +323,55 @@ def test_nd2nz_post_copy_preserves_data_beyond_its_base_element(disable_reuse):
         torch.testing.assert_close(actual_b.cpu(), expected_b, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("disable_reuse", [False, True])
+@pytest.mark.parametrize("explicit", [False, True], ids=["layout-copy", "physical-pointer"])
+def test_nz_column_slice_preserves_rows_after_partial_overwrite(disable_reuse, explicit):
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("Ascend NPU required")
+    from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
+
+    @T.prim_func
+    def main(B: T.Tensor((16, 16), "bfloat16"), out: T.Tensor((64, 16), "float32"), out_b: T.Tensor((1,), "bfloat16")):
+        with T.Kernel(1):
+            a = T.alloc_shared((65, 128), "bfloat16")
+            b = T.alloc_shared((65, 128), "bfloat16")
+            dst = T.alloc_l1((64, 16), "bfloat16")
+            rhs = T.alloc_l1((16, 16), "bfloat16")
+            accum = T.alloc_l0c((64, 16), "float32")
+            T.annotate_layout({a: make_ascend_compact_nz_layout(a), dst: make_ascend_nz_layout(dst)})
+            with T.Stage(0):
+                T.fill(a, T.bfloat16(100))
+                T.fill(b, T.bfloat16(200))
+                out_b[0] = b[0, 0]
+                T.fill(a[:16, :], T.bfloat16(300))
+                if explicit:
+                    T.ascend_nd2nz_post_copy(
+                        T.access_ptr(dst[0, 0], "w", extent=1024),
+                        T.access_ptr(a[0, 16], "r", extent=1024),
+                        64,
+                        16,
+                        src_pitch=65,
+                        dst_pitch=64,
+                        dtype="bfloat16",
+                    )
+                else:
+                    T.copy(a[:64, 16:32], dst)
+            T.copy(B, rhs)
+            T.gemm(dst, rhs, accum, clear_accum=True, transpose_B=True)
+            T.copy(accum, out)
+
+    kernel = tilelang.compile(main, out_idx=[1, 2], target="ascend", pass_configs={"tl.disable_shared_memory_reuse": disable_reuse})
+    rhs = torch.eye(16, dtype=torch.bfloat16, device="npu")
+    expected = torch.full((64, 16), 100, dtype=torch.float32)
+    expected[:16] = 300
+    expected_b = torch.tensor([200], dtype=torch.bfloat16)
+    for _ in range(10):
+        actual, actual_b = kernel(rhs)
+        torch.npu.synchronize()
+        torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+        torch.testing.assert_close(actual_b.cpu(), expected_b, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
