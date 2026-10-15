@@ -108,6 +108,30 @@ def test_ss_multiple_allocations_and_total_capacity(size):
         assert "asc_sync_intra_" not in source
 
 
+@pytest.mark.parametrize("size", [96, 100], ids=["fits", "exceeds-pool"])
+def test_ss_fixed_versions_check_final_allocation_capacity(size):
+    @T.prim_func
+    def main(seed: T.Tensor((16, 16), "float16"), out: T.Tensor((4,), "uint64")):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_ss((size,), "uint64")
+            b = T.alloc_ss((size,), "uint64")
+            T.annotate_buffer_versions({a: 2, b: 2})
+            cube = T.alloc_l1((16, 16), "float16")
+            T.copy(seed, cube)
+            for i in T.Pipelined(4, num_stages=2):
+                a[sid] = T.Cast("uint64", i + sid)
+                b[sid] = T.Cast("uint64", i + sid + 1)
+                out[i] = a[0] + a[1] + b[0] + b[1]
+
+    # Fixed version counts are validated after materialization and packing.
+    # Two allocations with two versions occupy 3072 or 3200 bytes.
+    if size == 100:
+        with pytest.raises(tvm.error.InternalError, match="SS allocations require a static total size of at most 3072 bytes"):
+            tilelang.lower(main, target="ascend", enable_device_compile=False)
+    else:
+        tilelang.lower(main, target="ascend", enable_device_compile=False)
+
+
 @pytest.mark.parametrize("divergent", [False, True])
 def test_ss_peer_read_requires_explicit_synchronization(divergent):
     @T.prim_func

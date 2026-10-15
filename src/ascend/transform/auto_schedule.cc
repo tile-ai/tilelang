@@ -915,17 +915,20 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // Validate buffer capacities upfront: if the minimum requirement (one
   // version of each eligible buffer) already exceeds the remaining capacity,
   // Z3 will never find a feasible solution.
+  // Only apply this bound when choosing versions; fixed allocations may reuse
+  // storage downstream, so their raw size sum is not a physical capacity check.
   for (size_t g = 0; g < group_capacities.size(); ++g) {
     int64_t capacity = group_capacities[g];
     const auto &idxs = group_indices[g];
-    if (capacity < 0) {
-      LOG(FATAL) << "Z3 loop scheduling failed: scope \"" << group_scopes[g]
-                 << "\" capacity is negative (" << capacity
-                 << "). Non-eligible and fixed-version buffers already exceed"
-                 << " the memory limit. Try using T.annotate_unlimit_memory(\""
-                 << group_scopes[g] << "\") or reduce buffer sizes.";
-    }
     if (!idxs.empty()) {
+      if (capacity < 0) {
+        LOG(FATAL)
+            << "Z3 loop scheduling failed: scope \"" << group_scopes[g]
+            << "\" capacity is negative (" << capacity
+            << "). Non-eligible and fixed-version buffers already exceed"
+            << " the memory limit. Try using T.annotate_unlimit_memory(\""
+            << group_scopes[g] << "\") or reduce buffer sizes.";
+      }
       int64_t min_usage = 0;
       for (int64_t idx : idxs) {
         min_usage += storage_sizes[idx];

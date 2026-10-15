@@ -151,8 +151,9 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
         assert int(versions[ub.data]) == 1
 
 
-@pytest.mark.parametrize("fixed", [False, True], ids=["inferred", "fixed"])
-@pytest.mark.parametrize("size", [96, 100], ids=["fits", "exceeds-pool"])
+@pytest.mark.parametrize(
+    "fixed,size", [(False, 96), (True, 96), (False, 100)], ids=["inferred-fits", "fixed-fits", "inferred-exceeds-pool"]
+)
 def test_ss_versions_share_capacity_across_aivs(fixed, size):
     buffers = [tirx.decl_buffer((size,), "uint64", name=f"ss{sid}", scope="shared.ss") for sid in range(2)]
     out = tirx.decl_buffer((4, 2), "uint64", name="out")
