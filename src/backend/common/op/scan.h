@@ -6,6 +6,7 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_SCAN_H_
 #define TVM_TL_BACKEND_COMMON_OP_SCAN_H_
 
+#include "backend/common/target_utils.h"
 #include "op/scan.h"
 #include "support/check.h"
 
@@ -37,6 +38,19 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
     auto threads = lower_args.thread_bounds->extent;
+    if (TargetIsCuda(lower_args.target) &&
+        !TargetIsCuTeDSL(lower_args.target)) {
+      const int64_t *num_threads = as_const_int(threads);
+      CHECK(num_threads != nullptr &&
+                (*num_threads == 32 || *num_threads == 64 ||
+                 *num_threads == 128 || *num_threads == 256 ||
+                 *num_threads == 512 || *num_threads == 1024),
+            ValueError)
+          << "T." << op_name
+          << " on CUDA shared memory requires block threads in "
+             "{32, 64, 128, 256, 512, 1024}; got "
+          << threads << ".";
+    }
     Array<PrimExpr> args;
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
