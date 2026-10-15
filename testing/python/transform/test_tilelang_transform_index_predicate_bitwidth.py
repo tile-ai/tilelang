@@ -401,5 +401,90 @@ def test_cpu_lowering_keeps_unrelated_data_select_int32():
     assert output.tolist() == [7, -1]
 
 
+@tilelang.testing.requires_llvm
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+def test_shared_guard_keeps_unpromoted_address_arithmetic(pass_name):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    source = tirx.decl_buffer((16,), "int32", name="A")
+    other = tirx.decl_buffer((256,), "int32", name="B")
+    product = i * j
+    other_index = tirx.Cast("int64", product << 31) >> 24
+    condition = tirx.all(product < 16, other_index >= 0, other_index < 256)
+    accesses = tirx.SeqStmt([tirx.Evaluate(source[product]), tirx.Evaluate(other[other_index])])
+    body = tirx.SeqStmt([tirx.DeclBuffer(source), tirx.DeclBuffer(other), tirx.IfThenElse(condition, accesses, None)])
+    before = tirx.PrimFunc([source.data, other.data, i, j], body, buffer_map={source.data: source, other.data: other})
+    after = _apply(before, pass_name)
+    loads = _nodes(after.body, tirx.BufferLoad)
+    assert loads[0].indices[0].dtype == "int64"
+    assert _compile_predicate(loads[1].indices[0], [i, j])(1, 1) == -128
+    assert _compile_predicate(_nodes(after.body, tirx.IfThenElse)[0].condition, [i, j])(1, 1) == 0
+
+
+def test_equivalent_flattened_accesses_keep_both_source_promotions():
+    before, i, j = _guarded_access("load")
+    branch = _nodes(before.body, tirx.IfThenElse)[0]
+    load = branch.then_case.value
+    accesses = tirx.SeqStmt([tirx.Evaluate(load), tirx.Evaluate(load.buffer[j * i])])
+    body = tirx.SeqStmt([before.body.seq[0], tirx.IfThenElse(branch.condition, accesses, None)])
+    after = _apply(before.with_body(body), "FlattenBuffer")
+    condition = _nodes(after.body, tirx.IfThenElse)[0].condition
+    assert all(expr.dtype == "int64" for expr in _nodes(condition, tirx.Mul))
+
+
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+@pytest.mark.parametrize("operation", ["shift", "add", "mul"])
+def test_index_promotion_keeps_enclosing_business_arithmetic(pass_name, operation):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    index = i + j
+    values = {"shift": index << 31, "add": index + ((1 << 31) - 1), "mul": index * (1 << 30)}
+    condition = values[operation] < 0
+    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), tirx.IfThenElse(condition, tirx.Evaluate(buffer[index]), None)])
+    before = tirx.PrimFunc([buffer.data, i, j], body, buffer_map={buffer.data: buffer})
+    after = _apply(before, pass_name)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, condition)
+    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+
+
+@tilelang.testing.requires_llvm
+def test_cpu_lowering_keeps_business_shift_condition_int32():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((1,), "int32"), i: T.int32, j: T.int32):
+        with T.Kernel(1, threads=1):
+            if ((i + j) << 31) < 0:
+                B[0] = A[i + j]
+
+    kernel = tilelang.compile(main, target="llvm", execution_backend="tvm_ffi")
+    source = torch.arange(16, dtype=torch.int32)
+    output = torch.full((1,), -1, dtype=torch.int32)
+    # An odd sum makes the int32 sign bit set; i=j=1 instead gives zero.
+    kernel(source, output, 0, 1)
+    assert output.item() == 1
+
+
+@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
+@pytest.mark.parametrize("field", ["shape", "guarded_shape", "elem_offset"])
+def test_conditional_buffer_metadata_preserves_definition_and_uses(pass_name, field):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    flag = tirx.Var("flag", "bool")
+    source = tirx.decl_buffer((32,), "int32", name="A")
+    shape = (tirx.if_then_else(flag, 16, 32),) if field == "shape" else (16,)
+    if field == "guarded_shape":
+        shape = (tirx.if_then_else(i * j < 16, source[i * j], 16),)
+    offset = tirx.if_then_else(flag, 0, 1) if field == "elem_offset" else 0
+    view = tirx.decl_buffer(shape, "int32", name="view", data=source.data, elem_offset=offset)
+    body = tirx.SeqStmt([tirx.DeclBuffer(source), tirx.DeclBuffer(view), tirx.Evaluate(source[i * j]), tirx.Evaluate(view[0])])
+    before = tirx.PrimFunc([source.data, i, j, flag], body, buffer_map={source.data: source})
+    assert tirx.analysis.verify_well_formed(before)
+    after = _apply(before, pass_name)
+    declarations = _nodes(after.body, tirx.DeclBuffer)
+    assert _nodes(after.body, tirx.BufferLoad)[-1].buffer.same_as(declarations[-1].buffer)
+    if field == "guarded_shape":
+        condition = declarations[-1].buffer.shape[0].args[0]
+        assert all(expr.dtype == "int64" for expr in _nodes(condition, tirx.Mul))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
