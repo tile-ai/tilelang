@@ -370,6 +370,14 @@ private:
   struct AccessPtrInfo {
     BufferLoad base_load;
     PrimExpr rw_mask;
+    // Element type of the access-pointer annotation. For tl.access_ptr this
+    // matches the backing buffer dtype; for tvm_access_ptr it is args[0].
+    DataType element_dtype;
+    // Original offset/extent in element_dtype units when the access came from
+    // tvm_access_ptr. Used to check the byte range when the annotation dtype
+    // differs from the backing buffer dtype. Empty for tl.access_ptr.
+    std::optional<PrimExpr> annotated_offset;
+    std::optional<PrimExpr> annotated_extent;
   };
 
   // Constructor initializing the base class with the analyzer
@@ -543,6 +551,9 @@ private:
       return AccessPtrInfo{
           Downcast<BufferLoad>(ptr_call->args[0]),
           ptr_call->args[2],
+          base_load->buffer->dtype,
+          std::nullopt,
+          std::nullopt,
       };
     }
 
@@ -557,9 +568,37 @@ private:
           << "Buffer data var " << buffer_data
           << " is not registered in buffer_data_to_buffer_.";
       Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+      // tvm_access_ptr(type, data, offset, extent, rw_mask): offset/extent are
+      // in annotation-dtype units, which may differ from the backing buffer.
+      DataType pointer_element_dtype = ptr_call->args[0].dtype();
+      PrimExpr annotated_offset = ptr_call->args[2];
+      PrimExpr annotated_extent = ptr_call->args[3];
+      PrimExpr load_index = annotated_offset;
+      if (pointer_element_dtype != flat->dtype) {
+        int pointer_elem_bits =
+            pointer_element_dtype.bits() * pointer_element_dtype.lanes();
+        int buffer_elem_bits = flat->dtype.bits() * flat->dtype.lanes();
+        ICHECK_GT(pointer_elem_bits, 0)
+            << "tvm_access_ptr element width must be positive: " << expr;
+        ICHECK_GT(buffer_elem_bits, 0)
+            << "tvm_access_ptr buffer element width must be positive: " << expr;
+        // Convert to backing-buffer element units for BufferLoad / fallback
+        // stores. Byte-range checks below keep the original annotated units so
+        // an intra-element address is not lost to integer division.
+        DataType address_dtype = DataType::Int(64);
+        load_index = FloorDiv(Cast(address_dtype, annotated_offset) *
+                                  IntImm(address_dtype, pointer_elem_bits),
+                              IntImm(address_dtype, buffer_elem_bits));
+        if (load_index.dtype() != flat->shape[0].dtype()) {
+          load_index = Cast(flat->shape[0].dtype(), load_index);
+        }
+      }
       return AccessPtrInfo{
-          BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
+          BufferLoad(flat, Array<PrimExpr>{load_index}),
           ptr_call->args[4],
+          pointer_element_dtype,
+          annotated_offset,
+          annotated_extent,
       };
     }
 
@@ -574,6 +613,66 @@ private:
     return info.value();
   }
 
+  // When tvm_access_ptr annotates a different element type than the backing
+  // buffer, interpret offset/extent in annotation-dtype units, convert to a
+  // bit range, and compare against the backing buffer's bit size.
+  Array<PrimExpr> CollectAnnotatedByteRangeConditions(const AccessPtrInfo &info,
+                                                      bool is_load) {
+    Array<PrimExpr> conditions;
+    ICHECK(info.annotated_offset.has_value() &&
+           info.annotated_extent.has_value())
+        << "annotated byte-range check requires tvm_access_ptr offset/extent";
+    Buffer buffer = info.base_load->buffer;
+    // Match CheckBufferIndices: only global buffers get runtime guards.
+    if (buffer.scope() != "global") {
+      return conditions;
+    }
+
+    int pointer_elem_bits =
+        info.element_dtype.bits() * info.element_dtype.lanes();
+    int buffer_elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
+    ICHECK_GT(pointer_elem_bits, 0)
+        << "tvm_access_ptr element width must be positive";
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "tvm_access_ptr buffer element width must be positive";
+
+    DataType address_dtype = DataType::Int(64);
+    PrimExpr bit_begin =
+        Cast(address_dtype, info.annotated_offset.value()) *
+        IntImm(address_dtype, pointer_elem_bits);
+    PrimExpr bit_end =
+        bit_begin + Cast(address_dtype, info.annotated_extent.value()) *
+                        IntImm(address_dtype, pointer_elem_bits);
+
+    Buffer flat = buffer.GetFlattenedBuffer();
+    PrimExpr flat_extent = Cast(address_dtype, flat->shape[0]);
+    for (size_t i = 1; i < flat->shape.size(); ++i) {
+      flat_extent =
+          flat_extent * Cast(address_dtype, flat->shape[i]);
+    }
+    PrimExpr buffer_bits =
+        flat_extent * IntImm(address_dtype, buffer_elem_bits);
+
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+    (void)is_load;
+    checker.PushCondition(bit_begin >= make_zero(bit_begin.dtype()));
+    checker.PushCondition(bit_end <= buffer_bits);
+    return checker.GetConditions();
+  }
+
+  bool NeedsAnnotatedByteRangeCheck(const AccessPtrInfo &info) {
+    if (!info.annotated_offset.has_value() ||
+        !info.annotated_extent.has_value()) {
+      return false;
+    }
+    int pointer_elem_bits =
+        info.element_dtype.bits() * info.element_dtype.lanes();
+    int buffer_elem_bits =
+        info.base_load->buffer->dtype.bits() *
+        info.base_load->buffer->dtype.lanes();
+    return pointer_elem_bits != buffer_elem_bits;
+  }
+
   Array<PrimExpr> CollectAccessPtrConditions(const PrimExpr &expr,
                                              int required_mask) {
     Array<PrimExpr> conditions;
@@ -582,8 +681,12 @@ private:
       return conditions;
     }
 
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     bool is_load = (GetConstAccessMask(info->rw_mask) & kAccessRead) != 0;
+    if (NeedsAnnotatedByteRangeCheck(info.value())) {
+      return CollectAnnotatedByteRangeConditions(info.value(), is_load);
+    }
+
+    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker.CheckBufferIndices(info->base_load->buffer,
                                info->base_load->indices, is_load,
                                /*throw_warning=*/false);
@@ -614,6 +717,10 @@ private:
         GetRequiredAccessPtrInfo(call->args[kCPAsyncSrcPtrArg], "cp.async");
     if (!AccessMaskMayUse(src_info.rw_mask, kAccessRead)) {
       return conditions;
+    }
+
+    if (NeedsAnnotatedByteRangeCheck(src_info)) {
+      return CollectAnnotatedByteRangeConditions(src_info, /*is_load=*/true);
     }
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);

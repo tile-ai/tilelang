@@ -587,6 +587,100 @@ def test_oob_store():
     assert_oob_store_legalize(64, 64)
 
 
+def test_tvm_access_ptr_uint8_over_float32_in_bounds_no_false_oob():
+    """Regression for #3493: annotation-dtype units must drive tvm_access_ptr bounds.
+
+    Each transfer copies 16 bytes from a float32 buffer via a uint8 access pointer.
+    All accesses with b in [0, 8) are in bounds; treating offset=b*16 as float32
+    elements would falsely reject every access with b >= 2.
+    """
+    blocks = 8
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((blocks, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    # The buggy unit scaling produced a guard equivalent to (b * 16) < 32, which
+    # is false for every in-bounds block index b >= 2. After the fix the guard
+    # must stay true for every b in [0, blocks).
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in range(blocks):
+        substituted = analyzer.simplify(
+            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
+        )
+        assert analyzer.can_prove(substituted), (
+            f"in-bounds block {block_idx} was predicated off; predicate={predicate}"
+        )
+
+
+def test_tvm_access_ptr_uint8_over_float32_oob_keeps_guard():
+    """Companion to #3493: truly OOB byte-range transfers must still be guarded."""
+    blocks = 8
+
+    @T.prim_func
+    def main(
+        # Only 2 rows => 32 bytes; offsets b*16 for b in [2, 8) are out of range.
+        src: T.Tensor((2, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected an OOB predicate for the oversized byte range"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    # First two rows are still in-bounds (32 bytes).
+    for block_idx in (0, 1):
+        substituted = analyzer.simplify(
+            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
+        )
+        assert analyzer.can_prove(substituted), (
+            f"in-bounds block {block_idx} should pass; predicate={predicate}"
+        )
+    # Later rows exceed the 32-byte buffer.
+    for block_idx in range(2, blocks):
+        substituted = analyzer.simplify(
+            tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")})
+        )
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)) or not analyzer.can_prove(substituted), (
+            f"OOB block {block_idx} should not be unconditionally true; predicate={predicate}"
+        )
+
+
 def test_cp_async_access_ptr_oob():
     assert_cp_async_access_ptr_legalize()
 
