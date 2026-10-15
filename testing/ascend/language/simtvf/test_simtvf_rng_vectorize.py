@@ -1,6 +1,6 @@
 """Tests for implicit SIMT floating-point RNG fusion in Ascend codegen."""
 
-import ast
+import re
 
 import pytest
 import torch
@@ -98,12 +98,11 @@ def _rng_vector_local(distribution, unrolled):
 @pytest.mark.parametrize("unrolled", [False, True], ids=["literal", "unrolled"])
 def test_pto_rng_vector_local_lane_offsets(distribution, unrolled):
     source = tilelang.lower(_rng_vector_local(distribution, unrolled), target="pto", enable_device_compile=False).kernel_source
-    source = ast.unparse(ast.parse(source))
     assert "vals = pto.alloc_buffer((4,), pto.f32)" in source
     assert "vals[" not in source
     if unrolled:
         assert ", vals, slot * 2)" in source
-        assert ", vals, slot * 2 + 1)" in source
+        assert re.search(r", vals, \(?slot \* 2\)? \+ 1\)", source)
     else:
         for offset in range(4):
             assert f", vals, {offset})" in source

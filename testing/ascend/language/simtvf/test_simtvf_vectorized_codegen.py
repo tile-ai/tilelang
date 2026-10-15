@@ -1,6 +1,5 @@
 """Regression tests for small-vector expression codegen in Ascend SIMT blocks."""
 
-import ast
 import re
 
 import pytest
@@ -182,35 +181,13 @@ def _vector_local_kernel(lanes, unrolled):
 @pytest.mark.parametrize("lanes,unrolled", _VECTOR_LOCAL_CASES)
 def test_pto_vector_local_uses_scalar_addressed_storage(lanes, unrolled):
     source = tilelang.lower(_vector_local_kernel(lanes, unrolled), target="pto", enable_device_compile=False).kernel_source
-    tree = ast.parse(source)
-    allocation = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == "pto.alloc_buffer"
-    )
-    local_name = allocation.targets[0].id
-    assert ast.literal_eval(allocation.value.args[0]) == (2 * lanes,)
-    assert ast.unparse(allocation.value.args[1]) == "pto.f32"
-    assert not any(
-        isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == local_name for node in ast.walk(tree)
-    )
-    for operation, buffer_arg in [("load", 0), ("store", 1)]:
-        accesses = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and ast.unparse(node.func) == f"pto.{operation}"
-            and isinstance(node.args[buffer_arg], ast.Name)
-            and node.args[buffer_arg].id == local_name
-        ]
-        assert accesses
-        for access in accesses:
-            assert any(keyword.arg == "contiguous" and ast.literal_eval(keyword.value) == lanes for keyword in access.keywords)
-        offsets = [ast.unparse(access.args[buffer_arg + 1]) for access in accesses]
-        if operation == "store" and unrolled:
-            assert f"t * {lanes}" in offsets
-        else:
-            assert str(lanes) in offsets
+    assert f"vals = pto.alloc_buffer(({2 * lanes},), pto.f32)" in source
+    assert "vals[" not in source
+    for offset in (0, lanes):
+        assert f"pto.load(vals, {offset}, contiguous={lanes})" in source
+    assert re.search(rf"pto\.store\([^\n]+, vals, 0, contiguous={lanes}\)", source)
+    offset = rf"t \* {lanes}" if unrolled else str(lanes)
+    assert re.search(rf"pto\.store\([^\n]+, vals, {offset}, contiguous={lanes}\)", source)
 
 
 @tilelang.testing.requires_ascend
