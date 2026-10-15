@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "common/pipeline_utils.h"
+#include "op/region.h"
 #include "pipeline/barrier.h"
 #include "pipeline/helpers.h"
 #include "pipeline/rewriter.h"
@@ -37,30 +38,72 @@ using tirx::GetSBlockReadWriteRegion;
 namespace software_pipeline {
 
 /*!
- * \brief A StmtExprMutator that replaces Buffer objects in BufferLoad and
- * BufferStore nodes with new Buffer objects from a replacement map.
- * Used to reconcile old and new expanded buffer objects when sibling
- * pipelines share buffers.
+ * \brief Reconcile pipeline buffer views at their allocation scope.
+ * Expanded views keep their loop-local version indices. Unexpanded accesses
+ * use slot zero of the shared multi-version allocation.
  */
 class BufferReplacer : public StmtExprMutator {
 public:
   explicit BufferReplacer(const Map<Buffer, Buffer> &replacements)
-      : replacements_(replacements) {}
+      : replacements_(replacements) {
+    for (const auto &[old_buffer, new_buffer] : replacements_) {
+      if (old_buffer->shape.size() < new_buffer->shape.size()) {
+        remapped_allocs_.emplace_back(old_buffer, new_buffer);
+      }
+    }
+  }
 
 private:
+  BufferRegion RewriteBufferRegion(const BufferRegion &region) const {
+    if (auto new_buffer = replacements_.Get(region->buffer)) {
+      Region bounds = region->region;
+      if (bounds.size() < new_buffer.value()->shape.size()) {
+        ICHECK_EQ(bounds.size() + 1, new_buffer.value()->shape.size());
+        bounds.insert(bounds.begin(), Range::FromMinExtent(0, 1));
+      }
+      return BufferRegion(new_buffer.value(), bounds);
+    }
+    return region;
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     if (auto new_buf = replacements_.Get(node->buffer)) {
-      node.CopyOnWrite()->buffer = new_buf.value();
+      auto *n = node.CopyOnWrite();
+      n->buffer = new_buf.value();
+      if (n->indices.size() < n->buffer->shape.size()) {
+        ICHECK_EQ(n->indices.size() + 1, n->buffer->shape.size());
+        n->indices.insert(n->indices.begin(), Integer(0));
+      }
     }
     return node;
   }
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     if (auto new_buf = replacements_.Get(node->buffer)) {
-      node.CopyOnWrite()->buffer = new_buf.value();
+      auto *n = node.CopyOnWrite();
+      n->buffer = new_buf.value();
+      if (n->indices.size() < n->buffer->shape.size()) {
+        ICHECK_EQ(n->indices.size() + 1, n->buffer->shape.size());
+        n->indices.insert(n->indices.begin(), Integer(0));
+      }
     }
     return node;
+  }
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        size_t num_extents = call->args.size() - 2;
+        if (load->indices.size() == num_extents + 1) {
+          Array<PrimExpr> args = call->args;
+          args.insert(args.begin() + 2, Integer(1));
+          return Call(call->dtype, call->op, args, call->annotations,
+                      call->span);
+        }
+      }
+    }
+    return call;
   }
   Stmt VisitStmt_(const DeclBufferNode *op) final {
     if (auto new_buf = replacements_.Get(op->buffer)) {
@@ -92,31 +135,31 @@ private:
     }
     Array<BufferRegion> reads;
     for (const auto &region : block->reads) {
-      if (auto new_buf = replacements_.Get(region->buffer)) {
-        reads.push_back(BufferRegion(new_buf.value(), region->region));
-        changed = true;
-      } else {
-        reads.push_back(region);
-      }
+      BufferRegion rewritten = RewriteBufferRegion(region);
+      changed = changed || !rewritten.same_as(region);
+      reads.push_back(rewritten);
     }
     Array<BufferRegion> writes;
     for (const auto &region : block->writes) {
-      if (auto new_buf = replacements_.Get(region->buffer)) {
-        writes.push_back(BufferRegion(new_buf.value(), region->region));
-        changed = true;
-      } else {
-        writes.push_back(region);
-      }
+      BufferRegion rewritten = RewriteBufferRegion(region);
+      changed = changed || !rewritten.same_as(region);
+      writes.push_back(rewritten);
     }
+    auto annotations = block->annotations;
+    changed = UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs_,
+                                                       &annotations) ||
+              changed;
     if (changed) {
       SBlockNode *bn = block.CopyOnWrite();
       bn->alloc_buffers = std::move(alloc_buffers);
       bn->reads = std::move(reads);
       bn->writes = std::move(writes);
+      bn->annotations = std::move(annotations);
     }
     return block;
   }
   Map<Buffer, Buffer> replacements_;
+  std::vector<std::pair<Buffer, Buffer>> remapped_allocs_;
 };
 
 class PipelineInjector : private StmtExprMutator {
@@ -325,6 +368,20 @@ private:
     return preserved_annotations;
   }
 
+  void CollectBufferReplacements(const Buffer &buffer, const Buffer &allocation,
+                                 Map<Buffer, Buffer> *replacements) {
+    if (auto expansions = buffer_expansions_.Get(buffer)) {
+      // Include the original buffer for single-version and non-pipelined uses.
+      replacements->Set(buffer, allocation);
+      for (const Buffer &expanded : expansions.value()) {
+        if (!expanded.same_as(allocation)) {
+          replacements->Set(expanded, allocation);
+        }
+      }
+      buffer_expansions_.erase(buffer);
+    }
+  }
+
   Stmt VisitStmt_(const SeqStmtNode *op) final {
     struct ScopedAllocation {
       Buffer buffer;
@@ -336,6 +393,7 @@ private:
     std::vector<std::pair<Var, Optional<Buffer>>> old_bindings;
     std::vector<ScopedAllocation> old_allocated;
     std::vector<std::pair<size_t, size_t>> flat_alloc_indices;
+    Map<Buffer, Buffer> replacements;
 
     auto register_buffer = [&](const Buffer &buffer,
                                bool is_allocation) -> std::optional<size_t> {
@@ -352,11 +410,12 @@ private:
 
     auto apply_pending_flat_alloc_remaps = [&]() {
       for (auto &[stmt_index, alloc_state_index] : flat_alloc_indices) {
-        const Buffer &old_buffer = old_allocated[alloc_state_index].buffer;
+        Buffer old_buffer = old_allocated[alloc_state_index].buffer;
         if (auto remapped = pending_buffer_remap_.Get(old_buffer)) {
           const auto *alloc = seq[stmt_index].as<AllocBufferNode>();
           ICHECK(alloc != nullptr);
           Buffer new_buffer = remapped.value();
+          CollectBufferReplacements(old_buffer, new_buffer, &replacements);
           seq.Set(stmt_index,
                   AllocBuffer(new_buffer, alloc->annotations, alloc->span));
           buffer_data_to_buffer_.Set(old_buffer->data, new_buffer);
@@ -376,7 +435,6 @@ private:
       Stmt new_child = VisitStmt(child);
       changed = changed || !new_child.same_as(child);
       seq.push_back(new_child);
-      apply_pending_flat_alloc_remaps();
 
       if (const auto *alloc = new_child.as<AllocBufferNode>()) {
         std::optional<size_t> alloc_state_index =
@@ -388,6 +446,9 @@ private:
         register_buffer(decl->buffer, false);
       }
     }
+    // Keep the original buffer registered while visiting sibling loops. Each
+    // loop computes its own version requirement; resize the allocation only
+    // after all uses in this scope have been visited.
     apply_pending_flat_alloc_remaps();
 
     for (auto it = old_allocated.rbegin(); it != old_allocated.rend(); ++it) {
@@ -406,7 +467,11 @@ private:
     if (!changed) {
       return GetRef<Stmt>(op);
     }
-    return SeqStmt(seq, op->span);
+    Stmt result = SeqStmt(seq, op->span);
+    if (!replacements.empty()) {
+      result = BufferReplacer(replacements)(std::move(result));
+    }
+    return result;
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -442,52 +507,6 @@ private:
     pipeline_allocs =
         CollectUsedPipelineBuffers(MakePipelineBody(pipeline_body_stmts),
                                    buffer_data_to_buffer_, allocated_buffers_);
-
-    // Handle already-expanded buffers from previous sibling pipelines.
-    // When two T.Pipelined loops share the same alloc_shared buffer with
-    // different num_stages, the first pipeline expands the buffer (e.g.,
-    // (64,32) → (2,64,32)).  The second pipeline must also expand it (to 5
-    // versions for num_stages=4), but it must expand the *original* 2D buffer,
-    // not the already-3D buffer from the first pipeline (which would produce
-    // a 4D buffer and crash LayoutInference).
-    //
-    // Fix: replace each already-expanded 3D buffer in pipeline_allocs with its
-    // original 2D form.  After RewritePipeline creates a new expansion, we
-    // reconcile the two Buffer objects by replacing all references to the old
-    // expanded buffer with the new one.
-    {
-      Array<Buffer> fixed_allocs;
-      for (const auto &buf : pipeline_allocs) {
-        Buffer orig_2d;
-        Buffer old_expanded;
-        // Check if a pending remap's value (expanded buffer) matches this
-        // buffer by comparing their data Vars.
-        for (const auto &[remap_key, remap_val] : pending_buffer_remap_) {
-          if (remap_val->data.same_as(buf->data)) {
-            orig_2d = remap_key;
-            old_expanded = remap_val;
-            break;
-          }
-        }
-        if (orig_2d.defined()) {
-          // Track the old expanded buffer (3D from first pipeline) for
-          // later replacement with the new expanded buffer (3D from
-          // the second pipeline).
-          old_expanded_buffers_.Set(orig_2d, old_expanded);
-          // Use the original 2D buffer so RewritePipeline creates a
-          // fresh expansion with this pipeline's num_stages.
-          fixed_allocs.push_back(orig_2d);
-          LOG(WARNING)
-              << "Buffer " << buf->name
-              << " is shared across sibling Pipelined loops with "
-                 "different num_stages.  The second loop will re-expand "
-                 "the original buffer instead of double-expanding.";
-        } else {
-          fixed_allocs.push_back(buf);
-        }
-      }
-      pipeline_allocs = std::move(fixed_allocs);
-    }
 
     Optional<Array<Integer>> replayable_bind_mask;
     if (auto replayable_bind_anno =
@@ -784,26 +803,6 @@ private:
         pipeline_info, scalar_binding_blocks, target_);
     Stmt pipeline = rewrite_result.pipeline;
 
-    // Reconcile old and new expanded buffers for siblings sharing buffers.
-    // The first pipeline's expansion created a buffer with shape (2,64,32),
-    // and the second pipeline creates one with 5 versions.  We must unify them
-    // so that later passes (LayoutInference) see a single buffer object for
-    // each Var.
-    if (!old_expanded_buffers_.empty()) {
-      for (const auto &[orig_2d, old_expanded] : old_expanded_buffers_) {
-        for (const auto &[pipe_alloc, new_expanded] :
-             rewrite_result.buffer_remap) {
-          if (pipe_alloc.same_as(orig_2d)) {
-            old_expanded_to_new_.Set(old_expanded, new_expanded);
-            break;
-          }
-        }
-      }
-      if (!old_expanded_to_new_.empty()) {
-        pipeline = BufferReplacer(old_expanded_to_new_)(std::move(pipeline));
-      }
-    }
-
     subtree_modified_ = true;
 
     auto unwrap_outer_attrs = [](Stmt stmt) {
@@ -885,9 +884,21 @@ private:
       }
     }
 
-    // Store the buffer remapping for updating outer block alloc_buffers
-    for (const auto &kv : rewrite_result.buffer_remap) {
-      pending_buffer_remap_.Set(kv.first, kv.second);
+    // Reserve enough space for every pipeline using the allocation. Keep all
+    // loop-local views until the allocation scope can reconcile them without
+    // changing the version indices generated by each pipeline.
+    for (const auto &[buffer, expanded] : rewrite_result.buffer_remap) {
+      Array<Buffer> expansions =
+          buffer_expansions_.Get(buffer).value_or(Array<Buffer>{});
+      expansions.push_back(expanded);
+      buffer_expansions_.Set(buffer, expansions);
+
+      Buffer allocation = pending_buffer_remap_.Get(buffer).value_or(expanded);
+      if (Downcast<IntImm>(expanded->shape[0])->value >
+          Downcast<IntImm>(allocation->shape[0])->value) {
+        allocation = expanded;
+      }
+      pending_buffer_remap_.Set(buffer, allocation);
     }
     pipeline = LowerAsyncCommitWaitAttrs(pipeline);
 
@@ -908,32 +919,6 @@ private:
     // Propagate to parent: if this subtree was modified, parent should know.
     subtree_modified_ = outer_flag || children_modified;
 
-    // Reconcile old and new expanded buffer objects from sibling pipelines.
-    // When two sibling T.Pipelined loops share buffers, the first pipeline
-    // creates an old expanded buffer (e.g. (2,64,32)) and the second creates
-    // a new one (e.g. (5,64,32)).  We must replace all references to the old
-    // buffer in the entire block body with the new one so LayoutInference
-    // sees a single consistent buffer object per Var.
-    //
-    // Compose replacement chains to handle 3+ sibling pipelines sharing the
-    // same buffer.  Without composition, A->B followed by B->C would leave
-    // references to B in the IR, creating mixed buffer objects for the same
-    // data Var.
-    if (!old_expanded_to_new_.empty()) {
-      Map<Buffer, Buffer> composed;
-      for (const auto &[key, val] : old_expanded_to_new_) {
-        Buffer resolved = val;
-        while (auto next = old_expanded_to_new_.Get(resolved)) {
-          resolved = next.value();
-        }
-        composed.Set(key, resolved);
-      }
-      old_expanded_to_new_ = std::move(composed);
-      block = Downcast<SBlock>(
-          BufferReplacer(old_expanded_to_new_)(std::move(block)));
-      children_modified = true;
-    }
-
     // Update alloc_buffers with any pending buffer remaps from pipeline
     // rewriting. This handles buffers allocated in this block but
     // multi-versioned during pipeline rewriting of inner loops.
@@ -941,10 +926,13 @@ private:
     bool layout_changed = false;
     Array<Buffer> new_alloc_buffers;
     std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
+    Map<Buffer, Buffer> replacements;
     for (const auto &buffer : block->alloc_buffers) {
       if (auto remapped = pending_buffer_remap_.Get(buffer)) {
         new_alloc_buffers.push_back(remapped.value());
         remapped_allocs.emplace_back(buffer, remapped.value());
+        CollectBufferReplacements(buffer, remapped.value(), &replacements);
+        buffer_data_to_buffer_.Set(buffer->data, remapped.value());
         pending_buffer_remap_.erase(buffer);
         allocs_changed = true;
       } else {
@@ -1012,6 +1000,10 @@ private:
         bn->alloc_buffers = new_alloc_buffers;
         allocs_changed = false; // already applied
       }
+    }
+
+    if (!replacements.empty()) {
+      block = Downcast<SBlock>(BufferReplacer(replacements)(std::move(block)));
     }
 
     bool modified = children_modified || allocs_changed || layout_changed;
@@ -1133,11 +1125,8 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> allocated_buffers_;
   Map<Buffer, Buffer> pending_buffer_remap_;
-  // Tracks old expanded buffers (from previous sibling pipelines) that need
-  // to be replaced.  Key: original 2D buffer, Value: old 3D expanded buffer.
-  Map<Buffer, Buffer> old_expanded_buffers_;
-  // Maps old expanded buffers to new expanded buffers for reconciliation.
-  Map<Buffer, Buffer> old_expanded_to_new_;
+  // All loop-local expanded views, keyed by their original allocation.
+  Map<Buffer, Array<Buffer>> buffer_expansions_;
   std::vector<std::pair<Buffer, Buffer>> pending_layout_remapped_allocs_;
   Optional<Target> target_;
   Optional<String> global_symbol_;
