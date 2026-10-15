@@ -705,6 +705,13 @@ private:
     opaque_pointer_context_ = previous_context;
   }
 
+  bool HasNd2NzLogicalRegion(const CallNode *op, size_t index) const {
+    auto annotation = op->annotations.Get("nd2nz_logical_regions");
+    const auto *mask =
+        annotation ? annotation.value().as<IntImmNode>() : nullptr;
+    return mask && (mask->value & (1 << index));
+  }
+
   void VisitNZPhysicalPointer(const CallNode *op, size_t index,
                               std::optional<int64_t> bytes, int mask) {
     const PrimExpr &pointer = op->args[index];
@@ -716,8 +723,7 @@ private:
     if (load && load->buffer->shape.size() >= 2) {
       size_t ndim = load->buffer->shape.size();
       if (op->args.size() == 7 && bytes && *bytes > 0 &&
-          op->annotations.count("nd2nz_logical_regions") &&
-          load->indices.size() == ndim) {
+          HasNd2NzLogicalRegion(op, index) && load->indices.size() == ndim) {
         // InsertNd2Nz proved that these logical axes map to the NZ DMA
         // blocks. Its access_ptr extent is a physical span including gaps;
         // interpreting it as a row-major run can omit rows of a column slice.
@@ -952,8 +958,7 @@ private:
         bool is_read = arg == (scatter ? 0U : 1U);
         bool logical = load->indices.size() >= 2 &&
                        load->indices.size() == load->buffer->shape.size() &&
-                       (!is_read || scatter ||
-                        op->annotations.count("nd2nz_logical_regions"));
+                       ((is_read && scatter) || HasNd2NzLogicalRegion(op, arg));
         if (!logical) {
           // Opaque physical views do not expose logical matrix axes. Their
           // base-element access_ptr is not a footprint; retain the whole view

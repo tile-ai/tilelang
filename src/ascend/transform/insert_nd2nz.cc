@@ -267,9 +267,10 @@ private:
   }
 
   Stmt Intrinsic(const Op &op, Array<PrimExpr> args, bool scatter) const {
-    // These pointers still use logical buffer indices before LowerTileOp.
+    // Each bit proves that the corresponding pointer argument's logical
+    // rectangle maps to the NZ DMA blocks before LowerTileOp.
     Call call(DataType::Void(), op, args,
-              {{"nd2nz_logical_regions", Integer(1)}});
+              {{"nd2nz_logical_regions", Integer(3)}});
     auto geometry = ParseNd2NzGeometry(call.get(), scatter);
     return geometry.Empty() ? Evaluate(Integer(0)) : Evaluate(call);
   }
@@ -466,29 +467,63 @@ private:
           << "NZ post-copy requires matching UB/L1 pointer element widths";
     Array<PrimExpr> indices = load->indices;
     Array<PrimExpr> shape = buffer->shape;
+    Array<PrimExpr> strides = buffer->strides;
     if (auto layout = LayoutFor(buffer)) {
       indices = layout.value()->Forward(indices);
       shape = layout.value()->OutputShape();
+      // LowerTileOp materializes dense physical storage. Logical strides
+      // neither describe those axes nor necessarily have the same rank.
+      strides = {};
     }
-    PrimExpr offset = cast(DataType::Int(64), buffer->elem_offset);
+    PrimExpr offset = make_const(DataType::Int(64), 0);
     PrimExpr capacity = Integer(1), stride = Integer(1);
     for (size_t i = shape.size(); i-- > 0;) {
-      PrimExpr step = buffer->strides.empty() ? stride : buffer->strides[i];
+      PrimExpr step = strides.empty() ? stride : strides[i];
       offset = offset + cast(DataType::Int(64), indices[i]) * step;
       capacity = capacity + (cast(DataType::Int(64), shape[i]) - 1) * step;
       stride = stride * cast(DataType::Int(64), shape[i]);
     }
-    if (!analyzer_->CanProveEqual(floormod(offset * Integer(element_bytes), 32),
-                                  0))
+    // Alignment uses the absolute address; bounds are relative to this view.
+    PrimExpr address = offset + cast(DataType::Int(64), buffer->elem_offset);
+    if (!analyzer_->CanProveEqual(
+            floormod(address * Integer(element_bytes), 32), 0))
       TVM_FFI_THROW(ValueError)
           << "NZ post-copy requires a 32-byte-aligned pointer: "
           << buffer->name;
-    if (!analyzer_->CanProve(offset >= 0 &&
+    if (!analyzer_->CanProve(address >= 0 && offset >= 0 &&
                              offset + Integer(span_bytes / element_bytes) <=
                                  capacity))
       TVM_FFI_THROW(ValueError)
           << "NZ post-copy physical span exceeds pointer buffer capacity: "
           << buffer->name;
+  }
+
+  bool HasLogicalPostCopyDestination(const PrimExpr &pointer,
+                                     const Nd2NzGeometry &geometry) const {
+    const auto *access = pointer.as<CallNode>();
+    const auto *load = access && access->op.same_as(tl::access_ptr())
+                           ? access->args[0].as<BufferLoadNode>()
+                           : nullptr;
+    if (!load || !IsNZBuffer(load->buffer))
+      return false;
+    const Buffer &buffer = load->buffer;
+    size_t ndim = buffer->shape.size();
+    Array<Range> ranges;
+    for (size_t i = 0; i < ndim; ++i) {
+      PrimExpr extent = Integer(i + 2 == ndim   ? geometry.rows
+                                : i + 1 == ndim ? geometry.cols
+                                                : 1);
+      if (!analyzer_->CanProve(load->indices[i] >= 0 &&
+                               load->indices[i] + extent <= buffer->shape[i]))
+        return false;
+      ranges.push_back(Range::FromMinExtent(load->indices[i], extent));
+    }
+    int c0 = AscendC0(buffer->dtype.bits());
+    if (!analyzer_->CanProveEqual(floormod(load->indices.back(), c0), 0) ||
+        !analyzer_->CanProveEqual(floormod(buffer->elem_offset, c0), 0))
+      return false;
+    return analyzer_->CanProveEqual(NZPitch(buffer, ranges),
+                                    Integer(geometry.dst_pitch));
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
@@ -505,7 +540,15 @@ private:
       ValidatePostCopyPointer(call->args[1],
                               geometry.SpanBytes(geometry.src_pitch),
                               geometry.src_bytes, true);
-      return Parent::VisitStmt_(op);
+      // Explicit pitches need not match a multidimensional view's layout.
+      // Prove the destination independently; an opaque source must not erase
+      // the disjoint AIV row slices of a valid NZ destination.
+      Call validated = GetRef<Call>(call);
+      validated.CopyOnWrite()->annotations.Set(
+          "nd2nz_logical_regions",
+          Integer(HasLogicalPostCopyDestination(call->args[0], geometry) ? 1
+                                                                         : 0));
+      return Evaluate(validated);
     }
     if (call == nullptr || !IsAscendCopyCall(call))
       return Parent::VisitStmt_(op);

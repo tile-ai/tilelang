@@ -128,3 +128,28 @@ def test_existing_bf16_physical_view_keeps_owner_and_pitch(parts):
     packed[:, :, :32, :] = x.reshape(2, 32, 4, 16).permute(0, 2, 1, 3)
     kernel = tilelang.compile(_partial_copy_to_l1(0, parts, physical_view=True), target="ascend", out_idx=-1)
     torch.testing.assert_close(kernel(identity, packed.flatten()), x.float(), rtol=0, atol=0)
+
+
+def test_post_copy_from_offset_physical_view():
+    offset, size = 16, 32 * 64
+
+    @T.prim_func
+    def main(identity: T.Tensor((64, 64), "bfloat16"), x: T.Tensor((2, offset + size), "bfloat16"), out: T.Tensor((64, 64), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            owner = T.alloc_shared((offset + size,), "bfloat16")
+            view = tirx.decl_buffer((size,), "bfloat16", data=owner.data, elem_offset=offset, scope="shared.dyn")
+            x_l1 = T.alloc_l1((64, 64), "bfloat16")
+            identity_l1 = T.alloc_l1((64, 64), "bfloat16")
+            result = T.alloc_l0c((64, 64), "float32")
+            T.copy(x[sid, :], owner)
+            T.ascend_nd2nz_post_copy(x_l1[sid * 32, 0], view[0], 32, 64, src_pitch=32, dst_pitch=64, dtype="bfloat16")
+            T.copy(identity, identity_l1)
+            T.gemm(x_l1, identity_l1, result, transpose_B=True, clear_accum=True)
+            T.copy(result, out)
+
+    identity = torch.eye(64, dtype=torch.bfloat16, device="npu")
+    x = (torch.arange(4096, device="npu") % 127).reshape(64, 64).to(torch.bfloat16)
+    packed = torch.full((2, offset + size), -13, dtype=x.dtype, device=x.device)
+    packed[:, offset:] = x.reshape(2, 32, 4, 16).permute(0, 2, 1, 3).reshape(2, size)
+    kernel = tilelang.compile(main, target="ascend", out_idx=-1)
+    torch.testing.assert_close(kernel(identity, packed), x.float(), rtol=0, atol=0)

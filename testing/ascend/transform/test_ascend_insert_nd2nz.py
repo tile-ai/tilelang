@@ -228,3 +228,44 @@ def test_canonical_nz_source_pitch_includes_fractal_rounding(source_rows, rows, 
     )
     (call,) = calls(transform.InsertNd2Nz()(before), "tl.ascend_nd2nz_post_copy")
     assert [int(x) for x in call.args[2:6]] == [rows, 64, pitch, 32]
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("explicit_strides", [False, True])
+def test_explicit_post_copy_uses_dense_physical_layout_strides(staged, explicit_strides):
+    from tilelang.layout import make_ascend_nz_layout
+    from testing.ascend._ir import kernel
+
+    src_shape = (2, 65, 128) if staged else (65, 128)
+    dst_shape = (2, 64, 16) if staged else (64, 16)
+    src_strides = ((65 * 128, 128, 1) if staged else (128, 1)) if explicit_strides else None
+    dst_strides = ((64 * 16, 16, 1) if staged else (16, 1)) if explicit_strides else None
+    src = tirx.decl_buffer(src_shape, "bfloat16", scope="shared.dyn", strides=src_strides)
+    dst = tirx.decl_buffer(dst_shape, "bfloat16", scope="shared.l1", strides=dst_strides)
+    prefix = (1,) if staged else ()
+    before = kernel(
+        tirx.Evaluate(
+            T.ascend_nd2nz_post_copy(dst[prefix + (0, 0)], src[prefix + (0, 16)], 64, 16, src_pitch=65, dst_pitch=64, dtype="bfloat16")
+        ),
+        buffers=[src, dst],
+        annotations={"layout_map": {src: make_ascend_compact_nz_layout(src), dst: make_ascend_nz_layout(dst)}},
+    )
+    assert len(calls(transform.InsertNd2Nz()(before), "tl.ascend_nd2nz_post_copy")) == 1
+
+
+@pytest.mark.parametrize("elem_offset,index,valid", [(16, 0, True), (1024, 0, True), (16, -16, False), (16, 16, False), (-16, 0, False)])
+def test_explicit_post_copy_checks_capacity_relative_to_view(elem_offset, index, valid):
+    from testing.ascend._ir import kernel
+
+    owner = tirx.decl_buffer((2048,), "bfloat16", scope="shared.dyn")
+    view = tirx.decl_buffer((1024,), "bfloat16", scope="shared.dyn", data=owner.data, elem_offset=elem_offset)
+    dst = tirx.decl_buffer((1024,), "bfloat16", scope="shared.l1")
+    before = kernel(
+        tirx.Evaluate(T.ascend_nd2nz_post_copy(dst[0], view[index], 64, 16, src_pitch=64, dst_pitch=64, dtype="bfloat16")),
+        buffers=[owner, dst],
+    )
+    if valid:
+        assert len(calls(transform.InsertNd2Nz()(before), "tl.ascend_nd2nz_post_copy")) == 1
+    else:
+        with pytest.raises(ValueError, match="physical span exceeds"):
+            transform.InsertNd2Nz()(before)
