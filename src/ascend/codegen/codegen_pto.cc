@@ -2771,13 +2771,10 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
              "float32, int8, uint8, int32, uint32, and "
              "float8_e4m3fn/float8_e5m2, got "
           << buffer->dtype;
-      stream << vid << " = pto.alloc_buffer((" << opt_size.value() << ",), "
-             << (buffer->dtype.is_vector()
-                     ? (tl::IsAscendVectorizableFP8(buffer->dtype)
-                            ? DataTypeName(buffer->dtype)
-                            : ScalarType(elem))
-                     : SIMTLocalStorageTypeName(buffer->dtype))
-             << ")\n";
+      // SIMT locals use scalar-addressed storage, including vector slots.
+      stream << vid << " = pto.alloc_buffer(("
+             << opt_size.value() * buffer->dtype.lanes() << ",), "
+             << SIMTLocalStorageTypeName(elem) << ")\n";
     } else if (persistent) {
       ICHECK(IsFloat32(buffer->dtype))
           << "PTO persistent local allocation currently supports float32 "
@@ -7416,6 +7413,16 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
   DataType value_dtype = op->dtype;
   DataType element_dtype = op->buffer->dtype;
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && element_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Convert vector slots to scalar offsets for the existing contiguous load.
+    index = VectorBufferElemIndex(index);
+    index = arith::Analyzer().Simplify(
+        index * make_const(index.dtype(), element_dtype.lanes()));
+    element_dtype = element_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): reading one slot yields a whole vector register. Emit a plain
@@ -7452,10 +7459,9 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
            "and 8 only, got "
         << value_dtype;
     const int lanes = value_dtype.lanes();
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "load");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "load");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     if (scope == "local.fragment" || scope == "local") {
@@ -7601,11 +7607,20 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   DataType buffer_dtype = op->buffer->dtype;
   DataType value_dtype = op->value.dtype();
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && buffer_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Match the scalar-addressed allocation and contiguous load path.
+    index = VectorBufferElemIndex(index);
+    index = arith::Analyzer().Simplify(
+        index * make_const(index.dtype(), buffer_dtype.lanes()));
+    buffer_dtype = buffer_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): the value is a whole vector register stored into one buffer
-  // slot. Emit a plain Python assignment; the buffer was allocated as a list
-  // (non-SIMT) or pto.alloc_buffer (SIMT).
+  // slot outside SIMT. Emit an assignment to its Python vector value.
   if (buffer_dtype.lanes() > 1) {
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
     PrintIndent();
@@ -7645,10 +7660,9 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
            "4, and 8 only, got "
         << value_dtype;
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "store");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "store");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     PrintIndent();

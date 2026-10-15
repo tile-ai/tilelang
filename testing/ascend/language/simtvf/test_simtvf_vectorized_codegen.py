@@ -1,5 +1,6 @@
 """Regression tests for small-vector expression codegen in Ascend SIMT blocks."""
 
+import ast
 import re
 
 import pytest
@@ -143,6 +144,87 @@ def _broadcast_kernel(dtype):
             T.copy(out_ub, out)
 
     return main
+
+
+_VECTOR_LOCAL_CASES = [
+    pytest.param(2, False, id="float2-literal"),
+    pytest.param(2, True, id="float2-unrolled"),
+    pytest.param(4, False, id="float4-literal"),
+    pytest.param(4, True, id="float4-unrolled"),
+]
+
+
+def _vector_local_kernel(lanes, unrolled):
+    @T.prim_func
+    def main(a: T.Tensor((3 * lanes,), T.float32), out: T.Tensor((4 * lanes,), T.float32)):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((3 * lanes,), T.float32)
+            out_ub = T.alloc_shared((4 * lanes,), T.float32)
+            T.copy(a, a_ub)
+            with T.SimtVF(threads=1):
+                vals = T.alloc_local((2,), f"float32x{lanes}")
+                if unrolled:
+                    for t in T.unroll(2):
+                        vals[t] = a_ub[T.Ramp(t * lanes, 1, lanes)]
+                else:
+                    vals[0] = a_ub[T.Ramp(0, 1, lanes)]
+                    vals[1] = a_ub[T.Ramp(lanes, 1, lanes)]
+                out_ub[T.Ramp(0, 1, lanes)] = vals[0]
+                out_ub[T.Ramp(lanes, 1, lanes)] = vals[1]
+                vals[0] = a_ub[T.Ramp(2 * lanes, 1, lanes)]
+                out_ub[T.Ramp(2 * lanes, 1, lanes)] = vals[0]
+                out_ub[T.Ramp(3 * lanes, 1, lanes)] = vals[1]
+            T.copy(out_ub, out)
+
+    return main
+
+
+@pytest.mark.parametrize("lanes,unrolled", _VECTOR_LOCAL_CASES)
+def test_pto_vector_local_uses_scalar_addressed_storage(lanes, unrolled):
+    source = tilelang.lower(_vector_local_kernel(lanes, unrolled), target="pto", enable_device_compile=False).kernel_source
+    tree = ast.parse(source)
+    allocation = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and ast.unparse(node.value.func) == "pto.alloc_buffer"
+    )
+    local_name = allocation.targets[0].id
+    assert ast.literal_eval(allocation.value.args[0]) == (2 * lanes,)
+    assert ast.unparse(allocation.value.args[1]) == "pto.f32"
+    assert not any(
+        isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == local_name for node in ast.walk(tree)
+    )
+    for operation, buffer_arg in [("load", 0), ("store", 1)]:
+        accesses = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and ast.unparse(node.func) == f"pto.{operation}"
+            and isinstance(node.args[buffer_arg], ast.Name)
+            and node.args[buffer_arg].id == local_name
+        ]
+        assert accesses
+        for access in accesses:
+            assert any(keyword.arg == "contiguous" and ast.literal_eval(keyword.value) == lanes for keyword in access.keywords)
+        offsets = [ast.unparse(access.args[buffer_arg + 1]) for access in accesses]
+        if operation == "store" and unrolled:
+            assert f"t * {lanes}" in offsets
+        else:
+            assert str(lanes) in offsets
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("lanes,unrolled", _VECTOR_LOCAL_CASES)
+def test_vector_local_slots_observe_mutation(lanes, unrolled, target):
+    import torch
+
+    a = torch.arange(1, 3 * lanes + 1, dtype=torch.float32, device="npu")
+    kernel = tilelang.compile(_vector_local_kernel(lanes, unrolled), target=target, out_idx=-1)
+    result = kernel(a)
+    torch.npu.synchronize()
+    expected = torch.cat((a[: 2 * lanes], a[2 * lanes :], a[lanes : 2 * lanes]))
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 def test_vector_min_max_and_mod_are_scalarized():
