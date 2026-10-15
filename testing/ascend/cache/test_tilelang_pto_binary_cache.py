@@ -7,6 +7,8 @@ cleanup) are covered in testing/python/cache/test_tilelang_cuda_binary_cache.py.
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 import tilelang
 from tilelang.cache.ascend_binary_cache import PTOBinaryCache
@@ -45,7 +47,7 @@ def _patch_callback(monkeypatch, compile_calls, toolchain=None):
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
     monkeypatch.setattr(pto_toolchain, "compile_ptodsl_to_aibin", _fake_pto_compile(compile_calls))
     if toolchain is None:
-        toolchain = {"ptoas": "ptoas test", "bisheng": "bisheng test"}
+        toolchain = {"ptoas": "ptoas test", "cann": "cann test"}
     monkeypatch.setattr(pto_toolchain, "toolchain_stamp", lambda: dict(toolchain))
     return ascend_backend.tilelang_callback_pto_compile
 
@@ -83,17 +85,113 @@ def test_pto_binary_cache_toolchain_upgrade_misses(monkeypatch, tmp_path):
     source = "from ptodsl import pto\n"
 
     compile_calls = []
-    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "bisheng": "bisheng 15"})
+    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"})
     assert bytes(compile_old(source, target)) == b"fake-aibin"
     assert len(compile_calls) == 1
 
     compile_calls.clear()
-    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.68", "bisheng": "bisheng 15"})
+    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.68", "cann": "/cann-a (9.1.0)"})
     assert bytes(compile_new(source, target)) == b"fake-aibin"
     assert len(compile_calls) == 1
 
     cache_files = list((tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}"))
     assert len(cache_files) == 2
+
+
+def test_pto_binary_cache_cann_change_misses(monkeypatch, tmp_path):
+    """Same source, flags, and tool versions, different CANN install: the cache must miss."""
+    _set_cache_dirs(monkeypatch, tmp_path)
+    target = Target({"kind": "ascend"})
+    source = "from ptodsl import pto\n"
+
+    compile_calls = []
+    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"})
+    assert bytes(compile_old(source, target)) == b"fake-aibin"
+    assert len(compile_calls) == 1
+
+    compile_calls.clear()
+    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-b (9.2.0)"})
+    assert bytes(compile_new(source, target)) == b"fake-aibin"
+    assert len(compile_calls) == 1
+
+    cache_files = list((tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}"))
+    assert len(cache_files) == 2
+
+
+def test_cann_identity_reads_ascend_home(monkeypatch, tmp_path):
+    from tilelang.contrib import pto_toolchain
+
+    def make_cann(name, version):
+        cann = tmp_path / name
+        (cann / "compiler").mkdir(parents=True)
+        (cann / "compiler" / "version.info").write_text(f'Version="{version}"\n', encoding="utf-8")
+        return cann
+
+    monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
+    monkeypatch.delenv("ASCEND_TOOLKIT_HOME", raising=False)
+    assert pto_toolchain._cann_identity() == ""
+
+    cann_a = make_cann("cann-a", "9.1.0")
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(cann_a))
+    assert pto_toolchain._cann_identity() == f"{cann_a.resolve()} (9.1.0)"
+
+    # ASCEND_TOOLKIT_HOME identifies the install when ASCEND_HOME_PATH is unset.
+    monkeypatch.delenv("ASCEND_HOME_PATH", raising=False)
+    monkeypatch.setenv("ASCEND_TOOLKIT_HOME", str(cann_a))
+    assert pto_toolchain._cann_identity() == f"{cann_a.resolve()} (9.1.0)"
+
+    cann_b = make_cann("cann-b", "9.2.0")
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(cann_b))
+    assert pto_toolchain._cann_identity() == f"{cann_b.resolve()} (9.2.0)"
+
+    # No version file anywhere: the resolved path alone identifies the install.
+    cann_c = tmp_path / "cann-c"
+    cann_c.mkdir()
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(cann_c))
+    assert pto_toolchain._cann_identity() == str(cann_c.resolve())
+
+
+def test_ptodsl_frontend_subprocess_resolves_installed_ptodsl(tmp_path):
+    """The compile subprocess must import the installed PTODSL frontend.
+
+    Launching the frontend by script path puts tilelang/contrib first on
+    the subprocess sys.path, so the generated source's `from ptodsl import
+    pto` resolves to the tilelang compat package instead. Editable-install
+    meta-path finders mask this, so the check runs inside the subprocess
+    itself, through the production invocation.
+    """
+    from tilelang.contrib import pto_toolchain
+
+    source = textwrap.dedent(
+        """\
+        import os
+
+
+        class FakeKernel:
+            def build(self):
+                pass
+
+            def compile(self):
+                import ptodsl
+
+                assert "tilelang" + os.sep + "contrib" not in ptodsl.__file__, (
+                    f"ptodsl resolved to the tilelang compat package: {ptodsl.__file__}"
+                )
+
+                class Module:
+                    def mlir_text(self):
+                        return "module {}"
+
+                return Module()
+
+
+        fake_kernel = FakeKernel()
+        """
+    )
+    src_path = tmp_path / "fake.ptodsl.py"
+    out_path = tmp_path / "fake.pto"
+    pto_toolchain._compile_ptodsl_to_pto(source, ["fake_kernel"], src_path, out_path)
+    assert out_path.read_text(encoding="utf-8") == "module {}"
 
 
 def test_pto_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
