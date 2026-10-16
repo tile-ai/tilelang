@@ -40,16 +40,30 @@ using namespace ffi;
 using runtime::StorageRank;
 using runtime::StorageScope;
 
+// Backend-private scopes (metal.cooperative_tensor) are unknown to
+// runtime::StorageScope::Create, which throws on them. They are never shared
+// memory, but they reach this pass whenever the kernel also uses shared memory.
+// Same check as in LowerThreadAllreduce and LowerDeviceKernelLaunch.
+static bool IsBackendPrivateScope(const std::string &scope) {
+  return scope == "metal.cooperative_tensor";
+}
+
 static bool IsDynamicSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+  const std::string scope = GetPtrStorageScope(std::move(buffer_var));
+  if (IsBackendPrivateScope(scope)) {
+    return false;
+  }
+  StorageScope storage_scope = runtime::StorageScope::Create(scope);
   return storage_scope.rank == runtime::StorageRank::kShared &&
          storage_scope.tag == ".dyn";
 }
 
 static bool IsStaticSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+  const std::string scope = GetPtrStorageScope(std::move(buffer_var));
+  if (IsBackendPrivateScope(scope)) {
+    return false;
+  }
+  StorageScope storage_scope = runtime::StorageScope::Create(scope);
   return storage_scope.rank == runtime::StorageRank::kShared &&
          storage_scope.tag.empty();
 }
