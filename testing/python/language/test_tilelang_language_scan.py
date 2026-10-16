@@ -68,6 +68,31 @@ def test_fragment_scan_annotations_preserved():
     assert 'test.scan="cummax"' in cummax_line
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize("shape, threads", [((128,), 96), ((8, 32), 160)])
+def test_cuda_shared_scan_unsupported_threads(op, shape, threads):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            scan(shared, dim=-1)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with (
+        target,
+        pytest.raises(
+            ValueError,
+            match=rf"T\.{op}.*32, 64, 128, 256, 512, 1024.*got {threads}",
+        ),
+    ):
+        tl.lower(main, target=target)
+
+
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
