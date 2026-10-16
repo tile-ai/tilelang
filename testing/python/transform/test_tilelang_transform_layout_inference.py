@@ -7,6 +7,7 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+from tvm.tirx.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -138,6 +139,62 @@ def test_register_count_is_default_layout_cost_model():
 
     tvm.ir.assert_structural_equal(default, register_count)
     assert not tvm.ir.structural_equal(default, io_aware)
+
+
+@pytest.mark.parametrize("cost_model", ["register-count", "io-aware"])
+def test_parallel_fragment_layout_covers_mixed_loop_extents(cost_model):
+    @T.prim_func
+    def main(C: T.Tensor((256,), T.float32)):
+        with T.Kernel(1, threads=128):
+            frag = T.alloc_fragment((256,), T.float32)
+            T.clear(frag)
+            for i in T.Parallel(100):
+                frag[i] = 5.0
+            for i in T.Parallel(256):
+                C[i] = frag[i] + 1.0
+
+    target = auto_target
+    with target, tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+
+    fragment_shapes = []
+    loop_shapes = []
+
+    def collect_layouts(node):
+        if isinstance(node, tvm.tirx.SBlock) and "layout_map" in node.annotations:
+            for buffer, layout in node.annotations["layout_map"].items():
+                if buffer.name == "frag":
+                    fragment_shapes.append([int(value) for value in layout.get_input_shape()])
+        if isinstance(node, tvm.tirx.For) and "parallel_loop_layout" in node.annotations:
+            layout = node.annotations["parallel_loop_layout"]
+            loop_shapes.append((int(node.extent), [int(value) for value in layout.get_input_shape()]))
+
+    post_order_visit(mod["main"].body, collect_layouts)
+    assert fragment_shapes
+    assert all(shape == [256] for shape in fragment_shapes)
+    assert {extent for extent, _ in loop_shapes} == {100, 256}
+    assert all(shape[0] >= extent for extent, shape in loop_shapes)
+
+
+def test_parallel_layout_rejects_unproven_symbolic_coverage():
+    n = T.dynamic("n")
+    loop_layout = T.Fragment((128,), forward_fn=lambda i: (i, 0))
+
+    @T.prim_func
+    def main(C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(n, loop_layout=loop_layout):
+                C[i] = 0.0
+
+    target = auto_target
+    with pytest.raises(tvm.TVMError, match="does not provably cover"), target:
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        tl.transform.LayoutInference()(mod)
 
 
 def test_static_ragged_copy_minimizes_full_thread_padding():
