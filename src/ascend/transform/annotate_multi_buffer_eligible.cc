@@ -20,6 +20,12 @@
  *  promoted to a write-first ancestor. Independent sibling loops may
  *  therefore become multiple owners of one storage.
  *
+ *  A GEMM accumulator cleared on the first iteration of the loop holding it
+ *  counts as written when that loop is viewed from an enclosing scope: the
+ *  clear rewrites the whole region before any read inside the loop, so an
+ *  enclosing loop may version the accumulator while the loop itself keeps
+ *  carrying it and never claims it.
+ *
  *  Frontend may pre-set the annotation. A storage named by any explicit claim
  *  is excluded from automatic owner inference across the whole kernel; the
  *  explicit claim is preserved unless the storage is already manually
@@ -172,8 +178,15 @@ AccessOrder AssumeForExecutes(AccessOrder body) {
 
 class WriteFirstClassifier : public StmtExprVisitor {
 public:
-  AccessOrder Classify(const Stmt &s, const Var &storage) {
+  // `accumulator_clear_loop` enables the accumulator-clear rule: a GEMM whose
+  // clear flag is guaranteed on that loop's first iteration rewrites the whole
+  // accumulator region before it is read inside the loop, so it classifies as a
+  // write. Only an enclosing scope may pass it; a loop classifying its own body
+  // must not, because its accumulator is loop-carried across its iterations.
+  AccessOrder Classify(const Stmt &s, const Var &storage,
+                       const ControlNode *accumulator_clear_loop = nullptr) {
     target_storage_ = storage;
+    accumulator_clear_loop_ = accumulator_clear_loop;
     result_ = AccessOrder::kUntouched;
     StmtExprVisitor::VisitStmt(s);
     return result_;
@@ -188,6 +201,7 @@ public:
 
 private:
   Var target_storage_;
+  const ControlNode *accumulator_clear_loop_ = nullptr;
   AccessOrder result_ = AccessOrder::kUntouched;
 
   // Dispatch short-circuit: skip further work once a terminal is reached.
@@ -328,6 +342,7 @@ private:
   void VisitExpr_(const CallNode *op) final {
     static const Op &region_op = region();
     static const auto access_ptr_op = Op::Get("tl.access_ptr");
+    static const auto gemm_op = Op::Get("tl.tileop.gemm");
 
     if (op->op.same_as(region_op)) {
       HandleRegionCall(op);
@@ -335,6 +350,10 @@ private:
     }
     if (op->op.same_as(access_ptr_op)) {
       HandleAccessPtrCall(op);
+      return;
+    }
+    if (op->op.same_as(gemm_op)) {
+      HandleGemmCall(op);
       return;
     }
     for (const auto &arg : op->args) {
@@ -421,6 +440,60 @@ private:
         result_ = AccessOrder::kWriteFirst;
     }
   }
+
+  // tl.tileop.gemm(A, B, C, trans_a, trans_b, m, n, k, policy, clear_accum,
+  //                mbar, c_coord_0, c_coord_1)
+  //   argument 2 is the accumulator region, argument 9 the clear flag.
+  // A MAD with the clear flag set rewrites the whole accumulator region instead
+  // of adding into it, so the accumulator is written before it is read once the
+  // flag is guaranteed on the first iteration of the loop being classified from
+  // an enclosing scope.
+  void HandleGemmCall(const CallNode *op) {
+    if (AccumulatorRegion(op) == nullptr ||
+        accumulator_clear_loop_ == nullptr || op->args.size() <= 9 ||
+        !ClearsOnFirstIteration(op->args[9])) {
+      for (const auto &arg : op->args) {
+        VisitExpr(arg);
+        if (IsTerminal(result_))
+          return;
+      }
+      return;
+    }
+    // Argument 2 is the accumulator region; the clear rewrites it instead of
+    // reading it. Every other argument keeps its ordinary classification.
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i == 2)
+        continue;
+      VisitExpr(op->args[i]);
+      if (IsTerminal(result_))
+        return;
+    }
+    result_ = AccessOrder::kWriteFirst;
+  }
+
+  // The accumulator region of this GEMM when it targets the tracked storage.
+  const CallNode *AccumulatorRegion(const CallNode *op) const {
+    if (op->args.size() <= 2)
+      return nullptr;
+    const auto *region_call = op->args[2].as<CallNode>();
+    if (region_call == nullptr || !region_call->op.same_as(region()) ||
+        region_call->args.empty()) {
+      return nullptr;
+    }
+    const auto *load = region_call->args[0].as<BufferLoadNode>();
+    if (load == nullptr || !target_storage_.same_as(load->buffer->data))
+      return nullptr;
+    return region_call;
+  }
+
+  // A multi-step GEMM clears its accumulator on the first step, i.e. the clear
+  // flag is built as `And(clear_accum, loop_var == loop_min)`. It is guaranteed
+  // on the first iteration when the remaining condition holds there too.
+  bool ClearsOnFirstIteration(const PrimExpr &clear) const {
+    const For &loop = accumulator_clear_loop_->control;
+    return GuardImplies(EQ(loop->loop_var, loop->min), clear,
+                        accumulator_clear_loop_->GetLoopBodyContext());
+  }
 };
 
 int RequestedStage(const IRStructure *node) {
@@ -455,10 +528,11 @@ class IRWriteFirstClassifier {
 public:
   static AccessOrder
   Classify(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-           const Var &storage, const ConstrSet &outer_ctx) {
+           const Var &storage, const ConstrSet &outer_ctx,
+           const ControlNode *accumulator_clear_loop = nullptr) {
     State state;
     for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
-      ProcessNode(node, storage, outer_ctx, &state);
+      ProcessNode(node, storage, outer_ctx, accumulator_clear_loop, &state);
       if (state.unsafe)
         return AccessOrder::kReadFirst;
     }
@@ -512,12 +586,13 @@ private:
     }
   }
 
-  static AccessOrder ClassifyPayload(const IRStructure *node,
-                                     const Var &storage) {
+  static AccessOrder
+  ClassifyPayload(const IRStructure *node, const Var &storage,
+                  const ControlNode *accumulator_clear_loop) {
     WriteFirstClassifier classifier;
     if (node->IsTask()) {
       return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
-                                 storage);
+                                 storage, accumulator_clear_loop);
     }
 
     const auto *control = static_cast<const ControlNode *>(node);
@@ -527,13 +602,21 @@ private:
       return header;
     }
 
+    // Classified from an enclosing scope, this loop is write-first when its own
+    // first iteration clears the accumulator: that write happens before every
+    // read of the storage inside the loop. Its own claim check classifies the
+    // same body without the rule, so the loop never claims an accumulator it
+    // carries across its own iterations.
     AccessOrder body =
-        Classify(control->children, storage, control->GetLoopBodyContext());
+        Classify(control->children, storage, control->GetLoopBodyContext(),
+                 /*accumulator_clear_loop=*/control);
     return SeqCompose(header, AssumeForExecutes(body));
   }
 
   static void ProcessNode(const IRStructure *node, const Var &storage,
-                          const ConstrSet &outer_ctx, State *state) {
+                          const ConstrSet &outer_ctx,
+                          const ControlNode *accumulator_clear_loop,
+                          State *state) {
     PrimExpr active_guard = Bool(true);
     WriteFirstClassifier classifier;
     for (const auto &guard : node->GetGuards()) {
@@ -553,8 +636,8 @@ private:
                       active_guard, outer_ctx, state);
       }
     }
-    ProcessAccess(ClassifyPayload(node, storage), active_guard, outer_ctx,
-                  state);
+    ProcessAccess(ClassifyPayload(node, storage, accumulator_clear_loop),
+                  active_guard, outer_ctx, state);
   }
 };
 
