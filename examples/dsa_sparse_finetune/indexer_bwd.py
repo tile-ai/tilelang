@@ -63,6 +63,12 @@ def tl_indexer_bwd_impl(
     Offsets: T.Tensor(offsets_shape, INT32)
     TokenIndices: T.Tensor(token_indices_shape, INT32)
 
+    # All rows, including keys absent from top-k, must start at zero.
+    with T.Kernel(T.ceildiv(seq_len, 32), threads=num_threads) as bx:
+        for i, j in T.Parallel(32, dim):
+            if bx * 32 + i < seq_len:
+                dIndexK[bx * 32 + i, j] = 0
+
     with T.Kernel(seq_len, threads=num_threads) as (bx):
         i_b, i_t = TokenIndices[bx, 0], TokenIndices[bx, 1]
         bos = Offsets[i_b]

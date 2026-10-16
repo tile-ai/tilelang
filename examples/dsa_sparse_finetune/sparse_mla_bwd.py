@@ -145,6 +145,12 @@ def bwd(
     dQ = T.empty(q_shape, dtype)
     dKV = T.empty(k_shape, accum_dtype)
 
+    # Zero global accumulators in a separate launch before any atomic updates.
+    with T.Kernel(T.ceildiv(S, 32), kv_group, threads=threads) as (bx, bz):
+        initial = T.alloc_fragment((32, D + D_tail), accum_dtype)
+        T.clear(initial)
+        T.copy(initial, dKV[bx * 32 : (bx + 1) * 32, bz, :])
+
     with T.Kernel(S, kv_group, threads=threads) as (b_s_i, bz):
         Q_shared = T.alloc_shared([padded_H, D], dtype)
         Q_tail_shared = T.alloc_shared([padded_H, D_tail], dtype)
