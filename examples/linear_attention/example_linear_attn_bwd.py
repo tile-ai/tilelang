@@ -9,6 +9,11 @@ from einops import rearrange
 from typing import Optional, Tuple
 
 
+def get_chunk_size() -> int:
+    """Use a smaller chunk on HIP to keep the backward kernel within LDS limits."""
+    return 32 if torch.version.hip is not None else 64
+
+
 @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
 def tl_fused_chunk_bwd_kernel(
     B,
@@ -23,7 +28,7 @@ def tl_fused_chunk_bwd_kernel(
         scale = DK**-0.5
     accum_dtype = T.float32
 
-    chunk_size = 64
+    chunk_size = get_chunk_size()
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
     assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
     NK = tilelang.cdiv(DK, BK)
@@ -134,7 +139,7 @@ def ref_program(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: Option
     q, k, v = q.float(), k.float(), v.float()
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    chunk_size = 64
+    chunk_size = get_chunk_size()
     q = rearrange(q, "b (n c) h d -> b h n c d", c=chunk_size) * scale
     k = rearrange(k, "b (n c) h d -> b h n c d", c=chunk_size)
     v = rearrange(v, "b (n c) h d -> b h n c d", c=chunk_size)
