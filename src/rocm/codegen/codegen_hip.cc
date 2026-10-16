@@ -2437,6 +2437,13 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
 
 void CodeGenTileLangHIP::VisitExpr_(const FloatImmNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  // An fp4 constant is printed as a `__tl_float_to_fp4(...)` call declared in
+  // hip_fp4.h. Printing it can happen without PrintType ever running on the fp4
+  // type (e.g. a scalar store to an external fp4 buffer), so enable the header
+  // here too -- this is the only path that feeds an fp4 FloatImm to PrintConst.
+  if (op->dtype.is_float4_e2m1fn()) {
+    enable_fp4_ = true;
+  }
   PrintConst(op, os, this);
 }
 
