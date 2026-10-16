@@ -12,7 +12,7 @@ def test_cupti_counts_torch_zeros_kernel_time():
     def fn():
         return torch.zeros(cache.numel(), dtype=cache.dtype, device=cache.device)
 
-    cache.zero_()
+    cache.sum(dtype=cache.dtype)
     fn()
     torch.cuda.synchronize()
 
@@ -31,7 +31,7 @@ def test_cupti_empty_function_excludes_cache_flush_time():
     def fn():
         pass
 
-    cache.zero_()
+    cache.sum(dtype=cache.dtype)
     torch.cuda.synchronize()
 
     with warnings.catch_warnings():

@@ -35,7 +35,6 @@ def do_bench(
     _n_warmup: int = 0,
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
-    fast_flush: bool = True,
     backend: Literal["event", "cupti", "cudagraph", "wall", "msprof", "msprof_detail"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
@@ -62,7 +61,6 @@ def do_bench(
         _n_warmup: Manual override for warmup iterations (default: 0 = auto)
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
-        fast_flush: Use faster GPU L2 cache flush with int32 vs int8 (default: True); ignored by "wall"
         backend: Timing method - "event", "cupti", "cudagraph", "wall", "msprof", or "msprof_detail" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
         device: Optional device to benchmark on. CUDA/HIP events, streams,
@@ -135,7 +133,6 @@ def do_bench(
                 _n_warmup=_n_warmup,
                 _n_repeat=_n_repeat,
                 quantiles=quantiles,
-                fast_flush=fast_flush,
                 backend=backend,
                 return_mode=return_mode,
                 device_idx=device_idx,
@@ -150,7 +147,6 @@ def do_bench(
         _n_warmup=_n_warmup,
         _n_repeat=_n_repeat,
         quantiles=quantiles,
-        fast_flush=fast_flush,
         backend=backend,
         return_mode=return_mode,
         device_idx=device_idx,
@@ -189,7 +185,6 @@ def _do_bench_impl(
     _n_warmup: int,
     _n_repeat: int,
     quantiles: list[float] | None,
-    fast_flush: bool,
     backend: Literal["event", "cupti", "cudagraph", "msprof", "msprof_detail"],
     return_mode: Literal["min", "max", "mean", "median"],
     device_idx: int | torch.device | None,
@@ -207,16 +202,15 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # Create L2 cache flush buffer (`cache_size` MB)
-    # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
-    cache_bytes = cache_size * 1024 * 1024
-    cache_numel = cache_bytes // 4 if fast_flush else cache_bytes
-    cache_dtype = torch.int if fast_flush else torch.int8
-    cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
+    # Create an int32 L2 cache flush buffer (`cache_size` MB).
+    cache_numel = cache_size * 1024 * 1024 // 4
+    cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
 
     # Warm the flush buffer once outside the timed estimate: the first
     # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
-    cache.zero_()
+    # Read the buffer to evict L2 without dirty cache lines requiring writeback.
+    # Preserve the dtype to avoid a full-buffer int64 cast on torch_npu.
+    cache.sum(dtype=cache.dtype)
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
@@ -224,7 +218,7 @@ def _do_bench_impl(
     end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
-        cache.zero_()
+        cache.sum(dtype=cache.dtype)
         fn()
     end_event.record()
     start_event.synchronize()

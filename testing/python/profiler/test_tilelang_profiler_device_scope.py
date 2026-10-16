@@ -51,10 +51,10 @@ def accelerator(monkeypatch):
             tensor_device = torch.device(device_type, selected)
             state.allocations.append(tensor_device)
 
-            def zero():
+            def flush(*, dtype):
                 state.flushes += 1
 
-            return SimpleNamespace(device=tensor_device, dtype=dtype, numel=lambda: numel, zero_=zero)
+            return SimpleNamespace(device=tensor_device, dtype=dtype, numel=lambda: numel, sum=flush)
 
         def function():
             state.calls.append(state.current)
@@ -139,7 +139,7 @@ def test_cuda_graph_stream_uses_explicit_device(monkeypatch, accelerator):
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
     monkeypatch.setattr(torch.cuda, "CUDAGraph", lambda: SimpleNamespace(replay=lambda: replays.append(state.current)))
     monkeypatch.setattr(torch.cuda, "graph", capture)
-    cache = SimpleNamespace(zero_=lambda: None)
+    cache = SimpleNamespace(dtype=torch.int32, sum=lambda **kwargs: None)
 
     result = torch_bench.bench_with_cudagraph(state.function, cache, 2, None, "mean", 2)
 
