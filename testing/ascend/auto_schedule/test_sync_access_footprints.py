@@ -21,9 +21,10 @@ def _events(program, disable_reuse=False, auto_schedule=False):
 
 @pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])
 @pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
-def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row):
+@pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
+def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope):
     src = tirx.decl_buffer((48, 16), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope="shared.l0a")
+    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope=scope)
     load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
     padding = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
     fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
@@ -56,6 +57,55 @@ def test_l0_tail_load_preserves_explicit_logical_region_conflicts():
     events = _events(main)
     assert ("set", "MTE2_MTE1") in events
     assert ("wait", "MTE2_MTE1") in events
+
+
+@pytest.mark.parametrize("fill_first", [False, True])
+@pytest.mark.parametrize("row", [16, 24], ids=["overlap", "adjacent"])
+def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
+    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
+    # A pointer consumer declares 24 rows. Unlike the L1->L0 load above,
+    # this access contract does not imply a whole-fractal read of 32 rows.
+    read = unit(tirx.Evaluate(tirx.call_extern("int32", "read_l1", T.access_ptr(src[0, 0], "r", 24, 16))), core=2)
+    region = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
+    fill = unit(tirx.Evaluate(T.fill(region, 0)), core=2)
+    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[src])
+    after = transform.InsertSync()(before)
+    pipe = "MTE2_S" if fill_first else "S_MTE2"
+    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
+    assert len(events) == (2 if row == 16 else 0)
+    if events:
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+
+
+@pytest.mark.parametrize("kind", ["dense", "mx"])
+@pytest.mark.parametrize("fill_first", [False, True])
+@pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
+def test_gemm_l1_tail_read_accounts_for_instruction_padding(kind, fill_first, row):
+    dtype = "bfloat16" if kind == "dense" else "float8_e4m3fn"
+    a = tirx.decl_buffer((48, 64), dtype, name="a", scope="shared.l1")
+    b = tirx.decl_buffer((32, 64), dtype, name="b", scope="shared.l1")
+    c = tirx.decl_buffer((32, 32), "float32", name="c", scope="shared.l0c")
+    sa = tirx.decl_buffer((48, 2), "uint16", name="sa", scope="shared.l1")
+    sb = tirx.decl_buffer((32, 2), "uint16", name="sb", scope="shared.l1")
+
+    def prefix(buffer):
+        return tirx.BufferRegion(buffer, [tvm.ir.Range(0, 24), tvm.ir.Range(0, buffer.shape[1])])
+
+    if kind == "dense":
+        call = T.gemm(prefix(a), b, prefix(c), transpose_B=True, clear_accum=True)
+    else:
+        call = T.gemm_blockscaled(prefix(a), b, prefix(c), prefix(sa), sb, transpose_B=True, clear_accum=True)
+    read = unit(tirx.Evaluate(call), core=2)
+    padding = tirx.BufferRegion(a, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 64)])
+    fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
+    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[a, b, c, sa, sb])
+    after = transform.InsertSync()(before)
+    # The fused L1 GEMM reads its inputs through MTE1.
+    pipe = "MTE2_MTE1" if fill_first else "MTE1_MTE2"
+    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
+    assert len(events) == (2 if row == 24 else 0)
+    if events:
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 
 
 @pytest.mark.parametrize("disable_reuse", [False, True])

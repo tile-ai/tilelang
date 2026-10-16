@@ -120,11 +120,10 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // an identically-shaped iteration in another owner can still be a distinct
 // epoch. Shared by scheduling-time IRStructure analysis and the scheduled-TIR
 // synchronization pass.
-// L1 reads may touch complete fractals; L1 writes retain their exact DMA/fill
-// regions (including any padding already made explicit before scheduling).
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        bool a_is_read, const ConstrSet &b_ctx,
-                        const BufferRegion &b_region, bool b_is_read,
+// Match hints against logical regions; compare instruction footprints supplied
+// by access analysis. Access direction does not determine either footprint.
+bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferAccess &a_access,
+                        const ConstrSet &b_ctx, const BufferAccess &b_access,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners = 0,
                         const ConflictHintList &root_conflicts = {},

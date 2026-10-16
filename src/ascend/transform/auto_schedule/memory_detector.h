@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "./memory_access.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
@@ -29,6 +30,7 @@
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "support/check.h"
@@ -78,8 +80,9 @@ inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
       record(BufferRegion(copy->src, copy->src_range),
              copy->src_range.size() - 2, copy->l0_pitch);
     }
-  } else if (call->op.same_as(Op::Get("tl.tileop.gemm"))) {
-    Gemm gemm(call->args, call->annotations);
+  } else if ((call->op.same_as(Gemm::Get()) ||
+              call->op.same_as(GemmBlockScaled::Get()))) {
+    Gemm gemm = Downcast<Gemm>(ParseOperator(call));
     if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
       record(gemm->aRegion_, gemm->a_->shape.size() - (gemm->transA_ ? 1 : 2));
       record(gemm->bRegion_, gemm->b_->shape.size() - (gemm->transB_ ? 2 : 1));
@@ -107,6 +110,8 @@ public:
     write_buffers_.clear();
     read_regions_.clear();
     write_regions_.clear();
+    read_footprints_.clear();
+    write_footprints_.clear();
     dom_map_.clear();
     hint_map_.clear();
     pending_conditions_.clear();
@@ -130,6 +135,8 @@ public:
     write_buffers_.clear();
     read_regions_.clear();
     write_regions_.clear();
+    read_footprints_.clear();
+    write_footprints_.clear();
     dom_map_.clear();
     hint_map_.clear();
     pending_conditions_.clear();
@@ -154,6 +161,14 @@ public:
   // Return collected write regions
   std::vector<BufferRegion> GetWriteRegions() const {
     return CollectRegions(write_buffers_, write_regions_);
+  }
+
+  std::vector<BufferAccess> GetReadAccesses() const {
+    return CollectAccesses(read_buffers_, read_regions_, read_footprints_);
+  }
+
+  std::vector<BufferAccess> GetWriteAccesses() const {
+    return CollectAccesses(write_buffers_, write_regions_, write_footprints_);
   }
 
   const Map<Var, Optional<PrimExpr>> &GetL0Pitches() const {
@@ -209,6 +224,12 @@ private:
   std::vector<std::vector<tvm::arith::IntSet>> read_regions_;
   /*! \brief The write regions of the current block */
   std::vector<std::vector<tvm::arith::IntSet>> write_regions_;
+  // Extra instruction coverage, kept separate from logical regions and from
+  // lifetime analysis's must-write/compact-storage accounting.
+  using FootprintMap = std::unordered_map<Buffer, std::vector<arith::IntSet>,
+                                          ObjectPtrHash, ObjectPtrEqual>;
+  FootprintMap read_footprints_;
+  FootprintMap write_footprints_;
   AccessMode mode_;
   /*!\ brief Internal analyzer. */
   arith::Analyzer ana_;
@@ -463,13 +484,23 @@ private:
     }
   }
 
-  // Lifetime analysis includes instruction padding, without promoting the
-  // conservative may-write footprint into an initialization fact.
+  // Record instruction padding without changing logical hint operands or
+  // promoting conservative may-writes into initialization facts.
   void RecordFractalMayAccess(const BufferRegion &region, bool is_read) {
     BufferRegion expanded = ExpandAscendFractalMayAccess(region);
     std::vector<arith::IntSet> ranges;
     for (const Range &range : expanded->region)
       ranges.push_back(RelaxAccessIndex(range->min, range->extent));
+    if (mode_ == AccessMode::kLogical) {
+      auto &footprints = is_read ? read_footprints_ : write_footprints_;
+      auto [it, inserted] = footprints.try_emplace(expanded->buffer, ranges);
+      if (!inserted) {
+        ICHECK_EQ(it->second.size(), ranges.size());
+        for (size_t i = 0; i < ranges.size(); ++i)
+          it->second[i] = arith::Union({it->second[i], ranges[i]});
+      }
+      return;
+    }
     if (is_read)
       Update(&read_buffers_, &read_regions_, expanded->buffer,
              std::move(ranges));
@@ -629,6 +660,27 @@ private:
     result.reserve(buffers.size());
     for (size_t i = 0; i < buffers.size(); ++i) {
       result.push_back(MakeBufferRegion(buffers[i], regions[i]));
+    }
+    return result;
+  }
+
+  std::vector<BufferAccess>
+  CollectAccesses(const std::vector<Buffer> &buffers,
+                  const std::vector<std::vector<arith::IntSet>> &regions,
+                  const FootprintMap &footprints) const {
+    std::vector<BufferAccess> result;
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      BufferRegion logical = MakeBufferRegion(buffers[i], regions[i]);
+      BufferRegion footprint = logical;
+      auto it = footprints.find(buffers[i]);
+      if (it != footprints.end()) {
+        auto ranges = regions[i];
+        ICHECK_EQ(ranges.size(), it->second.size());
+        for (size_t j = 0; j < ranges.size(); ++j)
+          ranges[j] = arith::Union({ranges[j], it->second[j]});
+        footprint = MakeBufferRegion(buffers[i], ranges);
+      }
+      result.push_back({logical, footprint});
     }
     return result;
   }
@@ -1061,10 +1113,35 @@ private:
       has_loop_break_ = true;
 
     if (mode_ == AccessMode::kLogical &&
-        (IsAscendCopyCall(op) || op->op.same_as(Op::Get("tl.tileop.gemm")))) {
+        (IsAscendCopyCall(op) || (op->op.same_as(Gemm::Get()) ||
+                                  op->op.same_as(GemmBlockScaled::Get())))) {
       auto saved_pitches = std::move(operation_pitches_);
       operation_pitches_ = GetCallL0Pitches(ffi::GetRef<Call>(op), layouts_);
       StmtExprVisitor::VisitExpr_(op);
+      // Operand contracts, rather than read/write direction, determine which
+      // accesses touch whole fractals. DMA/fill and explicit pointer regions
+      // retain their declared coverage.
+      if (IsAscendCopyCall(op)) {
+        AscendCopy copy(op->args, op->annotations);
+        if (IsL1Buffer(copy->src) &&
+            (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst) ||
+             IsL0SFBuffer(copy->dst))) {
+          RecordFractalMayAccess(BufferRegion(copy->src, copy->src_range),
+                                 true);
+          RecordFractalMayAccess(BufferRegion(copy->dst, copy->dst_range),
+                                 false);
+        } else if (IsL0CBuffer(copy->src)) {
+          RecordFractalMayAccess(BufferRegion(copy->src, copy->src_range),
+                                 true);
+        }
+      } else {
+        Gemm gemm = Downcast<Gemm>(ParseOperator(ffi::GetRef<Call>(op)));
+        auto accesses = gemm->GetAccessRegions();
+        for (const BufferRegion &region : accesses.reads)
+          RecordFractalMayAccess(region, true);
+        for (const BufferRegion &region : accesses.writes)
+          RecordFractalMayAccess(region, false);
+      }
       operation_pitches_ = std::move(saved_pitches);
       return;
     }
@@ -1091,8 +1168,9 @@ private:
       }
     }
     if (mode_ == AccessMode::kPhysical &&
-        op->op.same_as(Op::Get("tl.tileop.gemm"))) {
-      Gemm gemm(op->args, op->annotations);
+        (op->op.same_as(Gemm::Get()) ||
+         op->op.same_as(GemmBlockScaled::Get()))) {
+      Gemm gemm = Downcast<Gemm>(ParseOperator(ffi::GetRef<Call>(op)));
       if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
         StmtExprVisitor::VisitExpr_(op);
         auto record = [&](const BufferRegion &region, bool is_read,
