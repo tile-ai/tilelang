@@ -64,6 +64,15 @@ def LegalizeSimdMerging():
     return _ffi_api.LegalizeSimdMerging()  # type: ignore
 
 
+def AutoSimtVF():
+    """Form Stage 1 SIMT_VF regions around eligible Parallel work.
+
+    Runs before UnrollLoopSkipVF, fuses supported fragment flows within engine
+    boundaries, and legalizes fragment storage across generated VFs.
+    """
+    return _ffi_api.AutoSimtVF()  # type: ignore
+
+
 def UnrollLoopSkipVF():
     """Expand explicit unroll loops outside SIMD_VF / SIMT_VF blocks.
 
@@ -223,6 +232,7 @@ def RewriteFlagToBuf():
 
 
 __all__ = [
+    "AutoSimtVF",
     "NormalizeAscendFractalStorage",
     "AnnotateMultiBufferEligible",
     "AscendRemoveNoOp",
