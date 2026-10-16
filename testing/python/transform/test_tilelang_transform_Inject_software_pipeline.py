@@ -474,6 +474,91 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
+@pytest.mark.parametrize("first,second", [(2, 4), (4, 2), (3, 1), (1, 3), (3, 3)])
+@pytest.mark.parametrize("flat_alloc", [False, True])
+def test_inject_software_pipeline_sibling_buffers(first, second, flat_alloc):
+    layout = Layout([8, 16], lambda i, j: i * 16 + j)
+    allocate = T.alloc_buffer if flat_alloc else T.sblock_alloc_buffer
+
+    @T.prim_func
+    def before(A: T.Tensor((16, 8, 16), T.float16), B: T.Tensor((16, 8, 16), T.float16)):
+        with T.sblock("root"):
+            shared = allocate((8, 16), T.float16, scope="shared.dyn")
+            T.annotate_layout({shared: layout})
+            for k in T.serial(
+                8,
+                annotations={"software_pipeline_stage": [0, first - 1], "software_pipeline_order": [0, 1]},
+            ):
+                with T.sblock("load_first"):
+                    T.reads(A[k, 0:8, 0:16])
+                    T.writes(shared[0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        shared[i, j] = A[k, i, j]
+                with T.sblock("store_first"):
+                    T.reads(shared[0:8, 0:16])
+                    T.writes(B[k, 0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        B[k, i, j] = shared[i, j]
+            for k in T.serial(
+                8,
+                16,
+                annotations={"software_pipeline_stage": [0, second - 1], "software_pipeline_order": [0, 1]},
+            ):
+                with T.sblock("load_second"):
+                    T.reads(A[k, 0:8, 0:16])
+                    T.writes(shared[0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        shared[i, j] = A[k, i, j]
+                with T.sblock("store_second"):
+                    T.reads(shared[0:8, 0:16])
+                    T.writes(B[k, 0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        B[k, i, j] = shared[i, j]
+            # Ordinary scratch-buffer uses must also address the expanded view.
+            shared[0, 0] = A[0, 0, 0]
+            B[0, 0, 0] = shared[0, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    func = mod["main"]
+    block = _find_block_with_layout_map(func)
+    layout_map = block.annotations["layout_map"]
+    shared_data = next(iter(layout_map.keys()))
+    if flat_alloc:
+        shared = _find_alloc_buffer(func, shared_data)
+    else:
+        shared = next(buffer for buffer in block.alloc_buffers if buffer.data.same_as(shared_data))
+
+    capacity = max(first, second)
+    assert [int(dim) for dim in shared.shape] == [capacity, 8, 16]
+    assert layout_map[shared.data].is_equal(layout.expand([capacity]))
+
+    analyzer = tvm.arith.Analyzer()
+    moduli = set()
+    accesses = [
+        node
+        for node_type in (tvm.tirx.BufferLoad, tvm.tirx.BufferStore)
+        for node in collect_nodes(func, node_type)
+        if node.buffer.data.same_as(shared.data)
+    ]
+    for node in accesses:
+        assert node.buffer.same_as(shared)
+        assert len(node.indices) == 3
+        version = analyzer.simplify(node.indices[0])
+        bound = analyzer.const_int_bound(version)
+        assert 0 <= bound.min_value <= bound.max_value < capacity
+        if isinstance(version, tvm.tirx.FloorMod):
+            moduli.add(int(version.b))
+    for node in collect_nodes(func, tvm.tirx.SBlock):
+        for region in list(node.reads) + list(node.writes):
+            if region.buffer.data.same_as(shared.data):
+                assert region.buffer.same_as(shared)
+                assert len(region.region) == 3
+
+    assert accesses
+    assert moduli == {stages for stages in (first, second) if stages > 1}
+
+
 def _collect_leading_bind_names(mod, block_names):
     leading_binds = {name: [] for name in block_names}
     for node in collect_nodes(mod["main"], tvm.tirx.SBlock):
