@@ -20,7 +20,16 @@ ASCEND_EXECUTION_BACKENDS = [
     ExecutionBackendSpec("cython"),
 ]
 
-# PTO's execution backend owns the AOT pipeline (ptodsl -> ptoas -> bisheng).
+# PTO prefers tvm_ffi -- it is listed first, so execution_backend="auto"
+# resolves to it -- and also accepts the original "pto" spec (the Cython
+# launcher driving its own ptodsl -> ptoas -> bisheng pipeline).
 PTO_EXECUTION_BACKENDS = [
+    ExecutionBackendSpec(
+        "tvm_ffi",
+        enable_host_codegen=True,
+        enable_device_compile=True,
+        # Same capability as the plain-Ascend tvm_ffi spec above.
+        supports_callee_allocated_outputs=True,
+    ),
     ExecutionBackendSpec("pto"),
 ]
