@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
+from tilelang.language.cache import EvictPriority  # noqa: F401
 from tilelang.language.allocate import alloc_cluster_barrier, alloc_descriptor, alloc_tmem  # noqa: F401
 from tilelang.language.annotations import annotate_l2_hit_ratio, annotate_min_blocks_per_sm  # noqa: F401
 from tilelang.language.builtin import (  # noqa: F401
@@ -108,6 +109,7 @@ from .warpgroup import *  # noqa: F401,F403
 from .warpgroup import __all__ as _WARPGROUP_ALL
 
 _CUDA_API_ALL = (
+    "EvictPriority",
     "ClusterKernel",
     "CUDASourceCodeKernel",
     "Kernel",

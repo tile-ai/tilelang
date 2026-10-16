@@ -14,6 +14,7 @@ from tilelang.cuda.language import __all__ as __all__  # noqa: F401
 # Imported by name so static type checkers resolve the CUDA-typed signatures
 # through this facade (they cannot evaluate the dynamic __all__).
 from tilelang.cuda.language import (  # noqa: F401
+    EvictPriority,
     Kernel,
     Parallel,
     Unroll,

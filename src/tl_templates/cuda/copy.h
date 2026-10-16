@@ -281,27 +281,53 @@ TL_DEVICE void store_global_128_conditional(void *ptr, uint4 value, bool pred) {
   global_store<uint4, 16>(ptr, value, pred);
 }
 
-template <int EvictionPolicy> TL_DEVICE void prefetch_l2(const void *ptr) {
-  static_assert(
-      EvictionPolicy == 0 || EvictionPolicy == 2,
-      "tl::prefetch_l2 only supports `evict_normal` and `evict_last`");
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-  uint64_t g_addr = __cvta_generic_to_global(ptr);
-  if constexpr (EvictionPolicy == 0) {
-    asm volatile("prefetch.global.L2::evict_normal [%0];"
-                 :
-                 : "l"(g_addr)
-                 : "memory");
+template <bool IsGlobal> TL_DEVICE void prefetch_l1(const void *ptr) {
+  uint64_t addr;
+  if constexpr (IsGlobal) {
+    addr = __cvta_generic_to_global(ptr);
+    asm volatile("prefetch.global.L1 [%0];" : : "l"(addr) : "memory");
   } else {
-    asm volatile("prefetch.global.L2::evict_last [%0];"
-                 :
-                 : "l"(g_addr)
-                 : "memory");
+    addr = __cvta_generic_to_local(ptr);
+    asm volatile("prefetch.local.L1 [%0];" : : "l"(addr) : "memory");
   }
+}
+
+TL_DEVICE void prefetchu_l1(const void *ptr) {
+  asm volatile("prefetchu.L1 [%0];" : : "l"(ptr) : "memory");
+}
+
+template <int EvictPriority, bool IsGlobal>
+TL_DEVICE void prefetch_l2(const void *ptr) {
+  uint64_t addr;
+  if constexpr (IsGlobal) {
+    addr = __cvta_generic_to_global(ptr);
+  } else {
+    addr = __cvta_generic_to_local(ptr);
+  }
+  if constexpr (EvictPriority == -1) {
+    if constexpr (IsGlobal) {
+      asm volatile("prefetch.global.L2 [%0];" : : "l"(addr) : "memory");
+    } else {
+      asm volatile("prefetch.local.L2 [%0];" : : "l"(addr) : "memory");
+    }
+  } else {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+    if constexpr (EvictPriority == 0) {
+      asm volatile("prefetch.global.L2::evict_normal [%0];"
+                   :
+                   : "l"(addr)
+                   : "memory");
+    } else {
+      asm volatile("prefetch.global.L2::evict_last [%0];"
+                   :
+                   : "l"(addr)
+                   : "memory");
+    }
 #else
-  static_assert(EvictionPolicy != EvictionPolicy,
-                "tl::prefetch_l2 requires sm_80 or later");
+    static_assert(EvictPriority != EvictPriority,
+                  "tl::prefetch_l2 requires sm_80 or later");
 #endif
+  }
 }
 
 } // namespace tl
