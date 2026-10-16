@@ -3764,6 +3764,18 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             bool skip_first_arg,
                                             std::ostream &os) {
   DataType ret_dtype = GetRuntimeDataType(ret_type);
+  // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
+  // Select the scalar-core implementation using the existing VF context.
+  if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
+      global_symbol == "sqrtf") {
+    global_symbol = "AscendC::Std::sqrt";
+    if (!has_ascend_std_math_included_) {
+      // The Std headers use AscendC annotations from kernel_operator.h.
+      decl_stream << "#include <kernel_operator.h>\n";
+      decl_stream << "#include <utils/std/cmath.h>\n";
+      has_ascend_std_math_included_ = true;
+    }
+  }
   if (ret_dtype.is_fixed_length_vector()) {
     ValidateGenericVectorType("external call", ret_dtype);
     // Scalarize: for each lane, extract scalar args, call the scalar
