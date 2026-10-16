@@ -25,7 +25,6 @@
 #include "../ascend_pipe.h"
 #include "../buffer_version.h"
 #include "../core_mask.h"
-#include "./memory_access.h"
 #include "op/utils.h"
 
 namespace tvm {
@@ -40,6 +39,14 @@ using ffi::String;
 class IRStructure;
 class TaskNode;
 class ControlNode;
+
+// Keep the user-visible region for conflict hints and the instruction's
+// conservative footprint for dependency checks. Both use logical coordinates;
+// L0 compact-pitch compatibility is checked separately.
+struct BufferAccess {
+  BufferRegion region;
+  BufferRegion footprint;
+};
 
 // HBM bandwidth-contention resource bits. These are tracked separately from
 // ResourcePipe because a load and a store use different issue pipes but can

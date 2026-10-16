@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-#include "./memory_access.h"
+#include "./ir_structure.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
