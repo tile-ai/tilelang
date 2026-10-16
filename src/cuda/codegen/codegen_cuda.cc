@@ -2993,13 +2993,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
-    ICHECK_EQ(op->args.size(), 4U);
+    // An optional trailing string selects an element-format variant.
+    bool has_variant =
+        op->args.size() == 5U && op->args.back().as<StringImmNode>();
+    ICHECK(op->args.size() == 4U || has_variant);
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
+    if (has_variant) {
+      std::string variant = Downcast<StringImm>(op->args.back())->value;
+      ICHECK_EQ(variant, "b4x16_p64")
+          << "Unsupported ptx_ldmatrix variant: " << variant;
+      ICHECK_EQ(trans, 0) << "ldmatrix .b4x16_p64 has no transposed form";
+      func_name = "tl::ptx_ldmatrix_" + variant + "_x" + std::to_string(num);
+    }
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    print_extern_call_stmt(func_name, 2, has_variant ? 1 : 0);
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -3439,18 +3449,40 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string scale_b_byte_id = this->PrintExpr(op->args[19]);
     std::string scale_b_thread_id = this->PrintExpr(op->args[20]);
 
+    static const std::unordered_map<std::string, std::string>
+        mxf8f6f4_operand_enums = {
+            {"e2m1", "tl::SM120MmaOperandType::kE2M1"},
+            {"e3m2", "tl::SM120MmaOperandType::kE3M2"},
+            {"e2m3", "tl::SM120MmaOperandType::kE2M3"},
+            {"e4m3", "tl::SM120MmaOperandType::kE4M3"},
+            {"e5m2", "tl::SM120MmaOperandType::kE5M2"},
+    };
+    bool row_col_f32 =
+        accum_dtype == "float32" && A_layout == "row" && B_layout == "col";
     bool supported_mxf4nvf4_4x_ue4m3 =
-        accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
-        B_layout == "col" && kind == "mxf4nvf4" && scale_vec_size == 4 &&
-        A_dtype == "e2m1" && B_dtype == "e2m1" && scale_type == "ue4m3";
-    ICHECK(supported_mxf4nvf4_4x_ue4m3)
+        row_col_f32 && shape == "m16n8k64" && kind == "mxf4nvf4" &&
+        scale_vec_size == 4 && A_dtype == "e2m1" && B_dtype == "e2m1" &&
+        scale_type == "ue4m3";
+    bool supported_mxf4nvf4_2x_ue8m0 =
+        row_col_f32 && shape == "m16n8k64" && kind == "mxf4nvf4" &&
+        scale_vec_size == 2 && A_dtype == "e2m1" && B_dtype == "e2m1" &&
+        scale_type == "ue8m0";
+    bool supported_mxf8f6f4_1x_ue8m0 =
+        row_col_f32 && shape == "m16n8k32" && kind == "mxf8f6f4" &&
+        scale_vec_size == 1 && scale_type == "ue8m0" &&
+        mxf8f6f4_operand_enums.count(A_dtype) &&
+        mxf8f6f4_operand_enums.count(B_dtype);
+    ICHECK(supported_mxf4nvf4_4x_ue4m3 || supported_mxf4nvf4_2x_ue8m0 ||
+           supported_mxf8f6f4_1x_ue8m0)
         << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
         << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
         << ", B_layout=" << B_layout << ", kind=" << kind
         << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
         << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
         << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
-           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3 or scale_vec::2X e2m1.e2m1 f32 "
+           "ue8m0, and f32 m16n8k32 row.col "
+           "kind::mxf8f6f4 scale_vec::1X {e2m1,e3m2,e2m3,e4m3,e5m2} f32 ue8m0.";
 
     auto resolve_fp4_packed_buffer =
         [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
@@ -3469,9 +3501,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
     std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
+    std::string operand_type_enums;
+    if (supported_mxf4nvf4_2x_ue8m0) {
+      scale_type_enum = "tl::SM120MmaScaleType::kUE8M0";
+    }
+    if (supported_mxf8f6f4_1x_ue8m0) {
+      mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf8f6f4";
+      scale_type_enum = "tl::SM120MmaScaleType::kUE8M0";
+      operand_type_enums = ", " + mxf8f6f4_operand_enums.at(A_dtype) + ", " +
+                           mxf8f6f4_operand_enums.at(B_dtype);
+    }
     std::string mma_call =
         "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
-        "(SCALE_TYPE)>("
+        "(SCALE_TYPE)(OPERAND_TYPES)>("
         "reinterpret_cast<float*>((C_ptr) + (C_offset)), "
         "reinterpret_cast<const uint32_t*>((A_ptr) + (A_offset)), "
         "reinterpret_cast<const uint32_t*>((B_ptr) + (B_offset)), "
@@ -3487,6 +3529,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(MMA_KIND)", mma_kind_enum);
     replacer.register_rule("(SCALE_VEC_SIZE)", std::to_string(scale_vec_size));
     replacer.register_rule("(SCALE_TYPE)", scale_type_enum);
+    replacer.register_rule("(OPERAND_TYPES)", operand_type_enums);
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", a_offset);
     replacer.register_rule("(B_ptr)", b_ref);

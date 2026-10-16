@@ -3,6 +3,8 @@ from __future__ import annotations
 from tilelang import language as T
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
     TensorCoreIntrinEmitterSM120 as TensorCoreIntrinEmitterBlockScaled,
+    block_scale_mma_kind_for_dtypes,
+    block_scale_register_dtype,
 )
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
@@ -30,9 +32,16 @@ def _is_explicit_non_sm120_cuda(target: Target) -> bool:
 class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
     """SM120 warp-level block-scaled MMA lowering.
 
+    The operand dtypes select the instruction: packed E2M1 operands issue
+    ``kind::mxf4nvf4``, as NVFP4 (UE4M3 scales per 16 K) or MXFP4 (UE8M0
+    scales per 32 K), and E4M3/E5M2 operands issue ``kind::mxf8f6f4`` (UE8M0
+    scales per 32 K). Both read uint32 words that
+    pack the scales of four consecutive scale blocks.
+
     A may be shared or a full fragment; B remains shared. Fragment A and
     fragment scales use row-major packed uint32 scales. Compact K-major
-    scales retain the shared/shared ping-pong path, including odd atom grids.
+    scales retain the shared/shared ping-pong path, including odd atom grids;
+    that path is NVF4 only.
     """
 
     supported_sf_layouts = ("rowmajor", "blockscaled_chunk_kmajor")
@@ -44,9 +53,28 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         if _is_explicit_non_sm120_cuda(target):
             raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
 
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # kind::mxf8f6f4 takes independent A and B element types.
+        return True
+
+    @property
+    def block_scale_kind(self) -> tuple[str, int, str]:
+        return block_scale_mma_kind_for_dtypes(self.a_dtype, self.b_dtype, self.sf_a_granularity_k)
+
     def _validate_operands(self) -> None:
         if not (self.is_gemm_ss() or self.is_gemm_rs()):
             raise ValueError("T.mma_gemm_blockscaled requires shared or fragment A and shared B")
+        kind, scale_vec_size, _ = self.block_scale_kind
+        if kind == "mxf4nvf4" and scale_vec_size == 2 and self.sf_layout != "rowmajor":
+            raise ValueError("SM120 MXFP4 block-scaled GEMM currently requires sf_layout='rowmajor'")
+        if kind == "mxf8f6f4":
+            if self.sf_layout != "rowmajor":
+                raise ValueError("SM120 kind::mxf8f6f4 block-scaled GEMM currently requires sf_layout='rowmajor'")
+            if self.is_gemm_rs():
+                # The generic 8-bit fragment-A MMA layout does not reproduce
+                # FP8 T.gemm results on SM121; keep A in shared memory.
+                raise ValueError("SM120 kind::mxf8f6f4 block-scaled GEMM currently requires A in shared memory")
         if self.is_gemm_rs():
             if not is_full_region(self.ARegion):
                 raise ValueError("SM120 block-scaled fragment input A must be a full region")
@@ -54,6 +82,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
                 raise ValueError("SM120 block-scaled fragment A currently requires sf_layout='rowmajor'")
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+        kind, scale_vec_size, stype = self.block_scale_kind
         m_warp, n_warp = self.policy.compute_warp_partition(
             self.M,
             self.N,
@@ -74,6 +103,9 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
             chunk=self.chunk,
             thread_var=thread_var,
             is_blockscaled=True,
+            kind=kind,
+            scale_vec_size=scale_vec_size,
+            stype=stype,
         )
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -114,8 +146,8 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         local_thread_var = thread_index - thread_bounds.min
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
-        a_dtype = self.a_dtype
-        b_dtype = self.b_dtype
+        a_dtype = block_scale_register_dtype(self.a_dtype)
+        b_dtype = block_scale_register_dtype(self.b_dtype)
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
@@ -179,7 +211,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
 
             return _Simplify(_gemm_ss_blockscaled_kmajor, inline_let=True)
 
-        if int(block_K // micro_size_k) == 4:
+        if mma_emitter.is_nvf4 and int(block_K // micro_size_k) == 4:
 
             @T.prim_func
             def _gemm_ss_blockscaled_static_kblock() -> None:

@@ -84,7 +84,8 @@ protected:
   std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
   std::string GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
                                          PrimExpr index);
-  std::string PrintBytePointerExpr_(const PrimExpr &expr);
+  std::string PrintBytePointerExpr_(const PrimExpr &expr,
+                                    bool packed_fp4 = false);
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
   PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
