@@ -154,6 +154,50 @@ def test_fix_uses_destination_extent_and_preserves_source_pitch(case):
     _equal(copy.args[3:7], [12, 8, 40, 16] if case == "grouped" else [16, 72, 16, 128])
 
 
+@pytest.mark.parametrize("dual,src_shape", [(0, (32, 64)), (1, (64, 64)), (2, (32, 128))], ids=["single", "split-m", "split-n"])
+def test_fix_nz_uses_physical_panel_pitch_and_slice_origin(dual, src_shape):
+    src = tirx.decl_buffer(src_shape, "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((2, 64, 96), "float32", name="dst", scope="shared")
+    after = _lower(
+        src,
+        dst,
+        dst_region=_region(dst, [1, 32, 64], [1, 16, 16]),
+        layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)},
+        annotations={"dual_dst_ctl": dual},
+        unit_flag_ctrl=3,
+    )
+    (copy,) = calls(after, "tl.ascend_copy_matrix_cc_to_ub")
+    _equal(copy.args[3:8], [src_shape[1], src_shape[0], 64 * 16, src_shape[0], dual])
+    _equal([copy.args[0].args[2], copy.args[10], copy.args[14]], [64 * 96 + 64 * 16 + 16 * 16, 3, 0])
+
+
+@pytest.mark.parametrize("column,width", [(8, 32), (0, 24)])
+def test_fix_nz_rejects_partial_column_panels(column, width):
+    src = tirx.decl_buffer((32, width), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared")
+    with pytest.raises(ValueError, match="aligned to 16 elements"):
+        _lower(
+            src,
+            dst,
+            dst_region=_region(dst, [32, width], [0, column]),
+            layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)},
+        )
+
+
+def test_fix_nz_rejects_l1_float32_panel_width():
+    src = tirx.decl_buffer((32, 64), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared")
+    with pytest.raises(ValueError, match="use make_ascend_l0c_layout"):
+        _lower(src, dst, layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_major_k_layout(dst)})
+
+
+def test_fix_nz_rejects_noncompact_logical_strides():
+    src = tirx.decl_buffer((32, 64), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared", strides=(80, 1))
+    with pytest.raises(ValueError, match="requires dense logical strides"):
+        _lower(src, dst, layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)})
+
+
 @pytest.mark.parametrize("scope", ["shared.l1", "shared.dyn"])
 def test_nonrepresentable_dma_geometry_is_rejected(scope):
     src = tirx.decl_buffer((2, 3, 4), "bfloat16", name="src", strides=(20, 5, 1) if scope == "shared.l1" else (14, 4, 1))
