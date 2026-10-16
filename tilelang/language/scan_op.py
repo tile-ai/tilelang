@@ -95,7 +95,7 @@ def cumsum(
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
-    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src` or `dst` is a fragment, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
 
     Supports Buffer, BufferRegion, and BufferLoad inputs, allowing operations on buffer slices/regions.
 
@@ -137,7 +137,7 @@ def cumsum(
 
     dst, dim = _prepare_scan_args(src, dst, dim, "cumsum")
 
-    if is_fragment(src):
+    if is_fragment(src) or is_fragment(dst):
         cumsum_fragment(src, dst, dim, reverse, annotations)
         return
 
@@ -183,14 +183,14 @@ def cummax(
     Compute the cumulative maximum of `src` along `dim`, writing results to `dst`.
 
     Negative `dim` indices are normalized (Python-style). If `dst` is None,
-    the operation is performed in-place into `src`. When `src.scope()` is
-    "local.fragment", this delegates to `cummax_fragment`; otherwise it emits
-    the `tl.cummax` intrinsic.
+    the operation is performed in-place into `src`. When `src` or `dst` is a
+    fragment, this delegates to `cummax_fragment`; otherwise it emits the
+    `tl.cummax` intrinsic.
     """
 
     dst, dim = _prepare_scan_args(src, dst, dim, "cummax")
 
-    if is_fragment(src):
+    if is_fragment(src) or is_fragment(dst):
         cummax_fragment(src, dst, dim, reverse, annotations)
         return
 
