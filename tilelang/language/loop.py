@@ -72,6 +72,10 @@ def Parallel(
     merged_annotations: dict[str, Any] = dict(annotations) if annotations is not None else {}
     if coalesced_width is not None:
         merged_annotations["coalesced_width"] = coalesced_width
+    if "coalesced_width" in merged_annotations:
+        cw = merged_annotations["coalesced_width"]
+        if not isinstance(cw, tirx.PrimExpr):
+            merged_annotations["coalesced_width"] = IntImm("int32", int(cw))
     if loop_layout is not None:
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.
