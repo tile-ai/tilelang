@@ -104,6 +104,7 @@ def test_fill_int8_negative():
         torch.testing.assert_close(out, ref)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op", ["fill", "clear"])
 @pytest.mark.parametrize(
     ("lo", "hi", "fits"),
