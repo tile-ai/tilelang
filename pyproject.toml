@@ -50,6 +50,15 @@ dependencies = [
 fp4 = ["ml-dtypes>=0.5.1"]
 # if you want to enable layout inference visualization
 vis = ["matplotlib"]
+# AMD's Windows/Linux SDK is published on the AMD index, not PyPI.
+# Includes hipcc, public headers, device libraries, and the HIP runtime.
+rocm = [
+    "rocm[devel]==10.0.0; sys_platform == 'win32' or sys_platform == 'linux'",
+    # Declare the SDK packages directly so uv applies their explicit index
+    # mappings as well as the meta-package's mapping.
+    "rocm-sdk-core==10.0.0; sys_platform == 'win32' or sys_platform == 'linux'",
+    "rocm-sdk-devel==10.0.0; sys_platform == 'win32' or sys_platform == 'linux'",
+]
 # if you want to build with CUDA NVCC support
 nvcc = [
     "torch",
@@ -63,11 +72,20 @@ nvcc = [
 ]
 
 [[tool.uv.index]]
+name = "amd-rocm"
+url = "https://stable.repo.amd.com/rocm/whl-next/"
+explicit = true
+
+[[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
+rocm = [{ index = "amd-rocm", extra = "rocm" }]
+# The SDK meta-package resolves these from the same AMD release channel.
+rocm-sdk-core = [{ index = "amd-rocm", extra = "rocm" }]
+rocm-sdk-devel = [{ index = "amd-rocm", extra = "rocm" }]
 torch = [
     { index = "pytorch-cu130", marker = "sys_platform == 'win32'", extra = "nvcc" },
 ]

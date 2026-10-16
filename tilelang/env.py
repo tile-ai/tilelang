@@ -200,21 +200,9 @@ def _find_cuda_home() -> str:
 
 def _find_rocm_home() -> str:
     """Find the ROCM install path."""
-    rocm_home = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
-    if rocm_home is None:
-        rocmcc_path = shutil.which("hipcc")
-        if rocmcc_path is not None:
-            candidate = os.path.dirname(os.path.dirname(os.path.realpath(rocmcc_path)))
-            # Only trust a PATH-derived prefix when it carries the public HIP
-            # headers; partial toolchains without them exist in the wild (e.g.
-            # the preview compiler some ROCm 7 installs prepend to PATH).
-            if os.path.exists(os.path.join(candidate, "include", "hip", "hip_runtime.h")):
-                rocm_home = candidate
-        if rocm_home is None:
-            rocm_home = "/opt/rocm"
-            if not os.path.exists(rocm_home):
-                rocm_home = None
-    return rocm_home if rocm_home is not None else ""
+    from .toolchain.rocm import find_rocm_home
+
+    return find_rocm_home()
 
 
 # Cache control
@@ -588,10 +576,19 @@ def get_cuda_dll_search_dirs() -> list[str]:
 def get_runtime_library_dirs() -> list[str]:
     """Return library directories shipped with sibling Python packages.
 
-    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their libraries resolve
-    when TileLang is imported. Each lookup is best-effort; failures are ignored.
+    Locates ``tvm_ffi``, ``z3`` and the Windows HIP runtime so their libraries
+    resolve when TileLang is imported. Each lookup is best-effort.
     """
     dirs: list[str] = []
+    if sys.platform == "win32" and ROCM_HOME:
+        dirs.extend(path for path in (os.path.join(ROCM_HOME, "bin"), os.path.join(ROCM_HOME, "lib")) if os.path.isdir(path))
+    if sys.platform == "win32":
+        try:
+            import rocm_sdk
+
+            dirs.extend(str(path.parent) for path in rocm_sdk.find_libraries("amdhip64"))
+        except (ImportError, OSError):
+            pass
     try:
         from tvm_ffi import libinfo as tvm_ffi_libinfo
 
