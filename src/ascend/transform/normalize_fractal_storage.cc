@@ -184,7 +184,6 @@ private:
     }
     buffers_.Set(buffer, padded);
     canonical_buffers_.Set(buffer->data, padded);
-    layouts_.Set(buffer, padded_layout);
     canonical_layouts_.Set(padded, padded_layout);
   }
 
@@ -511,9 +510,11 @@ private:
     if (auto value = op->annotations.Get(attr::kLayoutMap)) {
       Map<Buffer, Layout> layouts;
       for (const auto &[buffer, layout] :
-           value.value().cast<Map<Buffer, Layout>>())
-        layouts.Set(buffers_.Get(buffer).value_or(buffer),
-                    layouts_.Get(buffer).value_or(layout));
+           value.value().cast<Map<Buffer, Layout>>()) {
+        Buffer rewritten = buffers_.Get(buffer).value_or(buffer);
+        layouts.Set(rewritten,
+                    canonical_layouts_.Get(rewritten).value_or(layout));
+      }
       block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layouts);
     }
     return block;
@@ -521,7 +522,6 @@ private:
   Map<Var, Buffer> anchors_;
   Map<Var, Buffer> canonical_buffers_;
   Map<Buffer, Buffer> buffers_;
-  Map<Buffer, Layout> layouts_;
   LayoutMap canonical_layouts_;
   Map<Buffer, Layout> logical_maps_;
 };
