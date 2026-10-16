@@ -189,6 +189,12 @@ private:
   bool IsLocalVarBuffer(const VarNode *var) const;
   void EmitMixedEntrySnapshot(const VarNode *var);
   void RestoreMixedSectionVariables(const SBlockNode *section);
+  std::string PrintVmiAnnotationValue(const std::string &key,
+                                      const ObjectRef &value);
+  void PrintPtoVmiCall_(const CallNode *op, std::ostream &os);
+  bool IsVmiLocalRegisterBuffer(const BufferNode *buffer) const;
+  void CheckVmiLocalRegisterIndex(const BufferNode *buffer,
+                                  const PrimExpr &index) const;
   bool HasAscendGemmL1(const PrimFunc &func) const;
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
