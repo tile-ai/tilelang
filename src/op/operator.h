@@ -176,6 +176,10 @@ struct LayoutInferArgs {
   // the vectorizer's width; scalar reducer-root attempts pass one. This is
   // a search option, not operator state or a constraint on inferred layouts.
   int candidate_vector_size_limit = 0;
+  // Fragment buffers created by an allocation site in the source SBlock.
+  // Derived Buffer views may share their storage and layout, but their
+  // partial physical image is not required to form a dense rectangle.
+  ffi::Map<tirx::Buffer, Bool> allocated_fragment_buffers;
 };
 
 class TileOperator;
