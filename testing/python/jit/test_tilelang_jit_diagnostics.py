@@ -193,6 +193,11 @@ def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch,
     monkeypatch.setattr(CacheState, "_enabled", True)
     compile_calls = []
 
+    # This test asserts that the compiler callback receives the fatbin target.
+    # A persistent self-hosted runner may already have this synthetic source in
+    # its disk cache, in which case the callback is intentionally bypassed.
+    monkeypatch.setattr(cuda_backend.env, "TILELANG_DISABLE_CACHE", "1")
+
     def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
         compile_calls.append((target_format, arch))
         return bytearray(b"fake-cuda-binary")
