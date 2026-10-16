@@ -280,20 +280,15 @@ class AutoTuner:
             frozen_inputs = list(captured_inputs)
             cached_tensors_by_device = {}
 
-            def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
-                if not isinstance(device, (int, str, torch.device)):
-                    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
-                if device not in _cached_tensors_by_device:
-                    if isinstance(device, torch.device):
-                        target_device = device
-                    elif isinstance(device, str):
-                        target_device = torch.device(device)
-                    else:
-                        target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
-                    _cached_tensors_by_device[device] = [
+            def supply_prog(_params, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
+                # derive the benchmark device from the captured tensors
+                src = next((t for t in _frozen_inputs if isinstance(t, torch.Tensor)), None)
+                target_device = src.device if src is not None else torch.device("cpu")
+                if target_device not in _cached_tensors_by_device:
+                    _cached_tensors_by_device[target_device] = [
                         tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
-                return _cached_tensors_by_device[device]
+                return _cached_tensors_by_device[target_device]
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
