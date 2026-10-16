@@ -1486,14 +1486,16 @@ using tl::tfloat32_t;
                                            int width = warpSize) {             \
     RAW raw = reinterpret_cast<RAW &>(val);                                    \
     RAW ret = static_cast<RAW>(                                                \
-        __shfl_down_sync(mask, static_cast<uint32_t>(raw), delta, width));     \
+        __shfl_down_sync(mask, static_cast<uint32_t>(raw),                     \
+                         static_cast<unsigned>(delta), width));                \
     return reinterpret_cast<TYPE &>(ret);                                      \
   }                                                                            \
   TL_PATCH TL_DEVICE TYPE __shfl_up_sync(unsigned mask, TYPE val, int delta,   \
                                          int width = warpSize) {               \
     RAW raw = reinterpret_cast<RAW &>(val);                                    \
-    RAW ret = static_cast<RAW>(                                                \
-        __shfl_up_sync(mask, static_cast<uint32_t>(raw), delta, width));       \
+    RAW ret =                                                                  \
+        static_cast<RAW>(__shfl_up_sync(mask, static_cast<uint32_t>(raw),      \
+                                        static_cast<unsigned>(delta), width)); \
     return reinterpret_cast<TYPE &>(ret);                                      \
   }
 
@@ -1501,8 +1503,7 @@ TL_DEFINE_SHFL_SYNC_OVERLOADS(half_t, uint16_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(bfloat16_t, uint16_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e4m3_t, uint8_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e5m2_t, uint8_t)
-
-#undef TL_DEFINE_SHFL_SYNC_OVERLOADS
+// Kept defined: cuda_fp4.h also applies it to fp4_e2_t.
 
 //
 // Optimized type-punned warp shuffle helpers for 16-bit types
