@@ -126,7 +126,7 @@ def test_alternating_epilogue_uses_each_aiv_flag_bank(versions):
                     T.copy(accum, ub)
                     T.copy(ub, C[i, :, :])
 
-    before = schedule(main, through="ResolveCore", auto_schedule=False)
+    before = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     (owner,) = nodes(before, tirx.For)
     counters = list(owner.annotations["tl.multi_buffer_counter_map"].values())
     assert len(counters) == 2 and not counters[0].same_as(counters[1])

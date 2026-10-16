@@ -116,7 +116,8 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
 }
 
 bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        const ConstrSet &b_ctx, const BufferRegion &b_region,
+                        bool a_is_read, const ConstrSet &b_ctx,
+                        const BufferRegion &b_region, bool b_is_read,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
                         const ConflictHintList &root_conflicts,
@@ -155,8 +156,16 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   if (!a_region->buffer.same_as(b_region->buffer))
     return true;
 
-  Array<Range> a_rng = ExpandAscendFractalMayAccess(a_region)->region;
-  Array<Range> b_rng = ExpandAscendFractalMayAccess(b_region)->region;
+  // Cube loads can read complete L1 fractals, but DMA/fill writes can address
+  // individual rows. Expanding those writes creates false conflicts between
+  // disjoint AIV NZ copies. Keep the original regions above for hint matching.
+  auto may_access = [](const BufferRegion &region, bool is_read) {
+    if (IsL1Buffer(region->buffer) && !is_read)
+      return region->region;
+    return ExpandAscendFractalMayAccess(region)->region;
+  };
+  Array<Range> a_rng = may_access(a_region, a_is_read);
+  Array<Range> b_rng = may_access(b_region, b_is_read);
   if (a_rng.size() != b_rng.size())
     return true; // shape mismatch — be safe
   const size_t ndim = a_rng.size();
@@ -388,7 +397,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
       };
 
       auto consider = [&](const std::vector<RegionAccess> &lhs_accesses,
-                          const std::vector<RegionAccess> &rhs_accesses) {
+                          const std::vector<RegionAccess> &rhs_accesses,
+                          bool lhs_is_read, bool rhs_is_read) {
         for (const RegionAccess &lhs : lhs_accesses) {
           for (const RegionAccess &rhs : rhs_accesses) {
             if (IsSharedBuffer(lhs.region->buffer) &&
@@ -420,7 +430,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             if (manual_versions && !owner_exclusion) {
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
                 if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                       rhs.task->outer_ctx, rhs.region, loop, d,
+                                       lhs_is_read, rhs.task->outer_ctx,
+                                       rhs.region, rhs_is_read, loop, d,
                                        /*num_storage_owners=*/0, root_conflicts,
                                        lhs.task->GetL0Pitch(lhs_storage),
                                        rhs.task->GetL0Pitch(rhs_storage))) {
@@ -435,12 +446,12 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                 continue;
               if (distance < 0 && loop == nullptr)
                 continue;
-              if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                     rhs.task->outer_ctx, rhs.region, loop,
-                                     distance, get_num_storage_owners(storage),
-                                     root_conflicts,
-                                     lhs.task->GetL0Pitch(lhs_storage),
-                                     rhs.task->GetL0Pitch(rhs_storage))) {
+              if (RegionsMayConflict(
+                      lhs.task->outer_ctx, lhs.region, lhs_is_read,
+                      rhs.task->outer_ctx, rhs.region, rhs_is_read, loop,
+                      distance, get_num_storage_owners(storage), root_conflicts,
+                      lhs.task->GetL0Pitch(lhs_storage),
+                      rhs.task->GetL0Pitch(rhs_storage))) {
                 add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
                          rhs.task,
                          owner_exclusion ? DependencyKind::kOwnerExclusion
@@ -451,9 +462,12 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
           }
         }
       };
-      consider(accesses[i].writes, accesses[j].reads);
-      consider(accesses[i].writes, accesses[j].writes);
-      consider(accesses[i].reads, accesses[j].writes);
+      consider(accesses[i].writes, accesses[j].reads, /*lhs_is_read=*/false,
+               /*rhs_is_read=*/true);
+      consider(accesses[i].writes, accesses[j].writes, /*lhs_is_read=*/false,
+               /*rhs_is_read=*/false);
+      consider(accesses[i].reads, accesses[j].writes, /*lhs_is_read=*/true,
+               /*rhs_is_read=*/false);
 
       if (i == j && nodes[i]->IsControl()) {
         CoveredDependencyMap covered = subtree_covered(nodes[i]);
