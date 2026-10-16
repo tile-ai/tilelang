@@ -246,26 +246,47 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
         The AMD GPU architecture
     """
     gpu_arch = "gfx900"
-    # check if rocm is installed
-    if not os.path.exists(rocm_path):
-        print("ROCm not detected, using default gfx900")
-        return gpu_arch
-    try:
-        # Execute rocminfo command
-        rocminfo_output = subprocess.check_output([f"{rocm_path}/bin/rocminfo"]).decode("utf-8")
 
-        # Use regex to match the "Name" field
-        match = re.search(r"Name:\s+(gfx\d+[a-zA-Z]*)", rocminfo_output)
-        if match:
-            gpu_arch = match.group(1)
-        return gpu_arch
-    except subprocess.CalledProcessError:
-        print(
-            f"Unable to execute rocminfo command, \
-                please ensure ROCm is installed and you have an AMD GPU on your system.\
-                    using default {gpu_arch}."
-        )
-        return gpu_arch
+    def _arch_from_rocminfo(prefix):
+        if not prefix:
+            return None
+        rocminfo = os.path.join(prefix, "bin", "rocminfo")
+        if not os.path.exists(rocminfo):
+            return None
+        try:
+            output = subprocess.check_output([rocminfo]).decode("utf-8")
+        except (subprocess.CalledProcessError, OSError):
+            return None
+        match = re.search(r"Name:\s+(gfx\d+[a-zA-Z]*)", output)
+        return match.group(1) if match else None
+
+    # Try the caller-provided prefix first (default /opt/rocm, as on a classic
+    # system install). If ROCm is not under that prefix -- e.g. a pip-packaged
+    # ROCm SDK (rocm-sdk / _rocm_sdk_devel) with no /opt/rocm -- re-locate the
+    # toolchain via find_rocm_path(), which honors ROCM_PATH and hipcc on PATH.
+    arch = _arch_from_rocminfo(rocm_path)
+    if arch is None:
+        try:
+            arch = _arch_from_rocminfo(find_rocm_path())
+        except RuntimeError:
+            arch = None
+    if arch is not None:
+        return arch
+
+    # Last resort before the hard-coded default: ask the runtime through torch,
+    # which reports gcnArchName even for pip-SDK installs that ship no rocminfo
+    # under a conventional prefix.
+    try:
+        from tilelang.rocm.target import _detect_rocm_arch
+
+        torch_arch = _detect_rocm_arch()
+        if torch_arch:
+            return torch_arch
+    except Exception:
+        pass
+
+    print("ROCm not detected, using default gfx900")
+    return gpu_arch
 
 
 # Well-known ROCm install prefix used as the last-resort hipcc candidate.
