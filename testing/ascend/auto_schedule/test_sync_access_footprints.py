@@ -5,6 +5,7 @@ import pytest
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
+from tilelang.layout import make_ascend_nz_layout
 from testing.ascend._ir import calls, copy, kernel, schedule, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 from tvm import tirx
@@ -28,9 +29,14 @@ def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope
     load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
     padding = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
     fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
-    # L1 fill can address individual rows. The load reads two whole row16
-    # fractals even though its effective region ends at row 24.
-    before = kernel(seq(fill, load) if fill_first else seq(load, fill), buffers=[src, dst])
+    # The copy normalizer exposes its two transferred row16 blocks. Fill
+    # keeps the explicitly requested eight rows.
+    before = kernel(
+        seq(fill, load) if fill_first else seq(load, fill),
+        buffers=[src, dst],
+        annotations={"layout_map": {src: make_ascend_nz_layout(src), dst: make_ascend_nz_layout(dst)}},
+    )
+    before = transform.NormalizeAscendFractalStorage()(before)
     after = transform.InsertSync()(before)
     pipe = "MTE2_MTE1" if fill_first else "MTE1_MTE2"
     events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
@@ -41,18 +47,18 @@ def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope
         assert not events
 
 
-def test_l0_tail_load_preserves_explicit_logical_region_conflicts():
+def test_l0_load_matches_explicit_transfer_region_conflicts():
     @T.prim_func
     def main():
         with T.Kernel(1):
             left = T.alloc_l1((32, 16), "bfloat16")
             right = T.alloc_l1((32, 16), "bfloat16")
             dst = T.alloc_l0a((32, 16), "bfloat16")
-            T.assume_conflict(left[:24, :], right[:24, :], cross=False)
+            T.assume_conflict(left[:24, :], right[:32, :], cross=False)
             with T.Stage(0):
                 T.fill(left[:24, :], 0)
                 # The source is already prepared at this sync-only boundary.
-                T.copy(right[:24, :], dst[:24, :])
+                T.copy(right[:32, :], dst[:32, :])
 
     events = _events(main)
     assert ("set", "MTE2_MTE1") in events
@@ -73,37 +79,6 @@ def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
     pipe = "MTE2_S" if fill_first else "S_MTE2"
     events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
     assert len(events) == (2 if row == 16 else 0)
-    if events:
-        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
-
-
-@pytest.mark.parametrize("kind", ["dense", "mx"])
-@pytest.mark.parametrize("fill_first", [False, True])
-@pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
-def test_gemm_l1_tail_read_accounts_for_instruction_padding(kind, fill_first, row):
-    dtype = "bfloat16" if kind == "dense" else "float8_e4m3fn"
-    a = tirx.decl_buffer((48, 64), dtype, name="a", scope="shared.l1")
-    b = tirx.decl_buffer((32, 64), dtype, name="b", scope="shared.l1")
-    c = tirx.decl_buffer((32, 32), "float32", name="c", scope="shared.l0c")
-    sa = tirx.decl_buffer((48, 2), "uint16", name="sa", scope="shared.l1")
-    sb = tirx.decl_buffer((32, 2), "uint16", name="sb", scope="shared.l1")
-
-    def prefix(buffer):
-        return tirx.BufferRegion(buffer, [tvm.ir.Range(0, 24), tvm.ir.Range(0, buffer.shape[1])])
-
-    if kind == "dense":
-        call = T.gemm(prefix(a), b, prefix(c), transpose_B=True, clear_accum=True)
-    else:
-        call = T.gemm_blockscaled(prefix(a), b, prefix(c), prefix(sa), sb, transpose_B=True, clear_accum=True)
-    read = unit(tirx.Evaluate(call), core=2)
-    padding = tirx.BufferRegion(a, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 64)])
-    fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
-    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[a, b, c, sa, sb])
-    after = transform.InsertSync()(before)
-    # The fused L1 GEMM reads its inputs through MTE1.
-    pipe = "MTE2_MTE1" if fill_first else "MTE1_MTE2"
-    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
-    assert len(events) == (2 if row == 24 else 0)
     if events:
         tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 

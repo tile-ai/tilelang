@@ -382,28 +382,6 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
   return true;
 }
 
-BufferRegion ExpandAscendFractalMayAccess(const BufferRegion &region) {
-  const Buffer &buffer = region->buffer;
-  int bits = buffer->dtype.bits();
-  if (!(IsL1Buffer(buffer) || IsL0ABuffer(buffer) || IsL0BBuffer(buffer) ||
-        IsL0CBuffer(buffer)) ||
-      region->region.size() < 2 || bits <= 0 || 256 % bits != 0)
-    return region;
-  int alignment = IsL0CBuffer(buffer) ? 16 : std::max(16, 256 / bits);
-  ffi::Array<Range> ranges = region->region;
-  for (const Range &range : ranges)
-    if (is_zero(range->extent))
-      return region;
-  for (size_t i = ranges.size() - 2; i < ranges.size(); ++i) {
-    PrimExpr begin = floordiv(ranges[i]->min, alignment) * alignment;
-    PrimExpr end = floordiv(ranges[i]->min + ranges[i]->extent + alignment - 1,
-                            alignment) *
-                   alignment;
-    ranges.Set(i, Range::FromMinExtent(begin, end - begin));
-  }
-  return BufferRegion(buffer, ranges);
-}
-
 // Ascend ND (row-major) identity layout for GM/UB operands. Forward is the
 // identity [i0, .., i_{n-1}] -> [i0, .., i_{n-1}], so OutputShape ==
 // InputShape. Used only for copy-parameter derivation in lowering;

@@ -279,8 +279,7 @@ private:
     bool changed = false;
     for (const Var &var : accesses.read_vars)
       changed |= AddDemand(&var_demand_, var, demand);
-    for (const BufferAccess &access : accesses.read_accesses) {
-      const BufferRegion &region = access.region;
+    for (const BufferRegion &region : accesses.read_regions) {
       if (IsRegisterRegion(region))
         changed |= AddDemand(&register_demand_, region->buffer->data, demand);
     }

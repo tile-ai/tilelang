@@ -108,6 +108,25 @@ public:
  */
 bool IsAscendCopyCall(const tirx::CallNode *call);
 
+namespace ascend {
+
+// The concrete regions transferred by a local data copy. Pitch is retained
+// separately because a destination region can be larger than the transfer.
+struct L0CopyRegions {
+  BufferRegion source;
+  BufferRegion destination;
+  PrimExpr pitch;
+};
+
+L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
+                                   const LayoutMap &layouts,
+                                   arith::Analyzer *analyzer);
+BufferRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
+                                     const LayoutMap &layouts,
+                                     arith::Analyzer *analyzer);
+
+} // namespace ascend
+
 } // namespace tl
 } // namespace tvm
 

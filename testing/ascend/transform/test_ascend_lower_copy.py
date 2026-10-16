@@ -26,7 +26,7 @@ def _region(buffer, extents=None, mins=None):
     )
 
 
-def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings=None, wrap=None, **kwargs):
+def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings=None, wrap=None, normalize=False, **kwargs):
     copy = T.copy(src_region if src_region is not None else src, dst_region if dst_region is not None else dst, **kwargs)
     buffers = [src, dst]
     for buffer in layouts or {}:
@@ -49,7 +49,10 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings
     params += tirx.analysis.undefined_vars(body, params)
     func = tirx.PrimFunc(params, body, buffer_map={b.data: b for b in globals_}).with_attr("target", target)
     with target:
-        return transform.AscendLowerTileOp()(tvm.IRModule({"main": func}))
+        mod = tvm.IRModule({"main": func})
+        if normalize:
+            mod = transform.NormalizeAscendFractalStorage()(mod)
+        return transform.AscendLowerTileOp()(mod)
 
 
 def _equal(actual, expected):
@@ -238,7 +241,8 @@ def test_partial_l0_copy_uses_full_pitch_and_mapped_destination_origin(dtype, ma
         ([0, 0], [16, 0], [24, 32], 4, "source row16 extent"),
     ],
 )
-def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_min, extent, l0_pitch, diagnostic):
+@pytest.mark.parametrize("normalize", [False, True], ids=["lower", "normalize-and-lower"])
+def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_min, extent, l0_pitch, diagnostic, normalize):
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
     with pytest.raises(ValueError, match=diagnostic):
@@ -249,6 +253,7 @@ def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_m
             _region(dst, extent, dst_min),
             layouts={src: make_ascend_major_k_layout(src), dst: make_ascend_major_k_layout(dst)},
             l0_pitch=l0_pitch,
+            normalize=normalize,
         )
 
 
@@ -559,3 +564,19 @@ def test_dynamic_sf_copy_requires_proven_data_capacity(axis, lower_bound, upper_
     (load,) = calls(lower(), "tl.ascend_load_ca_sf")
     if lower_bound <= upper_bound:
         _equal(load.args[4:6], [tirx.floordiv(n + 15, 16), 1] if axis == "mn" else [1, n])
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+def test_sf_tail_source_fits_its_fractal_allocation(normalize):
+    src = tirx.decl_buffer((24, 4), "uint8", name="src", scope="shared.l1")
+    data = tirx.decl_buffer((32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((24, 4), "uint8", name="sf", scope="shared.l0a.sf")
+    after = _lower(
+        src,
+        sf,
+        layouts={src: make_ascend_sf_layout(src), data: make_ascend_major_k_layout(data)},
+        bindings={sf.data: data.data},
+        normalize=normalize,
+    )
+    (load,) = calls(after, "tl.ascend_load_ca_sf")
+    _equal(load.args[4:8], [2, 2, 2, 2])

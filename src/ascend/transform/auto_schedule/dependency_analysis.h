@@ -120,10 +120,10 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // an identically-shaped iteration in another owner can still be a distinct
 // epoch. Shared by scheduling-time IRStructure analysis and the scheduled-TIR
 // synchronization pass.
-// Match hints against logical regions; compare instruction footprints supplied
-// by access analysis. Access direction does not determine either footprint.
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferAccess &a_access,
-                        const ConstrSet &b_ctx, const BufferAccess &b_access,
+// Copy normalization makes instruction transfer regions explicit before
+// scheduling. Compare those regions directly, including for conflict hints.
+bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
+                        const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners = 0,
                         const ConflictHintList &root_conflicts = {},

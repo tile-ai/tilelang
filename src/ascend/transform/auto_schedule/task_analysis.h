@@ -174,8 +174,8 @@ struct TaskResourceUsage {
 // remain separate from hardware resource classification because AutoSchedule
 // also adds accesses from surrounding guards and loop expressions to a task.
 struct TaskAccessInfo {
-  std::vector<BufferAccess> read_accesses;
-  std::vector<BufferAccess> write_accesses;
+  std::vector<BufferRegion> read_regions;
+  std::vector<BufferRegion> write_regions;
   Map<Var, Optional<PrimExpr>> l0_pitches;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
@@ -404,8 +404,8 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
       MemoryAccessDetector::AccessMode::kLogical, layouts);
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
-  result.read_accesses = memory_detector.GetReadAccesses();
-  result.write_accesses = memory_detector.GetWriteAccesses();
+  result.read_regions = memory_detector.GetReadRegions();
+  result.write_regions = memory_detector.GetWriteRegions();
   result.l0_pitches = memory_detector.GetL0Pitches();
   result.read_vars = memory_detector.GetReadVars();
   result.write_vars = memory_detector.GetWriteVars();
@@ -414,13 +414,13 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
 
 inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
                                 const Var &storage) {
-  auto regions_access = [&](const std::vector<BufferAccess> &regions) {
-    return std::any_of(regions.begin(), regions.end(), [&](const auto &access) {
-      return access.region->buffer->data.same_as(storage);
+  auto regions_access = [&](const std::vector<BufferRegion> &regions) {
+    return std::any_of(regions.begin(), regions.end(), [&](const auto &region) {
+      return region->buffer->data.same_as(storage);
     });
   };
-  if (regions_access(accesses.read_accesses) ||
-      regions_access(accesses.write_accesses)) {
+  if (regions_access(accesses.read_regions) ||
+      regions_access(accesses.write_regions)) {
     return true;
   }
   auto vars_access = [&](const std::vector<Var> &vars) {
@@ -509,8 +509,7 @@ public:
     CoreMask result = kCoreAll;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
-    for (const BufferAccess &access : accesses.read_accesses) {
-      const BufferRegion &region = access.region;
+    for (const BufferRegion &region : accesses.read_regions) {
       if (IsSharedBuffer(region->buffer)) {
         result &= kCoreVector;
       } else if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
@@ -526,7 +525,7 @@ public:
   CoreMask GetTaskReadCoreMask(const TaskNode *task) const {
     ICHECK(task != nullptr);
     TaskAccessInfo accesses;
-    accesses.read_accesses = task->GetReadAccesses();
+    accesses.read_regions = task->GetReadRegions();
     accesses.read_vars = task->GetReadVars();
     return GetAccessCoreMask(accesses, task);
   }
@@ -597,7 +596,7 @@ private:
 
 inline bool HasTaskBufferAccess(const Stmt &stmt) {
   TaskAccessInfo accesses = AnalyzeTaskAccesses(stmt);
-  return !accesses.read_accesses.empty() || !accesses.write_accesses.empty();
+  return !accesses.read_regions.empty() || !accesses.write_regions.empty();
 }
 
 inline bool HasTaskBufferAccess(const TaskNode *task) {
@@ -630,10 +629,10 @@ inline void ApplyTaskResourceUsage(const TaskResourceUsage &usage,
 
 inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
   ICHECK(task != nullptr);
-  for (const BufferAccess &access : accesses.read_accesses)
-    task->AddReadAccess(access);
-  for (const BufferAccess &access : accesses.write_accesses)
-    task->AddWriteAccess(access);
+  for (const BufferRegion &region : accesses.read_regions)
+    task->AddReadRegion(region);
+  for (const BufferRegion &region : accesses.write_regions)
+    task->AddWriteRegion(region);
   auto pitches = task->GetL0Pitches();
   for (const auto &[storage, pitch] : accesses.l0_pitches)
     MergeL0Pitch(&pitches, storage, pitch);
