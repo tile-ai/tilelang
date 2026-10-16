@@ -254,8 +254,10 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
         if not os.path.exists(rocminfo):
             return None
         try:
-            output = subprocess.check_output([rocminfo]).decode("utf-8")
-        except (subprocess.CalledProcessError, OSError):
+            # Bound the probe: a hung rocminfo (e.g. stuck GPU discovery) must
+            # not block arch detection before the torch/gfx900 fallbacks.
+            output = subprocess.check_output([rocminfo], timeout=10).decode("utf-8")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             return None
         match = re.search(r"Name:\s+(gfx\d+[a-zA-Z]*)", output)
         return match.group(1) if match else None
