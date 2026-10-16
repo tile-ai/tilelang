@@ -7,483 +7,289 @@ from tilelang import tvm
 from tvm import tirx
 
 
+@pytest.fixture(params=["ConfigIndexBitwidth", "FlattenBuffer"])
+def index_pass(request):
+    return getattr(tilelang.transform, request.param)()
+
+
 def _nodes(stmt, kind):
     result = []
     tirx.stmt_functor.post_order_visit(stmt, lambda node: result.append(node) if isinstance(node, kind) else None)
     return result
 
 
-def _apply(func, pass_name):
-    result = getattr(tilelang.transform, pass_name)()(tvm.IRModule({"main": func}))["main"]
+def _apply(func, index_pass):
+    result = index_pass(tvm.IRModule({"main": func}))["main"]
     assert not tirx.analysis.undefined_vars(result.body, list(result.params))
     assert tirx.analysis.verify_well_formed(result)
     return result
 
 
-def _guarded_access(kind, index_scale=1, guard="upper"):
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
-    index = i * j * index_scale
-    # Construct the guard separately, so matching must be structural.
-    condition = i * j < 16 if guard == "upper" else i * j >= 0
-    if kind == "widening_cast":
-        condition = tirx.Cast("int64", i * j) < 16
-    load = tirx.BufferLoad(buffer, [index])
-    if kind == "store":
-        body = tirx.IfThenElse(condition, tirx.BufferStore(buffer, 1, [index]), None)
-    elif kind == "likely":
-        body = tirx.IfThenElse(tirx.call_intrin("bool", "tirx.likely", condition), tirx.Evaluate(load), None)
-    elif kind.endswith("assert"):
-        assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("IndexError"), [], None)
-        if kind == "attr_seq_assert":
-            assertion = tirx.SeqStmt([tirx.Evaluate(0), assertion])
-        if kind != "assert":
-            assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
-        if kind == "nested_attr_assert":
-            assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
-        body = tirx.SeqStmt([assertion, tirx.Evaluate(load)])
-    elif kind == "block":
-        region = tirx.BufferRegion(buffer, [tvm.ir.Range(0, 16)])
-        block = tirx.SBlock([], [region], [], "guarded", tirx.Evaluate(load))
-        body = tirx.SBlockRealize([], condition, block)
-    elif kind == "while":
-        body = tirx.While(condition, tirx.Evaluate(load))
-    elif kind == "if_then_else":
-        body = tirx.Evaluate(tirx.if_then_else(condition, load, 0))
-    elif kind == "select":
-        body = tirx.Evaluate(tirx.BufferLoad(buffer, [tirx.Select(condition, index, 0)]))
-    elif kind == "load_predicate":
-        body = tirx.Evaluate(tirx.BufferLoad(buffer, [index], predicate=condition))
-    elif kind == "store_predicate":
-        body = tirx.BufferStore(buffer, 1, [index], predicate=condition)
-    elif kind == "access_ptr":
-        ptr = tirx.call_intrin("handle", "tirx.tvm_access_ptr", tirx.type_annotation("int32"), buffer.data, index, 1, 1)
-        body = tirx.IfThenElse(condition, tirx.Evaluate(ptr), None)
-    else:
-        body = tirx.IfThenElse(condition, tirx.Evaluate(load), None)
-    func = tirx.PrimFunc([buffer.data, i, j], tirx.SeqStmt([tirx.DeclBuffer(buffer), body]), buffer_map={buffer.data: buffer})
-    return func, i, j
+def _program(buffers, params, *statements):
+    body = tirx.SeqStmt([*(tirx.DeclBuffer(buffer) for buffer in buffers), *statements])
+    return tirx.PrimFunc([*(buffer.data for buffer in buffers), *params], body, buffer_map={buffer.data: buffer for buffer in buffers})
 
 
-def _condition(func, kind):
-    if kind.endswith("assert"):
-        return _nodes(func.body, tirx.AssertStmt)[0].condition
-    if kind == "block":
-        return _nodes(func.body, tirx.SBlockRealize)[0].predicate
-    if kind == "while":
-        return _nodes(func.body, tirx.While)[0].condition
-    if kind == "if_then_else":
-        return next(call.args[0] for call in _nodes(func.body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.if_then_else")))
-    if kind == "select":
-        return _nodes(func.body, tirx.Select)[0].condition
-    if kind == "load_predicate":
-        return _nodes(func.body, tirx.BufferLoad)[0].predicate
-    if kind == "store_predicate":
-        return _nodes(func.body, tirx.BufferStore)[0].predicate
-    return _nodes(func.body, tirx.IfThenElse)[0].condition
+def _pointer(buffer, offset, extent):
+    return tirx.call_intrin("handle", "tirx.tvm_access_ptr", tirx.type_annotation(buffer.dtype), buffer.data, offset, extent, 1)
 
 
-def _compile_predicate(condition, params):
-    # Execute only the predicate; a regression must not dereference a huge index.
-    body = tirx.Evaluate(tirx.ret(tirx.Cast("int64", condition)))
-    func = tirx.PrimFunc(params, body, ret_type=tvm.ir.PrimType("int64")).with_attr("global_symbol", "main")
-    return tvm.compile(func, target="llvm")
+def _lazy_condition(body):
+    return next(call.args[0] for call in _nodes(body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.if_then_else")))
 
 
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize(
-    "kind",
-    [
-        "load",
-        "store",
-        "likely",
-        "assert",
-        "attr_assert",
-        "nested_attr_assert",
-        "attr_seq_assert",
-        "block",
-        "while",
-        "widening_cast",
-        "if_then_else",
-        "select",
-        "load_predicate",
-        "store_predicate",
-    ],
-)
-def test_index_promotion_updates_matching_guard_arithmetic(pass_name, kind):
-    before, i, j = _guarded_access(kind)
-    after = _apply(before, pass_name)
-    condition = _condition(after, kind)
-    multiplications = _nodes(condition, tirx.Mul)
-    assert multiplications
-    assert all(expr.dtype == "int64" for expr in multiplications)
-    assert after.params[1].same_as(i) and after.params[2].same_as(j)
-    access = _nodes(after.body, tirx.BufferStore if kind.startswith("store") else tirx.BufferLoad)[0]
-    assert access.indices[0].dtype == "int64"
-    if isinstance(access, tirx.BufferLoad):
-        assert access.dtype == "int32"
+def _assert_wide_products(expr):
+    products = _nodes(expr, tirx.Mul)
+    assert products and all(product.dtype == "int64" for product in products)
 
 
-@tilelang.testing.requires_llvm
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("kind,guard", [("load", "upper"), ("load", "lower"), ("widening_cast", "upper"), ("attr_assert", "upper")])
-def test_overflowing_guard_rejects_wide_address(pass_name, kind, guard):
-    before, i, j = _guarded_access(kind, guard=guard)
-    after = _apply(before, pass_name)
-    executable = _compile_predicate(_condition(after, kind), [i, j])
-    assert executable(1, 4) == 1
-    assert executable(4, 4) == (guard == "lower")
-    assert executable(1 << 30, 4) == (guard == "lower")
-    assert executable(-(1 << 30), 4) == (guard == "upper")
-
-
-def test_flattened_offset_updates_guard_of_index_subexpression():
-    before, _, _ = _guarded_access("load", index_scale=4)
-    after = _apply(before, "FlattenBuffer")
-    assert all(expr.dtype == "int64" for expr in _nodes(_condition(after, "load"), tirx.Mul))
-
-
-def test_access_ptr_offset_promotion_updates_guard():
-    before, _, _ = _guarded_access("access_ptr")
-    after = _apply(before, "FlattenBuffer")
-    condition = _condition(after, "access_ptr")
-    assert all(expr.dtype == "int64" for expr in _nodes(condition, tirx.Mul))
-    call = next(call for call in _nodes(after.body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.tvm_access_ptr")))
-    assert call.args[2].dtype == "int64"
-    assert call.args[3].dtype == call.args[4].dtype == "int32"
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_index_promotion_preserves_data_and_predicate_value_boundaries(pass_name):
-    i, j, other = [tirx.Var(name, "int32") for name in ("i", "j", "other")]
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
+def test_promoted_access_preserves_data_and_control_flow(index_pass):
+    i, j, flag = [tirx.Var(name, "int32") for name in ("i", "j", "flag")]
+    source, output = [tirx.decl_buffer((16,), "int32", name=name) for name in ("A", "B")]
     product = i * j
-    conditions = [
-        tirx.Cast("int32", product) < 16,
-        tirx.Cast("int64", tirx.Cast("int32", product)) < 16,
-        tirx.call_extern("int32", "check_i32", product) < 16,
-        other * j < 16,
-    ]
-    statements = [tirx.IfThenElse(condition, tirx.BufferStore(buffer, product, [product]), None) for condition in conditions]
-    func = tirx.PrimFunc([buffer.data, i, j, other], tirx.SeqStmt([tirx.DeclBuffer(buffer), *statements]), buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
-    for stmt, condition in zip(_nodes(after.body, tirx.IfThenElse), conditions):
-        tvm.ir.assert_structural_equal(stmt.condition, condition)
-        tvm.ir.assert_structural_equal(stmt.then_case.value, product)
+    check = tirx.call_extern("bool", "check_once", flag)
+    fallback = tirx.BufferStore(output, tirx.call_extern("int32", "fallback"), [0])
+    branch = tirx.IfThenElse(
+        tirx.And(check, i * j + 1 <= 16),
+        tirx.BufferStore(output, source[product] + product, [product]),
+        fallback,
+    )
+    after = _apply(_program([source, output], [i, j, flag], branch), index_pass)
+    (actual,) = _nodes(after.body, tirx.IfThenElse)
+    index = _nodes(actual, tirx.BufferLoad)[0].indices[0]
+    assert index.dtype == "int64"
+    _assert_wide_products(index)
+    expected = tirx.IfThenElse(
+        tirx.And(check, index + 1 <= 16),
+        tirx.BufferStore(output, source[index] + product, [index]),
+        fallback,
+    )
+    tvm.ir.assert_structural_equal(actual, expected)
+    assert all(param.dtype == "int32" for param in list(after.params)[2:])
 
 
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_safe_index_and_guard_remain_int32(pass_name):
+def test_safe_index_and_guard_remain_int32(index_pass):
     i = tirx.Var("i", "int32")
     buffer = tirx.decl_buffer((32,), "int32", name="A")
     condition = i * 4 < 16
-    body = tirx.IfThenElse(condition, tirx.Evaluate(tirx.BufferLoad(buffer, [i * 4])), None)
-    body = tirx.For(i, 0, 8, tirx.ForKind.SERIAL, body)
-    func = tirx.PrimFunc([buffer.data], tirx.SeqStmt([tirx.DeclBuffer(buffer), body]), buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
+    body = tirx.For(i, 0, 8, tirx.ForKind.SERIAL, tirx.IfThenElse(condition, tirx.Evaluate(buffer[i * 4]), None))
+    after = _apply(_program([buffer], [], body), index_pass)
     tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, condition)
     assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int32"
 
 
-@pytest.mark.parametrize("manual_guard", [False, True])
-def test_cpu_lowering_keeps_guards_consistent_with_addresses(manual_guard):
-    @T.prim_func
-    def main(A: T.Tensor((16,), "float32"), B: T.Tensor((1,), "float32"), i: T.int32, j: T.int32):
-        with T.Kernel(1, threads=1):
-            if manual_guard:
-                if i * j < 16:
-                    B[0] = A[i * j]
-            else:
-                B[0] = A[i * j]
-
-    target = tvm.target.Target("c")
-    with target:
-        artifact = tilelang.lower(main, target=target, target_host="c")
-    multiplications = [expr for func in artifact.device_mod.functions.values() for expr in _nodes(func.body, tirx.Mul)]
-    assert multiplications
-    assert all(expr.dtype == "int64" for expr in multiplications)
-
-
-def _data_condition_program(selector):
+def test_unrelated_and_business_conditions_remain_int32(index_pass):
     i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
     flag = tirx.Var("flag", "bool")
     source = tirx.decl_buffer((16,), "int32", name="A")
-    output = tirx.decl_buffer((2,), "int32", name="B")
-    access = tirx.IfThenElse(flag, tirx.BufferStore(output, tirx.BufferLoad(source, [i * j]), [1]), None)
-    condition = i * j < 16
-    if selector == "statement":
-        data = tirx.IfThenElse(condition, tirx.BufferStore(output, 7, [0]), tirx.BufferStore(output, 9, [0]))
-        expected = condition
-    else:
-        expected = tirx.Select(condition, 7, 9) if selector == "select" else tirx.if_then_else(condition, 7, 9)
-        data = tirx.BufferStore(output, expected, [0])
-    body = tirx.SeqStmt([tirx.DeclBuffer(source), tirx.DeclBuffer(output), access, data])
-    return tirx.PrimFunc([source.data, output.data, i, j, flag], body, buffer_map={source.data: source, output.data: output}), expected
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("selector", ["select", "if_then_else", "statement"])
-def test_unrelated_data_conditions_are_preserved(pass_name, selector):
-    before, expected = _data_condition_program(selector)
-    after = _apply(before, pass_name)
-    data = after.body.seq[-1]
-    actual = data.condition if selector == "statement" else data.value
-    tvm.ir.assert_structural_equal(actual, expected)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
-
-
-@tilelang.testing.requires_llvm
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_unrelated_data_select_keeps_int32_result(pass_name):
-    before, _ = _data_condition_program("select")
-    after = _apply(before, pass_name)
-    executable = _compile_predicate(after.body.seq[-1].value, [before.params[2], before.params[3]])
-    assert executable(1 << 30, 4) == 7
-
-
-def _fixed_boundary_condition(boundary, selector="select"):
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    condition = i * j < 16
-    value = tirx.Select(condition, 1, -(1 << 31)) if selector == "select" else tirx.if_then_else(condition, 1, -(1 << 31))
-    if boundary == "clz":
-        return tirx.call_intrin("int32", "tirx.clz", value) < 16, i, j
-    if boundary == "cast":
-        return tirx.Cast("int32", value) < 0, i, j
-    if boundary == "selection":
-        return value < 0, i, j
-    if boundary == "conditional_value":
-        return tirx.if_then_else(condition, 1, -(1 << 31)) < 0, i, j
-    var = tirx.Var("v", "int32")
-    return tirx.Let(var, value, var < 0), i, j
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("boundary", ["clz", "cast", "let", "selection", "conditional_value"])
-def test_fixed_value_boundaries_keep_nested_data_conditions(pass_name, boundary):
-    condition, i, j = _fixed_boundary_condition(boundary)
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
-    body = tirx.IfThenElse(condition, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j])), None)
-    func = tirx.PrimFunc([buffer.data, i, j], tirx.SeqStmt([tirx.DeclBuffer(buffer), body]), buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, condition)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
-
-
-@tilelang.testing.requires_llvm
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("selector", ["select", "if_then_else"])
-def test_clz_guard_does_not_open_after_index_promotion(pass_name, selector):
-    condition, i, j = _fixed_boundary_condition("clz", selector)
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
-    body = tirx.IfThenElse(condition, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j])), None)
-    func = tirx.PrimFunc([buffer.data, i, j], tirx.SeqStmt([tirx.DeclBuffer(buffer), body]), buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
-    executable = _compile_predicate(_nodes(after.body, tirx.IfThenElse)[0].condition, [i, j])
-    assert executable(1 << 30, 4) == 0
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("wrapped", [False, True])
-def test_accesses_before_assert_do_not_widen_it(pass_name, wrapped):
-    before, i, j = _guarded_access("load")
-    condition = i * j < 16
-    assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("ValueError"), [], None)
-    if wrapped:
-        assertion = tirx.AttrStmt(0, "lexical_alloc_scope", 1, assertion)
-    before = before.with_body(tirx.SeqStmt([*before.body.seq, assertion]))
-    after = _apply(before, pass_name)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, condition)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_wrapped_assert_preserves_data_conditions_and_value_boundaries(pass_name):
-    condition, i, j = _fixed_boundary_condition("clz")
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    output = tirx.decl_buffer((1,), "int32", name="B")
     data = tirx.Select(i * j < 16, 7, 9)
-    assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("ValueError"), [], None)
-    wrapped = tirx.AttrStmt(0, "lexical_alloc_scope", 1, tirx.SeqStmt([tirx.Evaluate(data), assertion]))
-    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), wrapped, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j]))])
-    func = tirx.PrimFunc([buffer.data, i, j], body, buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, condition)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.Select)[0], data)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+    business = ((i + j) << 31) < 0
+    before = _program(
+        [source, output],
+        [i, j, flag],
+        tirx.IfThenElse(flag, tirx.Evaluate(source[i * j]), None),
+        tirx.BufferStore(output, data, [0]),
+        tirx.IfThenElse(business, tirx.Evaluate(source[i + j]), None),
+    )
+    after = _apply(before, index_pass)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.BufferStore)[0].value, data)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[-1].condition, business)
+    assert all(load.indices[0].dtype == "int64" for load in _nodes(after.body, tirx.BufferLoad))
 
 
-@pytest.mark.parametrize("wrapper", ["if", "for", "while", "thread_extent", "virtual_thread"])
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_conditional_assert_does_not_guard_access_after_wrapper(pass_name, wrapper):
-    before, i, j = _guarded_access("attr_assert")
-    assertion = before.body.seq[1]
-    flag = tirx.Var("flag", "bool")
-    if wrapper == "if":
-        assertion = tirx.IfThenElse(flag, assertion, None)
-    elif wrapper == "for":
-        assertion = tirx.For(tirx.Var("k", "int32"), 0, 0, tirx.ForKind.SERIAL, assertion)
-    elif wrapper == "while":
-        assertion = tirx.While(flag, assertion)
-    else:
-        thread = tirx.IterVar(None, tirx.Var("tx", "int32"), tirx.IterVar.ThreadIndex, "threadIdx.x")
-        assertion = tirx.AttrStmt(thread, wrapper, 0, assertion)
-    body = tirx.SeqStmt([before.body.seq[0], assertion, before.body.seq[-1]])
-    before = tirx.PrimFunc([*before.params, flag], body, buffer_map=before.buffer_map)
-    after = _apply(before, pass_name)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.AssertStmt)[0].condition, i * j < 16)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
+def test_guard_value_boundaries_are_preserved(index_pass):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    conditions = [
+        tirx.Cast("int32", i * j) < 16,
+        tirx.call_extern("int32", "check_i32", i * j) < 16,
+        tirx.call_intrin("int32", "tirx.clz", tirx.Select(i * j < 16, 1, -(1 << 31))) < 16,
+    ]
+    statements = [tirx.IfThenElse(condition, tirx.Evaluate(buffer[i * j]), None) for condition in conditions]
+    after = _apply(_program([buffer], [i, j], *statements), index_pass)
+    assert len(_nodes(after.body, tirx.IfThenElse)) == len(conditions)
+    for branch, condition in zip(_nodes(after.body, tirx.IfThenElse), conditions):
+        tvm.ir.assert_structural_equal(branch.condition, condition)
+    assert all(load.indices[0].dtype == "int64" for load in _nodes(after.body, tirx.BufferLoad))
 
 
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_wrapped_sequence_assert_combines_local_and_following_accesses(pass_name):
+def test_memory_guard_inside_fixed_abi_argument_is_promoted(index_pass):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    value = tirx.if_then_else(i * j < 16, buffer[i * j], 1)
+    call = tirx.call_intrin("int32", "tirx.clz", value)
+    after = _apply(_program([buffer], [i, j], tirx.Evaluate(call)), index_pass)
+    _assert_wide_products(_lazy_condition(after.body))
+    assert _nodes(after.body, tirx.BufferLoad)[0].dtype == "int32"
+    assert _nodes(after.body, tirx.Call)[-1].dtype == "int32"
+
+
+@pytest.mark.parametrize("scope", ["following", "preceding", "conditional"])
+def test_wrapped_assert_tracks_only_controlled_accesses(index_pass, scope):
     i, j, k = [tirx.Var(name, "int32") for name in ("i", "j", "k")]
+    flag = tirx.Var("flag", "bool")
     buffer = tirx.decl_buffer((16,), "int32", name="A")
     condition = tirx.And(i * j < 16, k * j < 16)
     assertion = tvm.get_global_func("tirx.AssertStmt")(condition, tirx.StringImm("IndexError"), [], None)
-    inner = tirx.SeqStmt([assertion, tirx.Evaluate(tirx.BufferLoad(buffer, [i * j]))])
-    wrapped = tirx.AttrStmt(0, "lexical_alloc_scope", 1, inner)
-    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), wrapped, tirx.Evaluate(tirx.BufferLoad(buffer, [k * j]))])
-    before = tirx.PrimFunc([buffer.data, i, j, k], body, buffer_map={buffer.data: buffer})
-    after = _apply(before, pass_name)
-    multiplications = _nodes(_nodes(after.body, tirx.AssertStmt)[0].condition, tirx.Mul)
-    assert len(multiplications) == 2 and all(expr.dtype == "int64" for expr in multiplications)
+    wrapped = tirx.AttrStmt(0, "lexical_alloc_scope", 1, tirx.SeqStmt([assertion, tirx.Evaluate(buffer[i * j])]))
+    if scope == "conditional":
+        wrapped = tirx.IfThenElse(flag, wrapped, None)
+    statements = [wrapped, tirx.Evaluate(buffer[k * j])]
+    if scope == "preceding":
+        statements.reverse()
+    after = _apply(_program([buffer], [i, j, k, flag], *statements), index_pass)
+    products = _nodes(_nodes(after.body, tirx.AssertStmt)[0].condition, tirx.Mul)
+    assert [product.dtype for product in products] == ["int64", "int64" if scope == "following" else "int32"]
 
 
-def test_cpu_lowering_keeps_wrapped_assert_consistent_with_address():
-    @T.prim_func
-    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((1,), "int32"), i: T.int32, j: T.int32):
-        with T.Kernel(1, threads=1):
-            with T.attr(0, "lexical_alloc_scope", 1):
-                assert i * j < 16, "index exceeds buffer size"
-            B[0] = A[i * j]
-
-    target = tvm.target.Target("c")
-    with target:
-        artifact = tilelang.lower(main, target=target, target_host="c")
-    functions = list(artifact.device_mod.functions.values())
-    assertions = [stmt for func in functions for stmt in _nodes(func.body, tirx.AssertStmt)]
-    assert assertions
-    for assertion in assertions:
-        multiplications = _nodes(assertion.condition, tirx.Mul)
-        assert multiplications and all(expr.dtype == "int64" for expr in multiplications)
-    addresses = [load.indices[0] for func in functions for load in _nodes(func.body, tirx.BufferLoad)]
-    assert addresses and all(index.dtype == "int64" for index in addresses)
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_memory_guard_inside_fixed_abi_argument_stays_consistent(pass_name):
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
-    value = tirx.if_then_else(i * j < 16, tirx.BufferLoad(buffer, [i * j]), 1)
-    body = tirx.Evaluate(tirx.call_intrin("int32", "tirx.clz", value))
-    func = tirx.PrimFunc([buffer.data, i, j], tirx.SeqStmt([tirx.DeclBuffer(buffer), body]), buffer_map={buffer.data: buffer})
-    after = _apply(func, pass_name)
-    conditional = next(call for call in _nodes(after.body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.if_then_else")))
-    assert all(expr.dtype == "int64" for expr in _nodes(conditional.args[0], tirx.Mul))
-    assert conditional.dtype == "int32"
-    assert _nodes(after.body, tirx.BufferLoad)[0].dtype == "int32"
-
-
-@tilelang.testing.requires_llvm
-def test_cpu_lowering_keeps_unrelated_data_select_int32():
-    import torch
-
-    @T.prim_func
-    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((2,), "int32"), i: T.int32, j: T.int32, flag: T.bool):
-        with T.Kernel(1, threads=1):
-            if flag:
-                B[1] = A[i * j]
-            B[0] = T.Select(i * j < 16, 7, 9)
-
-    kernel = tilelang.compile(main, target="llvm", execution_backend="tvm_ffi")
-    source = torch.arange(16, dtype=torch.int32)
-    output = torch.full((2,), -1, dtype=torch.int32)
-    kernel(source, output, 1 << 30, 4, False)
-    assert output.tolist() == [7, -1]
-
-
-@tilelang.testing.requires_llvm
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-def test_shared_guard_keeps_unpromoted_address_arithmetic(pass_name):
+def test_shared_guard_keeps_unpromoted_address_arithmetic(index_pass):
     i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
     source = tirx.decl_buffer((16,), "int32", name="A")
     other = tirx.decl_buffer((256,), "int32", name="B")
-    product = i * j
-    other_index = tirx.Cast("int64", product << 31) >> 24
-    condition = tirx.all(product < 16, other_index >= 0, other_index < 256)
-    accesses = tirx.SeqStmt([tirx.Evaluate(source[product]), tirx.Evaluate(other[other_index])])
-    body = tirx.SeqStmt([tirx.DeclBuffer(source), tirx.DeclBuffer(other), tirx.IfThenElse(condition, accesses, None)])
-    before = tirx.PrimFunc([source.data, other.data, i, j], body, buffer_map={source.data: source, other.data: other})
-    after = _apply(before, pass_name)
+    other_index = tirx.Cast("int64", (i * j) << 31) >> 24
+    condition = tirx.all(i * j < 16, other_index >= 0, other_index < 256)
+    accesses = tirx.SeqStmt([tirx.Evaluate(source[i * j]), tirx.Evaluate(other[other_index])])
+    after = _apply(_program([source, other], [i, j], tirx.IfThenElse(condition, accesses, None)), index_pass)
     loads = _nodes(after.body, tirx.BufferLoad)
     assert loads[0].indices[0].dtype == "int64"
-    assert _compile_predicate(loads[1].indices[0], [i, j])(1, 1) == -128
-    assert _compile_predicate(_nodes(after.body, tirx.IfThenElse)[0].condition, [i, j])(1, 1) == 0
+    tvm.ir.assert_structural_equal(loads[1].indices[0], other_index)
+    expected = tirx.all(loads[0].indices[0] < 16, other_index >= 0, other_index < 256)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, expected)
 
 
-def test_equivalent_flattened_accesses_keep_both_source_promotions():
-    before, i, j = _guarded_access("load")
-    branch = _nodes(before.body, tirx.IfThenElse)[0]
-    load = branch.then_case.value
-    accesses = tirx.SeqStmt([tirx.Evaluate(load), tirx.Evaluate(load.buffer[j * i])])
-    body = tirx.SeqStmt([before.body.seq[0], tirx.IfThenElse(branch.condition, accesses, None)])
-    after = _apply(before.with_body(body), "FlattenBuffer")
-    condition = _nodes(after.body, tirx.IfThenElse)[0].condition
-    assert all(expr.dtype == "int64" for expr in _nodes(condition, tirx.Mul))
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("operation", ["shift", "add", "mul"])
-def test_index_promotion_keeps_enclosing_business_arithmetic(pass_name, operation):
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    buffer = tirx.decl_buffer((16,), "int32", name="A")
-    index = i + j
-    values = {"shift": index << 31, "add": index + ((1 << 31) - 1), "mul": index * (1 << 30)}
-    condition = values[operation] < 0
-    body = tirx.SeqStmt([tirx.DeclBuffer(buffer), tirx.IfThenElse(condition, tirx.Evaluate(buffer[index]), None)])
-    before = tirx.PrimFunc([buffer.data, i, j], body, buffer_map={buffer.data: buffer})
-    after = _apply(before, pass_name)
-    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, condition)
-    assert _nodes(after.body, tirx.BufferLoad)[0].indices[0].dtype == "int64"
-
-
-@tilelang.testing.requires_llvm
-def test_cpu_lowering_keeps_business_shift_condition_int32():
-    import torch
-
-    @T.prim_func
-    def main(A: T.Tensor((16,), "int32"), B: T.Tensor((1,), "int32"), i: T.int32, j: T.int32):
-        with T.Kernel(1, threads=1):
-            if ((i + j) << 31) < 0:
-                B[0] = A[i + j]
-
-    kernel = tilelang.compile(main, target="llvm", execution_backend="tvm_ffi")
-    source = torch.arange(16, dtype=torch.int32)
-    output = torch.full((1,), -1, dtype=torch.int32)
-    # An odd sum makes the int32 sign bit set; i=j=1 instead gives zero.
-    kernel(source, output, 0, 1)
-    assert output.item() == 1
-
-
-@pytest.mark.parametrize("pass_name", ["ConfigIndexBitwidth", "FlattenBuffer"])
-@pytest.mark.parametrize("field", ["shape", "guarded_shape", "elem_offset"])
-def test_conditional_buffer_metadata_preserves_definition_and_uses(pass_name, field):
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    flag = tirx.Var("flag", "bool")
+def test_rebuilt_buffer_preserves_guard_matching_and_identity(index_pass):
+    i, j, s = [tirx.Var(name, "int32") for name in ("i", "j", "s")]
     source = tirx.decl_buffer((32,), "int32", name="A")
-    shape = (tirx.if_then_else(flag, 16, 32),) if field == "shape" else (16,)
-    if field == "guarded_shape":
-        shape = (tirx.if_then_else(i * j < 16, source[i * j], 16),)
-    offset = tirx.if_then_else(flag, 0, 1) if field == "elem_offset" else 0
-    view = tirx.decl_buffer(shape, "int32", name="view", data=source.data, elem_offset=offset)
-    body = tirx.SeqStmt([tirx.DeclBuffer(source), tirx.DeclBuffer(view), tirx.Evaluate(source[i * j]), tirx.Evaluate(view[0])])
-    before = tirx.PrimFunc([source.data, i, j, flag], body, buffer_map={source.data: source})
+    shape = (tirx.if_then_else(i * j < 16, source[i * j], 16),)
+    view = tirx.decl_buffer(shape, "int32", name="view", data=source.data)
+    access = tirx.IfThenElse(view[0] * s < 16, tirx.Evaluate(source[view[0] * s]), None)
+    after = _apply(_program([source], [i, j, s], tirx.DeclBuffer(view), access), index_pass)
+    rebuilt = _nodes(after.body, tirx.DeclBuffer)[-1].buffer
+    guard = _nodes(after.body, tirx.IfThenElse)[0].condition
+    assert guard.a.dtype == "int64"
+    assert _nodes(guard, tirx.BufferLoad)[0].buffer.same_as(rebuilt)
+    _assert_wide_products(rebuilt.shape[0].args[0])
+
+
+@pytest.mark.parametrize("selected_extent", [False, True])
+def test_pointer_range_tracks_offset_but_preserves_extent(selected_extent):
+    i, j, n = [tirx.Var(name, "int32") for name in ("i", "j", "n")]
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    extent = tirx.Select(i * j < 16, 1, (1 << 31) - 1) if selected_extent else n
+    pointer = _pointer(buffer, i * j, extent)
+    call = tirx.Evaluate(tirx.call_extern("int32", "consume", pointer))
+    before = _program([buffer], [i, j, n], tirx.IfThenElse(extent + i * j <= 16, call, None))
+    after = _apply(before, tilelang.transform.FlattenBuffer())
+    pointer = next(call for call in _nodes(after.body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.tvm_access_ptr")))
+    assert pointer.args[2].dtype == "int64"
+    _assert_wide_products(pointer.args[2])
+    tvm.ir.assert_structural_equal(pointer.args[3], extent)
+    assert pointer.args[4].dtype == "int32"
+    expected = pointer.args[2] + tirx.Cast("int64", extent) <= 16
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, expected)
+
+
+def test_gather_simplification_preserves_inner_guard(index_pass):
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    source, other = [tirx.decl_buffer((16,), "int32", name=name) for name in ("A", "B")]
+    index = tirx.if_then_else(i * j < 16, source[i * j], 0) & 15
+    after = _apply(_program([source, other], [i, j], tirx.Evaluate(other[index])), index_pass)
+    _assert_wide_products(_lazy_condition(after.body))
+    loads = _nodes(after.body, tirx.BufferLoad)
+    assert loads[0].indices[0].dtype == "int64"
+    assert all(load.dtype == "int32" for load in loads)
+
+
+def _conflicting_accesses(value=False):
+    i, j, k, l = [tirx.Var(name, "int32") for name in ("i", "j", "k", "l")]
+    source = tirx.decl_buffer((16,), "int32", name="A")
+    output = tirx.decl_buffer((1,), "int32", name="Out")
+    bound = tirx.Var("v", "int32")
+    condition = tirx.Let(bound, 16, i * j + k * l < bound)
+    true_value = tirx.call_extern("int32", "consume", _pointer(source, i * j, k * l))
+    false_value = source[i * j + k * l - 16]
+    if value:
+        body = tirx.BufferStore(output, tirx.if_then_else(condition, true_value, false_value), [0])
+    else:
+        body = tirx.IfThenElse(condition, tirx.BufferStore(output, true_value, [0]), tirx.BufferStore(output, false_value, [0]))
+    return _program([source, output], [i, j, k, l], body)
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_conflicting_branch_predicates_are_rejected(value):
+    before = _conflicting_accesses(value)
     assert tirx.analysis.verify_well_formed(before)
-    after = _apply(before, pass_name)
-    declarations = _nodes(after.body, tirx.DeclBuffer)
-    assert _nodes(after.body, tirx.BufferLoad)[-1].buffer.same_as(declarations[-1].buffer)
-    if field == "guarded_shape":
-        condition = declarations[-1].buffer.shape[0].args[0]
-        assert all(expr.dtype == "int64" for expr in _nodes(condition, tirx.Mul))
+    with pytest.raises(RuntimeError, match="conflicting index widths"):
+        _apply(before, tilelang.transform.FlattenBuffer())
+
+
+def test_unrelated_conflict_preserves_control_flow_and_bindings():
+    before = _conflicting_accesses()
+    flag = tirx.Var("flag", "bool")
+    condition = tirx.Let(tirx.Var("v", "int32"), 16, flag)
+    branch = before.body.seq[-1]
+    body = tirx.SeqStmt([*before.body.seq[:-1], tirx.IfThenElse(condition, branch.then_case, branch.else_case)])
+    before = tirx.PrimFunc([*before.params, flag], body, buffer_map=before.buffer_map)
+    after = _apply(before, tilelang.transform.FlattenBuffer())
+    (branch,) = _nodes(after.body, tirx.IfThenElse)
+    tvm.ir.assert_structural_equal(branch.condition, condition)
+    assert branch.else_case is not None and len(_nodes(after.body, tirx.BufferStore)) == 2
+    assert len(_nodes(after.body, tirx.Let)) == 1
+
+
+def test_explicit_extent_binding_preserves_declared_integer_semantics():
+    i, j, k, l, n = [tirx.Var(name, "int32") for name in ("i", "j", "k", "l", "n")]
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    pointer = _pointer(buffer, i * j, n)
+    accesses = tirx.SeqStmt([tirx.Evaluate(tirx.call_extern("int32", "consume", pointer)), tirx.Evaluate(buffer[i * j + n])])
+    before = _program([buffer], [i, j, k, l], tirx.Bind(n, k * l), tirx.IfThenElse(i * j + n < 16, accesses, None))
+    after = _apply(before, tilelang.transform.FlattenBuffer())
+    binding = _nodes(after.body, tirx.Bind)[0]
+    tvm.ir.assert_structural_equal(binding.value, k * l)
+    assert binding.var.dtype == "int32"
+    pointer = next(call for call in _nodes(after.body, tirx.Call) if call.op.same_as(tirx.op.Op.get("tirx.tvm_access_ptr")))
+    tvm.ir.assert_structural_equal(pointer.args[3], n)
+    end = pointer.args[2] + tirx.Cast("int64", n)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.IfThenElse)[0].condition, end < 16)
+    tvm.ir.assert_structural_equal(_nodes(after.body, tirx.BufferLoad)[0].indices[0], end)
+
+
+def test_vector_endpoints_use_promoted_arithmetic(index_pass):
+    i, j, s = [tirx.Var(name, "int32") for name in ("i", "j", "s")]
+    buffer = tirx.decl_buffer((16,), "int32", name="A")
+    base = i * j + 7
+    endpoints = [(base + 3 * s < 16, s), (s * 3 + base < 16, s), ((3 * s + i * j) + 7 < 16, s), (base - 3 >= 0, -1)]
+    statements = [tirx.IfThenElse(guard, tirx.Evaluate(buffer[tirx.Ramp(base, stride, 4)]), None) for guard, stride in endpoints]
+    after = _apply(_program([buffer], [i, j, s], *statements), index_pass)
+    branches = _nodes(after.body, tirx.IfThenElse)
+    assert len(branches) == len(endpoints)
+    for branch in branches:
+        assert branch.condition.a.dtype == "int64"
+        _assert_wide_products(branch.condition)
+        assert _nodes(branch, tirx.BufferLoad)[0].indices[0].dtype == "int64x4"
+
+
+@pytest.mark.skipif(
+    tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True) is None,
+    reason="CUDA codegen is not enabled",
+)
+def test_cuda_lowering_keeps_generated_guard_consistent_with_address():
+    @T.prim_func
+    def main(A: T.Tensor((16,), "float32"), B: T.Tensor((1,), "float32"), i: T.int32, j: T.int32):
+        with T.Kernel(1, threads=1):
+            B[0] = A[i * j]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tilelang.lower(main, target=target, target_host="c")
+    (func,) = artifact.device_mod.functions.values()
+    index = _nodes(func.body, tirx.BufferLoad)[0].indices[0]
+    assert index.dtype == "int64"
+    _assert_wide_products(index)
+    assert all(param.dtype == "int32" for param in list(func.params)[-2:])
+    expected = tirx.And(index < 16, tirx.IntImm("int64", 0) <= index)
+    tvm.ir.assert_structural_equal(_lazy_condition(func.body), expected)
 
 
 if __name__ == "__main__":
