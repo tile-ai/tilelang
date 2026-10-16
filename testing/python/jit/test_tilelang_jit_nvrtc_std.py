@@ -6,6 +6,32 @@ import tilelang.language as T
 import tilelang.testing
 
 
+def test_nvrtc_compile_destroys_failed_program(monkeypatch):
+    pytest.importorskip("cuda.bindings.nvrtc")
+    from tilelang.contrib import nvrtc
+
+    success = nvrtc.nvrtc.nvrtcResult.NVRTC_SUCCESS
+    destroyed = []
+    monkeypatch.setattr(nvrtc, "get_nvrtc_version", lambda: (12, 7))
+    monkeypatch.setattr(nvrtc.nvrtc, "nvrtcCreateProgram", lambda *args: (success, object()))
+    monkeypatch.setattr(
+        nvrtc.nvrtc,
+        "nvrtcCompileProgram",
+        lambda *args: (nvrtc.nvrtc.nvrtcResult.NVRTC_ERROR_COMPILATION,),
+    )
+
+    def destroy_program(program):
+        destroyed.append(program)
+        return (success,)
+
+    monkeypatch.setattr(nvrtc.nvrtc, "nvrtcDestroyProgram", destroy_program)
+
+    with pytest.raises(RuntimeError, match="Compilation error"):
+        nvrtc.compile_cuda('extern "C" __global__ void kernel() {}', arch=80)
+
+    assert len(destroyed) == 1
+
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("standard", ["c++17", "c++20"])
 def test_nvrtc_is_integral(standard):

@@ -59,6 +59,11 @@ def tilelang_callback_cuda_validate(device_mod):
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
+    cfg = pass_config or {}
+    compiler = str(cfg.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
+    if compiler not in ("nvcc", "nvrtc"):
+        raise ValueError(f"Unsupported CUDA compiler {compiler!r}; expected 'nvcc' or 'nvrtc'")
+
     target_arch, target_code = nvcc.get_target_arch_and_code(target)
     target_code_list = nvcc.get_target_code_list(target_code)
     gencode_code = nvcc.format_target_code_for_gencode(target_code)
@@ -68,7 +73,6 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
     compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
 
-    cfg = pass_config or {}
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
     ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     if ptxas_usage_level is not None:
@@ -103,6 +107,18 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options.append("--ptxas-options=--verbose")
         options.append("-w")
 
+    if compiler == "nvrtc":
+        from tilelang.contrib import nvrtc
+
+        if target_code_list and target_code_list != [f"sm_{target_arch}"]:
+            raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
+        compiler_version = nvrtc.get_nvrtc_version()
+        options += nvrtc.get_compile_options()
+        if cfg.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES, False) and not any(flag in {"-lineinfo", "--lineinfo"} for flag in options):
+            options.append("-lineinfo")
+    else:
+        compiler_version = nvcc.get_nvcc_version()
+
     cache_key = CUDABinaryCache.make_key(
         code=code,
         target_kind=target.kind.name,
@@ -110,12 +126,16 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         target_code=target_code_list,
         compile_format=compile_format,
         options=options,
+        compiler=f"{compiler} version={'.'.join(map(str, compiler_version))}",
     )
     cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
         return bytearray(cached_binary)
 
-    binary = nvcc.compile_cuda(code, compile_format, arch, options=options, verbose=verbose)
+    if compiler == "nvrtc":
+        binary = nvrtc.compile_cuda(code, compile_format, target_arch, options=options, verbose=verbose)
+    else:
+        binary = nvcc.compile_cuda(code, compile_format, arch, options=options, verbose=verbose)
     CUDABinaryCache.save(cache_key, compile_format, binary)
     return binary
 
