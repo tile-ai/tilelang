@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "backend/common/target_utils.h"
 #include "common/assume.h"
 #include "common/attr.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -79,6 +80,7 @@ public:
 
   void SetHostFuncSignature(const tirx::PrimFunc &func) {
     host_buffer_map_ = func->buffer_map;
+    batch_schedule_ = func->HasNonzeroAttr("ascend.batch_schedule");
   }
 
   void SetSourceSpan(const Span &span) { source_span_ = span; }
@@ -237,6 +239,7 @@ private:
   };
 
   bool found_device_region_{false};
+  bool batch_schedule_{false};
   Map<tirx::Var, tirx::Buffer> host_buffer_map_;
   Array<tirx::Var> non_restrict_params_;
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
@@ -534,6 +537,9 @@ private:
         {tl::attr::kNonRestrictParams, remapped_non_restrict_params}};
     if (cluster_dims_.defined()) {
       device_attrs.Set("cluster_dims", cluster_dims_.value());
+    }
+    if (batch_schedule_ && TargetIsAscend(device_target)) {
+      device_attrs.Set("ascend.batch_schedule", true);
     }
     if (!smem_alignment_map_.empty()) {
       device_attrs.Set(tl::kSmemAlignmentMap, smem_alignment_map_);

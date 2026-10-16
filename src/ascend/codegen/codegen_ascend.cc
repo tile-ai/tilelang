@@ -341,6 +341,9 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" ";
+  if (batch_schedule_) {
+    os << "__schedmode__(1) ";
+  }
   switch (kernel_mode_) {
   case AscendKernelMode::kMix:
     // dav-3510's direct AIC-to-AIV data paths require the physical 1:2 group.
@@ -545,6 +548,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked across PrimFunc code generation";
   this->InitFuncState(f);
+  batch_schedule_ = f->HasNonzeroAttr("ascend.batch_schedule");
   has_gemm_l0_ = false;
   has_gemm_l1_ = false;
   has_philox_rng_ = false;
