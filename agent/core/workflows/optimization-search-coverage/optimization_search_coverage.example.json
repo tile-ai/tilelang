@@ -1,0 +1,116 @@
+{
+  "schema_version": 3,
+  "cases": [
+    {
+      "case_id": "representative_case",
+      "outer_items": 72,
+      "inner_independent_chunks_per_item": 1,
+      "inner_chunks_independent": false,
+      "available_cores": 72,
+      "outer_task_waves": 1.0,
+      "flattened_task_waves": 1.0,
+      "per_task_payload_bytes": 256,
+      "kernel_time_us": 20.0,
+      "lower_bounds_us": {"movement": null, "compute": null},
+      "lower_bound_evidence": "Replace nulls after obtaining hardware and instruction evidence.",
+      "main_pipes": ["unknown"],
+      "performance_target": {
+        "logic": "ANY",
+        "conditions": [
+          {"metric": "kernel_time_us", "operator": "LE", "threshold": 10.0},
+          {"metric": "semantic_gm_util_pct", "operator": "GE", "threshold": 80.0}
+        ]
+      },
+      "best_metrics": {"kernel_time_us": 20.0, "semantic_gm_util_pct": 25.0},
+      "best_metric_evidence": ["Replace with the current best same-condition profiling artifact."],
+      "source_window": {
+        "access_pattern": "INDEXED_OR_REORDERED",
+        "bounded": true,
+        "span_bytes": 128,
+        "consumed_bytes": 96,
+        "density": 0.75,
+        "window_vregs": 2,
+        "register_window_feasible": true,
+        "window_scope": "smallest repeatable hot-loop source window for one vector output chunk",
+        "decomposition_checked": true,
+        "baseline_route_kind": "SCALAR_OR_SIMT",
+        "baseline_writeback_kind": "SCALAR",
+        "index_regularity": "periodic",
+        "evidence": "Replace with mapping, dtype and target-register evidence."
+      },
+      "obligation_ids": ["O_ROUTE", "O_TILE", "O_INTERACTION", "O_PIPELINE"]
+    }
+  ],
+  "obligations": [
+    {
+      "obligation_id": "O_ROUTE",
+      "kind": "physical_dataflow_routes",
+      "case_ids": ["representative_case"],
+      "status": "PENDING",
+      "candidate_ids": [],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
+      ],
+      "route_plan": [
+        {"plan_id": "R_SIMT", "route_kind": "SCALAR_OR_SIMT", "writeback_kind": "SCALAR", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "R_INDEX", "route_kind": "MEMORY_INDEXED_VECTOR", "writeback_kind": "INDEXED_SCATTER", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "R_DIRECT", "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER", "writeback_kind": "INDEXED_SCATTER", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "R_MATERIALIZED", "route_kind": "MATERIALIZED_TRANSFORM", "writeback_kind": "CONTIGUOUS", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []}
+      ]
+    },
+    {
+      "obligation_id": "O_TILE",
+      "kind": "work_granularity_search",
+      "case_ids": ["representative_case"],
+      "status": "PENDING",
+      "candidate_ids": [],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
+      ],
+      "boundary_plan": [
+        {"plan_id": "B_FULL", "boundary_kind": "FULL_CONTIGUOUS_UNIT", "case_values": {"representative_case": "derive_from_layout"}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_SIMD", "boundary_kind": "SIMD", "case_values": {"representative_case": "derive_from_lowering"}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_DMA", "boundary_kind": "DMA", "case_values": {"representative_case": "derive_from_copy_constraints"}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_CAPACITY", "boundary_kind": "CAPACITY", "case_values": {"representative_case": "derive_from_full_footprint"}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_PARALLEL", "boundary_kind": "PARALLEL", "case_values": {"representative_case": "derive_from_task_waves"}, "status": "PENDING", "candidate_ids": []}
+      ]
+    },
+    {
+      "obligation_id": "O_INTERACTION",
+      "kind": "granularity_dataflow_interaction",
+      "case_ids": ["representative_case"],
+      "status": "PENDING",
+      "candidate_ids": [],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
+      ],
+      "interaction_plan": [
+        {
+          "plan_id": "I_FULL_DIRECT_SCATTER",
+          "boundary_kind": "FULL_CONTIGUOUS_UNIT",
+          "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER",
+          "writeback_kind": "INDEXED_SCATTER",
+          "case_values": {"representative_case": "derive_from_layout"},
+          "status": "PENDING",
+          "candidate_ids": []
+        }
+      ]
+    },
+    {
+      "obligation_id": "O_PIPELINE",
+      "kind": "pipeline_realization",
+      "case_ids": ["representative_case"],
+      "status": "PENDING",
+      "candidate_ids": [],
+      "basis_candidate_id": "B0",
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
+      ],
+      "pipeline_plan": {
+        "automatic": {"status": "NOT_TRIED", "candidate_ids": []},
+        "manual": {"status": "NOT_TRIED", "candidate_ids": []}
+      }
+    }
+  ],
+  "candidate_events": []
+}
