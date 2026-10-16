@@ -2838,7 +2838,11 @@ private:
     };
 
     if (unroll_loop) {
-      if (const int64_t *extent_imm = as_const_int(extent)) {
+      // A runtime trip count n leaves the epilogue spanning (n + s) - n: fold
+      // it, or the epilogue stays a loop and its wait counts keep the loop var,
+      // which ptx_wait_group cannot take.
+      PrimExpr folded_extent = analyzer_.Simplify(extent);
+      if (const int64_t *extent_imm = as_const_int(folded_extent)) {
         if (*extent_imm > 1) {
           Array<Stmt> expanded;
           expanded.reserve(static_cast<size_t>(*extent_imm));
