@@ -164,7 +164,9 @@ TL_DEVICE void mbarrier_cp_async_arrive_noinc(BarrierType &smem_mbar) {
 
 template <bool kDependentFalse = false> TL_DEVICE void fence_proxy_async() {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.async.shared::cta;" : :);
+  // The memory clobber keeps the compiler from moving shared-memory accesses
+  // across the fence, which would defeat its ordering.
+  asm volatile("fence.proxy.async.shared::cta;" : : : "memory");
 #else
   static_assert(kDependentFalse,
                 "tl::fence_proxy_async requires sm_90 or later");
