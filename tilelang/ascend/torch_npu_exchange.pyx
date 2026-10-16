@@ -44,7 +44,14 @@ cdef const char* DLPACK_EXCHANGE_CAPSULE = "dlpack_exchange_api"
 cdef DLPackExchangeAPI* torch_exchange_original_api = NULL
 cdef DLPackExchangeAPI torch_exchange_patched_api
 cdef object torch_exchange_original_capsule = None
-cdef object torch_npu_stream_getter = None
+cdef object torch_npu_stream_getter_wait = None
+cdef object torch_npu_stream_getter_no_wait = None
+# False by default: direct ACL launches must observe the queue drain so they
+# stay ordered behind previously submitted torch_npu ops. TileLang flips this
+# on only after the task queue adapter is registered, because queued kernels
+# keep their order through the queue itself and a drain per FFI call would
+# serialize submissions and erase the async-submission benefit.
+cdef bint torch_npu_no_wait_stream_query = False
 
 
 cdef int torch_npu_current_work_stream(
@@ -53,7 +60,12 @@ cdef int torch_npu_current_work_stream(
     void** out_stream,
 ) except -1 with gil:
     if device_type == DLPACK_EXT_DEVICE:
-        out_stream[0] = <void*><uintptr_t>torch_npu_stream_getter(device_id)
+        getter = (
+            torch_npu_stream_getter_no_wait
+            if torch_npu_no_wait_stream_query
+            else torch_npu_stream_getter_wait
+        )
+        out_stream[0] = <void*><uintptr_t>getter(device_id)
         return 0
     return torch_exchange_original_api.current_work_stream(
         device_type,
@@ -67,14 +79,17 @@ def install_torch_npu_stream_exchange():
     global torch_exchange_original_api
     global torch_exchange_original_capsule
     global torch_exchange_patched_api
-    global torch_npu_stream_getter
+    global torch_npu_stream_getter_wait
+    global torch_npu_stream_getter_no_wait
+    global torch_npu_no_wait_stream_query
 
     import torch_npu
 
     cdef object tensor_type = torch.Tensor
     cdef object capsule
     cdef object patched_capsule
-    cdef object stream_getter
+    cdef object stream_getter_wait
+    cdef object stream_getter_no_wait
     cdef object current_stream
     cdef DLPackExchangeAPI* exchange_api
 
@@ -106,20 +121,24 @@ def install_torch_npu_stream_exchange():
     ):
         raise RuntimeError("incomplete Torch DLPack Exchange API table")
 
-    stream_getter = getattr(
+    stream_getter_wait = getattr(
         torch_npu._C,
         "_npu_getCurrentRawStream",
         None,
     )
-    if stream_getter is None:
-        stream_getter = getattr(
-            torch_npu._C,
-            "_npu_getCurrentRawStreamNoWait",
-            None,
-        )
-    if stream_getter is None:
+    stream_getter_no_wait = getattr(
+        torch_npu._C,
+        "_npu_getCurrentRawStreamNoWait",
+        None,
+    )
+    if stream_getter_wait is None and stream_getter_no_wait is None:
         current_stream = torch_npu.npu.current_stream
-        stream_getter = lambda device_id: current_stream(device_id).npu_stream
+        stream_getter_wait = lambda device_id: current_stream(device_id).npu_stream
+        stream_getter_no_wait = stream_getter_wait
+    elif stream_getter_wait is None:
+        stream_getter_wait = stream_getter_no_wait
+    elif stream_getter_no_wait is None:
+        stream_getter_no_wait = stream_getter_wait
 
     torch_exchange_patched_api = exchange_api[0]
     torch_exchange_patched_api.current_work_stream = torch_npu_current_work_stream
@@ -130,12 +149,16 @@ def install_torch_npu_stream_exchange():
     )
 
     torch_exchange_original_api = exchange_api
-    torch_npu_stream_getter = stream_getter
+    torch_npu_stream_getter_wait = stream_getter_wait
+    torch_npu_stream_getter_no_wait = stream_getter_no_wait
+    torch_npu_no_wait_stream_query = False
     try:
         tensor_type.__dlpack_c_exchange_api__ = patched_capsule
     except BaseException:
         torch_exchange_original_api = NULL
-        torch_npu_stream_getter = None
+        torch_npu_stream_getter_wait = None
+        torch_npu_stream_getter_no_wait = None
+        torch_npu_no_wait_stream_query = False
         raise
 
     # The copied callbacks belong to the original table, so retain its capsule
@@ -155,3 +178,16 @@ def is_torch_npu_stream_exchange_installed():
         DLPACK_EXCHANGE_CAPSULE,
     )
     return exchange_api == &torch_exchange_patched_api
+
+
+def set_torch_npu_no_wait_stream_query(enabled: bool):
+    """Select the stream query behavior for subsequent FFI stream lookups.
+
+    Queued launches (task queue adapter registered) may use the no-wait
+    accessor: their order is preserved by the queue, and a draining query
+    would serialize every FFI call behind the previous submission. Direct
+    ACL launches must keep the waiting accessor so they stay ordered behind
+    previously submitted torch_npu operations.
+    """
+    global torch_npu_no_wait_stream_query
+    torch_npu_no_wait_stream_query = enabled

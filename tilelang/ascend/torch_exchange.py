@@ -30,6 +30,19 @@ def is_torch_npu_stream_exchange_installed() -> bool:
     return bool(is_installed())
 
 
+def set_torch_npu_no_wait_stream_query(enabled: bool) -> None:
+    """Toggle the no-wait NPU stream query used by the patched exchange API.
+
+    Enable once the task queue adapter is registered (queued launches keep
+    their order through the queue); keep disabled for direct ACL launches so
+    the draining query preserves ordering with torch_npu submissions.
+    """
+
+    from tilelang_ascend_npu_exchange import set_torch_npu_no_wait_stream_query
+
+    set_torch_npu_no_wait_stream_query(enabled)
+
+
 def npu_current_device():
     """Torch device for the current NPU, for kernel output allocation."""
     import torch
@@ -60,4 +73,5 @@ __all__ = [
     "is_torch_npu_stream_exchange_installed",
     "npu_current_device",
     "npu_current_raw_stream",
+    "set_torch_npu_no_wait_stream_query",
 ]
