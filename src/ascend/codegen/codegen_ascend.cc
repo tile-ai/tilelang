@@ -19,6 +19,7 @@
 #include "arith/pattern_match.h"
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "transform/common/attr.h"
 
@@ -150,6 +151,10 @@ bool IsAscendWarpReduceDType(DataType dtype) {
 }
 
 static std::string GetAscendScopeQualifier(const std::string &scope) {
+  // Keep scalar accesses volatile for the vendor compiler. SS accesses in
+  // TIR follow ordinary Buffer optimization and synchronization semantics.
+  if (scope == "shared.ss" || scope == "shared.ss.dyn")
+    return "volatile __ssbuf__";
   if (scope == "shared" || scope == "shared.dyn")
     return "__ubuf__";
   if (scope == "shared.l0a" || scope == "shared.l0a.dyn")
@@ -3088,6 +3093,16 @@ void CodeGenTileLangAscend::VisitStmt_(const AllocBufferNode *op) {
     PrintType(dtype, stream);
     stream << " *" << vid << " = (" << qualifier << " ";
     PrintType(dtype, stream);
+    if (tl::IsSSBuffer(op->buffer)) {
+      ICHECK(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 2)
+          << "SS buffers require a MIX kernel with two AIVs";
+      auto elements = GetRef<AllocBuffer>(op).ConstantAllocationSize();
+      ICHECK(elements.has_value() && elements.value() > 0 &&
+             elements.value() <= 3072 / dtype.bytes())
+          << "SS allocations require a static total size of at most 3072 bytes";
+    }
+    // SS, like L1, starts at zero in its own address space. This is the
+    // dav-3510 device value returned by AscendC::GetSsbufBaseAddr().
     stream << " *)0;\n";
     alloc_storage_scope_[op->buffer->data.get()] = scope;
     RegisterHandleType(op->buffer->data.get(), dtype);
@@ -3654,6 +3669,11 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
 std::string CodeGenTileLangAscend::GetBufferRef(DataType t,
                                                 const BufferNode *buffer,
                                                 PrimExpr index) {
+  if (tl::IsSSBuffer(GetRef<Buffer>(buffer))) {
+    ICHECK(vf_mode_ == VFMode::kNone && t.is_uint() &&
+           (t.bits() == 32 || t.bits() == 64) && t.lanes() == 1)
+        << "SS supports scalar uint32/uint64 accesses outside VF blocks only";
+  }
   const VarNode *buffer_var = buffer->data.get();
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {

@@ -59,3 +59,24 @@ def test_subcore_ub_allocations_have_independent_address_spaces(disable_reuse):
         if index:
             assert offsets[0] + 32 <= offsets[index] or offsets[index] + size <= offsets[0]
     assert offsets[1] < offsets[2] + 64 and offsets[2] < offsets[1] + 128
+
+
+def test_ss_allocations_remain_disjoint_and_aligned_even_with_alias_contract():
+    a, b = [tirx.decl_buffer((2,), "uint32", name=name, scope="shared.ss") for name in ("a", "b")]
+    contract = {a.data: [b.data], b.data: [a.data]}
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(a),
+            tirx.AllocBuffer(b),
+            tirx.BufferStore(a, tirx.const(1, "uint32"), [0]),
+            tirx.BufferStore(b, tirx.const(2, "uint32"), [0]),
+        ]
+    )
+    body = tirx.AttrStmt(tirx.IterVar(None, tirx.Var("bx", "int32"), tirx.IterVar.ThreadIndex, "blockIdx.x"), "thread_extent", 1, body)
+    before = tvm.IRModule({"main": tirx.PrimFunc([], tirx.AttrStmt(contract, "tl.buffer_alias_map", 1, body))})
+    after = transform.MergeUBAllocations(disable_reuse=False)(before)
+    stores = nodes(after, tirx.BufferStore)
+    offsets = [int(tvm.arith.Analyzer().simplify(store.indices[0])) * 4 for store in stores]
+    assert sorted(offsets) == [0, 32]
+    allocations = nodes(after, tirx.AllocBuffer)
+    assert len(allocations) == 1

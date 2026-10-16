@@ -66,6 +66,21 @@ def test_nested_alias_accesses_have_one_complete_owner():
     assert len(owners) == 1 and owners[0].loop_var.same_as(outer)
 
 
+def test_ss_packed_publication_has_one_shared_owner():
+    words = tirx.decl_buffer((2,), "uint32", name="words", scope="shared.ss")
+    packed = tirx.decl_buffer((1,), "uint64", name="packed", data=words.data)
+    out = tirx.decl_buffer((4,), "uint64", name="out")
+    i = tirx.Var("i", "int32")
+    tasks = [unit(tirx.BufferStore(words, tirx.Cast("uint32", i), [sid]), core=core) for sid, core in enumerate((1, 4))]
+    tasks.append(unit(tirx.BufferStore(out, packed[0], [i]), core=2))
+    loop = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, seq(*tasks))
+    before = kernel(unit(loop, core=None), buffers=[words], params=[out], annotations={"tl.split_subcores": True})
+    after = transform.AnnotateMultiBufferEligible()(before)
+    (owner,) = nodes(after, tirx.For)
+    claims = owner.annotations.get("multi_buffer_eligible", [])
+    assert len(claims) == 1 and claims[0].same_as(words.data)
+
+
 @pytest.mark.parametrize("manual", [False, True], ids=["explicit-owner", "manual-ring"])
 def test_explicit_storage_policy_overrides_automatic_claims(manual, capfd):
     ub = tirx.decl_buffer((2,), "int32", name="ub", scope="shared.dyn")

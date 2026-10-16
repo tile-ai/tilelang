@@ -278,6 +278,27 @@ buf_c = T.alloc_l0c((TILE_M, TILE_N), "float32")
 frag = T.alloc_fragment((TILE,), "float32")
 ```
 
+On dav-3510, `T.alloc_ss(shape, "uint32")` or `"uint64"` allocates
+scalar storage shared by one AIC and its two AIVs. For example,
+`words = T.alloc_ss((2,), "uint32")` can be read as one packed word through
+`T.view(words, shape=(1,), dtype="uint64")`. The group has a 3072-byte pool;
+allocation bases are aligned to 32 bytes and different allocations do not reuse
+storage. Shapes must be static and allocation does not initialize the contents.
+SS follows ordinary buffer optimization semantics; unused accesses may be
+removed. Publication and slot-reuse order come from synchronization.
+
+The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use ordinary
+mode-4 synchronization, with each AIV tracked independently. Direct AIV peer
+dependencies require explicit synchronization, as with other shared storage.
+SS supports automatic multibuffering with the same owner and version annotations
+as L1. The uint32/uint64 views share a version clock and byte pitch, and all
+versions count toward the group's 3072-byte pool. Each epoch must write the
+data consumed in that epoch; disjoint AIV writes must still publish the same
+logical generation. SS accesses are scalar-only; VF, DMA and atomics are
+unsupported.
+With AutoSchedule disabled, supply the publication and reuse handshakes
+explicitly; see `testing/ascend/language/test_tilelang_ascend_ss.py`.
+
 For a deferred reduction inside `T.SimtVF`, use the reducer epoch API. Given
 float32 UB buffers `x_ub[TILE]` and `sum_ub[1]`:
 
