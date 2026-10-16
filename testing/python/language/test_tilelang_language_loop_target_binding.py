@@ -187,6 +187,7 @@ def test_constant_rebind_inside_a_region_is_rejected(constant):
                     Out[i] = val
 
 
+@tilelang.testing.requires_cuda
 def test_constant_rebind_at_the_same_level_is_still_accepted():
     """Control: nothing is conditional here, so there is nothing to reject."""
 
@@ -200,6 +201,7 @@ def test_constant_rebind_at_the_same_level_is_still_accepted():
     tilelang.compile(kernel, target="cuda")
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("spelling", ["int", "IntImm"])
 def test_both_constant_spellings_expire_alike(spelling):
     """`7` and `T.int32(7)` are the same constant and must leave the same record.
@@ -221,6 +223,7 @@ def test_both_constant_spellings_expire_alike(spelling):
     tilelang.compile(kernel, target="cuda")
 
 
+@tilelang.testing.requires_cuda
 def test_constant_stays_reusable_once_its_region_closed():
     """Control: a constant is not a TIR binding, so it does not expire with its region."""
 
