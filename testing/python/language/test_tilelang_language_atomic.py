@@ -194,7 +194,7 @@ def run_atomic_addx4(M, N, block_M, block_N):
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda()
-    B = torch.zeros(M, N, dtype=torch.float32).cuda()
+    B = torch.randn(M, N, dtype=torch.float32).cuda()
     ref_B = B.clone()
 
     for i in range(M):
@@ -206,6 +206,18 @@ def run_atomic_addx4(M, N, block_M, block_N):
 
     kernel(A, B)
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("dtype", [T.int32, T.int64])
+@tilelang.testing.requires_cuda
+def test_atomic_addx4_rejects_integer_destination(dtype):
+    @T.prim_func
+    def atomic_addx4_integer(A: T.Tensor((4,), dtype), B: T.Tensor((4,), dtype)):
+        with T.Kernel(1, threads=1):
+            T.atomic_addx4(B[0:4], A[0:4])
+
+    with pytest.raises(RuntimeError, match="AtomicAddx4"):
+        tilelang.compile(atomic_addx4_integer, target="cuda")
 
 
 @tilelang.jit

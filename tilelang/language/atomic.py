@@ -23,11 +23,15 @@ _ATOMIC_LOAD_MEMORY_ORDERS = frozenset({"relaxed", "consume", "acquire", "seq_cs
 _ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
 
 
-def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
+def _buffer_dtype(dst: BufferLikeType | Var) -> DataType:
     if isinstance(dst, Var) and T.has_let_value(dst):
         dst = T.get_let_value(dst)
     buffer = dst if isinstance(dst, Buffer) else dst.buffer
-    return buffer.dtype.with_lanes(lanes)
+    return buffer.dtype
+
+
+def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
+    return _buffer_dtype(dst).with_lanes(lanes)
 
 
 def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozenset[str]) -> int:
