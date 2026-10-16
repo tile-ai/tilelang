@@ -1453,6 +1453,7 @@ def _barrier_follows_extern(use_access_ptr):
     return "__syncthreads" in source.split("memset", 1)[1]
 
 
+@tilelang.testing.requires_cuda
 def test_address_of_extern_write_is_fenced_before_block_reads():
     """`address_of` says nothing about how its consumer uses the pointer, so the
     access has to be treated as a write. Classified as a read, the extern write
@@ -1461,6 +1462,7 @@ def test_address_of_extern_write_is_fenced_before_block_reads():
     assert _barrier_follows_extern(use_access_ptr=False), "no barrier after the extern write"
 
 
+@tilelang.testing.requires_cuda
 def test_access_ptr_write_is_fenced_before_block_reads():
     """Control: the same kernel using `access_ptr(..., "w")`, which names the
     access type, already got its barrier."""
