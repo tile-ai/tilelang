@@ -26,18 +26,20 @@ def convert_to_uint32(x):
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, out_dtype=T.int32):
+def tl_topk_impl(input, index, starts, ends, workspace, threads=1024, in_dtype=T.float32, out_dtype=T.int32):
     topk = T.const("topk")
     batch = T.dynamic("batch")
     seq_len = T.dynamic("seq_len")
     RADIX = _RADIX
     histogram_size = RADIX * 2 if threads == RADIX else RADIX + 1
-    SMEM_INPUT_SIZE = 4096  # assume the threshold bucket size after first pass is less than 4K
 
     input: T.Tensor[(batch, seq_len), in_dtype]
     index: T.Tensor[(batch, topk), out_dtype]
     starts: T.Tensor[(batch), out_dtype]
     ends: T.Tensor[(batch), out_dtype]
+    # A threshold bucket can contain every input element. Bound both radix
+    # buffers by seq_len rather than a fixed shared-memory capacity.
+    workspace: T.Tensor[(batch, 2, seq_len), T.int32]
 
     with T.Kernel(batch, threads=threads) as (bx):
         tx = T.get_thread_binding()
@@ -47,7 +49,6 @@ def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, o
         # bijective two-element-per-thread layout on the ROCm launch.
         s_histogram = T.alloc_shared([histogram_size], T.int32)
         s_num_input = T.alloc_shared([2], T.int32)
-        s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], T.int32)
 
         l_threshold_bin_id = T.alloc_var(T.int32)
         l_new_topk = T.alloc_var(T.int32)
@@ -122,7 +123,7 @@ def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, o
                     elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                         # pos = s_num_input[0]
                         pos = T.atomic_add(s_num_input[0], 1, return_prev=True)
-                        s_input_idx[0, pos] = input_idx
+                        workspace[bx, 0, pos] = input_idx
 
         # stage 2: tail pass
         for round in T.serial(4):
@@ -142,7 +143,7 @@ def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, o
             for s in T.serial(T.ceildiv(l_num_input, threads)):
                 if s * threads + tx < l_num_input:
                     l_bin_id32 = T.cast(
-                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        ((convert_to_uint32(input[bx, workspace[bx, r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                     )
                     T.atomic_add(s_histogram[l_bin_id32], 1)
             T.sync_threads()
@@ -173,30 +174,31 @@ def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, o
                 T.sync_threads()
                 if s * threads + tx < l_num_input:
                     l_bin_id32 = T.cast(
-                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        ((convert_to_uint32(input[bx, workspace[bx, r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                     )
                     if l_bin_id32 > l_threshold_bin_id:
                         pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
-                        index[bx, pos] = s_input_idx[r_idx, s * threads + tx]
+                        index[bx, pos] = workspace[bx, r_idx, s * threads + tx]
                     elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                         if round == 3:
                             l_out_pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             if l_out_pos < topk:
-                                index[bx, l_out_pos] = s_input_idx[r_idx, s * threads + tx]
+                                index[bx, l_out_pos] = workspace[bx, r_idx, s * threads + tx]
                         else:
                             pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                            s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * threads + tx]
+                            workspace[bx, r_idx ^ 1, pos] = workspace[bx, r_idx, s * threads + tx]
 
 
 def tl_topk(input, starts, ends, topk):
     batch, seq_len = input.shape
     indexes = torch.zeros(batch, topk, dtype=torch.int32, device=input.device)
+    workspace = torch.empty((batch, 2, seq_len), dtype=torch.int32, device=input.device)
     # CUDA supports named barriers for the 256-thread radix subgroup. HIP
     # currently lowers that synchronization to a full workgroup barrier, so
     # launch exactly the radix participants there to keep every barrier
     # convergent without changing the tuned CUDA configuration.
     threads = _RADIX if torch.version.hip is not None else 1024
-    tl_topk_impl(input, indexes, starts, ends, threads=threads)
+    tl_topk_impl(input, indexes, starts, ends, workspace, threads=threads)
     return indexes
 
 
