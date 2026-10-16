@@ -85,6 +85,7 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  void PrintWarpReduce(const char *name, const CallNode *op, std::ostream &os);
   bool TryEmitPackedBinaryOp_(const std::string &op, DataType result_type,
                               const PrimExpr &lhs, const PrimExpr &rhs,
                               std::ostream &os);
@@ -204,6 +205,8 @@ private:
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
   std::unordered_map<const VarNode *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
+  // Exact launch extent for complete warps; 0 keeps runtime membership checks.
+  int warp_reduce_block_threads_{0};
   // Physical backing variable name for each packed local FP4 buffer.
   std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       fp4_packed_buffers_;
