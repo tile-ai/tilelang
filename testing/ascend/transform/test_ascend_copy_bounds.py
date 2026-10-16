@@ -115,7 +115,7 @@ def test_dynamic_copy_clamps_extents_without_guarding_the_first_write():
         assert actual == [int(group_value < 4), row_count, 64]
 
 
-def _mx_operand_copy(layout, actual_k, k_alloc=128):
+def _mx_operand_copy(layout, actual_k, k_alloc=128, *, explicit_task=False):
     mn = 32
     src_transposed = layout != "k-contiguous"
     dst_transposed = layout == "mn-contiguous"
@@ -144,6 +144,8 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
             tirx.Evaluate(T.gemm_blockscaled(l0a, l0b, acc, sfa, sfb, transpose_A=dst_transposed, transpose_B=True, clear_accum=True)),
         ]
     )
+    if explicit_task:
+        body = tirx.SeqStmt([tirx.AttrStmt(tirx.IntImm("int32", 0), "tl.ascend_task", 1, body.seq[0]), *body.seq[1:]])
     root = tirx.SBlock(
         [],
         [],
@@ -153,7 +155,9 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
         alloc_buffers=[l1, scale, l0a, l0b, acc, sfa, sfb],
         annotations={"tl.l0_sf_bindings": {sfa.data: l0a.data, sfb.data: l0b.data}, "layout_map": {l1: make_ascend_major_k_layout(l1)}},
     )
-    return tvm.IRModule({"main": tirx.PrimFunc([a.data], tirx.SBlockRealize([], True, root), buffer_map={a.data: a})}), l1
+    body = tirx.SBlockRealize([], True, root)
+    params = [a.data, *tirx.analysis.undefined_vars(body, [a.data])]
+    return tvm.IRModule({"main": tirx.PrimFunc(params, body, buffer_map={a.data: a})}), l1
 
 
 @pytest.mark.parametrize(
@@ -167,13 +171,18 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
         ("transpose-to-k-contiguous", 33, None),
     ],
 )
-def test_mx_copy_pads_only_the_unwritten_k_tail(layout, actual_k, tail):
-    before, l1 = _mx_operand_copy(layout, actual_k)
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_mx_copy_pads_only_the_unwritten_k_tail(layout, actual_k, tail, explicit_task):
+    before, l1 = _mx_operand_copy(layout, actual_k, explicit_task=explicit_task)
     after = transform.AscendInsertOOBPadding()(before)
     fills = calls(after, "tl.tileop.fill")
     assert len(fills) == (tail is not None)
+    tasks = [node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
     if tail is None:
+        assert len(tasks) == int(explicit_task)
         return
+    (task,) = tasks
+    assert [stmt.value.op.name for stmt in task.body.seq] == ["tl.tileop.ascend_copy", "tl.tileop.fill"]
     (fill,) = fills
     dst, value = fill.args
     assert dst.args[0].buffer.same_as(l1)
@@ -196,3 +205,22 @@ def test_mx_padding_rejects_an_incomplete_physical_scale_group():
     before, _ = _mx_operand_copy("k-contiguous", 96, k_alloc=96)
     with pytest.raises(tvm.error.InternalError, match="divisible by 64"):
         transform.AscendInsertOOBPadding()(before)
+
+
+@pytest.mark.parametrize("layout", ["k-contiguous", "mn-contiguous", "transpose-to-k-contiguous"])
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_mx_dynamic_tail_guard_stays_inside_copy_task(layout, explicit_task):
+    actual_k = tirx.Var("actual_k", "int32")
+    before, _ = _mx_operand_copy(layout, tirx.min(tirx.max(actual_k, 1), 128), explicit_task=explicit_task)
+    after = transform.AscendInsertOOBPadding()(before)
+    (task,) = [node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+    copy, guard = task.body.seq
+    assert isinstance(copy, tirx.Evaluate) and copy.value.op.name == "tl.tileop.ascend_copy"
+    assert isinstance(guard, tirx.IfThenElse)
+    assert guard.then_case.value.op.name == "tl.tileop.fill"
+    assert guard.else_case is None
+    analyzer = tvm.arith.Analyzer()
+    for k in (32, 33, 64, 65, 96, 127, 128):
+        condition = tirx.stmt_functor.substitute(guard.condition, {actual_k: k})
+        expected = k % 64 != 0 if layout == "mn-contiguous" else (k + 31) // 32 < 2 * ((k + 63) // 64)
+        assert bool(int(analyzer.simplify(condition))) == expected

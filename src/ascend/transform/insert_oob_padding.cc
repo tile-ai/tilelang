@@ -9,12 +9,10 @@
  * insert copy control flow: LowerDMACopy derives both empty-tile and
  * fixed/singleton-axis in-bounds guards from the clamped ranges after
  * AutoSchedule. For a padded GM->L1 copy it appends the
- * padding fill(s) as semantic tl.fill statements. Ordinary data copies and
- * their padding form one MTE2 task; paired MX tails retain their grouping.
- * For FP8 L1 data
- * consumed by an MX scale-bearing L1->L0 copy, it automatically emits
- * DeepGEMM-compatible K-tail fills after the paired data loads. AutoSchedule
- * keeps those MTE2 fills ordered before L1->L0 consumes the buffers.
+ * padding fill(s) as semantic tl.fill statements. For FP8 L1 data consumed
+ * by an MX scale-bearing L1->L0 copy, it also emits DeepGEMM-compatible
+ * K-tail fills. Each copy and its padding form one MTE2 task, with any
+ * MX tail predicate guarding only the fill inside that task.
  *
  * Doing this before AutoSchedule (rather than inside copy.cc's LowerTileOp
  * lowering, which runs after AutoSchedule) makes the fill visible to
@@ -240,20 +238,14 @@ private:
   VarAxisMap result_;
 };
 
-struct MxKTailFill {
-  Stmt stmt;
-  PrimExpr condition;
-};
-
 // Build DeepGEMM's fill_tail_block for an actual-sized FP8 GM->L1 copy. The
 // destination allocation retains the full static tile geometry while the copy
 // ranges carry actual_mn/actual_k. LayoutInference has already tagged the L1
 // buffer as MajorK or MajorMN, so the physical fill can be selected without
 // exposing layout details on the Python surface.
-std::optional<MxKTailFill> MakeMxKTailFill(const Copy &copy,
-                                           LogicalAxis semantic_k_axis,
-                                           const LayoutMap &layout_map,
-                                           arith::Analyzer *analyzer) {
+Optional<Stmt> MakeMxKTailFill(const Copy &copy, LogicalAxis semantic_k_axis,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer) {
   if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst)) {
     return std::nullopt;
   }
@@ -323,7 +315,9 @@ std::optional<MxKTailFill> MakeMxKTailFill(const Copy &copy,
 
   Stmt fill =
       ascend::MakeL1Fill(copy->dst, fill_region, make_zero(copy->dst->dtype));
-  return MxKTailFill{fill, needs_fill};
+  if (!analyzer->CanProve(needs_fill))
+    fill = IfThenElse(needs_fill, fill);
+  return fill;
 }
 
 class OOBPaddingInserter : public arith::IRMutatorWithAnalyzer {
@@ -356,52 +350,6 @@ private:
     return it->second;
   }
 
-  Optional<Copy> AsMxGMToL1Copy(const Stmt &stmt) const {
-    const auto *evaluate = stmt.as<EvaluateNode>();
-    if (!evaluate)
-      return std::nullopt;
-    const auto *call = evaluate->value.as<CallNode>();
-    if (!call || !IsAscendCopyCall(call))
-      return std::nullopt;
-    AscendCopy copy(call->args, call->annotations);
-    if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst) ||
-        !IsMxL1Data(copy->dst)) {
-      return std::nullopt;
-    }
-    return copy;
-  }
-
-  void FlushMxKTailFills(Array<Stmt> *seq, std::vector<MxKTailFill> *pending) {
-    if (pending->empty())
-      return;
-
-    // These fill predicates are the only control flow intentionally created by
-    // this pre-AutoSchedule pass. They guard standalone MTE2 fill tasks, not
-    // copies. Each affected L1 buffer has already received its unconditional
-    // GM->L1 write in `seq`, so the predicates cannot change its write-first
-    // classification. Keep them visible here so AutoSchedule can order each
-    // possible fill against the later L1 consumer.
-    PrimExpr any_fill = const_false();
-    for (const MxKTailFill &fill : *pending) {
-      any_fill = analyzer_->Simplify(Or(any_fill, fill.condition));
-    }
-
-    Array<Stmt> body;
-    for (const MxKTailFill &fill : *pending) {
-      Stmt fill_stmt = fill.stmt;
-      if (!analyzer_->CanProveEqual(fill.condition, any_fill)) {
-        fill_stmt = IfThenElse(fill.condition, fill_stmt);
-      }
-      body.push_back(fill_stmt);
-    }
-    Stmt fill_group = body.size() == 1 ? body[0] : Stmt(SeqStmt(body));
-    if (!is_one(any_fill) && !analyzer_->CanProve(any_fill)) {
-      fill_group = IfThenElse(any_fill, fill_group);
-    }
-    seq->push_back(fill_group);
-    pending->clear();
-  }
-
   Stmt VisitStmt_(const SBlockNode *op) final {
     LayoutMap saved = layout_map_;
     VarAxisMap saved_mx_l1_k_axes = mx_l1_k_axes_;
@@ -421,32 +369,6 @@ private:
     layout_map_ = saved;
     mx_l1_k_axes_ = std::move(saved_mx_l1_k_axes);
     return stmt;
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> seq;
-    std::vector<MxKTailFill> pending;
-    for (const Stmt &original : op->seq) {
-      Optional<Copy> mx_copy = AsMxGMToL1Copy(original);
-      if (!mx_copy.defined()) {
-        FlushMxKTailFills(&seq, &pending);
-        seq.push_back(Parent::VisitStmt(original));
-        continue;
-      }
-
-      bool saved_defer = defer_mx_fill_;
-      defer_mx_fill_ = true;
-      seq.push_back(Parent::VisitStmt(original));
-      defer_mx_fill_ = saved_defer;
-      Copy mx_copy_value = mx_copy.value();
-      std::optional<MxKTailFill> fill =
-          MakeMxKTailFill(mx_copy_value, GetMxKAxis(mx_copy_value->dst),
-                          layout_map_, analyzer_);
-      if (fill.has_value())
-        pending.push_back(std::move(fill.value()));
-    }
-    FlushMxKTailFills(&seq, &pending);
-    return SeqStmt(seq, op->span);
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
@@ -487,35 +409,27 @@ private:
           Evaluate(Call(call->dtype, call->op, new_args, call->annotations));
     }
 
-    // Emit semantic fills for a padded GM->L1 copy. MX K-tail fills
-    // are grouped by VisitStmt_(SeqStmtNode*) so paired A/B loads are followed
-    // by both fills. AutoSchedule sees their exact tl.fill write regions and
-    // orders them before the MTE1 consumers; LowerTileOp later converts them
-    // to ascend_fill_l1, which codegen emits as asc_fill_l1. The fallback here
-    // handles a copy that is not
-    // inside a SeqStmt.
+    // Keep every padding write with the copy that prepares this L1 tile.
+    // An MX predicate guards only its tail fill, not the data copy or task.
     std::vector<Stmt> fills = MakeL1PaddingStmts(copy, layout_map_, analyzer_);
-    std::vector<MxKTailFill> mx_fills;
-    if (!defer_mx_fill_ && IsMxL1Data(copy->dst)) {
-      std::optional<MxKTailFill> mx_fill = MakeMxKTailFill(
-          copy_obj, GetMxKAxis(copy->dst), layout_map_, analyzer_);
-      if (mx_fill.has_value())
-        mx_fills.push_back(std::move(mx_fill.value()));
+    if (IsMxL1Data(copy->dst)) {
+      Optional<Stmt> mx_fill = MakeMxKTailFill(copy_obj, GetMxKAxis(copy->dst),
+                                               layout_map_, analyzer_);
+      if (mx_fill.defined())
+        fills.push_back(mx_fill.value());
     }
 
-    if (fills.empty() && mx_fills.empty()) {
+    if (fills.empty())
       return copy_stmt;
-    }
     Array<Stmt> seq;
     seq.push_back(copy_stmt);
-    for (auto &f : fills)
-      seq.push_back(f);
-    FlushMxKTailFills(&seq, &mx_fills);
+    for (auto &fill : fills)
+      seq.push_back(fill);
     Stmt body = SeqStmt(seq);
     // A data copy and its zero padding prepare one L1 tile on MTE2. Publish
     // completion only after both, without inserting a barrier between them.
-    // Preserve explicit task scopes and the separate paired-MX fill policy.
-    if (!fills.empty() && !IsMxL1Data(copy->dst) && task_depth_ == 0) {
+    // Reuse an explicit task scope instead of nesting another task.
+    if (task_depth_ == 0) {
       return AttrStmt(IntImm(DataType::Int(32), 0), attr::kAscendTask,
                       Integer(1), body);
     }
@@ -525,7 +439,6 @@ private:
   int task_depth_{0};
   LayoutMap layout_map_;
   VarAxisMap mx_l1_k_axes_;
-  bool defer_mx_fill_{false};
 };
 
 } // namespace
