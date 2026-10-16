@@ -228,14 +228,22 @@ private:
     }
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_GE(call->args.size(), 3)
-          << "tvm_access_ptr must have at least 3 arguments";
-      PrimExpr offset = call->args[2];
+      ICHECK_GE(call->args.size(), 4)
+          << "tvm_access_ptr must have offset and extent arguments";
+      IndexPredicateRewriter::Promoter promoter;
+      PrimExpr original_offset = call->args[2];
+      PrimExpr offset =
+          index_predicate_rewriter_.PrepareIndex(original_offset, promoter);
       if (NeedsInt64Promotion(offset)) {
-        IndexPredicateRewriter::Promoter promoter;
-        call.CopyOnWrite()->args.Set(2, promoter(offset));
-        index_predicate_rewriter_.Record(call, promoter);
+        PrimExpr promoted = promoter(offset);
+        promoter.RecordExtent(original_offset, promoted, call->args[3]);
+        promoter.RecordExtent(offset, promoted, call->args[3]);
+        offset = promoted;
       }
+      if (!offset.same_as(call->args[2])) {
+        call.CopyOnWrite()->args.Set(2, offset);
+      }
+      index_predicate_rewriter_.Record(call, promoter);
     }
     return std::move(call);
   }
@@ -257,11 +265,19 @@ private:
   Array<PrimExpr>
   GetSimplifiedElemOffset(const Buffer &buffer, const Array<PrimExpr> &indices,
                           IndexPredicateRewriter::Promoter &promoter) {
-    auto flattened_indices = buffer->ElemOffset(indices);
+    auto prepared_indices = indices.Map([&](const PrimExpr &index) {
+      return index_predicate_rewriter_.PrepareIndex(index, promoter);
+    });
+    auto flattened_indices = buffer->ElemOffset(prepared_indices);
     Array<PrimExpr> safe_indices;
-    for (const auto &index : flattened_indices) {
+    for (const auto &original_index : flattened_indices) {
+      PrimExpr index =
+          index_predicate_rewriter_.PrepareIndex(original_index, promoter);
       if (NeedsInt64Promotion(index)) {
-        safe_indices.push_back(promoter(index));
+        PrimExpr promoted = promoter(index);
+        promoter.RecordIndex(original_index, promoted);
+        promoter.RecordIndex(index, promoted);
+        safe_indices.push_back(promoted);
       } else {
         safe_indices.push_back(index);
       }

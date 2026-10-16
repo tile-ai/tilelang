@@ -93,11 +93,16 @@ private:
     Array<PrimExpr> new_indices;
     IndexPredicateRewriter::Promoter promoter;
     for (auto index : indices) {
+      PrimExpr original_index = index;
+      index = index_predicate_rewriter_.PrepareIndex(index, promoter);
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          index = promoter(index);
+          PrimExpr promoted = promoter(index);
+          promoter.RecordIndex(original_index, promoted);
+          promoter.RecordIndex(index, promoted);
+          index = promoted;
           new_indices.push_back(index);
           continue;
         }
@@ -116,11 +121,16 @@ private:
     Array<PrimExpr> new_indices;
     IndexPredicateRewriter::Promoter promoter;
     for (auto index : indices) {
+      PrimExpr original_index = index;
+      index = index_predicate_rewriter_.PrepareIndex(index, promoter);
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          index = promoter(index);
+          PrimExpr promoted = promoter(index);
+          promoter.RecordIndex(original_index, promoted);
+          promoter.RecordIndex(index, promoted);
+          index = promoted;
           new_indices.push_back(index);
           continue;
         }
