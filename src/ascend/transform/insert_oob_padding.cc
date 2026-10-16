@@ -9,7 +9,8 @@
  * insert copy control flow: LowerDMACopy derives both empty-tile and
  * fixed/singleton-axis in-bounds guards from the clamped ranges after
  * AutoSchedule. For a padded GM->L1 copy it appends the
- * padding fill(s) as standalone tl.fill statements.
+ * padding fill(s) as semantic tl.fill statements. Ordinary data copies and
+ * their padding form one MTE2 task; paired MX tails retain their grouping.
  * For FP8 L1 data
  * consumed by an MX scale-bearing L1->L0 copy, it automatically emits
  * DeepGEMM-compatible K-tail fills after the paired data loads. AutoSchedule
@@ -17,9 +18,8 @@
  *
  * Doing this before AutoSchedule (rather than inside copy.cc's LowerTileOp
  * lowering, which runs after AutoSchedule) makes the fill visible to
- * pipe/barrier analysis: it is scheduled as its own MTE2 task (see
- * auto_schedule/task_analysis.h's ResourceAnalyzer) and participates in the
- * dependency before the MTE1 L1->L0 loads that read the padded buffer. copy.cc
+ * pipe/barrier analysis: the copy task includes its padding writes and
+ * completes before the MTE1 L1->L0 loads that read the padded buffer. copy.cc
  * lowering consumes the already-clamped ranges and inserts the final copy
  * guard.
  * Both stages share the clamp/fill helpers in oob_padding.h.
@@ -41,6 +41,7 @@
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/attr.h"
 #include "layout/layout.h"
 #include "op/copy.h"
 #include "op/gemm.h"
@@ -336,6 +337,14 @@ private:
   using Parent = arith::IRMutatorWithAnalyzer;
   explicit OOBPaddingInserter(arith::Analyzer *analyzer) : Parent(analyzer) {}
 
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    const bool is_task = op->attr_key == attr::kAscendTask;
+    task_depth_ += is_task;
+    Stmt stmt = Parent::VisitStmt_(op);
+    task_depth_ -= is_task;
+    return stmt;
+  }
+
   bool IsMxL1Data(const Buffer &buffer) const {
     return mx_l1_k_axes_.count(buffer->data) != 0;
   }
@@ -478,7 +487,7 @@ private:
           Evaluate(Call(call->dtype, call->op, new_args, call->annotations));
     }
 
-    // Emit standalone semantic fills for a padded GM->L1 copy. MX K-tail fills
+    // Emit semantic fills for a padded GM->L1 copy. MX K-tail fills
     // are grouped by VisitStmt_(SeqStmtNode*) so paired A/B loads are followed
     // by both fills. AutoSchedule sees their exact tl.fill write regions and
     // orders them before the MTE1 consumers; LowerTileOp later converts them
@@ -502,9 +511,18 @@ private:
     for (auto &f : fills)
       seq.push_back(f);
     FlushMxKTailFills(&seq, &mx_fills);
-    return SeqStmt(seq);
+    Stmt body = SeqStmt(seq);
+    // A data copy and its zero padding prepare one L1 tile on MTE2. Publish
+    // completion only after both, without inserting a barrier between them.
+    // Preserve explicit task scopes and the separate paired-MX fill policy.
+    if (!fills.empty() && !IsMxL1Data(copy->dst) && task_depth_ == 0) {
+      return AttrStmt(IntImm(DataType::Int(32), 0), attr::kAscendTask,
+                      Integer(1), body);
+    }
+    return body;
   }
 
+  int task_depth_{0};
   LayoutMap layout_map_;
   VarAxisMap mx_l1_k_axes_;
   bool defer_mx_fill_{false};

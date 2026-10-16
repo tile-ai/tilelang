@@ -8,7 +8,9 @@ from tvm import tirx
 from testing.ascend._ir import calls, nodes
 
 
-def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_extent=None, *, scope="shared.l1", transpose=False):
+def _copy_module(
+    src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_extent=None, *, scope="shared.l1", transpose=False, explicit_task=False
+):
     src = tirx.decl_buffer(src_shape, "bfloat16", name="src")
     dst = tirx.decl_buffer(dst_shape, "bfloat16", name="dst", scope=scope)
 
@@ -25,15 +27,26 @@ def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_ex
         annotations={"transpose": tirx.IntImm("int32", 1)} if transpose else {},
     )
     annotations = {"layout_map": {dst: make_ascend_nz_layout(dst)}} if scope == "shared.l1" else {}
-    root = tirx.SBlock([], [], [], "root", tirx.Evaluate(copy), alloc_buffers=[dst], annotations=annotations)
+    body = tirx.Evaluate(copy)
+    if explicit_task:
+        body = tirx.AttrStmt(tirx.IntImm("int32", 0), "tl.ascend_task", 1, body)
+    root = tirx.SBlock([], [], [], "root", body, alloc_buffers=[dst], annotations=annotations)
     body = tirx.SBlockRealize([], True, root)
     params = [src.data, *tirx.analysis.undefined_vars(body, [src.data])]
     return tvm.IRModule({"main": tirx.PrimFunc(params, body, buffer_map={src.data: src})})
 
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["direct", "transpose"])
-def test_clamped_copy_and_padding_use_destination_axes(transpose):
-    before = _copy_module((8, 10) if transpose else (10, 8), (16, 32), [0, 0], [32, 16] if transpose else [16, 32], transpose=transpose)
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_clamped_copy_and_padding_use_destination_axes(transpose, explicit_task):
+    before = _copy_module(
+        (8, 10) if transpose else (10, 8),
+        (16, 32),
+        [0, 0],
+        [32, 16] if transpose else [16, 32],
+        transpose=transpose,
+        explicit_task=explicit_task,
+    )
     after = transform.AscendInsertOOBPadding()(before)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     assert [int(x) for x in copy.args[0].args[2:]] == ([8, 10] if transpose else [10, 8])
@@ -45,6 +58,9 @@ def test_clamped_copy_and_padding_use_destination_axes(transpose):
     assert regions == {(0, 16, 16, 16), (10, 0, 6, 32)}
     assert all(float(call.args[1]) == 0 for call in fills)
     assert not nodes(after, tirx.IfThenElse)
+    # The copy and its zero padding complete one tile, including inside T.Task.
+    (task,) = [node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+    assert [stmt.value.op.name for stmt in task.body.seq] == ["tl.tileop.ascend_copy", "tl.tileop.fill", "tl.tileop.fill"]
 
 
 @pytest.mark.parametrize("axis", ["row", "col"])

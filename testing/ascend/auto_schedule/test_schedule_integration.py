@@ -153,6 +153,44 @@ def test_counter_slot_is_compatible_with_l1_layout_lowering():
     assert artifact.kernel_source and artifact.device_mod
 
 
+def test_oob_copy_padding_does_not_serialize_mte2():
+    @T.prim_func
+    def main(A: T.Tensor((31, 32), "bfloat16"), B: T.Tensor((16, 32), "bfloat16"), C: T.Tensor((31, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_l1((16, 32), "bfloat16")
+            b = T.alloc_l1((16, 32), "bfloat16")
+            a0 = T.alloc_l0a((16, 32), "bfloat16")
+            b0 = T.alloc_l0b((16, 32), "bfloat16")
+            acc = T.alloc_l0c((16, 16), "float32")
+            # Opaque offsets make copy/padding footprints conservatively overlap.
+            row_idx = T.alloc_var("int32", init=0)
+            T.copy(B, b)
+            for i in T.Pipelined(2, num_stages=2):
+                T.copy(A[row_idx : row_idx + 16, :], a)
+                T.copy(a, a0)
+                T.copy(b, b0)
+                T.gemm(a0, b0, acc, transpose_B=True, clear_accum=True)
+                T.copy(acc, C[i * 16 : (i + 1) * 16, :])
+                row_idx += 16
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        tilelang.lower(main, target="ascend", enable_device_compile=False)
+    after = snapshots["tl.InsertSync"]
+    assert calls(after, "tl.tileop.fill"), "The last tile must still be zero padded"
+    assert not [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # Grouping the MTE2 writes must preserve the handoff to the L1 consumer.
+    for operation in ("set", "wait"):
+        assert [call for call in calls(after, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE2_MTE1"]
+
+
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
     @T.prim_func
     def main(
