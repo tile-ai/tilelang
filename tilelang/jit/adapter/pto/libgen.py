@@ -59,6 +59,7 @@ class PTOLibraryGenerator(LibraryGenerator):
             import re
             import sys
             import traceback
+            import types
 
             src_path = pathlib.Path(sys.argv[1])
             kernel_names = json.loads(sys.argv[2])
@@ -66,6 +67,26 @@ class PTOLibraryGenerator(LibraryGenerator):
             module_name = "_tilelang_ptodsl_compile"
 
             try:
+                # Importing ``tilelang.contrib.ptodsl`` normally executes the
+                # top-level tilelang and contrib package initializers.  Those
+                # initializers load the full TileLang runtime (and, in this
+                # environment, Triton/LLVM libraries), which conflicts with
+                # PTOAS's LLVM libraries in this compiler-only subprocess.
+                # Expose only namespace packages so the PTODSL helper modules
+                # can be imported without running either initializer.
+                tilelang_spec = importlib.util.find_spec("tilelang")
+                if tilelang_spec is None or tilelang_spec.origin is None:
+                    raise ImportError("Unable to locate the tilelang package for PTODSL helpers")
+                tilelang_root = pathlib.Path(tilelang_spec.origin).parent
+
+                tilelang_pkg = types.ModuleType("tilelang")
+                tilelang_pkg.__path__ = [str(tilelang_root)]
+                sys.modules["tilelang"] = tilelang_pkg
+
+                contrib_pkg = types.ModuleType("tilelang.contrib")
+                contrib_pkg.__path__ = [str(tilelang_root / "contrib")]
+                sys.modules["tilelang.contrib"] = contrib_pkg
+
                 spec = importlib.util.spec_from_file_location(module_name, src_path)
                 module = importlib.util.module_from_spec(spec)
                 assert spec.loader is not None
