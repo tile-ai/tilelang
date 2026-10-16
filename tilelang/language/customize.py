@@ -84,6 +84,12 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
 def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     """Reshapes the input buffer to the specified shape.
 
+    The result shares its data with ``src`` without copying, so ``src`` must be a
+    densely packed buffer with zero ``elem_offset``: a reshape cannot describe a
+    strided or offset source, and silently reading the backing storage as
+    contiguous from element zero would return the wrong elements. Use
+    :func:`view` with explicit ``strides`` for a non-contiguous source.
+
     Args:
         src (Buffer): Input buffer to be reshaped
         shape (ShapeType): New shape for the buffer
@@ -95,6 +101,25 @@ def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     assert prim_expr_equal(bits, src_bits) or arith.Analyzer().can_prove_equal(bits, src_bits), (
         f"T.reshape/view shape check failed. {bits_product(shape, src.dtype)}, {bits_product(src.shape, src.dtype)}"
     )
+
+    analyzer = arith.Analyzer()
+
+    # A reshape carries the source's layout over to a new shape, so it can only
+    # describe a source that starts at the allocation base and is densely packed.
+    if not (prim_expr_equal(src.elem_offset, 0) or bool(analyzer.can_prove_equal(src.elem_offset, 0))):
+        raise ValueError("T.reshape does not support a source buffer with non-zero elem_offset.")
+
+    if len(src.strides) != 0:
+        if len(src.strides) != len(src.shape):
+            raise ValueError(f"T.reshape requires a densely packed source buffer; '{src.name}' is not contiguous.")
+        expected_stride = 1
+        for extent, stride in zip(reversed(list(src.shape)), reversed(list(src.strides))):
+            extent_is_singleton = prim_expr_equal(extent, 1) or bool(analyzer.can_prove_equal(extent, 1))
+            stride_is_compact = prim_expr_equal(stride, expected_stride) or bool(analyzer.can_prove_equal(stride, expected_stride))
+            if not (extent_is_singleton or stride_is_compact):
+                raise ValueError(f"T.reshape requires a densely packed source buffer; '{src.name}' is not contiguous.")
+            expected_stride = expected_stride * extent
+
     return T.Tensor(shape, src.dtype, src.data)
 
 

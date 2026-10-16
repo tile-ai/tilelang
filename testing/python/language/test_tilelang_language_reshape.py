@@ -286,5 +286,55 @@ def test_reduce_absmax_after_reshape_3d():
     torch.testing.assert_close(B_torch, ref)
 
 
+# ---------------------------------------------------------------------------
+# Source-layout contract: the result shares src's data without copying, so a
+# strided or offset source cannot be described by a reshape. Reading the backing
+# storage as contiguous from element zero would silently return the wrong
+# elements. `T.view` already guards both cases; these pin the same contract for
+# `T.reshape`, which had no guard at all.
+# ---------------------------------------------------------------------------
+
+
+def _source_buffer(shape=(4, 8), **kwargs):
+    from tvm.script.ir_builder.tir import buffer as tir_buffer
+
+    return tir_buffer(shape, dtype="float32", **kwargs)
+
+
+def test_reshape_rejects_non_zero_elem_offset_source():
+    with pytest.raises(ValueError, match="non-zero elem_offset"):
+        T.reshape(_source_buffer(elem_offset=100), (2, 16))
+
+
+def test_reshape_rejects_strided_source():
+    with pytest.raises(ValueError, match="densely packed"):
+        T.reshape(_source_buffer((4, 4), strides=(8, 1)), (16,))
+
+
+def test_reshape_accepts_compact_source():
+    """Control: a densely packed source still reshapes."""
+    reshaped = T.reshape(_source_buffer((4, 8), strides=(8, 1)), (2, 16))
+    assert list(reshaped.shape) == [2, 16]
+
+
+@tilelang.testing.requires_cuda
+def test_reshape_rejects_strided_tensor_parameter():
+    """The same contract on the runnable path: a strided tensor parameter.
+
+    The kernel body is traced while the decorator runs, so the definition has to
+    sit inside the raises block.
+    """
+    with pytest.raises(ValueError, match="densely packed"):
+
+        @T.prim_func
+        def main(A: T.StridedTensor((4, 4), (8, 1), "float32"), B: T.Tensor((16,), "float32")):
+            with T.Kernel(1, threads=1) as _:
+                flat = T.reshape(A, (16,))
+                for i in T.serial(16):
+                    B[i] = flat[i]
+
+        tl.compile(main, target="cuda")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
