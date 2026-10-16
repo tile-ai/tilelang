@@ -110,6 +110,69 @@ def _assert_shared_write_sync_read(branch, call):
     _assert_stmt_order(branch, writes[0], _sync_stmt(branch, call), reads[0])
 
 
+@pytest.mark.parametrize(
+    "scope, write_in_else, thread_private, participants",
+    [
+        ("shared", False, False, 128),
+        ("shared", True, False, 128),
+        ("shared.dyn", False, False, 128),
+        ("shared", False, True, 128),
+        ("shared", False, False, 32),
+        ("shared", False, False, 48),
+    ],
+)
+def test_if_condition_read_before_branch_write(scope, write_in_else, thread_private, participants):
+    """Participating threads must finish reading before a branch changes the predicate."""
+    index_stride = int(thread_private)
+    writer_stride = 1 if thread_private else 128
+
+    @T.prim_func(private=True)
+    def func():
+        flag = T.alloc_buffer((128,), "int32", scope=scope)
+        result = T.alloc_buffer((1,), "int32", scope="local")
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if flag[tx * index_stride] == 0:
+            if tx % writer_stride == 0:
+                flag[tx * index_stride] = 1
+        else:
+            result[0] = 2
+
+    if write_in_else or participants < 128:
+        tx = _thread_var(func)
+
+        def rewrite_branch(node):
+            if isinstance(node, tirx.IfThenElse) and collect_nodes(node.condition, tirx.BufferLoad):
+                if write_in_else:
+                    node = tirx.IfThenElse(node.condition, node.else_case, node.then_case)
+                if participants < 128:
+                    node = tirx.IfThenElse(tx < participants, node, None)
+                return node
+
+        func = func.with_body(tirx.stmt_functor.ir_transform(func.body, None, rewrite_branch, ["tirx.IfThenElse"]))
+
+    mod = tvm.IRModule({"main": func})
+    if participants == 48:
+        with pytest.raises(Exception, match="not warp-uniform"):
+            tilelang.transform.ThreadSync(scope)(mod)
+        return
+    lowered = tilelang.transform.ThreadSync(scope)(mod)["main"]
+    syncs = _storage_syncs(lowered, scope, arg_count=3 if participants < 128 else 1)
+    if thread_private:
+        assert not syncs
+        return
+
+    snapshots = [node for node in collect_nodes(lowered, tirx.Bind) if collect_nodes(node.value, tirx.BufferLoad)]
+    assert len(snapshots) == 1, "The shared predicate must be evaluated before synchronizing"
+    branch = _guard(lowered, snapshots[0].var)
+    assert len(syncs) == 1
+    assert not collect_calls(branch, op="tirx.tvm_storage_sync"), "The barrier must be reached by both arms"
+    if participants < 128:
+        _assert_partial_sync_params(syncs, participants)
+    _assert_stmt_order(lowered, snapshots[0], _sync_stmt(lowered, syncs[0]), branch)
+
+
 @tilelang.testing.requires_cuda
 def test_no_sync_between_atomic_adds_to_shared():
     """Atomic WAW (and RMW) should not trigger thread-level sync insertion.
