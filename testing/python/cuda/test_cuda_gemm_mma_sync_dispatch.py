@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tvm import tirx
 
 
 def _make_gemm_kernel(dtype, accum_dtype):
@@ -22,6 +23,38 @@ def _make_gemm_kernel(dtype, accum_dtype):
             T.copy(Cl, C)
 
     return main
+
+
+@pytest.mark.parametrize("K", [20, 24])
+def test_gemm_mma_k_alignment_rejected_before_layout(K):
+    # K=20 previously failed in shared-memory swizzling, hiding the MMA constraint.
+    a = tirx.decl_buffer((64, K), "float16", scope="shared")
+    b = tirx.decl_buffer((K, 64), "float16", scope="shared")
+    c = tirx.decl_buffer((64, 64), "float32", scope="local.fragment")
+    call = T.gemm(a, b, c)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_86"})
+    with target, pytest.raises(ValueError) as exc_info:
+        op.infer_layout(target, 128)
+    message = str(exc_info.value)
+    assert "cuda.mma" in message
+    assert "sm_86" in message
+    assert "float16" in message
+    assert f"block_K ({K})" in message
+    assert "micro_size_k (16)" in message
+
+
+def test_gemm_mma_sm75_k24_layout():
+    # SM75 FP16 uses micro K=8, so K=24 must not be rejected by an Ampere rule.
+    a = tirx.decl_buffer((64, 24), "float16", scope="shared")
+    b = tirx.decl_buffer((24, 64), "float16", scope="shared")
+    c = tirx.decl_buffer((64, 64), "float32", scope="local.fragment")
+    call = T.gemm(a, b, c)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_75"})
+    with target:
+        layouts = op.infer_layout(target, 128)
+    assert all(buffer in layouts for buffer in (a, b, c))
 
 
 @tilelang.testing.requires_cuda
