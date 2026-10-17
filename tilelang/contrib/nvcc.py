@@ -151,8 +151,20 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
+    compiler_env = get_nvcc_subprocess_env()
+    if os.name == "nt":
+        from tilelang.contrib.msvc import get_env_path, get_msvc_environment_error
+
+        # NVCC on Windows requires MSVC, even when host libraries use clang-cl.
+        host_compiler = shutil.which("cl.exe", path=get_env_path(compiler_env or {}))
+        if host_compiler is None:
+            detail = get_msvc_environment_error()
+            raise RuntimeError("NVCC requires MSVC cl.exe on Windows." + (f" {detail}" if detail else ""))
+    else:
+        host_compiler = get_cplus_compiler()
     cmd = [get_nvcc_compiler()]
-    cmd += [f"-ccbin={get_cplus_compiler()}"]
+    if host_compiler is not None:
+        cmd += [f"-ccbin={host_compiler}"]
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]
@@ -180,8 +192,6 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
 
     cmd += ["-o", file_target]
     cmd += [temp_code]
-
-    compiler_env = get_nvcc_subprocess_env()
 
     if compiler_env is None:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

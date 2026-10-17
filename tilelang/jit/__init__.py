@@ -21,6 +21,7 @@ from collections.abc import Iterable
 
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
+from tilelang.language.eager.builder import _make_jit_key
 from tvm.target import Target
 from contextlib import nullcontext
 
@@ -76,11 +77,12 @@ class _CallFormCache:
         self.last_kernel = kernel
 
     def lookup(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Kernel | object, _CallFormKey | None]:
-        # Fastest path for tight loops: avoid rebuilding and hashing the call-form key.
+        # Validate even on a last-call hit: an unhashable value can compare equal
+        # to a previously cached hashable argument.
+        call_form_key = _make_jit_key((args, tuple(kwargs.items())))
         if self._matches_last(args, kwargs):
             return self.last_kernel, None
 
-        call_form_key = (args, tuple(kwargs.items()))
         kernel = self.entries.get(call_form_key, _CALL_FORM_CACHE_MISS)
         if kernel is not _CALL_FORM_CACHE_MISS:
             self._remember(call_form_key, kernel)
@@ -603,6 +605,10 @@ def jit(
     Supports two execution modes (automatically inferred):
     - **lazy**: Function returns PrimFunc explicitly. Returns compiled kernel object.
     - **eager**: Function uses DSL builder pattern. Executes kernel immediately.
+
+    Compile-time arguments and their defaults must be hashable. Their hash and
+    equality semantics must remain stable while cached kernels are in use.
+    Runtime tensor arguments are excluded from this requirement.
 
     Parameters
     ----------

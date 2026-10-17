@@ -337,6 +337,9 @@ public:
       std::vector<Var> task_storage_order;
       auto get_task_access =
           [&](const BufferRegion &region) -> TaskAccessRegions * {
+        // SS allocations are packed without lifetime reuse.
+        if (IsSSBuffer(region->buffer))
+          return nullptr;
         if (!IsAscendOnChipBuffer(region->buffer) &&
             !IsL0SFBuffer(region->buffer))
           return nullptr;

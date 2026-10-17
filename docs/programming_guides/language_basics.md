@@ -228,6 +228,12 @@ Notes
 - The `@jit` wrapper returns a callable kernel after the first compilation.
 - You can pass compile‑time tunables (tile sizes, dtypes) through the outer
   Python function and bake them into the generated TIR.
+- Compile-time arguments and their defaults must be hashable. Lists, dictionaries,
+  sets, and tuples containing unhashable values raise `TypeError`; use immutable,
+  hashable values such as tuples or frozen dataclasses instead. Values that affect
+  specialization, along with their hash and equality behavior, must remain stable
+  while cached kernels are in use. Runtime tensor arguments are excluded from this
+  requirement.
 
 ## 7. Tiled GEMM Skeleton
 

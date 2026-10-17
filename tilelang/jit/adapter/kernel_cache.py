@@ -35,7 +35,7 @@ class TVMFFIKernelCache(KernelCache):
         target_host = getattr(artifact, "target_host", None)
         target_host_kind = getattr(getattr(target_host, "kind", None), "name", None)
         if target_host_kind == "c":
-            return KernelCache._get_source_compile_args()
+            return kernel.adapter._get_compile_args()
         return KernelCache._get_export_link_args()
 
     def _save_wrapper_kernel_code_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):

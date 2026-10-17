@@ -136,6 +136,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
         return runtime.Executable(self.rt_mod)
 
+    def _get_compile_args(self) -> dict[str, Any]:
+        from tilelang.cpu.toolchain import get_compile_flags
+
+        compile_args = dict(COMPILE_ARGS)
+        backend_flags = get_compile_flags(self.target, self.pass_configs, execution_backend="tvm_ffi")
+        if backend_flags:
+            compile_args["options"] = [*compile_args.get("options", []), *backend_flags]
+        return compile_args
+
     def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
         executable = self.executable
         if executable is not None:
@@ -156,7 +165,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def _entry(self) -> Callable[..., Any]:
         executable = self._get_executable()
         if isinstance(executable, runtime.Executable):
-            executable = executable.jit(**COMPILE_ARGS)
+            executable = executable.jit(**self._get_compile_args())
         entry = executable.main
         params = [p for i, p in enumerate(self.params) if not self._ffi_callee_allocated_output_abi or i not in self.result_idx]
         uint64_indices = [i for i, p in enumerate(params) if str(p.dtype) == "uint64" and p.is_scalar()]

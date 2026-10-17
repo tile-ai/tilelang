@@ -318,7 +318,6 @@ def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs,
     export_link_args = {"link": "keep"}
     captured = []
 
-    monkeypatch.setattr(KernelCache, "_get_source_compile_args", staticmethod(lambda: source_compile_args))
     monkeypatch.setattr(KernelCache, "_get_export_link_args", staticmethod(lambda: export_link_args))
 
     class FakeExecutable:
@@ -328,6 +327,9 @@ def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs,
                 f.write(b"fake-so")
 
     class FakeAdapter:
+        def _get_compile_args(self):
+            return source_compile_args
+
         def get_exportable_executable(self):
             return FakeExecutable()
 

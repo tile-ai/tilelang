@@ -271,6 +271,8 @@ public:
   explicit TaskCostEstimator(Hf32ModeMap hf32_modes)
       : hf32_modes_(std::move(hf32_modes)) {}
 
+  void SetAivLanes(int lanes) { aiv_lanes_ = lanes; }
+
   // Estimate latency and initiation interval for one Ascend task.
   void Estimate(TaskNode *task);
 
@@ -321,6 +323,7 @@ private:
 
   AscendLatencyParams params_;
   Hf32ModeMap hf32_modes_;
+  int aiv_lanes_{2};
 
   // ====================================================================
   // Every divisor is guarded so an unknown bandwidth/throughput contributes
@@ -597,7 +600,7 @@ private:
 
   AivMteCost EstimateAivMte(AscendPath path,
                             const TaskCostFeatures::CopyInfo &info) const {
-    int64_t normalized_bytes = ScaleBytesByLanes(info.bytes, 2);
+    int64_t normalized_bytes = ScaleBytesByLanes(info.bytes, aiv_lanes_);
     int64_t bandwidth = BandwidthForCopy(path, info);
     int64_t completion_latency =
         params_.mte_descriptor_cycles +
@@ -2084,6 +2087,10 @@ private:
 
   void EstimateMarkedTask(const AttrStmtNode *op) {
     TaskMetadata metadata = ParseTaskMetadata(op->node);
+    // Projected tasks describe one AIV's traffic; a collective task
+    // describes the same operation on both AIVs.
+    auto attributes = task_metadata_detail::CopyTaskMetadata(op->node);
+    estimator_.SetAivLanes(attributes.count("subcore") ? 1 : 2);
     auto task = NewTask(op->body);
     ApplyTaskResourceUsage(AnalyzeTaskResourceUsage(op->body), task.get());
     ApplyTaskAccesses(AnalyzeTaskAccesses(op->body), task.get());
