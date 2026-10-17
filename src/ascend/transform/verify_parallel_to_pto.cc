@@ -744,47 +744,41 @@ private:
       public:
         CastCheck(UnitVisitor *parent) : parent_(parent) {}
         void VisitExpr_(const CastNode *op) final {
+          // Classify the *input of this Cast* with the existing lane-use
+          // analysis, then hand the explicit kind to the shared planner.
+          pto_analysis::LaneUseContext ctx = parent_->MakeLaneUseContext();
+          std::string lane_why;
+          pto_analysis::LaneUse use =
+              pto_analysis::AnalyzeLaneUse(op->value, &ctx, &lane_why);
+          if (use == pto_analysis::LaneUse::kUnknown) {
+            std::ostringstream oss;
+            oss << "Cast " << op->value.dtype() << " -> " << op->dtype
+                << " cannot classify its input: " << lane_why;
+            parent_->parent_->Fail("dtype", oss.str());
+            return;
+          }
+          pto_analysis::CastContext context;
+          if (use == pto_analysis::LaneUse::kUniform) {
+            context.value_kind = pto_analysis::CastValueKind::kScalar;
+            context.logical_lanes = 1;
+          } else {
+            context.value_kind = pto_analysis::CastValueKind::kVectorVmi;
+            context.logical_lanes = parent_->mapping_.lanes;
+          }
           std::string why;
-          auto plan = pto_analysis::PlanValueCast(op, &why);
+          auto plan = pto_analysis::PlanValueCast(op, context, &why);
           if (!plan.has_value()) {
             std::ostringstream oss;
             oss << "Cast " << op->value.dtype() << " -> " << op->dtype
-                << " has no proven VMI-equivalent conversion";
+                << " has no supported conversion";
             if (!why.empty()) {
               oss << ": " << why;
             }
             parent_->parent_->Fail("dtype", oss.str());
           }
-          // A lane-uniform Cast is emitted as a scalar Cast, while the
-          // conversion plan above proves the VMI-equivalent *vector* form.
-          // FP8 has no scalar form at all, so a lane-uniform FP8 Cast has to
-          // be read per lane; the non-FP8 pairs keep whatever lowering the
-          // codegen gives them.
-          if (plan.value().identity) {
-            VisitExpr(op->value); // annotations are not computation values
-            return;
-          }
-          if (!pto_analysis::IsSupportedFloat8(op->value.dtype()) &&
-              !pto_analysis::IsSupportedFloat8(op->dtype)) {
-            VisitExpr(op->value); // annotations are not computation values
-            return;
-          }
-          pto_analysis::LaneUseContext ctx = parent_->MakeLaneUseContext();
-          std::string lane_why;
-          pto_analysis::LaneUse use =
-              pto_analysis::AnalyzeLaneUse(op->value, &ctx, &lane_why);
-          if (use != pto_analysis::LaneUse::kVarying) {
-            std::ostringstream oss;
-            oss << "Cast " << op->value.dtype() << " -> " << op->dtype
-                << " stays lane-uniform";
-            if (use == pto_analysis::LaneUse::kUnknown) {
-              oss << " (lane use cannot be classified: " << lane_why << ")";
-            }
-            oss << "; FP8 conversions are only supported as a vector vcvt "
-                   "over the full lane range";
-            parent_->parent_->Fail("dtype", oss.str());
-          }
-          VisitExpr(op->value); // annotations are not computation values
+          // Nested value casts each plan independently; annotations are not
+          // computation values and are validated by the planner.
+          VisitExpr(op->value);
         }
         void VisitExpr_(const BufferLoadNode *) final {
           // Index casts belong to address analysis; do not descend.

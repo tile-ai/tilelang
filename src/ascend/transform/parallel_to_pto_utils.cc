@@ -242,11 +242,10 @@ PtoInverseMapping InvertPtoLaneLayout(const For &loop) {
   }
   Layout inverse = inverse_info.first;
 
-  // Forward the (chunk, lane) coordinates through the inverse layout to
-  // obtain the logical coordinate expression. The inverse layout has two
-  // outputs (the logical coordinate and the replicate coordinate); with
-  // replicate_size == 1 the second output is a constant zero and the
-  // design-doc convention is to take the logical part only.
+  // Forward (chunk, lane) through the inverse layout to obtain the logical
+  // iteration coordinates followed by the replicate coordinate. With
+  // replicate_size == 1, the trailing replicate coordinate is zero.
+  // The branches below use the logical coordinates for the loop dimensionality.
   Var chunk_var("pto_chunk", loop->loop_var.dtype());
   Var lane_var("pto_lane", loop->loop_var.dtype());
   Array<PrimExpr> logical = inverse->Forward({chunk_var, lane_var});
@@ -1281,9 +1280,274 @@ const std::set<std::string> &Fp8AllowedRoundings() {
   return kAllowed;
 }
 
+bool IsVmiLogicalLaneCount(int64_t lanes) {
+  return lanes == 64 || lanes == 128 || lanes == 256;
+}
+
+std::string CastContextName(const CastContext &context) {
+  if (context.value_kind == CastValueKind::kScalar) {
+    return "scalar";
+  }
+  std::ostringstream oss;
+  oss << "VMI, lanes=" << context.logical_lanes;
+  return oss.str();
+}
+
+bool IsHalfOrBfloat16(DataType dtype) {
+  return (dtype.is_float() && dtype.bits() == 16) || dtype.is_bfloat16();
+}
+
+/*! Identity attribute policy shared by the scalar and VMI branches: no
+ * conversion exists, so sat=True (the default) is normalized away, while
+ * sat=False or a non-empty rounding mode would claim a conversion semantic
+ * that does not exist.  An explicit empty round key means "no request". */
+bool ValidateIdentityCastAttributes(const CastAttributes &attrs,
+                                    const std::string &pair, std::string *why) {
+  if (attrs.has_sat && !attrs.sat) {
+    *why = pair + ": an identity cast does not accept sat=False";
+    return false;
+  }
+  if (attrs.has_round_mode) {
+    *why = pair + ": an identity cast does not accept a rounding mode";
+    return false;
+  }
+  return true;
+}
+
+/*! Integer attribute policy: rounding modes are never accepted; an explicit
+ * saturation flag is accepted only for narrowing and only as sat=False, which
+ * the direct NOSAT lowering already honours. */
+bool ValidateIntegerCastAttributes(const CastAttributes &attrs, bool narrowing,
+                                   const std::string &pair, std::string *why) {
+  if (attrs.has_round_mode) {
+    *why = pair + ": integer conversions do not accept a rounding mode";
+    return false;
+  }
+  if (attrs.has_sat) {
+    if (!narrowing) {
+      *why = pair + ": this integer conversion does not accept an explicit "
+                    "saturation flag";
+      return false;
+    }
+    if (attrs.sat) {
+      *why = pair + ": integer narrowing accepts only sat=False (NOSAT), not "
+                    "sat=True";
+      return false;
+    }
+  }
+  return true;
+}
+
+Optional<CastPlan> PlanScalarValueCast(const CastNode *cast,
+                                       const CastAttributes &attrs,
+                                       const std::string &pair,
+                                       std::string *reason) {
+  const DataType from = cast->value.dtype();
+  const DataType to = cast->dtype;
+  auto reject = [&](const std::string &why) {
+    if (reason != nullptr) {
+      *reason = why;
+    }
+    return Optional<CastPlan>();
+  };
+  ScalarCastPlan keep;
+  keep.action = ScalarCastAction::kKeepInput;
+  ScalarCastPlan rebuild;
+  rebuild.action = ScalarCastAction::kRebuildCast;
+  if (from == to) {
+    std::string why;
+    if (!ValidateIdentityCastAttributes(attrs, pair, &why)) {
+      return reject(why);
+    }
+    return CastPlan{keep};
+  }
+  const bool from_int = from.is_int() || from.is_uint();
+  const bool to_int = to.is_int() || to.is_uint();
+  if (from_int && to_int) {
+    std::string why;
+    if (!ValidateIntegerCastAttributes(attrs, to.bits() < from.bits(), pair,
+                                       &why)) {
+      return reject(why);
+    }
+    // Scalar integer casts keep the ordinary pto.cast/trunc lowering; the
+    // validated sat=False marker is already honoured and is normalized away.
+    return CastPlan{rebuild};
+  }
+  if (IsSupportedFloat8(from) || IsSupportedFloat8(to)) {
+    return reject(pair + ": non-identity FP8 conversions have no scalar "
+                         "lowering inside SIMD_VF; use a lane-varying value "
+                         "so the cast takes the VMI vcvt path");
+  }
+  const bool from_float = from.is_float() || from.is_bfloat16();
+  const bool to_float = to.is_float() || to.is_bfloat16();
+  if (from_float && to_float) {
+    if (attrs.has_round_mode) {
+      return reject(pair + ": this conversion does not accept a rounding mode");
+    }
+    const bool from_f32 = from.is_float() && from.bits() == 32;
+    const bool to_f32 = to.is_float() && to.bits() == 32;
+    if (!from_f32 && to_f32) {
+      if (attrs.has_sat) {
+        return reject(pair + ": this direction does not accept a saturation "
+                             "mode");
+      }
+      return CastPlan{rebuild};
+    }
+    if (from_f32 && !to_f32) {
+      if (attrs.has_sat && attrs.sat) {
+        return reject(pair + ": this conversion accepts only sat=False "
+                             "(non-saturating)");
+      }
+      return CastPlan{rebuild};
+    }
+    return reject(pair + ": cross-family f16 <-> bf16 narrowing has no "
+                         "validated rounding semantics; convert through "
+                         "float32 explicitly");
+  }
+  return reject(pair + ": no scalar conversion exists for this dtype pair");
+}
+
+Optional<CastPlan>
+PlanVectorValueCast(const CastNode *cast, const CastContext &context,
+                    const CastAttributes &attrs, const std::string &round_token,
+                    const std::string &pair, std::string *reason) {
+  const DataType from = cast->value.dtype();
+  const DataType to = cast->dtype;
+  auto reject = [&](const std::string &why) {
+    if (reason != nullptr) {
+      *reason = why;
+    }
+    return Optional<CastPlan>();
+  };
+  if (from == to) {
+    std::string why;
+    if (!ValidateIdentityCastAttributes(attrs, pair, &why)) {
+      return reject(why);
+    }
+    return CastPlan{VectorCastPlan{}};
+  }
+  const bool from_int = from.is_int() || from.is_uint();
+  const bool to_int = to.is_int() || to.is_uint();
+  if (from_int && to_int) {
+    std::string why;
+    if (!ValidateIntegerCastAttributes(attrs, to.bits() < from.bits(), pair,
+                                       &why)) {
+      return reject(why);
+    }
+    VectorCastPlan plan;
+    if (to.bits() < from.bits()) {
+      plan.steps.push_back(
+          {VectorCastOp::kIntegerTruncate, from, to, "", "NOSAT"});
+      return CastPlan{plan};
+    }
+    if (to.bits() == from.bits()) {
+      plan.steps.push_back(
+          {VectorCastOp::kIntegerReinterpret, from, to, "", ""});
+      return CastPlan{plan};
+    }
+    if (from.is_int() == to.is_int()) {
+      plan.steps.push_back({VectorCastOp::kIntegerExtend, from, to, "", ""});
+      return CastPlan{plan};
+    }
+    // Cross-sign widening: extend with the source signedness to the target
+    // width, then re-view the same-width result as the target signedness.
+    const DataType intermediate =
+        from.is_int() ? DataType::Int(to.bits()) : DataType::UInt(to.bits());
+    plan.steps.push_back(
+        {VectorCastOp::kIntegerExtend, from, intermediate, "", ""});
+    plan.steps.push_back(
+        {VectorCastOp::kIntegerReinterpret, intermediate, to, "", ""});
+    return CastPlan{plan};
+  }
+  const bool from_fp8 = IsSupportedFloat8(from);
+  const bool to_fp8 = IsSupportedFloat8(to);
+  if (from_fp8 || to_fp8) {
+    if (from_fp8 && to_fp8) {
+      return reject(pair + ": conversions between the two FP8 types are not "
+                           "supported (they are not a reinterpretation)");
+    }
+    VectorCastPlan plan;
+    if (from_fp8 && to.is_float() && to.bits() == 32) {
+      // Exact widening: a real conversion with no options.  An explicit hint
+      // here cannot be honoured, so it is rejected rather than dropped.
+      if (attrs.has_round_key) {
+        return reject(pair + ": this direction does not accept a rounding "
+                             "mode");
+      }
+      if (attrs.has_sat) {
+        return reject(pair + ": this direction does not accept a saturation "
+                             "mode");
+      }
+      plan.steps.push_back(
+          {VectorCastOp::kNonIntegerConvert, from, to, "", ""});
+      return CastPlan{plan};
+    }
+    if (to_fp8) {
+      if (!(from.is_float() && from.bits() == 32)) {
+        return reject(pair + ": the FP8 conversion instructions take a "
+                             "float32 source; convert to float32 explicitly "
+                             "first");
+      }
+      const std::set<std::string> &allowed = Fp8AllowedRoundings();
+      const std::string token = attrs.has_round_mode ? round_token : "R";
+      if (allowed.count(token) == 0) {
+        std::ostringstream oss;
+        oss << pair << ": rounding mode " << token;
+        if (attrs.has_round_mode && attrs.round != token) {
+          oss << " (from round=\"" << attrs.round << "\")";
+        }
+        oss << " is not supported by the FP8 conversion policy";
+        return reject(oss.str());
+      }
+      plan.steps.push_back({VectorCastOp::kNonIntegerConvert, from, to, token,
+                            (attrs.has_sat && !attrs.sat) ? "NOSAT" : "SAT"});
+      return CastPlan{plan};
+    }
+    return reject(pair + ": FP8 -> FP16/BF16 and FP8 <-> integer are out of "
+                         "scope; convert through float32 explicitly");
+  }
+  const bool from_float = from.is_float() || from.is_bfloat16();
+  const bool to_float = to.is_float() || to.is_bfloat16();
+  if (from_float && to_float) {
+    if (attrs.has_round_mode) {
+      return reject(pair + ": this conversion does not accept a rounding mode");
+    }
+    const bool from_f32 = from.is_float() && from.bits() == 32;
+    const bool to_f32 = to.is_float() && to.bits() == 32;
+    VectorCastPlan plan;
+    if (!from_f32 && to_f32) {
+      if (attrs.has_sat) {
+        return reject(pair + ": this direction does not accept a saturation "
+                             "mode");
+      }
+      // A real conversion: empty options are not a no-op.
+      plan.steps.push_back(
+          {VectorCastOp::kNonIntegerConvert, from, to, "", ""});
+      return CastPlan{plan};
+    }
+    if (from_f32 && !to_f32) {
+      if (attrs.has_sat && attrs.sat) {
+        return reject(pair + ": this conversion accepts only sat=False "
+                             "(NOSAT)");
+      }
+      // Pin R/NOSAT so the generated vcvt never depends on PTODSL defaults.
+      plan.steps.push_back(
+          {VectorCastOp::kNonIntegerConvert, from, to, "R", "NOSAT"});
+      return CastPlan{plan};
+    }
+    return reject(pair + ": cross-family f16 <-> bf16 narrowing has no "
+                         "validated rounding semantics; convert through "
+                         "float32 explicitly");
+  }
+  return reject(pair + ": float <-> integer conversions need per-combination "
+                       "rounding/overflow validation");
+}
+
 } // namespace
 
-Optional<CastPlan> PlanValueCast(const CastNode *cast, std::string *reason) {
+Optional<CastPlan> PlanValueCast(const CastNode *cast,
+                                 const CastContext &context,
+                                 std::string *reason) {
   DataType from = cast->value.dtype();
   DataType to = cast->dtype;
   auto reject = [&](const std::string &why) {
@@ -1293,11 +1557,34 @@ Optional<CastPlan> PlanValueCast(const CastNode *cast, std::string *reason) {
     return Optional<CastPlan>();
   };
   std::ostringstream pair_os;
-  pair_os << "`" << from << " -> " << to << "`";
+  pair_os << "`" << from << " -> " << to << "` (" << CastContextName(context)
+          << ")";
   const std::string pair = pair_os.str();
+  // The explicit kind is authoritative; lanes only validate it.  Inferring
+  // the kind from lanes would turn a lane-1 VMI value into a scalar and a
+  // scalar request with vector lanes into an implicit VMI fallback.
+  if (context.value_kind == CastValueKind::kScalar) {
+    if (context.logical_lanes != 1) {
+      return reject(pair +
+                    ": a scalar cast context must have exactly one "
+                    "logical lane, got " +
+                    std::to_string(context.logical_lanes));
+    }
+  } else {
+    if (!IsVmiLogicalLaneCount(context.logical_lanes)) {
+      return reject(pair +
+                    ": a VMI cast context requires logical lanes "
+                    "64/128/256, got " +
+                    std::to_string(context.logical_lanes));
+    }
+  }
   // Dtype legality is a precondition for every action plan,
   // including identity — unsupported types (int24/FP64/...) must not slip
-  // through the same-type fast path.
+  // through the same-type fast path.  The Parallel value path is
+  // element-wise, so both sides must be lane-1 elements.
+  if (from.lanes() != 1 || to.lanes() != 1) {
+    return reject(pair + ": value casts require lane-1 element operands");
+  }
   if (!IsSupportedElementDType(from) || !IsSupportedElementDType(to)) {
     return reject(pair + " is outside the supported element dtype set");
   }
@@ -1322,154 +1609,10 @@ Optional<CastPlan> PlanValueCast(const CastNode *cast, std::string *reason) {
     return reject(pair + ": " + why);
   }
 
-  if (from == to) {
-    // Identity, FP8 or not: no conversion is emitted, so an explicit sat=True
-    // is the default and is normalized away; any other explicit attribute
-    // would claim a conversion semantic that does not exist here.
-    if (attrs.has_sat && !attrs.sat) {
-      return reject(pair + ": an identity cast does not accept sat=False");
-    }
-    if (attrs.has_round_mode) {
-      return reject(pair +
-                    ": an identity cast does not accept a rounding mode");
-    }
-    CastPlan identity;
-    identity.identity = true;
-    return identity;
+  if (context.value_kind == CastValueKind::kScalar) {
+    return PlanScalarValueCast(cast, attrs, pair, reason);
   }
-
-  const bool from_fp8 = IsSupportedFloat8(from);
-  const bool to_fp8 = IsSupportedFloat8(to);
-  if (from_fp8 || to_fp8) {
-    if (from_fp8 && to_fp8) {
-      return reject(pair + ": conversions between the two FP8 types are not "
-                           "supported (they are not a reinterpretation)");
-    }
-    if (from_fp8 && to.is_float() && to.bits() == 32) {
-      // Widening: exact, no rounding or saturation involved. An explicit
-      // hint here cannot be honoured, so it is rejected rather than dropped.
-      // The direction contract rejects an attribute that is *carried* here,
-      // even an empty one: widening has no rounding to configure.
-      if (attrs.has_round_key) {
-        return reject(pair +
-                      ": this direction does not accept a rounding mode");
-      }
-      if (attrs.has_sat) {
-        return reject(pair +
-                      ": this direction does not accept a saturation mode");
-      }
-      return CastPlan{};
-    }
-    if (to_fp8) {
-      // The FP8 conversion instructions the target exposes are FP32 <-> FP8;
-      // there is no half -> FP8 conversion, so a float16/bfloat16 source is
-      // rejected here. This pass never adds a conversion node of its own: a
-      // user who wants the float32 route writes it explicitly, so the
-      // intermediate rounding is their expressed choice rather than a silent
-      // step inserted here.
-      if (!(from.is_float() && from.bits() == 32)) {
-        return reject(pair + ": the FP8 conversion instructions take a float32 "
-                             "source; convert to float32 explicitly first");
-      }
-      const std::set<std::string> &allowed = Fp8AllowedRoundings();
-      // An empty round selects the documented default (R with SAT below).
-      const std::string token = attrs.has_round_mode ? round_token : "R";
-      if (allowed.count(token) == 0) {
-        std::ostringstream oss;
-        oss << "rounding mode " << token;
-        if (attrs.has_round_mode && attrs.round != token) {
-          oss << " (from round=\"" << attrs.round << "\")";
-        }
-        oss << " is not supported by the FP8 conversion policy for `" << from
-            << " -> " << to << "`";
-        return reject(oss.str());
-      }
-      CastPlan plan;
-      // The PTO default is R/SAT; pin both explicitly so the generated VMI
-      // call never depends on PTODSL defaults.
-      plan.rounding = token;
-      plan.saturate = (attrs.has_sat && !attrs.sat) ? "NOSAT" : "SAT";
-      return plan;
-    }
-    return reject(pair +
-                  " is not a supported FP8 conversion (FP8 -> FP16/BF16 and "
-                  "FP8 <-> integer are out of scope; convert through "
-                  "float32 explicitly)");
-  }
-
-  // Non-FP8 conversion: the plan is fixed by the TIR semantics of the
-  // operation, so an explicit annotation must agree with it. `finish` is the
-  // one place that decides this, so a hint is accepted exactly when the plan
-  // already does what it asks for and rejected otherwise — never dropped.
-  auto finish = [&](const CastPlan &plan) -> Optional<CastPlan> {
-    if (attrs.has_round_mode) {
-      return reject(pair + ": this conversion does not accept a rounding mode");
-    }
-    if (attrs.has_sat && (attrs.sat || plan.saturate != "NOSAT")) {
-      return reject(pair + ": this conversion does not accept an explicit "
-                           "saturation flag");
-    }
-    return plan;
-  };
-
-  // Same-width signed/unsigned reinterprets have no validated lowering
-  // (VMI vcvt requires a bit-width change); reject.
-  if (from.bits() == to.bits() && from.code() == DataType::kInt &&
-      to.code() == DataType::kUInt) {
-    return reject("same-width int -> uint is a reinterpretation, which VMI "
-                  "vcvt does not provide");
-  }
-  if (from.bits() == to.bits() && from.code() == DataType::kUInt &&
-      to.code() == DataType::kInt) {
-    return reject("same-width uint -> int is a reinterpretation, which VMI "
-                  "vcvt does not provide");
-  }
-  // No width re-check here: IsSupportedElementDType at function entry already
-  // restricts both sides to 8/16/32-bit lane-1 elements (and excludes FP64).
-  CastPlan plan;
-  // Every integer combination shares one rule: TVM integer casts truncate on
-  // narrowing and extend on widening, PTODSL defaults narrowing to saturate,
-  // and NOSAT restores the truncating semantics. The same-width int/uint
-  // reinterpretations are rejected above.
-  if ((from.is_int() || from.is_uint()) && (to.is_int() || to.is_uint())) {
-    if (to.bits() < from.bits()) {
-      plan.saturate = "NOSAT";
-    }
-    return finish(plan);
-  }
-  if (from.is_float() && (to.is_float() || to.is_bfloat16())) {
-    if (to.bits() > from.bits() && to.is_float()) {
-      // f16 -> f32 widening is exact.
-      return finish(plan);
-    }
-    // f32 -> f16/bf16 narrowing: TIR Cast rounds to nearest; pin R so the
-    // VMI vcvt never depends on PTODSL defaults. NOSAT keeps IEEE
-    // overflow-to-inf semantics instead of clamping to the largest finite.
-    if (from.bits() == 32 && to.bits() == 16) {
-      plan.rounding = "R";
-      plan.saturate = "NOSAT";
-      return finish(plan);
-    }
-    // The only float narrowing left here is the cross-family f16 <-> bf16
-    // step; its rounding semantics are not validated.
-    return reject(
-        "cross-family f16 <-> bf16 narrowing has no validated rounding "
-        "semantics; convert through float32 explicitly");
-  }
-  // Bfloat16's is_float() is false, so bf16 -> f32 fell into the
-  // reject branch below even though it is the same exact widening as
-  // f16 -> f32 (and the PTO backend supports the vcvt). Allow exactly
-  // this one bfloat combination; every other stays rejected as before.
-  if (from.is_bfloat16() && to.is_float() && to.bits() == 32) {
-    return finish(plan);
-  }
-  if (from.is_float() != to.is_float()) {
-    // float <-> int conversions need per-combination rounding/overflow
-    // validation against PTOAS; currently rejected.
-    return reject("float <-> integer conversions need per-combination "
-                  "rounding/overflow validation");
-  }
-  return reject("no proven VMI-equivalent conversion for this dtype pair");
+  return PlanVectorValueCast(cast, context, attrs, round_token, pair, reason);
 }
 
 std::optional<std::string> FindUnsupportedExprNode(const PrimExpr &expr) {
