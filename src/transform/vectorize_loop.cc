@@ -720,6 +720,26 @@ public:
 
     int total_count =
         static_cast<int>(Downcast<IntImm>(count)->value) * vector_size;
+    // Widen the access regions together with the instruction. Keeping the old
+    // scalar extent hides most of the transfer from later alias/sync analysis.
+    auto widen_region = [&](const PrimExpr &pointer) {
+      auto bits = GetAccessPtrElementBits(pointer);
+      if (!bits.has_value()) {
+        // address_of and raw pointers do not declare an access region.
+        return pointer;
+      }
+      Call ptr = Downcast<Call>(pointer);
+      int element_bits = bits.value();
+      ICHECK_EQ(total_bits % element_bits, 0);
+      int extent_arg = ptr->op.same_as(builtin::tvm_access_ptr()) ? 3 : 1;
+      Array<PrimExpr> args = ptr->args;
+      args.Set(extent_arg,
+               make_const(args[extent_arg].dtype(), total_bits / element_bits));
+      return PrimExpr(
+          Call(ptr->dtype, ptr->op, args, ptr->annotations, ptr->span));
+    };
+    dst = widen_region(dst);
+    src = widen_region(src);
     Array<PrimExpr> new_args{dst, src, IntImm(count.dtype(), total_count)};
     if (predicate.defined()) {
       new_args.push_back(predicate.value());
