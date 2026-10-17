@@ -10,6 +10,7 @@ from tilelang.language.common import __all__ as _COMMON_ALL
 from .allocate import (  # noqa: F401
     alloc_shared,
     alloc_l1,
+    alloc_ss,
     alloc_l0a,
     alloc_l0a_sf,
     alloc_l0b,
@@ -105,6 +106,7 @@ _ASCEND_API_ALL = (
     "alloc_l0b_sf",
     "alloc_l0c",
     "alloc_l1",
+    "alloc_ss",
     "annotate_buffer_versions",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",

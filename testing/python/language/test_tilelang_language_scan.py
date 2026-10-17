@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
@@ -190,6 +191,8 @@ def test_cumsum_fragment():
 def test_cumsum_smem_1d():
     run_cumsum_1d(512, 64)
     run_cumsum_1d(512, 64, reverse=True)
+    run_cumsum_1d(64, 32)
+    run_cumsum_1d(64, 32, reverse=True)
 
 
 def test_cumsum_fragment_1d():
@@ -498,6 +501,8 @@ def test_cummax_smem_1d():
     run_cummax_1d(512, 64)
     run_cummax_1d(512, 64, reverse=True)
     run_cummax_1d(80, 40, reverse=True, negative_input=True, threads=64)
+    run_cummax_1d(80, 40, negative_input=True, threads=32)
+    run_cummax_1d(80, 40, reverse=True, threads=32)
 
 
 def test_cummax_fragment_1d():
@@ -575,14 +580,14 @@ def run_cummax_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
     torch.testing.assert_close(tilelang_res, ref)
 
 
-def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32):
+def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, threads=256):
 
     @T.prim_func
     def scan_strided_out_of_place(
         A: T.Tensor((M, N), dtype),
         B: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(1, threads=256) as _:
+        with T.Kernel(1, threads=threads) as _:
             src_big = T.alloc_shared((M, src_pitch), dtype)
             dst_big = T.alloc_shared((M, dst_pitch), dtype)
             for i, j in T.Parallel(M, src_pitch):
@@ -604,8 +609,8 @@ def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=
     return scan_strided_out_of_place
 
 
-def run_scan_strided_out_of_place(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32):
-    program = scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op, dim, reverse, dtype)
+def run_scan_strided_out_of_place(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, threads=256):
+    program = scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op, dim, reverse, dtype, threads=threads)
     jit_kernel = tl.compile(program, out_idx=-1)
 
     A = torch.arange(M * N, dtype=getattr(torch, dtype), device="cuda").reshape(M, N) - N
@@ -646,11 +651,12 @@ def test_cummax_strided_region():
         run_cummax_strided(M, N, NBIG, dim, reverse)
 
 
-def test_scan_strided_out_of_place():
+@pytest.mark.parametrize("threads", [32, 256])
+def test_scan_strided_out_of_place(threads):
     """Out-of-place scan with distinct source and destination row pitches."""
     for op in ("cumsum", "cummax"):
         for dim in (0, 1):
-            run_scan_strided_out_of_place(8, 40, 64, 80, op=op, dim=dim, reverse=dim == 1)
+            run_scan_strided_out_of_place(8, 40, 64, 80, op=op, dim=dim, reverse=dim == 1, threads=threads)
 
 
 def scan_offset_subregion_test(H, W, r0, r1, op="cumsum", dim=0, reverse=False, dtype=T.float32):
