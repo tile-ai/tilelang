@@ -231,6 +231,18 @@ if(CCACHE_PROGRAM)
   # text, the resulting result-key is stable across .tmpXXX rotations.
   if(WIN32)
     set(CCACHE_PROGRAM "${CCACHE_PROGRAM};ignore_options=-external:I*")
+
+    # CMake emits concatenated -imsvc<path> for clang-cl. ccache 4.9 hashes
+    # that form even in preprocessor mode, so PEP 517's random dependency
+    # paths defeat hits despite the preprocessor wrapper below. A trailing
+    # space makes CMake emit -imsvc <path>: ccache then omits the include
+    # option from the preprocessor hash while retaining it in direct mode.
+    foreach(_lang IN ITEMS C CXX)
+      if(CMAKE_${_lang}_COMPILER_ID STREQUAL "Clang" AND
+         CMAKE_${_lang}_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(CMAKE_INCLUDE_SYSTEM_FLAG_${_lang} "-imsvc ")
+      endif()
+    endforeach()
   endif()
 
   # Plug a wrapper around cl.exe -P so .tmpXXX path components in the
@@ -274,50 +286,7 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
-
-set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
-set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
-set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
-set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
-
-# TVM's config.cmake redefines USE_* options later, so we cache the user's choice
-# (including explicit -DUSE_XXX arguments) before we include TVM and restore it
-# afterwards.
-
-macro(tilelang_define_backend_option BACKEND)
-  set(_backend_var "USE_${BACKEND}")
-  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
-  set(_user_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
-
-  set(_user_override OFF)
-  if(DEFINED ${_user_override_var})
-    set(_user_override "${${_user_override_var}}")
-  endif()
-
-  if(DEFINED CACHE{${_backend_var}})
-    get_property(_cache_type CACHE ${_backend_var} PROPERTY TYPE)
-    if(_cache_type STREQUAL "UNINITIALIZED")
-      set(_user_override ON)
-    endif()
-  endif()
-
-  set(_default OFF)
-  if(DEFINED ${_backend_var})
-    set(_default "${${_backend_var}}")
-  endif()
-
-  option(${_backend_var} "${_doc}" "${_default}")
-  # Remember if the user explicitly set this option so that later logic
-  # won't auto-toggle backends they configured on the command line.
-  set(${_user_override_var} ${_user_override} CACHE INTERNAL
-    "User explicitly set ${_backend_var} during configuration" FORCE)
-  set(TILELANG_OPTION_${_backend_var} "${${_backend_var}}")
-endmacro()
-
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  tilelang_define_backend_option(${BACKEND})
-endforeach()
+include(cmake/BackendOptions.cmake)
 
 set(PREBUILD_CYTHON ON)
 
@@ -354,6 +323,22 @@ unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 # /opt/rocm/include -> 3rdparty/hip-headers/include (vendored default).
 set(TILELANG_HIP_INCLUDE_DIR "" CACHE PATH
     "Path to HIP headers when building with USE_ROCM=ON on a host without a ROCm runtime")
+
+# The ascendcl stub library avoids a hard DT_NEEDED dependency on
+# libascendcl.so, so Ascend-enabled wheels can be imported on machines without
+# CANN installed.
+#
+# The stub is POSIX-only (dlopen/dlsym via <dlfcn.h>); the Ascend backend
+# itself does not support Windows. Only meaningful when USE_ASCEND is enabled.
+if(WIN32 AND NOT CYGWIN)
+  set(_TILELANG_USE_ASCEND_STUBS_DEFAULT OFF)
+else()
+  set(_TILELANG_USE_ASCEND_STUBS_DEFAULT ON)
+endif()
+option(TILELANG_USE_ASCEND_STUBS
+       "Use POSIX dlopen-based ascendcl stub library for portable wheels"
+       ${_TILELANG_USE_ASCEND_STUBS_DEFAULT})
+unset(_TILELANG_USE_ASCEND_STUBS_DEFAULT)
 # Configs end
 
 include(cmake/load_tvm.cmake)
@@ -397,78 +382,13 @@ file(GLOB TILE_LANG_SRCS
   src/backend/common/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
+  src/backend/common/codegen/codegen_py.cc
 )
 
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
-# Track if the user explicitly selected a backend via cache options.
-set(TILELANG_BACKEND_USER_SELECTED OFF)
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  set(_backend_var "USE_${BACKEND}")
-  set(_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
-  if(${_backend_var} OR ${_override_var})
-    set(TILELANG_BACKEND_USER_SELECTED ON)
-  endif()
-endforeach()
-
-# Only auto-select a backend when the user didn't specify one explicitly.
-if(NOT TILELANG_BACKEND_USER_SELECTED)
-  set(_tilelang_backend_env_selected OFF)
-
-  if(DEFINED ENV{USE_CUDA})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_CUDA})
-      set(USE_CUDA ON)
-    else()
-      set(USE_CUDA OFF)
-    endif()
-  endif()
-
-  if(DEFINED ENV{USE_ROCM})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_ROCM})
-      set(USE_ROCM ON)
-    else()
-      set(USE_ROCM OFF)
-    endif()
-  endif()
-
-  if(DEFINED ENV{USE_METAL})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_METAL})
-      set(USE_METAL ON)
-    else()
-      set(USE_METAL OFF)
-    endif()
-  endif()
-
-
-  if(DEFINED ENV{USE_LLVM})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_LLVM})
-      set(USE_LLVM ON)
-    else()
-      set(USE_LLVM OFF)
-    endif()
-  endif()
-
-  if(NOT _tilelang_backend_env_selected)
-    if(APPLE)
-      message(STATUS "Enable Metal support by default.")
-      set(USE_METAL ON)
-    elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
-      message(STATUS "Enable CUDA support by default.")
-      set(USE_CUDA ON)
-    else()
-      message(STATUS "CUDA toolkit not found; building without CUDA support by default.")
-      set(USE_CUDA OFF)
-    endif()
-  endif()
-  unset(_tilelang_backend_env_selected)
-endif()
-
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
@@ -476,6 +396,8 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/metal/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu/CMakeLists.txt")
+include("${CMAKE_CURRENT_SOURCE_DIR}/src/ascend/CMakeLists.txt")
+list(REMOVE_DUPLICATES TILE_LANG_SRCS)
 
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
@@ -648,8 +570,93 @@ endif()
 # dependency and matches Cython's own suggested workaround. See #2125.
 target_compile_definitions(tilelang_cython_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
+# PTO owns its packed-storage launch ABI independently of the Cython backend.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp"
+  COMMENT
+    "Cythoning tilelang/jit/adapter/pto/cython_wrapper.pyx"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/pto/cython_wrapper.pyx"
+          --module-name tilelang_pto_wrapper
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/pto/cython_wrapper.pyx"
+  VERBATIM)
+
+python_add_library(tilelang_pto_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+if(WIN32)
+  target_compile_definitions(tilelang_pto_wrapper PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_pto_wrapper PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+target_compile_definitions(tilelang_pto_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+
+# Ascend Torch-NPU stream exchange extension. Pure CPython/DLPack (no CANN
+# dependency), so it builds on every configuration like the other
+# TILE_LANG_ASCEND_ALWAYS sources; torch_npu is imported lazily at call time.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp"
+  COMMENT
+    "Cythoning tilelang/ascend/torch_npu_exchange.pyx"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/ascend/torch_npu_exchange.pyx"
+          --module-name tilelang_ascend_npu_exchange
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/ascend/torch_npu_exchange.pyx"
+  VERBATIM)
+
+python_add_library(tilelang_ascend_npu_exchange MODULE "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp" ${USE_SABI} WITH_SOABI)
+if(WIN32)
+  target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_ascend_npu_exchange PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+
+# CPU-only heuristic for the Ascend DeepGEMM examples; no CANN dependency.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+          --module-name tilelang_deepgemm_heuristics
+          --output-file "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+  VERBATIM)
+python_add_library(tilelang_deepgemm_heuristics MODULE
+                   "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c" ${USE_SABI} WITH_SOABI)
+target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+if(WIN32)
+  target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_deepgemm_heuristics PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+set_target_properties(tilelang_deepgemm_heuristics PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+install(TARGETS tilelang_deepgemm_heuristics
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
+
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+set_target_properties(tilelang_pto_wrapper PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+set_target_properties(tilelang_ascend_npu_exchange PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -657,6 +664,14 @@ set_target_properties(tilelang_cython_wrapper PROPERTIES
 
 # Install the extension into tilelang/lib inside the wheel
 install(TARGETS tilelang_cython_wrapper
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
+install(TARGETS tilelang_pto_wrapper
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
+install(TARGETS tilelang_ascend_npu_exchange
         LIBRARY DESTINATION tilelang/lib
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)

@@ -7,6 +7,7 @@ import torch
 from tilelang import tvm
 from tilelang.jit.kernel import JITKernel
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
+from tilelang.jit.adapter import tvm_ffi as tvm_ffi_adapter
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
 tirx = tvm.tirx
@@ -53,6 +54,21 @@ def _make_adapter():
 
     adapter._make_executable = make_executable
     return adapter, created
+
+
+@pytest.mark.parametrize("callee_allocated", [False, True])
+def test_adapter_initialization_does_not_probe_runtime(monkeypatch, callee_allocated):
+    adapter, _ = _make_adapter()
+    adapter._ffi_callee_allocated_output_abi = callee_allocated
+
+    def unexpected_runtime_probe(*args):
+        pytest.fail("Runtime device resolution must be deferred until kernel invocation.")
+
+    monkeypatch.setattr(adapter, "get_current_device_functor", unexpected_runtime_probe)
+    monkeypatch.setattr(tvm_ffi_adapter, "_install_torch_stream_exchange", unexpected_runtime_probe)
+
+    adapter._post_init()
+    assert callable(adapter.func)
 
 
 def test_cold_compiled_dispatch_does_not_probe_cuda(monkeypatch):
@@ -130,7 +146,7 @@ def test_exporting_disk_cached_library_to_its_own_path_succeeds(tmp_path):
     assert cached_library.read_bytes() == b"cached-library"
 
 
-def test_callee_allocated_output_dispatch_uses_single_main_entry():
+def test_callee_allocated_output_dispatch_uses_single_main_entry(monkeypatch):
     adapter, _ = _make_adapter()
     adapter.params = [_FakeKernelParam(), _FakeKernelParam()]
     adapter.result_idx = [1]
@@ -144,6 +160,11 @@ def test_callee_allocated_output_dispatch_uses_single_main_entry():
 
     adapter.executable = main
     tensor = torch.empty(1)
+
+    def unexpected_device_probe():
+        pytest.fail("Tensor inputs must provide the runtime device.")
+
+    monkeypatch.setattr(adapter, "get_current_device_functor", unexpected_device_probe)
 
     assert adapter._convert_torch_func()(tensor) is expected
     assert calls == [(tensor, tensor)]

@@ -222,6 +222,13 @@ TIR_VAR_SCOPE_FRAME = (
 )
 
 
+def register_var_scope_frame(frame_type: type) -> None:
+    """Register a backend-specific frame as a variable scope."""
+    global TIR_VAR_SCOPE_FRAME
+    if frame_type not in TIR_VAR_SCOPE_FRAME:
+        TIR_VAR_SCOPE_FRAME += (frame_type,)
+
+
 def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
@@ -1361,33 +1368,16 @@ _MISSING_ARG = object()
 _ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
 
 
-def _freeze_jit_key_part(value: Any) -> Any:
-    """Canonicalize supported compile-time values into hashable key parts."""
+def _make_jit_key(values: tuple[Any, ...], *, context: str = "JIT compile-time arguments") -> tuple[Any, ...]:
+    """Validate compile-time values without changing their cache-key semantics."""
 
-    if isinstance(value, dict):
-        return (
-            dict,
-            tuple(
-                (_freeze_jit_key_part(key), _freeze_jit_key_part(item_value))
-                for key, item_value in sorted(value.items(), key=lambda item: repr(item[0]))
-            ),
-        )
-    if isinstance(value, list):
-        return list, tuple(_freeze_jit_key_part(item) for item in value)
-    if isinstance(value, set):
-        return set, tuple(sorted((_freeze_jit_key_part(item) for item in value), key=repr))
-    if isinstance(value, tuple):
-        return tuple(_freeze_jit_key_part(item) for item in value)
-
-    if not isinstance(value, Hashable):
-        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}")
-    return value
-
-
-def _make_jit_key(values: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Build the phase-1 cache key from already ordered compile-time values."""
-
-    return tuple(_freeze_jit_key_part(value) for value in values)
+    try:
+        hash(values)
+    except TypeError as exc:
+        raise TypeError(
+            f"{context} must be hashable: {exc}. Use immutable, hashable values such as tuples instead of lists or dicts."
+        ) from exc
+    return values
 
 
 @dataclass(frozen=True)
@@ -1421,6 +1411,9 @@ class _JITArgumentBinder:
         self.signature = signature
         self.tensor_arg_names = tensor_arg_names
         self.params = tuple(signature.parameters.values())
+        for param in self.params:
+            if param.name not in tensor_arg_names and param.default is not inspect.Parameter.empty:
+                _make_jit_key((param.default,), context=f"Default value for JIT compile-time parameter {param.name!r}")
         self.param_names = tuple(param.name for param in self.params)
         self.param_index = {name: i for i, name in enumerate(self.param_names)}
         self.defaults = tuple(param.default if param.default is not inspect.Parameter.empty else _MISSING_ARG for param in self.params)
@@ -1649,11 +1642,11 @@ class JITFunc(Generic[_P, _T]):
             inspect.signature(self.orig_func).bind(*args, **kwargs)
         except TypeError:
             return False
+        bound = self._argument_binder.bind(args, kwargs)
         try:
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
-                bound = self._argument_binder.bind(args, kwargs)
                 self.p1_cache[bound.p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False
@@ -1700,8 +1693,12 @@ class JITFunc(Generic[_P, _T]):
     def get_tir(self, *args, **kwargs):
         bound = self._argument_binder.bind(args, kwargs)
         if bound.p1_key not in self.p1_cache:
-            # in legacy gemm, we use lazy tir template to build the tir
-            self.p1_cache[bound.p1_key] = self._build_tir_template(**bound.compile_kwargs)
+            # Lazy factories retain their positional arguments.
+            if self.mode == "lazy":
+                template = self._build_tir_template(*args, **kwargs)
+            else:
+                template = self._build_tir_template(**bound.compile_kwargs)
+            self.p1_cache[bound.p1_key] = template
         return self.p1_cache[bound.p1_key].get_tir(
             self.tensor_args,
             bound.tensor_args,
