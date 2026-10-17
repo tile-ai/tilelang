@@ -385,10 +385,17 @@ public:
         });
       }
       // Remember which buffers the descriptor addresses: it can be issued by
-      // several WGMMA batches after a single initialization.
+      // several WGMMA batches after a single initialization. Initializations
+      // on different paths are accumulated, since which one a later issue sees
+      // is not known here.
       if (!op->args.empty()) {
         if (const auto *desc = op->args[0].as<BufferLoadNode>()) {
-          wgmma_descriptor_operands_[desc->buffer->data.get()] = operands;
+          auto &known = wgmma_descriptor_operands_[desc->buffer->data.get()];
+          for (const VarNode *buf : operands) {
+            if (std::find(known.begin(), known.end(), buf) == known.end()) {
+              known.push_back(buf);
+            }
+          }
         }
       }
       for (const VarNode *buf : operands) {

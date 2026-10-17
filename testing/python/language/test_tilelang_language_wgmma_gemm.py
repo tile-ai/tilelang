@@ -290,12 +290,16 @@ def test_async_wgmma_operand_not_merged_before_wait(conditional_first_wait):
     assert offsets["B0"] != offsets["B1"]
 
 
+@pytest.mark.parametrize("conditional_first_wait", [False, True])
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
-def test_async_wgmma_operand_not_merged_before_wait_correctness():
+def test_async_wgmma_operand_not_merged_before_wait_correctness(conditional_first_wait):
     import torch
 
     num_ctas, m, d = 256, 64, 64
-    kernel = tilelang.compile(_make_async_wgmma_reuse_kernel(num_ctas, m, d), target="cuda")
+    kernel = tilelang.compile(
+        _make_async_wgmma_reuse_kernel(num_ctas, m, d, conditional_first_wait=conditional_first_wait),
+        target="cuda",
+    )
     generator = torch.Generator(device="cuda").manual_seed(0)
     q = torch.randn(num_ctas, m, d, device="cuda", generator=generator).to(torch.bfloat16)
     k = torch.randn(num_ctas, 2 * m, d, device="cuda", generator=generator).to(torch.bfloat16)
@@ -394,3 +398,47 @@ def test_wgmma_wait_in_sibling_branch_does_not_retire_other_branch_operand():
         T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
 
     assert _merged_shared_dyn_sizes(func) == [8192]
+
+
+def test_wgmma_descriptor_initialized_in_both_branches_keeps_both_operands_live():
+    # The descriptor addresses B0 on one path and B1 on the other. The wait inside the then
+    # branch retires only B0 there, and the WGMMA issued after the join reads whichever buffer the
+    # descriptor holds, so neither may share storage with Tmp.
+    from tvm.script import tirx as T
+
+    op = tvm.ir.Op.get
+
+    def init(desc, buf):
+        return T.evaluate(
+            T.call_intrin(
+                "handle",
+                op("tl.initialize_wgmma_descriptor"),
+                desc[0],
+                T.tvm_access_ptr(T.type_annotation("uint8"), buf.data, 0, 4096, 1),
+                1,
+                1,
+                64,
+            )
+        )
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        B1 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            init(desc, B0)
+            T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+            T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+        else:
+            init(desc, B1)
+        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+        Tmp[tx] = T.uint8(1)
+        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+
+    assert _merged_shared_dyn_sizes(func) == [12288]
