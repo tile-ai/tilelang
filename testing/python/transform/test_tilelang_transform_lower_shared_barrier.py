@@ -4,6 +4,7 @@ import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -18,45 +19,28 @@ def _apply(func):
     return mod
 
 
-def _collect_calls(stmt, op_name: str | set[str]):
-    op_names = {op_name} if isinstance(op_name, str) else op_name
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and str(node.op.name) in op_names:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
-
-
 def _collect_storage_syncs(stmt):
-    return _collect_calls(stmt, "tirx.tvm_storage_sync")
+    return collect_calls(stmt, op="tirx.tvm_storage_sync")
 
 
 def _collect_init_barrier_calls(stmt):
-    return _collect_calls(stmt, "tirx.ptx_init_barrier_thread_count")
+    return collect_calls(stmt, op="tirx.ptx_init_barrier_thread_count")
 
 
 def _collect_fence_barrier_init(stmt):
-    return _collect_calls(stmt, "tl.ptx_fence_barrier_init")
+    return collect_calls(stmt, op="tl.ptx_fence_barrier_init")
 
 
 def _collect_shuffle_elect(stmt):
-    return _collect_calls(stmt, "tl.tl_shuffle_elect")
+    return collect_calls(stmt, op="tl.tl_shuffle_elect")
 
 
 def _collect_barrier_blocks(stmt):
-    blocks = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            barrier_bufs = [buf for buf in node.alloc_buffers if buf.scope() in ("shared.barrier", "shared.cluster_barrier")]
-            if barrier_bufs:
-                blocks.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return blocks
+    return [
+        block
+        for block in collect_nodes(stmt, tvm.tirx.SBlock)
+        if any(buf.scope() in ("shared.barrier", "shared.cluster_barrier") for buf in block.alloc_buffers)
+    ]
 
 
 @tilelang.testing.requires_cuda

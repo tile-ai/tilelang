@@ -160,6 +160,7 @@ def _find_vsdevcmd() -> str | None:
             continue
         root = os.path.join(base, "Microsoft Visual Studio")
         for pattern in (
+            os.path.join(root, "18", "*", "Common7", "Tools", "VsDevCmd.bat"),
             os.path.join(root, "2022", "*", "Common7", "Tools", "VsDevCmd.bat"),
             os.path.join(root, "2019", "*", "Common7", "Tools", "VsDevCmd.bat"),
         ):

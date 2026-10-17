@@ -176,7 +176,12 @@ from .tile_schedule import (
 
 
 def import_source(source: str | None = None):
-    # source is the source code to be imported
+    """Import C-like source before generated declarations and function bodies.
+
+    Source follows backend headers and may use their types and macros. Use
+    compiler flags for macros that configure those headers. Imports preserve
+    visitation order; a trailing newline is optional.
+    """
     from tvm.tirx.script.builder.ir import sblock_attr
 
     return sblock_attr({"pragma_import_c": source}) if source is not None else None

@@ -68,8 +68,11 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
   }
 
   bool requires_tcgen05 = op->isTcgen05_ || use_2cta;
-  if (!requires_tcgen05 && TargetIsSM120(target) && shared_operands &&
-      IsFragmentBuffer(op->c_)) {
+  bool matches_sm120_mma =
+      TargetIsSM120(target) &&
+      (IsSharedBuffer(op->a_) || IsFragmentBuffer(op->a_)) &&
+      IsSharedBuffer(op->b_) && IsFragmentBuffer(op->c_);
+  if (!requires_tcgen05 && matches_sm120_mma) {
     return kCudaMMABlockScaled;
   }
 
@@ -78,8 +81,9 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
           ? "Blackwell SM100 TCGEN5MMA (A/B in shared memory, C in tensor "
             "memory) when is_tcgen05 or use_2cta is set"
           : "either Blackwell SM100 TCGEN5MMA (A/B in shared memory, C in "
-            "tensor memory) or SM120 mma.sync (A/B in shared memory, C in a "
-            "fragment)";
+            "tensor memory) or SM120 mma.sync (A in shared memory or a "
+            "fragment, "
+            "B in shared memory, C in a fragment)";
   LOG(FATAL) << "Block-scaled GEMM requires " << requirement
              << ", but got target=" << target << ", A scope=" << op->a_.scope()
              << ", B scope=" << op->b_.scope() << ", C scope=" << op->c_.scope()

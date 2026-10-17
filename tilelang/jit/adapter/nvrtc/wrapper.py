@@ -22,7 +22,7 @@ from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
-from tilelang.jit.adapter.utils import match_declare_kernel, pythonic_expr, parse_function_call_args, parse_tma_descriptor_args
+from tilelang.jit.adapter.utils import pythonic_expr, parse_tma_descriptor_args
 
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
@@ -287,7 +287,68 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
         Casts are noise in generated Python code - Python is dynamically typed.
         """
-        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
+        return pythonic_expr(
+            expr,
+            self._TYPE_MAP,
+            ignore_cast=True,
+            floor_div_op="//",
+            var_name_map=getattr(self, "_argument_names", None),
+        )
+
+    def _collect_function_args(self):
+        """Keep the adapter's positional ABI, naming inputs by Var identity."""
+        self._argument_names = {}
+        function_args = []
+
+        def append(var, arg_type):
+            if var in self._argument_names:
+                return
+            # Do not reuse user names: these can collide with wrapper locals,
+            # imported modules, or another Var with the same name_hint.
+            name = f"_tl_arg_{len(function_args)}"
+            self._argument_names[var] = name
+            function_args.append({"name": name, "type": arg_type, "var": var})
+
+        for param in self.prim_func.params:
+            if param in self.prim_func.buffer_map:
+                append(self.prim_func.buffer_map[param].data, "ctypes.c_void_p")
+            else:
+                append(param, self._lookup_type(param.dtype))
+
+        # Shapes precede strides, matching NVRTCKernelAdapter's runtime ABI.
+        for field in ("shape", "strides"):
+            for param in self.prim_func.params:
+                if param in self.prim_func.buffer_map:
+                    for value in getattr(self.prim_func.buffer_map[param], field):
+                        if isinstance(value, tvm.tirx.Var):
+                            append(value, self._lookup_type(value.dtype))
+        return function_args
+
+    def _collect_kernel_call_args(self, function_params, function_args, desc_name_map, desc_name_var_map):
+        """Read call-site values, not the device code generator's printed names."""
+        by_var = {arg["var"]: arg for arg in function_args}
+        descriptor_names = {var: name for name, var in desc_name_var_map.items()}
+        call_args = []
+        for param in function_params:
+            if param in by_var:
+                arg = by_var[param]
+                value = arg["name"]
+                if arg["type"] == "ctypes.c_void_p":
+                    value += ".data_ptr()"
+                call_args.append((value, arg["type"]))
+            elif self.tma_descriptor_args is not None and param in self.tma_descriptor_args:
+                name = descriptor_names.get(param)
+                if name is None:
+                    name = f"_tl_tma_{len(descriptor_names)}"
+                    descriptor_names[param] = name
+                    desc_name_var_map[name] = param
+                    desc_name_map[name] = self._pythonic_expr(self.tma_descriptor_args[param][4])
+                call_args.append((name, "None"))
+            elif str(param.dtype) != "handle":
+                call_args.append((self._pythonic_expr(param), self._lookup_type(param.dtype)))
+            else:
+                raise ValueError(f"Cannot resolve NVRTC kernel argument by identity: {param}")
+        return call_args
 
     def create_dispatch_func(self, code, function_informations):
         """Generate Python dispatch function that launches multiple CUDA kernels.
@@ -311,33 +372,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             3. Launches each kernel with cuLaunchKernelEx
             4. Resets L2 cache policies (if needed)
         """
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
-
-        function_args = [{"name": "kernels", "type": "dict[str, CUkernel]"}]
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": "ctypes.c_void_p",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
-            else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
-
-        function_args.append(self.get_stream_type())
+        function_args = self._collect_function_args()
 
         # Format the function arguments for declaration
-        def_args = ", ".join([f"{arg['name']}" for arg in function_args])
+        def_args = ", ".join(["kernels", *[arg["name"] for arg in function_args], "stream=0"])
 
         # Check if any function needs L2 Persistent Map
         has_l2_persistent_map = False
@@ -361,24 +399,12 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
 
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            # Transform function for NVRTC: returns (arg_value, arg_type) tuples
-            def transform_nvrtc_arg(name: str, arg_type: str):
-                if arg_type == "ctypes.c_void_p":
-                    return (f"{name}.data_ptr()", arg_type)
-                return (name, arg_type)
-
-            call_args = parse_function_call_args(
-                declaration, function_args, function_params, desc_name_map, desc_name_var_map, transform_nvrtc_arg
-            )
+            call_args = self._collect_kernel_call_args(function_params, function_args, desc_name_map, desc_name_var_map)
+            # Launch extents refer to device Vars, whose identities differ from
+            # the original host Vars. Bind them through this exact call site.
+            for device_param, host_param in zip(self.device_mod[function_name].params, function_params, strict=True):
+                if str(device_param.dtype) != "handle":
+                    self._argument_names[device_param] = f"({self._pythonic_expr(host_param)})"
 
             for arg_name, arg_type in call_args:
                 if arg_type == "ctypes.c_void_p":
@@ -460,6 +486,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return ""
         init_l2_persistent_map = ""
         for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[function_name].items():
+            matches = [buffer.data for buffer in self.prim_func.buffer_map.values() if buffer.data.name == buffer_name]
+            if len(matches) != 1:
+                raise ValueError(f"Ambiguous L2 persistent buffer name: {buffer_name}")
+            buffer_name = self._argument_names[matches[0]]
             # Get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
 
@@ -502,7 +532,12 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+        )
 
         # Generate Python code from parsed parameters
         for params in parsed_params:

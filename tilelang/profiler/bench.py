@@ -11,7 +11,7 @@ from typing import Literal
 
 import torch
 
-from tilelang.utils.device import IS_CUDA, Event, device_synchronize
+from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
 
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
@@ -25,7 +25,7 @@ from .wall import bench_with_wall
 
 logger = logging.getLogger(__name__)
 
-device = "cuda:0" if IS_CUDA else "mps:0"
+device = "cuda:0" if IS_CUDA else "npu" if IS_NPU else "mps:0"
 
 
 def do_bench(
@@ -36,7 +36,7 @@ def do_bench(
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
+    backend: Literal["event", "cupti", "cudagraph", "wall", "msprof", "msprof_detail"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
     cache_size: int = 256,
@@ -52,7 +52,7 @@ def do_bench(
 
     Wall timing measures host elapsed time without cache flushing. With no
     device or a CPU device, the callable is assumed to be synchronous. An
-    explicit CUDA/HIP or MPS device enables synchronization before and after
+    explicit CUDA/HIP, MPS, or NPU device enables synchronization before and after
     each wall-clock sample, including launch and synchronization overhead.
 
     Args:
@@ -63,11 +63,12 @@ def do_bench(
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
         fast_flush: Use faster GPU L2 cache flush with int32 vs int8 (default: True); ignored by "wall"
-        backend: Timing method - "event", "cupti", "cudagraph", or "wall" (default: "event")
+        backend: Timing method - "event", "cupti", "cudagraph", "wall", "msprof", or "msprof_detail" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
         device: Optional device to benchmark on. CUDA/HIP events, streams,
             cache buffers, and synchronization are scoped to that device.
-            Event timing also accepts MPS; wall timing accepts CPU and MPS.
+            Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
+            Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
         cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
 
     Returns:
@@ -89,9 +90,11 @@ def do_bench(
         if resolved_device is not None:
             if resolved_device.type == "cuda":
                 device_context = torch.cuda.device(resolved_device)
+            elif resolved_device.type == "npu":
+                device_context = torch.npu.device(resolved_device)
             elif resolved_device.type not in ("cpu", "mps"):
-                raise ValueError(f"Wall timing supports CPU, CUDA/HIP, or MPS devices, got {resolved_device}")
-            if resolved_device.type in ("cuda", "mps"):
+                raise ValueError(f"Wall timing supports CPU, CUDA/HIP, MPS, or NPU devices, got {resolved_device}")
+            if resolved_device.type in ("cuda", "mps", "npu"):
                 synchronize = partial(device_synchronize, resolved_device)
 
         with device_context:
@@ -118,12 +121,13 @@ def do_bench(
 
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
-    if device is not None and not isinstance(device, int) and torch.device(device).type == "mps":
+    if device is not None and not isinstance(device, int) and torch.device(device).type in ("mps", "npu"):
         device_idx = torch.device(device)
     else:
         device_idx = _normalize_cuda_device(device)
-    if isinstance(device_idx, int):
-        with torch.cuda.device(device_idx):
+    if isinstance(device_idx, int) or (isinstance(device_idx, torch.device) and device_idx.type == "npu"):
+        device_context = torch.cuda.device(device_idx) if isinstance(device_idx, int) else torch.npu.device(device_idx)
+        with device_context:
             return _do_bench_impl(
                 fn,
                 warmup=warmup,
@@ -186,14 +190,18 @@ def _do_bench_impl(
     _n_repeat: int,
     quantiles: list[float] | None,
     fast_flush: bool,
-    backend: Literal["event", "cupti", "cudagraph"],
+    backend: Literal["event", "cupti", "cudagraph", "msprof", "msprof_detail"],
     return_mode: Literal["min", "max", "mean", "median"],
     device_idx: int | torch.device | None,
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
-    if backend in ("cupti", "cudagraph") and torch.device(_cache_device(device_idx)).type == "mps":
-        raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
+    if backend in ("cupti", "cudagraph"):
+        cache_device_type = torch.device(_cache_device(device_idx)).type
+        if cache_device_type == "mps":
+            raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
+        if cache_device_type == "npu":
+            raise ValueError(f'{backend} timing requires CUDA/HIP; use "event", "msprof", or "wall" for NPU')
 
     # Initial function call and synchronization
     fn()
@@ -205,6 +213,11 @@ def _do_bench_impl(
     cache_numel = cache_bytes // 4 if fast_flush else cache_bytes
     cache_dtype = torch.int if fast_flush else torch.int8
     cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
+
+    # Warm the flush buffer once outside the timed estimate: the first
+    # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
+    cache.zero_()
+    _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
     start_event = Event(enable_timing=True)
@@ -244,5 +257,9 @@ def _do_bench_impl(
         return _bench_with_cupti(fn, cache, n_repeat)
     elif backend == "cudagraph":
         return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode, device_idx)
+    elif backend.startswith("msprof"):
+        from .msprof import bench_with_msprof
+
+        return bench_with_msprof(fn, cache, n_repeat, detailed=backend == "msprof_detail")
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
