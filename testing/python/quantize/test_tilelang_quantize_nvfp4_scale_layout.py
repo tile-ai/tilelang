@@ -857,8 +857,11 @@ def test_sm120_cuda_header_only_keeps_the_atomic_mma_wrapper():
     source = header.read_text()
 
     assert "#if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED)" in source
-    assert "defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)" in source
-    assert "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8" in source
+    # SM121 (GB10) shares the SM120 MMA; CUTLASS only defines SM120A for sm_120a.
+    for family in ("SM120A", "SM120F", "SM121A", "SM121F"):
+        assert f"defined(CUTLASS_ARCH_MMA_{family}_ENABLED)" in source
+    assert "defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)" in source
+    assert "tl::sm120_mma_sync_blockscaled requires sm_120a/f or sm_121a/f and" in source
     assert "sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs" in source
     assert "sm120_mma_sync_blockscaled" in source
     assert "SM120ScaleTVPackage" not in source

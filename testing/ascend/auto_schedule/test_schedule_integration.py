@@ -70,13 +70,13 @@ def _make_epilogue_program(sids: int):
     def main(
         A: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
         B: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
-        C: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
+        C: T.Tensor((STEPS, TILE, TILE), "float32"),
     ):
         with T.MixedKernel(1, sids=sids):
             a_l1 = T.alloc_l1((TILE, TILE), "bfloat16")
             b_l1 = T.alloc_l1((TILE, TILE), "bfloat16")
             accum = T.alloc_l0c((TILE, TILE), "float32")
-            output = T.alloc_shared((TILE, TILE), "bfloat16")
+            output = T.alloc_shared((TILE // sids, TILE), "float32")
             T.annotate_buffer_versions({output: 2})
 
             for step in T.Pipelined(STEPS, num_stages=2):
@@ -90,8 +90,14 @@ def _make_epilogue_program(sids: int):
                     clear_accum=True,
                     unit_flag_ctrl=3,
                 )
-                T.copy(accum, output, unit_flag_ctrl=3)
-                T.copy(output, C[step, :, :])
+                if sids == 1:
+                    T.copy(accum, output, unit_flag_ctrl=3)
+                    T.copy(output, C[step, :, :])
+                else:
+                    # Each AIV owns half of the output; launch-count coverage
+                    # must not depend on synchronizing overlapping GM stores.
+                    T.dual_copy(accum, output, unit_flag_ctrl=3)
+                    T.dual_copy(output, C[step, :, :])
 
     return main
 
@@ -147,6 +153,415 @@ def test_counter_slot_is_compatible_with_l1_layout_lowering():
     assert artifact.kernel_source and artifact.device_mod
 
 
+def _make_subcore_gemm(pattern, steps, unit_flag=0):
+    @T.prim_func
+    def main(
+        A: T.Tensor((steps, 32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        C: T.Tensor((steps, 32, 32), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a_l1 = T.alloc_l1((32, 32), "bfloat16")
+            b_l1 = T.alloc_l1((32, 32), "bfloat16")
+            accum = T.alloc_l0c((32, 32), "float32")
+            dq = T.alloc_shared((32, 32), "bfloat16")
+            half = T.alloc_shared((16, 32), "bfloat16")
+            epi = T.alloc_shared((32, 32), "float32")
+            T.annotate_buffer_versions({epi: (2, "counter")})
+            T.copy(B, b_l1)
+            for i in T.Pipelined(steps, num_stages=2):
+                if pattern == "epilogue":
+                    T.copy(A[i, :, :], a_l1)
+                elif pattern == "halves":
+                    T.copy(A[i, sid * 16 : (sid + 1) * 16, :], half)
+                    with T.SimdVF():
+                        value = T.simd.vld(half[0, 0])
+                        T.simd.vsts(half[0, 0], value)
+                    T.copy(half, a_l1[sid * 16 : (sid + 1) * 16, :])
+                elif pattern == "fixed":
+                    if sid == 0:
+                        T.copy(A[i, :, :], dq)
+                        with T.SimdVF():
+                            value = T.simd.vld(dq[0, 0])
+                            T.simd.vsts(dq[0, 0], value)
+                        T.copy(dq, a_l1)
+                else:
+                    if sid == i % 2:
+                        T.copy(A[i, :, :], dq)
+                        with T.SimdVF():
+                            value = T.simd.vld(dq[0, 0])
+                            T.simd.vsts(dq[0, 0], value)
+                        T.copy(dq, a_l1)
+                T.gemm(a_l1, b_l1, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=unit_flag)
+                if pattern == "fixed":
+                    if sid == 1:
+                        T.copy(accum, epi, unit_flag_ctrl=unit_flag)
+                        with T.SimdVF():
+                            value = T.simd.vld(epi[0, 0])
+                            T.simd.vsts(epi[0, 0], value)
+                        T.copy(epi, C[i, :, :])
+                else:
+                    if sid == (i + 1) % 2:
+                        T.copy(accum, epi, unit_flag_ctrl=unit_flag)
+                        with T.SimdVF():
+                            value = T.simd.vld(epi[0, 0])
+                            T.simd.vsts(epi[0, 0], value)
+                        T.copy(epi, C[i, :, :])
+
+    return main
+
+
+@pytest.mark.parametrize("pattern", ["epilogue", "fixed", "halves", "switch"])
+def test_subcore_roles_survive_complete_lowering(pattern):
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.ResolveCore", "tl.MaterializeMultiBuffer"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_make_subcore_gemm(pattern, 5), target="ascend")
+    assert artifact.kernel_source and artifact.device_mod
+    resolved = snapshots["tl.ResolveCore"]
+    copies = [
+        task for task in nodes(resolved, tirx.AttrStmt) if task.attr_key == "tl.ascend_task" and calls(task.body, "tl.tileop.ascend_copy")
+    ]
+    assert {1, 2, 4} <= {int(task.node["core_mask"]) for task in copies}
+    materialized = snapshots["tl.MaterializeMultiBuffer"]
+    func = materialized["main"]
+    output = func.buffer_map[func.params[2]]
+    buffers = [
+        call.args[0].args[0].buffer for call in calls(materialized, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(output)
+    ]
+    assert len(buffers) == (1 if pattern == "fixed" else 2)
+    assert len({buffer.data for buffer in buffers}) == len(buffers)
+    allocations = [buffer for block in nodes(materialized, tirx.SBlock) for buffer in block.alloc_buffers]
+    assert all(buffer.scope() == "shared.dyn" and any(buffer.same_as(allocated) for allocated in allocations) for buffer in buffers)
+    assert all(tuple(int(dim) for dim in buffer.shape) == (2, 32, 32) for buffer in buffers)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "pattern, steps, unit_flag",
+    [
+        ("epilogue", 1, 0),
+        ("epilogue", 5, 0),
+        ("fixed", 5, 0),
+        ("halves", 5, 0),
+        ("switch", 5, 0),
+        ("epilogue", 5, 3),
+        ("fixed", 5, 3),
+    ],
+)
+def test_subcore_gemm_results(pattern, steps, unit_flag):
+    import torch
+
+    torch.manual_seed(23)
+    a = torch.randn(steps, 32, 32, dtype=torch.bfloat16).npu()
+    b = torch.randn(32, 32, dtype=torch.bfloat16).npu()
+    output = tilelang.compile(_make_subcore_gemm(pattern, steps, unit_flag), target="ascend", out_idx=-1)(a, b)
+    torch.testing.assert_close(output.cpu(), a.cpu().float() @ b.cpu().float().T, rtol=0.01, atol=0.02)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("rows, dual, unit_flag", [(16, True, 3), (32, True, 3), (16, False, 0)])
+def test_subcore_fixpipe_synchronization(rows, dual, unit_flag):
+    import torch
+
+    outputs = 1 if dual else 2
+
+    @T.prim_func
+    def main(A: T.Tensor((rows, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((outputs, rows, 32), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((rows, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            accum = T.alloc_l0c((rows, 32), "float32")
+            ub = T.alloc_shared((rows // 2 if dual else rows, 32), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=unit_flag)
+            if dual:
+                T.dual_copy(accum, ub, unit_flag_ctrl=unit_flag)
+                with T.SimdVF():
+                    value = T.simd.vld(ub[0, 0])
+                    T.simd.vsts(ub[0, 0], value)
+                T.copy(ub, C[0, sid * (rows // 2) : (sid + 1) * (rows // 2), :])
+            else:
+                T.copy(accum, ub, unit_flag_ctrl=unit_flag)
+                T.copy(ub, C[sid, :, :])
+
+    torch.manual_seed(37)
+    a = torch.randn(rows, 32, dtype=torch.bfloat16).npu()
+    b = torch.randn(32, 32, dtype=torch.bfloat16).npu()
+    output = tilelang.compile(main, target="ascend", out_idx=-1)(a, b).cpu()
+    expected = a.cpu().float() @ b.cpu().float().T
+    torch.testing.assert_close(output, expected.expand(outputs, rows, 32), rtol=0.01, atol=0.02)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("loop_kind", ["pipelined", "while"])
+def test_subcore_loops_can_have_different_extents(loop_kind):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 3, 64), "float32"), C: T.Tensor((2, 3, 64), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({ub: (2, "counter")})
+            if loop_kind == "while":
+                i = T.alloc_var("int32", init=0)
+                while i < sid + 2:
+                    T.copy(A[sid, i, :], ub)
+                    T.copy(ub, C[sid, i, :])
+                    i += 1
+            else:
+                for i in T.Pipelined(sid + 2, num_stages=2):
+                    T.copy(A[sid, i, :], ub)
+                    T.copy(ub, C[sid, i, :])
+
+    a = torch.randn(2, 3, 64).npu()
+    output = torch.full_like(a, -1)
+    tilelang.compile(main, target="ascend")(a, output)
+    expected = a.cpu()
+    expected[0, 2] = -1
+    torch.testing.assert_close(output.cpu(), expected)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("break_sid", [0, 1])
+def test_subcore_break_preserves_the_other_cube_stream(break_sid):
+    import torch
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4, 32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        V: T.Tensor((4, 32, 32), "float32"),
+        C: T.Tensor((2, 4, 32, 32), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            ub = T.alloc_shared((32, 32), "float32")
+            T.copy(B, b)
+            for i in T.serial(4):
+                if sid == break_sid and i == 1:
+                    T.loop_break()
+                if sid == 0:
+                    T.copy(V[i, :, :], ub)
+                else:
+                    T.copy(A[i, :, :], a)
+                    T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, ub)
+                T.copy(ub, C[sid, i, :, :])
+
+    a = torch.ones((4, 32, 32), dtype=torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    v = torch.full((4, 32, 32), 7.0).npu()
+    output = torch.full((2, 4, 32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, v, output)
+    expected = torch.stack((v.cpu(), torch.full_like(v.cpu(), 32.0)))
+    expected[break_sid, 1:] = -1
+    torch.testing.assert_close(output.cpu(), expected)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("owner", [0, 1])
+@pytest.mark.parametrize("consumer", ["copy", "loop-bound", "loop-break"])
+def test_subcore_scalar_loop_exit_reaches_later_cube_consumers(owner, consumer):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 32, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((32, 32), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            count = T.alloc_var("int32", init=0)
+            for i in T.serial(4):
+                if sid == owner:
+                    if i == 1:
+                        T.loop_break()
+                    count += 1
+            if sid == owner:
+                T.copy(B, b)
+                for j in T.serial(count if consumer == "loop-bound" else (1 if consumer == "copy" else 4)):
+                    if consumer == "loop-break" and j >= count:
+                        T.loop_break()
+                    T.copy(A[count - 1 if consumer == "copy" else j, :, :], a)
+                    T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, C)
+
+    a = torch.arange(1, 5, dtype=torch.float32)[:, None, None].expand(4, 32, 32).contiguous().to(torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    output = torch.full((32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, output)
+    torch.testing.assert_close(output.cpu(), torch.full((32, 32), 32.0))
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("varying_stride", [False, True])
+def test_subcore_strided_view_preserves_physical_storage(varying_stride):
+    import torch
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        C: T.Tensor((2, 32, 32), "float32"),
+        Storage: T.Tensor((2, 32, 64), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            storage = T.alloc_shared((32, 64), "float32")
+            view = T.StridedTensor(
+                (32, 32), ((sid + 1) * 32 if varying_stride else 64, 1), "float32", data=storage.data, scope="shared.dyn"
+            )
+            T.fill(storage, -1.0)
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+            T.copy(acc, view)
+            T.copy(view, C[sid, :, :])
+            T.copy(storage, Storage[sid, :, :])
+
+    a = torch.arange(32 * 32, dtype=torch.float32).reshape(32, 32).to(torch.bfloat16).npu()
+    b = torch.eye(32, dtype=torch.bfloat16).npu()
+    output = torch.empty((2, 32, 32), dtype=torch.float32).npu()
+    storage = torch.empty((2, 32, 64), dtype=torch.float32).npu()
+    tilelang.compile(main, target="ascend")(a, b, output, storage)
+    expected = a.cpu().float()
+    expected_storage = torch.full((2, 32, 64), -1.0)
+    for sid in range(2):
+        row_stride = (sid + 1) * 32 if varying_stride else 64
+        expected_storage[sid].as_strided((32, 32), (row_stride, 1)).copy_(expected)
+    torch.testing.assert_close(output.cpu(), expected.expand(2, 32, 32), rtol=0, atol=0)
+    torch.testing.assert_close(storage.cpu(), expected_storage, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("routing", ["constant", "parameter", "local"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_per_core_fixpipe_dispatch_preserves_each_subcore_output(routing, explicit):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 32, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((4, 2, 32, 32), "float32")):
+        with T.MixedKernel(4) as (bx, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            ub = T.alloc_shared((32, 32), "float32")
+            T.fill(ub, 0.0)
+            T.copy(A[bx, :, :], a)
+            T.copy(B, b)
+            T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+            with T.PerCoreTask():
+                if bx % 2 == 0:
+                    if explicit:
+                        with T.Task():
+                            route = bx // 2 % 2
+                            T.copy(acc, ub, sub_blockid=0 if routing == "constant" else (route if routing == "local" else bx // 2 % 2))
+                    else:
+                        route = bx // 2 % 2
+                        T.copy(acc, ub, sub_blockid=0 if routing == "constant" else (route if routing == "local" else bx // 2 % 2))
+                elif explicit:
+                    with T.Task():
+                        route = (bx // 2 + 1) % 2
+                        T.copy(acc, ub, sub_blockid=1 if routing == "constant" else (route if routing == "local" else (bx // 2 + 1) % 2))
+                else:
+                    route = (bx // 2 + 1) % 2
+                    T.copy(acc, ub, sub_blockid=1 if routing == "constant" else (route if routing == "local" else (bx // 2 + 1) % 2))
+            T.copy(ub, C[bx, sid, :, :])
+
+    a = torch.arange(1, 5, dtype=torch.float32)[:, None, None].expand(4, 32, 32).contiguous().to(torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    output = torch.full((4, 2, 32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, output)
+    expected = torch.zeros_like(output.cpu())
+    for block in range(4):
+        sid = block % 2 if routing == "constant" else (block // 2 + block % 2) % 2
+        expected[block, sid] = 32.0 * (block + 1)
+    torch.testing.assert_close(output.cpu(), expected)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("direction", ["load", "store"])
+def test_per_core_vector_dispatch_preserves_each_subcore_output(direction):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 2, 64), "float32"), C: T.Tensor((2, 2, 64), "float32")):
+        with T.MixedKernel(2) as (bx, sid):
+            ub = T.alloc_shared((64,), "float32")
+            if direction == "load":
+                with T.PerCoreTask():
+                    if bx == 0:
+                        with T.Task():
+                            T.copy(A[0, sid, :], ub)
+                    else:
+                        with T.Task():
+                            T.copy(A[1, sid, :], ub)
+            else:
+                T.copy(A[bx, sid, :], ub)
+            if direction == "store":
+                with T.PerCoreTask():
+                    if bx == 0:
+                        with T.Task():
+                            T.copy(ub, C[0, sid, :])
+                    else:
+                        with T.Task():
+                            T.copy(ub, C[1, sid, :])
+                # Different participation forces subcore projection even
+                # though the candidate selection itself is subcore-uniform.
+                if sid == 0:
+                    T.fill(ub, 0.0)
+            else:
+                if sid == 0:
+                    T.copy(ub, C[bx, 0, :])
+                else:
+                    T.copy(ub, C[bx, 1, :])
+
+    data = torch.arange(256, dtype=torch.float32).reshape(2, 2, 64).npu()
+    output = torch.full_like(data, -1.0)
+    tilelang.compile(main, target="ascend")(data, output)
+    torch.testing.assert_close(output.cpu(), data.cpu(), rtol=0, atol=0)
+
+
+def test_subcore_mutable_scalar_is_replicated_with_its_guard():
+    from testing.ascend._ir import schedule
+
+    @T.prim_func
+    def main(C: T.Tensor((5, 16, 16), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            accum = T.alloc_l0c((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            progress = T.alloc_var("int32", init=0)
+            for i in T.serial(5):
+                if sid == i % 2 and progress < sid + 2:
+                    T.copy(accum, ub)
+                    T.copy(ub, C[i, :, :])
+                    progress += 1
+
+    resolved = schedule(main, through="ResolveCore", auto_schedule=False)
+    progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
+    assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
+    masks = {
+        int(task.node["core_mask"])
+        for task in nodes(resolved, tirx.AttrStmt)
+        if task.attr_key == "tl.ascend_task"
+        and any(store.buffer.same_as(buffer) for store in nodes(task.body, tirx.BufferStore) for buffer in progress)
+    }
+    # C's shared storage epoch is the union of the two guards. Both scalar
+    # states can be recomputed on all three cores, independently of UB data.
+    assert masks == {7}
+
+
 @pytest.mark.parametrize("sids", [1, 2])
 def test_mixed_kernel_uses_requested_vector_count(sids):
     snapshots = {}
@@ -154,13 +569,35 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name == "tl.LowerScheduledTIR":
+            if info.name in ("tl.AssignCore", "tl.InsertSync", "tl.LowerScheduledTIR"):
                 snapshots[info.name] = mod
 
     with tvm.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_epilogue_program(sids), target="ascend")
+    vector_mask = 1 if sids == 1 else 5
+    assigned = [task for task in nodes(snapshots["tl.AssignCore"], tirx.AttrStmt) if task.attr_key == "tl.ascend_task"]
+    masks = {int(task.node["core_mask"]) for task in assigned}
+    assert vector_mask in masks
+    assert all(mask & (2 | vector_mask) == mask for mask in masks)
+
+    # AIC flags address exactly the participating AIV banks. The uniform AIV
+    # body and its synchronization stay shared when both subcores participate.
+    cube_banks = set()
+    analyzer = tvm.arith.Analyzer()
+    for task in nodes(snapshots["tl.InsertSync"], tirx.AttrStmt):
+        if task.attr_key != "tl.ascend_task":
+            continue
+        for operation in ("set", "wait"):
+            for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
+                if int(task.node["core_mask"]) == 2:
+                    bound = analyzer.const_int_bound(call.args[2])
+                    assert bound.min_value // 16 == bound.max_value // 16
+                    cube_banks.add(bound.min_value // 16)
+                else:
+                    assert int(task.node["core_mask"]) == vector_mask
+    assert cube_banks == set(range(sids))
     vectors = [block for block in nodes(snapshots["tl.LowerScheduledTIR"], tirx.SBlock) if block.name_hint == "VECTOR"]
-    assert vectors and all(int(block.annotations["vector_count"]) == sids for block in vectors)
+    assert len(vectors) == 1 and int(vectors[0].annotations["vector_count"]) == sids
     assert "asc_sync_intra_arrive(" in artifact.kernel_source
     assert "asc_sync_intra_wait(" in artifact.kernel_source
     if sids == 1:

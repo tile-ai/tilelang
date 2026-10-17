@@ -242,5 +242,30 @@ def test_vf_helpers_are_unique_after_explicit_unroll():
     assert source.count("main_kernel_simt_vf_0_1>(cce::dim3(1));") == 1
 
 
+@tilelang.testing.requires_ascend(support_required="compile-only")
+def test_imported_helper_precedes_vf_definitions():
+    imported_source = "__aicore__ inline int imported_helper(int x) { return x + 1; } // trailing comment \\"
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            T.import_source(imported_source)
+            with T.SimdVF():
+                T.evaluate(tirx.call_extern("int32", "imported_helper", 1))
+            with T.SimtVF(threads=1):
+                T.evaluate(tirx.call_extern("int32", "imported_helper", 2))
+
+    source = lower(main, target="ascend").kernel_source
+
+    # SIMD headers are discovered while generating the VF body, after the
+    # import was visited. They still belong before imported definitions.
+    assert source.index("#include <tl_templates/ascend/simd_inst.h>") < source.index(imported_source)
+    for vf_mode, argument in [("simd", 1), ("simt", 2)]:
+        helper = re.search(rf"__{vf_mode}_vf__[^{{]+{{([^}}]*)}}", source)
+        assert helper is not None, source
+        assert source.index(imported_source) < helper.start(), source
+        assert f"imported_helper({argument})" in helper.group(1), source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

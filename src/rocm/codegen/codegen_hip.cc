@@ -404,34 +404,33 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
   }
 }
 
-std::string CodeGenTileLangHIP::Finish() {
+void CodeGenTileLangHIP::EmitPreamble_(std::ostream &os) const {
   // hip must need a header file.
-  decl_stream << "#include <hip/hip_runtime.h>\n";
+  os << "#include <hip/hip_runtime.h>\n";
   if (need_mma_h_) {
-    decl_stream << "#include <mma.h>\n";
+    os << "#include <mma.h>\n";
   }
 
   if (enable_fp8_) {
-    decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
+    os << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
   if (enable_fp4_) {
-    decl_stream << "#include <tl_templates/hip/hip_fp4.h>\n";
+    os << "#include <tl_templates/hip/hip_fp4.h>\n";
   }
 
   if (need_cooperative_groups_) {
-    decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
+    os << "#include <hip/hip_cooperative_groups.h>\n";
   }
 
-  decl_stream << "#include <tl_templates/hip/gemm.h>\n";
-  decl_stream << "#include <tl_templates/hip/copy.h>\n";
-  decl_stream << "#include <tl_templates/hip/reduce.h>\n";
-  decl_stream << "#include <tl_templates/hip/scan.h>\n";
-  decl_stream << "#include <tl_templates/hip/ldsm.h>\n";
-  decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
-  decl_stream << "#include <tl_templates/hip/debug.h>\n";
-  decl_stream << "\n";
-  return CodeGenC::Finish();
+  os << "#include <tl_templates/hip/gemm.h>\n";
+  os << "#include <tl_templates/hip/copy.h>\n";
+  os << "#include <tl_templates/hip/reduce.h>\n";
+  os << "#include <tl_templates/hip/scan.h>\n";
+  os << "#include <tl_templates/hip/ldsm.h>\n";
+  os << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
+  os << "#include <tl_templates/hip/debug.h>\n";
+  os << "\n";
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {

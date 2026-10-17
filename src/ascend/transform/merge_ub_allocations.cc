@@ -32,6 +32,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -376,9 +377,17 @@ public:
   Stmt Extract(const Stmt &stmt) { return VisitStmt(stmt); }
   bool FoundContract() const { return found_contract_; }
   const BufferAliasMap &Aliases() const { return aliases_; }
+  const AivStorageMap &AivStorages() const { return aiv_storages_; }
 
 private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == kAivStorageMap) {
+      for (const auto &[storage, sid] : op->node.cast<AivStorageMap>()) {
+        ICHECK(sid->value == 0 || sid->value == 1);
+        aiv_storages_.Set(storage, sid);
+      }
+      return VisitStmt(op->body);
+    }
     if (op->attr_key != kBufferAliasMap)
       return StmtMutator::VisitStmt_(op);
     BufferAliasMap local = op->node.cast<BufferAliasMap>();
@@ -401,6 +410,7 @@ private:
   }
 
   BufferAliasMap aliases_;
+  AivStorageMap aiv_storages_;
   bool found_contract_{false};
 };
 
@@ -413,15 +423,47 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
   BufferAliasMap aliases = extractor.Aliases();
   ValidateBufferAliasMap(aliases);
 
-  auto planner = [aliases = std::move(aliases)](
+  AivStorageMap aiv_storages = extractor.AivStorages();
+  auto planner = [aliases = std::move(aliases), aiv_storages, disable_reuse](
                      const Stmt &, const AllocationMap &allocations,
                      const AllocationOrder &allocation_order,
-                     const std::string &, int alignment, bool debug) {
-    return BuildAliasMemoryPlan(allocations, allocation_order, alignment, debug,
-                                aliases);
+                     const std::string &scope, int alignment, bool debug) {
+    auto plan = [&](const AllocationMap &group, const AllocationOrder &order) {
+      return disable_reuse ? BuildSequentialPlan(group, alignment)
+                           : BuildAliasMemoryPlan(group, order, alignment,
+                                                  debug, aliases);
+    };
+    if (!scope.empty() || aiv_storages.empty())
+      return plan(allocations, allocation_order);
+    // Common allocations reserve a prefix in both UBs. Private allocations
+    // independently start after that prefix; equal numeric offsets on V0/V1
+    // are different physical memory, including when lifetime reuse is disabled.
+    std::array<AllocationMap, 3> groups;
+    std::array<AllocationOrder, 3> orders;
+    for (const auto &[storage, allocation] : allocations) {
+      auto sid = aiv_storages.Get(GetRef<Var>(storage));
+      int group = sid.has_value() ? static_cast<int>(sid.value()->value) : 2;
+      groups[group].emplace(storage, allocation);
+    }
+    for (const auto *storage : allocation_order) {
+      for (int group = 0; group < 3; ++group)
+        if (groups[group].count(storage))
+          orders[group].push_back(storage);
+    }
+    MemoryPlan result = plan(groups[2], orders[2]);
+    PrimExpr prefix = AlignPrimExpr(result.total_size, alignment);
+    PrimExpr private_size = make_zero(prefix.dtype());
+    for (int sid = 0; sid < 2; ++sid) {
+      MemoryPlan local = plan(groups[sid], orders[sid]);
+      for (const auto &[storage, offset] : local.byte_offsets)
+        result.byte_offsets[storage] = prefix + cast(prefix.dtype(), offset);
+      private_size = max(private_size, cast(prefix.dtype(), local.total_size));
+    }
+    result.total_size = prefix + private_size;
+    return result;
   };
   return merge_ub::MergeAllocations(std::move(stmt), align_bytes, verbose,
-                                    disable_reuse, planner);
+                                    false, planner);
 }
 
 } // namespace

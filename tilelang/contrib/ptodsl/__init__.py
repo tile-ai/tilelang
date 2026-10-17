@@ -1,5 +1,10 @@
 """TileLang compatibility helpers for generated PTODSL kernels."""
 
+from .allreduce import (
+    simt_allreduce_max,
+    simt_allreduce_min,
+    simt_allreduce_sum,
+)
 from .common import (
     as_logical_bool,
     if_then_else,
@@ -24,9 +29,6 @@ from .simt import (
     scalar_binary_fp8,
     scalar_div,
     scalar_rsqrt,
-    simt_allreduce_max,
-    simt_allreduce_min,
-    simt_allreduce_sum,
     store_vector_to_list,
     shuffle_vec,
     vector_from_list,

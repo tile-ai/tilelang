@@ -3,6 +3,7 @@ import math
 import tilelang
 import tilelang.language as T
 import torch
+from tilelang.backend.target import determine_target
 
 
 @tilelang.jit(
@@ -30,6 +31,17 @@ def mhc_pre_big_fuse_tilelang(
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     hidden_block = math.gcd(512, hidden_size)
+    target = determine_target("auto", return_object=True)
+    is_hip = target.kind.name == "hip"
+    if is_hip:
+        target_warp_size = target.attrs.get("thread_warp_size")
+        if target_warp_size is None:
+            raise RuntimeError(f"Cannot determine the HIP wavefront size for target {target}")
+        role_threads = int(target_warp_size)
+        kernel_threads = role_threads * 2
+    else:
+        role_threads = 32
+        kernel_threads = 96
 
     gemm_out_mul: T.Tensor[[n_splits, num_tokens, hc_mult3], T.float32]
     gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]
@@ -41,7 +53,7 @@ def mhc_pre_big_fuse_tilelang(
     comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]
 
-    with T.Kernel(num_tokens, threads=96) as i:
+    with T.Kernel(num_tokens, threads=kernel_threads) as i:
         ##################################################################
         # _pre_norm_fn_fwd_norm
         rms = T.alloc_fragment(1, T.float32)
@@ -59,7 +71,7 @@ def mhc_pre_big_fuse_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if T.get_thread_binding() < role_threads:
             ##################################################################
             # _pre_split_mixes_fwd (post & comb)
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
@@ -146,20 +158,35 @@ def mhc_pre_gemm_sqrsum_tilelang(
     assert hc_mult3 <= 32  # should be 24 usually
     num_tokens = T.dynamic("num_tokens")
     assert hc_hidden_size % hidden_block == 0
+    target = determine_target("auto", return_object=True)
+    is_hip = target.kind.name == "hip"
+    fn_dtype = T.float32 if is_hip else T.tfloat32
+    gemm_dtype = T.bfloat16 if is_hip else T.tfloat32
 
     x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)
-    fn: T.Tensor((hc_mult3, hc_hidden_size), T.tfloat32)
+    fn: T.Tensor((hc_mult3, hc_hidden_size), fn_dtype)
     out: T.Tensor((num_tokens, hc_mult3), T.float32)
     sqrsum: T.Tensor((num_tokens), T.float32)
 
     with T.Kernel(T.ceildiv(num_tokens, token_block)) as px:
         out_frag = T.alloc_fragment((token_block, 32), T.float32)
         sqrsum_part = T.alloc_fragment((token_block, 4), T.float32)
+        if is_hip:
+            # The MFMA A fragment is replicated across the two output waves,
+            # so it cannot uniquely determine ownership for sqrsum_part.
+            T.annotate_layout(
+                {
+                    sqrsum_part: T.Fragment(
+                        sqrsum_part.shape,
+                        forward_fn=lambda i, j: (i * 4 + j, 0),
+                    )
+                }
+            )
         T.clear(out_frag)
         T.clear(sqrsum_part)
         for pz in T.Pipelined(hc_hidden_size // hidden_block, num_stages=2):
             x_smem_16 = T.alloc_shared((token_block, hidden_block), T.bfloat16)
-            fn_smem = T.alloc_shared((32, hidden_block), T.tfloat32)
+            fn_smem = T.alloc_shared((32, hidden_block), gemm_dtype)
 
             T.annotate_layout({x_smem_16: tilelang.layout.make_swizzled_layout(x_smem_16)})
 
@@ -168,12 +195,16 @@ def mhc_pre_gemm_sqrsum_tilelang(
 
             x_frag_16 = T.alloc_fragment((token_block, hidden_block), T.bfloat16)
             T.copy(x_smem_16, x_frag_16)
-            x_frag = T.alloc_fragment((token_block, hidden_block), T.tfloat32)
+            x_frag = T.alloc_fragment((token_block, hidden_block), gemm_dtype)
             T.copy(x_frag_16, x_frag)
 
             for jj in T.serial(hidden_block // 4):
                 for i, j in T.Parallel(token_block, 4):
-                    sqrsum_part[i, j] += x_frag[i, jj * 4 + j] * x_frag[i, jj * 4 + j]
+                    if is_hip:
+                        x_value = T.cast(x_smem_16[i, jj * 4 + j], T.float32)
+                    else:
+                        x_value = x_frag[i, jj * 4 + j]
+                    sqrsum_part[i, j] += x_value * x_value
 
             # should be TF32 gemm
             T.gemm(
