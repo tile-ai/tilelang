@@ -395,11 +395,11 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.iter, ast.Call):
             call = ast.Call(
-                func=quote_expr("__tb.iter_call", span=node.iter),
+                func=quote_expr("__tb.iter_call", span=node),
                 args=[node.iter.func, *node.iter.args],
                 keywords=node.iter.keywords,
             )
-            ast.copy_location(call, node.iter)
+            ast_set_span(call, (node.lineno, node.col_offset, node.lineno, node.col_offset))
             node.iter = call
         tmp = self.get_tmp()
         # names = self._parse_names(node.target)
