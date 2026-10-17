@@ -42,9 +42,11 @@
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
+#include "ws_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -150,18 +152,16 @@ private:
 // Statement classification
 // ---------------------------------------------------------------------------
 
+// BufferLayoutMap / TileStmtKind and the statement classifiers live in
+// ws_analysis.h, shared with the automatic schedulers.
 using BufferDataToBufferMap =
     std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-using BufferMap =
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using VarExprMap =
     std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 using StmtRewriteMap =
     std::unordered_map<Stmt, Stmt, ObjectPtrHash, ObjectPtrEqual>;
-using BufferLayoutMap = std::unordered_map<Var, std::pair<Buffer, Layout>,
-                                           ObjectPtrHash, ObjectPtrEqual>;
 
 struct LocalAccessSummary {
   BufferSet read_buffers;
@@ -219,144 +219,6 @@ static Buffer CloneBranchPrivateBuffer(const Buffer &buffer,
                 buffer->elem_offset, buffer->name + suffix,
                 buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
-}
-
-class BufferRemapper : public StmtExprMutator {
-public:
-  static Stmt Rewrite(const Stmt &stmt, const BufferMap &buffer_remap) {
-    if (buffer_remap.empty()) {
-      return stmt;
-    }
-    BufferRemapper remapper(buffer_remap);
-    return remapper.VisitStmt(stmt);
-  }
-
-private:
-  explicit BufferRemapper(const BufferMap &buffer_remap)
-      : buffer_remap_(buffer_remap) {
-    for (const auto &[old_buf, new_buf] : buffer_remap_) {
-      var_remap_.emplace(old_buf->data, new_buf->data);
-    }
-  }
-
-  Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
-      return it->second;
-    }
-    return buffer;
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = var_remap_.find(ffi::GetRef<Var>(op));
-    if (it != var_remap_.end()) {
-      return it->second;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    Buffer new_buffer = RemapBuffer(load->buffer);
-    if (!new_buffer.same_as(load->buffer)) {
-      return BufferLoad(new_buffer, load->indices, load->predicate, load->span);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    Buffer new_buffer = RemapBuffer(store->buffer);
-    if (!new_buffer.same_as(store->buffer)) {
-      return BufferStore(new_buffer, store->value, store->indices,
-                         store->predicate, store->span);
-    }
-    return store;
-  }
-
-  const BufferMap &buffer_remap_;
-  VarExprMap var_remap_;
-};
-
-enum class TileStmtKind {
-  kTmaProducer,     // TMA load producer (global->shared)
-  kCpAsyncProducer, // Explicit cp.async / commit / wait_group producer stmt
-  kSimtProducer, // Non-tile-op SIMT copy: For loop writing shared from global
-  kConsumer,     // Compute (gemm, reduce, element-wise, etc.)
-  kOther         // Unclassified
-};
-
-/// Detect if a statement is a SIMT global-to-shared memory copy.
-/// Matches any statement that writes to shared memory and reads from global
-/// memory, without reading shared or local buffers (which would indicate
-/// consumer-side compute).  This is intentionally broader than "pure direct
-/// copy" so that T.Parallel with complex indexing / if_then_else (later
-/// lowered to cp.async) is also captured.
-class SimtProducerDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const Stmt &stmt) {
-    SimtProducerDetector d;
-    d(stmt);
-    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
-  }
-
-private:
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsSharedBuffer(op->buffer)) {
-      writes_shared_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsGlobalBuffer(op->buffer)) {
-      reads_global_ = true;
-    }
-    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
-      reads_shared_local_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  bool writes_shared_{false};
-  bool reads_global_{false};
-  bool reads_shared_local_{false};
-};
-
-class EvaluateCallInSimpleWrapperExtractor
-    : public StmtFunctor<Optional<Call>(const Stmt &)> {
-public:
-  Optional<Call> VisitStmt_(const EvaluateNode *op) final {
-    return op->value.as<Call>();
-  }
-
-  Optional<Call> VisitStmt_(const IfThenElseNode *op) final {
-    if (op->else_case.defined()) {
-      return Optional<Call>();
-    }
-    return VisitStmt(op->then_case);
-  }
-
-  Optional<Call> VisitStmt_(const AttrStmtNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockRealizeNode *op) final {
-    return VisitStmt(op->block->body);
-  }
-
-  Optional<Call> VisitStmtDefault_(const Object *) final {
-    return Optional<Call>();
-  }
-};
-
-static Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
-  EvaluateCallInSimpleWrapperExtractor extractor;
-  return extractor(stmt);
 }
 
 class BufferDataToBufferCollector : public StmtExprVisitor {
@@ -501,28 +363,24 @@ private:
           VisitExpr(range->min);
           VisitExpr(range->extent);
         }
-        if (gemm->sfaRegion_.defined()) {
-          if (IsBranchPrivateBuffer(gemm->sfaRegion_->buffer)) {
-            summary_.read_buffers.insert(gemm->sfaRegion_->buffer);
+        if (const auto *bs = AsGemmBlockScaled(*gemm)) {
+          if (IsBranchPrivateBuffer(bs->sfaRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfaRegion_->buffer);
           }
-          for (const auto &range : gemm->sfaRegion_->region) {
+          for (const auto &range : bs->sfaRegion_->region) {
             VisitExpr(range->min);
             VisitExpr(range->extent);
           }
-        }
-        if (gemm->sfbRegion_.defined()) {
-          if (IsBranchPrivateBuffer(gemm->sfbRegion_->buffer)) {
-            summary_.read_buffers.insert(gemm->sfbRegion_->buffer);
+          if (IsBranchPrivateBuffer(bs->sfbRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfbRegion_->buffer);
           }
-          for (const auto &range : gemm->sfbRegion_->region) {
+          for (const auto &range : bs->sfbRegion_->region) {
             VisitExpr(range->min);
             VisitExpr(range->extent);
           }
+          VisitExpr(bs->sfKStart_);
         }
         VisitExpr(gemm->clearAccum_);
-        if (gemm->sfKStart_.defined()) {
-          VisitExpr(gemm->sfKStart_);
-        }
         return;
       }
     }
@@ -617,59 +475,9 @@ ClassifyPreludeStmt(const Stmt &stmt, const BufferDataToBufferMap &buffer_map,
   return PreludeStmtPlacement::kKeepSharedPrelude;
 }
 
-static bool ContainsPtxCpAsync(const Stmt &stmt) {
-  bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = node.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        found = true;
-      }
-    }
-  });
-  return found;
-}
-
-static bool IsPtxCommitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() &&
-         call.value()->op.same_as(builtin::ptx_commit_group());
-}
-
-static bool IsPtxWaitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() && call.value()->op.same_as(builtin::ptx_wait_group());
-}
-
-static bool IsBarrierOrTmaControlCall(const CallNode *call) {
-  return call->op.same_as(mbarrier_wait_parity()) ||
-         call->op.same_as(mbarrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier()) ||
-         call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-         call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
-         call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-         call->op.same_as(tma_store()) ||
-         call->op.same_as(tma_store_arrive()) ||
-         call->op.same_as(tma_store_wait()) ||
-         call->op.same_as(builtin::tvm_storage_sync());
-}
-
 static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
   return copy != nullptr && IsGlobalBuffer(copy->src) &&
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
-}
-
-static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
-                                                           Target target) {
-  if (copy == nullptr) {
-    return {cuda::CopyInst::kNormal, true, ""};
-  }
-  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
 }
 
 static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
@@ -694,9 +502,11 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
 
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  cuda::CopyInstSelection result =
+      cuda::ClassifyWarpSpecializedCopy(*copy, target);
   return HasGlobalToSharedCopyShape(copy) && result.supported &&
-         !cuda::CopyInstIsTMA(result.inst) &&
+         !cuda::CopyInstIsTMALoad(result.inst) &&
+         !cuda::CopyInstIsTMAStore(result.inst) &&
          !cuda::CopyInstIsCPAsync(result.inst);
 }
 
@@ -747,63 +557,6 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
   return has_allowed_work && !has_disallowed;
 }
 
-/// Classify a tile-op copy as TMA load producer, cp.async producer, or
-/// consumer using coarse pre-layout checks.
-static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
-  if (copy == nullptr) {
-    return TileStmtKind::kConsumer;
-  }
-
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
-  if (cuda::CopyInstIsTMA(result.inst)) {
-    return TileStmtKind::kTmaProducer;
-  }
-  if (cuda::CopyInstIsCPAsync(result.inst)) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-
-  return TileStmtKind::kConsumer;
-}
-
-/// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
-  // Tile-op Calls: classify directly via CopyNode checks.
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (tile_op.defined()) {
-        if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target);
-        }
-        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
-        // producer so it goes to the producer warp group.
-        if (tile_op.as<Im2ColOpNode>()) {
-          if (TargetIsHopper(target)) {
-            return TileStmtKind::kTmaProducer;
-          }
-        }
-        return TileStmtKind::kConsumer; // non-copy tile-op
-      }
-    }
-  }
-  // Explicit cp.async producer-side statements are already low-level builtins.
-  if (ContainsPtxCpAsync(stmt) || IsPtxCommitGroup(stmt) ||
-      IsPtxWaitGroup(stmt)) {
-    return TileStmtKind::kCpAsyncProducer;
-  }
-  // Non-tile-op: check for SIMT global-to-shared copy.
-  if (SimtProducerDetector::Detect(stmt)) {
-    return TileStmtKind::kSimtProducer;
-  }
-  return TileStmtKind::kConsumer;
-}
-
-bool IsProducer(TileStmtKind kind) {
-  return kind == TileStmtKind::kTmaProducer ||
-         kind == TileStmtKind::kCpAsyncProducer ||
-         kind == TileStmtKind::kSimtProducer;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers: create barrier IR nodes
 // ---------------------------------------------------------------------------
@@ -846,7 +599,7 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
 /// - Tile-op copy calls get `kAsyncCopyNoImplicitCommitWait` so copy.cc does
 ///   not emit its own implicit commit/wait either.
 /// This allows the WS pass to emit its own commit_group +
-/// cp_async_barrier_noinc, tying cp.async completion to the forward mbarrier.
+/// async arrival, tying cp.async completion to the forward mbarrier.
 class SimtProducerAnnotator : public StmtExprMutator {
 public:
   static Stmt Annotate(const Stmt &stmt, Target target) {
@@ -1444,7 +1197,7 @@ private:
         ++num_producer_groups;
       if (k == TileStmtKind::kSimtProducer)
         has_simt_producer = true;
-      if (k == TileStmtKind::kCpAsyncProducer)
+      if (k == TileStmtKind::kCpAsyncProducer || k == TileStmtKind::kCpAsyncRaw)
         has_cp_async_producer = true;
     }
 
@@ -1540,7 +1293,8 @@ private:
       int earliest_async_read = static_cast<int>(consumer_compute_stmts.size());
       for (size_t i = 0; i < flat_stmts.size(); ++i) {
         if (kinds[i] != TileStmtKind::kSimtProducer &&
-            kinds[i] != TileStmtKind::kCpAsyncProducer) {
+            kinds[i] != TileStmtKind::kCpAsyncProducer &&
+            kinds[i] != TileStmtKind::kCpAsyncRaw) {
           continue;
         }
         int first_read = FindFirstAsyncProducerConsumerRead(
@@ -1690,11 +1444,15 @@ private:
     }
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
-    // Forward arrive_count:
-    //   - Pure TMA (possibly merged): 1 (leader thread only)
-    //   - Mixed TMA with SIMT/cp.async: producer_extent (all producer threads)
-    PrimExpr fwd_arrive_count = (can_merge_tma_barriers ||
-                                 (!has_simt_producer && !has_cp_async_producer))
+    bool has_async_producer = has_simt_producer || has_cp_async_producer;
+    bool has_producer_prefix =
+        !outer_leading_bindings.empty() || !inner_leading_bindings.empty();
+    for (const auto &prefix : producer_loop_prefix_stmts)
+      has_producer_prefix |= !prefix.empty();
+    bool producer_is_single_warp = !has_async_producer &&
+                                   !has_producer_prefix &&
+                                   !loop_body_condition.defined();
+    PrimExpr fwd_arrive_count = producer_is_single_warp
                                     ? IntImm(DataType::Int(32), 1)
                                     : producer_extent;
     Array<PrimExpr> arrive_counts;
@@ -1735,7 +1493,7 @@ private:
     // --- Build producer body ---
     // Producer structure (mixed TMA + SIMT/cp.async):
     //   bp_wait → SIMT copies (all threads, async) → TMA copies (leader) →
-    //   commit + cp_async_barrier_noinc.
+    //   completion tracking.
     // SIMT copies are placed after bp_wait but before TMA so cp.async
     // and TMA can overlap.
 
@@ -1748,7 +1506,8 @@ private:
         // commit+wait — the WS pass will emit its own commit+barrier_noinc.
         simt_producer_stmts.push_back(
             SimtProducerAnnotator::Annotate(flat_stmts[i], target_));
-      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
+      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer ||
+                 kinds[i] == TileStmtKind::kCpAsyncRaw) {
         simt_producer_stmts.push_back(flat_stmts[i]);
       }
     }
@@ -1804,7 +1563,7 @@ private:
         // arrive_and_expect_tx instead of separate expect_tx + arrive.
         // When merged barriers, only the last TMA copy should arrive.
         bool emit_arrive_on_this =
-            !has_simt_producer && !has_cp_async_producer &&
+            producer_is_single_warp &&
             (!can_merge_tma_barriers || tma_idx == last_tma_idx);
 
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
@@ -1833,26 +1592,24 @@ private:
         producer_stmts.push_back(s);
       }
     }
-    // When any producer-side work is not single-threaded pure-TMA, all
-    // producer threads arrive on all forward barriers after finishing it.
-    // SIMT copies (later lowered to cp.async by InjectPTXAsyncCopy) and
-    // explicit cp.async groups use commit_group + cp_async_barrier_noinc
-    // so the async copy completion drives the mbarrier arrival, allowing
-    // TMA and cp.async to overlap.  Other groups use MakeArriveBarrier.
-    if (has_simt_producer || has_cp_async_producer) {
-      // Any SIMT producer will become cp.async after LowerTileOp.
-      bool group_has_async_copy = has_simt_producer || has_cp_async_producer;
-      for (int g = 0; g < num_producer_groups; ++g) {
-        int fwd_base = g * num_stages;
+    // Async-only producers already contribute one completion per thread.
+    // With a prefix, also publish any synchronous writes by a regular release.
+    if (!producer_is_single_warp) {
+      for (int fwd_base = 0; fwd_base < num_fwd; fwd_base += num_stages) {
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
-        if (group_has_async_copy) {
-          // Tie cp.async completion to the forward mbarrier.
-          // commit_group was already emitted right after the cp.async
-          // instructions (before TMA) to maximize overlap.
+        if (!has_async_producer) {
+          // No async copy: each thread publishes its writes and arrives.
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        } else if (!has_producer_prefix) {
+          // Async copy only: completion consumes the thread's arrival credit.
           producer_stmts.push_back(Evaluate(
               Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                    {MakeBarrierRef(barrier_buf, fwd_id)})));
         } else {
+          // Async copy with prefix: reserve completion, then publish writes.
+          producer_stmts.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async_barrier(),
+                            {MakeBarrierRef(barrier_buf, fwd_id)})));
           producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
         }
       }
@@ -1990,6 +1747,11 @@ private:
     // --- Rewrite threadIdx.x for WS partitions ---
     // Producer owns the low partition and already sees [0, producer_extent).
     Stmt rewritten_producer = final_producer_loop;
+    if (producer_is_single_warp) {
+      rewritten_producer = IfThenElse(
+          LT(thread_iv_->var, make_const(thread_iv_->var.dtype(), 32)),
+          rewritten_producer);
+    }
     // Consumer owns the high partition and is remapped back to
     // [0, consumer_extent) for existing tile-op layout assumptions.
     Stmt rewritten_consumer = PCThreadIdxRewriter::Rewrite(
@@ -2033,7 +1795,7 @@ private:
     // LayoutInference: a single fragment layout cannot represent both thread
     // ranges. Clone every branch-private buffer touched by the producer so
     // LayoutInference can infer an independent producer-side thread range.
-    BufferMap producer_buffer_remap;
+    BufferRemap producer_buffer_remap;
     Array<Buffer> producer_private_buffers;
     {
       BufferSet block_alloc_buffers;
@@ -2067,11 +1829,11 @@ private:
     }
     if (!producer_buffer_remap.empty()) {
       rewritten_producer =
-          BufferRemapper::Rewrite(rewritten_producer, producer_buffer_remap);
+          RemapBuffers(rewritten_producer, producer_buffer_remap);
       Array<Stmt> remapped_producer_init;
       for (const auto &stmt : extracted_producer_init_) {
         remapped_producer_init.push_back(
-            BufferRemapper::Rewrite(stmt, producer_buffer_remap));
+            RemapBuffers(stmt, producer_buffer_remap));
       }
       extracted_producer_init_ = remapped_producer_init;
     }
@@ -2701,47 +2463,9 @@ private:
 // Detect if manual WS is already present (skip if so)
 // ---------------------------------------------------------------------------
 
-class ManualWSDetector : public StmtExprVisitor {
-public:
-  static bool HasManualWS(const Stmt &stmt) {
-    ManualWSDetector d;
-    d(stmt);
-    return d.found_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    // Detect both the T.ws() language-level attr ("warp_specialize") and
-    // the compiler-level attr (kWarpSpecializationScope).
-    if (op->attr_key == "warp_specialize" ||
-        op->attr_key == attr::kWarpSpecializationScope) {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
-};
-
 /// Quick pre-scan: check if the function contains a pipelined loop (num_stages
 /// >= 1) with at least one TMA load producer tile op and no manual layout
 /// annotations (which are incompatible with early MVB expansion).
-/// Check whether a layout annotation on a shared buffer is compatible with
-/// TMA.  TMA supports identity (linear) layouts and the three standard
-/// swizzle modes (32B / 64B / 128B).  Any other layout (e.g. padded,
-/// Volta-style) cannot be used with TMA.
-static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
-  Optional<cute::ComposedLayout> composed =
-      cute::ComposedLayoutFromTileLang(layout);
-  if (!composed.defined())
-    return false;
-  // Recast to byte space (the swizzle atom is defined on byte addresses).
-  cute::ComposedLayout composed_bytes =
-      composed.value().Recast(buffer->dtype.bits(), /*new_bits=*/8);
-  return composed_bytes->swizzle->IsTMACompatible();
-}
-
 class TiledWSCandidate : public StmtExprVisitor {
 public:
   static bool Check(const Stmt &stmt, Target target) {
@@ -2786,26 +2510,7 @@ private:
 
   void VisitStmt_(const SBlockNode *op) final {
     // Collect layout_map entries so we can cross-check TMA copy targets.
-    if (op->annotations.count("layout_map")) {
-      auto anno = op->annotations.Get("layout_map");
-      if (auto gmap = anno->as<Map<ObjectRef, ObjectRef>>(); gmap.has_value()) {
-        for (const auto &[key, val] : gmap.value()) {
-          Layout layout;
-          if (auto l = val.as<Layout>(); l.has_value())
-            layout = l.value();
-          if (auto buf = key.as<Buffer>(); buf.has_value()) {
-            layout_map_[buf.value()->data] = {buf.value(), layout};
-          } else if (auto var = key.as<Var>(); var.has_value()) {
-            for (const auto &buf : op->alloc_buffers) {
-              if (buf->data.same_as(var.value())) {
-                layout_map_[buf->data] = {buf, layout};
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
+    CollectAnnotatedLayouts(GetRef<SBlock>(op), layout_map_);
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -2846,7 +2551,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       return f;
     }
     // Skip if the function already has manual WS.
-    if (ManualWSDetector::HasManualWS(f->body)) {
+    if (HasManualWarpSpecialization(f->body)) {
       return f;
     }
     // Skip if TMA is not available.

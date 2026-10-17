@@ -17,7 +17,7 @@ import re
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
 from tilelang import tvm
 
 N = 256

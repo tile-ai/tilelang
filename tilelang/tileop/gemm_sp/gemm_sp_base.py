@@ -105,28 +105,8 @@ class GemmSPBase:
         return self.gemm_sp_node.cRegion
 
     @property
-    def stride_A(self) -> int:
-        return self.gemm_sp_node.stride_A
-
-    @property
-    def stride_B(self) -> int:
-        return self.gemm_sp_node.stride_B
-
-    @property
-    def offset_A(self) -> int:
-        return self.gemm_sp_node.offset_A
-
-    @property
-    def offset_B(self) -> int:
-        return self.gemm_sp_node.offset_B
-
-    @property
     def clear_accum(self) -> bool:
         return self.gemm_sp_node.clear_accum
-
-    @property
-    def k_pack(self) -> int:
-        return self.gemm_sp_node.k_pack
 
     @property
     def wg_wait(self) -> int:

@@ -102,7 +102,10 @@ bool IsAsyncIntrinsic(const CallNode *call) {
       call->op.same_as(tma_load_gather4()) ||
       call->op.same_as(tma_store_scatter4()) ||
       call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs()) ||
+      call->op.same_as(ptx_wgmma_sp_ss()) ||
+      call->op.same_as(ptx_wgmma_sp_rs()) ||
       call->op.same_as(ptx_tcgen05_mma_ss()) ||
+      call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts())) {
     return true;
   }

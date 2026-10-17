@@ -163,6 +163,7 @@ file(GLOB TILE_LANG_CUDA_ACTIVE_SRCS
   src/cuda/codegen/rt_mod_cutedsl.cc
   src/cuda/op/*.cc
   src/cuda/transform/*.cc
+  src/cuda/transform/auto_schedule/*.cc
 )
 list(REMOVE_ITEM TILE_LANG_CUDA_ACTIVE_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/op/builtin.cc"

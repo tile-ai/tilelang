@@ -67,7 +67,7 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
     # Record body-bound global bases before optional let inlining obscures
     # their provenance. CopyAnalysis consumes this marker for every lowering
     # path, independently of whether warp specialization is enabled.
@@ -100,9 +100,11 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
+    # AutoWarpSpecialization: derive a WSSchedule for kernels without one, using the scheduler named by tl.enable_auto_warp_specialization (opt-in; no-op when unset).
     # MaterializeWSSchedule: Materialize a user-provided warp-specialization schedule (T.annotate_ws_schedule).
     # ProducerConsumerWarpSpecialized: The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers are multi-versioned internally only for functions where the WS transformation actually applies.
     if allow_warp_specialized(target=target):
+        mod = tilelang.cuda.transform.AutoWarpSpecialization()(mod)
         mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 

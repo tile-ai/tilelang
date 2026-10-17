@@ -40,7 +40,9 @@ public:
 
   PrimExpr VisitExpr_(const tirx::CastNode *op) final {
     if (op->dtype.is_int() && op->dtype.bits() < 64) {
-      return tvm::cast(DataType::Int(64), op->value);
+      // Widen the converted value without removing a narrowing cast or
+      // changing the arithmetic enclosed by an explicit conversion.
+      return tvm::cast(op->dtype.with_bits(64), ffi::GetRef<PrimExpr>(op));
     }
     return ffi::GetRef<PrimExpr>(op);
   }

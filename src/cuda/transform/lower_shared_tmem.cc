@@ -9,6 +9,7 @@
  */
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
+#include "op/utils.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
 #include <algorithm>
@@ -619,7 +620,7 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     auto buffer = store->buffer;
-    ICHECK(buffer.scope() != "shared.tmem")
+    ICHECK(!IsTmemBuffer(buffer))
         << "We should never directly store data into tmem!";
     return store;
   }

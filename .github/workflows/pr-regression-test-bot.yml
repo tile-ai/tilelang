@@ -275,26 +275,26 @@ jobs:
           sysctl kern.corefile kern.coredump kern.sugid_coredump
 
       - name: Run performance regression test
+        id: perf
         run: |
           source test_regression/bin/activate
           OLD_PYTHON=./old/bin/python NEW_PYTHON=./new/bin/python \
             PERF_REGRESSION_MD=regression_result.md PERF_REGRESSION_PNG=regression_result.png \
             python ./maint/scripts/test_perf_regression.py
 
-      - name: Read markdown table
-        id: read_md
-        run: |
-          echo "content<<EOF" >> $GITHUB_OUTPUT
-          cat regression_result.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
+      # An `if:` without a status-check function is evaluated as `success() && ...`,
+      # which is false once the step above exits 1 on a regression. `!cancelled()`
+      # supplies the status check explicitly, so the report is still posted before
+      # the job goes red.
       - name: Upload result image as artifact
+        if: ${{ !cancelled() && (steps.perf.outcome == 'success' || steps.perf.outcome == 'failure') }}
         uses: actions/upload-artifact@v7
         with:
           name: perf-regression-${{ github.run_id }}
           path: regression_result.png
 
       - name: Post test results as PR comment
+        if: ${{ !cancelled() && (steps.perf.outcome == 'success' || steps.perf.outcome == 'failure') }}
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

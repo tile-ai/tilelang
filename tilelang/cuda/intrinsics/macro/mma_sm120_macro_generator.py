@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import tilelang.language as T
 from tilelang import tvm as tvm
+from tilelang.utils.language import is_fragment
 from tvm.runtime import convert
 from tvm.tirx import Buffer, BufferRegion, PrimExpr, Var
 
@@ -110,10 +111,10 @@ class SM120BlockScaleTile:
                 f"SM120 full-tile N shape mismatch: tile_n={self.tile_n}, "
                 f"block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles}"
             )
-        # One compact scale word is shared by each adjacent pair of MMA atoms.
-        if self.warp_rows <= 0 or self.warp_cols <= 0 or self.warp_rows % 2 != 0 or self.warp_cols % 2 != 0:
+        # The final compact scale package may contain one unpaired MMA atom.
+        if self.warp_rows <= 0 or self.warp_cols <= 0:
             raise ValueError(
-                f"SM120 compact scale packages require a positive even MMA atom grid per warp, got {self.warp_rows}x{self.warp_cols}"
+                f"SM120 compact scale packages require a positive MMA atom grid per warp, got {self.warp_rows}x{self.warp_cols}"
             )
         if self.warp_row_tiles != self.warp_rows * self.micro_size_m:
             raise ValueError(
@@ -179,11 +180,11 @@ class SM120BlockScaleTile:
         sfa_row = 8 * (lane & 1) + (lane >> 2)
         sfb_col = lane >> 2
         a_owner_in_pair = qlane >> 1
-        scale_m0 = warp_m * self.warp_row_tiles + a_owner_in_pair * 16 + sfa_row
-        scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
+        scale_m0 = warp_m * self.warp_row_tiles + sfa_row
+        scale_n0 = warp_n * self.warp_col_tiles + sfb_col
         return (
-            tuple(scale_m0 + g * 32 for g in range(self.sfa_words)),
-            tuple(scale_n0 + g * 32 for g in range(self.sfb_words)),
+            tuple(scale_m0 + (g * 32 + a_owner_in_pair * 16) % self.warp_row_tiles for g in range(self.sfa_words)),
+            tuple(scale_n0 + (g * 32 + qlane * 8) % self.warp_col_tiles for g in range(self.sfb_words)),
         )
 
     def compact_selector_scale_word_offsets(
@@ -371,6 +372,47 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         else:
             super()._initialize_mma_prefix(k_dim)
 
+    def make_mma_load_layout(self, local_buf, matrix="A"):
+        if not self.is_blockscaled or matrix != "A":
+            return super().make_mma_load_layout(local_buf, matrix)
+
+        # SM120 A registers are ordered (K8, M8, K32), matching ldmatrix.x4.
+        # The dense FP4 layout instead orders (K8, K32, M8).
+        def forward(i, j):
+            return 4 * (i % 8) + (j % 32) // 8, 8 * (i // 8) + 16 * (j // 32) + j % 8
+
+        if self.a_transposed:
+            fragment = T.Fragment((64, 16), forward_fn=lambda i, j: forward(j, i))
+            fragment = fragment.repeat([self.chunk // 64, self.warp_rows], repeat_on_thread=False, lower_dim_first=True)
+            fragment = fragment.repeat([1, self.block_row_warps], repeat_on_thread=True, lower_dim_first=True)
+        else:
+            fragment = T.Fragment((16, 64), forward_fn=forward)
+            fragment = fragment.repeat([self.warp_rows, self.chunk // 64], repeat_on_thread=False, lower_dim_first=False)
+            fragment = fragment.repeat([self.block_row_warps, 1], repeat_on_thread=True, lower_dim_first=True)
+        return fragment.replicate(self.block_col_warps)
+
+    def make_scale_load_layout(self, buffer, matrix):
+        """Distribute row-major uint32 scale words to MMA selector source lanes."""
+        rows, words = buffer.shape
+        wm, wn = self.block_row_warps, self.block_col_warps
+        if matrix == "A":
+            warp_tile = self.warp_row_tiles
+            return T.Fragment(
+                (rows, words),
+                replicate=2 * wn,
+                forward_thread_fn=lambda row, k, rep: (
+                    (rep // 2) * wm * 32 + (row // warp_tile) * 32 + (row % 8) * 4 + (row % 16) // 8 + (rep % 2) * 2
+                ),
+                forward_index_fn=lambda row, k: (row % warp_tile) // 16 * words + k,
+            )
+        warp_tile = self.warp_col_tiles
+        return T.Fragment(
+            (rows, words),
+            replicate=4 * wm,
+            forward_thread_fn=lambda row, k, rep: (row // warp_tile) * wm * 32 + (rep // 4) * 32 + (row % 8) * 4 + rep % 4,
+            forward_index_fn=lambda row, k: (row % warp_tile) // 8 * words + k,
+        )
+
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         if not self.is_blockscaled:
             return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
@@ -549,6 +591,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
         local_size_b = self.local_size_b
+        a_local_stride = k_inner * warp_rows * local_size_a if is_fragment(A_local_buf) else 0
         local_size_out = self.local_size_out
         kind = self.kind
         scale_vec_size = self.scale_vec_size
@@ -612,7 +655,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     b_dtype_abbrv,
                     stype,
                     A_local_buf.data,
-                    i * local_size_a,
+                    a_local_stride + i * local_size_a,
                     B_local_buf.data,
                     j * local_size_b,
                     C_local_buf.data,
@@ -644,7 +687,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                         b_dtype_abbrv,
                         stype,
                         A_local_buf.data,
-                        i * local_size_a,
+                        a_local_stride + i * local_size_a,
                         B_local_buf.data,
                         j * local_size_b + lift(local_size_b) // 2,
                         C_local_buf.data,
@@ -814,15 +857,17 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             qlane = tx % 4
             sfa_row = self._sfa_row_in_atom(tx)
             sfb_col = self._sfb_col_in_atom(tx)
-            scale_m0 = warp_m * self.warp_row_tiles + (qlane // 2) * 16 + sfa_row
-            scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
+            scale_m0 = warp_m * self.warp_row_tiles + sfa_row
+            scale_n0 = warp_n * self.warp_col_tiles + sfb_col
+            # Unused selector lanes in an odd tail wrap inside their own warp
+            # tile, avoiding out-of-bounds loads without changing active lanes.
             for g in T.unroll(sfa_words):
-                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_block, tile_m)
+                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + (g * 32 + (qlane // 2) * 16) % self.warp_row_tiles, k_block, tile_m)
                 SFA_local_buf[g] = SFA_data[
                     tuple(SFA_other) + (SFA_base_m + scale_a_word // k_blocks, SFA_base_k + scale_a_word % k_blocks)
                 ]
             for g in T.unroll(sfb_words):
-                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_block, tile_n)
+                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + (g * 32 + qlane * 8) % self.warp_col_tiles, k_block, tile_n)
                 SFB_local_buf[g] = SFB_data[
                     tuple(SFB_other) + (SFB_base_n + scale_b_word // k_blocks, SFB_base_k + scale_b_word % k_blocks)
                 ]

@@ -45,6 +45,22 @@ def get_cta_rank_in_cluster(cluster_size=4):
 
 
 @tilelang.jit(out_idx=-1)
+def get_cluster_id_kernel(cluster_size=4):
+    assert 128 % cluster_size == 0
+
+    @T.prim_func
+    def main(A: T.Tensor((128, 2), T.int32)):
+        with T.ClusterKernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
+            if T.get_thread_binding() == 0:
+                A[bx, 0] = T.get_cluster_id()
+                # Program-space cluster id and the hardware rank must agree on
+                # which programs form a cluster.
+                A[bx, 1] = T.get_cluster_id() * T.get_cluster_size() + T.block_rank_in_cluster()
+
+    return main
+
+
+@tilelang.jit(out_idx=-1)
 def barrier_kernel():
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
@@ -108,6 +124,15 @@ def test_cluster_launch_intrinsics(cluster_size=4):
     result = kernel()
     ref = torch.arange(128, dtype=torch.int32, device="cuda") % cluster_size
     assert torch.all(result == ref)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_cluster_id_matches_hardware_rank(cluster_size=4):
+    result = get_cluster_id_kernel(cluster_size)()
+    bx = torch.arange(128, dtype=torch.int32, device="cuda")
+    assert torch.all(result[:, 0] == bx // cluster_size)
+    assert torch.all(result[:, 1] == bx)
 
 
 @tilelang.testing.requires_cuda

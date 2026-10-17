@@ -62,9 +62,9 @@ resolve either backend again.
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
   dialect, lowering, codegen, and target-specific toolchain primitives.
-- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`, or
-  `cutedsl`, is a reusable Build/JIT/Runtime implementation that may serve one
-  or more compatible target backends.
+- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`,
+  `cutedsl`, or `pto`, is a reusable Build/JIT/Runtime implementation that may
+  serve one or more compatible target backends.
 - A target backend **declares execution compatibility** and satisfies the
   selected implementation's source, artifact, and launch-metadata contract; it
   does not normally implement another JIT adapter or runtime.
@@ -145,12 +145,15 @@ The public compiler or JIT entry creates one immutable `BackendContext`:
 context = create_backend_context(target, target_host, execution_backend)
 ```
 
-Context preparation performs three operations:
+Context preparation performs four operations:
 
-1. Normalize the device target and host target.
-2. Select exactly one `BackendModule` using `target.kind.name` and, when
-   needed, `supports_target`.
-3. Resolve one available `ExecutionBackendSpec` from the user request or the
+1. Normalize the device target.
+2. Apply any registered execution-aware target normalization. This lets a
+   backend select a target variant from an explicit execution backend without
+   adding target-specific branches to the shared context factory.
+3. Normalize the host target and select exactly one `BackendModule` using
+   `target.kind.name` and, when needed, `supports_target`.
+4. Resolve one available `ExecutionBackendSpec` from the user request or the
    backend's ordered `auto` preference.
 
 The resulting context binds:
@@ -165,7 +168,9 @@ BackendContext
 
 Cache, lowering, codegen, and JIT code pass the same context instance.
 Backend-specific target parsing and canonicalization belong in the backend
-package; backend selection itself stays in the shared context factory.
+package. A target variant driven by the explicit execution choice registers a
+`register_target_execution_normalizer` callback from that package; backend
+selection itself stays in the shared context factory.
 
 ## Language Dialects
 
@@ -174,7 +179,7 @@ freely compose that surface with extensions under
 `tilelang/<backend>/language`:
 
 ```python
-from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang import language as T  # common + CUDA compatibility facade
 from tilelang.cuda import language as T  # common + CUDA extensions
 from tilelang.rocm import language as T  # common + ROCm extensions
 ```
@@ -240,6 +245,34 @@ functions that require Metal runtime context.
 The engine must not contain a `target.kind.name` dispatch table for backend
 codegen. Backend variants, such as CUDA and CuTeDSL, declare their own codegen
 entries in their manifests.
+
+### Shared C-like Source Emission
+
+CUDA, HIP, CPU C, Ascend C++, Metal, and C host codegen inherit
+`CodeGenTileLangCBase` from
+[`src/backend/common/codegen/codegen_c_base.h`](../../src/backend/common/codegen/codegen_c_base.h).
+The base owns statement interception, optional `#line` directives, and final
+source assembly. Python-emitting codegens use their separate Python base.
+
+The output order is backend headers and preamble, imported source, then
+generated declarations, forward declarations, and function bodies. Write
+headers discovered during initialization or traversal to `preamble_stream_`.
+Override `EmitPreamble_(std::ostream&) const` for headers selected after module
+traversal. Keep generated declarations and helper definitions in `decl_stream`;
+they may call imported helpers. Backends must not override `Finish()`.
+
+`T.import_source`, `T.Kernel(prelude=...)`, and raw `pragma_import_c` attributes
+share this ordering. The base intercepts the attributes before backend-specific
+statement dispatch and separates imports with two newlines, including when an
+import ends in a backslash. Imports retain visitation order without
+deduplication. They may use types and macros from backend headers. Macros that
+configure those headers must be supplied through compiler flags, such as
+`compile_flags=["-DENABLE_BF16"]`, because imports follow the headers.
+
+Backend builders pass `tl.emit_line_directives` to `SetEmitLineDirectives`.
+The default is off. A custom `AddFunction` implementation must call
+`PreFunctionBody` after its compiler-generated prologue to emit the function
+entry span before printing the body.
 
 ## Execution Backend Compatibility
 

@@ -3,12 +3,14 @@ import errno
 from pathlib import Path
 from types import SimpleNamespace
 
-import cloudpickle
 import pytest
+
+from tilelang import tvm
 
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
 from tilelang.cache.kernel_cache import KernelCache
+from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
@@ -27,7 +29,7 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = ["param"]
+        self.params = [KernelParam(tvm.DataType("float32"), [4])]
 
 
 @pytest.fixture
@@ -62,8 +64,7 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
     cache._write_manifest(str(cache_path))
     return cache_path
 
@@ -100,7 +101,7 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
-    assert captured["params"] == ["param"]
+    assert captured["params"] == [KernelParam(tvm.DataType("float32"), [4])]
     assert captured["backend_context"] is backend_context
 
 
@@ -201,8 +202,7 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
     cache_path = Path(cache._get_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
 
     def fail_from_database(cls, **kwargs):
         raise AssertionError("incomplete cache entries should miss before rebuilding from database")

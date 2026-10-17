@@ -3,6 +3,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -27,36 +28,14 @@ def _check(original, expected, target=sm100_target):
     tvm.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
 
 
-def _count_calls(stmt, op_name: str):
-    count = 0
-
-    def visitor(node):
-        nonlocal count
-        if isinstance(node, tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
-            count += 1
-
-    tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return count
-
-
 def _count_extern_calls_with_prefix(stmt, prefix: str):
-    count = 0
-
-    def visitor(node):
-        nonlocal count
-        if not isinstance(node, tirx.Call):
-            return
-        op = getattr(node, "op", None)
-        if getattr(op, "name", None) != "tirx.call_extern":
-            return
-        if not node.args:
-            return
-        name = node.args[0]
-        if isinstance(name, tirx.StringImm) and name.value.startswith(prefix):
-            count += 1
-
-    tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return count
+    # Reject the entire legacy TCGEN05 extern family, including shape/template
+    # variants. Enumerating only today's symbols would weaken this regression.
+    return sum(
+        1
+        for call in collect_calls(stmt, op="tirx.call_extern")
+        if call.args and isinstance(call.args[0], tirx.StringImm) and call.args[0].value.startswith(prefix)
+    )
 
 
 def _tcgen05_ld_call(tmem_ref, local_buf):
@@ -129,8 +108,33 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
         mod = tl.cuda.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
-    assert _count_calls(body, "tl.tcgen05_ld") == 1
+    assert_call_count(body, op="tl.tcgen05_ld", count=1)
     assert _count_extern_calls_with_prefix(body, "tl::tcgen05_ld_") == 0
+
+
+@tilelang.testing.requires_cuda
+def test_blockscaled_issue_without_arrive_gets_handoff_fences():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            barrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
+            desc = T.decl_buffer((1,), T.uint64, scope="local")
+            c = T.decl_buffer((128, 128), T.float32, scope="shared.tmem")
+            sfa = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
+            sfb = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
+            T.mbarrier_wait_parity(barrier[0], 0)
+            T.ptx_tcgen05_mma_blockscaled_ss("e4m3", desc.data, 0, desc.data, 0, c.data, 0, 0, 1, sfa.data, 0, sfb.data, 0)
+            T.ptx_arrive_barrier(barrier[0])
+
+    body = _apply(before)["main"].body
+    calls = [str(getattr(call.op, "name", "")) for call in collect_nodes(body, tirx.Call)]
+    assert_call_count(body, op="tl.tcgen05_after_thread_sync", count=1)
+    assert_call_count(body, op="tl.tcgen05_before_thread_sync", count=1)
+    assert_call_count(body, op="tl.tcgen05_mma_arrive", count=0)
+    assert calls.index("tl.mbarrier_wait_parity") < calls.index("tl.tcgen05_after_thread_sync")
+    assert calls.index("tl.tcgen05_after_thread_sync") < calls.index("tl.ptx_tcgen05_mma_blockscaled_ss")
+    assert calls.index("tl.ptx_tcgen05_mma_blockscaled_ss") < calls.index("tl.tcgen05_before_thread_sync")
+    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tirx.ptx_arrive_barrier")
 
 
 @tilelang.testing.requires_cuda
@@ -180,7 +184,7 @@ def test_lower_tmem_copy_uses_tcgen05_st_intrin():
         mod = tl.cuda.transform.LowerSharedTmem()(mod)
 
     body = mod["main"].body
-    assert _count_calls(body, "tl.tcgen05_st") == 1
+    assert_call_count(body, op="tl.tcgen05_st", count=1)
     assert _count_extern_calls_with_prefix(body, "tl::tcgen05_st_") == 0
 
 
@@ -262,7 +266,7 @@ def test_sync_boundary_stops_wait_lookahead():
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     mod = _apply(func)
-    assert _count_calls(mod["main"].body, "tl.tcgen05_after_thread_sync") == 0
+    assert_call_count(mod["main"].body, op="tl.tcgen05_after_thread_sync", count=0)
 
 
 @tilelang.testing.requires_cuda
@@ -283,8 +287,8 @@ def test_existing_manual_fences_are_not_duplicated():
 
     mod = _apply(func)
     body = mod["main"].body
-    assert _count_calls(body, "tl.tcgen05_after_thread_sync") == 1
-    assert _count_calls(body, "tl.tcgen05_before_thread_sync") == 1
+    assert_call_count(body, op="tl.tcgen05_after_thread_sync", count=1)
+    assert_call_count(body, op="tl.tcgen05_before_thread_sync", count=1)
 
 
 @tilelang.testing.requires_cuda
@@ -300,8 +304,8 @@ def test_non_sm100_targets_are_left_untouched():
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     mod = _apply(func, sm90_target)
-    assert _count_calls(mod["main"].body, "tl.tcgen05_before_thread_sync") == 0
-    assert _count_calls(mod["main"].body, "tl.tcgen05_after_thread_sync") == 0
+    assert_call_count(mod["main"].body, op="tl.tcgen05_before_thread_sync", count=0)
+    assert_call_count(mod["main"].body, op="tl.tcgen05_after_thread_sync", count=0)
 
 
 if __name__ == "__main__":

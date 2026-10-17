@@ -1039,13 +1039,16 @@ def _make_allreduce_width_kernel(reduce_fn, M, width, threads):
     return kernel
 
 
-def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale):
+def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads=None):
+    if threads is None:
+        threads = logical_width * scale
+
     @T.prim_func
     def kernel(
         A: T.Tensor((logical_width, scale), T.float32),
         B: T.Tensor((scale,), T.float32),
     ):
-        with T.Kernel(1, threads=logical_width * scale):
+        with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((logical_width, scale), T.float32)
             dst = T.alloc_fragment((scale,), T.float32)
             T.copy(A, src)
@@ -1089,6 +1092,28 @@ def test_allreduce_scale_greater_than_one_valid_runtime(logical_width, scale):
 def test_allreduce_scale_greater_than_one_rejects_non_power_of_two(reduce_fn):
     with pytest.raises(Exception, match=r"logical_width.*positive power of two"):
         _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, 48, 2))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
+@pytest.mark.parametrize(
+    ("logical_width", "scale", "threads"),
+    [
+        # Exactly one replica: t ^ 48 reads past the 96-entry workspace.
+        (32, 3, 96),
+        # Two replicas over 192 of 256 threads: the layout inferred for a
+        # (32, 3) fragment, silently mixes columns and replicas.
+        (32, 3, 256),
+        # Shuffle-only width: shfl_xor(12/6/3) still straddles columns.
+        (8, 3, 128),
+    ],
+)
+def test_allreduce_rejects_non_power_of_two_scale(reduce_fn, logical_width, scale, threads):
+    # The XOR butterfly only addresses the reduce coordinate when the thread
+    # stride between consecutive participants is a power of two; a stride-3
+    # reduce must fail loudly instead of returning a wrong result.
+    with pytest.raises(Exception, match=r"scale .*power of two"):
+        _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads))
 
 
 def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):
@@ -1195,6 +1220,66 @@ def test_reduce_packed_max_nan_batch_runtime():
         B = _compile(_make_nan_reduce_kernel(T.reduce_max, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
         assert not math.isnan(B[0].float().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
         assert math.isnan(B[2].float().item()), f"{tl_dtype}: NaN row must produce NaN"
+
+
+# ---------------------------------------------------------------------------
+# Frontend legality: the bitwise reduce dtype gate covers both faces
+# ---------------------------------------------------------------------------
+
+
+def _make_bitwise_reduce_kernel(op, src_dtype, dst_dtype, M=4, N=4):
+    @T.prim_func
+    def main(A: T.Tensor((M, N), src_dtype), Out: T.Tensor((M,), dst_dtype)):
+        with T.Kernel(1, threads=128):
+            A_fr = T.alloc_fragment((M, N), src_dtype)
+            B_fr = T.alloc_fragment((M,), dst_dtype)
+            T.copy(A, A_fr)
+            op(A_fr, B_fr, dim=1)
+            T.copy(B_fr, Out)
+
+    return main
+
+
+def _compile_bitwise_reduce(program):
+    tilelang.disable_cache()
+    try:
+        return tilelang.compile(program, out_idx=-1, target="cuda")
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name", ["reduce_bitand", "reduce_bitor", "reduce_bitxor"])
+def test_bitwise_reduce_rejects_float_source(op_name):
+    """A float source must be rejected rather than silently value-cast to int.
+
+    The gate inspected only the destination, so a float source was truncated
+    before the bitwise reduction ran.
+    """
+    op = getattr(T, op_name)
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(op, "float32", "int32"))
+
+    message = str(exc_info.value)
+    assert op_name in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_rejects_float_destination():
+    """The destination face of the gate keeps firing."""
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "float32"))
+
+    message = str(exc_info.value)
+    assert "reduce_bitor" in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_accepts_integer_faces():
+    """Control: an integer source and destination still lower."""
+    _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "int32"))
 
 
 if __name__ == "__main__":

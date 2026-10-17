@@ -58,6 +58,11 @@ static constexpr const char *kWSScheduleKey = "tl.ws_schedule";
  */
 static constexpr const char *kWSOpIdKey = "tl.ws_op_id";
 
+// Attr wrapper from T.annotate_ws_pipeline_depth: node = buffer var, value =
+// depth of the pipeline the automatic scheduler hosts for it at the
+// enclosing scope. Scheduler-only metadata; the materializer drops it.
+static constexpr const char *kWSPipelineDepthKey = "tl.ws_pipeline_depth";
+
 /*! \brief Scope id of the kernel's implicit root scope (T.WSScope.ROOT). */
 static constexpr const char *kWSRootScopeId = "tl.ws_scope_root";
 
@@ -72,6 +77,8 @@ public:
   /*! \brief setmaxnreg budget; 0 = unset. */
   int64_t max_nreg;
 
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.WSRole", WSRoleNode, ffi::Object);
 };
@@ -94,6 +101,8 @@ public:
   /*! \brief Number of buffer versions. */
   int64_t depth;
 
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.WSPipeline", WSPipelineNode,
                                     ffi::Object);
@@ -110,6 +119,8 @@ public:
 /*! \brief Base class of one step in a role's program. */
 class WSInstrNode : public ffi::Object {
 public:
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO("tl.WSInstr", WSInstrNode, ffi::Object);
 };
@@ -204,6 +215,8 @@ public:
   /*! \brief Role name -> instruction sequence. */
   ffi::Map<ffi::String, ffi::Array<WSInstr>> bodies;
 
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.WSScope", WSScopeNode, ffi::Object);
 };
@@ -225,6 +238,8 @@ public:
   ffi::Array<WSPipeline> pipelines;
   ffi::Array<WSScope> scopes;
 
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.WSSchedule", WSScheduleNode,
                                     ffi::Object);

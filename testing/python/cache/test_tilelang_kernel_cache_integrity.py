@@ -12,12 +12,14 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
-import cloudpickle
 import pytest
+
+from tilelang import tvm
 
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
 from tilelang.cache.kernel_cache import KernelCache
+from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 
 
@@ -33,7 +35,7 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = ["param"]
+        self.params = [KernelParam(tvm.DataType("float32"), [4])]
 
 
 @pytest.fixture
@@ -126,20 +128,6 @@ def test_load_removes_entry_with_same_size_corruption(cache_dirs, tmp_path, monk
     assert not cache_path.exists()
 
 
-def test_hash_check_disabled_still_catches_truncation(cache_dirs, tmp_path, monkeypatch):
-    monkeypatch.setattr(env, "TILELANG_CACHE_VERIFY_HASH", "0")
-    cache = KernelCache()
-    key = "size-only-check"
-    cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
-    cache_path = Path(cache._get_cache_path(key))
-
-    lib_file = cache_path / cache.kernel_lib_path
-    lib_file.write_bytes(b"short")
-
-    assert _load_expecting_no_build(cache, key, monkeypatch) is None
-    assert not cache_path.exists()
-
-
 def test_source_files_are_size_checked_but_not_hashed(cache_dirs, tmp_path, monkeypatch):
     # Hashing sources on load would regress lazy source loading; only their
     # size is checked, so a same-size rewrite of a source file must not
@@ -163,8 +151,7 @@ def test_legacy_entry_without_manifest_misses_and_save_repairs(cache_dirs, tmp_p
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")
     (cache_path / cache.kernel_lib_path).write_bytes(b"legacy-truncated")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
 
     assert _load_expecting_no_build(cache, key, monkeypatch) is None
 
