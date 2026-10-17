@@ -260,7 +260,7 @@ public:
     int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
     // before scope.
     linear_seq_.push_back(e);
-    StmtExprVisitor::VisitStmt_(op);
+    VisitScopeBody(op);
     // after scope.
     e.touched = std::move(scope_.back().touched);
     scope_.pop_back();
@@ -273,6 +273,44 @@ public:
     // record the pointer to end index.
     ICHECK_NE(end_index, 0U);
     linear_seq_[begin_index].scope_pair_offset = end_index - begin_index;
+  }
+
+  template <typename T> void VisitScopeBody(const T *op) {
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  // Operands of in-flight WGMMAs are tracked along control flow: a wait that
+  // only runs on one path retires them on that path alone, so the state after
+  // a branch is the union of its paths and the state after a loop also keeps
+  // what a zero-trip execution would leave pending.
+  void VisitScopeBody(const IfThenElseNode *op) {
+    this->VisitExpr(op->condition);
+    const auto before = pending_wgmma_buffers_;
+    this->VisitStmt(op->then_case);
+    const auto after_then = std::move(pending_wgmma_buffers_);
+    pending_wgmma_buffers_ = before;
+    if (op->else_case) {
+      this->VisitStmt(op->else_case.value());
+    }
+    for (const VarNode *buf : after_then) {
+      MarkWgmmaOperandPending(buf);
+    }
+  }
+
+  void VisitScopeBody(const ForNode *op) {
+    const auto before = pending_wgmma_buffers_;
+    StmtExprVisitor::VisitStmt_(op);
+    for (const VarNode *buf : before) {
+      MarkWgmmaOperandPending(buf);
+    }
+  }
+
+  void VisitScopeBody(const WhileNode *op) {
+    const auto before = pending_wgmma_buffers_;
+    StmtExprVisitor::VisitStmt_(op);
+    for (const VarNode *buf : before) {
+      MarkWgmmaOperandPending(buf);
+    }
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
@@ -328,31 +366,53 @@ public:
   void VisitExpr_(const CallNode *op) final {
     StmtExprVisitor::VisitExpr_(op);
     if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
+      std::vector<const VarNode *> operands;
       for (const PrimExpr &arg : op->args) {
-        PostOrderVisit(arg, [this](const ObjectRef &node) {
+        PostOrderVisit(arg, [&](const ObjectRef &node) {
           const VarNode *buf = nullptr;
           if (const auto *load = node.as<BufferLoadNode>()) {
             buf = load->buffer->data.get();
           } else if (const auto *var = node.as<VarNode>()) {
             buf = var;
           }
-          if (buf == nullptr || !alloc_info_.count(buf) ||
-              !alloc_info_[buf].alloc ||
-              !IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-            return;
+          if (buf != nullptr && alloc_info_.count(buf) &&
+              alloc_info_[buf].alloc &&
+              IsAppropriateSharedMemory(GetRef<Var>(buf)) &&
+              std::find(operands.begin(), operands.end(), buf) ==
+                  operands.end()) {
+            operands.push_back(buf);
           }
-          for (const auto &pending : pending_wgmma_buffers_) {
-            if (pending.first == buf) {
-              return;
+        });
+      }
+      // Remember which buffers the descriptor addresses: it can be issued by
+      // several WGMMA batches after a single initialization.
+      if (!op->args.empty()) {
+        if (const auto *desc = op->args[0].as<BufferLoadNode>()) {
+          wgmma_descriptor_operands_[desc->buffer->data.get()] = operands;
+        }
+      }
+      for (const VarNode *buf : operands) {
+        MarkWgmmaOperandPending(buf);
+      }
+    } else if (op->op.same_as(tl::ptx_wgmma_ss()) ||
+               op->op.same_as(tl::ptx_wgmma_rs()) ||
+               op->op.same_as(tl::ptx_wgmma_sp_ss()) ||
+               op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+      // Every issue re-arms the operands of the descriptors it reads, since an
+      // earlier full wait may have retired them.
+      for (const PrimExpr &arg : op->args) {
+        if (const auto *var = arg.as<VarNode>()) {
+          auto it = wgmma_descriptor_operands_.find(var);
+          if (it != wgmma_descriptor_operands_.end()) {
+            for (const VarNode *buf : it->second) {
+              MarkWgmmaOperandPending(buf);
             }
           }
-          pending_wgmma_buffers_.emplace_back(buf, scope_.size());
-        });
+        }
       }
     } else if (op->op.same_as(tl::wait_wgmma()) ||
                op->op.same_as(tl::warpgroup_wait())) {
-      for (const auto &pending : pending_wgmma_buffers_) {
-        const VarNode *buf = pending.first;
+      for (const VarNode *buf : pending_wgmma_buffers_) {
         // Count the wait as a read, with the same scope attribution as a
         // BufferLoad.
         if (enable_aggressive_merge_) {
@@ -364,20 +424,10 @@ public:
         }
       }
       // wait(N) leaves up to N MMAs in flight; only a full wait retires them.
-      // A wait nested deeper than the descriptor initialization may sit in a
-      // branch that other paths skip, so it only retires operands initialized
-      // at its own scope depth or deeper.
       const auto *count =
           op->args.empty() ? nullptr : op->args[0].as<IntImmNode>();
       if (count != nullptr && count->value == 0) {
-        const size_t wait_depth = scope_.size();
-        pending_wgmma_buffers_.erase(
-            std::remove_if(pending_wgmma_buffers_.begin(),
-                           pending_wgmma_buffers_.end(),
-                           [&](const auto &pending) {
-                             return pending.second >= wait_depth;
-                           }),
-            pending_wgmma_buffers_.end());
+        pending_wgmma_buffers_.clear();
       }
     }
   }
@@ -429,8 +479,19 @@ private:
   // The size of the scope.
   size_t scope_level_{0};
   // Shared buffers read by WGMMAs that no full wait has retired yet.
-  // Each entry carries the scope depth of its descriptor initialization.
-  std::vector<std::pair<const VarNode *, size_t>> pending_wgmma_buffers_;
+  void MarkWgmmaOperandPending(const VarNode *buf) {
+    if (std::find(pending_wgmma_buffers_.begin(), pending_wgmma_buffers_.end(),
+                  buf) == pending_wgmma_buffers_.end()) {
+      pending_wgmma_buffers_.push_back(buf);
+    }
+  }
+
+  // Shared buffers read by WGMMAs that no full wait has retired on the
+  // current path.
+  std::vector<const VarNode *> pending_wgmma_buffers_;
+  // Shared buffers addressed by each WGMMA descriptor's initialization.
+  std::unordered_map<const VarNode *, std::vector<const VarNode *>>
+      wgmma_descriptor_operands_;
 };
 
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {

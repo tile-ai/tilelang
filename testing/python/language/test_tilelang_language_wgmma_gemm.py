@@ -307,3 +307,90 @@ def test_async_wgmma_operand_not_merged_before_wait_correctness():
         kernel(q, k, o0, o1)
         torch.testing.assert_close(o0, ref0, rtol=1e-2, atol=1e-2)
         torch.testing.assert_close(o1, ref1, rtol=1e-2, atol=1e-2)
+
+
+def _merged_shared_dyn_sizes(func):
+    import re
+
+    mod = tvm.IRModule.from_expr(func)
+    cuda_target = tvm.target.Target("cuda", host="llvm")
+    mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
+    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
+    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    return [int(size) for size in re.findall(r'alloc_buffer\(\((\d+),\), "uint8", scope="shared.dyn"\)', mod.script())]
+
+
+def test_wgmma_descriptor_reused_after_full_wait_keeps_operand_live():
+    # One descriptor initialization feeds two WGMMA batches with a full wait in between. The
+    # second batch reads B0 again, so a buffer written while it is in flight must not be merged
+    # onto B0's storage.
+    from tvm.script import tirx as T
+
+    op = tvm.ir.Op.get
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        T.evaluate(
+            T.call_intrin(
+                "handle",
+                op("tl.initialize_wgmma_descriptor"),
+                desc[0],
+                T.tvm_access_ptr(T.type_annotation("uint8"), B0.data, 0, 4096, 1),
+                1,
+                1,
+                64,
+            )
+        )
+        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+        Tmp[tx] = T.uint8(1)
+        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+
+    # Disjoint storage is the sum of both buffers; merged storage would be 4096.
+    assert _merged_shared_dyn_sizes(func) == [8192]
+
+
+def test_wgmma_wait_in_sibling_branch_does_not_retire_other_branch_operand():
+    # The wait in the else branch runs only when the then branch did not, so B0 (issued in the
+    # then branch) is still in flight when Tmp is written after the if.
+    from tvm.script import tirx as T
+
+    op = tvm.ir.Op.get
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    op("tl.initialize_wgmma_descriptor"),
+                    desc[0],
+                    T.tvm_access_ptr(T.type_annotation("uint8"), B0.data, 0, 4096, 1),
+                    1,
+                    1,
+                    64,
+                )
+            )
+            T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+        else:
+            T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+        Tmp[tx] = T.uint8(1)
+        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+
+    assert _merged_shared_dyn_sizes(func) == [8192]
