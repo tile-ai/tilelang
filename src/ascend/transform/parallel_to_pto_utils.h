@@ -1,7 +1,6 @@
 /*!
  * \file parallel_to_pto_utils.h
- * \brief Shared read-only analysis helpers for the PTO Parallel vectorize
- * path. See docs/vectorize_parallel_to_pto_design.md.
+ * \brief Shared read-only analysis helpers for PTO Parallel vectorization.
  *
  * VerifyParallelToPTO consumes these helpers to check the input contract;
  * VectorizeParallelToPTO re-runs the same analysis to build its VMI code.
@@ -22,6 +21,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <variant>
+#include <vector>
 
 #include "../../layout/layout.h"
 #include "../../op/builtin.h"
@@ -192,19 +193,70 @@ bool IsSupportedElementDType(DataType dtype);
  * just that a target name exists. */
 bool IsSupportedFloat8(DataType dtype);
 
-/*! Cast conversion descriptor.
- * empty() means the combination has no proven-equivalent VMI mapping and
- * must be rejected by Verify. */
-struct CastPlan {
-  /*! Identity conversion (from == to): keep the original value, emit no
-   * vcvt (VMI rejects width-preserving conversions). */
-  bool identity = false;
-  /*! PTODSL saturate annotation value, e.g. "NOSAT"; empty when the
-   * conversion must not rely on PTODSL defaults. */
-  std::string saturate;
-  /*! PTODSL rounding annotation value, e.g. "Z"; empty when N/A. */
-  std::string rounding;
+/*! Value category of one value-Cast position.  The kind is supplied by the
+ * caller (Verify from AnalyzeLaneUse, Vectorize from the converted input
+ * shape); the planner never infers it from lanes. */
+enum class CastValueKind {
+  kScalar,
+  kVectorVmi,
 };
+
+/*! Per-Cast planning context.  `logical_lanes` is validation information
+ * only; `value_kind` is the dispatch key. */
+struct CastContext {
+  CastValueKind value_kind = CastValueKind::kScalar;
+  int64_t logical_lanes = 1;
+};
+
+/*! Scalar value-Cast plan: either keep the input (identity) or rebuild an
+ * ordinary scalar Cast with the validated annotations and the original span.
+ * No new scalar rounding/saturation mode is introduced. */
+enum class ScalarCastAction {
+  kKeepInput,
+  kRebuildCast,
+};
+
+struct ScalarCastPlan {
+  ScalarCastAction action = ScalarCastAction::kKeepInput;
+  /*! Validated annotations to carry onto the rebuilt Cast (the same shape as
+   * CastNode::annotations).  Attributes that are proven to match the
+   * existing scalar lowering are normalized away, so this map is empty for
+   * the currently admitted directions. */
+  ffi::Map<ffi::String, ffi::Any> annotations;
+};
+
+/*! One ordered vector conversion action. */
+enum class VectorCastOp {
+  /*! Same-sign widening: one logical vcvt. */
+  kIntegerExtend,
+  /*! Same-width signedness change / source-sign re-view: one
+   * vinterpret_cast. */
+  kIntegerReinterpret,
+  /*! Narrowing including cross-sign: one logical vcvt with NOSAT. */
+  kIntegerTruncate,
+  /*! Real non-integer conversion (f16/bf16/FP8 -> f32, f32 -> f16/bf16/FP8);
+   * empty options still mean a conversion, never a no-op. */
+  kNonIntegerConvert,
+};
+
+struct VectorCastStep {
+  VectorCastOp op = VectorCastOp::kIntegerExtend;
+  DataType from; // element type consumed by this step
+  DataType to;   // element type produced by this step
+  /*! PTODSL rounding annotation value, e.g. "R"; empty when N/A. */
+  std::string rounding;
+  /*! PTODSL saturate annotation value, e.g. "NOSAT"; empty when N/A. */
+  std::string saturate;
+};
+
+struct VectorCastPlan {
+  /*! Ordered actions; an empty list is a proven identity (no conversion).
+   * A non-empty list still may be a single real conversion with empty
+   * options (that is not an identity). */
+  std::vector<VectorCastStep> steps;
+};
+
+using CastPlan = std::variant<ScalarCastPlan, VectorCastPlan>;
 
 /*! Operation-level type support for the vector arithmetic emitted
  * here. VMI vmul only supports i16/i32/f16/bf16/f32
@@ -271,32 +323,32 @@ LaneUse AnalyzeLaneUse(const PrimExpr &expr, LaneUseContext *ctx,
 LaneUse AnalyzeLaneUseMeta(const PrimExpr &expr, LaneUseContext *ctx,
                            std::string *reason);
 
-/*! Decide the conversion attributes for a value Cast. This is the single
- * admission point for every Cast on the vectorize path; Verify and Vectorize
- * both consume its result, so they cannot diverge.
+/*! Decide the conversion plan for a value Cast. This is the single admission
+ * point for every Cast on the vectorize path; Verify and Vectorize both pass
+ * an explicit CastContext and consume the same plan, so they cannot diverge.
  *
- * Same-width reinterpretation-free identity is impossible in
- * TIR Cast, so the proven set is:
- *  - integer narrowing/widening with truncating semantics: TVM integer
- *    casts truncate on narrowing (codegen_llvm CreateIntCast), PTODSL
- *    needs saturate="NOSAT" for narrowing to keep that semantics;
- *  - float widening (f16->f32, bf16->f32): exact;
- *  - the FP8 matrix: E4M3FN/E5M2 <-> f32. The conversion instructions the
- *    target exposes are FP32 <-> FP8, so a narrowing conversion carries an
- *    explicit rounding and saturation attribute (the FP8 conversion policy in
- *    the implementation file) and a half (f16/bf16) source is rejected rather
- *    than routed through float32 internally. FP8 -> FP16/BF16, FP8 <-> integer,
- *    E4M3FN <-> E5M2 and every other FP8 variant stay out of scope.
- * Everything else (float narrowing, float<->int, unusual bit widths)
- * returns nullopt -> reject.
+ * Dispatch is first scalar vs VMI, then integer vs non-integer:
+ *  - scalar: identity KeepInput; integer widening/narrowing and the newly
+ *    admitted same-width signedness change rebuild an ordinary scalar Cast;
+ *    f16/bf16 <-> f32 keep their existing scalar lowering; non-identity FP8,
+ *    float<->int and f16<->bf16 stay rejected;
+ *  - VMI integer: identity 0 steps; same-width cross-sign one
+ *    vinterpret_cast; same-sign widening one vcvt; cross-sign widening
+ *    source-sign widen then same-width vinterpret_cast; narrowing one direct
+ *    vcvt NOSAT. All 36 supported pairs are represented; no consumer-layout
+ *    feasibility is guessed here;
+ *  - VMI non-integer: a real conversion action for f16/bf16/FP8 -> f32
+ *    (empty options are not a no-op) and for f32 -> f16/bf16/FP8 with the
+ *    existing rounding/saturation policy.
  *
  * `cast` carries the backend annotations written by the frontend cast
  * helpers (rounding mode, saturation flag, stochastic rbits operand). They
  * are read here — never interpreted by the expression visitors — and an
  * attribute the selected conversion cannot honour is a rejection, not a
  * silently dropped hint. When `reason` is non-null it receives a diagnostic
- * naming the source type, target type and the offending option. */
+ * naming the category, source/target types, lanes and the offending option. */
 Optional<CastPlan> PlanValueCast(const CastNode *cast,
+                                 const CastContext &context,
                                  std::string *reason = nullptr);
 
 /*! Check whether an expression only uses nodes from the supported
