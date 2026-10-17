@@ -5069,7 +5069,15 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
       os << ", ";
     }
     os << key << "=";
-    if (op_name == "tl.vmi.vcvt" && key == "to_dtype" && op->dtype.is_int()) {
+    if (op_name == "tl.vmi.vstore" && key == "dist_mode") {
+      // TileLang uses "dintlv" for two-input stores; PTODSL uses "intlv".
+      // Load operations keep "dintlv". Map the store mode only at emission;
+      // tuple recognition above uses the original annotation.
+      const auto *mode = value.as<StringImmNode>();
+      ICHECK(mode != nullptr) << "tl.vmi.vstore dist_mode must be a string";
+      os << "\"" << (mode->value == "dintlv" ? "intlv" : mode->value) << "\"";
+    } else if (op_name == "tl.vmi.vcvt" && key == "to_dtype" &&
+               op->dtype.is_int()) {
       os << PtoSignedIntegerTypeName(op->dtype.element_of());
     } else if (op_name == "tl.vmi.vload" && key == "size" &&
                op->dtype.element_of().is_float4_e2m1fn()) {

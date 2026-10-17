@@ -169,9 +169,34 @@ def _require_compatible_mask(mask, lanes: int, *, context: str):
     return mask
 
 
+def _access_ptr_base_load(value):
+    """Return the immediate BufferLoad behind a frontend ``tl.access_ptr`` call.
+
+    This is a local type recovery for an explicit pointer expression, not
+    general pointer provenance analysis: only the call's own base argument
+    (through a direct frontend ``Bind`` alias) is inspected.
+    """
+    if isinstance(value, tirx.Var):
+        from tilelang.language.frame import has_let_value, get_let_value
+
+        if has_let_value(value):
+            bound = get_let_value(value)
+            if bound is not None and not isinstance(bound, tirx.Var):
+                return _access_ptr_base_load(bound)
+        return None
+    if isinstance(value, tirx.Call):
+        op = value.op
+        if getattr(op, "name", None) == "tl.access_ptr" and value.args and isinstance(value.args[0], BufferLoad):
+            return value.args[0]
+    return None
+
+
 def _require_ub_address(value, *, context: str):
     buffer = None
-    if isinstance(value, (BufferLoad, BufferRegion)):
+    base_load = _access_ptr_base_load(value)
+    if base_load is not None:
+        buffer = base_load.buffer
+    elif isinstance(value, (BufferLoad, BufferRegion)):
         buffer = value.buffer
     elif isinstance(value, Buffer):
         buffer = value
@@ -185,6 +210,9 @@ def _require_ub_address(value, *, context: str):
 
 
 def _address_element_dtype(value):
+    base_load = _access_ptr_base_load(value)
+    if base_load is not None:
+        return _dtype(base_load.buffer.dtype)
     if isinstance(value, BufferLoad):
         return _dtype(value.buffer.dtype)
     if isinstance(value, BufferRegion):
@@ -270,7 +298,6 @@ def _validate_pto_load_modes(
     group,
     stride,
     block_stride,
-    repeat_stride,
     allow_group_brc: bool,
     allowed_dist_modes,
 ):
@@ -281,17 +308,15 @@ def _validate_pto_load_modes(
     if group is not None:
         if dist_mode is not None and (not allow_group_brc or dist_mode != "brc"):
             raise TypeError(f"{context} does not allow dist_mode together with group")
-        if block_stride is not None or repeat_stride is not None:
+        if block_stride is not None:
             raise TypeError(f"{context} does not allow block_stride together with group")
         if stride is None:
             raise TypeError(f"{context} with group=... requires stride")
         return
 
-    if block_stride is not None or repeat_stride is not None:
+    if block_stride is not None:
         if dist_mode is not None:
             raise TypeError(f"{context} does not allow dist_mode together with block_stride")
-        if block_stride is None or repeat_stride is None:
-            raise TypeError(f"{context} requires block_stride and repeat_stride together")
         if stride is not None:
             raise TypeError(f"{context} does not allow stride together with block_stride")
         return
@@ -313,32 +338,211 @@ def _looks_like_mask(value) -> bool:
         return False
 
 
-def _resolve_ptr_and_offset(source, offset=None, *, access_type: str, extent=None):
+def _is_unit_stride_1d(buffer) -> bool:
+    if len(buffer.shape) != 1:
+        return False
+    if buffer.strides:
+        return len(buffer.strides) == 1 and _constant_int(buffer.strides[0]) == 1
+    return True
+
+
+def _tight_buffer_span(buffer):
+    """Return ``prod(shape)`` when *buffer* is tightly packed, else ``None``.
+
+    A whole-buffer descriptor is only sound when the logical buffer covers one
+    contiguous physical span.  Explicit strides must equal the row-major
+    strides; default (empty) strides are row-major by construction.
+    """
+    ndim = len(buffer.shape)
+    if ndim == 0:
+        return None
+    if buffer.strides:
+        if len(buffer.strides) != ndim:
+            return None
+        from tvm import arith
+
+        analyzer = arith.Analyzer()
+        expected = 1
+        for dim in range(ndim - 1, -1, -1):
+            if not analyzer.can_prove_equal(buffer.strides[dim], expected):
+                return None
+            expected = expected * buffer.shape[dim]
+    span = 1
+    for dim in buffer.shape:
+        span = span * dim
+    return span
+
+
+def _source_relative_offset(source):
+    """Element offset of *source* relative to its buffer's logical origin.
+
+    ``Buffer.offset_of`` already folds strides and ``elem_offset``; the origin
+    offset (which is exactly ``elem_offset``) is subtracted so the result can
+    be added to an ``access_ptr(buffer, ...)`` whose lowering adds
+    ``elem_offset`` once.
+    """
+    if isinstance(source, BufferLoad):
+        buffer = source.buffer
+        indices = list(source.indices)
+    elif isinstance(source, BufferRegion):
+        buffer = source.buffer
+        indices = [region.min for region in source.region]
+    elif isinstance(source, Buffer):
+        return _zero_offset()
+    else:
+        return None
+    if not buffer.shape or len(indices) != len(buffer.shape):
+        return None
+    source_offsets = buffer.offset_of(indices)
+    origin_offsets = buffer.offset_of([0] * len(buffer.shape))
+    # A single flattened index is the only form whose linear address this
+    # frontend contract can relate to one descriptor.  Multi-address /
+    # axis-separator buffers are not proven linear and keep the existing
+    # boundary instead of being silently reduced to offsets[0].
+    if len(source_offsets) != 1 or len(origin_offsets) != 1:
+        return None
+    return source_offsets[0] - origin_offsets[0]
+
+
+def _whole_buffer_plan(source, *, fallback_extent):
+    """Declare the whole known tight buffer and keep the relative origin offset.
+
+    Used when a group/block stride is dynamic (or a static negative stride has
+    no directly constructible low address).  When the buffer is not provably
+    tight (view/padding/strides), this returns the caller's fallback extent
+    beginning at the source origin: that is only the pre-existing boundary and
+    is not claimed as a complete conservative footprint.
+    """
+    buffer = source if isinstance(source, Buffer) else source.buffer
+    span = _tight_buffer_span(buffer)
+    relative = _source_relative_offset(source)
+    if span is None or relative is None:
+        return fallback_extent, None, None
+    return span, buffer, relative
+
+
+def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem_dtype):
+    """May-access span of an equal-distance group access (C.2/C.3.1).
+
+    The first group starts at the original access address ``A``.  For stride
+    ``S`` and physical group width ``W`` the contiguous envelope is
+    ``[A + min(0,(G-1)*S), A + max(0,(G-1)*S) + W)``.  A negative static
+    stride on a 1-D unit-stride buffer relocates the descriptor to the lowest
+    address and compensates with the VMI instruction offset.
+
+    A group load is unmasked and therefore reads whole physical vectors: when
+    the logical per-group width ``N/G`` is not a multiple of the physical VL,
+    the last chunk still reads a full VL (e.g. f32 G=1/N=80 lowers to two
+    full vlds covering 128 address elements).  A group store keeps the logical
+    width because the backend's generated tail mask bounds the writes; do not
+    copy the load rounding onto stores.
+    """
+    group_const = _constant_int(group)
+    if group_const is None or group_const <= 0:
+        return _whole_buffer_plan(source, fallback_extent=lanes)
+    # Slot (one result/input element per group) and group broadcast read or
+    # write exactly one address element per group.  Ordinary groups cover
+    # ceil(N/G) elements; the ceiling keeps a non-divisible shape conservative.
+    if dist_mode == "brc" or lanes <= group_const:
+        per_group = 1
+    else:
+        per_group = (lanes + group_const - 1) // group_const
+        bits = int(getattr(elem_dtype, "bits", 0) or 0)
+        if is_load and bits > 0:
+            vector_elements = max(1, 2048 // bits)
+            per_group = (per_group + vector_elements - 1) // vector_elements * vector_elements
+    stride_const = _constant_int(stride)
+    if stride_const is None:
+        return _whole_buffer_plan(source, fallback_extent=lanes)
+    span = (group_const - 1) * stride_const
+    low = min(0, span)
+    high = max(0, span) + per_group
+    extent = high - low
+    if low == 0:
+        return extent, None, None
+    if isinstance(source, BufferLoad) and len(source.indices) == 1 and _is_unit_stride_1d(source.buffer):
+        shifted = tirx.BufferLoad(source.buffer, [source.indices[0] + low])
+        return extent, shifted, -low
+    return _whole_buffer_plan(source, fallback_extent=lanes)
+
+
+def _block_access_plan(source, *, lanes, elem_dtype, block_stride):
+    """May-access span of a block-stride access (C.3.2).
+
+    ``block_stride`` is measured in 32-byte blocks.  A full physical vector
+    covers eight blocks; physical chunks beyond one vector start at the next
+    block group, and the tail chunk of a masked store conservatively covers
+    its whole block group as well.
+    """
+    bits = int(getattr(elem_dtype, "bits", 0) or 0)
+    if bits <= 0:
+        return lanes, None, None
+    elements_per_block = max(1, 256 // bits)
+    vector_elements = max(1, 2048 // bits)
+    chunks = (lanes + vector_elements - 1) // vector_elements
+    blocks = chunks * max(1, vector_elements // elements_per_block)
+    block_const = _constant_int(block_stride)
+    if block_const is None or block_const < 0:
+        # A dynamic control word (and the i16 control-word encoding) has no
+        # statically provable span; declare the whole known tight buffer.
+        return _whole_buffer_plan(source, fallback_extent=lanes)
+    extent = (blocks - 1) * block_const * elements_per_block + elements_per_block
+    return extent, None, None
+
+
+def _vmi_access_plan(source, *, lanes, elem_dtype, dist_mode, group, stride, block_stride, is_load):
+    """Compute (descriptor extent, descriptor base, instruction offset).
+
+    ``descriptor base`` is ``None`` when the original source is already the
+    right ``access_ptr`` base.  The instruction offset is ``None`` for zero.
+    Only buffer sources are analysed; explicit pointers keep their caller
+    declared ``ptr + offset`` ABI untouched.
+    """
+    if not isinstance(source, (BufferLoad, Buffer, BufferRegion)):
+        return None, None, None
+    if dist_mode == "dintlv":
+        # Two interleaved inputs/outputs: the complete 2*N span, regardless of
+        # the (ineffective) store mask.
+        return 2 * lanes, None, None
+    if group is not None:
+        return _group_access_plan(
+            source,
+            lanes=lanes,
+            group=group,
+            stride=stride,
+            dist_mode=dist_mode,
+            is_load=is_load,
+            elem_dtype=elem_dtype,
+        )
+    if block_stride is not None:
+        return _block_access_plan(source, lanes=lanes, elem_dtype=elem_dtype, block_stride=block_stride)
+    if str(elem_dtype) == "float4_e2m1fn":
+        # Genuine FP4 descriptors stay in logical FP4 element units;
+        # RewriteFp4ToFp4x2 performs the single physical packing.
+        return lanes, None, None
+    if dist_mode == "brc":
+        # An ordinary broadcast reads one source element; keeping the old
+        # conservative `size` declaration is allowed and does not change the
+        # instruction semantics.
+        return lanes, None, None
+    if is_load:
+        bits = int(getattr(elem_dtype, "bits", 0) or 0)
+        if bits <= 0:
+            return lanes, None, None
+        vector_elements = max(1, 2048 // bits)
+        # An unmasked load reads whole physical vectors: cover the tail chunk.
+        return (lanes + vector_elements - 1) // vector_elements * vector_elements, None, None
+    return lanes, None, None
+
+
+def _resolve_ptr_and_offset(source, offset=None, *, access_type: str, extent=None, descriptor=None, instruction_offset=None):
     """Normalize VMI address syntax into PTODSL's explicit ptr+offset ABI."""
     if isinstance(source, (BufferLoad, Buffer, BufferRegion)) and offset is not None:
         raise TypeError("T.vmi buffer addresses do not accept an offset; express the offset in the buffer index")
-    if isinstance(source, BufferLoad):
-        # Keep the linear element offset outside access_ptr.  In particular,
-        # FP4 callers convert this logical offset to f4e2m1x2 units before
-        # PTO emission; leaving it embedded in access_ptr would make PTO
-        # interpret it as an already-packed offset.
-        strides = source.buffer.strides
-        if len(strides) != len(source.indices):
-            strides = []
-            for index in range(len(source.indices)):
-                stride = 1
-                for extent_dim in source.buffer.shape[index + 1 :]:
-                    stride = stride * extent_dim
-                strides.append(stride)
-        linear_offset = None
-        for index, stride in zip(source.indices, strides):
-            term = index * stride
-            linear_offset = term if linear_offset is None else linear_offset + term
-        ptr = access_ptr(source.buffer, access_type, extent=extent, offset=0)
-        return ptr, linear_offset if linear_offset is not None else _zero_offset()
-    if isinstance(source, (Buffer, BufferRegion)):
-        ptr = access_ptr(source, access_type, extent=extent, offset=0)
-        return ptr, _zero_offset()
+    base = descriptor if descriptor is not None else source
+    if isinstance(base, (BufferLoad, Buffer, BufferRegion)):
+        ptr = access_ptr(base, access_type, extent=extent, offset=0)
+        return ptr, instruction_offset if instruction_offset is not None else _zero_offset()
     if offset is None:
         return source, _zero_offset()
     return source, offset
@@ -442,10 +646,8 @@ def vload(
     offset=None,
     *,
     size,
-    to_dtype=None,
     stride=None,
     block_stride=None,
-    repeat_stride=None,
     dist_mode=None,
     group=None,
     loc=None,
@@ -467,51 +669,46 @@ def vload(
         group=group,
         stride=stride,
         block_stride=block_stride,
-        repeat_stride=repeat_stride,
         allow_group_brc=True,
-        allowed_dist_modes={None, "continuous", "dintlv", "unpack", "brc"},
+        allowed_dist_modes={None, "continuous", "dintlv", "brc"},
     )
     if size is None:
         raise TypeError("T.vmi.vload(...) requires size")
-    if to_dtype is not None and dist_mode != "unpack":
-        raise TypeError('T.vmi.vload(...) accepts to_dtype only when dist_mode="unpack"')
     source_elem = _require_address_element_dtype(source, context="T.vmi.vload(...)")
-    # Keep si*/ui* spelling for PTODSL annotations. Unpack vload itself is not
-    # legalized on the current VPTO path; this preserves a correct annotation
-    # if enabled later.
-    to_dtype_annot = None
     is_packed_fp4 = str(source_elem) == "float4_e2m1fn"
     if is_packed_fp4:
         if size % 2:
             raise ValueError("T.vmi.vload(...) requires an even FP4 lane count for packed FP4 storage")
-        if to_dtype is not None or dist_mode == "unpack":
-            raise TypeError("T.vmi.vload(...) does not unpack or convert packed FP4 source vectors")
         if dist_mode == "dintlv":
             raise TypeError('T.vmi.vload(...) does not support packed FP4 with dist_mode="dintlv"')
-        if group is not None or block_stride is not None or repeat_stride is not None or dist_mode == "brc":
+        if group is not None or block_stride is not None or dist_mode == "brc":
             raise TypeError("T.vmi.vload(...) only supports contiguous packed FP4 loads")
-    if dist_mode == "unpack":
-        if to_dtype is None:
-            raise TypeError('T.vmi.vload(...) requires to_dtype when dist_mode="unpack"')
-        to_dtype_annot = _pto_to_dtype_annotation(to_dtype)
-        to_dtype = _scalar_dtype(to_dtype, context="T.vmi.vload(..., to_dtype=...)")
-        if getattr(to_dtype, "bits", None) != 2 * getattr(source_elem, "bits", None):
-            raise TypeError("T.vmi.vload(...) unpack must widen by exactly one step")
 
-    result_dtype = _vector_result_dtype(
+    result_dtype = _vector_result_dtype(source, size, elem_dtype=source_elem)
+    extent, descriptor, instruction_offset = _vmi_access_plan(
         source,
-        size,
-        elem_dtype=to_dtype if to_dtype is not None else source_elem,
+        lanes=size,
+        elem_dtype=source_elem,
+        dist_mode=dist_mode,
+        group=group,
+        stride=stride,
+        block_stride=block_stride,
+        is_load=True,
     )
-    ptr, extra_offset = _resolve_ptr_and_offset(source, offset, access_type="r", extent=size)
+    ptr, extra_offset = _resolve_ptr_and_offset(
+        source,
+        offset,
+        access_type="r",
+        extent=extent,
+        descriptor=descriptor,
+        instruction_offset=instruction_offset,
+    )
     if is_packed_fp4:
         extra_offset = _pack_fp4_element_offset(extra_offset, context="T.vmi.vload(...)")
     attrs = {
         "size": size,
-        "to_dtype": to_dtype_annot,
         "stride": stride,
         "block_stride": block_stride,
-        "repeat_stride": repeat_stride,
         "dist_mode": dist_mode,
         "group": group,
         "loc": loc,
@@ -532,10 +729,8 @@ def vstore(
     *,
     stride=None,
     block_stride=None,
-    repeat_stride=None,
     dist_mode=None,
     group=None,
-    pmode=None,
     loc=None,
     ip=None,
 ):
@@ -549,7 +744,6 @@ def vstore(
         group=group,
         stride=stride,
         block_stride=block_stride,
-        repeat_stride=repeat_stride,
         allow_group_brc=False,
         allowed_dist_modes={None, "continuous", "dintlv"},
     )
@@ -567,32 +761,51 @@ def vstore(
     elif isinstance(values, VmiPair) or _is_sequence(values):
         raise TypeError('T.vmi.vstore(...) expects a single VMI vector unless dist_mode="dintlv"')
 
-    store_extent = _lanes_of(values[0]) if _is_sequence(values) else _lanes_of(values)
-    ptr, extra_offset = _resolve_ptr_and_offset(destination, offset, access_type="w", extent=store_extent)
+    store_lanes = _lanes_of(values[0]) if _is_sequence(values) else _lanes_of(values)
     value_args = list(values) if _is_sequence(values) else [values]
     if value_dtype is None:
         value_dtype = _element_dtype_of(values[0]) if _is_sequence(values) else _element_dtype_of(values)
     if str(value_dtype) == "float4_e2m1fn":
-        if store_extent % 2:
+        if store_lanes % 2:
             raise ValueError("T.vmi.vstore(...) requires an even FP4 lane count for packed FP4 storage")
         if dist_mode == "dintlv":
             raise TypeError('T.vmi.vstore(...) does not support packed FP4 with dist_mode="dintlv"')
-        if group is not None or block_stride is not None or repeat_stride is not None:
+        if group is not None or block_stride is not None:
             raise TypeError("T.vmi.vstore(...) only supports contiguous packed FP4 stores")
+    elif mask is not None:
+        mask = _require_mask(mask, context="T.vmi.vstore(...)")
+
+    extent, descriptor, instruction_offset = _vmi_access_plan(
+        destination,
+        lanes=store_lanes,
+        elem_dtype=value_dtype,
+        dist_mode=dist_mode,
+        group=group,
+        stride=stride,
+        block_stride=block_stride,
+        is_load=False,
+    )
+    ptr, extra_offset = _resolve_ptr_and_offset(
+        destination,
+        offset,
+        access_type="w",
+        extent=extent,
+        descriptor=descriptor,
+        instruction_offset=instruction_offset,
+    )
+    if str(value_dtype) == "float4_e2m1fn":
         extra_offset = _pack_fp4_element_offset(extra_offset, context="T.vmi.vstore(...)")
         if mask is not None:
             mask = _require_mask(mask, context="T.vmi.vstore(...) of FP4")
             if not str(_dtype_of(mask)).startswith("bool"):
                 raise TypeError("T.vmi.vstore(...) of FP4 expects a VMI mask operand")
-            physical_lanes = store_extent // 2
+            physical_lanes = store_lanes // 2
             if _lanes_of(mask) != physical_lanes:
                 raise TypeError(
                     "T.vmi.vstore(...) of FP4 requires a physical FP4x2 mask with "
-                    f"half as many lanes as its {store_extent}-lane logical FP4 value "
+                    f"half as many lanes as its {store_lanes}-lane logical FP4 value "
                     f"(expected {physical_lanes}, got {_lanes_of(mask)})"
                 )
-    elif mask is not None:
-        mask = _require_mask(mask, context="T.vmi.vstore(...)")
     return _call_vmi(
         "vstore",
         "void",
@@ -602,10 +815,8 @@ def vstore(
         mask,
         stride=stride,
         block_stride=block_stride,
-        repeat_stride=repeat_stride,
         dist_mode=dist_mode,
         group=group,
-        pmode=pmode,
         loc=loc,
         ip=ip,
     )
@@ -832,12 +1043,14 @@ def vcadd(source, mask, *, group=None, pmode=None, reassoc=None, loc=None, ip=No
     context = "T.vmi.vcadd(...)"
     _reject_packed_fp4(source, context=context)
     elem_dtype = _element_dtype_of(source)
-    if reassoc is None and str(elem_dtype).startswith(("float", "bfloat")):
-        raise TypeError(
-            f"{context} on floating-point vectors requires an explicit reassoc argument; spell out reassoc=True or reassoc=False"
-        )
     if reassoc is not None and not isinstance(reassoc, bool):
         raise TypeError(f"{context} requires reassoc to be the Python boolean True or False; received {reassoc!r}")
+    if reassoc is False:
+        raise TypeError(
+            f"{context} does not support reassoc=False: the PTO backend accepts only reassoc=True (integer vectors may omit reassoc)"
+        )
+    if reassoc is None and str(elem_dtype).startswith(("float", "bfloat")):
+        raise TypeError(f"{context} on floating-point vectors requires an explicit reassoc=True argument; the PTO backend rejects omission")
     lanes = 1 if group is None else _normalize_lanes(group, context="T.vmi.vcadd(..., group=...)")
     if group is not None and _lanes_of(source) % group != 0:
         raise ValueError(f"{context} requires source lanes to be divisible by group")
