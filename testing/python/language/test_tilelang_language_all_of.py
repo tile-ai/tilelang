@@ -77,7 +77,7 @@ def test_all_of_global_uniform_range_uses_warp():
 @tilelang.testing.requires_rocm
 def test_all_of_shared_scope_rocm():
     size, threads = 134, 64
-    kernel = tilelang.compile(shared_all_of(size, threads), target="hip", out_idx=-1)
+    kernel = tilelang.compile(shared_all_of(size, threads), out_idx=-1)
     for false_index in (None, size - 1):
         source = torch.ones(size, dtype=torch.int32, device="cuda")
         if false_index is not None:

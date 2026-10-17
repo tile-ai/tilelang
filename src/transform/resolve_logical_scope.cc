@@ -154,7 +154,7 @@ private:
   }
 
   bool IsWarpUniformAccess(const CallNode *logical_call) const {
-    ICHECK(logical_call->args.size() == 2U || logical_call->args.size() == 3U);
+    ICHECK_EQ(logical_call->args.size(), 3U);
     const auto *access_ptr = logical_call->args[0].as<CallNode>();
     ICHECK(access_ptr != nullptr);
     ICHECK(access_ptr->op.same_as(tl::access_ptr()));
@@ -210,23 +210,17 @@ private:
       return visited;
     }
 
-    ICHECK(call->args.size() == 2U || call->args.size() == 3U);
-    if (call->args.size() == 3U) {
-      const auto *scope = call->args[2].as<StringImmNode>();
-      ICHECK(scope != nullptr);
-      if (scope->value != "auto") {
-        return visited;
-      }
+    ICHECK_EQ(call->args.size(), 3U);
+    const auto *scope = call->args[2].as<StringImmNode>();
+    ICHECK(scope != nullptr);
+    if (scope->value != "auto") {
+      return visited;
     }
 
     Array<PrimExpr> args = call->args;
     const bool use_warp =
         is_warp_uniform_ && HasFullWarps() && IsWarpUniformAccess(call);
-    if (args.size() == 2U) {
-      args.push_back(StringImm(use_warp ? "warp" : "thread"));
-    } else {
-      args.Set(2, StringImm(use_warp ? "warp" : "thread"));
-    }
+    args.Set(2, StringImm(use_warp ? "warp" : "thread"));
     return Call(call->dtype, call->op, args, call->span);
   }
 

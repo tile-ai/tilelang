@@ -952,7 +952,6 @@ template <typename T> TL_DEVICE bool Any(T *a, int size) {
   return false;
 }
 
-// AnyWarp
 template <typename T> TL_DEVICE bool AnyWarp(T *a, int size) {
   unsigned int lane_id;
   asm volatile("mov.u32 %0, %laneid;" : "=r"(lane_id));
@@ -974,7 +973,6 @@ template <typename T> TL_DEVICE bool All(T *a, int size) {
   return true;
 }
 
-// AllWarp
 template <typename T> TL_DEVICE bool AllWarp(T *a, int size) {
   unsigned int lane_id;
   asm volatile("mov.u32 %0, %laneid;" : "=r"(lane_id));
