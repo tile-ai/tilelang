@@ -325,85 +325,7 @@ def _merged_shared_dyn_sizes(func):
     return [int(size) for size in re.findall(r'alloc_buffer\(\((\d+),\), "uint8", scope="shared.dyn"\)', mod.script())]
 
 
-def test_wgmma_descriptor_reused_after_full_wait_keeps_operand_live():
-    # One descriptor initialization feeds two WGMMA batches with a full wait in between. The
-    # second batch reads B0 again, so a buffer written while it is in flight must not be merged
-    # onto B0's storage.
-    from tvm.script import tirx as T
-
-    op = tvm.ir.Op.get
-
-    @T.prim_func(private=True)
-    def func():
-        T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
-        T.launch_thread("threadIdx.y", 1)
-        T.launch_thread("threadIdx.z", 1)
-        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
-        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
-        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-        T.evaluate(
-            T.call_intrin(
-                "handle",
-                op("tl.initialize_wgmma_descriptor"),
-                desc[0],
-                T.tvm_access_ptr(T.type_annotation("uint8"), B0.data, 0, 4096, 1),
-                1,
-                1,
-                64,
-            )
-        )
-        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
-        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
-        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
-        Tmp[tx] = T.uint8(1)
-        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
-
-    # Disjoint storage is the sum of both buffers; merged storage would be 4096.
-    assert _merged_shared_dyn_sizes(func) == [8192]
-
-
-def test_wgmma_wait_in_sibling_branch_does_not_retire_other_branch_operand():
-    # The wait in the else branch runs only when the then branch did not, so B0 (issued in the
-    # then branch) is still in flight when Tmp is written after the if.
-    from tvm.script import tirx as T
-
-    op = tvm.ir.Op.get
-
-    @T.prim_func(private=True)
-    def func():
-        T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
-        T.launch_thread("threadIdx.y", 1)
-        T.launch_thread("threadIdx.z", 1)
-        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
-        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
-        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
-        if tx < 64:
-            T.evaluate(
-                T.call_intrin(
-                    "handle",
-                    op("tl.initialize_wgmma_descriptor"),
-                    desc[0],
-                    T.tvm_access_ptr(T.type_annotation("uint8"), B0.data, 0, 4096, 1),
-                    1,
-                    1,
-                    64,
-                )
-            )
-            T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
-        else:
-            T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
-        Tmp[tx] = T.uint8(1)
-        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
-
-    assert _merged_shared_dyn_sizes(func) == [8192]
-
-
-def test_wgmma_descriptor_initialized_in_both_branches_keeps_both_operands_live():
-    # The descriptor addresses B0 on one path and B1 on the other. The wait inside the then
-    # branch retires only B0 there, and the WGMMA issued after the join reads whichever buffer the
-    # descriptor holds, so neither may share storage with Tmp.
+def _wgmma_ir_helpers():
     from tvm.script import tirx as T
 
     op = tvm.ir.Op.get
@@ -421,6 +343,71 @@ def test_wgmma_descriptor_initialized_in_both_branches_keeps_both_operands_live(
             )
         )
 
+    def issue(desc):
+        return T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+
+    def wait():
+        return T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+
+    return T, init, issue, wait
+
+
+# Each builder returns hand-written IR and the shared-memory bytes expected when every buffer
+# the in-flight WGMMA may still read is kept apart from `Tmp`, which is written while it runs.
+def _ir_descriptor_reused_after_full_wait():
+    # One initialization feeds two batches with a full wait in between; the second batch
+    # reads B0 again.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        init(desc, B0)
+        issue(desc)
+        wait()
+        issue(desc)
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_wait_in_sibling_branch():
+    # The else branch waits, but only the then branch issued the WGMMA, so B0 is still in
+    # flight after the if.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            init(desc, B0)
+            issue(desc)
+        else:
+            wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_descriptor_initialized_on_two_paths():
+    # The descriptor addresses B0 on one path and B1 on the other; the WGMMA issued after the
+    # join reads whichever it holds.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
     @T.prim_func(private=True)
     def func():
         T.launch_thread("blockIdx.x", 1)
@@ -433,12 +420,22 @@ def test_wgmma_descriptor_initialized_in_both_branches_keeps_both_operands_live(
         desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
         if tx < 64:
             init(desc, B0)
-            T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
-            T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+            issue(desc)
+            wait()
         else:
             init(desc, B1)
-        T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+        issue(desc)
         Tmp[tx] = T.uint8(1)
-        T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+        wait()
 
-    assert _merged_shared_dyn_sizes(func) == [12288]
+    return func, 3 * 4096
+
+
+@pytest.mark.parametrize(
+    "build",
+    [_ir_descriptor_reused_after_full_wait, _ir_wait_in_sibling_branch, _ir_descriptor_initialized_on_two_paths],
+    ids=["descriptor_reused", "sibling_branch", "two_paths"],
+)
+def test_wgmma_operands_stay_live_until_full_wait(build):
+    func, expected_bytes = build()
+    assert _merged_shared_dyn_sizes(func) == [expected_bytes]
