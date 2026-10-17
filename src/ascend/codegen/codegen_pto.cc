@@ -2142,6 +2142,7 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
   mixed_entry_snapshot_ids_.clear();
   loop_condition_snapshot_ids_.clear();
   simd_pair_vars_.clear();
+  value_defs_.clear();
   gemm_emit_contexts_.clear();
   gemm_emit_context_by_call_.clear();
   gemm_zero_addr_emitted_ = false;
@@ -2706,6 +2707,7 @@ std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition) {
          (dtype.is_bool() || dtype.is_int() || dtype.is_uint()))
       << "PTO control-flow condition must be a scalar integer predicate, got "
       << dtype;
+  CheckPtoScalarOperand_(condition, "PTO control-flow condition");
   std::string value = RemoveOutermostParentheses(PrintExpr_(condition));
   // TIR follows C truthiness for all integer conditions.  Always compare at
   // the use site because a bool-typed expression may be materialized in an
@@ -2757,20 +2759,24 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
 
 std::string CodeGenTileLangPTO::LocalVarStoreValue(const PrimExpr &value,
                                                    DataType dtype) {
-  std::string value_expr = RemoveOutermostParentheses(PrintExpr_(value));
   if (dtype.is_handle()) {
-    return value_expr;
+    return RemoveOutermostParentheses(PrintExpr_(value));
   }
   bool is_literal =
       value.as<IntImmNode>() != nullptr || value.as<FloatImmNode>() != nullptr;
   if (dtype.is_scalar() && is_literal) {
-    return "pto.const(" + value_expr + ", dtype=" + DataTypeName(dtype) + ")";
+    return "pto.const(" + RemoveOutermostParentheses(PrintExpr_(value)) +
+           ", dtype=" + DataTypeName(dtype) + ")";
   }
   if (dtype.is_bool() || dtype.bits() == 1 || dtype.is_int() ||
       dtype.is_uint()) {
-    return ScalarCastExpr(value_expr, dtype, "PTO local.var store");
+    // Check provenance before printing/adapting the scalar (covers bool and
+    // integer local.var stores; other local.var branches keep their route).
+    CheckPtoScalarOperand_(value, "PTO local.var integer store");
+    return ScalarCastExpr(RemoveOutermostParentheses(PrintExpr_(value)), dtype,
+                          "PTO local.var store");
   }
-  return value_expr;
+  return RemoveOutermostParentheses(PrintExpr_(value));
 }
 
 void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
@@ -3497,6 +3503,7 @@ std::string CodeGenTileLangPTO::GetLocalByteAddrExpr(
            ", dtype=pto.int64)";
   }
 
+  CheckPtoScalarOperand_(elem_index, context.c_str());
   std::string index_expr = RemoveOutermostParentheses(PrintExpr_(elem_index));
   std::string coerced = ScalarCastExpr(index_expr, DataType::Int(64), context);
   if (elem_bytes == 1) {
@@ -4895,6 +4902,513 @@ static bool IsVmiVcvtFromFp4(const CallNode *op) {
          op->args[0].dtype().element_of().is_float4_e2m1fn();
 }
 
+static std::string VmiDtypeAnnotation(DataType element) {
+  if (element.is_int()) {
+    return PtoSignedIntegerTypeName(element);
+  }
+  if (element.is_uint()) {
+    return "pto.ui" + std::to_string(element.bits());
+  }
+  return DataTypeName(element);
+}
+
+const char *CodeGenTileLangPTO::PtoValueKindName(PtoValueKind kind) {
+  switch (kind) {
+  case PtoValueKind::kScalar:
+    return "scalar";
+  case PtoValueKind::kVmiData:
+    return "VMI data";
+  case PtoValueKind::kVmiMask:
+    return "VMI mask";
+  case PtoValueKind::kVmiPair:
+    return "VMI pair";
+  case PtoValueKind::kVoid:
+    return "void";
+  case PtoValueKind::kHandle:
+    return "handle";
+  case PtoValueKind::kOtherVector:
+    return "other vector";
+  case PtoValueKind::kUnknown:
+    return "unknown";
+  }
+  return "unknown";
+}
+
+struct CodeGenTileLangPTO::PtoValueQueryContext {
+  // Query-local lexical overrides (Let bindings seen by the active query).
+  std::unordered_map<const VarNode *, PrimExpr> local_defs;
+  // Vars on the current definition chain; re-entering one is a cycle.
+  std::unordered_set<const VarNode *> active;
+  // Query-local memo for expression/definition classification.  Node identity
+  // is stable, but a result computed under an active Let override is only
+  // valid for that lexical scope, so entries carry the scope generation.
+  std::unordered_map<const Object *,
+                     std::pair<size_t, CodeGenTileLangPTO::PtoValueKind>>
+      memo;
+  size_t scope_generation{0};
+};
+
+// Classifies each immediate semantic operand of `expr` exactly once without
+// descending into operand subtrees: ExprVisitor's per-node dispatch walks one
+// level, and each child visit is intercepted below and handed to the full
+// (memoized) classification.  This keeps ordinary scalar expressions linear
+// even for deeply nested or shared DAG-shaped terms.
+struct CodeGenTileLangPTO::PtoOperandScanner final : public tirx::ExprVisitor {
+  PtoOperandScanner(const CodeGenTileLangPTO *codegen,
+                    PtoValueQueryContext *context)
+      : codegen_(codegen), context_(context) {}
+
+  bool has_unknown_origin{false};
+
+  void VisitExpr(const PrimExpr &expr) final {
+    if (!expr.defined() || has_unknown_origin) {
+      return;
+    }
+    PtoValueKind kind = codegen_->ClassifyPtoValue_(expr, context_);
+    has_unknown_origin =
+        kind == PtoValueKind::kVmiData || kind == PtoValueKind::kVmiMask ||
+        kind == PtoValueKind::kVmiPair || kind == PtoValueKind::kVoid ||
+        kind == PtoValueKind::kUnknown;
+  }
+
+  // Walks the immediate semantic operands of the root expression.  The
+  // qualified base call bypasses this class's VisitExpr override for the root
+  // only; the per-node handlers reach the children through the virtual
+  // VisitExpr above.
+  void ScanImmediateOperands(const PrimExpr &expr) {
+    tirx::ExprVisitor::VisitExpr(expr);
+  }
+
+private:
+  const CodeGenTileLangPTO *codegen_;
+  PtoValueQueryContext *context_;
+};
+
+namespace {
+
+bool IsVmiOpName(const std::string &name) {
+  return name.rfind("tl.vmi.", 0) == 0;
+}
+
+} // namespace
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyPtoValue_(const PrimExpr &expr) const {
+  PtoValueQueryContext context;
+  return ClassifyPtoValue_(expr, &context);
+}
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyPtoValue_(const PrimExpr &expr,
+                                      PtoValueQueryContext *context) const {
+  if (!expr.defined() || context == nullptr) {
+    return PtoValueKind::kUnknown;
+  }
+  const Object *node = expr.get();
+  auto memo_it = context->memo.find(node);
+  if (memo_it != context->memo.end() &&
+      memo_it->second.first == context->scope_generation) {
+    return memo_it->second.second;
+  }
+  PtoValueKind kind = ClassifyPtoValueUncached_(expr, context);
+  context->memo[node] = std::make_pair(context->scope_generation, kind);
+  return kind;
+}
+
+CodeGenTileLangPTO::PtoValueKind CodeGenTileLangPTO::ClassifyPtoValueUncached_(
+    const PrimExpr &expr, PtoValueQueryContext *context) const {
+  if (const auto *var = expr.as<VarNode>()) {
+    const PrimExpr *definition = nullptr;
+    PrimExpr stored;
+    auto local_it = context->local_defs.find(var);
+    if (local_it != context->local_defs.end()) {
+      stored = local_it->second;
+      definition = &stored;
+    } else {
+      auto it = value_defs_.find(var);
+      if (it != value_defs_.end()) {
+        stored = it->second;
+        definition = &stored;
+      }
+    }
+    if (definition != nullptr) {
+      ICHECK(context->active.insert(var).second)
+          << "PTO SSA definition cycle detected for variable "
+          << var->name_hint;
+      PtoValueKind kind = ClassifyPtoValue_(*definition, context);
+      context->active.erase(var);
+      return kind;
+    }
+    // Unbound Var: parameter/loop variable contract.
+    if (expr.dtype().is_handle()) {
+      return PtoValueKind::kHandle;
+    }
+    if (expr.dtype().is_scalar()) {
+      return PtoValueKind::kScalar;
+    }
+    return PtoValueKind::kOtherVector;
+  }
+
+  if (expr.as<IntImmNode>() != nullptr || expr.as<FloatImmNode>() != nullptr) {
+    return PtoValueKind::kScalar;
+  }
+
+  if (const auto *let = expr.as<LetNode>()) {
+    // Query-local lexical scope: bind the RHS in the local override layer and
+    // classify the body with the binding visible.  The persistent table is not
+    // modified.  The RHS is classified lazily when the body resolves the bound
+    // Var: classifying it eagerly here would traverse the same RHS a second
+    // time under the bumped scope generation and make a linear nested-Let
+    // chain exponential.  Unused bindings do not affect the body's result
+    // classification; emission still handles and validates the RHS.
+    auto previous = context->local_defs.find(let->var.get());
+    bool had_previous = previous != context->local_defs.end();
+    PrimExpr saved;
+    if (had_previous) {
+      saved = previous->second;
+    }
+    context->local_defs[let->var.get()] = let->value;
+    ++context->scope_generation;
+    PtoValueKind kind = ClassifyPtoValue_(let->body, context);
+    ++context->scope_generation;
+    if (had_previous) {
+      context->local_defs[let->var.get()] = saved;
+    } else {
+      context->local_defs.erase(let->var.get());
+    }
+    return kind;
+  }
+
+  if (const auto *cast = expr.as<CastNode>()) {
+    PtoValueKind source = ClassifyPtoValue_(cast->value, context);
+    if (cast->value.dtype() == cast->dtype) {
+      return source;
+    }
+    // Non-identity casts of VMI values require VMI conversion operations.
+    // A scalar result dtype alone does not make a VMI or unknown source
+    // a scalar value.
+    if (source == PtoValueKind::kVmiData || source == PtoValueKind::kVmiMask ||
+        source == PtoValueKind::kVmiPair || source == PtoValueKind::kVoid ||
+        source == PtoValueKind::kUnknown) {
+      return PtoValueKind::kUnknown;
+    }
+    if (expr.dtype().is_handle()) {
+      return PtoValueKind::kHandle;
+    }
+    if (expr.dtype().is_scalar()) {
+      return PtoValueKind::kScalar;
+    }
+    return PtoValueKind::kOtherVector;
+  }
+
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return ClassifyBufferLoad_(load);
+  }
+
+  if (const auto *call = expr.as<CallNode>()) {
+    auto opt_call_op = call->op.as<Op>();
+    if (opt_call_op.has_value()) {
+      const std::string name = opt_call_op.value()->name;
+      if (IsVmiOpName(name)) {
+        return ClassifyVmiCallResult_(call, context);
+      }
+      if (call->op.same_as(tirx::builtin::reinterpret())) {
+        ICHECK_EQ(call->args.size(), 1U)
+            << "tirx.reinterpret expects 1 argument (value)";
+        PtoValueKind source = ClassifyPtoValue_(call->args[0], context);
+        if (source == PtoValueKind::kVmiData) {
+          DataType source_dtype = call->args[0].dtype();
+          DataType target_dtype = expr.dtype();
+          if (source_dtype.bits() == target_dtype.bits() &&
+              source_dtype.lanes() == target_dtype.lanes()) {
+            return PtoValueKind::kVmiData;
+          }
+          return PtoValueKind::kUnknown;
+        }
+        if (source == PtoValueKind::kVmiMask ||
+            source == PtoValueKind::kVmiPair || source == PtoValueKind::kVoid ||
+            source == PtoValueKind::kUnknown) {
+          return PtoValueKind::kUnknown;
+        }
+        if (expr.dtype().is_handle()) {
+          return PtoValueKind::kHandle;
+        }
+        if (expr.dtype().is_scalar()) {
+          return PtoValueKind::kScalar;
+        }
+        return PtoValueKind::kOtherVector;
+      }
+    }
+    return ClassifyOrdinaryExpr_(expr, context);
+  }
+
+  return ClassifyOrdinaryExpr_(expr, context);
+}
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyOrdinaryExpr_(const PrimExpr &expr,
+                                          PtoValueQueryContext *context) const {
+  // Ordinary scalar expressions keep their contract unless a semantic operand
+  // carries a VMI kind or an unknown VMI origin.  Only the immediate operands
+  // are classified (once each, memoized); the query never prints or emits.
+  PtoOperandScanner scanner(this, context);
+  scanner.ScanImmediateOperands(expr);
+  if (scanner.has_unknown_origin) {
+    return PtoValueKind::kUnknown;
+  }
+  if (expr.dtype().is_handle()) {
+    return PtoValueKind::kHandle;
+  }
+  if (expr.dtype().is_scalar()) {
+    return PtoValueKind::kScalar;
+  }
+  return PtoValueKind::kOtherVector;
+}
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyBufferLoad_(const BufferLoadNode *op) const {
+  // Ordinary memory reads follow the storage contract: a scalar-valued
+  // BufferLoad is a scalar regardless of which VMI store previously wrote the
+  // address.  VMI local register slots are the only buffer reads classified as
+  // VMI data; multi-lane local.var and ordinary vectors stay on their existing
+  // register/vector routes.
+  if (IsVmiLocalRegisterBuffer(op->buffer.get())) {
+    return PtoValueKind::kVmiData;
+  }
+  if (op->dtype.is_scalar()) {
+    return PtoValueKind::kScalar;
+  }
+  return PtoValueKind::kOtherVector;
+}
+
+CodeGenTileLangPTO::PtoValueKind CodeGenTileLangPTO::ClassifyVmiCallResult_(
+    const CallNode *op, PtoValueQueryContext *context) const {
+  auto opt_call_op = op->op.as<Op>();
+  ICHECK(opt_call_op.has_value()) << "tl.vmi call has a non-Op callee";
+  const std::string name = opt_call_op.value()->name;
+  if (name == "tl.vmi.create_mask" || name == "tl.vmi.vcmp" ||
+      name == "tl.vmi.vcmps") {
+    return PtoValueKind::kVmiMask;
+  }
+  if (name == "tl.vmi.vintlv" || name == "tl.vmi.vdintlv" ||
+      name == "tl.vmi.vunzip" || name == "tl.vmi.vmull") {
+    return PtoValueKind::kVmiPair;
+  }
+  if (name == "tl.vmi.vload") {
+    // vload is data unless the explicit dist_mode=dintlv annotation selects
+    // the pair-returning form.
+    auto it = op->annotations.find("dist_mode");
+    if (it != op->annotations.end()) {
+      const auto *mode = (*it).second.as<StringImmNode>();
+      ICHECK(mode != nullptr)
+          << "tl.vmi.vload dist_mode annotation must be a string";
+      if (mode->value == "dintlv") {
+        return PtoValueKind::kVmiPair;
+      }
+    }
+    return PtoValueKind::kVmiData;
+  }
+  if (name == "tl.vmi.pair_get") {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.vmi.pair_get expects (pair, index)";
+    PtoValueKind pair_kind = ClassifyPtoValue_(op->args[0], context);
+    ICHECK(pair_kind == PtoValueKind::kVmiPair)
+        << "PTO provenance tl.vmi.pair_get source must be a VMI pair; got "
+        << PtoValueKindName(pair_kind) << " (" << op->args[0].dtype()
+        << "): " << op->args[0];
+    const auto *index = op->args[1].as<IntImmNode>();
+    ICHECK(index != nullptr && (index->value == 0 || index->value == 1))
+        << "PTO provenance tl.vmi.pair_get index must be the constant 0 or 1, "
+           "got "
+        << op->args[1];
+    return PtoValueKind::kVmiData;
+  }
+  if (name == "tl.vmi.vstore" || name == "tl.vmi.vscatter") {
+    return PtoValueKind::kVoid;
+  }
+  static const std::unordered_set<std::string> kDataOps = {
+      "tl.vmi.vci",      "tl.vmi.vbrc",
+      "tl.vmi.vzip",     "tl.vmi.vadd",
+      "tl.vmi.vsub",     "tl.vmi.vmul",
+      "tl.vmi.vdiv",     "tl.vmi.vmax",
+      "tl.vmi.vmin",     "tl.vmi.vand",
+      "tl.vmi.vor",      "tl.vmi.vxor",
+      "tl.vmi.vshl",     "tl.vmi.vshr",
+      "tl.vmi.vabs",     "tl.vmi.vneg",
+      "tl.vmi.vrelu",    "tl.vmi.vexp",
+      "tl.vmi.vln",      "tl.vmi.vsqrt",
+      "tl.vmi.vnot",     "tl.vmi.vadds",
+      "tl.vmi.vmuls",    "tl.vmi.vmaxs",
+      "tl.vmi.vmins",    "tl.vmi.vshls",
+      "tl.vmi.vshrs",    "tl.vmi.vsel",
+      "tl.vmi.vselr",    "tl.vmi.vcadd",
+      "tl.vmi.vcmax",    "tl.vmi.vcmin",
+      "tl.vmi.vcvt",     "tl.vmi.vinterpret_cast",
+      "tl.vmi.vexpdif",  "tl.vmi.vaxpy",
+      "tl.vmi.vlrelu",   "tl.vmi.vprelu",
+      "tl.vmi.vmula",    "tl.vmi.vdhist",
+      "tl.vmi.vchist",   "tl.vmi.vgather",
+      "tl.vmi.vgatherb",
+  };
+  if (kDataOps.count(name) != 0U) {
+    return PtoValueKind::kVmiData;
+  }
+  // Registered operations without an explicit contract (for example a future
+  // addition) stay unknown so consumers diagnose instead of guessing.
+  return PtoValueKind::kUnknown;
+}
+
+void CodeGenTileLangPTO::CheckPtoScalarOperand_(const PrimExpr &expr,
+                                                const char *consumer) const {
+  PtoValueKind kind = ClassifyPtoValue_(expr);
+  if (kind == PtoValueKind::kScalar) {
+    return;
+  }
+  std::ostringstream message;
+  message << consumer << " expects a scalar; got " << PtoValueKindName(kind)
+          << " (" << expr.dtype() << ", lanes=" << expr.dtype().lanes()
+          << "): " << expr;
+  if (kind == PtoValueKind::kUnknown) {
+    const auto *call = expr.as<CallNode>();
+    if (call != nullptr) {
+      auto opt_call_op = call->op.as<Op>();
+      if (opt_call_op.has_value() && IsVmiOpName(opt_call_op.value()->name)) {
+        message << "; unclassified " << opt_call_op.value()->name
+                << " result; add an explicit VMI return contract";
+      }
+    }
+  }
+  LOG(FATAL) << message.str();
+}
+
+bool CodeGenTileLangPTO::ResolvesToMutableRegisterRead(
+    const PrimExpr &expr,
+    std::unordered_map<const VarNode *, PrimExpr> *local_defs,
+    std::unordered_set<const VarNode *> *active) const {
+  if (!expr.defined() || local_defs == nullptr || active == nullptr) {
+    return false;
+  }
+  if (const auto *cast = expr.as<CastNode>()) {
+    // Same-dtype casts are transparent aliases; numeric conversions are not.
+    return cast->value.dtype() == cast->dtype &&
+           ResolvesToMutableRegisterRead(cast->value, local_defs, active);
+  }
+  if (const auto *let = expr.as<LetNode>()) {
+    auto previous = local_defs->find(let->var.get());
+    const bool had_previous = previous != local_defs->end();
+    PrimExpr saved;
+    if (had_previous) {
+      saved = previous->second;
+    }
+    (*local_defs)[let->var.get()] = let->value;
+    const bool resolves =
+        ResolvesToMutableRegisterRead(let->body, local_defs, active);
+    if (had_previous) {
+      (*local_defs)[let->var.get()] = saved;
+    } else {
+      local_defs->erase(let->var.get());
+    }
+    return resolves;
+  }
+  if (const auto *var = expr.as<VarNode>()) {
+    PrimExpr stored;
+    const PrimExpr *definition = nullptr;
+    auto local_it = local_defs->find(var);
+    if (local_it != local_defs->end()) {
+      stored = local_it->second;
+      definition = &stored;
+    } else {
+      auto it = value_defs_.find(var);
+      if (it != value_defs_.end()) {
+        stored = it->second;
+        definition = &stored;
+      }
+    }
+    if (definition == nullptr || !active->insert(var).second) {
+      return false;
+    }
+    const bool resolves =
+        ResolvesToMutableRegisterRead(*definition, local_defs, active);
+    active->erase(var);
+    return resolves;
+  }
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return ScopeOfBuffer(load->buffer.get()) == "local.var";
+  }
+  return false;
+}
+
+bool CodeGenTileLangPTO::IsMutableRegisterGroupSource(
+    const PrimExpr &source) const {
+  // Accept numeric local.var reads through Var/Let aliases and same-dtype
+  // casts. Keep their classification unchanged: other-vector for multiple
+  // lanes, scalar for one lane. This helper only checks whether grouped vbrc
+  // may consume the expression; it does not inspect mutable stores.
+  // is_uint() includes TIR uint1/bool. Handle reads are not numeric.
+  // Other expressions, including VMI mask/pair/void/unknown results, do not
+  // resolve to this read pattern.
+  const DataType dtype = source.dtype();
+  if (!dtype.is_int() && !dtype.is_uint() && !dtype.is_float() &&
+      !dtype.is_bfloat16()) {
+    return false;
+  }
+  std::unordered_map<const VarNode *, PrimExpr> local_defs;
+  std::unordered_set<const VarNode *> active;
+  return ResolvesToMutableRegisterRead(source, &local_defs, &active);
+}
+
+void CodeGenTileLangPTO::CheckPtoVmiBridgeOperand_(
+    const CallNode *op, const char *op_name, PtoValueKind source_kind) const {
+  ICHECK(!op->args.empty()) << op_name << " expects a source operand";
+  const PrimExpr &source = op->args[0];
+  const bool has_group = op->annotations.find("group") != op->annotations.end();
+  if (std::string(op_name) == "tl.vmi.vci") {
+    if (source_kind == PtoValueKind::kVmiData) {
+      LOG(FATAL) << "tl.vmi.vci base expects a scalar; got VMI data ("
+                 << source.dtype() << ", lanes=" << source.dtype().lanes()
+                 << "): " << source;
+    }
+    if (source_kind != PtoValueKind::kScalar) {
+      LOG(FATAL) << "tl.vmi.vci base expects a scalar; got "
+                 << PtoValueKindName(source_kind) << " (" << source.dtype()
+                 << ", lanes=" << source.dtype().lanes() << "): " << source;
+    }
+    return;
+  }
+  // tl.vmi.vbrc
+  if (has_group) {
+    const auto *group = op->annotations.at("group").as<IntImmNode>();
+    ICHECK(group != nullptr)
+        << "tl.vmi.vbrc group annotation must be a constant integer";
+    if (source_kind != PtoValueKind::kVmiData) {
+      // Also accept numeric local.var reads through pure aliases without
+      // changing their classification. Scalar constants and parameters do not
+      // match this read pattern. Require the same lane count as the group.
+      if (IsMutableRegisterGroupSource(source)) {
+        ICHECK_EQ(source.dtype().lanes(), group->value)
+            << "tl.vmi.vbrc source lane count must equal group; got "
+            << source.dtype().lanes() << " lanes and group=" << group->value;
+        return;
+      }
+      LOG(FATAL) << "tl.vmi.vbrc with group=... requires a VMI vreg; got "
+                 << PtoValueKindName(source_kind) << " (" << source.dtype()
+                 << ", lanes=" << source.dtype().lanes() << "): " << source;
+    }
+    ICHECK_EQ(source.dtype().lanes(), group->value)
+        << "tl.vmi.vbrc source lane count must equal group; got "
+        << source.dtype().lanes() << " lanes and group=" << group->value;
+    return;
+  }
+  if (source_kind == PtoValueKind::kVmiMask ||
+      source_kind == PtoValueKind::kVmiPair ||
+      source_kind == PtoValueKind::kVoid ||
+      source_kind == PtoValueKind::kHandle ||
+      source_kind == PtoValueKind::kUnknown) {
+    LOG(FATAL) << "tl.vmi.vbrc cannot broadcast "
+               << PtoValueKindName(source_kind) << " (" << source.dtype()
+               << ", lanes=" << source.dtype().lanes() << "): " << source;
+  }
+}
+
 void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
                                           std::ostream &os) {
   auto opt_call_op = op->op.as<Op>();
@@ -4954,7 +5468,18 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
     return;
   }
 
-  // Adapt integer scalar sources of vci/vbrc at the VMI
+  // Classify the VMI source *before* printing any argument.  A lane-1 VMI
+  // vreg is a TIR scalar by dtype but remains VMI data; only a proven scalar
+  // may enter the integer signless bridge.  vci/scalar-only consumers receive
+  // an explicit category diagnostic instead of an invalid PTODSL scalar op.
+  PtoValueKind vmi_source_kind = PtoValueKind::kUnknown;
+  if (!op->args.empty()) {
+    vmi_source_kind = ClassifyPtoValue_(op->args[0]);
+  }
+  if (op_name == "tl.vmi.vbrc" || op_name == "tl.vmi.vci") {
+    CheckPtoVmiBridgeOperand_(op, op_name.c_str(), vmi_source_kind);
+  }
+  // Adapt proven integer scalar sources of vci/vbrc at the VMI
   // value-argument boundary. The generated scalar must be *signless*: PTOAS
   // materialises per-physical-vector offsets with `arith.constant`, which
   // requires signless integers, so a typed (signed) constant base fails for
@@ -4962,17 +5487,17 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
   // a constant whenever the loop has a single chunk, so integer VCI always
   // takes this path; VBRC constants keep the verified typed-literal path.
   const bool scalar_integer_input =
-      !op->args.empty() && op->args[0].dtype().is_scalar() &&
+      vmi_source_kind == PtoValueKind::kScalar && !op->args.empty() &&
+      op->args[0].dtype().is_scalar() &&
       (op->args[0].dtype().is_int() || op->args[0].dtype().is_uint());
-  const bool integer_vector_result =
-      op->dtype.is_vector() &&
-      (op->dtype.element_of().is_int() || op->dtype.element_of().is_uint());
+  const bool integer_data_result =
+      op->dtype.element_of().is_int() || op->dtype.element_of().is_uint();
   const bool integer_source_literal =
       !op->args.empty() && op->args[0].as<IntImmNode>() != nullptr;
   const bool bridge_integer_source =
       (op_name == "tl.vmi.vci" ||
        (op_name == "tl.vmi.vbrc" && !integer_source_literal)) &&
-      scalar_integer_input && integer_vector_result;
+      scalar_integer_input && integer_data_result;
 
   if (bridge_integer_source) {
     os << "pto.vmi.vinterpret_cast(";
@@ -5141,6 +5666,15 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         RequiresStatementControlFlow(op->args[1]) ||
         RequiresStatementControlFlow(op->args[2]);
     auto branch_value = [&](const PrimExpr &expr) {
+      const bool scalar_adapted_branch =
+          expr.as<IntImmNode>() == nullptr &&
+          expr.as<FloatImmNode>() == nullptr &&
+          (expr.dtype().is_bool() ||
+           (op->dtype.is_scalar() &&
+            (op->dtype.is_int() || op->dtype.is_uint())));
+      if (scalar_adapted_branch) {
+        CheckPtoScalarOperand_(expr, "PTO if_then_else branch");
+      }
       std::string value = PrintExpr_(expr);
       if (expr.dtype().is_bool()) {
         // PTODSL typed constants require numeric bool literals.
@@ -5527,8 +6061,35 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
   if (op->op.same_as(tirx::builtin::reinterpret())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tirx.reinterpret expects 1 argument (value)";
-    std::string value = PrintExpr_(op->args[0]);
+    PtoValueKind reinterpret_source_kind = ClassifyPtoValue_(op->args[0]);
     DataType target_dtype = op->dtype;
+    if (reinterpret_source_kind == PtoValueKind::kVmiData) {
+      DataType source_dtype = op->args[0].dtype();
+      if (source_dtype.bits() == target_dtype.bits() &&
+          source_dtype.lanes() == target_dtype.lanes()) {
+        // Same element width and lane count is a register-level re-view; use
+        // the explicit VMI reinterpret API, never scalar/lexical bitcasts.
+        os << "pto.vmi.vinterpret_cast(" << PrintExpr_(op->args[0])
+           << ", to_dtype=" << VmiDtypeAnnotation(target_dtype.element_of())
+           << ")";
+        return;
+      }
+      LOG(FATAL) << "PTO reinterpret of VMI data requires the same element "
+                    "width and lane count; use T.vmi.vinterpret_cast with the "
+                    "explicit packed/shape contract (source "
+                 << source_dtype << ", target " << target_dtype
+                 << "): " << op->args[0];
+    }
+    if (reinterpret_source_kind == PtoValueKind::kVmiMask ||
+        reinterpret_source_kind == PtoValueKind::kVmiPair ||
+        reinterpret_source_kind == PtoValueKind::kVoid ||
+        reinterpret_source_kind == PtoValueKind::kUnknown) {
+      LOG(FATAL) << "PTO reinterpret cannot consume "
+                 << PtoValueKindName(reinterpret_source_kind) << " (source "
+                 << op->args[0].dtype() << ", target " << target_dtype
+                 << "): " << op->args[0];
+    }
+    std::string value = PrintExpr_(op->args[0]);
     if (target_dtype.lanes() > 1) {
       // Vector reinterpret: lower to pto.vbitcast(vec, elem_type).
       os << "pto.vbitcast(" << value << ", "
@@ -5928,6 +6489,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd vlrelu/vprelu expects 3 arguments";
     if (op->op.same_as(tl::simd_vlrelu())) {
       DataType vector_dtype = op->args[0].dtype();
+      CheckPtoScalarOperand_(op->args[1], "tl.simd.vlrelu scalar");
       std::string alpha = WrapTypedConst(
           RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
           vector_dtype, IsImmediateScalar(op->args[1]));
@@ -5977,6 +6539,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                                           : "vshrs";
     std::string src = PrintExpr_(op->args[0]);
     DataType result_dtype = op->args[0].dtype();
+    CheckPtoScalarOperand_(op->args[1], "tl.simd vector-scalar operand");
     std::string scalar = WrapTypedConst(
         RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
         result_dtype, IsImmediateScalar(op->args[1]));
@@ -6051,6 +6614,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
   if (op->op.same_as(tl::simd_vcmps())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vcmps expects 4 arguments (src, scalar, mask, op)";
+    CheckPtoScalarOperand_(op->args[1], "tl.simd.vcmps scalar");
     std::string cmp_op = Downcast<StringImm>(op->args[3])->value;
     static const std::unordered_map<std::string, const char *> kCmpModeEnum = {
         {"eq", "EQ"}, {"ne", "NE"}, {"gt", "GT"},
@@ -6082,6 +6646,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     // Match the authored vector element dtype (i16 for packed-ue8m0 lane math,
     // i32 for f32 gather paths). Always-i32 coercion breaks i16 vci users.
     DataType elem = op->dtype.element_of();
+    CheckPtoScalarOperand_(op->args[0], "tl.simd.vci index");
     std::string index;
     if (IsImmediateScalar(op->args[0])) {
       index =
@@ -6102,6 +6667,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd.vdup expects 3 arguments (src, mask, mode)";
     ValidateVecMode_(op, 2);
     DataType elem = op->dtype.element_of();
+    CheckPtoScalarOperand_(op->args[0], "tl.simd.vdup scalar");
     std::string scalar;
     if (IsImmediateScalar(op->args[0])) {
       scalar =
@@ -6502,7 +7068,17 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
       if (op_name == "tl.vmi.pair_get") {
         ICHECK_EQ(op->args.size(), 2U)
             << "tl.vmi.pair_get expects exactly 2 arguments";
-        os << "(" << PrintExpr_(op->args[0]) << ")[" << PrintExpr_(op->args[1])
+        PtoValueKind pair_kind = ClassifyPtoValue_(op->args[0]);
+        ICHECK(pair_kind == PtoValueKind::kVmiPair)
+            << "tl.vmi.pair_get source must be a VMI pair; got "
+            << PtoValueKindName(pair_kind) << " (" << op->args[0].dtype()
+            << "): " << op->args[0];
+        const auto *pair_index = op->args[1].as<IntImmNode>();
+        ICHECK(pair_index != nullptr &&
+               (pair_index->value == 0 || pair_index->value == 1))
+            << "tl.vmi.pair_get index must be the constant 0 or 1, got "
+            << op->args[1];
+        os << "(" << PrintExpr_(op->args[0]) << ")[" << pair_index->value
            << "]";
         return;
       }
@@ -6546,6 +7122,21 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
   if (from == to) {
     PrintExpr_(op->value, os);
     return;
+  }
+
+  PtoValueKind cast_source_kind = ClassifyPtoValue_(op->value);
+  if (cast_source_kind == PtoValueKind::kVmiData) {
+    LOG(FATAL) << "PTO integer cast cannot consume VMI data; use T.vmi.vcvt "
+                  "or T.vmi.vinterpret_cast (source "
+               << op->value.dtype() << ", target " << to << "): " << op->value;
+  }
+  if (cast_source_kind == PtoValueKind::kVmiMask ||
+      cast_source_kind == PtoValueKind::kVmiPair ||
+      cast_source_kind == PtoValueKind::kVoid ||
+      cast_source_kind == PtoValueKind::kUnknown) {
+    LOG(FATAL) << "PTO cast cannot consume "
+               << PtoValueKindName(cast_source_kind) << " (source "
+               << op->value.dtype() << ", target " << to << "): " << op->value;
   }
 
   const bool from_fp8 = tl::IsAscendVectorizableFP8(from);
@@ -6684,8 +7275,14 @@ void CodeGenTileLangPTO::VisitExpr_(const LetNode *op,
       << "PTO Let variable is already defined: " << op->var->name_hint;
 
   std::string vid = AllocVarID(op->var.get());
+  ICHECK(!value_defs_.count(op->var.get()))
+      << "duplicate PTO Let definition: " << op->var->name_hint;
+  value_defs_.emplace(op->var.get(), op->value);
   std::string body = PrintExpr_(op->body);
 
+  bool removed_def = value_defs_.erase(op->var.get());
+  ICHECK(removed_def) << "PTO Let definition was not registered: "
+                      << op->var->name_hint;
   bool removed = var_idmap_.erase(op->var.get());
   ICHECK(removed) << "PTO Let variable was not registered: "
                   << op->var->name_hint;
@@ -6882,6 +7479,9 @@ void CodeGenTileLangPTO::VisitExpr_(const NotNode *op,
   ICHECK(op->dtype.is_scalar() && op->a.dtype().is_bool())
       << "PTO logical-not currently supports scalar bool predicates only, got "
       << op->a.dtype();
+  // A lane-1 VMI mask is a TIR scalar bool but remains a VMI value and cannot
+  // enter the logical scalar adapter.
+  CheckPtoScalarOperand_(op->a, "PTO logical-not operand");
   // tl.logical_not(value) implements logical negation as value == 0.
   os << "tl.logical_not(";
   PrintExpr_(op->a, os);
@@ -6900,10 +7500,14 @@ void CodeGenTileLangPTO::VisitExpr_(const SelectNode *op,
       return;
     }
     if (op->dtype.is_scalar() && op->dtype.is_bool()) {
+      // The logical-bool adapter is scalar-only; a lane-1 VMI mask (or VMI
+      // data used as a predicate) must be diagnosed, not normalized.
+      CheckPtoScalarOperand_(expr, "PTO select branch");
       os << "tl.as_logical_bool(" << PrintExpr_(expr) << ")";
       return;
     }
     if (coerce_integer_branches) {
+      CheckPtoScalarOperand_(expr, "PTO select branch");
       os << ScalarCastExpr(PrintExpr_(expr), op->dtype, "PTO select branch");
       return;
     }
@@ -7029,6 +7633,13 @@ void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,
 void CodeGenTileLangPTO::VisitStmt_(const DeclBufferNode *op) { (void)op; }
 
 void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
+  // Record every SSA definition before any printing branch (including the
+  // early-return SIMD pair/pointer paths below).  Queries only consume the
+  // stored IR; they never depend on the printed form.
+  ICHECK(!value_defs_.count(op->var.get()))
+      << "duplicate PTO SSA definition: " << op->var->name_hint;
+  value_defs_.emplace(op->var.get(), op->value);
+
   if (const auto *call = op->value.as<CallNode>()) {
     if (IsOpName(call->op, "tl.simd.alloc")) {
       AllocVarID(op->var.get());
