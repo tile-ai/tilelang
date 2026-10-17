@@ -195,6 +195,43 @@ private:
   std::string PrintVmiAnnotationValue(const std::string &key,
                                       const ObjectRef &value);
   void PrintPtoVmiCall_(const CallNode *op, std::ostream &os);
+  // SSA provenance for PTO values.  The table maps a bound VarNode to its RHS
+  // IR; only Bind/Let registration writes it.  Queries are pure: they never
+  // print, emit, allocate names or modify the persistent table.
+  enum class PtoValueKind {
+    kScalar,
+    kVmiData,
+    kVmiMask,
+    kVmiPair,
+    kVoid,
+    kHandle,
+    kOtherVector,
+    kUnknown,
+  };
+  struct PtoValueQueryContext; // query-local Let overrides + active Var set
+  struct PtoOperandScanner;    // one-level immediate-operand classification
+  PtoValueKind ClassifyPtoValue_(const PrimExpr &expr) const;
+  PtoValueKind ClassifyPtoValue_(const PrimExpr &expr,
+                                 PtoValueQueryContext *context) const;
+  PtoValueKind ClassifyPtoValueUncached_(const PrimExpr &expr,
+                                         PtoValueQueryContext *context) const;
+  PtoValueKind ClassifyVmiCallResult_(const CallNode *op,
+                                      PtoValueQueryContext *context) const;
+  PtoValueKind ClassifyBufferLoad_(const BufferLoadNode *op) const;
+  PtoValueKind ClassifyOrdinaryExpr_(const PrimExpr &expr,
+                                     PtoValueQueryContext *context) const;
+  static const char *PtoValueKindName(PtoValueKind kind);
+  void CheckPtoScalarOperand_(const PrimExpr &expr, const char *consumer) const;
+  void CheckPtoVmiBridgeOperand_(const CallNode *op, const char *op_name,
+                                 PtoValueKind source_kind) const;
+  // Grouped vbrc also accepts numeric local.var reads through pure aliases.
+  // The source classification is unchanged; the consumer checks lanes == group.
+  // This does not infer the read's origin from mutable stores.
+  bool IsMutableRegisterGroupSource(const PrimExpr &source) const;
+  bool ResolvesToMutableRegisterRead(
+      const PrimExpr &expr,
+      std::unordered_map<const VarNode *, PrimExpr> *local_defs,
+      std::unordered_set<const VarNode *> *active) const;
   bool IsVmiLocalRegisterBuffer(const BufferNode *buffer) const;
   void CheckVmiLocalRegisterIndex(const BufferNode *buffer,
                                   const PrimExpr &index) const;
@@ -247,6 +284,9 @@ private:
   // VarNode to its (low, high) SSA name pair.
   std::unordered_map<const VarNode *, std::pair<std::string, std::string>>
       simd_pair_vars_;
+  // Persistent per-function SSA definitions used by PtoValueKind queries.
+  // Registered at every Bind/Let entry and cleared in ResetFunctionState_.
+  std::unordered_map<const VarNode *, PrimExpr> value_defs_;
   std::vector<PTOGemmEmitContext> gemm_emit_contexts_;
   std::unordered_map<Call, size_t, ObjectPtrHash, ObjectPtrEqual>
       gemm_emit_context_by_call_;
