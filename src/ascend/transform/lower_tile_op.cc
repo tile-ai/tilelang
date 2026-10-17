@@ -1268,6 +1268,18 @@ private:
       }
     }
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (op->attr_key == tl::kAivStorageMap) {
+      AivStorageMap remapped;
+      for (const auto &[storage, sid] : op->node.cast<AivStorageMap>()) {
+        Var data = var_remap_.Get(storage).value_or(storage);
+        if (auto existing = remapped.Get(data))
+          ICHECK_EQ(existing.value()->value, sid->value);
+        remapped.Set(data, sid);
+      }
+      AttrStmt attribute = Downcast<AttrStmt>(stmt);
+      attribute.CopyOnWrite()->node = remapped;
+      return attribute;
+    }
     if (op->attr_key == tl::kBufferAliasMap) {
       auto aliases = op->node.try_cast<BufferAliasMap>();
       ICHECK(aliases.has_value())

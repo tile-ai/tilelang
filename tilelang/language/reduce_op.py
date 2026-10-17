@@ -57,8 +57,14 @@ def reduce(
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_region = to_buffer_region(out)
     out_buffer = out_region.buffer
-    if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
+    if reduce_type in ("bitand", "bitor", "bitxor"):
+        # Both faces must be integral: a float source would otherwise be silently
+        # value-cast to an integer before the bitwise reduction runs.
+        buf_dtype = _get_buffer(buffer).dtype
+        if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
+        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out_region)

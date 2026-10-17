@@ -897,7 +897,7 @@ std::shared_ptr<TaskNode> MakeCounterTask(const Stmt &body, int stage) {
   task->SetStage(stage);
   // Counter state is local.var and can be cloned to either core. ResolveCore
   // narrows this candidate from the prepared owner/core protocol.
-  task->SetCoreMask(kCoreBroadcast);
+  task->SetCoreMask(kCoreAll);
   task->SetPipeMask(static_cast<uint16_t>(ResourcePipe::kScalar));
   return task;
 }
@@ -1031,7 +1031,7 @@ void AnnotateStorageEpochs(
       CoreMask available_core_mask;
     };
     std::vector<GuardRepresentative> guard_representatives{
-        {Bool(true), kCoreBroadcast}};
+        {Bool(true), kCoreAll}};
     arith::Analyzer domain_analyzer;
     loop->GetLoopBodyContext().Populate(domain_analyzer);
     StorageEpochGuardMap guard_map;

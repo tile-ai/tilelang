@@ -12,6 +12,39 @@ def strided_buffer(shape, dtype, strides, name="A"):
     return tvm.tirx.decl_buffer(shape, dtype, name=name, strides=strides)
 
 
+@pytest.mark.parametrize("src_dtype,dtype", [("float32", "float16"), ("float16", "float32"), ("float16x2", "float16")])
+def test_scalar_view_rejects_different_bit_count(src_dtype, dtype):
+    src = T.Tensor((), src_dtype)
+    with pytest.raises(ValueError, match="logical bit count"):
+        T.view(src, shape=(), dtype=dtype)
+
+
+@pytest.mark.parametrize("src_dtype,dtype", [("float32", "float32"), ("float32", "int32"), ("float16x2", "int32")])
+def test_scalar_view_preserves_bit_count(src_dtype, dtype):
+    src = T.Tensor((), src_dtype)
+    viewed = T.view(src, shape=(), dtype=dtype)
+    assert len(viewed.shape) == 0
+    assert str(viewed.dtype) == dtype
+    assert viewed.data.same_as(src.data)
+
+
+@pytest.mark.parametrize(
+    "src_shape,src_dtype,shape,dtype",
+    [
+        ((), "float32", (1,), "float32"),
+        ((1,), "float32", (), "float32"),
+        ((), "float32", (2,), "float16"),
+        ((2,), "float16", (), "float32"),
+    ],
+)
+def test_scalar_view_rank_change(src_shape, src_dtype, shape, dtype):
+    src = T.Tensor(src_shape, src_dtype)
+    viewed = T.view(src, shape=shape, dtype=dtype)
+    assert tuple(int(dim) for dim in viewed.shape) == shape
+    assert str(viewed.dtype) == dtype
+    assert viewed.data.same_as(src.data)
+
+
 def test_view_requires_explicit_strides_for_noncontiguous_source():
     stride0 = T.dynamic("stride0", dtype=T.int64)
     stride1 = T.dynamic("stride1", dtype=T.int64)
