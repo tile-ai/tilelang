@@ -259,6 +259,11 @@ def test_resolve_uses_target_warp_size(target, divisor, expected_scope):
     assert _logical_scopes(resolved) == [expected_scope]
 
 
+def test_resolve_without_target_warp_size_uses_thread_scope():
+    resolved = _resolve(_make_any_of_kernel("none"), tvm.target.Target("hip"))
+    assert _logical_scopes(resolved) == ["thread"]
+
+
 def test_resolve_global_uniform_range_uses_warp():
     @T.prim_func
     def main(
