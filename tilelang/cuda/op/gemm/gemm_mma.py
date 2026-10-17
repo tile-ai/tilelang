@@ -37,6 +37,14 @@ class GemmMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
+        block_K = emitter.chunk
+        micro_size_k = emitter.micro_size_k
+        if block_K < micro_size_k or block_K % micro_size_k != 0:
+            raise ValueError(
+                f"{GEMM_INST_MMA} on target {target} with A dtype {self.a_dtype} and B dtype {self.b_dtype}: "
+                f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k}) "
+                f"and a multiple of micro_size_k ({micro_size_k})"
+            )
         return emitter
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -100,9 +108,6 @@ class GemmMMA(GemmBase):
         C_buf = C_region.buffer
 
         clear_accum = self.clear_accum
-
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
-        assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
