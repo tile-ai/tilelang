@@ -40,7 +40,7 @@ import cutlass.cute as cute
 from cutlass.cute.typing import Int, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
-_TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a"]
+_TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a", "sm_121", "sm_121a"]
 
 
 class _MbarrierPointerAdapter:

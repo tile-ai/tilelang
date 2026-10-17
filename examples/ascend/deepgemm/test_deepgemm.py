@@ -1,5 +1,7 @@
 """Numerical checks for DeepGEMM schedulers and scale conversion."""
 
+import os
+
 import pytest
 import torch
 import tilelang.testing
@@ -36,6 +38,10 @@ def test_fp8_batched_scales():
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
 def test_bf16_m_grouped_padding():
     a, b = _input((512, 64), 0), _input((2, 32, 64), 1)
     a[17:256] = 0
