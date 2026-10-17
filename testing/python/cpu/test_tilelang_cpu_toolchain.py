@@ -80,5 +80,5 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     assert TVMFFIKernelCache._get_export_kwargs(kernel)["options"] == ["-existing", "-O2", "-fopenmp"]
     adapter.params = []
     adapter._ffi_callee_allocated_output_abi = False
-    adapter._entry
+    assert adapter._entry is Executable.main
     assert seen["options"] == ["-existing", "-O2", "-fopenmp"]
