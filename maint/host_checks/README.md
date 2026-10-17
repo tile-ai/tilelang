@@ -1,5 +1,15 @@
 # Host-Side Check Repro Scripts
 
+## C/MIR performance report
+
+Run `python maint/host_checks/host_ir_benchmark.py --targets cuda nvrtc cutedsl` from the repository root
+(other targets: `hip`, `metal`, `ascend`). Reports and raw samples are written to `host-ir-report/` and uploaded by CI.
+Trials alternate C/MIR with fresh TileLang caches and verify correctness plus new-process cache hits without host compilation.
+Host publication includes packaging; executable sizes include device modules. Steady timings measure CPU submission and
+amortized synchronized wall time, not device-event latency. OS/driver/compiler caches and CI contention can affect results.
+
+## Error reproductions
+
 This folder contains standalone scripts that deliberately trigger host-side (and adapter-side) validation errors described in `docs/compiler_internals/tensor_checks.md`. Each script can be run directly and will reproduce the corresponding error with a minimal example.
 
 Prerequisites

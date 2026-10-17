@@ -31,3 +31,16 @@ file(GLOB TILE_LANG_METAL_ACTIVE_SRCS
   src/metal/codegen/rt_mod_metal.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_ACTIVE_SRCS})
+
+# Compile the MPS bridge once, never as part of a kernel's Host IR build.
+enable_language(OBJCXX)
+set(CMAKE_OBJCXX_STANDARD 17)
+find_package(Python COMPONENTS Interpreter REQUIRED)
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -c "from torch.utils.cpp_extension import include_paths; print(';'.join(include_paths()))"
+  OUTPUT_VARIABLE TILELANG_TORCH_INCLUDES
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
+set_source_files_properties(src/metal/codegen/rt_mod_metal.cc PROPERTIES
+  LANGUAGE OBJCXX INCLUDE_DIRECTORIES "${TILELANG_TORCH_INCLUDES}")

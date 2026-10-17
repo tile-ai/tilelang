@@ -8,7 +8,6 @@ from tvm.target import Target
 from .utils import (
     is_ascend_target,
     is_metal_target,
-    is_cutedsl_target,
     match_declare_kernel,
     match_declare_kernel_cpu,
     is_cuda_target,
@@ -1067,9 +1066,6 @@ class TLMetalSourceWrapper:
         return self.lib_code
 
 
-# TLCuTeDSLSourceWrapper has been moved to tilelang.jit.adapter.cutedsl.wrapper
-
-
 class TLWrapper(BaseWrapper):
     """
     A wrapper class for the TileLang backend.
@@ -1124,37 +1120,3 @@ class TLWrapper(BaseWrapper):
             pass_configs=self.pass_configs,
         )
         return wrapper.lib_code
-
-
-class TLPyWrapper(TLWrapper):
-    def __init__(self, target: Target):
-        super().__init__(target)
-
-    def wrap(self, py_source: str):
-        # assert self.scheduled_ir_module is not None, "Please assign optimized module first."
-        if is_cutedsl_target(self.target):
-            from tilelang.jit.adapter.cutedsl import TLCuTeDSLSourceWrapper
-
-            wrapper_class = TLCuTeDSLSourceWrapper
-        elif is_cuda_target(self.target):
-            from tilelang.jit.adapter.nvrtc import TLNVRTCSourceWrapper
-
-            wrapper_class = TLNVRTCSourceWrapper
-        else:
-            raise ValueError(f"Unsupported target for NVRTC backend: {self.target}")
-        wrapper = wrapper_class(
-            scheduled_ir_module=self.scheduled_ir_module,
-            source=py_source,
-            target=self.target,
-            device_mod=self.device_mod,
-            host_mod=self.host_mod,
-            pass_configs=self.pass_configs,
-        )
-        return {
-            "host_func": getattr(wrapper, "host_func", None),
-            "function_names": getattr(wrapper, "function_names", None),
-            "tma_cpp_init_code": getattr(wrapper, "tma_cpp_init_code", None),
-            "tma_lib_name": getattr(wrapper, "tma_lib_name", None),
-            "launcher_cpp_code": getattr(wrapper, "launcher_cpp_code", None),
-            "launcher_lib_name": getattr(wrapper, "launcher_lib_name", None),
-        }

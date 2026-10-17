@@ -1,14 +1,4 @@
-"""Regression tests for issue #2722: TileLang on Metal.
-
-Covers two behaviors that previously made Metal support opaque:
-1. `@tilelang.jit` with no explicit `execution_backend` must resolve to the
-   torch backend (Metal adapter) instead of `tvm_ffi`.
-2. The torch backend must not attempt to persist a compiled library to the disk
-   cache (it has no `libpath` artifact; `torch.mps.compile_shader` compiles the
-   MSL source in-process). Before the fix this raised
-   `AttributeError: 'MetalKernelAdapter' object has no attribute 'libpath'`
-   and logged "Error during atomic cache save" on every run.
-"""
+"""Default Metal Host IR execution/cache and explicit Torch cache behavior."""
 
 import logging
 import os
@@ -21,8 +11,7 @@ import torch
 from tilelang.cache.kernel_cache import KernelCache
 
 
-@tilelang.jit
-def _matmul_gemm_auto(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
+def _matmul_gemm(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     @T.prim_func
     def gemm_kernel(
         A: T.Tensor((M, K), dtype),
@@ -47,6 +36,9 @@ def _matmul_gemm_auto(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum
     return gemm_kernel
 
 
+_matmul_gemm_auto = tilelang.jit(_matmul_gemm)
+
+
 def _run_gemm(jit_kernel, M, N, K):
     a = torch.randn(M, K, dtype=torch.float16, device="mps")
     b = torch.randn(K, N, dtype=torch.float16, device="mps")
@@ -57,17 +49,19 @@ def _run_gemm(jit_kernel, M, N, K):
 
 
 @tilelang.testing.requires_metal
-def test_auto_backend_resolves_to_torch():
-    """Bare @tilelang.jit must resolve to the torch (Metal) backend."""
+def test_auto_backend_resolves_to_tvm_ffi():
+    """Bare @tilelang.jit must resolve to the shared Host IR backend."""
     M, N, K = 64, 64, 64
     kernel = _matmul_gemm_auto(M, N, K, 16, 16, 8)
-    assert kernel.execution_backend == "torch", kernel.execution_backend
+    assert kernel.execution_backend == "tvm_ffi", kernel.execution_backend
     _run_gemm(kernel, M, N, K)
 
 
 @tilelang.testing.requires_metal
-def test_torch_backend_no_disk_cache_write():
+def test_torch_backend_no_disk_cache_write(tmp_path, monkeypatch):
     """The torch backend must not write disk cache entries or log save errors."""
+    # Other xdist workers may publish MIR kernels to the shared cache.
+    monkeypatch.setattr(tilelang.env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
     cache_logger = logging.getLogger("tilelang.cache.kernel_cache")
     records = []
     handler = logging.Handler()
@@ -80,7 +74,7 @@ def test_torch_backend_no_disk_cache_write():
 
     try:
         M, N, K = 64, 64, 64
-        kernel = _matmul_gemm_auto(M, N, K, 16, 16, 8)
+        kernel = tilelang.compile(_matmul_gemm(M, N, K, 16, 16, 8), target="metal", execution_backend="torch")
         _run_gemm(kernel, M, N, K)
         # Second run in the same process: memory-cache hit, still no disk I/O.
         _run_gemm(kernel, M, N, K)
@@ -92,6 +86,27 @@ def test_torch_backend_no_disk_cache_write():
 
     after = set(os.listdir(cache_root)) if os.path.isdir(cache_root) else set()
     assert after == before, f"torch backend wrote disk cache entries: {after - before}"
+
+
+@tilelang.testing.requires_metal
+def test_mir_host_native_roundtrip(tmp_path):
+    @T.prim_func
+    def add_one(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = A[i] + 1
+
+    kernel = tilelang.compile(add_one, target="metal")
+    path = str(tmp_path / "metal.tlm")
+    kernel.export_library(path)
+    loaded = tilelang.tvm.runtime.load_module(path)
+    a = torch.arange(128, device="mps", dtype=torch.float32)
+    b = torch.empty_like(a)
+    for call in (kernel, loaded):
+        # Torch work before/after the launch exercises MPS command-buffer ordering.
+        a = a * 2
+        call(a, b)
+        torch.testing.assert_close(b * 2, (a + 1) * 2)
 
 
 if __name__ == "__main__":

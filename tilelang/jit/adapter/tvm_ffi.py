@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 from collections.abc import Callable
+from functools import cached_property
 import sys
 import threading
 
@@ -16,7 +17,6 @@ import torch
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
-from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
 from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
@@ -134,19 +134,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def _make_executable(self) -> tvm.runtime.Executable:
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
-        executable = runtime.Executable(self.rt_mod)
-        compile_args = dict(COMPILE_ARGS)
+        return runtime.Executable(self.rt_mod)
+
+    def _get_compile_args(self) -> dict[str, Any]:
         from tilelang.cpu.toolchain import get_compile_flags
 
+        compile_args = dict(COMPILE_ARGS)
         backend_flags = get_compile_flags(self.target, self.pass_configs, execution_backend="tvm_ffi")
         if backend_flags:
-            options = list(compile_args.get("options", []))
-            options += backend_flags
-            compile_args["options"] = options
-        if compile_args:
-            # Precompile with platform and backend-owned toolchain options.
-            executable.jit(**compile_args)
-        return executable
+            compile_args["options"] = [*compile_args.get("options", []), *backend_flags]
+        return compile_args
 
     def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
         executable = self.executable
@@ -163,6 +160,28 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def get_exportable_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
         """Return the lazy executable, or the runnable module loaded from disk cache."""
         return self._get_executable()
+
+    @cached_property
+    def _entry(self) -> Callable[..., Any]:
+        executable = self._get_executable()
+        if isinstance(executable, runtime.Executable):
+            executable = executable.jit(**self._get_compile_args())
+        entry = executable.main
+        params = [p for i, p in enumerate(self.params) if not self._ffi_callee_allocated_output_abi or i not in self.result_idx]
+        uint64_indices = [i for i, p in enumerate(params) if str(p.dtype) == "uint64" and p.is_scalar()]
+        if not uint64_indices:
+            return entry
+
+        def call(*args):
+            # TVM-FFI transports integers in signed 64-bit slots; retain the bits.
+            args = list(args)
+            for i in uint64_indices:
+                value = args[i]
+                if (1 << 63) <= value < (1 << 64):
+                    args[i] = value - (1 << 64)
+            return entry(*args)
+
+        return call
 
     def _uses_ffi_callee_allocated_output_abi(self) -> bool:
         """Whether lowering gives this kernel the callee-allocated main ABI."""
@@ -248,28 +267,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
 
-        # Prepare helpers for friendly dtype error messages
-        prim_func = self.prim_func
-        buffer_map = prim_func.buffer_map
-        params = prim_func.params
-        # Expected dtype string per parameter index (for buffers only)
-        expected_dtype_strs: list[str | None] = []
-        # Track whether each param is a buffer (has dtype) vs scalar
-        is_buffer_param: list[bool] = []
-        for p in params:
-            if p in buffer_map:
-                expected_dtype_strs.append(str(buffer_map[p].dtype))
-                is_buffer_param.append(True)
-            else:
-                expected_dtype_strs.append(None)
-                is_buffer_param.append(False)
+        expected_inputs = len(self.params) - len(self.result_idx)
 
         def func(*inputs: torch.Tensor | Any):
             nonlocal current_device_functor
             # Validate input count strictly
-            expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
+
+            # No allocation or argument stitching is needed. Keep NPU stream
+            # initialization on the device-aware path below.
+            if not self.result_idx and not hasattr(torch, "npu"):
+                self._entry(*inputs)
+                return []
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -344,8 +354,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             if out_device is not None:
                 self._prepare_torch_device(out_device)
-            executable = self._get_executable()
-            executable(*tensor_list)
+            self._entry(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -385,7 +394,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable()(*inputs, allocator_anchor)
+            result = self._entry(*inputs, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)
@@ -395,7 +404,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     @classmethod
     def from_database(
         cls,
-        params: list[TensorType],
+        params: list[KernelParam],
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
@@ -406,9 +415,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
-        adapter = cls.__new__(cls)
-        adapter.params = params
-        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter = cls(
+            params=params,
+            result_idx=result_idx,
+            target=target,
+            func_or_mod=func_or_mod,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
         host_kernel_source = adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
         device_kernel_source = adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
         adapter.wrapped_source = (
@@ -416,25 +431,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if device_kernel_source.text is not None and host_kernel_source.text is not None
             else None
         )
-        adapter.pass_configs = pass_configs
-
-        if isinstance(func_or_mod, tirx.PrimFunc):
-            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
-        else:
-            adapter.ir_module = func_or_mod
-
-        target = determine_target(target, return_object=True)
-        adapter.target = Target(determine_target(target))
-
-        adapter.verbose = verbose
         adapter.libpath = kernel_lib_path
         adapter.kernel_global_source = device_kernel_source.text
-        adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
-        adapter._ffi_callee_allocated_output_abi = adapter._uses_ffi_callee_allocated_output_abi()
-        adapter.dynamic_symbolic_map = None if adapter._ffi_callee_allocated_output_abi else adapter._process_dynamic_symbolic()
-        adapter._executable_lock = threading.Lock()
-        adapter._post_init()
         return adapter
 
     def get_host_source(self) -> str | None:

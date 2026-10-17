@@ -1,13 +1,18 @@
 """Compilation settings and tile geometry shared by all kernel families."""
 
 import tilelang.ascend.language as T
+from tilelang.ascend.target import target_is_plain_ascend
+from tilelang.backend.target import determine_target
+from tilelang.env import env
+from tvm.target import Target
 
 from ..config import Major
 
 # Alpha epilogues can fill all 256 KiB of UB. These kernels do not need VF
 # stack spills or Ascend C APIs that use reserved UB; retain the full dynamic
-# UB reservation at launch and release both compiler-reserved regions.
-COMPILE_FLAGS = [
+# UB reservation at launch and release both compiler-reserved regions when
+# compiling Ascend C. PTOAS does not accept these Bisheng frontend options.
+ASCENDC_COMPILE_FLAGS = [
     "--cce-disable-vf-stack-reserved-ubuf",
     "--cce-disable-asc-reserved-ubuf",
 ]
@@ -20,6 +25,16 @@ MAX_EPILOGUE_STAGES = 8
 
 # Each packed int16 scale pair covers 64 FP8 K elements.
 MX_SF_DIVISOR = 64
+
+
+def with_compile_flags(kernel):
+    """Apply the UB options only to the compiler that consumes Ascend C."""
+    target = Target.current(allow_none=True)
+    if target is None:
+        target = determine_target(env.get_default_target(), return_object=True)
+    if target_is_plain_ascend(target):
+        return kernel.with_attr("tilelang_compile_flags", ASCENDC_COMPILE_FLAGS)
+    return kernel
 
 
 def clamp(value, lower, upper):

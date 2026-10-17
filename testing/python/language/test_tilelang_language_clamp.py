@@ -196,10 +196,14 @@ def test_clamp_python_literals():
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", CLAMP_NAN_DTYPES)
-def test_clamp_vectorized_operands(dtype):
+@pytest.mark.parametrize("target", ["cuda", "cutedsl"])
+def test_clamp_vectorized_operands(dtype, target):
     import torch
 
-    N = 128
+    if target == "cutedsl":
+        pytest.importorskip("cutlass.cute")
+    fp8 = target == "cutedsl" and dtype in (T.float8_e4m3, T.float8_e5m2)
+    N = 256 if fp8 else 128
 
     @T.prim_func
     def main(A: T.Tensor((N,), dtype), Lo: T.Tensor((N,), dtype), Hi: T.Tensor((N,), dtype), C: T.Tensor((N,), dtype)):
@@ -207,14 +211,15 @@ def test_clamp_vectorized_operands(dtype):
             for i in T.Parallel(N):
                 C[i] = T.clamp(A[i], Lo[i], Hi[i])
 
-    kernel = tilelang.compile(main, target="cuda")
+    kernel = tilelang.compile(main, target=target)
     source = kernel.get_kernel_source()
-    if dtype in (T.float16, T.bfloat16):
-        assert "tl::clamp2(" in source
-    else:
-        assert "tl::clamp(" in source
-    if dtype == T.float32:
-        assert "*(float4*)" in source
+    if target == "cuda":
+        if dtype in (T.float16, T.bfloat16):
+            assert "tl::clamp2(" in source
+        else:
+            assert "tl::clamp(" in source
+        if dtype == T.float32:
+            assert "*(float4*)" in source
 
     a = torch.linspace(-2.0, 2.0, N, dtype=torch.float64, device="cuda")
     lo = torch.full_like(a, -1.0)
@@ -228,6 +233,12 @@ def test_clamp_vectorized_operands(dtype):
     kernel(a, lo, hi, c)
     ref = torch.clamp(a.double(), lo.double(), hi.double())
     torch.testing.assert_close(c.double(), ref, equal_nan=True, atol=0, rtol=0)
+    if fp8:
+        bits = torch.arange(256, device="cuda").to(torch.uint8)
+        a, lo, hi = (bits.roll(shift).view(dtype.as_torch()) for shift in (0, 85, 171))
+        kernel(a, lo, hi, c)
+        ref = torch.clamp(a.double(), lo.double(), hi.double())
+        torch.testing.assert_close(c.double(), ref, equal_nan=True, atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda

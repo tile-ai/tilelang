@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import platform
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -173,10 +175,12 @@ class BackendModule:
         spec = next((spec for spec in all_specs if spec.name == requested_name), None)
         if spec is None:
             allowed = ", ".join(spec.name for spec in all_specs) or "<none>"
-            raise ValueError(
-                f"Invalid execution backend {requested!r} for target {target.kind.name!r}. "
-                f"Allowed: {allowed}. Tip: use execution_backend='auto'."
-            )
+            tip = {
+                "nvrtc": "use execution_backend='tvm_ffi' with pass_configs={'tl.cuda_compiler': 'nvrtc'}",
+                "cutedsl": "use target='cutedsl' with execution_backend='tvm_ffi'",
+                "pto": "use target='pto' with execution_backend='tvm_ffi'",
+            }.get(requested_name, "use execution_backend='auto'")
+            raise ValueError(f"Invalid execution backend {requested!r} for target {target.kind.name!r}. Allowed: {allowed}. Tip: {tip}.")
         if not spec.is_available():
             available = ", ".join(spec.name for spec in available_specs) or "<none>"
             raise ValueError(
@@ -321,13 +325,19 @@ def create_backend_context(
     assert isinstance(normalized_target, Target)
     normalized_target = normalize_target_for_execution(normalized_target, execution_backend)
 
+    module = _resolve_backend_module(normalized_target)
+    execution = module.resolve_execution_backend(execution_backend, normalized_target)
     if target_host is None:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+        use_mir = (
+            execution.name == "tvm_ffi"
+            and normalized_target.kind.name in ("cuda", "hip", "ascend", "metal")
+            and platform.machine().lower() in ("x86_64", "amd64", "aarch64", "arm64")
+            and tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
+        )
+        target_host = "mir" if use_mir else "llvm" if tvm.runtime.enabled("llvm") else "c"
     normalized_target_host = Target(target_host)
     normalized_target = Target(normalized_target, normalized_target_host)
 
-    module = _resolve_backend_module(normalized_target)
-    execution = module.resolve_execution_backend(execution_backend, normalized_target)
     return BackendContext(
         module=module,
         target=normalized_target,

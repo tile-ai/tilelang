@@ -1,23 +1,52 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
 
 import pytest
 
 from tilelang import tvm
 from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend
+from tilelang.backend.pass_pipeline import PassPipeline
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_pass_pipeline_scopes_and_restores_target(nested, fail):
+    target = tvm.target.Target("c")
+    outer = tvm.target.Target("llvm") if nested else None
+    mod = tvm.IRModule()
+
+    def lower(input_mod, input_target):
+        assert input_mod.same_as(mod)
+        assert input_target.same_as(target)
+        assert tvm.target.Target.current().same_as(target)
+        if fail:
+            raise ValueError("pipeline failure")
+        return input_mod
+
+    pipeline = PassPipeline("test-target-scope", lower)
+    with outer if nested else nullcontext():
+        previous = tvm.target.Target.current(allow_none=True)
+        if fail:
+            with pytest.raises(ValueError, match="pipeline failure"):
+                pipeline.lower(mod, target)
+        else:
+            assert pipeline.lower(mod, target).same_as(mod)
+        current = tvm.target.Target.current(allow_none=True)
+        assert current is None if previous is None else current.same_as(previous)
 
 
 def test_builtin_backend_modules_are_explicit():
     expected = {
-        "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
-        "cutedsl": (("cuda",), ["cutedsl"]),
+        "cuda": (("cuda",), ["tvm_ffi", "cython"]),
+        "cutedsl": (("cuda",), ["tvm_ffi"]),
         "rocm": (("hip",), ["tvm_ffi", "cython"]),
         "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),
-        "metal": (("metal",), ["torch", "tvm_ffi"]),
+        "metal": (("metal",), ["tvm_ffi", "torch"]),
         "webgpu": (("webgpu",), ["tvm_ffi"]),
         "ascend": (("ascend",), ["tvm_ffi", "cython"]),
-        "pto": (("ascend",), ["pto"]),
+        "pto": (("ascend",), ["tvm_ffi"]),
     }
 
     assert {
@@ -102,7 +131,34 @@ def test_cutedsl_backend_reuses_cuda_pipeline():
     assert cutedsl_backend.name == "cutedsl"
     assert cutedsl_backend.get_pipeline(cutedsl_target) is cuda_backend.get_pipeline(cuda_target)
     assert cutedsl_backend.get_device_codegen(cutedsl_target).name == "cutedsl"
-    assert cutedsl_backend.allowed_execution_backends(cutedsl_target) == ("cutedsl",)
+    assert cutedsl_backend.allowed_execution_backends(cutedsl_target) == ("tvm_ffi",)
+
+
+@pytest.mark.parametrize("alias", ["nvrtc", "cutedsl"])
+@pytest.mark.parametrize("from_env", [False, True])
+def test_execution_aliases_normalize_before_cache(monkeypatch, alias, from_env):
+    from tilelang.cache import cached, _dispatch_map
+    from tilelang.env import env
+    from tilelang.cuda import cutedsl_backend
+
+    monkeypatch.setattr(cutedsl_backend, "check_cutedsl_available", lambda: None)
+    monkeypatch.setattr(env, "TILELANG_DEFAULT_EXECUTION_BACKEND", alias)
+    monkeypatch.setattr(_dispatch_map["tvm_ffi"], "cached", lambda *args, **kwargs: kwargs)
+    configs = {"tl.enable_fast_math": True}
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        result = cached(target=target, execution_backend=None if from_env else alias, pass_configs=configs)
+    context = result["backend_context"]
+    assert context.execution_backend.name == "tvm_ffi"
+    assert context.module.name == ("cuda" if alias == "nvrtc" else "cutedsl")
+    assert context.target.attrs["arch"] == "sm_80"
+    assert configs == {"tl.enable_fast_math": True}
+    assert result["pass_configs"] == (dict(configs, **{"tl.cuda_compiler": "nvrtc"}) if alias == "nvrtc" else configs)
+    with pytest.raises(ValueError, match="requires a compatible CUDA target"):
+        cached(target="hip", execution_backend=alias)
+    if alias == "nvrtc":
+        with pytest.raises(ValueError, match="conflicts"):
+            cached(target=target, execution_backend=alias, pass_configs={"tl.cuda_compiler": "nvcc"})
 
 
 def test_webgpu_only_exposes_tvm_ffi_execution():
@@ -121,5 +177,92 @@ def test_create_backend_context_binds_compile_state():
     assert context.target_host.kind.name == "c"
     assert context.execution_backend.name == "tvm_ffi"
 
+    import platform
+
+    has_mir = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
+    for target in ("cuda", "hip", "ascend", "metal"):
+        if target not in tvm.target.Target.list_kinds():
+            continue
+        default = create_backend_context(target)
+        assert default.execution_backend.name == "tvm_ffi"
+        if has_mir and platform.machine().lower() in ("x86_64", "amd64", "aarch64", "arm64"):
+            assert default.target_host.kind.name == "mir"
+        else:
+            assert default.target_host.kind.name == ("llvm" if tvm.runtime.enabled("llvm") else "c")
+    assert create_backend_context("cuda", execution_backend="cython").target_host.kind.name != "mir"
+
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_mir_scalar_host_and_binary_cache(tmp_path, monkeypatch, dynamic):
+    from tilelang import transform
+    from tvm import tirx as T
+
+    build = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True)
+    if build is None:
+        pytest.skip("MIR host compiler is not built")
+    params = [T.Var("self", "handle"), T.Var("args", "handle"), T.Var("n", "int32"), T.Var("ret", "handle")]
+    x, y = T.Var("x", "int64"), T.Var("y", "int64")
+    cases = [
+        (T.min(x, y), 7, -2, -2),
+        (T.max(x, y), 7, -2, 7),
+        (T.Cast("bool", x), 2, 0, 1),
+        (T.Cast("float64", T.Cast("uint64", x)), 8192, 0, 8192),
+        (T.Cast("float32", T.Cast("uint64", x)), 8192, 0, 8192),
+        (T.Cast("bool", T.Cast("float64", x)), 2, 0, 1),
+        (T.tvm_struct_get(params[1], 0, 15, "float32") * 4, 1.75, 0, 7),
+        (T.Cast("uint64", T.Cast("float64", x)), 17, 0, 17),
+        (T.Cast("uint64", T.Cast("float64", x) + T.const(float(2**63), "float64")), 8192, 0, -(2**63) + 8192),
+        (T.floordiv(x, y), -7, 3, -3),
+        (T.floormod(x, y), -7, 3, 2),
+        (T.bitwise_not(x), 7, 0, -8),
+        (T.call_extern("float64", "sqrt", T.Cast("float64", x)), 81, 0, 9),
+        (T.max(T.call_extern("float64", "sqrt", T.Cast("float64", x)), T.Cast("float64", y)), -1, 7, 7),
+    ]
+
+    def no_compiler(*args, **kwargs):
+        pytest.fail("MIR host compilation or cache packaging invoked a subprocess")
+
+    monkeypatch.setattr("subprocess.Popen", no_compiler)
+    for expr, a, b, expected in cases:
+        # TVMFFIAny fields: type_index=13, union_value=15; integer type index=1.
+        value = T.Cast("int64", expr)
+        store = T.Evaluate(T.tvm_struct_set(params[3], 0, 15, value))
+        if dynamic:
+            size = params[2] * 4096
+            buffer = T.decl_buffer((size,), "int64", scope="local", data_alignment=128)
+            loop = T.Var("i", "int32")
+            store = T.For(
+                loop,
+                0,
+                256,
+                T.ForKind.SERIAL,
+                T.SeqStmt(
+                    [
+                        T.AllocBuffer(buffer),
+                        T.BufferStore(buffer, value, [size - 1]),
+                        T.Evaluate(T.tvm_struct_set(params[3], 0, 15, T.BufferLoad(buffer, [size - 1]))),
+                        T.IfThenElse(loop == 128, T.Evaluate(T.call_intrin("int32", tvm.ir.Op.get("tl.loop_break"))), None),
+                    ]
+                ),
+            )
+        body = T.SeqStmt(
+            [
+                T.Bind(x, T.tvm_struct_get(params[1], 0, 15, "int64")),
+                T.Bind(y, T.tvm_struct_get(params[1], 1, 15, "int64")),
+                T.Evaluate(T.tvm_struct_set(params[3], 0, 13, 1)),
+                store,
+            ]
+        )
+        func = T.PrimFunc(params, body).with_attr("global_symbol", "__tvm_ffi_main").with_attr("tirx.is_entry_func", True)
+        func = func.with_attr("target", tvm.target.Target("mir"))
+        module = build(transform.LowerIntrin()(tvm.IRModule({"main": func})), tvm.target.Target("mir"))
+        assert module.main(a, b) == expected
+        path = tmp_path / "scalar.tlm"
+        path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(module))
+        cached = tvm.runtime.load_module(str(path))
+        assert cached.main(a, b) == expected
+        path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(cached))
+        assert tvm.runtime.load_module(str(path)).main(a, b) == expected

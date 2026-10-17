@@ -1,6 +1,9 @@
 from pathlib import Path
+import pytest
 
-from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
+from tilelang.contrib import nvcc
+from tilelang.contrib.nvcc import discover_cuda_include_paths
+from tilelang.contrib.nvcc import get_nvrtc_include_options
 
 
 def _make_include_tree(cuda_home: Path, relative_paths: list[str]) -> list[str]:
@@ -12,10 +15,19 @@ def _make_include_tree(cuda_home: Path, relative_paths: list[str]) -> list[str]:
     return paths
 
 
-def test_discovers_flat_pip_include_layout(tmp_path):
+def test_discovers_flat_pip_include_layout(tmp_path, monkeypatch):
     expected = _make_include_tree(tmp_path, ["include", "include/cccl"])
 
     assert discover_cuda_include_paths(str(tmp_path), machine="x86_64", system="linux") == expected
+    monkeypatch.setattr(nvcc, "CUDA_HOME", str(tmp_path))
+    for major in (12, 13):
+        options = [f"-I{path}" for path in expected] + [f"-D__CUDACC_VER_MAJOR__={major}"]
+        if major < 13:
+            options.append(f"-I{tmp_path / 'include' / 'cuda' / 'std'}")
+        assert get_nvrtc_include_options(major) == options
+    monkeypatch.setattr(nvcc, "CUDA_HOME", "")
+    with pytest.raises(RuntimeError, match="CUDA_HOME"):
+        get_nvrtc_include_options(13)
 
 
 def test_discovers_target_specific_system_include_layout(tmp_path):

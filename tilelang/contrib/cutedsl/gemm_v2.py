@@ -12,11 +12,10 @@ __all__ = [
 
 import cutlass
 import cutlass.cute as cute
-from cutlass._mlir.dialects import nvvm, llvm
+from cutlass._mlir.dialects import llvm
 from cutlass._mlir import ir
-from cutlass.cutlass_dsl import T, Constexpr
+from cutlass.cutlass_dsl import Constexpr
 import cutlass.cute.nvgpu.warpgroup as warpgroup
-from .utils import type_map
 
 
 class GmmaDescriptor:
@@ -34,14 +33,15 @@ class GmmaDescriptor:
         return GmmaDescriptor(res_i64[0])
 
 
-def initialize_wgmma_descriptor(layout_type, leading_byte_offset, stride_byte_offset, desc: GmmaDescriptor, start_address: cute.Pointer):
+def initialize_wgmma_descriptor(layout_type, leading_byte_offset, stride_byte_offset, desc: GmmaDescriptor, start_address):
     # Manually pack the descriptor bits to match the WGMMA descriptor format:
     #   Bits [0:13]  = start_address >> 4
     #   Bits [16:29] = leading_byte_offset
     #   Bits [32:45] = stride_byte_offset
     #   Bits [49:51] = base_offset (0)
     #   Bits [62:63] = layout_type
-    ptr_val = start_address.toint() >> 4
+    ptr = start_address.iterator if isinstance(start_address, cute.Tensor) else start_address
+    ptr_val = ptr.toint() >> 4
     # Low 32 bits: start_address[0:13] | leading[16:29]
     desc.desc[0] = cutlass.Int32(ptr_val) | cutlass.Int32(cutlass.Int32(leading_byte_offset) << 16)
     # High 32 bits: stride[0:13] | layout_type[30:31]
@@ -120,77 +120,40 @@ def _wgmma_ab_dtype(dtype_str):
     return _FP32_TO_TF32.get(dtype_str, dtype_str)
 
 
-@cute.jit
 def wgmma_ss(
-    A_dtype: str,
-    B_dtype: str,
-    C_dtype: str,
-    M: Constexpr[int],
-    N: Constexpr[int],
-    K: Constexpr[int],
-    tnspA: bool,
-    tnspB: bool,
-    scaleA: int,
-    scaleB: int,
-    desc_a: GmmaDescriptor,
-    desc_b: GmmaDescriptor,
-    C_ptr: cute.Pointer,
-    scale_out: Constexpr[int],
+    A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out, E_ptr=None, sparse_selector=0
 ):
-    num_elems_per_thread = _wgmma_num_c_regs(M, N, C_dtype)
-
-    C_types = llvm.StructType.get_literal([T.i32()] * num_elems_per_thread)
-
-    C_vecs = cute.make_tensor(cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_elems_per_thread,))
-
-    # Pack current accumulator values into a struct
-    inouts_struct = llvm.mlir_undef(C_types)
-    for i in cutlass.range_constexpr(num_elems_per_thread):
-        inouts_struct = llvm.insertvalue(inouts_struct, C_vecs[i].ir_value(), [i])
-
-    shape_attr = ir.Attribute.parse(f"#nvvm.shape<m={M},n={N},k={K}>")
-
-    new_C_vecs = nvvm.wgmma_mma_async(
-        results_=C_types,
-        inouts=inouts_struct,
-        descriptor_a=desc_a.desc_i64[0].ir_value(),
-        descriptor_b=desc_b.desc_i64[0].ir_value(),
-        shape=shape_attr,
-        type_a=type_map[_wgmma_ab_dtype(A_dtype)],
-        type_b=type_map[_wgmma_ab_dtype(B_dtype)],
-        type_d=type_map[C_dtype],
-        scale_d=nvvm.WGMMAScaleOut.zero if scale_out == 0 else nvvm.WGMMAScaleOut.one,
-        scale_a=nvvm.WGMMAScaleIn.one if scaleA == 1 else nvvm.WGMMAScaleIn.neg,
-        scale_b=nvvm.WGMMAScaleIn.one if scaleB == 1 else nvvm.WGMMAScaleIn.neg,
-        layout_a=nvvm.MMALayout.col if tnspA else nvvm.MMALayout.row,
-        layout_b=nvvm.MMALayout.row if tnspB else nvvm.MMALayout.col,
+    return _wgmma(
+        A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out, E_ptr, sparse_selector
     )
-    for i in cutlass.range_constexpr(num_elems_per_thread):
-        C_vecs[i] = llvm.extractvalue(T.i32(), new_C_vecs, [i])
+
+
+def wgmma_rs(A_dtype, B_dtype, C_dtype, M, N, K, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out, E_ptr=None, sparse_selector=0):
+    return _wgmma(A_dtype, B_dtype, C_dtype, M, N, K, False, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out, E_ptr, sparse_selector)
 
 
 @cute.jit
-def wgmma_rs(
+def _wgmma(
     A_dtype: str,
     B_dtype: str,
     C_dtype: str,
     M: Constexpr[int],
     N: Constexpr[int],
     K: Constexpr[int],
+    tnspA: Constexpr[bool],
     tnspB: Constexpr[bool],
     scaleA: Constexpr[int],
     scaleB: Constexpr[int],
-    A_ptr: cute.Pointer,
+    A_ptr,
     desc_b: GmmaDescriptor,
     C_ptr: cute.Pointer,
-    scale_out: Constexpr[int],
+    scale_out,
+    E_ptr=None,
+    sparse_selector: Constexpr[int] = 0,
 ):
-    """WGMMA register-shared variant using PTX inline asm.
-
-    A operand comes from registers, B from shared memory descriptor.
-    M is always 64. A is always K-major (not transposed).
-    """
-    num_a_regs = 4  # Always 4 for M=64, all supported dtypes
+    """Shared PTX emission keeps scale-out a runtime predicate for both variants."""
+    is_ss = isinstance(A_ptr, GmmaDescriptor)
+    num_a_regs = 1 if is_ss else 4
     num_c_regs = _wgmma_num_c_regs(M, N, C_dtype)
 
     ptx_a = _PTX_DTYPE_MAP[_wgmma_ab_dtype(A_dtype)]
@@ -198,53 +161,53 @@ def wgmma_rs(
     ptx_c = _PTX_DTYPE_MAP[C_dtype]
 
     # Create tensor views over register data
-    A_vecs = cute.make_tensor(cute.recast_ptr(A_ptr, dtype=cute.Int32), (num_a_regs,))
+    if cutlass.const_expr(not is_ss):
+        A_vecs = cute.make_tensor(cute.recast_ptr(A_ptr, dtype=cute.Int32), (num_a_regs,))
     C_vecs = cute.make_tensor(cute.recast_ptr(C_ptr, dtype=cute.Int32), (num_c_regs,))
 
-    # Operand numbering in the inline asm:
-    #   $0 .. $(num_c_regs-1)                          : output D regs (f32)
-    #   $(num_c_regs) .. $(2*num_c_regs-1)             : tied C inputs
-    #   $(2*num_c_regs) .. $(2*num_c_regs+3)           : A regs (i32)
-    #   $(2*num_c_regs+4)                              : desc_b (i64)
     a_base = 2 * num_c_regs
     desc_b_idx = a_base + num_a_regs
+    scale_idx = desc_b_idx + 1
 
-    # Build PTX asm string
     d_regs_str = ", ".join(f"${i}" for i in range(num_c_regs))
-    a_regs_str = ", ".join(f"${a_base + i}" for i in range(num_a_regs))
-    tnsp_b_imm = 1 if tnspB else 0
-    # Embed scale_out as immediate in predicate setup
-    scale_const = 1 if scale_out != 0 else 0
-
-    # TF32 WGMMA does not have a tnspB parameter (B is always K-major)
-    tail_args = f"p, {scaleA}, {scaleB};" if ptx_a == "tf32" else f"p, {scaleA}, {scaleB}, {tnsp_b_imm};"
+    a_regs_str = f"${a_base}" if is_ss else "{" + ", ".join(f"${a_base + i}" for i in range(num_a_regs)) + "}"
+    sparse = E_ptr is not None
+    tail_args = f"${scale_idx + 1}, {sparse_selector}, p" if sparse else "p"
+    if cutlass.const_expr(ptx_a not in ("s8", "u8")):
+        tail_args += f", {scaleA}, {scaleB}"
+    if cutlass.const_expr(ptx_a in ("f16", "bf16")):
+        if cutlass.const_expr(is_ss):
+            tail_args += f", {int(tnspA)}"
+        tail_args += f", {int(tnspB)}"
 
     asm_str = (
         "{\n"
         ".reg .pred p;\n"
-        f"setp.ne.b32 p, {scale_const}, 0;\n"
-        f"wgmma.mma_async.sync.aligned.m{M}n{N}k{K}"
+        f"setp.ne.b32 p, ${scale_idx}, 0;\n"
+        f"wgmma.mma_async{'.sp' if sparse else ''}.sync.aligned.m{M}n{N}k{K}"
         f".{ptx_c}.{ptx_a}.{ptx_b} "
         f"{{{d_regs_str}}}, "
-        f"{{{a_regs_str}}}, "
+        f"{a_regs_str}, "
         f"${desc_b_idx}, "
-        f"{tail_args}\n"
+        f"{tail_args};\n"
         "}\n"
     )
 
-    # Determine if C/D is float or integer based on canonical PTX dtype.
-    # All type/constraint decisions are made here (no branching in the DSL loop).
-    is_int_accum = ptx_c == "s32"
-    c_constraint = "r" if is_int_accum else "f"
+    # Integer and packed FP16 accumulators use i32 registers.
+    use_float_regs = ptx_c == "f32"
+    c_constraint = "f" if use_float_regs else "r"
     i32_type = ir.IntegerType.get_signless(32)
     f32_type = ir.F32Type.get()
-    c_ir_type = i32_type if is_int_accum else f32_type
+    c_ir_type = f32_type if use_float_regs else i32_type
 
     # Build constraint string
     out_constraints = ",".join([f"={c_constraint}"] * num_c_regs)
     tied_constraints = ",".join([str(i) for i in range(num_c_regs)])
-    a_constraints = ",".join(["r"] * num_a_regs)
-    constraints = f"{out_constraints},{tied_constraints},{a_constraints},l"
+    a_constraints = "l" if is_ss else ",".join(["r"] * num_a_regs)
+    constraints = f"{out_constraints},{tied_constraints},{a_constraints},l,r"
+
+    if cutlass.const_expr(sparse):
+        constraints += ",r"
 
     # Prepare operands list
     operands = []
@@ -252,14 +215,21 @@ def wgmma_rs(
     # Tied C inputs: for 'f' constraint bitcast i32→f32, for 'r' pass i32 as-is
     for i in cutlass.range_constexpr(num_c_regs):
         val = C_vecs[i].ir_value()
-        operands.append(val if is_int_accum else llvm.bitcast(f32_type, val))
+        operands.append(llvm.bitcast(f32_type, val) if use_float_regs else val)
 
-    # A inputs (i32)
-    for i in cutlass.range_constexpr(num_a_regs):
-        operands.append(A_vecs[i].ir_value())
+    if cutlass.const_expr(is_ss):
+        operands.append(A_ptr.desc_i64[0].ir_value())
+    else:
+        for i in cutlass.range_constexpr(num_a_regs):
+            operands.append(A_vecs[i].ir_value())
 
     # desc_b (i64)
     operands.append(desc_b.desc_i64[0].ir_value())
+    operands.append(cutlass.Int32(scale_out).ir_value())
+
+    if cutlass.const_expr(sparse):
+        metadata = cute.make_tensor(cute.recast_ptr(E_ptr, dtype=cute.Int32), (1,))
+        operands.append(metadata[0].ir_value())
 
     # Result type
     result_type = llvm.StructType.get_literal([c_ir_type] * num_c_regs)
@@ -278,4 +248,4 @@ def wgmma_rs(
     # Extract results and store back: for 'f' bitcast f32→i32, for 'r' direct
     for i in cutlass.range_constexpr(num_c_regs):
         extracted = llvm.extractvalue(c_ir_type, result, [i])
-        C_vecs[i] = extracted if is_int_accum else llvm.bitcast(i32_type, extracted)
+        C_vecs[i] = llvm.bitcast(i32_type, extracted) if use_float_regs else extracted

@@ -609,9 +609,11 @@ def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=
     return scan_strided_out_of_place
 
 
-def run_scan_strided_out_of_place(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, threads=256):
+def run_scan_strided_out_of_place(
+    M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, target="auto", threads=256
+):
     program = scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op, dim, reverse, dtype, threads=threads)
-    jit_kernel = tl.compile(program, out_idx=-1)
+    jit_kernel = tl.compile(program, out_idx=-1, target=target)
 
     A = torch.arange(M * N, dtype=getattr(torch, dtype), device="cuda").reshape(M, N) - N
     if op == "cumsum":
@@ -651,12 +653,15 @@ def test_cummax_strided_region():
         run_cummax_strided(M, N, NBIG, dim, reverse)
 
 
+@pytest.mark.parametrize("target", ["auto", pytest.param("cutedsl", marks=tilelang.testing.requires_cuda.marks())])
 @pytest.mark.parametrize("threads", [32, 256])
-def test_scan_strided_out_of_place(threads):
+def test_scan_strided_out_of_place(target, threads):
     """Out-of-place scan with distinct source and destination row pitches."""
+    if target == "cutedsl":
+        pytest.importorskip("cutlass.cute")
     for op in ("cumsum", "cummax"):
         for dim in (0, 1):
-            run_scan_strided_out_of_place(8, 40, 64, 80, op=op, dim=dim, reverse=dim == 1, threads=threads)
+            run_scan_strided_out_of_place(8, 40, 64, 80, op=op, dim=dim, reverse=dim == 1, target=target, threads=threads)
 
 
 def scan_offset_subregion_test(H, W, r0, r1, op="cumsum", dim=0, reverse=False, dtype=T.float32):

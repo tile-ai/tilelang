@@ -10,6 +10,7 @@ from tilelang.env import TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
+from .pto import compile_pto
 
 
 def tilelang_callback_ascend_compile(code, target, pass_config=None):
@@ -74,5 +75,6 @@ PTO_BACKEND = register_backend(
         device_codegens={"ascend": codegen.PTO_CODEGEN},
         execution_backends=execution_backend.PTO_EXECUTION_BACKENDS,
         host_codegens=STANDARD_HOST_CODEGENS,
+        callbacks={"tilelang_callback_pto_compile": compile_pto},
     )
 )

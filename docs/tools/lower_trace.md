@@ -281,12 +281,10 @@ output) decides how to proceed:
 
 :::{note}
 **Backend requirements for edit-and-recompile.** The edit-and-recompile
-workflow requires a source-compiling execution backend — `nvrtc`, `cython`, or
-`cutedsl`. These backends use `*_without_compile` codegen FFIs that produce
-source-only modules, then compile the (edited) source string at runtime via
-NVRTC / Cython / CuTeDSL.
+workflow requires `cython`, which uses `*_without_compile` codegen FFIs to produce
+source-only modules and compiles the edited source at runtime.
 
-The default `tvm_ffi` backend pre-compiles device code to a binary (PTX/hsaco)
+The default `tvm_ffi` backend pre-compiles device code to a binary
 from TIR during codegen. When the `tvm_ffi` backend is active and you edit
 `codegen.cpp`, you'll see a `NOTE` message indicating that your edits are
 recorded in the trace for diff viewing but were **not recompiled**. To use
@@ -294,7 +292,7 @@ edit-and-recompile, switch to a source-compiling backend:
 
 ```python
 # For CUDA targets:
-tilelang.compile(..., execution_backend="nvrtc")
+tilelang.compile(..., execution_backend="cython")
 
 # For HIP targets:
 tilelang.compile(..., execution_backend="cython")

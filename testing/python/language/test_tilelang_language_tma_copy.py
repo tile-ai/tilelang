@@ -318,6 +318,8 @@ def _tma_stack_int(block, index):
 
 
 def _assert_2d_f32_tma_descriptor(kernel, desc_name, rows, global_width):
+    if kernel.target_host.kind.name != "c":
+        return  # C source assertions are covered by the explicit C parametrization.
     block = _tma_descriptor_init_block(kernel.get_host_source(), desc_name)
     assert _tma_stack_int(block, 2) == 2
     assert _tma_stack_int(block, 4) == global_width
@@ -329,7 +331,8 @@ def _assert_2d_f32_tma_descriptor(kernel, desc_name, rows, global_width):
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_load_wide_linear_fixed_slice_with_unaligned_global_shape():
+@pytest.mark.parametrize("target_host", [None, "c"])
+def test_tma_load_wide_linear_fixed_slice_with_unaligned_global_shape(target_host):
     # The extent and coordinate are not 256-aligned; the byte stride and
     # starting address still satisfy CUDA's 16-byte requirements.
     rows, global_width, tile_width, col_offset = 16, 516, 512, 4
@@ -354,6 +357,7 @@ def test_tma_load_wide_linear_fixed_slice_with_unaligned_global_shape():
     kernel = tilelang.compile(
         main,
         out_idx=[1],
+        target_host=target_host,
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     source = kernel.get_kernel_source()
@@ -369,7 +373,8 @@ def test_tma_load_wide_linear_fixed_slice_with_unaligned_global_shape():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_store_wide_linear_fixed_slice_with_unaligned_global_shape():
+@pytest.mark.parametrize("target_host", [None, "c"])
+def test_tma_store_wide_linear_fixed_slice_with_unaligned_global_shape(target_host):
     # Fifteen rows select the unswizzled layout; 516 and 4 satisfy byte
     # alignment without being aligned to the 256-element box.
     rows, global_width, tile_width, col_offset = 15, 516, 512, 4
@@ -390,6 +395,7 @@ def test_tma_store_wide_linear_fixed_slice_with_unaligned_global_shape():
 
     kernel = tilelang.compile(
         main,
+        target_host=target_host,
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     source = kernel.get_kernel_source()
@@ -408,7 +414,8 @@ def test_tma_store_wide_linear_fixed_slice_with_unaligned_global_shape():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tma_load_oob_fill_with_non_aligned_global_extent():
+@pytest.mark.parametrize("target_host", [None, "c"])
+def test_tma_load_oob_fill_with_non_aligned_global_extent(target_host):
     rows, global_width, row_stride, tile_width, col_offset = 2, 515, 516, 256, 512
 
     @T.prim_func
@@ -427,12 +434,14 @@ def test_tma_load_oob_fill_with_non_aligned_global_extent():
     kernel = tilelang.compile(
         main,
         out_idx=[1],
+        target_host=target_host,
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     assert "tl::tma_load" in kernel.get_kernel_source()
-    block = _tma_descriptor_init_block(kernel.get_host_source(), "A_desc")
-    assert _tma_stack_int(block, 4) == global_width
-    assert _tma_stack_int(block, 7) == row_stride * 4
+    if kernel.target_host.kind.name == "c":
+        block = _tma_descriptor_init_block(kernel.get_host_source(), "A_desc")
+        assert _tma_stack_int(block, 4) == global_width
+        assert _tma_stack_int(block, 7) == row_stride * 4
 
     import torch
 
@@ -622,13 +631,14 @@ def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzl
         assert _tma_stack_int(block, 13) == expect_swizzle
 
 
-def run_fp4_tma_copy_roundtrip():
+def run_fp4_tma_copy_roundtrip(target_host=None):
     import torch
 
     M, N = 128, 256
     program = fp4_tma_copy_roundtrip(M=M, N=N)
     kernel = tilelang.compile(
         program,
+        target_host=target_host,
         out_idx=[1],
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
@@ -637,9 +647,10 @@ def run_fp4_tma_copy_roundtrip():
     assert "CUtensorMap" in device_source
     assert "tl::tma_load" in device_source
     assert "tl::tma_store" in device_source
-    assert host_source.count("__tvm_tensormap_create_tiled") >= 2
-    for desc_name in ("A_desc", "B_desc"):
-        _assert_fp4_packed_tma_descriptor(host_source, desc_name)
+    if kernel.target_host.kind.name == "c":
+        assert host_source.count("__tvm_tensormap_create_tiled") >= 2
+        for desc_name in ("A_desc", "B_desc"):
+            _assert_fp4_packed_tma_descriptor(host_source, desc_name)
 
     a = torch.randint(-128, 128, (M, N // 2), device="cuda", dtype=torch.int8)
     b = kernel(a)
@@ -760,6 +771,7 @@ def run_fp4_tma_copy_unpacked_smem_load():
     kernel = tilelang.compile(
         program,
         target="cuda",
+        target_host="c",  # This test checks the generated C descriptor, not execution.
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     device_source = kernel.get_kernel_source()
@@ -772,8 +784,9 @@ def run_fp4_tma_copy_unpacked_smem_load():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
-def test_fp4_tma_copy_roundtrip_packed_smem():
-    run_fp4_tma_copy_roundtrip()
+@pytest.mark.parametrize("target_host", [None, "c"])
+def test_fp4_tma_copy_roundtrip_packed_smem(target_host):
+    run_fp4_tma_copy_roundtrip(target_host)
 
 
 @tilelang.testing.requires_cuda

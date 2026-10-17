@@ -27,21 +27,34 @@ __all__ = [
 import cutlass
 import cutlass.cute as cute
 from cutlass.experimental import primitives as prims
+from .utils import bitcast, select
+
+
+def _minmax(a, b, minimum):
+    if type(a) is type(b) and isinstance(a, (cutlass.Float8E4M3FN, cutlass.Float8E5M2)):
+        # Order FP8 encodings without converting their values. Negative codes
+        # run backwards; this also orders -0 below +0. Preserve NaN payloads.
+        x, y = cutlass.Int32(bitcast(a, cutlass.Uint8)), cutlass.Int32(bitcast(b, cutlass.Uint8))
+        kx, ky = select(x >= 128, 127 - x, x), select(y >= 128, 127 - y, y)
+        last = 126 if isinstance(a, cutlass.Float8E4M3FN) else 124
+        choose_a = kx < ky if minimum else kx > ky
+        return select(((x & 127) > last) | (((y & 127) <= last) & choose_a), a, b)
+    return cutlass.min(a, b) if minimum else cutlass.max(a, b)
 
 
 def min(a, b, c=None):
     """Type-preserving min for scalar CuTeDSL values."""
-    result = cutlass.min(a, b)
+    result = _minmax(a, b, True)
     if c is not None:
-        result = cutlass.min(result, c)
+        result = _minmax(result, c, True)
     return result
 
 
 def max(a, b, c=None):
     """Type-preserving max for scalar CuTeDSL values."""
-    result = cutlass.max(a, b)
+    result = _minmax(a, b, False)
     if c is not None:
-        result = cutlass.max(result, c)
+        result = _minmax(result, c, False)
     return result
 
 
@@ -316,7 +329,7 @@ class CumSum2D:
         self.TILE_H = threads // self.WARP_SIZE
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         """
         Perform 2D cumulative sum.
 
@@ -332,8 +345,9 @@ class CumSum2D:
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        # Scalar indexing stays row-major while each view preserves its pitch.
+        src_tensor = cute.make_tensor(src, cute.make_layout((W, H), stride=(1, src_stride)))
+        dst_tensor = cute.make_tensor(dst, cute.make_layout((W, H), stride=(1, dst_stride)))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
@@ -386,15 +400,16 @@ class CumMax2D:
         self.WARP_SIZE = 32
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        # Scalar indexing stays row-major while each view preserves its pitch.
+        src_tensor = cute.make_tensor(src, cute.make_layout((W, H), stride=(1, src_stride)))
+        dst_tensor = cute.make_tensor(dst, cute.make_layout((W, H), stride=(1, dst_stride)))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile

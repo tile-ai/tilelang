@@ -49,8 +49,9 @@ def _make_adapter():
         def executable(*args):
             return None
 
-        created.append(executable)
-        return executable
+        module = SimpleNamespace(main=executable)
+        created.append(module)
+        return module
 
     adapter._make_executable = make_executable
     return adapter, created
@@ -71,8 +72,15 @@ def test_adapter_initialization_does_not_probe_runtime(monkeypatch, callee_alloc
     assert callable(adapter.func)
 
 
-def test_cold_compiled_dispatch_does_not_probe_cuda(monkeypatch):
+@pytest.mark.parametrize("device_aware", [False, True])
+def test_cold_compiled_dispatch_does_not_probe_cuda(monkeypatch, device_aware):
     adapter, created = _make_adapter()
+    prepared_devices = []
+    monkeypatch.setattr(adapter, "_prepare_torch_device", prepared_devices.append)
+    if device_aware:
+        monkeypatch.setattr(torch, "npu", object(), raising=False)
+    else:
+        monkeypatch.delattr(torch, "npu", raising=False)
     func = adapter._convert_torch_func()
     tensor = torch.empty(1)
     cuda_probe_count = 0
@@ -85,11 +93,16 @@ def test_cold_compiled_dispatch_does_not_probe_cuda(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", counted_is_available)
 
     for _ in range(3):
-        func(tensor)
+        assert func(tensor) == []
+
+    with pytest.raises(ValueError, match="expected 1 inputs"):
+        func()
 
     assert cuda_probe_count == 0
     assert len(created) == 1
     assert adapter.executable is created[0]
+    assert adapter._entry is created[0].main
+    assert prepared_devices == ([tensor.device] * 3 if device_aware else [])
 
 
 def test_executable_is_initialized_once_and_reused():
@@ -158,7 +171,7 @@ def test_callee_allocated_output_dispatch_uses_single_main_entry(monkeypatch):
         calls.append(args)
         return expected
 
-    adapter.executable = main
+    adapter.executable = SimpleNamespace(main=main)
     tensor = torch.empty(1)
 
     def unexpected_device_probe():
@@ -229,3 +242,27 @@ def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source()
 
     with pytest.raises(ValueError, match="does not match"):
         prepare_tvm_ffi_callee_allocated_outputs(attributed, [0])
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+def test_mir_host_clz_native_reload(dtype, tmp_path):
+    build = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True)
+    if build is None:
+        pytest.skip("MIR host compiler is not built")
+    params = [tirx.Var(name, ty) for name, ty in [("self", "handle"), ("args", "handle"), ("n", "int32"), ("ret", "handle")]]
+    value = tirx.Cast(dtype, tirx.tvm_struct_get(params[1], 0, 15, "int64"))
+    body = tirx.SeqStmt(
+        [
+            tirx.Evaluate(tirx.tvm_struct_set(params[3], 0, 13, 1)),
+            tirx.Evaluate(tirx.tvm_struct_set(params[3], 0, 15, tirx.Cast("int64", tirx.clz(value)))),
+        ]
+    )
+    func = tirx.PrimFunc(params, body).with_attr("global_symbol", "__tvm_ffi_main").with_attr("tirx.is_entry_func", True)
+    module = build(tvm.IRModule({"main": func}), tvm.target.Target("mir"))
+    path = tmp_path / "clz.tlm"
+    path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(module))
+    loaded = tvm.runtime.load_module(str(path))
+    bits = int(dtype[-2:])
+    for value in [0, -1, -(1 << 63)] + [1 << b for b in range(63)]:
+        expected = bits - (value & ((1 << bits) - 1)).bit_length()
+        assert module.main(value) == loaded.main(value) == expected

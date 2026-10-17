@@ -399,6 +399,29 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/ascend/CMakeLists.txt")
 list(REMOVE_DUPLICATES TILE_LANG_SRCS)
 
+# MIR is an optional host compiler, not a device/execution backend. Do not build
+# its C frontend, tools or tests, and never download dependencies during builds.
+set(TILELANG_MIR_SOURCE_DEFAULT "")
+# Native MIR cache images support x86-64 and AArch64.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64)$")
+  set(TILELANG_MIR_SOURCE_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/mir")
+endif()
+set(TILELANG_MIR_SOURCE_DIR "${TILELANG_MIR_SOURCE_DEFAULT}" CACHE PATH "MIR source checkout (empty to disable)")
+if(TILELANG_MIR_SOURCE_DIR)
+  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "The MIR host compiler requires a 64-bit host")
+  endif()
+  add_library(tilelang_mir OBJECT
+    ${TILELANG_MIR_SOURCE_DIR}/mir.c ${TILELANG_MIR_SOURCE_DIR}/mir-gen.c)
+  set_target_properties(tilelang_mir PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
+  if(NOT MSVC)
+    target_compile_options(tilelang_mir PRIVATE -fsigned-char)
+  endif()
+  list(APPEND TILE_LANG_SRCS src/backend/common/codegen/codegen_mir.cc)
+  set_source_files_properties(src/backend/common/codegen/codegen_mir.cc
+    PROPERTIES INCLUDE_DIRECTORIES "${TILELANG_MIR_SOURCE_DIR}")
+endif()
+
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
 
@@ -512,9 +535,21 @@ if(WIN32)
   # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
   # DLL names without falling back to the old unified tvm.dll.
   target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
+  if(TARGET tilelang_mir)
+    target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_mir>)
+    target_link_libraries(tvm_compiler PRIVATE psapi)
+  endif()
 else()
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
+  if(APPLE AND USE_METAL)
+    # Torch is loaded by the caller; do not bundle/link a second copy into wheels.
+    target_link_options(tilelang PRIVATE "-undefined" "dynamic_lookup")
+  endif()
+  if(TARGET tilelang_mir)
+    target_sources(tilelang PRIVATE $<TARGET_OBJECTS:tilelang_mir>)
+    target_link_libraries(tilelang PRIVATE ${CMAKE_DL_LIBS} m)
+  endif()
 
   # Place dev build outputs under build/lib for consistency
   set_target_properties(tilelang PROPERTIES
@@ -570,27 +605,6 @@ endif()
 # dependency and matches Cython's own suggested workaround. See #2125.
 target_compile_definitions(tilelang_cython_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
-# PTO owns its packed-storage launch ABI independently of the Cython backend.
-add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp"
-  COMMENT
-    "Cythoning tilelang/jit/adapter/pto/cython_wrapper.pyx"
-  COMMAND Python::Interpreter -m cython
-          "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/pto/cython_wrapper.pyx"
-          --module-name tilelang_pto_wrapper
-          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp"
-  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/pto/cython_wrapper.pyx"
-  VERBATIM)
-
-python_add_library(tilelang_pto_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-if(WIN32)
-  target_compile_definitions(tilelang_pto_wrapper PRIVATE Py_NO_LINK_LIB=1)
-  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
-    target_link_options(tilelang_pto_wrapper PRIVATE
-      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
-  endif()
-endif()
-target_compile_definitions(tilelang_pto_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
 # Ascend Torch-NPU stream exchange extension. Pure CPython/DLPack (no CANN
 # dependency), so it builds on every configuration like the other
@@ -651,11 +665,7 @@ set_target_properties(tilelang_cython_wrapper PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
-set_target_properties(tilelang_pto_wrapper PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
+
 set_target_properties(tilelang_ascend_npu_exchange PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -667,10 +677,7 @@ install(TARGETS tilelang_cython_wrapper
         LIBRARY DESTINATION tilelang/lib
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
-install(TARGETS tilelang_pto_wrapper
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
+
 install(TARGETS tilelang_ascend_npu_exchange
         LIBRARY DESTINATION tilelang/lib
         RUNTIME DESTINATION tilelang/lib

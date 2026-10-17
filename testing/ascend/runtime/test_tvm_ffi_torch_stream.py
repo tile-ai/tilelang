@@ -16,7 +16,6 @@ PROBE_ELEMENTS = 256
 
 @tilelang.jit(
     target="ascend",
-    execution_backend="tvm_ffi",
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
     compile_flags=["-O2"],
 )

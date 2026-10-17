@@ -1,3 +1,5 @@
+import re
+
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang import language as T
@@ -16,7 +18,7 @@ def test_kernel(
 @tilelang.testing.requires_cuda
 def test_let_vectorize_load():
     kernel_source = test_kernel.get_kernel_source()
-    assert "float4 b" in kernel_source
+    assert "float4 b" in kernel_source or ("b = tl.make_tensor_at_offset" in kernel_source and "(4,)" in kernel_source)
 
 
 @tilelang.jit
@@ -33,7 +35,7 @@ def bind_kernel(A: T.Tensor((64,), T.float16), B: T.Tensor((64,), T.float16)):
 @tilelang.testing.requires_cuda
 def test_bind_kernel():
     kernel_source = bind_kernel.get_kernel_source()
-    assert "float x" in kernel_source
+    assert "float x" in kernel_source or re.search(r"(?<![\w.])x\s*=", kernel_source)
 
 
 @tilelang.jit
@@ -53,7 +55,7 @@ def producer_bind_kernel(A: T.Tensor((64,), T.float16), B: T.Tensor((64,), T.flo
 @tilelang.testing.requires_cuda
 def test_producer_bind_kernel():
     kernel_source = producer_bind_kernel.get_kernel_source()
-    assert "tl::tma_load" in kernel_source
+    assert "tl::tma_load" in kernel_source or "tl.tma_load" in kernel_source
 
 
 if __name__ == "__main__":

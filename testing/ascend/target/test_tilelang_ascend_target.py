@@ -71,23 +71,24 @@ def test_native_ascend_kind_drives_backend_identity():
     assert get_backend("ascend").resolve_execution_backend("auto", target).name == "tvm_ffi"
 
 
-def test_pto_execution_backend_selects_pto_target_variant():
-    context = create_backend_context("ascend", "c", "pto")
+def test_pto_target_variant_uses_tvm_ffi_execution():
+    context = create_backend_context("pto", "c", "tvm_ffi")
 
     assert context.name == "pto"
     assert context.target.kind.name == "ascend"
     assert target_is_pto(context.target)
-    assert context.execution_backend.name == "pto"
+    assert context.execution_backend.name == "tvm_ffi"
     assert context.module.get_device_codegen(context.target) is PTO_CODEGEN
     assert tvm.ffi.get_global_func("target.build.tilelang_pto_without_compile", allow_missing=True) is not None
 
 
-def test_pto_execution_backend_preserves_ascend_target_options():
-    context = create_backend_context({"kind": "ascend", "arch": "dav-3510"}, "c", "pto")
+def test_pto_target_variant_preserves_ascend_target_options():
+    context = create_backend_context({"kind": "ascend", "keys": ["pto", "ascend"], "arch": "dav-3510"}, "c", "tvm_ffi")
 
     assert context.name == "pto"
     assert str(context.target.attrs["arch"]) == "dav-3510"
     assert target_is_pto(context.target)
+    assert context.execution_backend.name == "tvm_ffi"
 
 
 def test_auto_execution_backend_keeps_plain_ascend_codegen():

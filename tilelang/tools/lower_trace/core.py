@@ -498,9 +498,7 @@ class LowerTraceSession(PassInstrumentationTool):
         if patched_text.rstrip() != codegen_text.rstrip():
             target_kind = getattr(getattr(event.target, "kind", None), "name", "")
             backend_hint = ""
-            if target_kind == "cuda":
-                backend_hint = " Use execution_backend='nvrtc' for edit-and-recompile support."
-            elif target_kind == "hip":
+            if target_kind in ("cuda", "hip"):
                 backend_hint = " Use execution_backend='cython' for edit-and-recompile support."
             print(
                 f"  {_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_codegen: NOTE — user edits in "

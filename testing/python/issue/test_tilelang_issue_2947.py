@@ -28,7 +28,7 @@ def test_packed_unsigned_convert_with_zeros_uses_signed_output_domain():
                 "float16",
             )
 
-    kernel = tilelang.compile(dequantize, target="cuda", execution_backend="nvrtc")
+    kernel = tilelang.compile(dequantize, target="cuda", pass_configs={"tl.cuda_compiler": "nvrtc"})
     packed = torch.tensor(np.arange(n, dtype=np.uint32), device="cuda")
     decoded = torch.empty(n, dtype=torch.float16, device="cuda")
     kernel(packed, decoded)

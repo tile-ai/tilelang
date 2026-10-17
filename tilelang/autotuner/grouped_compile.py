@@ -16,7 +16,6 @@ from tilelang.autotuner.param import CompileArgs
 from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_codegen
 from tilelang.engine.param import CompiledArtifact
-from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
@@ -77,9 +76,9 @@ def compile_grouped_unit_tvm_ffi(
                 ]
                 with (
                     tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
-                    compile_args.target,
+                    backend_context.target,
                 ):
-                    host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
+                    host_mod, device_mod, params, normalized_target, _ = lower_to_host_device_ir(
                         program,
                         backend_context,
                     )
@@ -159,19 +158,8 @@ def compile_grouped_unit_tvm_ffi(
                         params=item["params"],
                         kernel_source=grouped_kernel_source,
                         rt_mod=host_rt_mod,
-                    )
-
-                    adapter = TVMFFIKernelAdapter(
-                        params=artifact.params,
-                        result_idx=item["output_indices"],
                         target=item["target"],
-                        func_or_mod=item["program"],
-                        host_mod=artifact.host_mod,
-                        device_mod=artifact.device_mod,
-                        rt_mod=artifact.rt_mod,
-                        device_kernel_source=artifact.kernel_source,
-                        verbose=compile_args.verbose,
-                        pass_configs=pass_configs,
+                        target_host=backend_context.target_host,
                     )
 
                     jit_kernel = JITKernel(
@@ -186,8 +174,14 @@ def compile_grouped_unit_tvm_ffi(
                         backend_context=backend_context,
                     )
                     jit_kernel.artifact = artifact
-                    jit_kernel.adapter = adapter
-                    jit_kernel.torch_function = adapter.func
+                    jit_kernel.adapter = jit_kernel._create_adapter_from_artifact(
+                        item["program"],
+                        item["output_indices"],
+                        artifact,
+                        pass_configs,
+                        {"kernel": str(item["program"].attrs["global_symbol"]), "backend": "tvm_ffi", "config": idx},
+                    )
+                    jit_kernel.torch_function = jit_kernel.adapter.func
 
                     unit_results.append((idx, config_arg, jit_kernel, None))
                 except Exception as e:
