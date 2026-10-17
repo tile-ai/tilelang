@@ -471,11 +471,44 @@ bool IsSupportedSIMTLocalStorageType(DataType t) {
   return IsSimtLocalBufferDtype(t) || (t.is_scalar() && t == DataType::Int(32));
 }
 
+bool IsSimtLocalIntegerStorageDtype(DataType t) {
+  return t.is_scalar() && (t.is_int() || t.is_uint()) &&
+         (t.bits() == 8 || t.bits() == 32) &&
+         IsSupportedSIMTLocalStorageType(t);
+}
+
+std::string SimtLocalIntegerStorageTypeName(DataType t) {
+  ICHECK(IsSimtLocalIntegerStorageDtype(t));
+  return "pto.i" + std::to_string(t.bits());
+}
+
+// SIMT local integer storage is signless because LLVM stack accesses require
+// signless integer element types.  TileLang's logical signedness is restored
+// at the load boundary and folded back to the backing type at the store
+// boundary.  These adapters are only consumed by the SIMT local branches of
+// ScalarLoad/EmitScalarStore/EmitScalarizedLoad/EmitScalarizedStore.
+std::string SimtLocalLoadAdapter(const std::string &value, DataType t) {
+  if (!IsSimtLocalIntegerStorageDtype(t)) {
+    return value;
+  }
+  return "pto.cast(" + value + ", " + DataTypeName(t) + ")";
+}
+
+std::string SimtLocalStoreAdapter(const std::string &value, DataType t) {
+  if (!IsSimtLocalIntegerStorageDtype(t)) {
+    return value;
+  }
+  return "pto.cast(" + value + ", " + SimtLocalIntegerStorageTypeName(t) + ")";
+}
+
 std::string SIMTLocalStorageTypeName(DataType t) {
   ICHECK(IsSupportedSIMTLocalStorageType(t));
   // LLVM stack allocations require signless integer element types. Preserve
   // TileLang's signedness at load/store boundaries instead.
-  return IsInteger32(t) ? "pto.i32" : DataTypeName(t);
+  if (IsSimtLocalIntegerStorageDtype(t)) {
+    return SimtLocalIntegerStorageTypeName(t);
+  }
+  return DataTypeName(t);
 }
 
 bool IsSupportedSIMTFP8ContiguousLaneCount(int lanes) {
@@ -2700,10 +2733,7 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
       return "tl.fp8_byte_load(" + GetVarID(buffer->data.get()) + ", " +
              index_str + ", " + FP8TypeName(buffer->dtype) + ")";
     }
-    if (IsInteger32(buffer->dtype)) {
-      return "pto.cast(" + value + ", " + DataTypeName(buffer->dtype) + ")";
-    }
-    return value;
+    return SimtLocalLoadAdapter(value, buffer->dtype);
   }
 
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
@@ -2770,9 +2800,7 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
                << FP8TypeName(dtype) << ")\n";
         return;
       }
-      if (IsInteger32(dtype)) {
-        store_value = "pto.cast(" + store_value + ", pto.i32)";
-      }
+      store_value = SimtLocalStoreAdapter(store_value, dtype);
       stream << "pto.store(" << store_value << ", "
              << GetVarID(buffer->data.get()) << ", " << index_str << ")\n";
       return;
@@ -7929,11 +7957,7 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
       std::string value = "pto.load(" + GetVarID(op->buffer->data.get()) +
                           ", " + index_str +
                           ", contiguous=" + std::to_string(lanes) + ")";
-      // Local integer storage is signless; restore the authored signedness.
-      os << (IsInteger32(element_dtype)
-                 ? ScalarCastExpr(value, element_dtype,
-                                  "PTO SIMT local vector load")
-                 : value);
+      os << SimtLocalLoadAdapter(value, element_dtype);
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
@@ -8149,8 +8173,8 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
     const std::string contiguous_suffix =
         store_lanes > 1 ? ", contiguous=" + std::to_string(store_lanes) : "";
     if (scope == "local.fragment" || scope == "local") {
-      stream << "pto.store(" << value << ", "
-             << GetVarID(op->buffer->data.get()) << ", " << index_str
+      stream << "pto.store(" << SimtLocalStoreAdapter(value, buffer_dtype)
+             << ", " << GetVarID(op->buffer->data.get()) << ", " << index_str
              << contiguous_suffix << ")\n";
       return;
     }
