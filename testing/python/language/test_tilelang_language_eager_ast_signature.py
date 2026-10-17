@@ -52,10 +52,12 @@ def test_mutate_maps_generated_lines_to_kernel():
 
     import tilelang.language as T
 
-    # Keep the iterable on its own line to distinguish it from generated loop calls.
+    # Keep context and iterable expressions separate from generated wrapper calls.
     # fmt: off
     def kernel(x: T.Tensor((8,), T.float32)):
-        with T.Kernel(1, threads=8):
+        with (
+            T.Kernel(1, threads=8)
+        ):
             for j in (
                 T.serial(8)
             ):
@@ -73,7 +75,7 @@ def test_mutate_maps_generated_lines_to_kernel():
         return lines
 
     first = inspect.getsourcelines(kernel)[1]
-    assert code_lines(mutate(kernel).gen.__code__) == {first + offset for offset in (0, 1, 2, 3, 5, 6, 8)}
+    assert code_lines(mutate(kernel).gen.__code__) == {first + offset for offset in (0, 1, 2, 4, 5, 7, 8, 10)}
     executed = []
 
     def trace(frame, event, arg):
@@ -90,12 +92,22 @@ def test_mutate_maps_generated_lines_to_kernel():
     finally:
         sys.settrace(previous_trace)
     arcs = set(zip(executed, executed[1:]))
-    assert {(first + a, first + b) for a, b in ((2, 5), (5, 6), (5, 8), (2, 1))} <= arcs
+    assert {(first + a, first + b) for a, b in ((4, 7), (7, 8), (7, 10), (4, 1))} <= arcs
 
 
 @pytest.mark.parametrize(
     "method, offset",
-    [(None, 14), ("ctx_with", 1), ("ctx_for", 2), ("iter_call", 2), ("iterable", 3), ("ctx_if", 5), ("unwrap_value", 6)],
+    [
+        (None, 18),
+        ("ctx_with", 1),
+        ("context", 2),
+        ("context_arg", 3),
+        ("ctx_for", 6),
+        ("iter_call", 6),
+        ("iterable", 7),
+        ("ctx_if", 9),
+        ("unwrap_value", 10),
+    ],
 )
 def test_mutate_preserves_multiline_traceback(monkeypatch, method, offset):
     import inspect
@@ -103,12 +115,16 @@ def test_mutate_preserves_multiline_traceback(monkeypatch, method, offset):
     from contextlib import nullcontext
     from types import SimpleNamespace
 
-    sequence = SimpleNamespace(iterable=range)
+    sequence = SimpleNamespace(iterable=range, context=nullcontext, context_arg=None)
 
     # Keep distinct expression lines to check traceback locations after rewriting.
     # fmt: off
     def kernel():
-        with nullcontext():
+        with (
+            sequence.context(
+                sequence.context_arg
+            )
+        ):
             for i in (
                 sequence.iterable(1)
             ):
@@ -127,15 +143,15 @@ def test_mutate_preserves_multiline_traceback(monkeypatch, method, offset):
 
     first = inspect.getsourcelines(kernel)[1]
     builder = _TestBuilder()
-    if method == "iterable":
-        monkeypatch.delattr(sequence, "iterable")
+    if method in ("iterable", "context", "context_arg"):
+        monkeypatch.delattr(sequence, method)
     elif method is not None:
 
         def fail(*args, **kwargs):
             raise RuntimeError("builder failure")
 
         monkeypatch.setattr(builder, method, fail)
-    with pytest.raises(AttributeError if method in (None, "iterable") else RuntimeError) as excinfo:
+    with pytest.raises(AttributeError if method in (None, "iterable", "context", "context_arg") else RuntimeError) as excinfo:
         mutate(kernel).gen(builder)()
     frame = next(frame for frame in traceback.extract_tb(excinfo.value.__traceback__) if frame.name == "kernel")
     assert frame.lineno == first + offset

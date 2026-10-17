@@ -735,7 +735,7 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr.context_expr)
+            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=node)
         if is_kernel_ctx:
             return [quote1("if __tb.skip_kernel_ctx(): return", span=node), node]
         return node
