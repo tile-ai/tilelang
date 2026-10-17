@@ -79,6 +79,8 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    if pass_ctx.config.get("tl.enable_invariant_arithmetic", False):
+        mod = tilelang.transform.LowerInvariantArithmetic(stage="prepare")(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 

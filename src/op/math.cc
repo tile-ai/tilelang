@@ -10,6 +10,7 @@
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -56,6 +57,95 @@ TVM_REGISTER_OP("tl.clamp")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("metal.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("webgpu.FLowerIntrinsic", LowerClamp);
+
+ffi::Optional<PrimExpr> LowerInvariantArithmetic(const Call &call) {
+  bool remainder =
+      call->op.same_as(fast_rem()) || call->op.same_as(barrett_reduce());
+  if (!remainder && !call->op.same_as(fast_div()) &&
+      !call->op.same_as(bounded_rem())) {
+    return std::nullopt;
+  }
+  // Expand only at codegen: earlier simplification can undo the reciprocal
+  // arithmetic or hoist a fallback division out of a short-circuit guard.
+  ffi::Array<tirx::Bind> bindings;
+  auto bind = [&](PrimExpr value, const char *name) -> PrimExpr {
+    if (value.as<IntImmNode>() || value.as<VarNode>()) {
+      return value;
+    }
+    Var var(name, value.dtype());
+    bindings.push_back(tirx::Bind(var, value));
+    return var;
+  };
+  auto finish = [&](PrimExpr result) {
+    for (auto it = bindings.rbegin(); it != bindings.rend(); ++it) {
+      result = Let((*it)->var, (*it)->value, result);
+    }
+    return result;
+  };
+  PrimExpr x = bind(call->args[0], "dividend");
+  PrimExpr d = bind(cast(x.dtype(), call->args[1]), "divisor");
+  if (call->op.same_as(bounded_rem())) {
+    return finish(Select(x >= d, x - d, x));
+  }
+  bool barrett = call->op.same_as(barrett_reduce());
+  PrimExpr reciprocal = call->args[2];
+  PrimExpr shift = barrett ? make_const(DataType::Int(32), 0) : call->args[3];
+  PrimExpr valid = call->args[barrett ? 3 : 4];
+  PrimExpr truncating = call->args[barrett ? 4 : 5];
+  PrimExpr nonnegative = call->args[barrett ? 5 : 6];
+  PrimExpr positive = call->args[barrett ? 6 : 7];
+  DataType u = DataType::UInt(x.dtype().bits()), word = reciprocal.dtype();
+  PrimExpr zero = make_zero(u), one = make_const(u, 1);
+  auto magnitude = [&](PrimExpr value, PrimExpr negative) {
+    PrimExpr sign = bind(zero - cast(u, negative), "sign_mask");
+    return bind((cast(u, value) ^ sign) - sign, "magnitude");
+  };
+  PrimExpr negative_x =
+      x.dtype().is_int() ? !nonnegative && x < 0 : Bool(false);
+  PrimExpr negative_d = x.dtype().is_int() ? !positive && d < 0 : Bool(false);
+  negative_x = bind(negative_x, "negative_x");
+  negative_d = bind(negative_d, "negative_d");
+  PrimExpr ax = magnitude(x, negative_x), ad = magnitude(d, negative_d);
+  PrimExpr negative_q = bind(negative_x != negative_d, "negative_q");
+  PrimExpr bias = bind(!truncating && negative_q && ax != zero, "floor_bias");
+  PrimExpr n = bind(cast(word, ax - cast(u, bias)), "numerator");
+  PrimExpr q = bind(Call(word, mul_hi(), {n, reciprocal}), "quotient");
+  bool magic = !barrett && word.bits() == 32 &&
+               call->args[1].dtype() == DataType::Int(32);
+  PrimExpr r;
+  if (magic) {
+    q = bind(q >> shift, "shifted_quotient");
+    if (remainder) {
+      r = bind(n - q * cast(word, ad), "remainder");
+    }
+  } else {
+    r = bind(n - q * cast(word, ad), "remainder");
+    PrimExpr correction = bind(cast(u, r) >= ad, "correction");
+    q = bind(q + cast(word, correction), "corrected_quotient");
+    r = bind(r - Select(correction, cast(word, ad), make_zero(word)),
+             "corrected_remainder");
+  }
+  PrimExpr result, negative;
+  if (remainder) {
+    r = bind(Select(ad == one, make_zero(word), r), "identity_remainder");
+    result = bind(Select(bias, ad - one - cast(u, r), cast(u, r)), "result");
+    negative = Select(truncating, negative_x, negative_d);
+  } else {
+    q = bind(Select(ad == one, n, q), "identity_quotient");
+    result = bind(cast(u, q) + cast(u, bias), "result");
+    negative = negative_q;
+  }
+  PrimExpr sign = bind(zero - cast(u, negative), "result_sign");
+  result = cast(x.dtype(), (result ^ sign) - sign);
+  // Keep fallback arithmetic inside a lazy expression, never a Let binding.
+  PrimExpr numerator = ax - cast(u, bias);
+  PrimExpr fallback =
+      remainder ? truncmod(numerator, ad) : truncdiv(numerator, ad);
+  fallback = remainder ? Select(bias, ad - one - fallback, fallback)
+                       : fallback + cast(u, bias);
+  fallback = cast(x.dtype(), (fallback ^ sign) - sign);
+  return finish(if_then_else(valid, result, fallback));
+}
 
 PrimExpr pow_of_int_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();

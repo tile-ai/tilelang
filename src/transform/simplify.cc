@@ -715,7 +715,11 @@ private:
     if (op->attr_key == "tl.assume") {
       PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
       auto n = CopyOnWrite(op);
-      n->node = std::move(condition);
+      // Later passes may no longer have the buffer/loop facts used here.
+      // Keep a proven assumption rather than replacing its evidence with true.
+      if (!is_one(condition)) {
+        n->node = std::move(condition);
+      }
       return Parent::VisitStmt_(n.get());
     }
     return Parent::VisitStmt_(op);
