@@ -704,7 +704,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const DivNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  if (op->dtype.is_int() || op->dtype.is_uint()) {
+  if (op->dtype.is_int()) {
+    PrintBinaryExpr_("tl.truncdiv", op->dtype, op->a, op->b, os);
+  } else if (op->dtype.is_uint()) {
     PrintBinaryExpr_("//", op->dtype, op->a, op->b, os);
   } else {
     if (enable_fastmath_) {
@@ -3174,8 +3176,13 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
 
   const std::string one_char_op{"+-*%<>^|&"};
   const std::string two_char_op{"// == != <= >="};
-  if ((opstr.size() == 1 && one_char_op.find(opstr) != std::string::npos) ||
-      (opstr.size() == 2 && two_char_op.find(opstr) != std::string::npos)) {
+  if (opstr == "tl.truncdiv") {
+    PrintIndent();
+    stream << sret << ".store(tl.truncdiv(" << vlhs << ", " << vrhs << "))\n";
+  } else if ((opstr.size() == 1 &&
+              one_char_op.find(opstr) != std::string::npos) ||
+             (opstr.size() == 2 &&
+              two_char_op.find(opstr) != std::string::npos)) {
     PrintIndent();
     stream << sret << ".store(" << vlhs << " " << opstr << " " << vrhs << ")\n";
   } else {
