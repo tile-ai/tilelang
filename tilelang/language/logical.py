@@ -19,9 +19,10 @@ def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
         A TVM intrinsic call that performs the any operation
     """
     return_type: str = "bool"
+
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems, "auto")
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -43,9 +44,10 @@ def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
             tirx.op.Op.get("tl.any_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
+            "auto",
         )
     else:
-        raise ValueError(f"Invalid buffer type: {type(buffer)}")
+        raise TypeError(f"Invalid buffer type: {type(buffer)}")
 
 
 def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
@@ -55,12 +57,12 @@ def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
         buffer: Either a TVM buffer or buffer region to be checked
 
     Returns:
-        A TVM intrinsic call that performs the any operation
+        A TVM intrinsic call that performs the all operation
     """
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems, "auto")
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -82,6 +84,7 @@ def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
             tirx.op.Op.get("tl.all_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
+            "auto",
         )
     else:
-        raise ValueError(f"Invalid buffer type: {type(buffer)}")
+        raise TypeError(f"Invalid buffer type: {type(buffer)}")
