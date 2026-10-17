@@ -405,7 +405,10 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # auto: infer by checking if function returns PrimFunc directly
         if not isinstance(self.func, JITFunc):
             return "lazy"
-        is_lazy_style = self.func._is_lazy_style(*args, **kwargs)
+        # Inference can evaluate and cache the factory before get_tir does.
+        # Use the same target context for that first evaluation.
+        with self._get_frontend_target_context():
+            is_lazy_style = self.func._is_lazy_style(*args, **kwargs)
         return "lazy" if is_lazy_style else "eager"
 
     def initialize_jit_mode(self, *args: _P.args, **kwargs: _P.kwargs) -> Literal["lazy", "eager"]:
