@@ -95,7 +95,7 @@ public:
 
 private:
   bool HasFullWarps() const {
-    if (warp_size_ <= 0 || env_threads_.empty()) {
+    if (env_threads_.empty()) {
       return false;
     }
 
@@ -111,9 +111,6 @@ private:
   }
 
   bool IsWarpUniformExpr(const PrimExpr &expr) const {
-    if (warp_size_ <= 0) {
-      return false;
-    }
     PrimExpr expanded_expr = Substitute(expr, bind_values_);
     ThreadPrivateLoadDetector detector;
     if (detector.Detect(expanded_expr)) {
@@ -343,13 +340,11 @@ PrimFunc ResolveLogicalScopePrimFunc(PrimFunc func) {
   auto target = func->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "ResolveLogicalScope requires a bound target";
   auto warp_size_attr = target.value()->GetAttr<Integer>("thread_warp_size");
-  // Generic targets such as `hip` may not identify an architecture. In that
-  // case, keep the thread implementation instead of guessing a warp size.
-  int warp_size = 0;
-  if (warp_size_attr.defined()) {
-    warp_size = warp_size_attr.value().IntValue();
-    ICHECK_GT(warp_size, 0);
+  if (!warp_size_attr.defined()) {
+    return func;
   }
+  int warp_size = warp_size_attr.value().IntValue();
+  ICHECK_GT(warp_size, 0);
 
   LogicalScopeResolver resolver(warp_size);
   PrimFuncNode *node = func.CopyOnWrite();

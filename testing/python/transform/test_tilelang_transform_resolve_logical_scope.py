@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.rocm.target import with_rocm_target_attrs
+from tilelang.testing.ir import collect_extern_calls
 from tvm.tirx import op
 from tvm.tirx.stmt_functor import post_order_visit
 
@@ -259,9 +260,14 @@ def test_resolve_uses_target_warp_size(target, divisor, expected_scope):
     assert _logical_scopes(resolved) == [expected_scope]
 
 
-def test_resolve_without_target_warp_size_uses_thread_scope():
-    resolved = _resolve(_make_any_of_kernel("none"), tvm.target.Target("hip"))
-    assert _logical_scopes(resolved) == ["thread"]
+def test_resolve_without_target_warp_size_lowers_to_thread_helper():
+    target = tvm.target.Target("hip")
+    resolved = _resolve(_make_any_of_kernel("none"), target)
+    mod = tvm.IRModule({"main": resolved})
+    mod = tilelang.transform.LowerAccessPtr()(mod)
+    mod = tilelang.transform.LowerIntrin()(mod)
+    assert len(collect_extern_calls(mod["main"], symbol="tl::Any")) == 1
+    assert collect_extern_calls(mod["main"], symbol="tl::AnyWarp") == []
 
 
 def test_resolve_global_uniform_range_uses_warp():
