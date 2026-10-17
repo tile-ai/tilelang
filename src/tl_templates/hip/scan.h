@@ -90,20 +90,21 @@ template <class Reducer, int threads, bool reverse = false>
 struct InclusiveScan1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
     if (threadIdx.x >= SEG)
       return;
     InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1, 1);
   }
+  // Use the target wavefront width, capped by the block's thread count.
   template <typename T>
-  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
-                                 int N) {
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32 && threads >= 32) {
+    if (wavefront_size == 32 || threads == 32) {
       run<T, 32>(src, dst, N);
-    } else if (threads >= 64) {
+    } else if constexpr (threads >= 64) {
       run<T, 64>(src, dst, N);
     }
   }
@@ -114,7 +115,7 @@ struct InclusiveScan2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);
   static_assert(Axis == 0 or Axis == 1);
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
     if (H <= 0 || W <= 0)
@@ -143,50 +144,73 @@ struct InclusiveScan2D {
       }
     }
   }
+  // Use the target wavefront width, capped by the block's thread count.
   template <typename T>
-  static TL_DEVICE void run_auto(const T *__restrict__ src, T *__restrict__ dst,
-                                 int H, int W, int src_stride, int dst_stride) {
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W, int src_stride, int dst_stride) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32 && threads >= 32) {
+    if (wavefront_size == 32 || threads == 32) {
       run<T, 32>(src, dst, H, W, src_stride, dst_stride);
-    } else if (threads >= 64) {
+    } else if constexpr (threads >= 64) {
       run<T, 64>(src, dst, H, W, src_stride, dst_stride);
     }
   }
 };
 
 template <int threads, bool reverse = false> struct CumSum1D {
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
     InclusiveScan1D<ScanSumOp, threads, reverse>::template run<T, SEG>(src, dst,
                                                                        N);
   }
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
+    InclusiveScan1D<ScanSumOp, threads, reverse>::run(src, dst, N);
+  }
 };
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
     InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::template run<T, SEG>(
         src, dst, H, W, src_stride, dst_stride);
   }
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W, int src_stride, int dst_stride) {
+    InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::run(
+        src, dst, H, W, src_stride, dst_stride);
+  }
 };
 
 template <int threads, bool reverse = false> struct CumMax1D {
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
     InclusiveScan1D<ScanMaxOp, threads, reverse>::template run<T, SEG>(src, dst,
                                                                        N);
   }
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
+    InclusiveScan1D<ScanMaxOp, threads, reverse>::run(src, dst, N);
+  }
 };
 
 template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
-  template <typename T, int SEG = 64>
+  template <typename T, int SEG>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
     InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::template run<T, SEG>(
+        src, dst, H, W, src_stride, dst_stride);
+  }
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int H, int W, int src_stride, int dst_stride) {
+    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::run(
         src, dst, H, W, src_stride, dst_stride);
   }
 };

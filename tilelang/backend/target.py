@@ -11,6 +11,7 @@ TargetInput = str | Mapping[str, object] | Target
 TargetLike = str | TargetConfig | Target
 TargetDetector = Callable[[], TargetInput | None]
 TargetNormalizer = Callable[[TargetLike], TargetInput | None]
+TargetExecutionNormalizer = Callable[[Target, str | None], Target | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +26,15 @@ class TargetNormalizerSpec:
     normalize: TargetNormalizer
 
 
+@dataclass(frozen=True, slots=True)
+class TargetExecutionNormalizerSpec:
+    name: str
+    normalize: TargetExecutionNormalizer
+
+
 _TARGET_DETECTORS: dict[str, TargetDetectorSpec] = {}
 _TARGET_NORMALIZERS: dict[str, TargetNormalizerSpec] = {}
+_TARGET_EXECUTION_NORMALIZERS: dict[str, TargetExecutionNormalizerSpec] = {}
 
 
 def register_target_detector(
@@ -55,12 +63,37 @@ def register_target_normalizer(
     return spec
 
 
+def register_target_execution_normalizer(
+    name: str,
+    normalize: TargetExecutionNormalizer,
+    *,
+    override: bool = False,
+) -> TargetExecutionNormalizerSpec:
+    """Register target specialization driven by an execution backend choice."""
+
+    if name in _TARGET_EXECUTION_NORMALIZERS and not override:
+        raise ValueError(f"Target execution normalizer {name!r} is already registered")
+    spec = TargetExecutionNormalizerSpec(name=name, normalize=normalize)
+    _TARGET_EXECUTION_NORMALIZERS[name] = spec
+    return spec
+
+
 def _normalize_registered_target(target: TargetLike) -> TargetInput | None:
     for spec in _TARGET_NORMALIZERS.values():
         normalized = spec.normalize(target)
         if normalized is not None:
             return normalized
     return None
+
+
+def normalize_target_for_execution(target: Target, execution_backend: str | None) -> Target:
+    """Apply the first registered execution-aware target specialization."""
+
+    for spec in _TARGET_EXECUTION_NORMALIZERS.values():
+        normalized = spec.normalize(target, execution_backend)
+        if normalized is not None:
+            return normalized
+    return target
 
 
 def auto_detect_target() -> TargetInput:
