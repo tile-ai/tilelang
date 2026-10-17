@@ -254,12 +254,12 @@ public:
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
+    Target target = Target::Current(false);
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
         MaxVectorLoadBits(
-            Target::Current(false),
-            VectorizeFindMemoryAccess::MaySupportVectorize256(node));
+            target, VectorizeFindMemoryAccess::MaySupportVectorize256(node));
 
     // Check if For body contains SeqStmt (multiple statements).
     // When there's SeqStmt, we use conservative strategy - treating local
@@ -572,8 +572,16 @@ private:
 
   PrimExpr VisitExpr_(const SelectNode *node) final {
     // Select stays an expression-level ternary. Constrain its vector width
-    // using the same condition-uniformity rule as IfThenElse.
-    CheckConditionVectorized(node->condition);
+    // using the same condition-uniformity rule as IfThenElse, unless the
+    // target codegen supports lane-wise vector predicates and therefore
+    // does not need this control-flow restriction.
+    Target target = Target::Current(false);
+    bool vector_predicate =
+        target.defined() &&
+        target->GetAttr<Bool>("supports_vector_predicate", Bool(false)).value();
+    if (!vector_predicate) {
+      CheckConditionVectorized(node->condition);
+    }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
@@ -646,6 +654,20 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::tvm_access_ptr())) {
       HandleTvmAccessPtr(node);
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(tl::rng_rand_float())) {
+      // Stateful RNG calls produce scalar values before any destination cast.
+      // Keep that source width as a non-cast constraint: the simple-store
+      // strategy intentionally ignores cast constraints, while later passes
+      // handle the packed destination conversion independently.
+      int value_bits = node->dtype.bits() * node->dtype.lanes();
+      ICHECK_GT(value_bits, 0)
+          << "tl.rng_rand_float requires a fixed-width result dtype, got "
+          << node->dtype;
+      int vectorize_length =
+          std::max(1, std::min(4, vector_load_bits_max_ / value_bits));
+      buffer_vector_infos_.push_back(
+          {Buffer(), vectorize_length, false, {}, /*is_cast=*/false});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
       ICHECK_GE(node->args.size(), 2U)
@@ -1248,6 +1270,9 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
 }
 
 int MaxVectorLoadBits(const Target &target, bool global_only_access) {
+  if (auto max_bits = target->GetAttr<Integer>("max_vector_bits")) {
+    return static_cast<int>(max_bits.value()->value);
+  }
   if (TargetSupportVectorize256(target) && !tl_config::Vectorize256Disabled() &&
       global_only_access) {
     return 256;

@@ -857,8 +857,11 @@ def test_sm120_cuda_header_only_keeps_the_atomic_mma_wrapper():
     source = header.read_text()
 
     assert "#if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED)" in source
-    assert "defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)" in source
-    assert "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8" in source
+    # SM121 (GB10) shares the SM120 MMA; CUTLASS only defines SM120A for sm_120a.
+    for family in ("SM120A", "SM120F", "SM121A", "SM121F"):
+        assert f"defined(CUTLASS_ARCH_MMA_{family}_ENABLED)" in source
+    assert "defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)" in source
+    assert "tl::sm120_mma_sync_blockscaled requires sm_120a/f or sm_121a/f and" in source
     assert "sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs" in source
     assert "sm120_mma_sync_blockscaled" in source
     assert "SM120ScaleTVPackage" not in source
@@ -893,6 +896,36 @@ def test_encode_ue4m3_scale_bytes_known_values():
     assert torch.equal(encoded, torch.tensor([0x00, 0x01, 0x08, 0x38, 0x40, 0x7E], dtype=torch.uint8))
     torch.testing.assert_close(decode_ue4m3_scale_bytes(encoded), values)
     assert torch.isnan(decode_ue4m3_scale_bytes(torch.tensor([0x7F], dtype=torch.uint8))).all()
+
+
+@tilelang_testing.requires_cuda
+def test_decode_ue4m3_scale_byte_device_helper_matches_host_reference():
+    """The device decoder must agree with the host reference for every code.
+
+    The host reference maps the reserved UE4M3 code 0x7F to NaN. The device
+    helper used to fall through to the plain bit-pattern path for that code and
+    return a finite 480.0, which exceeds _UE4M3_MAX (448.0) and is not a
+    representable UE4M3 value.
+    """
+    import tilelang
+    import tilelang.language as T
+
+    @T.prim_func
+    def decode_kernel(codes: T.Tensor((256,), "int32"), out: T.Tensor((256,), "float32")):
+        with T.Kernel(1, threads=256):
+            tx = T.get_thread_binding()
+            out[tx] = nvfp4_utils._tl_decode_ue4m3_scale_byte(codes[tx])
+
+    kernel = tilelang.compile(decode_kernel)
+    codes = torch.arange(256, dtype=torch.int32, device="cuda")
+    decoded = torch.empty(256, dtype=torch.float32, device="cuda")
+    kernel(codes, decoded)
+    decoded = decoded.cpu()
+
+    reference = decode_ue4m3_scale_bytes(torch.arange(256, dtype=torch.uint8))
+    assert torch.equal(torch.isnan(decoded), torch.isnan(reference))
+    finite = ~torch.isnan(reference)
+    assert torch.equal(decoded[finite], reference[finite])
 
 
 def test_quantize_nvfp4_blockscaled_bf16_activation_contract():

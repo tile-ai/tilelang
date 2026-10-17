@@ -7,6 +7,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
@@ -18,6 +19,7 @@
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
+#include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/access_ptr_utils.h"
 #include "loop_partition.h"
@@ -446,14 +448,17 @@ private:
     }
 
     // For loading, we can always use safe value if the access is out of
-    // bounds
-    PrimExpr value = load;
-    for (auto cond : conditions) {
-      ICHECK(cond.dtype() == DataType::Bool(1))
-          << "condition is not a boolean: " << cond;
-      value = if_then_else(cond, value, GetSafeValue(load->buffer));
+    // bounds. Flattening reverses the evaluation order of the legacy nested
+    // guards, so only do it when every condition is pure and total.
+    PrimExpr safe_value = GetSafeValue(load->buffer);
+    if (CanFlattenConditions(conditions)) {
+      return if_then_else(CombineConditions(conditions), load, safe_value);
     }
-    return value;
+    PrimExpr guarded = load;
+    for (const PrimExpr &condition : conditions) {
+      guarded = if_then_else(condition, guarded, safe_value);
+    }
+    return guarded;
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -483,12 +488,15 @@ private:
     }
 
     // If a store is out of bounds, we skip the corresponding stmt directly.
-    Stmt store_with_conditions = store;
-    for (auto cond : conditions) {
-      store_with_conditions =
-          IfThenElse(cond, store_with_conditions, Stmt(), store->span);
+    if (CanFlattenConditions(conditions)) {
+      return IfThenElse(CombineConditions(conditions), store, Stmt(),
+                        store->span);
     }
-    return store_with_conditions;
+    Stmt guarded = store;
+    for (const PrimExpr &condition : conditions) {
+      guarded = IfThenElse(condition, guarded, Stmt(), store->span);
+    }
+    return guarded;
   }
 
   // Recursively check Load/Store in the call arguments.
@@ -623,12 +631,63 @@ private:
     return src_info.base_load->buffer;
   }
 
+  bool CanFlattenConditions(const Array<PrimExpr> &conditions) {
+    for (const PrimExpr &condition : conditions) {
+      ICHECK(condition.dtype() == DataType::Bool(1))
+          << "Safe-memory condition must be a scalar boolean, but got "
+          << condition.dtype() << ": " << condition;
+
+      if (SideEffect(condition) > CallEffectKind::kPure) {
+        return false;
+      }
+
+      bool is_total = true;
+      PostOrderVisit(condition, [&](const ObjectRef &node) {
+        if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
+            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
+            node.as<ModNode>() || node.as<FloorDivNode>() ||
+            node.as<FloorModNode>()) {
+          is_total = false;
+        }
+      });
+      if (!is_total) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  PrimExpr CombineConditionsFrom(const Array<PrimExpr> &conditions, size_t i) {
+    if (i == conditions.size()) {
+      return PrimExpr();
+    }
+
+    PrimExpr condition = conditions[i];
+    bool implied = false;
+    try {
+      implied =
+          analyzer_->CanProve(condition, arith::ProofStrength::kSymbolicBound);
+    } catch (const std::exception &) {
+      // Keep the runtime guard if proving fails.
+    }
+    if (implied) {
+      return CombineConditionsFrom(conditions, i + 1);
+    }
+
+    With<arith::ConstraintContext> constraint(analyzer_, condition);
+    PrimExpr rest = CombineConditionsFrom(conditions, i + 1);
+    return rest.defined() ? tirx::And(condition, rest) : condition;
+  }
+
   PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
     ICHECK(!conditions.empty());
-    PrimExpr combined = conditions[0];
-    for (size_t i = 1; i < conditions.size(); ++i) {
-      combined = tirx::And(combined, conditions[i]);
+    for (const PrimExpr &condition : conditions) {
+      ICHECK(condition.dtype() == DataType::Bool(1))
+          << "Safe-memory condition must be a scalar boolean, but got "
+          << condition.dtype() << ": " << condition;
     }
+    PrimExpr combined = CombineConditionsFrom(conditions, 0);
+    ICHECK(combined.defined());
     return analyzer_->Simplify(combined);
   }
 
@@ -661,11 +720,8 @@ private:
     }
     safe_value = analyzer_->Simplify(safe_value);
 
-    // Predicated cp.async zero-fills on the false path. Use that form when the
-    // buffer's safe value is zero so downstream codegen can emit the native
-    // conditional intrinsic instead of materializing an explicit fallback
-    // store.
-    if (analyzer_->CanProveEqual(safe_value, make_zero(dst_dtype))) {
+    // Hardware zero-fill requires an all-zero bit pattern.
+    if (IsZeroBitPattern(safe_value)) {
       PrimExpr predicate = existing_predicate.defined()
                                ? analyzer_->Simplify(tirx::And(
                                      existing_predicate.value(), combined))

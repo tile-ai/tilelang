@@ -52,4 +52,9 @@ def Kernel(
             tx, ty = T.get_thread_bindings()
             ...
     """
-    return launch_kernel(blocks, threads=threads, prelude=prelude, cluster_dims=cluster_dims)
+    return launch_kernel(
+        blocks,
+        threads=threads,
+        prelude=prelude,
+        cluster_dims=cluster_dims,
+    )

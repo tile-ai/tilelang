@@ -18,7 +18,7 @@ from tilelang.metal.transform import MetalFragmentToSimdgroup
 def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch(
-        lower_thread_binding=True, default_threads=128, unsupported_annotations=["cluster_dims"]
+        lower_grid_binding=True, lower_thread_binding=True, default_threads=128, unsupported_annotations=["cluster_dims"]
     )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 

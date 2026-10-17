@@ -138,7 +138,7 @@ git diff --check
   ordering, replayability, and multi-versioning contracts.
 - `src/transform/layout_inference/parallel_loop_layout_validator.h`:
   post-inference parallel-layout annotation contract.
-- `tilelang/{cuda,rocm,cpu,metal,webgpu}/pipeline.py`: target pipeline order.
+- `tilelang/{cuda,rocm,cpu,metal,webgpu,ascend}/pipeline.py`: target pipeline order.
 - `tilelang/transform/pass_config.py`: opt-outs and strictness controls.
 
 Read `$tilelang-layout` before changing rules whose truth depends on fragment

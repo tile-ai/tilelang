@@ -45,6 +45,7 @@ def metal_events(monkeypatch):
         monkeypatch.setattr(module, "Event", Event)
     monkeypatch.setattr(bench, "device", "mps:0")
     monkeypatch.setattr(device_utils, "IS_CUDA", False)
+    monkeypatch.setattr(device_utils, "IS_NPU", False)
     monkeypatch.setattr(device_utils, "IS_MPS", True)
     monkeypatch.setattr(torch.mps, "synchronize", synchronize)
     monkeypatch.setattr(torch, "empty", empty)
@@ -85,8 +86,8 @@ def test_event_metal_timing(metal_events, device, return_mode, quantiles, expect
 
     assert result == pytest.approx(expected)
     assert metal_events.calls == 11
-    assert metal_events.flushes == 8
-    assert metal_events.synchronizations == 2
+    assert metal_events.flushes == 9
+    assert metal_events.synchronizations == 3
     assert metal_events.event_synchronizations == 2
     assert len(metal_events.events) == 8
     cache_device = torch.device(device) if device is not None else torch.device("mps:0")

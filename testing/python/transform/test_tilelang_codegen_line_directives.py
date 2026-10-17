@@ -11,6 +11,8 @@ drift). See docs/issue_2913/codegen_final.md for the design.
 
 import re
 
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -138,6 +140,44 @@ def test_same_line_statements_reemit_directive():
     assert len(same_line) >= 2, (
         f"expected >=2 re-emitted directives for line {store_line}, got {same_line}; all directives: {directives}\n{source}"
     )
+
+
+@pytest.mark.parametrize(
+    ("codegen", "target"),
+    [
+        ("c_host", "c"),
+        # The FFI registration check below also supports Metal source codegen
+        # on hosts without a Metal runtime.
+        pytest.param(
+            "metal_without_compile",
+            "metal",
+            marks=tilelang.testing.requires_metal.marks(support_required="optional"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("emit", [None, False, True], ids=["default", "disabled", "enabled"])
+def test_host_and_metal_line_directives(codegen, target, emit):
+    build = tvm.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
+    if build is None:
+        pytest.skip(f"{codegen} codegen is not built")
+    source_name = tvm.ir.SourceName(__file__)
+    entry_span = tvm.ir.Span(source_name, 10, 10, 0, 1)
+    stmt_span = tvm.ir.Span(source_name, 20, 20, 0, 1)
+    body = tvm.tirx.SeqStmt([tvm.tirx.Evaluate(tvm.tirx.call_extern("int32", "consume", value), span=stmt_span) for value in (1, 2)])
+    func = tvm.tirx.PrimFunc([], body, span=entry_span).with_attr("global_symbol", "line_kernel")
+    if target == "metal":
+        func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+        func = func.with_attr("tirx.kernel_launch_params", [])
+    config = {} if emit is None else {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: emit}
+    with tvm.transform.PassContext(config=config):
+        source = build(tvm.IRModule.from_expr(func), tvm.target.Target(target)).inspect_source()
+
+    directives = _line_directives(source)
+    if emit:
+        assert (10, __file__) in directives, source
+        assert directives.count((20, __file__)) == 2, source
+    else:
+        assert not directives, source
 
 
 if __name__ == "__main__":
