@@ -596,7 +596,7 @@ def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
         assert result2.inspect_source() == source_v1
         captured = capsys.readouterr()
         assert "NOT recompiled" in captured.out
-        assert "nvrtc" in captured.out
+        assert "execution_backend='cython'" in captured.out
 
 
 def test_codegen_conflict_backup(tmp_path):

@@ -36,7 +36,8 @@ def main():
 
     c = kernel(a, b)
 
-    ref_c = a @ b
+    # Use FP32 accumulation rather than reduced-precision FP16 reductions.
+    ref_c = (a.float() @ b.float()).to(c.dtype)
 
     print("c:")
     print(c)

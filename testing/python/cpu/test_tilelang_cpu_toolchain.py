@@ -48,11 +48,14 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     seen = {}
 
     class Executable:
+        main = staticmethod(lambda: None)
+
         def __init__(self, mod):
             assert mod is adapter.rt_mod
 
         def jit(self, **kwargs):
             seen.update(kwargs)
+            return self
 
     def flags(target, pass_configs, *, execution_backend):
         assert target.same_as(adapter.target)
@@ -67,5 +70,15 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     monkeypatch.setattr(tvm_ffi.runtime, "Executable", Executable)
     monkeypatch.setattr(tvm_ffi, "COMPILE_ARGS", {"options": ["-existing"]})
     monkeypatch.setattr(toolchain, "get_compile_flags", flags)
-    adapter._make_executable()
+    adapter.executable = adapter._make_executable()
+    assert not seen
+    assert adapter._get_compile_args()["options"] == ["-existing", "-O2", "-fopenmp"]
+    from types import SimpleNamespace
+    from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
+
+    kernel = SimpleNamespace(adapter=adapter, target=adapter.target, artifact=SimpleNamespace(target_host=tvm.target.Target("c")))
+    assert TVMFFIKernelCache._get_export_kwargs(kernel)["options"] == ["-existing", "-O2", "-fopenmp"]
+    adapter.params = []
+    adapter._ffi_callee_allocated_output_abi = False
+    assert adapter._entry is Executable.main
     assert seen["options"] == ["-existing", "-O2", "-fopenmp"]

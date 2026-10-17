@@ -173,10 +173,11 @@ class BackendModule:
         spec = next((spec for spec in all_specs if spec.name == requested_name), None)
         if spec is None:
             allowed = ", ".join(spec.name for spec in all_specs) or "<none>"
-            raise ValueError(
-                f"Invalid execution backend {requested!r} for target {target.kind.name!r}. "
-                f"Allowed: {allowed}. Tip: use execution_backend='auto'."
-            )
+            tip = {
+                "nvrtc": "use execution_backend='tvm_ffi' with pass_configs={'tl.cuda_compiler': 'nvrtc'}",
+                "cutedsl": "use target='cutedsl' with execution_backend='tvm_ffi'",
+            }.get(requested_name, "use execution_backend='auto'")
+            raise ValueError(f"Invalid execution backend {requested!r} for target {target.kind.name!r}. Allowed: {allowed}. Tip: {tip}.")
         if not spec.is_available():
             available = ", ".join(spec.name for spec in available_specs) or "<none>"
             raise ValueError(

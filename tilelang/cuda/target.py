@@ -117,7 +117,7 @@ def _normalize_cutedsl_target_for_resolve(target: TargetLike) -> Target | None:
     if normalized is None:
         return None
     try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+        from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
         check_cutedsl_available()
     except ImportError as err:

@@ -47,7 +47,7 @@ class KernelCache:
     _memory_cache = {}  # In-memory cache dictionary
     _staging_cleanup_lock = threading.Lock()
     _last_cleaned_staging_root: str | None = None
-    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] = "tvm_ffi"
+    execution_backend: Literal["tvm_ffi", "cython", "torch", "pto"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
@@ -244,7 +244,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: list[int],
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "torch", "pto"] = "tvm_ffi",
         args=None,
         target: str | Target = "auto",
         target_host: str | Target = None,
@@ -290,7 +290,7 @@ class KernelCache:
         *args,
         target: str | Target | None = None,
         target_host: str | Target | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto"] | None = None,
         verbose: bool,
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
@@ -438,10 +438,7 @@ class KernelCache:
         # Save outside the lock: staging+rename is atomic and idempotent (like the
         # disk load above). Holding the lock here serialized every worker's save.
         if env.is_cache_enabled():
-            cache_path = self._get_cache_path(key)
             self._save_kernel_to_disk(key, kernel, func, verbose)
-            # Set cache path on adapter so it can save cubin after first execution
-            self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
@@ -865,9 +862,6 @@ class KernelCache:
             host_kernel_source = None
             self.logger.exception("Error loading host kernel source code from disk")
         return device_kernel_source, host_kernel_source
-
-    def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
-        return
 
     def _build_kernel(
         self,

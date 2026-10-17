@@ -1255,7 +1255,16 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << ", " << b_bias << ", " << c_ref << ", " << c_bias << ", "
            << meta_ref << ", " << meta_bias << ", " << sparse_selector << ", "
            << saturate << ")\n";
-  } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
+  } else if (op->op.same_as(tl::ptx_wgmma_ss()) ||
+             op->op.same_as(tl::ptx_wgmma_sp_ss())) {
+    auto args = op->args;
+    std::string metadata;
+    if (op->op.same_as(tl::ptx_wgmma_sp_ss())) {
+      ICHECK_EQ(args.size(), 18U);
+      metadata = ", " + GetVarPtr_(args[8]) + " + " + PrintExpr_(args[9]) +
+                 ", " + PrintExpr_(args[10]);
+      args.erase(args.begin() + 8, args.begin() + 11);
+    }
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: a_is_k_major (Bool)
     // arg 2: b_is_k_major (Bool)
@@ -1271,23 +1280,23 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // arg 12: scale_out (PrimExpr)
     // arg 13: scale_in_a (Bool)
     // arg 14: scale_in_b (Bool)
-    ICHECK_EQ(op->args.size(), 15U) << "ptx_wgmma_ss expects 15 args";
-    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    ICHECK_EQ(args.size(), 15U) << "ptx_wgmma_ss expects 15 args";
+    std::string shape = Downcast<StringImm>(args[0])->value;
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
-    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
-    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
-    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
-    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
-    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
-    std::string a_desc = PrintExpr_(op->args[6]);
-    std::string A_offset = PrintExpr_(op->args[7]);
-    std::string b_desc = PrintExpr_(op->args[8]);
-    std::string B_offset = PrintExpr_(op->args[9]);
-    std::string c_ref = GetVarPtr_(op->args[10]);
-    std::string c_offset = PrintExpr_(op->args[11]);
-    std::string scale_out = PrintExpr_(op->args[12]);
-    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
-    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+    bool a_is_k_major = Downcast<Bool>(args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(args[5])->value;
+    std::string a_desc = PrintExpr_(args[6]);
+    std::string A_offset = PrintExpr_(args[7]);
+    std::string b_desc = PrintExpr_(args[8]);
+    std::string B_offset = PrintExpr_(args[9]);
+    std::string c_ref = GetVarPtr_(args[10]);
+    std::string c_offset = PrintExpr_(args[11]);
+    std::string scale_out = PrintExpr_(args[12]);
+    bool scale_in_a = Downcast<Bool>(args[13])->value;
+    bool scale_in_b = Downcast<Bool>(args[14])->value;
     // tnspA = !a_is_k_major, tnspB = !b_is_k_major
     std::string tnspA = a_is_k_major ? "False" : "True";
     std::string tnspB = b_is_k_major ? "False" : "True";
@@ -1300,8 +1309,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << ", " << tnspB << ", " << scaleA << ", " << scaleB << ", ("
            << a_desc << " + " << A_offset << "), (" << b_desc << " + "
            << B_offset << "), " << c_ref << " + " << c_offset << ", "
-           << scale_out << ")\n";
-  } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
+           << scale_out << metadata << ")\n";
+  } else if (op->op.same_as(tl::ptx_wgmma_rs()) ||
+             op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+    auto args = op->args;
+    std::string metadata;
+    if (op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+      ICHECK_EQ(args.size(), 17U);
+      metadata = ", " + GetVarPtr_(args[7]) + " + " + PrintExpr_(args[8]) +
+                 ", " + PrintExpr_(args[9]);
+      args.erase(args.begin() + 7, args.begin() + 10);
+    }
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: b_is_k_major (Bool)
     // arg 2: A_dtype (StringImm)
@@ -1316,22 +1334,22 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // arg 11: scale_out (PrimExpr)
     // arg 12: scale_in_a (Bool)
     // arg 13: scale_in_b (Bool)
-    ICHECK_EQ(op->args.size(), 14U) << "ptx_wgmma_rs expects 14 args";
-    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    ICHECK_EQ(args.size(), 14U) << "ptx_wgmma_rs expects 14 args";
+    std::string shape = Downcast<StringImm>(args[0])->value;
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
-    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
-    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
-    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
-    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
-    std::string a_ref = GetVarPtr_(op->args[5]);
-    std::string A_offset = PrintExpr_(op->args[6]);
-    std::string b_desc = PrintExpr_(op->args[7]);
-    std::string B_offset = PrintExpr_(op->args[8]);
-    std::string c_ref = GetVarPtr_(op->args[9]);
-    std::string c_offset = PrintExpr_(op->args[10]);
-    std::string scale_out = PrintExpr_(op->args[11]);
-    bool scale_in_a = Downcast<Bool>(op->args[12])->value;
-    bool scale_in_b = Downcast<Bool>(op->args[13])->value;
+    bool b_is_k_major = Downcast<Bool>(args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(args[4])->value;
+    std::string a_ref = GetVarPtr_(args[5]);
+    std::string A_offset = PrintExpr_(args[6]);
+    std::string b_desc = PrintExpr_(args[7]);
+    std::string B_offset = PrintExpr_(args[8]);
+    std::string c_ref = GetVarPtr_(args[9]);
+    std::string c_offset = PrintExpr_(args[10]);
+    std::string scale_out = PrintExpr_(args[11]);
+    bool scale_in_a = Downcast<Bool>(args[12])->value;
+    bool scale_in_b = Downcast<Bool>(args[13])->value;
     // tnspB = !b_is_k_major (A is always K-major in RS)
     std::string tnspB = b_is_k_major ? "False" : "True";
     int scaleA = scale_in_a ? 1 : -1;
@@ -1341,7 +1359,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspB
            << ", " << scaleA << ", " << scaleB << ", " << a_ref << " + "
            << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
-           << " + " << c_offset << ", " << scale_out << ")\n";
+           << " + " << c_offset << ", " << scale_out << metadata << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss expects 15 arguments";
@@ -1555,7 +1573,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
             LinearizeBufferIndices_(load->buffer.get(), load->indices));
         os << "tl.bitcast(" << expr_str << ", ";
         PrintType(tgt_dtype.element_of(), os);
-        os << ")";
+        os << ", " << tgt_dtype.lanes() << ")";
         return;
       }
 
@@ -1588,7 +1606,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       std::string expr_str = PrintExpr_(op->args[0]);
       os << "tl.bitcast(" << expr_str << ", ";
       PrintType(tgt_dtype.element_of(), os);
-      os << ")";
+      os << ", " << tgt_dtype.lanes() << ")";
     }
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
@@ -1888,24 +1906,22 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // prev value
     os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
-  } else if (op->op.same_as(builtin::shift_right())) {
+  } else if (op->op.same_as(builtin::shift_right()) ||
+             op->op.same_as(builtin::shift_left())) {
     // CuTeDSL type promotion fix: Int8 >> 4 returns Int32 in CuTeDSL,
     // but TIR expects result type to match operand type. Wrap in explicit
     // type conversion to match CUDA behavior.
     ICHECK_EQ(op->args.size(), 2U);
+    const char *shift = op->op.same_as(builtin::shift_right()) ? ">>" : "<<";
+    if (!op->dtype.is_scalar()) {
+      PrintBinaryIntrinsic_(op, shift, os);
+      return;
+    }
     DataType result_dtype = op->dtype;
     std::string lhs = PrintExpr_(op->args[0]);
     std::string rhs = PrintExpr_(op->args[1]);
     PrintType(result_dtype, os);
-    os << "((" << lhs << " >> " << rhs << "))";
-  } else if (op->op.same_as(builtin::shift_left())) {
-    // Same fix for shift_left
-    ICHECK_EQ(op->args.size(), 2U);
-    DataType result_dtype = op->dtype;
-    std::string lhs = PrintExpr_(op->args[0]);
-    std::string rhs = PrintExpr_(op->args[1]);
-    PrintType(result_dtype, os);
-    os << "((" << lhs << " << " << rhs << "))";
+    os << "((" << lhs << " " << shift << " " << rhs << "))";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
@@ -1913,10 +1929,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  // Emit Python ternary: (true_val if cond else false_val).
-  // This yields ArithValue which is fine in expression contexts (range(),
-  // etc.). When used as a BufferStore value that requires TensorSSA, the store
-  // handler will wrap it with tl.where() at statement level.
+  // TIR Select evaluates both branches, unlike if_then_else. Emit a select
+  // operation instead of nested Python conditionals in the CuTe AST frontend.
   std::string cond = PrintExpr_(op->condition);
   std::string t = PrintExpr_(op->true_value);
   std::string f = PrintExpr_(op->false_value);
@@ -1947,7 +1961,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
   };
   t = cast_branch(t, op->true_value.dtype());
   f = cast_branch(f, op->false_value.dtype());
-  os << "(" << t << " if " << cond << " else " << f << ")";
+  os << "tl.select(" << cond << ", " << t << ", " << f << ")";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const LetNode *op,
@@ -2928,18 +2942,14 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
 
     // Emit the for header (same logic as below, but always non-unrolled path
     // since break loops use runtime conditions)
+    std::string bounds;
+    if (!is_zero(op->min)) {
+      bounds = PrintExpr_(op->min) + ", ";
+    }
+    bounds += PrintExpr_(arith::Analyzer().Simplify(op->extent + op->min));
     PrintIndent();
     std::string vid = AllocVarID(op->loop_var.get());
-    stream << "for " << vid << " in range(";
-    if (is_zero(op->min)) {
-      PrintExpr_(op->extent, stream);
-    } else {
-      PrintExpr_(op->min, stream);
-      stream << ", ";
-      PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
-      PrintExpr_(upper_bound, stream);
-    }
-    stream << "):\n";
+    stream << "for " << vid << " in range(" << bounds << "):\n";
 
     // Emit the body wrapped in guard check
     int for_scope = BeginScope();
@@ -2971,18 +2981,18 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
   bool use_range_constexpr = unroll_factor.empty() &&
                              as_const_int(op->extent) != nullptr &&
                              *as_const_int(op->extent) <= LOOP_UNROLL_THRESHOLD;
+  std::string bounds;
+  if (!is_zero(start_expr)) {
+    bounds = PrintExpr_(start_expr) + ", ";
+  }
+  bounds += PrintExpr_(stop_expr);
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
   stream << "for " << vid << " in cutlass.range";
   if (use_range_constexpr) {
     stream << "_constexpr";
   }
-  stream << "(";
-  if (!is_zero(start_expr)) {
-    PrintExpr_(start_expr, stream);
-    stream << ", ";
-  }
-  PrintExpr_(stop_expr, stream);
+  stream << "(" << bounds;
   if (!unroll_factor.empty()) {
     stream << ", unroll=" << unroll_factor;
   } else if (!use_range_constexpr) {
@@ -3195,7 +3205,11 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
         PrintVecElemLoad_(vrhs, rhs.dtype(), i, value_temp);
         value_temp << ")";
       }
-      PrintVecElemStore_(sret, dtype, i, value_temp.str());
+      std::string value = value_temp.str();
+      if (opstr == ">>" || opstr == "<<") {
+        value = DTypeToString(dtype.element_of()) + "(" + value + ")";
+      }
+      PrintVecElemStore_(sret, dtype, i, value);
     }
   }
   os << sret << ".load()";

@@ -42,7 +42,8 @@ def main():
     c = torch.zeros(M, N).cuda().float()
     matmul(a, b, c, block_M, block_N, block_K, split_k)
 
-    ref_c = a @ b
+    # Match the kernel's FP32 accumulation in the correctness reference.
+    ref_c = a.float() @ b.float()
 
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
 

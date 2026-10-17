@@ -42,12 +42,9 @@ def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
         b = compiled(a)
         torch.testing.assert_close(b, a + 1.0)
 
-        executable = compiled.adapter.get_exportable_executable()
-        if disk_cache_hit:
-            assert isinstance(executable, tilelang.tvm.runtime.Module)
-        else:
-            assert isinstance(executable, tilelang.tvm.runtime.Executable)
-        rt_mod = executable.jit() if isinstance(executable, tilelang.tvm.runtime.Executable) else executable
+        # Cold compilation also reuses the published library instead of JITing twice.
+        rt_mod = compiled.adapter.get_exportable_executable()
+        assert isinstance(rt_mod, tilelang.tvm.runtime.Module)
         assert rt_mod.get_function(str(kernel.attrs["global_symbol"]), query_imports=True) is not None
         with pytest.raises(AttributeError):
             rt_mod.get_function(f"{kernel.attrs['global_symbol']}_auto_output", query_imports=True)

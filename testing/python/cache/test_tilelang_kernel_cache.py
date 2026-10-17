@@ -47,7 +47,7 @@ def _require_backend_available(backend: str) -> None:
     if backend != "cutedsl":
         return
     try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+        from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
         check_cutedsl_available()
     except ImportError as e:
@@ -115,7 +115,7 @@ def clean_cache_env(tmp_path, request):
     env.TILELANG_CACHE_DIR = str(cache_dir)
 
     # Clear memory caches to force disk I/O
-    _dispatch_map[backend]._memory_cache.clear()
+    _dispatch_map["cython" if backend == "cython" else "tvm_ffi"]._memory_cache.clear()
 
     return cache_dir
 
@@ -158,7 +158,8 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
         kernel_func,
         out_idx=[2],
         target=_get_target_from_backend(backend),
-        execution_backend=backend,
+        execution_backend="cython" if backend == "cython" else "tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if backend == "nvrtc" else None,
     )
 
     assert counter.count == 1, f"Cache miss: postproc should be called once, got {counter.count}"
@@ -171,18 +172,18 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     assert len(cache_files) > 0, "Cache files should be created, found none"
 
     # === Pass 2: Cache hit (clear memory cache to force disk read) ===
-    _dispatch_map[backend]._memory_cache.clear()
+    _dispatch_map["cython" if backend == "cython" else "tvm_ffi"]._memory_cache.clear()
 
     kernel2 = tilelang.compile(
         kernel_func,
         out_idx=[2],
         target=_get_target_from_backend(backend),
-        execution_backend=backend,
+        execution_backend="cython" if backend == "cython" else "tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if backend == "nvrtc" else None,
     )
 
     assert counter.count == 1, f"Cache hit: postproc should not be called again, got {counter.count} calls"
-    if backend == "nvrtc":
-        assert kernel1.adapter.kernels is not kernel2.adapter.kernels
+    assert kernel1.adapter is not kernel2.adapter
 
     source2 = kernel2.get_kernel_source()
     assert counter.marker in source2, f"Expected cached marker '{counter.marker}' in source"
@@ -219,6 +220,9 @@ def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
 
     kernel_func = vector_add.with_attr("global_symbol", f"export_library_{uuid.uuid4().hex[:8]}")
     cold_kernel = tilelang.compile(kernel_func, out_idx=[1], execution_backend="tvm_ffi")
+    assert isinstance(cold_kernel.adapter.executable, tilelang.tvm.runtime.Module)
+    a = torch.ones(128, device="cuda")
+    torch.testing.assert_close(cold_kernel(a), a + 1)
     cold_library = tmp_path / "cold.so"
     cold_kernel.export_library(str(cold_library))
 
@@ -228,6 +232,7 @@ def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
     cached_kernel.export_library(str(cached_library))
 
     assert cold_library.is_file()
+    assert cold_library.read_bytes() == cached_library.read_bytes()
     assert cached_kernel.artifact is None
     assert cached_library.read_bytes() == Path(cached_kernel.adapter.libpath).read_bytes()
     assert tilelang.tvm.runtime.load_module(str(cached_library)) is not None
@@ -260,7 +265,8 @@ def test_cache_miss_detection(clean_cache_env, backend):
         kernel_func1,
         out_idx=[1],
         target=_get_target_from_backend(backend),
-        execution_backend=backend,
+        execution_backend="cython" if backend == "cython" else "tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if backend == "nvrtc" else None,
     )
     assert counter.count == 1, f"First kernel: expected 1 call, got {counter.count}"
 
@@ -278,7 +284,8 @@ def test_cache_miss_detection(clean_cache_env, backend):
         kernel_func2,
         out_idx=[1],
         target=_get_target_from_backend(backend),
-        execution_backend=backend,
+        execution_backend="cython" if backend == "cython" else "tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if backend == "nvrtc" else None,
     )
 
     assert counter.count == 2, f"Different function should cause cache miss, expected 2 calls, got {counter.count}"
@@ -312,7 +319,8 @@ def test_cache_isolation_between_tests(clean_cache_env, backend):
         kernel_func,
         out_idx=[1],
         target=_get_target_from_backend(backend),
-        execution_backend=backend,
+        execution_backend="cython" if backend == "cython" else "tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if backend == "nvrtc" else None,
     )
 
     # Should be cache miss (empty cache dir)

@@ -56,7 +56,7 @@ def _lower_cuda_source(program, arch: str) -> str:
 def _lower_cutedsl_source(program) -> str:
     if not tvm.runtime.enabled("cuda"):
         pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-    from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+    from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
     try:
         check_cutedsl_available()

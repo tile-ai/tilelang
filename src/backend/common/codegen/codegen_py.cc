@@ -510,18 +510,15 @@ void CodeGenTileLangPY::VisitStmt_(const AttrStmtNode *op) {
 }
 
 void CodeGenTileLangPY::VisitStmt_(const ForNode *op) {
+  // Bounds may emit Let bindings; finish them before writing the loop header.
+  std::string bounds;
+  if (!is_zero(op->min)) {
+    bounds = PrintExpr_(op->min) + ", ";
+  }
+  bounds += PrintExpr_(arith::Analyzer().Simplify(op->extent + op->min));
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
-  stream << "for " << vid << " in range(";
-  if (is_zero(op->min)) {
-    PrintExpr_(op->extent, stream);
-  } else {
-    PrintExpr_(op->min, stream);
-    stream << ", ";
-    PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
-    PrintExpr_(upper_bound, stream);
-  }
-  stream << "):\n";
+  stream << "for " << vid << " in range(" << bounds << "):\n";
   int for_scope = BeginScope();
   PrintStmt_(op->body);
   EndScope(for_scope);

@@ -281,8 +281,7 @@ output) decides how to proceed:
 
 :::{note}
 **Backend requirements for edit-and-recompile.** The edit-and-recompile
-workflow requires a source-compiling execution backend — `nvrtc`, `cython`, or
-`cutedsl`. These backends use `*_without_compile` codegen FFIs that produce
+workflow requires a source-compiling execution backend — `cython`. This backend use `*_without_compile` codegen FFIs that produce
 source-only modules, then compile the (edited) source string at runtime via
 NVRTC / Cython / CuTeDSL.
 
@@ -294,7 +293,7 @@ edit-and-recompile, switch to a source-compiling backend:
 
 ```python
 # For CUDA targets:
-tilelang.compile(..., execution_backend="nvrtc")
+tilelang.compile(..., execution_backend="cython")
 
 # For HIP targets:
 tilelang.compile(..., execution_backend="cython")
