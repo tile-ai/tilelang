@@ -17,6 +17,10 @@ using namespace tirx;
 namespace rocm {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
+  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
+    return reducing_threads > 32;
+  }
+
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
   static int GetPreferredVectorizedSize(const ReduceOpNode &, Target) {

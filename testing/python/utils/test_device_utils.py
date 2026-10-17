@@ -1,4 +1,5 @@
 import runpy
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -9,19 +10,30 @@ from tilelang.utils import device as device_utils
 
 
 @pytest.mark.parametrize(
-    "cuda_available, mps_available, expected_backend, expected_device",
+    "cuda_available, npu_available, mps_available, expected_backend, expected_device",
     [
-        pytest.param(True, False, "cuda", 3, id="cuda"),
-        pytest.param(False, True, "mps", "mps:0", id="metal"),
-        pytest.param(True, True, "cuda", 3, id="cuda-before-metal"),
-        pytest.param(False, False, None, None, id="cpu"),
+        pytest.param(True, False, False, "cuda", 3, id="cuda"),
+        pytest.param(False, False, True, "mps", "mps:0", id="metal"),
+        pytest.param(True, False, True, "cuda", 3, id="cuda-before-metal"),
+        pytest.param(False, False, False, None, None, id="cpu"),
+        pytest.param(False, True, False, "npu", 5, id="npu"),
+        pytest.param(True, True, False, "cuda", 3, id="cuda-before-npu"),
+        pytest.param(False, True, True, "npu", 5, id="npu-before-metal"),
     ],
 )
-def test_device_compatibility(monkeypatch, cuda_available, mps_available, expected_backend, expected_device):
+def test_device_compatibility(monkeypatch, cuda_available, npu_available, mps_available, expected_backend, expected_device):
     cuda_event = Mock()
+    npu_event = Mock()
     mps_event = Mock()
     cuda_sync = Mock()
+    npu_sync = Mock()
     mps_sync = Mock()
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(is_available=lambda: npu_available, current_device=lambda: 5, Event=npu_event, synchronize=npu_sync),
+        raising=False,
+    )
     monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda_available)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps_available)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
@@ -33,10 +45,12 @@ def test_device_compatibility(monkeypatch, cuda_available, mps_available, expect
     namespace = runpy.run_path(device_utils.__file__)
 
     assert namespace["IS_CUDA"] is cuda_available
+    assert namespace["IS_NPU"] is npu_available
     assert namespace["IS_MPS"] is mps_available
-    assert namespace["Event"] is {"cuda": cuda_event, "mps": mps_event, None: None}[expected_backend]
+    assert namespace["Event"] is {"cuda": cuda_event, "npu": npu_event, "mps": mps_event, None: None}[expected_backend]
     assert namespace["get_current_device"]() == expected_device
     cuda_event.assert_not_called()
+    npu_event.assert_not_called()
     mps_event.assert_not_called()
     if expected_backend is None:
         with pytest.raises(RuntimeError, match="No device is available"):
@@ -52,6 +66,10 @@ def test_device_compatibility(monkeypatch, cuda_available, mps_available, expect
     else:
         cuda_sync.assert_not_called()
         mps_sync.assert_not_called()
+    if expected_backend == "npu":
+        npu_sync.assert_called_once_with()
+    else:
+        npu_sync.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -91,7 +109,7 @@ def test_device_synchronize_rejects_unsupported_devices(monkeypatch, device):
     monkeypatch.setattr(torch.cuda, "synchronize", cuda_sync)
     monkeypatch.setattr(torch.mps, "synchronize", mps_sync)
 
-    with pytest.raises(ValueError, match="only supports CUDA/HIP or MPS"):
+    with pytest.raises(ValueError, match="only supports CUDA/HIP, MPS, or NPU"):
         device_utils.device_synchronize(device)
     cuda_sync.assert_not_called()
     mps_sync.assert_not_called()

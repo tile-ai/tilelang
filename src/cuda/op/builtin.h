@@ -105,11 +105,6 @@ TVM_DLL const Op &fmul();
 TVM_DLL const Op &max2_nan();
 TVM_DLL const Op &min2_nan();
 
-// random op
-TVM_DLL const Op &rng_init();
-TVM_DLL const Op &rng_rand();
-TVM_DLL const Op &rng_rand_float();
-
 /*!
  * \brief Return the sentinel dtype used for CUDA tensor-map parameters.
  */
@@ -637,20 +632,6 @@ TVM_DLL const Op &tcgen05_after_thread_sync();
  */
 
 TVM_DLL const Op &increase_descriptor_offset();
-
-/*!
- * \brief tilelang intrinsic for assert on device.
- *
- *  This op is used to represent an assert on device
- */
-TVM_DLL const Op &device_assert();
-
-/*!
- * \brief tilelang intrinsic for assert on device with additional message.
- *
- *  This op is used to represent an assert on device with additional message.
- */
-TVM_DLL const Op &device_assert_with_msg();
 
 /*!
  * \brief tilelang intrinsic for CUDA find-first-set bit (__ffs / __ffsll).

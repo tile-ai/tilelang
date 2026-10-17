@@ -643,6 +643,11 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  static void CheckAllReduceWidth(int reducing_threads, int scale,
+                                  const char *op_name, Target) {
+    reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+  }
+
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
                          const Buffer &dst_buffer,
                          const LowerArgs &lower_args) {
@@ -1015,8 +1020,8 @@ template <typename Impl> struct ReduceLowerer {
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
-          reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                      "tl.reduce");
+          Impl::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                    "tl.reduce", lower_args.target);
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
@@ -1038,7 +1043,8 @@ template <typename Impl> struct ReduceLowerer {
                                   ? clear_buffer->dtype.with_lanes(vsize)
                                   : clear_buffer->dtype;
           PrimExpr workspace;
-          bool need_workspace = reducing_threads > 32;
+          bool need_workspace = Impl::AllReduceNeedsWorkspace(
+              reducing_threads, thread_step.scale, lower_args.target);
           if (need_workspace) {
             int ws_size = block_threads * eff_batch;
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
@@ -1208,8 +1214,8 @@ template <typename Impl> struct ReduceLowerer {
 
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
-        reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                    "tl.reduce");
+        Impl::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                  "tl.reduce", lower_args.target);
         auto thread_offset = lower_args.thread_bounds->min;
         PrimExpr all_threads = lower_args.thread_bounds->extent;
         if (reducing_threads > 32 &&
@@ -1224,7 +1230,8 @@ template <typename Impl> struct ReduceLowerer {
             thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
-        if (reducing_threads > 32) {
+        if (Impl::AllReduceNeedsWorkspace(reducing_threads, thread_step.scale,
+                                          lower_args.target)) {
           int workspace_size =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           PrimExpr workspace =

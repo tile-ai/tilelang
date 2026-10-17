@@ -49,6 +49,10 @@ inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
 struct HIPMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
+      // Match TIR's ties-to-even constant folding, not C99 round's ties-away.
+      if (name == "round" && (t.bits() == 32 || t.bits() == 64)) {
+        name = "nearbyint";
+      }
       switch (t.bits()) {
       case 64:
         return name;

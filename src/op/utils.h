@@ -18,6 +18,9 @@ namespace tl {
 
 using namespace tirx;
 
+/*! \brief Whether a constant has an all-zero bit pattern, excluding -0.0. */
+TVM_DLL bool IsZeroBitPattern(const PrimExpr &expr);
+
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 TVM_DLL int to_CUtensorMapDataType(DataType dtype);
 

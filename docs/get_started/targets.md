@@ -17,6 +17,7 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `cutedsl` | NVIDIA CUTLASS/CuTe DSL backend. Requires `nvidia-cutlass-dsl`. |
 | `hip` | AMD GPUs via ROCm. Use a config dict for options such as `{"kind": "hip", "mcpu": "gfx90a"}`. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
+| `ascend` | Huawei Ascend NPUs. Use `execution_backend="pto"` to select PTO code generation. |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
 | `webgpu` | Browser / WebGPU runtimes. |
 | `c` | Emit plain C source for inspection or custom toolchains. |
@@ -58,6 +59,19 @@ the default is `auto`.
 ```bash
 export TILELANG_DEFAULT_TARGET=cuda
 ```
+
+For Ascend, the target and execution backend can be selected independently.
+The following defaults keep the native `ascend` target while selecting the PTO
+target variant and PTO code generator:
+
+```bash
+export TILELANG_DEFAULT_TARGET=ascend
+export TILELANG_EXECUTION_BACKEND=pto
+```
+
+This is equivalent to passing `target="ascend", execution_backend="pto"` to
+`tilelang.compile` or `@tilelang.jit`. Omitting the execution backend, or using
+`execution_backend="auto"`, keeps the default AscendC code generator.
 
 For target options, use a JSON object string. This is useful in scripts that rely on the default target through
 `tilelang.compile(..., target=None)`, `@tilelang.jit`, or autotuning:

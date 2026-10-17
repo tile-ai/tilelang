@@ -5,7 +5,7 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tirx
+from tvm import tirx, arith
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -29,6 +29,10 @@ def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
     if isinstance(arg, tirx.Var) and T.has_let_value(arg):
         return T.get_let_value(arg).buffer
     return arg
+
+
+def _prove_equal(expr1, expr2) -> bool:
+    return prim_expr_equal(expr1, expr2) or arith.Analyzer().can_prove_equal(expr1, expr2)
 
 
 def _gemm_dense_slots(
@@ -75,13 +79,13 @@ def _gemm_dense_slots(
     K = A_shape[-2] if transpose_A else A_shape[-1]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(M_A, M), f"{api_name} M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert prim_expr_equal(K, K_B), f"{api_name} K shape check failed: K_A = {K}, K_B = {K_B}"
+    assert _prove_equal(M_A, M), f"{api_name} M shape check failed: M_A = {M_A}, M_C = {M}"
+    assert _prove_equal(K, K_B), f"{api_name} K shape check failed: K_A = {K}, K_B = {K_B}"
     if use_2cta:
         # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert prim_expr_equal(N_B * 2, N), f"{api_name} N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
+        assert _prove_equal(N_B * 2, N), f"{api_name} N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
     else:
-        assert prim_expr_equal(N_B, N), f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}"
+        assert _prove_equal(N_B, N), f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}"
 
     for name, dim in (("M", M), ("N", N), ("K", K)):
         if not isinstance(dim, tirx.IntImm):
@@ -96,7 +100,7 @@ def _gemm_dense_slots(
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
     B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
-    C_arg = buffer_region_to_tile_region(C_region, "rw", list(C_shape))
+    C_arg = buffer_region_to_tile_region(C_region, "w" if isinstance(clear_accum, bool) and clear_accum else "rw", list(C_shape))
     # When mbar is None, pass a placeholder constant (0). The C++ side only
     # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
     # correctly ignored.
@@ -186,7 +190,8 @@ def gemm(
 
     Backend dialects extend this signature with their hardware's knobs:
     ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
-    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA).
+    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA),
+    ``tilelang.ascend.language.gemm`` adds ``unit_flag_ctrl`` (Cube unit flag).
 
     Returns:
         tirx.Call: A handle to the GEMM operation.

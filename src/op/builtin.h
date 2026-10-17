@@ -146,6 +146,13 @@ static constexpr const char *kPassProfileThresholdMs =
  */
 TVM_DLL const Op &tvm_ffi_call_with_result();
 
+/*! \brief Elementwise clamp with NaN propagation and single-evaluation
+ * operands. */
+TVM_DLL const Op &clamp();
+
+/*! \brief Shared clamp expansion for backends without a device helper. */
+TVM_DLL PrimExpr LowerClamp(PrimExpr expr);
+
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
@@ -304,6 +311,19 @@ TVM_DLL const Op &sync_grid();
  *
  */
 TVM_DLL const Op &sync_warp();
+
+// RNG ops. #2855 registers these under the CUDA dialect, but this fork also
+// consumes them from backend-neutral code (loop_vectorize) and the Ascend
+// codegen/SIMT RNG path, so declare them here too (registration stays in
+// cuda/op/builtin.cc; a redeclaration is harmless).
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
+
+// device_assert lowers through the Ascend codegen (toolkit assert()) as well as
+// CUDA; #2855 files it under the CUDA dialect, so redeclare for asc codegen.
+TVM_DLL const Op &device_assert();
+TVM_DLL const Op &device_assert_with_msg();
 
 /*!
  * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
