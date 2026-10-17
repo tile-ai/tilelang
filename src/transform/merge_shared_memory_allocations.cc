@@ -320,6 +320,56 @@ public:
 
   void VisitStmt_(const AssertStmtNode *op) final { VisitNewScope(op); }
 
+  // An async WGMMA keeps reading its shared operands through the descriptor
+  // until the wait that retires it, but the only syntactic access to such a
+  // buffer is the descriptor initialization. Keep those buffers live until the
+  // next WGMMA wait, otherwise a later buffer can be merged onto their storage
+  // while the MMA is still in flight.
+  void VisitExpr_(const CallNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
+      for (const PrimExpr &arg : op->args) {
+        PostOrderVisit(arg, [this](const ObjectRef &node) {
+          const VarNode *buf = nullptr;
+          if (const auto *load = node.as<BufferLoadNode>()) {
+            buf = load->buffer->data.get();
+          } else if (const auto *var = node.as<VarNode>()) {
+            buf = var;
+          }
+          if (buf == nullptr || !alloc_info_.count(buf) ||
+              !alloc_info_[buf].alloc ||
+              !IsAppropriateSharedMemory(GetRef<Var>(buf))) {
+            return;
+          }
+          if (std::find(pending_wgmma_buffers_.begin(),
+                        pending_wgmma_buffers_.end(),
+                        buf) == pending_wgmma_buffers_.end()) {
+            pending_wgmma_buffers_.push_back(buf);
+          }
+        });
+      }
+    } else if (op->op.same_as(tl::wait_wgmma()) ||
+               op->op.same_as(tl::warpgroup_wait())) {
+      for (const VarNode *buf : pending_wgmma_buffers_) {
+        // Count the wait as a read, with the same scope attribution as a
+        // BufferLoad.
+        if (enable_aggressive_merge_) {
+          scope_.back().touched.push_back(buf);
+        } else {
+          size_t access_level =
+              std::min(alloc_info_[buf].level, scope_.size() - 1);
+          scope_[access_level].touched.push_back(buf);
+        }
+      }
+      // wait(N) leaves up to N MMAs in flight; only a full wait retires them.
+      const auto *pending =
+          op->args.empty() ? nullptr : op->args[0].as<IntImmNode>();
+      if (pending != nullptr && pending->value == 0) {
+        pending_wgmma_buffers_.clear();
+      }
+    }
+  }
+
   // linearized access sequence.
   std::vector<StmtEntry> linear_seq_;
   // The storage scope of each buffer
@@ -366,6 +416,8 @@ private:
   std::vector<StmtEntry> scope_;
   // The size of the scope.
   size_t scope_level_{0};
+  // Shared buffers read by WGMMAs that no full wait has retired yet.
+  std::vector<const VarNode *> pending_wgmma_buffers_;
 };
 
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {

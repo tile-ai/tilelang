@@ -234,3 +234,67 @@ def test_wgmma_gemm_sliced_operand_correctness(M, N, K, num_k_tiles):
     kernel(a, b, d)
     ref = (a.float() @ b.float().t()).half()
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
+
+
+def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64):
+    # B0 is last used syntactically by the first wgmma_gemm (via its descriptor), but the
+    # MMA reads it until wait_wgmma. B1 is written in between and must not share B0's storage.
+    @T.prim_func
+    def main(
+        Q: T.Tensor((num_ctas, m, d), T.bfloat16),
+        K: T.Tensor((num_ctas, 2 * m, d), T.bfloat16),
+        O0: T.Tensor((num_ctas, m, m), T.float32),
+        O1: T.Tensor((num_ctas, m, m), T.float32),
+    ):
+        with T.Kernel(num_ctas, threads=128) as b:
+            C0 = T.alloc_fragment((m, m), T.float32)
+            C1 = T.alloc_fragment((m, m), T.float32)
+            A = T.alloc_shared((m, d), T.bfloat16)
+            B0 = T.alloc_shared((m, d), T.bfloat16)
+            B1 = T.alloc_shared((m, d), T.bfloat16)
+            T.copy(Q[b, 0:m, 0:d], A, disable_tma=True)
+            T.copy(K[b, 0:m, 0:d], B0, disable_tma=True)
+            T.wgmma_gemm(A, B0, C0, transpose_B=True, clear_accum=True)
+            T.copy(K[b, m : 2 * m, 0:d], B1, disable_tma=True)
+            T.wgmma_gemm(A, B1, C1, transpose_B=True, clear_accum=True)
+            T.wait_wgmma(0)
+            T.warpgroup_fence_operand(C0, num_regs=32)
+            T.warpgroup_fence_operand(C1, num_regs=32)
+            T.copy(C0, O0[b, 0:m, 0:m])
+            T.copy(C1, O1[b, 0:m, 0:m])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_async_wgmma_operand_not_merged_before_wait():
+    # Compile-only: B0 and B1 must get distinct shared-memory offsets (#3525).
+    import re
+
+    kernel = tilelang.compile(_make_async_wgmma_reuse_kernel(), target={"kind": "cuda", "arch": "sm_90a"})
+    src = kernel.get_kernel_source()
+    offsets = {}
+    for name in ("B0", "B1"):
+        match = re.search(rf"\b{name}\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\)", src)
+        assert match is not None, f"{name} not found in generated source"
+        offsets[name] = int(match.group(1))
+    assert offsets["B0"] != offsets["B1"]
+
+
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_async_wgmma_operand_not_merged_before_wait_correctness():
+    import torch
+
+    num_ctas, m, d = 256, 64, 64
+    kernel = tilelang.compile(_make_async_wgmma_reuse_kernel(num_ctas, m, d), target="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    q = torch.randn(num_ctas, m, d, device="cuda", generator=generator).to(torch.bfloat16)
+    k = torch.randn(num_ctas, 2 * m, d, device="cuda", generator=generator).to(torch.bfloat16)
+    ref0 = torch.einsum("bmd,bnd->bmn", q.double(), k[:, :m].double()).float()
+    ref1 = torch.einsum("bmd,bnd->bmn", q.double(), k[:, m:].double()).float()
+    for _ in range(5):
+        o0 = torch.empty(num_ctas, m, m, device="cuda")
+        o1 = torch.empty(num_ctas, m, m, device="cuda")
+        kernel(q, k, o0, o1)
+        torch.testing.assert_close(o0, ref0, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(o1, ref1, rtol=1e-2, atol=1e-2)
