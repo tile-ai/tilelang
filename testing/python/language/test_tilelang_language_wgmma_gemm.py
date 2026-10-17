@@ -234,3 +234,208 @@ def test_wgmma_gemm_sliced_operand_correctness(M, N, K, num_k_tiles):
     kernel(a, b, d)
     ref = (a.float() @ b.float().t()).half()
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
+
+
+def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64, conditional_first_wait=False):
+    # B0 is last used syntactically by the first wgmma_gemm (via its descriptor), but the
+    # MMA reads it until wait_wgmma. B1 is written in between and must not share B0's storage.
+    @T.prim_func
+    def main(
+        Q: T.Tensor((num_ctas, m, d), T.bfloat16),
+        K: T.Tensor((num_ctas, 2 * m, d), T.bfloat16),
+        O0: T.Tensor((num_ctas, m, m), T.float32),
+        O1: T.Tensor((num_ctas, m, m), T.float32),
+    ):
+        with T.Kernel(num_ctas, threads=128) as b:
+            C0 = T.alloc_fragment((m, m), T.float32)
+            C1 = T.alloc_fragment((m, m), T.float32)
+            A = T.alloc_shared((m, d), T.bfloat16)
+            B0 = T.alloc_shared((m, d), T.bfloat16)
+            B1 = T.alloc_shared((m, d), T.bfloat16)
+            T.copy(Q[b, 0:m, 0:d], A, disable_tma=True)
+            T.copy(K[b, 0:m, 0:d], B0, disable_tma=True)
+            T.wgmma_gemm(A, B0, C0, transpose_B=True, clear_accum=True)
+            if conditional_first_wait:  # noqa: SIM102 - the prim_func parser needs the nested form
+                # Only some CTAs retire the first wgmma here, so B0 must stay live until the final wait.
+                if b % 2 == 0:
+                    T.wait_wgmma(0)
+            T.copy(K[b, m : 2 * m, 0:d], B1, disable_tma=True)
+            T.wgmma_gemm(A, B1, C1, transpose_B=True, clear_accum=True)
+            T.wait_wgmma(0)
+            T.warpgroup_fence_operand(C0, num_regs=32)
+            T.warpgroup_fence_operand(C1, num_regs=32)
+            T.copy(C0, O0[b, 0:m, 0:m])
+            T.copy(C1, O1[b, 0:m, 0:m])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("conditional_first_wait", [False, True])
+def test_async_wgmma_operand_not_merged_before_wait(conditional_first_wait):
+    # Compile-only: B0 and B1 must get distinct shared-memory offsets (#3525), also when an
+    # earlier wait_wgmma sits in a branch that other paths skip.
+    import re
+
+    kernel = tilelang.compile(
+        _make_async_wgmma_reuse_kernel(conditional_first_wait=conditional_first_wait),
+        target={"kind": "cuda", "arch": "sm_90a"},
+    )
+    src = kernel.get_kernel_source()
+    offsets = {}
+    for name in ("B0", "B1"):
+        match = re.search(rf"\b{name}\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\)", src)
+        assert match is not None, f"{name} not found in generated source"
+        offsets[name] = int(match.group(1))
+    assert offsets["B0"] != offsets["B1"]
+
+
+@pytest.mark.parametrize("conditional_first_wait", [False, True])
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_async_wgmma_operand_not_merged_before_wait_correctness(conditional_first_wait):
+    import torch
+
+    num_ctas, m, d = 256, 64, 64
+    kernel = tilelang.compile(
+        _make_async_wgmma_reuse_kernel(num_ctas, m, d, conditional_first_wait=conditional_first_wait),
+        target="cuda",
+    )
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    q = torch.randn(num_ctas, m, d, device="cuda", generator=generator).to(torch.bfloat16)
+    k = torch.randn(num_ctas, 2 * m, d, device="cuda", generator=generator).to(torch.bfloat16)
+    ref0 = torch.einsum("bmd,bnd->bmn", q.double(), k[:, :m].double()).float()
+    ref1 = torch.einsum("bmd,bnd->bmn", q.double(), k[:, m:].double()).float()
+    for _ in range(5):
+        o0 = torch.empty(num_ctas, m, m, device="cuda")
+        o1 = torch.empty(num_ctas, m, m, device="cuda")
+        kernel(q, k, o0, o1)
+        torch.testing.assert_close(o0, ref0, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(o1, ref1, rtol=1e-2, atol=1e-2)
+
+
+def _merged_shared_dyn_sizes(func):
+    import re
+
+    mod = tvm.IRModule.from_expr(func)
+    cuda_target = tvm.target.Target("cuda", host="llvm")
+    mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
+    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
+    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    return [int(size) for size in re.findall(r'alloc_buffer\(\((\d+),\), "uint8", scope="shared.dyn"\)', mod.script())]
+
+
+def _wgmma_ir_helpers():
+    from tvm.script import tirx as T
+
+    op = tvm.ir.Op.get
+
+    def init(desc, buf):
+        return T.evaluate(
+            T.call_intrin(
+                "handle",
+                op("tl.initialize_wgmma_descriptor"),
+                desc[0],
+                T.tvm_access_ptr(T.type_annotation("uint8"), buf.data, 0, 4096, 1),
+                1,
+                1,
+                64,
+            )
+        )
+
+    def issue(desc):
+        return T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
+
+    def wait():
+        return T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+
+    return T, init, issue, wait
+
+
+# Each builder returns hand-written IR and the shared-memory bytes expected when every buffer
+# the in-flight WGMMA may still read is kept apart from `Tmp`, which is written while it runs.
+def _ir_descriptor_reused_after_full_wait():
+    # One initialization feeds two batches with a full wait in between; the second batch
+    # reads B0 again.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        init(desc, B0)
+        issue(desc)
+        wait()
+        issue(desc)
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_wait_in_sibling_branch():
+    # The else branch waits, but only the then branch issued the WGMMA, so B0 is still in
+    # flight after the if.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            init(desc, B0)
+            issue(desc)
+        else:
+            wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_descriptor_initialized_on_two_paths():
+    # The descriptor addresses B0 on one path and B1 on the other; the WGMMA issued after the
+    # join reads whichever it holds.
+    T, init, issue, wait = _wgmma_ir_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        B1 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            init(desc, B0)
+            issue(desc)
+            wait()
+        else:
+            init(desc, B1)
+        issue(desc)
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 3 * 4096
+
+
+@pytest.mark.parametrize(
+    "build",
+    [_ir_descriptor_reused_after_full_wait, _ir_wait_in_sibling_branch, _ir_descriptor_initialized_on_two_paths],
+    ids=["descriptor_reused", "sibling_branch", "two_paths"],
+)
+def test_wgmma_operands_stay_live_until_full_wait(build):
+    func, expected_bytes = build()
+    assert _merged_shared_dyn_sizes(func) == [expected_bytes]
