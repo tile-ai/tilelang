@@ -278,6 +278,10 @@ const bool default_im2col_registered = RegisterDefaultIm2Col();
 
 } // namespace
 
+bool Im2ColUsesSIMT(Target target) {
+  return ResolveIm2ColImpl(target).lower == LowerIm2ColSIMT;
+}
+
 void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
