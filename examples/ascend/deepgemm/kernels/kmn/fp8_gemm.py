@@ -4,7 +4,7 @@ import tilelang
 import tilelang.ascend.language as T
 
 from ...config import GemmType, Major
-from ..common import COMPILE_FLAGS, MAX_EPILOGUE_STAGES, MK_ALIGNMENT, MX_SF_DIVISOR, physical_shape
+from ..common import MAX_EPILOGUE_STAGES, MK_ALIGNMENT, MX_SF_DIVISOR, physical_shape, with_compile_flags
 from ..copy import make_gm_to_l1_copy, make_scale_copy
 from ..epilogue import make_store_output
 from .compute import make_compute
@@ -185,24 +185,24 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
         ):
             body(gm_a, gm_b, gm_sfa, gm_sfb, gm_d, grouped_layout=grouped_layout)
 
-    return kernel
+    return with_compile_flags(kernel)
 
 
-@tilelang.jit(compile_flags=COMPILE_FLAGS)
+@tilelang.jit
 def build_fp8_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, with_alpha=False):
     return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Normal, with_alpha)
 
 
-@tilelang.jit(compile_flags=COMPILE_FLAGS)
+@tilelang.jit
 def build_fp8_batched_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config):
     return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Batched)
 
 
-@tilelang.jit(compile_flags=COMPILE_FLAGS)
+@tilelang.jit
 def build_fp8_m_grouped_gemm(total_m, n, k, major_b, out_dtype, config):
     return _build_kernel(total_m, n, k, Major.K, major_b, out_dtype, False, config, GemmType.MGroupedContiguousWithPsumLayout)
 
 
-@tilelang.jit(compile_flags=COMPILE_FLAGS)
+@tilelang.jit
 def build_fp8_k_grouped_gemm(m, n, total_k, out_dtype, config):
     return _build_kernel(m, n, total_k, Major.MN, Major.MN, out_dtype, True, config, GemmType.KGroupedContiguousWithPsumLayout)
