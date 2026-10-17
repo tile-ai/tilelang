@@ -194,6 +194,11 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    # Verify PTO requirements on the final device TIR before code generation.
+    # The current check proves masked-store destination alignment after all
+    # layout and UB address rewrites.
+    if target_is_pto(target):
+        mod = ascend_transform.VerifyPTOCodegenLegality()(mod)
     return mod
 
 

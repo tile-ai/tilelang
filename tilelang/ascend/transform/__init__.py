@@ -155,6 +155,19 @@ def LegalizeParallelToPTO():
     return _ffi_api.LegalizeParallelToPTO()  # type: ignore
 
 
+def VerifyPTOCodegenLegality():
+    """Verify PTO requirements before code generation without modifying IR.
+
+    Consumes the final device TIR after LowerDeviceKernelLaunch and the final
+    layout and UB rewrites. Currently checks destination alignment for
+    default/continuous explicit-mask VMI stores of b8/b16/b32 data: 32 bytes
+    for ordinary stores, or natural element alignment for recognized 1PT
+    writeback. Bool data is excluded. Shapes, layouts, masks and addresses are
+    unchanged. Functions without a PTO target pass through unchanged.
+    """
+    return _ffi_api.VerifyPTOCodegenLegality()  # type: ignore
+
+
 def VectorizeParallelToPTO():
     """Rewrite verified T.Parallel loops inside PTO SIMD_VF blocks into
     logical VMI code.
@@ -287,4 +300,5 @@ __all__ = [
     "UnrollLoopSkipVF",
     "VectorizeParallelToPTO",
     "VerifyParallelToPTO",
+    "VerifyPTOCodegenLegality",
 ]
