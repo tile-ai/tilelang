@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import overload
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
@@ -1747,8 +1748,34 @@ def substitute_primfunc(prim_func, vmap):
     )
 
 
-def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
-    def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
+@overload
+def prim_func(func: Callable[_P, _T], *, eager_jit: Literal[False] = False) -> PrimFunc[_P, _T]: ...
+
+
+@overload
+def prim_func(func: None = None, *, eager_jit: Literal[False] = False) -> Callable[[Callable[_P, _T]], PrimFunc[_P, _T]]: ...
+
+
+@overload
+def prim_func(func: Callable[_P, _T], *, eager_jit: Literal[True]) -> JITFunc[_P, _T]: ...
+
+
+@overload
+def prim_func(func: None = None, *, eager_jit: Literal[True]) -> Callable[[Callable[_P, _T]], JITFunc[_P, _T]]: ...
+
+
+@overload
+def prim_func(func: Callable[_P, _T], *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]: ...
+
+
+@overload
+def prim_func(func: None = None, *, eager_jit: bool = False) -> Callable[[Callable[_P, _T]], PrimFunc[_P, _T] | JITFunc[_P, _T]]: ...
+
+
+def prim_func(
+    func: Callable[_P, _T] | None = None, *, eager_jit: bool = False
+) -> PrimFunc[_P, _T] | JITFunc[_P, _T] | Callable[[Callable[_P, _T]], PrimFunc[_P, _T] | JITFunc[_P, _T]]:
+    def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
         func_annot = get_type_hints(func)

@@ -2,17 +2,53 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, overload
 
 from tvm import tirx
 from tvm.tirx.script.builder import frame
 
 from tilelang.language.loop import (
+    ForFrame,
     Parallel as _common_Parallel,
     unroll as _common_unroll,
 )
 
 __all__ = ["Parallel", "Unroll", "unroll"]
+
+
+@overload
+def Parallel(
+    extent: int | tirx.PrimExpr,
+    /,
+    *,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[tirx.Var]: ...
+
+
+@overload
+def Parallel(
+    extent: int | tirx.PrimExpr,
+    second_extent: int | tirx.PrimExpr,
+    /,
+    *extents: int | tirx.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[list[tirx.Var]]: ...
+
+
+@overload
+def Parallel(
+    *extents: int | tirx.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    prefer_async: bool | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[tirx.Var | list[tirx.Var]]: ...
 
 
 def Parallel(

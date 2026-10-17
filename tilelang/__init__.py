@@ -6,6 +6,8 @@ import sys
 import warnings
 from pathlib import Path
 
+__all__ = ["__version__", "env", "logger", "set_log_level"]
+
 
 def _compute_version() -> str:
     """Return the package version without being polluted by unrelated installs.
@@ -196,6 +198,49 @@ if not env.is_light_import():
         # only load once here
         if env.SKIP_LOADING_TILELANG_SO == "0":
             _LIB, _LIB_PATH = _load_tile_lang_lib()
+
+    __all__ += [
+        "DataType",
+        "Fragment",
+        "JITKernel",
+        "Layout",
+        "PassConfigKey",
+        "Profiler",
+        "TensorSupplyType",
+        "analysis",
+        "ascend",
+        "autotune",
+        "build_date",
+        "cdiv",
+        "compile",
+        "cpu",
+        "cuda",
+        "deprecated",
+        "disable_cache",
+        "dtypes",
+        "enable_cache",
+        "engine",
+        "get_runtime_library_dirs",
+        "ir",
+        "is_cache_enabled",
+        "jit",
+        "language",
+        "libinfo",
+        "lower",
+        "metal",
+        "next_power_of_2",
+        "par_compile",
+        "prepend_dll_search_path",
+        "register_c_postproc",
+        "register_cuda_postproc",
+        "register_hip_postproc",
+        "rocm",
+        "tileop",
+        "tools",
+        "transform",
+        "tvm",
+        "webgpu",
+    ]
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401

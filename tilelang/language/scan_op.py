@@ -19,7 +19,7 @@ def _scan_fragment(
     dim: int,
     reverse: bool,
     op_key: str,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     src_shape = retrieve_shape(src)
     src_buffer = _get_buffer(src)
@@ -47,7 +47,7 @@ def cumsum_fragment(
     dst: BufferLikeType,
     dim: int,
     reverse: bool,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """
     Compute cumulative sum for fragment buffers by copying to shared memory first.
@@ -90,7 +90,7 @@ def cumsum(
     dst: BufferLikeType | None = None,
     dim: int = 0,
     reverse: bool = False,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> tirx.PrimExpr | None:
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
@@ -158,7 +158,7 @@ def cummax_fragment(
     dst: BufferLikeType,
     dim: int,
     reverse: bool,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """
     Compute cumulative maximum for fragment buffers by staging through shared memory.
@@ -177,7 +177,7 @@ def cummax(
     dst: BufferLikeType | None = None,
     dim: int = 0,
     reverse: bool = False,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> tirx.PrimExpr | None:
     """
     Compute the cumulative maximum of `src` along `dim`, writing results to `dst`.
