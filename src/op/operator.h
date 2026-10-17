@@ -139,6 +139,9 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // L0C data Var -> M pitch of the MAD that last wrote it. FixPipe must walk
+  // that stored pitch; the allocation shape and the copied region do not.
+  ffi::Map<tirx::Var, PrimExpr> l0c_producer_m;
 };
 
 /*! \brief One reducer_update site, as seen by layout analysis: the update
