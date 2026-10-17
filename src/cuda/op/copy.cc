@@ -2496,6 +2496,11 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
   auto shared_tensor = is_load ? dst : src;
   auto global_tensor = is_load ? src : dst;
 
+  // Unlike tensor-map copies, linear bulk copies have no shared-memory swizzle.
+  if (lower_args.require_smem_alignment) {
+    lower_args.require_smem_alignment(shared_tensor->data, 16);
+  }
+
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
     shared_elements *= shared_range[i]->extent;
