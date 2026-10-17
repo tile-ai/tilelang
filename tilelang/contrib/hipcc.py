@@ -11,13 +11,12 @@ import os
 import subprocess
 import tempfile
 
-import tvm_ffi
-
 from tilelang import tvm as tvm
 from tilelang.env import env
 from tvm.contrib import utils
 from tvm.base import py_str
-from tvm.contrib.rocm import get_rocm_arch, find_rocm_path
+
+from .rocm import find_hipcc, find_rocm_path, get_rocm_arch
 
 from .hip_resource_info import filter_and_record, hipcc_remark_flag
 
@@ -75,7 +74,7 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
-    cmd = ["hipcc"]
+    cmd = [find_hipcc()]
     cmd += ["-O3", "-c"]
     # Always include line info for better profiling and mapping
     cmd += ["-gline-tables-only"]
@@ -117,12 +116,3 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
         if not data:
             raise RuntimeError("Compilation error: empty result is generated")
         return data
-
-
-@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
-def tilelang_callback_hip_compile(code, target):
-    """use hipcc to generate fatbin code for better optimization"""
-    from tilelang.rocm.target import target_get_mcpu
-
-    hsaco = compile_hip(code, target_format="hsaco", arch=target_get_mcpu(target))
-    return hsaco

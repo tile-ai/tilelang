@@ -1,6 +1,6 @@
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.rocm.language as T
 from tilelang.utils.tensor import torch_assert_close
 from tilelang.language.fp8 import determine_fp8_type, determine_torch_fp8_type
 import itertools

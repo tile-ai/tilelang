@@ -27,11 +27,15 @@ def test_local_to_memory():
     @T.prim_func
     def after(b: T.Tensor[(16,), T.float4_e2m1fn]):
         b_frag = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(b_frag[i], T.float4_e2m1fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(b_frag[i], T.float4_e2m1fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -48,11 +52,15 @@ def test_memory_to_local():
     @T.prim_func
     def after(b: T.Tensor[(16,), T.float4_e2m1fn]):
         b_frag = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = b_frag[i]
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float4_e2m1fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = b_frag[i]
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -163,11 +171,15 @@ def test_local_to_memory_with_let_stmt():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -188,11 +200,15 @@ def test_local_to_memory_with_bind_chain():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
@@ -213,15 +229,51 @@ def test_local_to_memory_with_branch_local_bind():
     def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
         a_frag = T.alloc_local((16,), T.float32)
         scale = T.alloc_local((16,), T.float32)
-        b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
-        for i in T.vectorized(16):
-            if i < 8:
-                b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
-        for i_copy in T.vectorized(16):
-            if i_copy < 8:
-                b[i_copy] = b_local_cast[i_copy]
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                if i < 8:
+                    b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                if i_copy < 8:
+                    b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
+
+
+def test_cast_buffers_wrapped_in_lexical_alloc_scope():
+    """The pass must wrap cast buffers in a block annotated with
+    lexical_alloc_scope, so StorageRewrite keeps them scoped to the use site."""
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float4_e2m1fn]):
+        b_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            b[i] = b_frag[i]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    annotated_blocks = [0]
+    allocs_inside = [0]
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.SBlock) and "lexical_alloc_scope" in node.annotations:
+            annotated_blocks[0] += 1
+
+            def _count(inner):
+                if isinstance(inner, tvm.tirx.AllocBuffer):
+                    allocs_inside[0] += 1
+
+            post_order_visit(node.body, _count)
+
+    post_order_visit(mod["main"].body, _visit)
+    assert annotated_blocks[0] == 1, f"Expected 1 lexical_alloc_scope block, got {annotated_blocks[0]}"
+    assert allocs_inside[0] == 1, f"Expected the cast buffer alloc inside the scope, got {allocs_inside[0]}"
 
 
 # =============================================================================
@@ -516,6 +568,96 @@ def test_e2e_scalar_load_no_cast_buffer():
 
     assert "c_local_cast" in source, "Expected c_local_cast for store-side decoupling"
     assert "b_local_cast" not in source, "Scalar load b[0] should not get a cast buffer"
+
+
+def test_no_transform_evaluate_root_opaque_intrinsic():
+    """Test that a vectorized loop whose body is an opaque intrinsic is skipped.
+
+    Decoupling splits the value edge of a BufferStore to insert a staging
+    buffer. An Evaluate discards its result and stores nothing, so that edge
+    does not exist. Here the int64 index casts inside the ptx_cp_async
+    predicate previously made the pass treat the statement as mixed-precision
+    compute and rewrite both address operands to local staging buffers.
+
+    Regression test for issue #2497.
+    """
+
+    @T.prim_func
+    def before(a: T.Tensor[(256,), T.bfloat16], b: T.Tensor[(256,), T.bfloat16]):
+        for i in T.vectorized(8):
+            T.ptx_cp_async(
+                T.address_of(b[i]),
+                T.address_of(a[i]),
+                1,
+                T.cast(i, "int64") < T.int64(128),
+            )
+
+    @T.prim_func
+    def after(a: T.Tensor[(256,), T.bfloat16], b: T.Tensor[(256,), T.bfloat16]):
+        for i in T.vectorized(8):
+            T.ptx_cp_async(
+                T.address_of(b[i]),
+                T.address_of(a[i]),
+                1,
+                T.cast(i, "int64") < T.int64(128),
+            )
+
+    _check(before, after)
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_pipelined_int64_index_cp_async_operands():
+    """Test that pipelined global→shared copies keep global/shared cp_async operands.
+
+    With int64 index arithmetic, DecoupleTypeCast used to rewrite the address
+    operands of ptx_cp_async to kernel-local register arrays, emitting
+    cp_async_gs_conditional(local, local). That violates the instruction's
+    address-space constraints (dst must be shared, src must be global) and
+    fails at launch with CUDA_ERROR_INVALID_ADDRESS_SPACE.
+
+    Regression test for issue #2497.
+    """
+    block_size, head_dim, num_stages = 128, 128, 2
+
+    @tilelang.jit
+    def kernel_fn():
+        total_len = T.dynamic("total_len", "int64")
+        num_blocks = T.dynamic("num_blocks")
+
+        @T.prim_func
+        def main(
+            Input: T.Tensor[(total_len, head_dim), T.bfloat16],
+            Output: T.Tensor[(total_len, head_dim), T.float32],
+            Offsets: T.Tensor[(num_blocks,), T.int64],
+        ):
+            with T.Kernel(num_blocks, threads=256) as bx:
+                shared_buf = T.alloc_shared((block_size, head_dim), T.bfloat16)
+                accum = T.alloc_fragment((block_size, head_dim), T.float32)
+
+                offset = Offsets[bx]
+                trip_count = T.ceildiv(T.cast(total_len - offset, "int32"), block_size)
+                for i in T.Pipelined(trip_count, num_stages=num_stages):
+                    start = T.cast(i, "int64") * block_size
+                    T.copy(
+                        Input[offset + start : offset + start + block_size, :],
+                        shared_buf,
+                        disable_tma=True,
+                    )
+                    for r, c in T.Parallel(block_size, head_dim):
+                        accum[r, c] = T.cast(shared_buf[r, c], T.float32)
+                        Output[offset + start + T.cast(r, "int64"), c] = accum[r, c]
+
+        return main
+
+    source = kernel_fn().get_kernel_source()
+
+    # Filter for the data-movement calls specifically: cp_async_commit/cp_async_wait
+    # also match a bare "cp_async" substring, so they alone would satisfy a laxer check
+    # while leaving the operand assertion below with nothing to inspect.
+    gs_lines = [line for line in source.splitlines() if "cp_async_gs" in line]
+    assert gs_lines, "Expected cp_async_gs (global->shared) calls for disable_tma copy"
+    for line in gs_lines:
+        assert "_local_cast" not in line, f"cp_async operand points at local memory: {line.strip()}"
 
 
 if __name__ == "__main__":

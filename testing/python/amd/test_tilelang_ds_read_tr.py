@@ -13,7 +13,7 @@ ds_read_tr8_b64   – LDS transpose read, 64-bit, 8-element transpose.
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.rocm import language as T
 import tilelang.testing
 from tilelang.backend.target import determine_target
 from tilelang.rocm.target import target_is_gfx950

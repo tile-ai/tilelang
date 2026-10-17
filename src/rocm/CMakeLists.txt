@@ -1,4 +1,14 @@
-# ROCm backend: toolchain, stub libraries, source files, and build configuration.
+# ROCm backend: source files, toolchain, stubs, and build configuration.
+#
+# ROCm target helpers and intrinsic rules are pure C++ registrations used by
+# common code and source generation. Compile them regardless of USE_ROCM.
+file(GLOB TILE_LANG_ROCM_ALWAYS_SRCS
+  src/rocm/codegen/intrin_rule_hip.cc
+  src/rocm/op/builtin.cc
+  src/rocm/target_utils.cc
+)
+list(APPEND TILE_LANG_SRCS ${TILE_LANG_ROCM_ALWAYS_SRCS})
+
 if(NOT USE_ROCM)
   return()
 endif()
@@ -68,7 +78,7 @@ if(TILELANG_USE_HIP_STUBS)
   endif()
 
   # ============================================================================
-  # HIP Stub Library (libhip_stub.so)
+  # HIP Stub Library (libstub_hip.so)
   # ============================================================================
   # This library provides drop-in replacements for HIP runtime/module APIs by
   # lazily loading libamdhip64.so at runtime.
@@ -84,11 +94,13 @@ if(TILELANG_USE_HIP_STUBS)
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    OUTPUT_NAME "hip_stub"
+    # Keep stub filenames distinct from real ROCm libraries, matching the CUDA
+    # stub naming convention.
+    OUTPUT_NAME "stub_hip"
   )
 
   # ============================================================================
-  # HIPRTC Stub Library (libhiprtc_stub.so)
+  # HIPRTC Stub Library (libstub_hiprtc.so)
   # ============================================================================
   # This library provides a minimal HIPRTC API surface and lazily loads
   # libhiprtc.so at runtime.
@@ -101,7 +113,7 @@ if(TILELANG_USE_HIP_STUBS)
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    OUTPUT_NAME "hiprtc_stub"
+    OUTPUT_NAME "stub_hiprtc"
   )
 
   # Make TVM link against our HIP stub instead of the real libamdhip64.so.
@@ -118,12 +130,15 @@ if(TILELANG_USE_HIP_STUBS)
       "HSA runtime library to link against" FORCE)
 endif()
 
-file(GLOB TILE_LANG_HIP_SRCS
+file(GLOB TILE_LANG_ROCM_ACTIVE_SRCS
   src/rocm/codegen/codegen_hip.cc
   src/rocm/codegen/rt_mod_hip.cc
   src/rocm/op/*.cc
+  src/rocm/transform/*.cc
 )
-list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
+list(REMOVE_ITEM TILE_LANG_ROCM_ACTIVE_SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/rocm/op/builtin.cc")
+list(APPEND TILE_LANG_SRCS ${TILE_LANG_ROCM_ACTIVE_SRCS})
 list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
 
 # Register stubs for linking and install

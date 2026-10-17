@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/transpose.h
- * \brief Transpose operation for 2D shared memory buffers.
+ * \brief Transpose operation that swaps the final two buffer axes.
  */
 
 #ifndef TVM_TL_OP_TRANSPOSE_H_
@@ -15,7 +15,7 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-/// Node class for transpose operations: dst[j, i] = src[i, j]
+/// Node class for transpose operations over the final two axes.
 class TransposeNode : public TileOperatorNode {
 public:
   Buffer src, dst;
@@ -33,8 +33,9 @@ public:
         .def_ro("dst_range", &TransposeNode::dst_range);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   TileOperator Clone() const override;
 
@@ -46,13 +47,13 @@ private:
   Array<IterVar> MakeIterVars() const;
 
   /// Generate source (src_dst=0) or destination (src_dst=1) index expressions.
-  /// For the destination side, non-trivial dimension indices are reversed to
-  /// implement the transpose.
+  /// For the destination side, the final two source axes are exchanged.
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
 
-  /// Build boundary predicate with transposed index mapping for dst.
-  PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
-                         Array<PrimExpr> extents, int src_dst) const;
+  /// Build a boundary predicate for generated buffer indices.
+  PrimExpr MakePredicate(arith::Analyzer *analyzer,
+                         const Array<PrimExpr> &indices,
+                         const Array<PrimExpr> &extents) const;
 };
 
 using TransposeTargetPredicate = bool (*)(Target target);
@@ -61,7 +62,7 @@ struct TransposeImpl {
   const char *name;
   TransposeTargetPredicate match_target;
 
-  Stmt (*lower)(const TransposeNode &op, const LowerArgs &T,
+  Stmt (*lower)(const TransposeNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

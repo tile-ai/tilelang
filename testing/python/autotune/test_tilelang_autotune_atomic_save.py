@@ -15,7 +15,9 @@ from tilelang.autotuner.param import (
     KERNEL_PY_PATH,
     PARAMS_PATH,
 )
+from tilelang.engine.param import KernelParam
 from tilelang.env import env
+from tilelang import tvm
 
 
 class _FakeAdapter:
@@ -34,7 +36,7 @@ class _FakeKernel:
         self.execution_backend = execution_backend
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = ["param"]
+        self.params = [KernelParam(tvm.DataType("float32"), [4])]
 
 
 def _fake_func():
@@ -44,11 +46,8 @@ def _fake_func():
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 

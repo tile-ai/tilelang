@@ -34,7 +34,7 @@ def _detect_torch_cuda_arch() -> str | None:
 
     if not torch.cuda.is_available():
         return None
-    cap = torch.cuda.get_device_capability(0)
+    cap = torch.cuda.get_device_capability(torch.cuda.current_device())
     return f"sm_{nvcc.get_target_arch(cap)}" if cap else None
 
 
@@ -52,9 +52,25 @@ def _detect_cuda_target() -> Target | str | None:
         return None
     if not check_cuda_availability():
         return None
+    # A CUDA toolkit alone does not make this a CUDA host. check_cuda_availability
+    # only looks for a toolkit/nvcc path, so a machine that merely has the CUDA
+    # toolkit installed -- a cross-compilation host, or an NPU box with the CUDA
+    # headers alongside the NPU stack -- would otherwise be auto-detected as
+    # CUDA. Auto-detection returns the first backend that claims to be
+    # available, so that mis-detection also shadows the NPU. Require an actually
+    # usable device; an explicit target="cuda" still works everywhere.
+    if not torch.cuda.is_available():
+        return None
 
     arch = _detect_torch_cuda_arch()
     return _cuda_target_from_arch(arch)
+
+
+def normalize_cuda_target(target: TargetLike) -> Target | None:
+    if not isinstance(target, str) or target.strip() != "cuda":
+        return None
+    normalized = _cuda_target_from_arch(_detect_torch_cuda_arch())
+    return normalized if isinstance(normalized, Target) else None
 
 
 def _with_cutedsl_key(target: Target | str) -> Target:
@@ -141,8 +157,8 @@ def target_has_ldmatrix(target: Target) -> bool:
     return _target_ffi_api().TargetHasLdmatrix(target)
 
 
-def target_has_stmatrix(target: Target) -> bool:
-    return _target_ffi_api().TargetHasStmatrix(target)
+def target_has_stmatrix(target: Target, is_m16n8: bool = False) -> bool:
+    return _target_ffi_api().TargetHasStmatrix(target, is_m16n8)
 
 
 def target_has_bulk_copy(target: Target) -> bool:
@@ -150,4 +166,5 @@ def target_has_bulk_copy(target: Target) -> bool:
 
 
 register_target_detector("cuda", _detect_cuda_target, override=True)
+register_target_normalizer("cuda", normalize_cuda_target, override=True)
 register_target_normalizer("cutedsl", _normalize_cutedsl_target_for_resolve, override=True)

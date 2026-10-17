@@ -5,7 +5,7 @@
 
 #include "backend/common/op/finalize_reducer.h"
 
-#include "backend/common/target_utils.h"
+#include "cuda/target_utils.h"
 
 #include <sstream>
 
@@ -17,7 +17,7 @@ using namespace tirx;
 namespace cuda {
 
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
-  static int WarpSize(Target target) { return TargetGetWarpSize(target); }
+  static int WarpSize(Target target) { return TargetCudaGetWarpSize(target); }
 
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
@@ -27,7 +27,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
@@ -43,7 +43,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
-    if (TargetHasSMVersionGE(target, 90)) {
+    if (TargetSupportsNamedBarrier(target)) {
       ss << ", tl::NamedBarrier<" << all_threads << ">";
     }
     ss << ">::run";

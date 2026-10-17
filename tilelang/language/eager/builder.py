@@ -2,7 +2,10 @@ from __future__ import annotations
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
+import builtins
+from functools import partial
 
+from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
 from tvm.ir.base import Span
@@ -31,6 +34,34 @@ import threading
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Guard iterator/container construction, not reductions (use explicit T.* ops
+# for device reductions). Identity keys avoid hashing or comparing user callables.
+_BUILTIN_ITERABLE_ARG_MAP = {
+    id(func): (func, select_iterables)
+    for funcs, select_iterables in (
+        ((builtins.enumerate,), lambda args, kwargs: args[:1] or ((kwargs["iterable"],) if "iterable" in kwargs else ())),
+        ((builtins.zip,), lambda args, kwargs: args),
+        ((builtins.map,), lambda args, kwargs: args[1:]),
+        ((builtins.filter,), lambda args, kwargs: args[1:2]),
+        # iter(callable, sentinel) does not take an iterable.
+        ((builtins.iter,), lambda args, kwargs: args if len(args) == 1 else ()),
+        (
+            (
+                builtins.reversed,
+                builtins.list,
+                builtins.tuple,
+                builtins.set,
+                builtins.frozenset,
+                builtins.dict,
+                builtins.sorted,
+            ),
+            lambda args, kwargs: args[:1],
+        ),
+    )
+    for func in funcs
+}
 
 
 def unwrap_expr(expr) -> PrimExpr | int | float:
@@ -131,6 +162,9 @@ class ContinueFrame(Frame): ...
 class BreakFrame(Frame): ...
 
 
+class PythonLoopFrame(Frame): ...
+
+
 @dataclass
 class SerialForWithStep:
     start: PrimExpr
@@ -188,6 +222,13 @@ TIR_VAR_SCOPE_FRAME = (
 )
 
 
+def register_var_scope_frame(frame_type: type) -> None:
+    """Register a backend-specific frame as a variable scope."""
+    global TIR_VAR_SCOPE_FRAME
+    if frame_type not in TIR_VAR_SCOPE_FRAME:
+        TIR_VAR_SCOPE_FRAME += (frame_type,)
+
+
 def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
@@ -216,6 +257,12 @@ class Builder(BaseBuilder):
         self.current_macro_name = "<unknown-macro>"
         # stack to record caller fileline, not callee fileline
         self.macro_fileline_stack: list[tuple[str, int, str]] = []
+        self._spans_enabled = env.is_span_enable()
+        # Pending leaf segment: (stmt_frame, stmt_count, file, line) recorded
+        # by set_fileline; stmts appended to the frame afterwards belong to
+        # that source statement until the next set_fileline / frame exit.
+        self._span_pending: tuple[Any, int, str, int] | None = None
+        self._span_first_fileline: tuple[str, int] | None = None
 
     @classmethod
     def current(cls) -> Self:
@@ -267,7 +314,89 @@ class Builder(BaseBuilder):
         self.name_inside_frame, self.macro_arg_annot = save
 
     def get(self) -> PrimFunc:
-        return self.ir_builder.get()
+        if self._spans_enabled:
+            self._flush_span_pending()
+        func = self.ir_builder.get()
+        if self._spans_enabled and self._span_first_fileline is not None:
+            from tilelang.ir import make_span, set_prim_func_span
+
+            set_prim_func_span(func, make_span(*self._span_first_fileline))
+        return func
+
+    # ------------------------------------------------------------------
+    # Source span injection (TILELANG_ENABLE_IR_SPAN)
+    # ------------------------------------------------------------------
+
+    def with_buffer_span(self, buffer: Buffer) -> Buffer:
+        """Stamp an unspanned buffer with the current user source location."""
+        if not self._spans_enabled or self.current_line <= 0:
+            return buffer
+
+        from tilelang.ir import get_buffer_span, make_span, set_buffer_span
+
+        if get_buffer_span(buffer) is None:
+            set_buffer_span(buffer, make_span(self.current_file, self.current_line))
+        return buffer
+
+    def _current_stmt_frame(self):
+        """The innermost open frame whose `stmts` accumulates emitted stmts."""
+        for frame in reversed(self.frames):
+            if isinstance(frame, tirx.frame.TIRFrame):
+                f = frame
+                # KernelLaunchFrame nests launch/block frames entered C++-side;
+                # leaf statements accumulate in its innermost sub-frame.
+                while isinstance(f, KernelLaunchFrame) and len(f.frames) > 0 and isinstance(f.frames[-1], tirx.frame.TIRFrame):
+                    f = f.frames[-1]
+                return f
+        return None
+
+    def _flush_span_pending(self):
+        """Stamp stmts appended since the last recorded source statement."""
+        if self._span_pending is None:
+            return
+        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
+
+        frame, start, file, line = self._span_pending
+        self._span_pending = None
+        if line <= 0:
+            return
+        try:
+            stmts = frame.stmts
+        except Exception:
+            return
+        span = make_span(file, line)
+        for i in range(start, len(stmts)):
+            if get_stmt_span(stmts[i]) is None:
+                set_stmt_span(stmts[i], span)
+
+    def _stamp_new_parent_stmts(self, parent, start: int, file: str, line: int):
+        """Stamp stmts produced by an exited frame into its parent frame.
+
+        Frames like KernelLaunchFrame assemble a whole subtree (launch grid
+        loops, block realize) whose intermediate nodes never pass through
+        `with_frame`; stamp every still-unspanned stmt in the produced
+        subtree with the frame's entry line. Nodes already stamped with their
+        own statement line keep their span.
+        """
+        if parent is None or line <= 0:
+            return
+        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
+        from tvm.tirx.stmt_functor import post_order_visit
+
+        try:
+            stmts = parent.stmts
+        except Exception:
+            return
+        if len(stmts) <= start:
+            return
+        span = make_span(file, line)
+
+        def stamp(node):
+            if isinstance(node, tvm.tirx.Stmt) and get_stmt_span(node) is None:
+                set_stmt_span(node, span)
+
+        for i in range(start, len(stmts)):
+            post_order_visit(stmts[i], stamp)
 
     def find_frame_idx(self, frame: type | tuple[type, ...], start=0) -> int | None:
         for idx in reversed(range(start, len(self.frames))):
@@ -287,9 +416,33 @@ class Builder(BaseBuilder):
     @contextmanager
     def with_frame(self, frame: AbstractContextManager[Any] | None):
         pop_idx = len(self.frames)
-        yield self.enter_frame(frame)
+        span_entry = None
+        if self._spans_enabled and frame is not None:
+            # Record the enclosing stmt container and the entry position (the
+            # `with`/`for` line), so stmts this frame produces into its parent
+            # can be stamped after it exits.
+            parent = self._current_stmt_frame()
+            span_entry = (
+                parent,
+                len(parent.stmts) if parent is not None else 0,
+                self.current_file,
+                self.current_line,
+            )
+        try:
+            yield self.enter_frame(frame)
+        except BaseException as exc:
+            # Unwind Python frame state without finalizing incomplete TIR.
+            while len(self.frames) > pop_idx:
+                self.frames.pop().__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        if self._spans_enabled:
+            # Flush leaf stmts of the frame being exited before its __exit__
+            # moves them into the produced node.
+            self._flush_span_pending()
         while len(self.frames) > pop_idx:
             self.frames.pop().__exit__(None, None, None)
+        if self._spans_enabled and span_entry is not None:
+            self._stamp_new_parent_stmts(*span_entry)
 
     class _has_if_frame: ...
 
@@ -345,6 +498,35 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
+        if isinstance(it, range):
+            from tilelang.language import serial
+
+            it = serial(it.start, it.stop, it.step)
+        if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
+            # Python iterables expand the body at IR construction time. TIR
+            # values must be excluded explicitly: Var carries an __iter__ shim
+            # for single-binding unpacking and Buffer.__getitem__ never raises
+            # IndexError, so both would iterate instead of failing.
+            self.python_iterable(it, "Invalid for loop")
+            try:
+                iterator = iter(it)
+            except TypeError:
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding, "
+                    "or a Python iterable"
+                ) from None
+            pos = len(self.frames)
+            self.frames.append(PythonLoopFrame())
+            try:
+                # Keep user-owned generators resumable after a loop break.
+                for value in iterator:  # noqa: UP028
+                    yield value
+            finally:
+                # Python loops do not introduce a lexical scope. Keep emitted
+                # lets/allocations alive for later iterations and following code.
+                self.frames.pop(pos)
+            return
         if isinstance(it, (SerialForWithStep, UnrollForWithStep)):
             # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
@@ -382,14 +564,30 @@ class Builder(BaseBuilder):
             with self.with_frame(it) as v:
                 yield v
 
+    def _is_python_loop_control(self):
+        idx = self.find_frame_idx((PythonLoopFrame, tirx.frame.ForFrame, tirx.frame.WhileFrame, MacroFrame))
+        if idx is None or not isinstance(self.frames[idx], PythonLoopFrame):
+            return False
+        if self.find_frame_idx(tirx.frame.IfFrame, start=idx + 1) is not None:
+            raise NotImplementedError(
+                "Cannot lower break/continue targeting a compile-time Python iterable loop under a device-side condition: "
+                "the expanded loop has no runtime control-flow target. Use T.serial over runtime-indexable data, "
+                "or a compile-time condition."
+            )
+        return True
+
     def ctx_continue(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopContinue
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
         tirx.evaluate(tirx.continue_loop())
 
     def ctx_break(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopBreak
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
         tirx.evaluate(tirx.break_loop())
@@ -413,7 +611,7 @@ class Builder(BaseBuilder):
         with self.with_frame(tirx.While(cond_v_unwrap)):
             yield None
 
-    def bind(self, name, value, annot=BaseBuilder.empty):
+    def bind(self, name, value, annot=BaseBuilder.empty, *, loop_target=False):
         self.check_continue_break()
 
         # in prim func, before T.match_buffer
@@ -440,19 +638,26 @@ class Builder(BaseBuilder):
             if isinstance(annot, Buffer) and annot.scope() == "global":
                 from tilelang.language import match_buffer
 
-                return IRBuilder.name(
-                    name,
-                    match_buffer(
-                        orig_value,
-                        annot.shape,
-                        annot.dtype,
-                        strides=annot.strides,
-                    ),
+                return self.with_buffer_span(
+                    IRBuilder.name(
+                        name,
+                        match_buffer(
+                            orig_value,
+                            annot.shape,
+                            annot.dtype,
+                            strides=annot.strides,
+                        ),
+                    )
                 )
             else:
                 return orig_value
 
-        orig_value = locals.get(name, self.empty)
+        # Only a live Ref/alloc_var is a store target; loop targets and the
+        # rewriter's `_` temporaries always bind fresh.
+        if loop_target or name == "_" or self.binding_expired(name):
+            orig_value = self.empty
+        else:
+            orig_value = locals.get(name, self.empty)
 
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
@@ -479,6 +684,7 @@ class Builder(BaseBuilder):
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            self.name_inside_frame.pop(name, None)
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
             return value.value
@@ -486,6 +692,8 @@ class Builder(BaseBuilder):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
             # Python name (e.g., loop vars like `i`) across different for-frames
             # works without triggering out-of-scope errors.
+            if isinstance(value, Buffer):
+                self.with_buffer_span(value)
             IRBuilder.name(name, value)
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
@@ -495,18 +703,20 @@ class Builder(BaseBuilder):
 
         # 3. Bind immutable tilelang objects
         res = self.bind_immutable(name, value)
+        if isinstance(res, Buffer):
+            self.with_buffer_span(res)
 
-        # 4. Check variable scope and shadowing
+        # 4. Check variable scope
         if name != "_":
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-            if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                logger.warning(
-                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                    stacklevel=2,
-                )
             self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def binding_expired(self, name: str | None) -> bool:
+        """Whether `name` was last bound inside a TIR region that has since closed."""
+        frame = self.name_inside_frame.get(name)
+        return frame is not None and frame not in self.frames
 
     def unwrap_value(self, value):
         """
@@ -579,9 +789,6 @@ class Builder(BaseBuilder):
         elif isinstance(target, Var):
             # Treat augmented assignment on immutable vars (SSA) as re-binding:
             #   x -= y  ==>  x = x - y
-            #
-            # This matches user expectations and avoids hard failures, while still
-            # warning about re-binding immutable values (same as `x = x - y`).
             name = name or getattr(target, "orig_name", None) or target.name  # type: ignore[attr-defined]
             res = eval_op(op, target, aug_value)
 
@@ -599,11 +806,6 @@ class Builder(BaseBuilder):
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-                if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                    logger.warning(
-                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                        stacklevel=2,
-                    )
                 self.name_inside_frame[name] = self.frames[frame]
             return res
         else:
@@ -629,6 +831,13 @@ class Builder(BaseBuilder):
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
+
+    def unaryop(self, op, operand):
+        if op == "UAdd" and isinstance(operand, PrimExpr):
+            # PrimExpr overloads unary minus and invert but not unary plus.
+            # Unary plus is the identity on numbers, so hand back the operand.
+            return operand
+        return super().unaryop(op, operand)
 
     def ifexp(self, cond, then, otherwise):
         cond = unwrap_cond(cond)
@@ -696,14 +905,12 @@ class Builder(BaseBuilder):
         elif not cond:
             raise AssertionError(msg)
 
-    def rval(self, name: str, value: Any) -> Any:
-        if name in self.name_inside_frame:
-            frame = self.name_inside_frame[name]
-            if frame not in self.frames:
-                raise RuntimeError(
-                    f"Immutable variable `{name}` is used outside its defining region!\n"
-                    f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
-                )
+    def rval(self, name: str | None, value: Any) -> Any:
+        if self.binding_expired(name):
+            raise RuntimeError(
+                f"Immutable variable `{name}` is used outside its defining region!\n"
+                f"variable `{name}` is defined in frame: {self.name_inside_frame[name]}, current frames: {self.frames}."
+            )
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
@@ -730,7 +937,14 @@ class Builder(BaseBuilder):
 
     def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
-            return tirx.arg(name, value)
+            arg = tirx.arg(name, value)
+            # Stamp parameter buffers with the signature line (SpanAttacher
+            # emits set_fileline with the parameter's own line before each
+            # `__tb.arg(...)` call), so diagnostics involving only argument
+            # buffers (e.g. T.copy(A, B)) also carry a source location.
+            if isinstance(arg, Buffer):
+                self.with_buffer_span(arg)
+            return arg
         elif value is self.empty:
             raise ValueError(f"Argument `{name}` is not annotated")
         elif isinstance(value, Hashable):
@@ -744,12 +958,46 @@ class Builder(BaseBuilder):
         else:
             return self.prim_func_arg(name, value)
 
-    def override(self, name: str):
+    def iter_call(self, func, /, *args, **kwargs):
         from tilelang.language import serial
 
-        if name == "range":
-            return serial
-        raise ValueError(f"Unknown override: {name}")
+        if func is builtins.range:
+            return serial(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    def python_iterable(self, value, context):
+        """Reject device values before Python can acquire an iterator over them."""
+        if isinstance(value, (PrimExpr, Buffer, BufferRegion, Ref, EqualOp, NotEqualOp)):
+            raise TypeError(
+                f"{context}: a TIR expression or buffer is not iterable (got {type(value).__name__}). "
+                "Use range(n) or T.serial(n) in a for statement to loop over a runtime extent, "
+                "or iterate over a Python container such as [expr] or buffer.shape."
+            )
+        if isinstance(value, (SerialForWithStep, tirx.frame.IRBuilderFrame)):
+            raise TypeError(
+                f"{context}: a TileLang loop or IR builder frame is not a compile-time Python iterable. "
+                "Use TileLang loop constructors directly in a for statement; "
+                "use range with compile-time bounds in a comprehension."
+            )
+        return value
+
+    def resolve_call(self, func):
+        entry = _BUILTIN_ITERABLE_ARG_MAP.get(id(func))
+        if entry is None:
+            return func
+        return partial(self._call_python_builtin, *entry)
+
+    def _call_python_builtin(self, func, select_iterables, /, *args, **kwargs):
+        """Check iterable operands before a builtin hides or consumes them."""
+        for value in select_iterables(args, kwargs):
+            self.python_iterable(value, f"{func.__name__}()")
+        return func(*args, **kwargs)
+
+    def comprehension_filter(self, cond):
+        cond = unwrap_cond(cond)
+        if isinstance(cond, PrimExpr):
+            raise TypeError("Comprehension filters must be evaluable at compile time; use a serial loop with an if statement instead.")
+        return cond
 
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
         var = tirx.Var(name, dtype)
@@ -761,6 +1009,13 @@ class Builder(BaseBuilder):
         self.current_file = filename
         self.current_line = lineno
         self.current_macro_name = name
+        if self._spans_enabled:
+            self._flush_span_pending()
+            frame = self._current_stmt_frame()
+            if frame is not None:
+                self._span_pending = (frame, len(frame.stmts), filename, lineno)
+                if self._span_first_fileline is None and lineno > 0:
+                    self._span_first_fileline = (filename, lineno)
 
     def get_fileline_stack(self, stacklevel=1):
         stack = self.macro_fileline_stack + [(self.current_file, self.current_line, self.current_macro_name)]
@@ -1109,6 +1364,225 @@ class TirTemplate(Generic[_P, _T]):
         return pf
 
 
+_MISSING_ARG = object()
+_ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
+
+
+def _make_jit_key(values: tuple[Any, ...], *, context: str = "JIT compile-time arguments") -> tuple[Any, ...]:
+    """Validate compile-time values without changing their cache-key semantics."""
+
+    try:
+        hash(values)
+    except TypeError as exc:
+        raise TypeError(
+            f"{context} must be hashable: {exc}. Use immutable, hashable values such as tuples instead of lists or dicts."
+        ) from exc
+    return values
+
+
+@dataclass(frozen=True)
+class _BoundJITArgs:
+    """JIT arguments split into phase-1 key, runtime tensors, and compile kwargs."""
+
+    p1_key: tuple[Any, ...]
+    tensor_args: dict[str, Any]
+    compile_kwargs: dict[str, Any]
+
+
+class _JITArgumentBinder:
+    """Bind Python JIT calls into TileLang's phase-1 cache inputs.
+
+    The binder keeps three pieces of data separate:
+
+    - phase-1 key values: compile-time arguments that identify the TIR template
+    - tensor args: runtime tensors used later for phase-2 shape/stride matching
+    - compile kwargs: raw values passed back to the user's Python JIT function
+
+    The common path avoids inspect.Signature.bind() because this code runs before
+    every cache lookup. Signatures with *args or **kwargs still use Python's
+    binder because their call semantics are harder to reproduce safely.
+    """
+
+    def __init__(
+        self,
+        signature: inspect.Signature,
+        tensor_arg_names: set[str],
+    ):
+        self.signature = signature
+        self.tensor_arg_names = tensor_arg_names
+        self.params = tuple(signature.parameters.values())
+        for param in self.params:
+            if param.name not in tensor_arg_names and param.default is not inspect.Parameter.empty:
+                _make_jit_key((param.default,), context=f"Default value for JIT compile-time parameter {param.name!r}")
+        self.param_names = tuple(param.name for param in self.params)
+        self.param_index = {name: i for i, name in enumerate(self.param_names)}
+        self.defaults = tuple(param.default if param.default is not inspect.Parameter.empty else _MISSING_ARG for param in self.params)
+        self.required_indices = tuple(i for i, value in enumerate(self.defaults) if value is _MISSING_ARG)
+        self.positional_param_count = sum(
+            1 for param in self.params if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        )
+        self.use_signature_bind = any(
+            param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for param in self.params
+        )
+
+    def bind(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        if self.use_signature_bind:
+            return self._bind_with_signature(args, kwargs)
+        return self._bind_fast(args, kwargs)
+
+    def bind_no_tensor_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        if self.tensor_arg_names:
+            raise ValueError("bind_no_tensor_key is only valid for JIT functions without tensor arguments")
+        if self.use_signature_bind:
+            bound = self.signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            return self._pack_no_tensor_key(bound.arguments)
+        return self._bind_fast_no_tensor_key(args, kwargs)
+
+    @staticmethod
+    def _extra_key(extra_kwargs: dict[str, Any]) -> _ExtraJITKwargsKey:
+        # Extra kwargs are compile-time values for explicit T.const bindings.
+        # Sort names so f(M=1, N=2) and f(N=2, M=1) share one key.
+        return tuple(sorted(extra_kwargs.items()))
+
+    def _pack_no_tensor_key(self, arguments: dict[str, Any]) -> tuple[Any, ...]:
+        """Pack a lazy no-tensor call directly into a phase-1 key."""
+
+        p1_values: list[Any] = []
+        for param in self.params:
+            value = arguments[param.name]
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Signature.bind() stores **kwargs as one dict under the
+                # VAR_KEYWORD parameter. Flatten it so each keyword remains a
+                # normal compile-time key component.
+                if value:
+                    p1_values.append(self._extra_key(value))
+            else:
+                p1_values.append(value)
+        return _make_jit_key(tuple(p1_values))
+
+    def _pack_bound_arguments(
+        self,
+        arguments: dict[str, Any],
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> _BoundJITArgs:
+        p1_values: list[Any] = []
+        tensor_args: dict[str, Any] = {}
+        compile_kwargs: dict[str, Any] = {}
+        extra_kwargs = extra_kwargs or {}
+        for param in self.params:
+            name = param.name
+            value = arguments[name]
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                # Keep **kwargs flattened both in the key and in compile_kwargs;
+                # passing {"kwargs": {...}} would change the user's call form.
+                if value:
+                    p1_values.append(self._extra_key(value))
+                    compile_kwargs.update(value)
+                continue
+            if name in self.tensor_arg_names:
+                # Tensor args are runtime inputs. They do not identify the TIR
+                # template, but they are needed for phase-2 shape/stride keys.
+                tensor_args[name] = value
+            else:
+                p1_values.append(value)
+                compile_kwargs[name] = value
+        if extra_kwargs:
+            p1_values.append(self._extra_key(extra_kwargs))
+            compile_kwargs.update(extra_kwargs)
+        return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
+
+    def _bind_with_signature(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Slow path for signatures that need Python's full binding rules."""
+
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return self._pack_bound_arguments(bound.arguments)
+
+    def _bind_fast(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _BoundJITArgs:
+        """Fast binder for normal positional/keyword-only JIT signatures."""
+
+        if len(args) > self.positional_param_count:
+            raise TypeError(
+                f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
+            )
+
+        values = list(self.defaults)
+        extra_kwargs: dict[str, Any] = {}
+        for i, value in enumerate(args):
+            values[i] = value
+
+        for name, value in kwargs.items():
+            index = self.param_index.get(name)
+            if index is None:
+                # TileLang allows extra compile-time kwargs for explicit T.const bindings.
+                extra_kwargs[name] = value
+                continue
+            if index < len(args):
+                raise TypeError(f"got multiple values for argument '{name}'")
+            values[index] = value
+
+        for index in self.required_indices:
+            if values[index] is _MISSING_ARG and self.param_names[index] not in self.tensor_arg_names:
+                raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+
+        p1_values: list[Any] = []
+        tensor_args: dict[str, Any] = {}
+        compile_kwargs: dict[str, Any] = {}
+        for name, value in zip(self.param_names, values):
+            if name in self.tensor_arg_names:
+                if value is not _MISSING_ARG:
+                    tensor_args[name] = value
+            else:
+                p1_values.append(value)
+                compile_kwargs[name] = value
+        if extra_kwargs:
+            p1_values.append(self._extra_key(extra_kwargs))
+            compile_kwargs.update(extra_kwargs)
+        return _BoundJITArgs(_make_jit_key(tuple(p1_values)), tensor_args, compile_kwargs)
+
+    def _bind_fast_no_tensor_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        """Fastest path for lazy factories where every argument is compile-time."""
+
+        if len(args) > self.positional_param_count:
+            raise TypeError(
+                f"too many positional arguments for JIT function: expected at most {self.positional_param_count}, got {len(args)}"
+            )
+
+        if not kwargs:
+            # Common lazy cache-hit form: positional values, no tensor args, no
+            # kwargs. Fill omitted defaults without allocating _BoundJITArgs.
+            if len(args) == len(self.param_names):
+                return _make_jit_key(args)
+            for index in self.required_indices:
+                if index >= len(args):
+                    raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+            return _make_jit_key(args + self.defaults[len(args) :])
+
+        values = list(self.defaults)
+        extra_kwargs: dict[str, Any] = {}
+        for i, value in enumerate(args):
+            values[i] = value
+
+        for name, value in kwargs.items():
+            index = self.param_index.get(name)
+            if index is None:
+                # TileLang allows extra compile-time kwargs for explicit T.const bindings.
+                extra_kwargs[name] = value
+                continue
+            if index < len(args):
+                raise TypeError(f"got multiple values for argument '{name}'")
+            values[index] = value
+
+        for index in self.required_indices:
+            if values[index] is _MISSING_ARG:
+                raise TypeError(f"missing a required argument: '{self.param_names[index]}'")
+
+        if extra_kwargs:
+            values.append(self._extra_key(extra_kwargs))
+        return _make_jit_key(tuple(values))
+
+
 @dataclass
 class JITFunc(Generic[_P, _T]):
     """
@@ -1128,6 +1602,7 @@ class JITFunc(Generic[_P, _T]):
     """
 
     orig_func: Callable[_P, _T]
+    signature: inspect.Signature
     arg_names: list[str]
     tensor_args: dict[str, Buffer | Var]
     tensor_args_defaults: dict[str, Any]
@@ -1137,17 +1612,11 @@ class JITFunc(Generic[_P, _T]):
     def __post_init__(self):
         # we don't want it to show up in the constructor
         self.p1_cache: dict[Any, TirTemplate[_P, _T]] = {}
+        self._argument_binder = _JITArgumentBinder(self.signature, set(self.tensor_args))
 
     def _parse_phase1_key(self, *args, **kwargs):
-        kwargs.update({k: v for k, v in zip(self.arg_names, args)})
-        tensor_args = {}
-        for k in self.tensor_args:
-            if k in kwargs:
-                tensor_args[k] = kwargs.pop(k)
-            elif k in self.tensor_args_defaults:
-                tensor_args[k] = self.tensor_args_defaults[k]
-        p1_key = tuple(sorted(kwargs.items()))
-        return p1_key, tensor_args, kwargs
+        bound = self._argument_binder.bind(args, kwargs)
+        return bound.p1_key, bound.tensor_args, bound.compile_kwargs
 
     def _is_lazy_style(self, *args, **kwargs) -> bool:
         """
@@ -1173,12 +1642,12 @@ class JITFunc(Generic[_P, _T]):
             inspect.signature(self.orig_func).bind(*args, **kwargs)
         except TypeError:
             return False
+        bound = self._argument_binder.bind(args, kwargs)
         try:
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
-                p1_key, _, _ = self._parse_phase1_key(*args, **kwargs)
-                self.p1_cache[p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
+                self.p1_cache[bound.p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False
         except (JITNoBuilderError, EagerJITBuildError):
@@ -1208,23 +1677,33 @@ class JITFunc(Generic[_P, _T]):
 
     def parse_args(self, *args, **kwargs):
         """Parse arguments and return cache key and tensor args."""
-        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        if not tensor_args:
+        if not self.tensor_args:
+            p1_key = self._argument_binder.bind_no_tensor_key(args, kwargs)
             return (p1_key, None), {}
-        tir_temp = self.p1_cache.get(p1_key, None)
+
+        bound = self._argument_binder.bind(args, kwargs)
+        tir_temp = self.p1_cache.get(bound.p1_key, None)
         if tir_temp is None:
             # mode should be set by JITImpl before calling parse_args
-            tir_temp = self._build_tir_template(**kwargs)
-            self.p1_cache[p1_key] = tir_temp
-        p2_key = tir_temp._parse_phase2_key(**tensor_args, **kwargs)
-        return (p1_key, p2_key), tensor_args
+            tir_temp = self._build_tir_template(**bound.compile_kwargs)
+            self.p1_cache[bound.p1_key] = tir_temp
+        p2_key = tir_temp._parse_phase2_key(**bound.tensor_args, **bound.compile_kwargs)
+        return (bound.p1_key, p2_key), bound.tensor_args
 
     def get_tir(self, *args, **kwargs):
-        p1_key, tensor_args, kwargs = self._parse_phase1_key(*args, **kwargs)
-        if p1_key not in self.p1_cache:
-            # in legacy gemm, we use lazy tir template to build the tir
-            self.p1_cache[p1_key] = self._build_tir_template(**kwargs)
-        return self.p1_cache[p1_key].get_tir(self.tensor_args, tensor_args, kwargs)
+        bound = self._argument_binder.bind(args, kwargs)
+        if bound.p1_key not in self.p1_cache:
+            # Lazy factories retain their positional arguments.
+            if self.mode == "lazy":
+                template = self._build_tir_template(*args, **kwargs)
+            else:
+                template = self._build_tir_template(**bound.compile_kwargs)
+            self.p1_cache[bound.p1_key] = template
+        return self.p1_cache[bound.p1_key].get_tir(
+            self.tensor_args,
+            bound.tensor_args,
+            bound.compile_kwargs,
+        )
 
     def __call__(self, *args, **kwargs):
         return self.get_tir(*args, **kwargs)
@@ -1294,7 +1773,7 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
             tensor_args_defaults = {
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
-            return JITFunc(func, arg_names, tensor_args, tensor_args_defaults, ir_gen)
+            return JITFunc(func, sig, arg_names, tensor_args, tensor_args_defaults, ir_gen)
         else:
             try:
                 builder = Builder()

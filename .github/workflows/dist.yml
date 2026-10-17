@@ -19,6 +19,8 @@ on:
       - VERSION
       - version_provider.py
       - .github/workflows/dist.yml
+      # Exercised by the GPU wheel-test job below.
+      - maint/scripts/smoke_test_wheel.py
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
@@ -61,7 +63,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: recursive
@@ -95,8 +97,8 @@ jobs:
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
-          uv pip install -v dist/*.tar.gz
-          python3 -c "import tilelang; print(tilelang.__version__)"
+          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
         # Not PR to save artifact storage, as SDist is only needed for releases.
@@ -116,8 +118,8 @@ jobs:
       matrix:
         target:
           # Build wheels for the minimum supported Python ABI.
-          - { runner: ubuntu-latest, toolkit: "CUDA-12.8", test_backends: "cu118 cu130", python_version: "3.10" }
-          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8", test_backends: "cu126 cu130", python_version: "3.10" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: windows-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: macos-latest, toolkit: "Metal", python_version: "3.10" }
           # - "3.14t"  # let user to build from source for now
@@ -136,21 +138,33 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.target.python_version }}
+          activate-environment: true
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          max-size: "200MB"
+          # One full Windows build writes >200MB of compressed objects; a
+          # smaller cap makes ccache evict entries mid-build (522 cleanups
+          # observed at 200MB) so the cache never converges.
+          max-size: "2GB"
           create-symlink: ${{ runner.os != 'Windows' }}
           evict-old-files: "7d"
           append-timestamp: false
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
+          # A commit key covers source, headers, submodules and build settings.
+          # Avoid hashFiles('**/*.cc'): its post-job scan also walks the freshly
+          # installed multi-GB Python environments and delays cache cleanup.
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ github.sha }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
             wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
 
@@ -180,16 +194,11 @@ jobs:
             echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
           fi
 
-      - name: Set CIBW_BUILD (Windows)
+      - name: Set build environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $pythonVersion = "${{ matrix.target.python_version }}"
-          $pythonVersionMajMin = ($pythonVersion -split '\.')[0..1] -join '.'
-          $pythonVersionMajMinNoDot = $pythonVersionMajMin -replace '\.', ''
-          "CIBW_BUILD=cp${pythonVersionMajMinNoDot}-*" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-          "CIBW_CONFIG_SETTINGS=cmake.build-type=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-          "CMAKE_BUILD_TYPE=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_BUILD_TYPE=Release" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           if ("${{ matrix.target.toolkit }}" -like "*CUDA*") {
             $cudaVersion = "${{ matrix.target.toolkit }}".Split('-')[-1]
@@ -197,7 +206,6 @@ jobs:
             $cudaVersionMajMinNoDot = $cudaVersionMajMin -replace '\.', ''
             "CUDA_VERSION=$cudaVersion" | Tee-Object -FilePath $env:GITHUB_ENV -Append
             "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-            "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
           if ("${{ env.IS_RELEASE }}" -eq "true") {
@@ -205,18 +213,82 @@ jobs:
           }
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.0
+        if: runner.os != 'Windows'
+        uses: pypa/cibuildwheel@v4.2
         with:
           package-dir: .
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
 
-      - name: Setup Python and uv with caching
-        id: setup-uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: ${{ matrix.target.python_version }}
-          activate-environment: true
+      # Fixed dependency paths allow ccache direct hits across runner instances.
+      # cibuildwheel's random PEP 517 directories forced 700/703 warm hits through
+      # preprocessing and also installed/tested the same cp310 wheel twice.
+      - name: Build wheels (Windows)
+        id: windows_wheel
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          "started=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_OUTPUT
+          $python = (Resolve-Path .venv/Scripts/python.exe).Path
+          uv pip install --python $python build tomli "cmake>=3.26.1" "ninja>=1.11"
+          $requirements = & $python -c "import tomli; print('\n'.join(tomli.load(open('pyproject.toml', 'rb'))['build-system']['requires']))"
+          uv pip install --python $python @requirements
+          $extra = @(& $python -c "from build import ProjectBuilder; print('\n'.join(ProjectBuilder('.').get_requires_for_build('wheel')))") | Where-Object { $_ -ne '' }
+          if ($extra.Count) {
+            uv pip install --python $python @extra
+          }
+          uv build --wheel --no-build-isolation --python $python --out-dir raw-wheelhouse `
+            -C cmake.build-type=Release -C "cmake.define.Python3_EXECUTABLE=$python"
+          Get-ChildItem raw-wheelhouse -Filter *.whl | ForEach-Object {
+            uvx delvewheel repair -w wheelhouse $_.FullName
+          }
+
+      - name: Windows wheel build summary
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          BUILD_OUTCOME: ${{ steps.windows_wheel.outcome }}
+          BUILD_STARTED: ${{ steps.windows_wheel.outputs.started }}
+          CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
+        run: |
+          $summary = @('## Windows wheel build', '', "Build step: **$env:BUILD_OUTCOME**")
+          if ($env:BUILD_STARTED) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:BUILD_STARTED
+            $summary += "Elapsed: **$elapsed seconds** (dependencies, build and wheel repair)."
+          }
+          $summary += @('', '### Compiler cache', '')
+          if (Test-Path $env:CCACHE_STATSLOG) {
+            $summary += @('```text') + @(ccache --version | Select-Object -First 1)
+            $summary += @(ccache --show-log-stats --verbose) + @('```')
+            $source = ''
+            $misses = @(Get-Content $env:CCACHE_STATSLOG | ForEach-Object {
+              if ($_.StartsWith('# ')) {
+                $source = $_.Substring(2)
+              } elseif ($_ -eq 'cache_miss') {
+                $source
+              }
+            })
+            if ($misses.Count) {
+              $summary += @('', "### Cache misses ($($misses.Count))", '', '```text')
+              $summary += $misses + @('```')
+            }
+          } else {
+            $summary += 'No per-build ccache log was produced; compilation may not have started.'
+          }
+          $summary += @('', '### Repaired wheels', '')
+          $wheels = @(Get-ChildItem wheelhouse -Filter *.whl -ErrorAction SilentlyContinue)
+          if ($wheels.Count) {
+            $summary += @('| Wheel | Size (MiB) |', '| --- | ---: |')
+            foreach ($wheel in $wheels) {
+              $summary += ('| {0} | {1:F2} |' -f $wheel.Name, ($wheel.Length / 1MB))
+            }
+          } else {
+            $summary += 'No repaired wheels were produced.'
+          }
+          $summary | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Test built wheels
         if: runner.os != 'Windows'
@@ -246,6 +318,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
             $wheel = $_.FullName
             Write-Host "Testing wheel: $wheel"
@@ -299,6 +372,7 @@ jobs:
         if: contains(matrix.target.toolkit, 'CUDA') && runner.os == 'Windows'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $env:UV_PYTHON = "3.12"
           $versionLog = Join-Path $env:RUNNER_TEMP "tilelang-wheel-versions.txt"
           if (Test-Path $versionLog) {
@@ -339,6 +413,153 @@ jobs:
           name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
           if-no-files-found: error
+
+  test-wheels-gpu:
+    name: Test built wheels with ${{ matrix.target.toolkit }} (on ${{ matrix.target.name }})
+    # The build runners have no GPU, so nothing above proves the built wheels
+    # actually launch kernels: the Linux wheels are fat CUDA+ROCm builds and
+    # neither half was ever executed. This job installs the built wheel on
+    # self-hosted GPU runners and runs a real kernel on each backend. Wheel
+    # artifacts are only uploaded outside PRs (or for [Release] PRs), so gate
+    # this job the same way as the "Upload wheels" step. It is deliberately
+    # not in the needs-chain of publish-pypi: an offline self-hosted runner
+    # must not be able to block a release.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    needs: [build-wheels]
+    strategy:
+      matrix:
+        target:
+          # Both consume the Linux x86_64 wheel built by the CUDA-13.0 leg above.
+          - { tags: [self-hosted, nvidia], name: self-hosted-nvidia, toolkit: CUDA-13.0, python_version: "3.12" }
+          - { tags: [self-hosted, amd, gfx942], name: self-hosted-amd-gfx942, toolkit: ROCm-7.2, python_version: "3.12" }
+      fail-fast: false
+    timeout-minutes: 60
+    runs-on: ${{ matrix.target.tags }}
+
+    steps:
+      - name: Checkout repository
+        # Only needed for maint/scripts/smoke_test_wheel.py; the wheel under
+        # test comes from the build-wheels artifact.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set environment (self-hosted runners)
+        run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
+
+      - name: Set environment (CUDA)
+        if: contains(matrix.target.toolkit, 'CUDA')
+        run: |
+          TOOLKIT="${{ matrix.target.toolkit }}"
+          CUDA_VERSION="${TOOLKIT##*-}"
+          CUDA_VERSION_MAJMIN="$(echo "${CUDA_VERSION}" | cut -d '.' -f-2)"
+          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          else
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          fi
+          echo "TORCH_INDEX_URL=${TORCH_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+
+          # The wheel JIT-compiles kernels with the host nvcc at runtime.
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+            NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
+            if [[ -n "${NVCC_VERSION}" && "${NVCC_VERSION%%.*}" != "${CUDA_VERSION%%.*}" ]]; then
+              echo "::warning::nvcc CUDA ${NVCC_VERSION} does not match requested ${TOOLKIT}."
+            fi
+          else
+            echo "::warning::nvcc not found in PATH!"
+          fi
+
+      - name: Set environment (ROCm)
+        if: contains(matrix.target.toolkit, 'ROCm')
+        run: |
+          TOOLKIT="${{ matrix.target.toolkit }}"
+          ROCM_VERSION="${TOOLKIT##*-}"
+          ROCM_VERSION_MAJMIN="$(echo "${ROCM_VERSION}" | cut -d '.' -f-2)"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
+          else
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          fi
+          echo "TORCH_INDEX_URL=${TORCH_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+
+          if [[ ! -x "$(command -v hipcc)" ]]; then
+            export PATH="/opt/rocm/bin:${PATH}"
+            export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+          if [[ -x "$(command -v hipcc)" ]]; then
+            echo "\$ $(command -v hipcc) --version" && hipcc --version
+          else
+            echo "::warning::hipcc not found in PATH!"
+          fi
+
+      - name: Setup Python and uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.target.python_version }}
+          activate-environment: true
+          # Do not use cache upload/download for self-hosted runners, as it is
+          # slow; the local cache directory persists on the runner instead.
+          enable-cache: false
+          prune-cache: false
+          cache-local-path: ${{ env.UV_CACHE_DIR }}
+          ignore-nothing-to-cache: true
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          # Matches the wheels built for this runner's os/arch (Linux-X64).
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Test built wheels on GPU
+        run: |
+          # Always exercise real kernel compilation: a warm kernel cache on a
+          # persistent self-hosted runner must not mask a broken wheel.
+          export TILELANG_DISABLE_CACHE=1
+
+          ls -lh wheelhouse/
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            (
+              set -e
+              uv venv test-venv
+              source test-venv/bin/activate
+
+              # Install torch from the toolkit-matched channel only, before the
+              # wheel, so the resolver cannot substitute a mismatched build
+              # from PyPI (e.g. the CUDA torch on a ROCm host).
+              uv pip install -v --index-url "${TORCH_INDEX_URL}" torch
+              uv pip install -v "${WHEEL}"
+              # Run from RUNNER_TEMP so `import tilelang` resolves to the
+              # installed wheel rather than the repository source tree.
+              cp maint/scripts/smoke_test_wheel.py "${RUNNER_TEMP}/"
+              (
+                set -e
+                cd "${RUNNER_TEMP}"
+                uv run --no-project -- python smoke_test_wheel.py
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
 
   list-artifacts:
     name: List artifacts
@@ -387,7 +608,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Validate release tag matches VERSION
         run: |

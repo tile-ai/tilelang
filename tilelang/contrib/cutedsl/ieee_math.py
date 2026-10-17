@@ -3,10 +3,8 @@
 """
 IEEE-754 compliant floating-point operations with explicit rounding modes.
 
-These correspond to CUDA __fadd_rn, __fsub_rz, etc. Implemented via inline PTX
-to ensure exact rounding mode compliance.
-
-Rounding modes: rn (nearest), rz (toward zero), rm (toward -inf), rp (toward +inf)
+These correspond to CUDA __fadd_rn, __fsub_rz, etc.  TileLang keeps the
+public API names stable and delegates instruction emission to CUTLASS primitives.
 """
 
 __all__ = [
@@ -19,288 +17,184 @@ __all__ = [
     "ieee_fdiv",
 ]
 
-from cutlass._mlir.dialects import llvm
-from cutlass.base_dsl.typing import Float32, Float64
-from cutlass.cutlass_dsl import T, dsl_user_op
+import enum
+
+from cutlass.base_dsl.typing import Float32, Float64, Numeric
+from cutlass.experimental import primitives as prims
 
 
-# --- f32 binary ops ---
+class FPRound(str, enum.Enum):
+    RN = "rn"
+    RZ = "rz"
+    RM = "rm"
+    RP = "rp"
 
 
-@dsl_user_op
+def _rounding(rounding: str | FPRound) -> str:
+    if isinstance(rounding, FPRound):
+        return rounding.value
+    return FPRound(rounding).value
+
+
+def _scalar_arg_type(arg):
+    if isinstance(arg, Numeric):
+        return type(arg)
+    if hasattr(arg, "type"):
+        return Numeric.from_mlir_type(arg.type)
+    return None
+
+
+def _use_f64(*args) -> bool:
+    return any(_scalar_arg_type(arg) is Float64 for arg in args)
+
+
+def _ptx_dtype(dtype) -> str:
+    if dtype is Float32:
+        return "f32"
+    if dtype is Float64:
+        return "f64"
+    raise TypeError(f"Unsupported IEEE dtype: {dtype}")
+
+
+def _unary_fp_ptx(op: str, dtype, a, *, rounding: str = "rn", loc=None, ip=None):
+    rnd = _rounding(rounding)
+    return dtype(
+        prims.inline_ptx(
+            f"{op}.{rnd}.{_ptx_dtype(dtype)} {{$w0}}, {{$r0}};",
+            write_only_types=[dtype],
+            read_only_args=[dtype(a)],
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+def _binary_fp_ptx(op: str, dtype, a, b, *, rounding: str = "rn", loc=None, ip=None):
+    rnd = _rounding(rounding)
+    return dtype(
+        prims.inline_ptx(
+            f"{op}.{rnd}.{_ptx_dtype(dtype)} {{$w0}}, {{$r0}}, {{$r1}};",
+            write_only_types=[dtype],
+            read_only_args=[dtype(a), dtype(b)],
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+def _ternary_fp_ptx(op: str, dtype, a, b, c, *, rounding: str = "rn", loc=None, ip=None):
+    rnd = _rounding(rounding)
+    return dtype(
+        prims.inline_ptx(
+            f"{op}.{rnd}.{_ptx_dtype(dtype)} {{$w0}}, {{$r0}}, {{$r1}}, {{$r2}};",
+            write_only_types=[dtype],
+            read_only_args=[dtype(a), dtype(b), dtype(c)],
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
 def _fadd_f32(a: Float32, b: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(), Float32(b).ir_value()],
-            f"add.{rounding}.f32 $0, $1, $2;",
-            "=f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("add", Float32, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _fsub_f32(a: Float32, b: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(), Float32(b).ir_value()],
-            f"sub.{rounding}.f32 $0, $1, $2;",
-            "=f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("sub", Float32, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _fmul_f32(a: Float32, b: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(), Float32(b).ir_value()],
-            f"mul.{rounding}.f32 $0, $1, $2;",
-            "=f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("mul", Float32, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _fmaf_f32(a: Float32, b: Float32, c: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(), Float32(b).ir_value(), Float32(c).ir_value()],
-            f"fma.{rounding}.f32 $0, $1, $2, $3;",
-            "=f,f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _ternary_fp_ptx("fma", Float32, a, b, c, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _frcp_f32(a: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value()],
-            f"rcp.{rounding}.f32 $0, $1;",
-            "=f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _unary_fp_ptx("rcp", Float32, a, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _fsqrt_f32(a: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value()],
-            f"sqrt.{rounding}.f32 $0, $1;",
-            "=f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _unary_fp_ptx("sqrt", Float32, a, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _fdiv_f32(a: Float32, b: Float32, *, rounding: str = "rn", loc=None, ip=None) -> Float32:
-    return Float32(
-        llvm.inline_asm(
-            T.f32(),
-            [Float32(a).ir_value(), Float32(b).ir_value()],
-            f"div.{rounding}.f32 $0, $1, $2;",
-            "=f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("div", Float32, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-# --- f64 binary ops ---
-
-
-@dsl_user_op
 def _dadd_f64(a: Float64, b: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value(), Float64(b).ir_value()],
-            f"add.{rounding}.f64 $0, $1, $2;",
-            "=d,d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("add", Float64, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _dsub_f64(a: Float64, b: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value(), Float64(b).ir_value()],
-            f"sub.{rounding}.f64 $0, $1, $2;",
-            "=d,d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("sub", Float64, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _dmul_f64(a: Float64, b: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value(), Float64(b).ir_value()],
-            f"mul.{rounding}.f64 $0, $1, $2;",
-            "=d,d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _binary_fp_ptx("mul", Float64, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _dmaf_f64(a: Float64, b: Float64, c: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value(), Float64(b).ir_value(), Float64(c).ir_value()],
-            f"fma.{rounding}.f64 $0, $1, $2, $3;",
-            "=d,d,d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _ternary_fp_ptx("fma", Float64, a, b, c, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _drcp_f64(a: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value()],
-            f"rcp.{rounding}.f64 $0, $1;",
-            "=d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _unary_fp_ptx("rcp", Float64, a, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _dsqrt_f64(a: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value()],
-            f"sqrt.{rounding}.f64 $0, $1;",
-            "=d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return _unary_fp_ptx("sqrt", Float64, a, rounding=rounding, loc=loc, ip=ip)
 
 
-@dsl_user_op
 def _ddiv_f64(a: Float64, b: Float64, *, rounding: str = "rn", loc=None, ip=None) -> Float64:
-    return Float64(
-        llvm.inline_asm(
-            T.f64(),
-            [Float64(a).ir_value(), Float64(b).ir_value()],
-            f"div.{rounding}.f64 $0, $1, $2;",
-            "=d,d,d",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
-
-
-# --- Public API (dispatches by dtype) ---
+    return _binary_fp_ptx("div", Float64, a, b, rounding=rounding, loc=loc, ip=ip)
 
 
 def ieee_fadd(a, b, rounding="rn"):
     """IEEE-754 add with explicit rounding mode."""
+    if _use_f64(a, b):
+        return _dadd_f64(a, b, rounding=rounding)
     return _fadd_f32(a, b, rounding=rounding)
 
 
 def ieee_fsub(a, b, rounding="rn"):
     """IEEE-754 subtract with explicit rounding mode."""
+    if _use_f64(a, b):
+        return _dsub_f64(a, b, rounding=rounding)
     return _fsub_f32(a, b, rounding=rounding)
 
 
 def ieee_fmul(a, b, rounding="rn"):
     """IEEE-754 multiply with explicit rounding mode."""
+    if _use_f64(a, b):
+        return _dmul_f64(a, b, rounding=rounding)
     return _fmul_f32(a, b, rounding=rounding)
 
 
 def ieee_fmaf(a, b, c, rounding="rn"):
     """IEEE-754 fused multiply-add with explicit rounding mode."""
+    if _use_f64(a, b, c):
+        return _dmaf_f64(a, b, c, rounding=rounding)
     return _fmaf_f32(a, b, c, rounding=rounding)
 
 
 def ieee_frcp(a, rounding="rn"):
     """IEEE-754 reciprocal with explicit rounding mode."""
+    if _use_f64(a):
+        return _drcp_f64(a, rounding=rounding)
     return _frcp_f32(a, rounding=rounding)
 
 
 def ieee_fsqrt(a, rounding="rn"):
     """IEEE-754 square root with explicit rounding mode."""
+    if _use_f64(a):
+        return _dsqrt_f64(a, rounding=rounding)
     return _fsqrt_f32(a, rounding=rounding)
 
 
 def ieee_fdiv(a, b, rounding="rn"):
     """IEEE-754 divide with explicit rounding mode."""
+    if _use_f64(a, b):
+        return _ddiv_f64(a, b, rounding=rounding)
     return _fdiv_f32(a, b, rounding=rounding)

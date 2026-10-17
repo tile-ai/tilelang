@@ -7,7 +7,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/target_utils.h"
+#include "rocm/target_utils.h"
 
 #include <cmath>
 #include <limits>
@@ -32,12 +32,16 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   constexpr int kMPerWarp = 16;
   constexpr int kNPerWarp = 16;
 
+  // Guard the callers that do not go through ComputeWarpPartition: a zero
+  // warp count makes the modulo below divide by zero and kills the process.
+  ICHECK_GT(num_warps, 0) << "num_warps must be positive, but got "
+                          << num_warps;
   ICHECK(M % kMPerWarp == 0)
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
 
-  if (policy.isFullRow()) {
+  if (policy.IsFullRow()) {
     m_warp = num_warps;
     n_warp = 1;
     if (M % (m_warp * kMPerWarp) != 0) {
@@ -47,7 +51,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (policy.isFullCol()) {
+  } else if (policy.IsFullCol()) {
     m_warp = 1;
     n_warp = num_warps;
     if (N % (n_warp * kNPerWarp) != 0) {
@@ -57,7 +61,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (policy.isSquare()) {
+  } else if (policy.IsSquare()) {
     int max_m_warps = M / kMPerWarp;
     float ideal_ratio = N > 0 ? static_cast<float>(M) / N : 1.0f;
 
@@ -118,23 +122,24 @@ struct Gemm {
   ComputeWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                        int block_size, Target target, ffi::String gemm_inst) {
     (void)gemm_inst;
-    int num_warps = block_size / TargetGetWarpSize(target);
+    const int warp_size = TargetRocmGetWarpSize(target);
+    // A block narrower than one wavefront yields zero warps, which used to
+    // reach ComputeDefaultWarpPartition and abort the process with SIGFPE on
+    // its `M % (m_warp * kMPerWarp)`. Thread counts tuned for NVIDIA's 32-lane
+    // warp hit this on CDNA, where the wavefront is 64 wide.
+    ICHECK_GE(block_size, warp_size)
+        << "T.gemm needs at least one full wavefront, but this block has only "
+        << block_size << " threads while the wavefront size for "
+        << target->str() << " is " << warp_size
+        << ". Raise the kernel's thread count to a multiple of " << warp_size
+        << ".";
+    int num_warps = block_size / warp_size;
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 
   static bool ReuseExistingSharedLayout(ffi::String gemm_inst) {
     (void)gemm_inst;
     return false;
-  }
-
-  static ffi::String InstructionKind(ffi::String gemm_inst) {
-    if (gemm_inst == kROCmMFMA) {
-      return "mfma";
-    }
-    if (gemm_inst == kROCmWMMA) {
-      return "wmma";
-    }
-    return "unknown";
   }
 };
 
@@ -151,7 +156,6 @@ bool RegisterROCmGemm() {
       rocm::Gemm::SelectInst,
       rocm::Gemm::ComputeWarpPartition,
       rocm::Gemm::ReuseExistingSharedLayout,
-      rocm::Gemm::InstructionKind,
   });
   return true;
 }

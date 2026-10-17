@@ -53,6 +53,7 @@ import tilelang
 from tilelang import Profiler
 import tilelang.language as T
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
     @T.prim_func
     def main(
@@ -62,7 +63,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
     ):
         # Define a grid with enough blocks to cover M×N
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-
             # Allocate shared memory for the current tile of A and B
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
@@ -134,6 +134,7 @@ artifact = tilelang.lower(func)
 profiler = Profiler(artifact.rt_mod, artifact.params, result_idx=[2])
 
 import torch
+
 a = torch.randn(1024, 1024).cuda().half()
 b = torch.randn(1024, 1024).cuda().half()
 
@@ -172,9 +173,11 @@ Below is a more advanced snippet that showcases how to apply memory layouts, ena
 
 ```python
 import tilelang.language as T
+
 # `make_mma_swizzle_layout` is a python-defined layout function
 # that helps align data for MMA (Matrix Multiply-Accumulate) operations.
 from tilelang.cuda.intrinsics import make_mma_swizzle_layout as make_swizzle_layout
+
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float):
     @T.prim_func
@@ -187,13 +190,15 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
             # Allocate shared and local fragments
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # Annotate memory layout
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Enable swizzle-based rasterization for better L2 locality
             T.use_swizzle(panel_size=10, enable=True)
@@ -329,12 +334,11 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Tensor(A_shape, in_dtype),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -342,10 +346,12 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            T.annotate_layout(
+                {
+                    A_shared: make_swizzle_layout(A_shared),
+                    B_shared: make_swizzle_layout(B_shared),
+                }
+            )
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -353,7 +359,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -363,20 +368,11 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
-                    mma_emitter.ldmatrix_a(
-                        A_local,
-                        A_shared,
-                        ki
-                    )
+                    mma_emitter.ldmatrix_a(A_local, A_shared, ki)
 
                     # Load B into fragment
-                    mma_emitter.ldmatrix_b(
-                        B_local,
-                        B_shared,
-                        ki
-                    )
+                    mma_emitter.ldmatrix_b(B_local, B_shared, ki)
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)

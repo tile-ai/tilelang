@@ -6,7 +6,8 @@
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
 - **Python Version**: >= 3.10
-- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **NVIDIA GPUs — CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **AMD GPUs — ROCm**: a host ROCm installation providing `hipcc` (see [Installing on AMD GPUs (ROCm)](#installing-on-amd-gpus-rocm))
 
 The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
 
@@ -31,6 +32,40 @@ After installing tilelang, you can verify the installation by running:
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
 ```
+
+### Installing on AMD GPUs (ROCm)
+
+The Linux x86_64 wheels on PyPI are fat CUDA+ROCm builds: the same `pip install tilelang` works on AMD GPUs, and no source build or separate package index is required. Two things differ from the CUDA flow:
+
+1. **A host ROCm installation is required at runtime.** Kernels are JIT-compiled with the host `hipcc` (there is no pip-provided ROCm toolchain, unlike the CUDA `nvcc` extra).
+2. **Install a ROCm build of PyTorch first.** A plain `pip install tilelang` resolves the default (CUDA) `torch` from PyPI, which cannot detect AMD GPUs. Install torch from the ROCm channel matching your ROCm version before (or when) installing tilelang:
+
+```bash
+# 1) Install a ROCm build of PyTorch (pick the channel matching your ROCm version)
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.0
+
+# 2) Install tilelang; the already-installed torch is reused
+pip install tilelang
+```
+
+Verify that the ROCm target is detected:
+
+```bash
+python -c "import tilelang; from tilelang.backend.target import determine_target; print(tilelang.__version__, determine_target(return_object=True))"
+```
+
+This should print a `hip` target with your GPU architecture (e.g. `mcpu=gfx942`).
+
+If ROCm is installed outside `/opt/rocm`, or several HIP toolchains are visible on `PATH`, set `ROCM_PATH` to pin the installation TileLang should use:
+
+```bash
+export ROCM_PATH=/opt/rocm  # or your custom ROCm prefix
+```
+
+Notes:
+
+- The `tilelang[nvcc]` extra is CUDA-only; do not install it on ROCm hosts.
+- Windows and macOS wheels do not include the ROCm backend (Linux only).
 
 ## Building from Source
 
@@ -121,9 +156,12 @@ python -c "import tilelang; print(tilelang.__version__)"
 ```
 
 Some useful CMake options you can toggle while configuring:
-- `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when CUDA headers are found).
-- `-DUSE_ROCM=ON` selects ROCm support when building on AMD GPUs.
+
+- `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when a CUDA toolkit is found, except on macOS).
+- `-DUSE_ROCM=ON|OFF` enables ROCm support (default ON on Linux).
+- `-DUSE_ASCEND=ON|OFF` enables Ascend support (default ON on Linux).
 - `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
+- `-DUSE_LLVM=ON` enables the LLVM backend for CPU codegen.
 
 (using-existing-tvm)=
 
@@ -198,6 +236,12 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 ### ROCm container build (gfx942/gfx950)
 
+A source build is **not** required just to run TileLang on AMD GPUs — the PyPI
+wheels already include the ROCm backend (see
+[Installing on AMD GPUs (ROCm)](#installing-on-amd-gpus-rocm)). Use the
+container/source flow below when developing TileLang itself or when you need a
+custom build.
+
 If you want a ready-to-use ROCm image that builds TileLang from source, use
 `docker/Dockerfile.rocm`. This is the recommended path for a clean, reproducible
 environment.
@@ -270,7 +314,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.6" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi>=0.1.11,<0.1.13" "z3-solver>=4.13.0"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
@@ -299,11 +343,20 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 ## Install Configs
 
 ### Build-time environment variables
-`USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
 
-`USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
+Backend options are independent. CMake variables, including `-DUSE_*=...` arguments and existing cache entries, take precedence over environment variables. Environment variables initialize options in a fresh build directory; use `-D` arguments to change an existing configuration.
+
+`USE_CUDA`: Enables CUDA support, default: `ON` when a host or pip-provided CUDA toolkit is found, except on macOS. Set `CUDAToolkit_ROOT` to select a different CUDA toolkit.
+
+`USE_ROCM`: Enables ROCm support, default: `ON` on Linux and `OFF` elsewhere. The default HIP stubs and vendored headers allow building without a ROCm installation. Set `USE_ROCM=<rocm_sdk>` to use a custom SDK path.
+
+`USE_ASCEND`: Enables Ascend support, default: `ON` on Linux and `OFF` elsewhere. The default Ascend stub and local ACL declarations allow building without CANN.
+
+Running kernels still requires the selected backend's compiler, runtime, and device. Set `USE_CUDA=OFF USE_ROCM=OFF USE_ASCEND=OFF` to disable all three backends.
 
 `USE_METAL`: If to enable Metal support, default: `ON` on Darwin.
+
+`USE_LLVM`: If to enable LLVM support for CPU codegen, default: `OFF`. Set `USE_LLVM=1` for auto-detection, or pass `-DUSE_LLVM=/path/to/llvm-config` through `CMAKE_ARGS` when you need a specific LLVM installation. LLVM 15 or newer is required.
 
 `TVM_ROOT`: TVM source root to use.
 

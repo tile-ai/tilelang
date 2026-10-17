@@ -7,6 +7,9 @@
 #ifndef TVM_TL_LAYOUT_UTILS_H_
 #define TVM_TL_LAYOUT_UTILS_H_
 
+#include <cstdint>
+#include <optional>
+
 #include "support/check.h"
 #include <tvm/arith/iter_affine_map.h>
 
@@ -26,6 +29,16 @@ public:
 private:
   std::string msg_;
 };
+
+/*!
+ * \brief Fully evaluate a constant integer expression used by a layout.
+ *
+ * In addition to ordinary arithmetic, this handles the bitwise and shift
+ * builtins that arith::Analyzer does not currently fold for constant operands.
+ *
+ * \return The integer value, or std::nullopt for an unsupported expression.
+ */
+std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr);
 
 /*!
  * \brief Collect the IterSplit that is not used in expr.

@@ -17,7 +17,7 @@ PASS_CFG = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True, tilelang.PassConfi
 
 @tilelang.jit(out_idx=[3, 4], pass_configs=PASS_CFG)
 def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, groups=1):
-    """Forward for LSE; K/V indexed by by // groups."""
+    """Forward for LSE; K/V indexed by head // groups."""
     if groups <= 0 or heads % groups != 0:
         raise ValueError("groups must be a positive divisor of heads")
     head_kv = heads // groups

@@ -116,8 +116,6 @@ def run_alloc_var_with_initializer(
     assert f"= {init_value};" in code
 
 
-# TODO(Gong): ROCm is not supported yet, disable for now
-@tilelang.testing.requires_cuda
 def test_alloc_var_with_initializer():
     run_alloc_var_with_initializer(256, 64, T.int32, 5)
 
@@ -157,8 +155,6 @@ def run_alloc_multi_vars_with_initializer(
     assert code.count("= 2;") == 1
 
 
-# TODO(Gong): ROCm is not supported yet, disable for now
-@tilelang.testing.requires_cuda
 def test_alloc_multi_vars_with_initializer():
     run_alloc_multi_vars_with_initializer(256, 64, T.int32)
 
@@ -234,6 +230,25 @@ def run_alloc_global_eagerjit(
 def test_alloc_global():
     run_alloc_global(1024, 128, T.float16)
     run_alloc_global_eagerjit(1024, 128, T.float16)
+
+
+def alloc_barrier_kernel(arrive_count):
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float16)):
+        with T.Kernel(1, threads=128):
+            bar = T.alloc_barrier(arrive_count)  # noqa: F841
+
+    return main
+
+
+def test_alloc_barrier_rejects_non_positive_arrive_count():
+    import pytest
+
+    for bad in (0, -5, [128, 0]):
+        with pytest.raises(ValueError, match="arrive_count must be at least 1"):
+            alloc_barrier_kernel(bad)
+    alloc_barrier_kernel(128)  # valid count still traces
 
 
 if __name__ == "__main__":

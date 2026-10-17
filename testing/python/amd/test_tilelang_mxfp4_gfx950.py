@@ -24,7 +24,7 @@ from tilelang import tvm as tvm
 
 
 def _hip_target():
-    return "hip -mcpu=gfx950"
+    return {"kind": "hip", "mcpu": "gfx950"}
 
 
 def _fp4_encode(vals):
@@ -52,6 +52,19 @@ def _fp4_decode(packed: bytes):
         result.append(lut[byte & 0xF])
         result.append(lut[(byte >> 4) & 0xF])
     return result
+
+
+@tilelang.testing.requires_gfx950
+def test_static_fp4_shared_allocation_uses_packed_extent():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=1):
+            A_shared = T.alloc_shared((127,), T.float4_e2m1fn, scope="shared")
+            A_shared[126] = T.cast(0.0, T.float4_e2m1fn)
+
+    artifact = tilelang.lower(kernel, target={"kind": "hip", "mcpu": "gfx950"})
+
+    assert "fp4_e2_t A_shared[64];" in artifact.kernel_source
 
 
 # ---------------------------------------------------------------------------
@@ -217,10 +230,9 @@ def test_mxfp4_dequant_gemm_twiddling(M, N, K):
 @tilelang.testing.requires_gfx950
 def test_get_mxfp_intrin_group_returns_hip_source():
     """get_mxfp_intrin_group() returns HIP C++ source (not CUDA PTX) for gfx950."""
-    from tilelang.quantize import get_mxfp_intrin_group
-    from tilelang import tvm
+    from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
-    target = tvm.target.Target("hip -mcpu=gfx950")
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
     info = get_mxfp_intrin_group(
         out_dtype=T.bfloat16,
         source_bit=4,
@@ -242,7 +254,7 @@ def test_get_mxfp_intrin_group_returns_hip_source():
 
 def test_get_mxfp_intrin_group_returns_ptx_for_cuda():
     """get_mxfp_intrin_group() returns CUDA PTX source when target is None."""
-    from tilelang.quantize import get_mxfp_intrin_group
+    from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
     info = get_mxfp_intrin_group(
         out_dtype=T.bfloat16,

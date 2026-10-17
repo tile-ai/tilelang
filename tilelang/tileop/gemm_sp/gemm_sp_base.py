@@ -15,7 +15,7 @@ class GemmSPBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_var: tirx.Var):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: tirx.PrimExpr):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -105,28 +105,8 @@ class GemmSPBase:
         return self.gemm_sp_node.cRegion
 
     @property
-    def stride_A(self) -> int:
-        return self.gemm_sp_node.stride_A
-
-    @property
-    def stride_B(self) -> int:
-        return self.gemm_sp_node.stride_B
-
-    @property
-    def offset_A(self) -> int:
-        return self.gemm_sp_node.offset_A
-
-    @property
-    def offset_B(self) -> int:
-        return self.gemm_sp_node.offset_B
-
-    @property
     def clear_accum(self) -> bool:
         return self.gemm_sp_node.clear_accum
-
-    @property
-    def k_pack(self) -> int:
-        return self.gemm_sp_node.k_pack
 
     @property
     def wg_wait(self) -> int:

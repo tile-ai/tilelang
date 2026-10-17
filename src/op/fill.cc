@@ -186,11 +186,13 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * The lowering may query layout and thread information from @p T and uses the
  * provided analyzer for any required arithmetic/layout analysis.
  *
- * @param T Lowering arguments (target, thread bounds, thread var, layout map).
+ * @param lower_args Lowering arguments (target, thread bounds, thread var,
+ * layout map).
  * @return Stmt The lowered TIR statement implementing the fill.
  */
-Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveFillImpl(T.target).lower(*this, T, analyzer);
+Stmt FillNode::Lower(const LowerArgs &lower_args,
+                     arith::Analyzer *analyzer) const {
+  return ResolveFillImpl(lower_args.target).lower(*this, lower_args, analyzer);
 }
 
 /**
@@ -200,11 +202,11 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
  * Currently no layout inference is performed for Fill and the function returns
  * an empty LayoutMap.
  *
- * @param T Context required for layout inference (unused).
+ * @param layout_args Context required for layout inference (unused).
  * @param level The inference level requested (unused).
  * @return LayoutMap Empty map indicating no inferred layouts for this operator.
  */
-LayoutMap FillNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap FillNode::InferLayout(const LayoutInferArgs &layout_args,
                                 InferLevel level) const {
   return {};
 }

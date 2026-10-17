@@ -90,6 +90,10 @@ class Layout(Node):
     def get_forward_index(self):
         return self.index
 
+    def get_linearized_forward_index(self) -> PrimExpr:
+        """Return the row-major linear offset of the physical output index."""
+        return _ffi_api.Layout_linearized_index(self)
+
     def map_forward_index(self, indices: list[PrimExpr]) -> PrimExpr:
         """
         Compute the forward index mapping for a given set of input indices.
@@ -246,6 +250,30 @@ class Layout(Node):
             The layout to compare with.
         """
         return _ffi_api.Layout_is_equal(self, other)
+
+    def map_region_bounds(self, region: list[Range]) -> list[Range]:
+        """
+        Map a logical (input-space) sub-region to its physical (output-space)
+        bounding-box region.
+
+        This is the region-aware generalization of ``get_output_shape()``, which
+        is equivalent to ``map_region_bounds`` with full-extent ranges.
+
+        Example (NZ layout): a logical slice ``[m0:m1, k0:k1]`` on a ``[M, K]``
+        buffer maps to physical ``[m0//16 : (m1-m0)//16, k0//C0 : (k1-k0)//C0,
+        0:16, 0:C0]``.
+
+        Parameters
+        ----------
+        region : list[Range]
+            One ``Range`` per input dimension, each ``[min, min+extent)``.
+
+        Returns
+        -------
+        list[Range]
+            One ``Range`` per output dimension.
+        """
+        return _ffi_api.Layout_map_region_bounds(self, region)
 
     def __call__(self, *args: list[PrimExpr]) -> PrimExpr:
         return self.map_forward_index(args)

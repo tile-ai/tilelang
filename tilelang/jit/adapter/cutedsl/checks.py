@@ -6,7 +6,7 @@ from importlib.util import find_spec as _find_spec
 import os
 
 _CUTEDSL_PUBLIC_DIST = "nvidia-cutlass-dsl"
-_CUTEDSL_MIN_VERSION = (4, 3, 1)
+_CUTEDSL_MIN_VERSION = (4, 7, 0)
 _CUTEDSL_BANNED_VERSIONS = {(4, 3, 4)}  # Known broken versions
 _VERSION_TRIPLE_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
@@ -15,7 +15,7 @@ def _parse_version_triple(version_str: str) -> tuple[int, int, int] | None:
     """Parse a best-effort (major, minor, patch) triple from a version string.
 
     We intentionally avoid importing heavy/optional version parsers. For our
-    minimum requirement (>= 4.3.1), a numeric triple comparison is sufficient.
+    minimum requirement (>= 4.7.0), a numeric triple comparison is sufficient.
     """
     m = _VERSION_TRIPLE_RE.search(version_str)
     if not m:

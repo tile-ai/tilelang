@@ -92,8 +92,8 @@ def _make_unary_kernel(op_func, dtype_tl):
 # ---------------------------------------------------------------------------
 
 
-def _lower_to_cuda_source(func, target=SM80_TARGET) -> str:
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+def _lower_to_cuda_source(func, target=SM80_TARGET, pass_configs=None) -> str:
+    with tvm.transform.PassContext(config=pass_configs or {}), tvm.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
@@ -140,6 +140,74 @@ def _make_auto_vec_fma_kernel(dtype_tl, width: int = 4):
     return main
 
 
+def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False, annotations=None):
+    """Build a row reduction whose local fragment is contiguous per thread."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, 128), dtype=T.float32),
+        C: T.Tensor((M,), dtype=T.float32),
+    ):
+        with T.Kernel(1, 1, threads=M) as (bx, by):
+            src = T.alloc_fragment((M, 128), T.float32)
+            dst = T.alloc_fragment((M,), T.float32)
+            T.copy(A, src)
+            if nan_propagate:
+                reduce_func(src, dst, dim=1, nan_propagate=True, annotations=annotations)
+            else:
+                reduce_func(src, dst, dim=1, annotations=annotations)
+            T.copy(dst, C)
+
+    return main
+
+
+def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threads=256, annotations=None):
+    """Build a reduction that shuffles packed values between threads."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, width), dtype=T.float32),
+        C: T.Tensor((rows,), dtype=T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_shared((rows, width), T.float32)
+            dst = T.alloc_fragment((rows,), T.float32)
+            T.copy(A, src, disable_tma=True)
+            reduce_func(src, dst, dim=1, batch=2, annotations=annotations)
+            T.copy(dst, C)
+
+    return main
+
+
+def _make_auto_vec_batched_reduce_workspace_kernel():
+    """Build a packed reduction whose cross-warp step uses shared workspace."""
+    rows = 4
+    width = 512
+    threads = 128
+    vec_size = 8
+
+    def fragment_layout(i, j):
+        linear = i * width + j
+        thread_id = linear // vec_size % threads
+        local_id = linear // (threads * vec_size) * vec_size + linear % vec_size
+        return thread_id, local_id
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, width), dtype=T.float32),
+        C: T.Tensor((rows,), dtype=T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((rows, width), T.float32)
+            dst = T.alloc_fragment((rows,), T.float32)
+            T.annotate_layout({src: T.Fragment(src.shape, forward_fn=fragment_layout)})
+            T.copy(A, src)
+            T.reduce_sum(src, dst, dim=1, batch=2)
+            T.copy(dst, C)
+
+    return main
+
+
 # ===================================================================
 # Parametrised op / dtype lists
 # ===================================================================
@@ -170,10 +238,52 @@ _TORCH_REFS = {
     "abs2": lambda a: torch.abs(a),
 }
 
+_REDUCE_OPS = [
+    ("sum", T.reduce_sum, ("add2",)),
+    ("abssum", T.reduce_abssum, ("add2", "abs2")),
+    ("max", T.reduce_max, ("max2",)),
+    ("min", T.reduce_min, ("min2",)),
+    ("absmax", T.reduce_absmax, ("max2", "abs2")),
+]
+
+
+def _torch_reduce(a, op_name):
+    if op_name == "sum":
+        return torch.sum(a, dim=1)
+    if op_name == "abssum":
+        return torch.sum(torch.abs(a), dim=1)
+    if op_name == "max":
+        return torch.max(a, dim=1).values
+    if op_name == "min":
+        return torch.min(a, dim=1).values
+    if op_name == "absmax":
+        return torch.max(torch.abs(a), dim=1).values
+    raise ValueError(f"Unsupported reduction: {op_name}")
+
 
 # ===================================================================
 # Codegen tests
 # ===================================================================
+
+
+@pytest.mark.parametrize("op_name,op_func", _BINARY_OPS, ids=[n for n, _ in _BINARY_OPS])
+def test_binary_rejects_mixed_packed_dtypes(op_name, op_func):
+    x = tvm.tirx.Var("x", "float16x2")
+    y = tvm.tirx.Var("y", "bfloat16x2")
+
+    with pytest.raises(ValueError, match="same dtype"):
+        op_func(x, y)
+
+
+@pytest.mark.parametrize("mixed_index", [0, 1, 2])
+def test_fma2_rejects_mixed_packed_dtypes(mixed_index):
+    x = tvm.tirx.Var("x", "float16x2")
+    y = tvm.tirx.Var("y", "bfloat16x2")
+    args = [x, x, x]
+    args[mixed_index] = y
+
+    with pytest.raises(ValueError, match="same dtype"):
+        T.fma2(*args)
 
 
 @tilelang.testing.requires_cuda
@@ -264,6 +374,90 @@ def test_codegen_auto_vec_fma_f32():
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name,reduce_func,packed_ops", _REDUCE_OPS, ids=[op[0] for op in _REDUCE_OPS])
+def test_codegen_auto_vec_reduce_f32_sm100(op_name, reduce_func, packed_ops):
+    func = _make_auto_vec_reduce_kernel(reduce_func)
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    for packed_op in packed_ops:
+        assert f"tl::{packed_op}" in src, f"Expected tl::{packed_op} in SM100 float32 {op_name} reduction"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_codegen_auto_vec_reduce_f32_disable_fadd2(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::add2" not in src, f"tl::add2 should be disabled for float32 {op_name} reduction"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_codegen_auto_vec_reduce_f32_disable_fadd2_pass_config(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func)
+    src = _lower_to_cuda_source(
+        func,
+        target=SM100_TARGET,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FP32X2_REDUCTION: False},
+    )
+    assert "tl::add2" not in src, f"tl::add2 should be disabled for float32 {op_name} reduction"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_reduce_f32_disable_fadd2_pass_config_does_not_disable_max2():
+    func = _make_auto_vec_reduce_kernel(T.reduce_max)
+    src = _lower_to_cuda_source(
+        func,
+        target=SM100_TARGET,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FP32X2_REDUCTION: False},
+    )
+    assert "tl::max2" in src
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_reduce_f32_disable_fadd2_does_not_disable_max2():
+    func = _make_auto_vec_reduce_kernel(T.reduce_max, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::max2" in src
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_batched_reduce_f32_disable_fadd2():
+    func = _make_auto_vec_batched_reduce_kernel(T.reduce_sum, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::add2" not in src
+    assert "SumOp_f32x2" not in src
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_batched_reduce_f32_disable_fadd2_pass_config():
+    func = _make_auto_vec_batched_reduce_kernel(T.reduce_sum)
+    src = _lower_to_cuda_source(
+        func,
+        target=SM100_TARGET,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FP32X2_REDUCTION: False},
+    )
+    assert "tl::add2" not in src
+    assert "SumOp_f32x2" not in src
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name,reduce_func,packed_ops", _REDUCE_OPS, ids=[op[0] for op in _REDUCE_OPS])
+def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
+    func = _make_auto_vec_reduce_kernel(reduce_func)
+    src = _lower_to_cuda_source(func, target=SM80_TARGET)
+    for packed_op in packed_ops:
+        assert f"tl::{packed_op}" not in src, f"tl::{packed_op} should not appear in pre-SM100 float32 {op_name} reduction"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_func", [T.reduce_max, T.reduce_min, T.reduce_absmax])
+def test_codegen_auto_vec_reduce_f32_rejects_nan_mode(reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func, nan_propagate=True)
+    with pytest.raises(ValueError, match="nan_propagate=True requires float16 or bfloat16 output, got float32"):
+        _lower_to_cuda_source(func, target=SM100_TARGET)
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype_name", ["bfloat16", "float16"])
 def test_codegen_auto_vec_fma_half_types(dtype_name):
     dtype_tl, _ = _DTYPE_MAP[dtype_name]
@@ -329,6 +523,72 @@ def test_correctness_fma2(dtype_name):
         torch.testing.assert_close(d, ref)
     else:
         torch.testing.assert_close(d, ref, atol=1e-2, rtol=1e-1)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_name,reduce_func", [(op_name, reduce_func) for op_name, reduce_func, _ in _REDUCE_OPS])
+def test_correctness_auto_vec_reduce_f32(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func)
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    a = torch.randn((M, 128), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    reference = _torch_reduce(a, op_name)
+    torch.testing.assert_close(result, reference, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_correctness_auto_vec_reduce_f32_disable_fadd2(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func, annotations={"enable_fadd2": False})
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    a = torch.randn((M, 128), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    reference = _torch_reduce(a, op_name)
+    torch.testing.assert_close(result, reference, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_correctness_auto_vec_reduce_f32_disable_fadd2_pass_config(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func)
+    kernel = tilelang.compile(
+        func,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_FP32X2_REDUCTION: False},
+    )
+    a = torch.randn((M, 128), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    reference = _torch_reduce(a, op_name)
+    torch.testing.assert_close(result, reference, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_correctness_auto_vec_batched_reduce_f32():
+    func = _make_auto_vec_batched_reduce_kernel(T.reduce_sum)
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    a = torch.randn((M, 64), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    torch.testing.assert_close(result, torch.sum(a, dim=1), atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+def test_correctness_auto_vec_batched_reduce_f32_workspace():
+    func = _make_auto_vec_batched_reduce_workspace_kernel()
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    source = kernel.get_kernel_source()
+    allreduce_call = next(line for line in source.splitlines() if "AllReduce<" in line)
+    assert "make_int2" not in allreduce_call
+    assert "(&(workspace[0]))" in allreduce_call
+
+    a = torch.randn((4, 512), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    torch.testing.assert_close(result, torch.sum(a, dim=1), atol=1e-4, rtol=1e-4)
 
 
 @tilelang.testing.requires_cuda

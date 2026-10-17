@@ -82,12 +82,9 @@ def sparse_mla_fwd(
         by,
         bz,
     ):
-        Q_shared = T.alloc_shared([H_per_block, D], dtype)
-        Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
+        Q_shared = T.alloc_shared([H_per_block, D + D_tail], dtype)
         KV_shared = T.alloc_shared([BI, D], dtype)
         K_tail_shared = T.alloc_shared([BI, D_tail], dtype)
-        O_shared = T.alloc_shared([H_per_block, D], dtype)
-        Lse_shared = T.alloc_shared([H_per_block], accum_dtype)
         mask = T.alloc_fragment([BI], "bool")
 
         acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
@@ -111,8 +108,9 @@ def sparse_mla_fwd(
         H0 = g_i * padded_H + (0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64)
         H1 = H0 + H_per_block
 
-        T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-        T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
+        # TODO: merge the statements when the compiler has better support for non-power-of-2 extents.
+        T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared[:, :D])
+        T.copy(Q[b_i, s_i, H0:H1, D:], Q_shared[:, D:])
 
         for i_i in T.Pipelined(NI, num_stages=num_stages):
             for bi_i in T.Parallel(BI):
@@ -126,14 +124,14 @@ def sparse_mla_fwd(
             for h_i, bi_i in T.Parallel(H_per_block, BI):
                 acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
             T.gemm(
-                Q_shared,
+                Q_shared[:, :D],
                 KV_shared,
                 acc_s,
                 transpose_B=True,
                 policy=T.GemmWarpPolicy.FullRow,
             )
             T.gemm(
-                Q_tail_shared,
+                Q_shared[:, D:],
                 K_tail_shared,
                 acc_s,
                 transpose_B=True,
@@ -241,17 +239,26 @@ def test_sparse_mla_fwd(
     block_I=64,
     num_stages=2,
     threads=256,
+    profile=True,
+    indices=None,
 ):
+    """Validate and optionally benchmark sparse MLA forward."""
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
 
-    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
-    for b in range(B):
-        for t in range(S):
-            for h in range(HKV):
-                i_i = torch.randperm(max(1, t))[:topk]
-                indices[b, t, h, : len(i_i)] = i_i
+    if indices is None:
+        indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+        for b in range(B):
+            for t in range(S):
+                for h in range(HKV):
+                    i_i = torch.randperm(max(1, t))[:topk]
+                    indices[b, t, h, : len(i_i)] = i_i
+    else:
+        expected_prefix = (B, S, HKV)
+        if tuple(indices.shape[:3]) != expected_prefix:
+            raise ValueError(f"indices must start with shape {expected_prefix}, got {tuple(indices.shape)}")
+        topk = indices.shape[-1]
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
@@ -261,15 +268,17 @@ def test_sparse_mla_fwd(
         assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
         print("assert_tensors_similar passed")
 
-    def fn():
-        return sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+    if profile:
 
-    from tilelang.profiler import do_bench
+        def fn():
+            return sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
-    ms = do_bench(fn, warmup=100, rep=250)
-    print(f"Average time: {ms:.3f} ms")
-    print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+        from tilelang.profiler import do_bench
+
+        ms = do_bench(fn, warmup=100, rep=250)
+        print(f"Average time: {ms:.3f} ms")
+        print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+        print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(

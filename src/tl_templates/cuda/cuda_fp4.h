@@ -97,14 +97,6 @@ struct __CUDA_ALIGN__(8) fp4_e2_16_t {
 struct __CUDA_ALIGN__(16) fp4_e2_32_t {
   fp4_e2_16_t x;
   fp4_e2_16_t y;
-
-  TL_DEVICE fp4_e2_32_t &operator=(const ulonglong4 &rhs) {
-    x.x = *(fp4_e2_8_t *)&rhs.x;
-    x.y = *(fp4_e2_8_t *)&rhs.y;
-    y.x = *(fp4_e2_8_t *)&rhs.z;
-    y.y = *(fp4_e2_8_t *)&rhs.w;
-    return *this;
-  }
 };
 
 struct __CUDA_ALIGN__(32) fp4_e2_64_t {
@@ -112,61 +104,55 @@ struct __CUDA_ALIGN__(32) fp4_e2_64_t {
   fp4_e2_32_t y;
 };
 
-// Pack two fp4_e2_t values.
-TL_DEVICE fp4_e2_2_t make_fp4_e2_2_t(fp4_e2_t x, fp4_e2_t y) {
-  __nv_fp4x2_storage_t packed = (x.__x & 0x0F) | ((y.__x & 0x0F) << 4);
-  fp4_e2_2_t result;
-  result.__x = packed;
+namespace tl {
+// Build a nibble-packed fp4 vector from one fp4_e2_t per lane. One variadic
+// definition covers every lane count (2/4/.../64) instead of a
+// make_fp4_e2_<N>_t constructor ladder.
+template <typename V, typename... Ts> TL_DEVICE V make_fp4_vec(Ts... lanes) {
+  constexpr int kN = static_cast<int>(sizeof...(lanes));
+  static_assert(kN % 2 == 0, "fp4 vectors pack two lanes per byte");
+  static_assert(sizeof(V) * 2 == kN,
+                "tl::make_fp4_vec lane count does not match the vector size");
+  const fp4_e2_t vals[] = {lanes...};
+  V result;
+  uint8_t *bytes = reinterpret_cast<uint8_t *>(&result);
+#pragma unroll
+  for (int i = 0; i < kN / 2; ++i) {
+    bytes[i] = static_cast<uint8_t>((vals[2 * i].__x & 0x0F) |
+                                    ((vals[2 * i + 1].__x & 0x0F) << 4));
+  }
   return result;
 }
+} // namespace tl
 
-// Pack four fp4_e2_t values.
-TL_DEVICE fp4_e2_4_t make_fp4_e2_4_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
-                                     fp4_e2_t x3) {
-  fp4_e2_4_t result;
-  result.x = make_fp4_e2_2_t(x0, x1);
-  result.y = make_fp4_e2_2_t(x2, x3);
-  return result;
+// ============================================================================
+// FP4 -> FP8 (E4M3) Conversions
+// ============================================================================
+// Every E2M1 value, including -0, is exactly representable in E4M3, so the
+// conversion is a pure bit transcode: result byte n is the E4M3 encoding of
+// nibble n.
+
+// fp4_e2m1x4 (2 bytes) -> fp8_e4m3x4 (4 bytes)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_e2m1x4_to_e4m3x4(const __nv_fp4x4_storage_t src) {
+  // The two table words hold E4M3(0, .5, 1, 1.5) and E4M3(2, 3, 4, 6); each
+  // nibble's magnitude bits select one byte. The second permutation lands each
+  // nibble's sign bit in bit 3 of its result byte, shifted up to bit 7.
+  uint32_t magnitude = __byte_perm(0x3c383000, 0x4c484440, src & 0x7777);
+  uint32_t signs = (__byte_perm(src, src >> 4, 0x5140) & 0x08080808) << 4;
+  return magnitude | signs;
 }
 
-// Pack eight fp4_e2_t values.
-TL_DEVICE fp4_e2_8_t make_fp4_e2_8_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
-                                     fp4_e2_t x3, fp4_e2_t x4, fp4_e2_t x5,
-                                     fp4_e2_t x6, fp4_e2_t x7) {
-  fp4_e2_8_t result;
-  result.x = make_fp4_e2_4_t(x0, x1, x2, x3);
-  result.y = make_fp4_e2_4_t(x4, x5, x6, x7);
-  return result;
+// fp4_e2m1x2 (1 byte) -> fp8_e4m3x2 (2 bytes)
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_e2m1x2_to_e4m3x2(const __nv_fp4x2_storage_t src) {
+  return static_cast<__nv_fp8x2_storage_t>(__tl_cvt_e2m1x4_to_e4m3x4(src));
 }
 
-// Pack sixteen fp4_e2_t values.
-TL_DEVICE fp4_e2_16_t make_fp4_e2_16_t(fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2,
-                                       fp4_e2_t x3, fp4_e2_t x4, fp4_e2_t x5,
-                                       fp4_e2_t x6, fp4_e2_t x7, fp4_e2_t y0,
-                                       fp4_e2_t y1, fp4_e2_t y2, fp4_e2_t y3,
-                                       fp4_e2_t y4, fp4_e2_t y5, fp4_e2_t y6,
-                                       fp4_e2_t y7) {
-  fp4_e2_16_t result;
-  result.x = make_fp4_e2_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
-  result.y = make_fp4_e2_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
-  return result;
-}
-
-// Pack thirty-two fp4_e2_t values.
-TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
-    fp4_e2_t x0, fp4_e2_t x1, fp4_e2_t x2, fp4_e2_t x3, fp4_e2_t x4,
-    fp4_e2_t x5, fp4_e2_t x6, fp4_e2_t x7, fp4_e2_t x8, fp4_e2_t x9,
-    fp4_e2_t x10, fp4_e2_t x11, fp4_e2_t x12, fp4_e2_t x13, fp4_e2_t x14,
-    fp4_e2_t x15, fp4_e2_t y0, fp4_e2_t y1, fp4_e2_t y2, fp4_e2_t y3,
-    fp4_e2_t y4, fp4_e2_t y5, fp4_e2_t y6, fp4_e2_t y7, fp4_e2_t y8,
-    fp4_e2_t y9, fp4_e2_t y10, fp4_e2_t y11, fp4_e2_t y12, fp4_e2_t y13,
-    fp4_e2_t y14, fp4_e2_t y15) {
-  fp4_e2_32_t result;
-  result.x = make_fp4_e2_16_t(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11,
-                              x12, x13, x14, x15);
-  result.y = make_fp4_e2_16_t(y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11,
-                              y12, y13, y14, y15);
-  return result;
+// fp4_e2m1 -> fp8_e4m3
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_e2m1_to_e4m3(const __nv_fp4_storage_t src) {
+  return static_cast<__nv_fp8_storage_t>(__tl_cvt_e2m1x4_to_e4m3x4(src));
 }
 
 // ============================================================================
@@ -174,7 +160,7 @@ TL_DEVICE fp4_e2_32_t make_fp4_e2_32_t(
 // ============================================================================
 // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html
 
-// Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
+// Custom fp4_e2m1 -> half conversion for CUDA version < 13.0 to avoid using
 // `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
 // `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
 __device__ __half_raw __tl_cvt_fp4_to_halfraw_naive(
@@ -189,7 +175,7 @@ __device__ __half_raw __tl_cvt_fp4_to_halfraw_naive(
   return res;
 }
 
-// Custom fp4_e2m1 -> half convertion for CUDA version < 13.0 to avoid using
+// Custom fp4_e2m1 -> half conversion for CUDA version < 13.0 to avoid using
 // `cvt.rn.relu.f16x2.e2m1x2`, as there are bugs in PTXAS related to
 // `cvt.rn.relu.f16x2.e2m1x2` between CUDA 12.6 and 12.9
 __device__ __half2_raw __tl_cvt_fp4x2_to_halfraw2_naive(
@@ -280,33 +266,54 @@ TL_DEVICE __nv_fp4x2_storage_t __tl_cvt_float2_to_fp4x2(const float2 src) {
 // To get little-endian nibble order (nibble0=elem0), pass elements in reverse.
 
 // Full 4-element version (float4 input)
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp4x4_storage_t
 __tl_cvt_f32x4_to_e2m1x4_rs_sat(float4 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp4x4_storage_t result;
   asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=h"(result)
       : "f"(src.w), "f"(src.z), "f"(src.y), "f"(src.x), "r"(rbits));
   return result;
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP4 requires sm_100a or sm_103a");
+  return {};
+#endif
 }
 
 // 2-element version: pass src.x as f, src.y as e, returns lower byte as fp4x2
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp4x2_storage_t
 __tl_cvt_f32x2_to_e2m1x2_rs_sat(float2 src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp4x4_storage_t tmp;
   asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=h"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(src.y), "f"(src.x), "r"(rbits));
   return static_cast<__nv_fp4x2_storage_t>(tmp & 0xFF);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP4 requires sm_100a or sm_103a");
+  return {};
+#endif
 }
 
 // 1-element version: pass src as f (lowest position), returns low nibble as fp4
+template <bool kDependentFalse = false>
 TL_DEVICE __nv_fp4_storage_t
 __tl_cvt_f32x1_to_e2m1x1_rs_sat(float src, unsigned int rbits) {
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL)
   __nv_fp4x4_storage_t tmp;
   asm("cvt.rs.satfinite.e2m1x4.f32 %0, {%1, %2, %3, %4}, %5;"
       : "=h"(tmp)
       : "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(src), "r"(rbits));
   return static_cast<__nv_fp4_storage_t>(tmp & 0x0F);
+#else
+  static_assert(kDependentFalse,
+                "Stochastic rounding f32-to-FP4 requires sm_100a or sm_103a");
+  return {};
+#endif
 }
 
 // ============================================================================

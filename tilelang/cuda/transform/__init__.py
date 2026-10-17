@@ -3,6 +3,35 @@
 from .. import _ffi_api
 
 
+def AutoWarpSpecialization():
+    """Derive a warp-specialization schedule with the scheduler named by
+    the ``tl.enable_auto_warp_specialization`` pass config (currently
+    ``"role_based"``); a no-op when the config is unset.
+
+    Eligible kernels gain stable ``tl.ws_op_id`` markers and a typed
+    ``WSSchedule`` block annotation — the same surface a hand-written
+    schedule uses — which :func:`MaterializeWSSchedule` then lowers.
+    Kernels the scheduler declines are left unchanged.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AutoWarpSpecialization()  # type: ignore
+
+
+def AnnotateDeviceBoundTmaCopies():
+    """Mark tile copies whose TensorMap base is defined in the device body.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateDeviceBoundTmaCopies()  # type: ignore
+
+
 def ProducerConsumerWarpSpecialized():
     """Producer-consumer warp specialization at the tile-op level.
 
@@ -16,20 +45,6 @@ def ProducerConsumerWarpSpecialized():
         The result pass
     """
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
-
-
-def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
-
-    The tiled tile-op implementation is now the canonical
-    ``ProducerConsumerWarpSpecialized`` pass.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return ProducerConsumerWarpSpecialized()
 
 
 def LowerBlackwell2SM():
@@ -140,12 +155,30 @@ def AnnotateWarpGroupRegAlloc():
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 
+def MaterializeWSSchedule():
+    """Materialize a user-provided warp-specialization schedule.
+
+    Consumes the ``ws_schedule`` block annotation attached by
+    ``T.annotate_ws_schedule`` and rewrites the kernel into explicit
+    warp-specialized form (role branches, multi-versioned buffers,
+    mbarrier synchronization, TMA copies, async tcgen05 MMA).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MaterializeWSSchedule()  # type: ignore
+
+
 def PersistThreadblock():
     """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
 
 
 __all__ = [
+    "AnnotateDeviceBoundTmaCopies",
+    "AutoWarpSpecialization",
     "AnnotateWarpGroupRegAlloc",
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
@@ -157,7 +190,7 @@ __all__ = [
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "MarkCudaSyncCalls",
+    "MaterializeWSSchedule",
     "PersistThreadblock",
     "ProducerConsumerWarpSpecialized",
-    "ProducerConsumerWarpSpecializedTiled",
 ]

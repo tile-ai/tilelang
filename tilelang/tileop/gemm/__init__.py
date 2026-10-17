@@ -21,11 +21,11 @@ def gemm_lower(
     layout_map,
     target: Target,
     thread_bounds: Range,
-    thread_var: tirx.Var,
+    thread_index: tirx.PrimExpr,
     mbar_phase_expr: tirx.PrimExpr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm.lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+    stmt = gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
     return stmt
 
 
@@ -33,7 +33,7 @@ def gemm_lower(
 class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
-    # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
+    # clearAccum, kPack, wgWait, policy
     #
     # Backward-compat alias properties are provided below to support old names.
 
@@ -83,22 +83,6 @@ class Gemm(Node, Scriptable):
         return self.transB
 
     @property
-    def stride_A(self):
-        return self.strideA
-
-    @property
-    def stride_B(self):
-        return self.strideB
-
-    @property
-    def offset_A(self):
-        return self.offsetA
-
-    @property
-    def offset_B(self):
-        return self.offsetB
-
-    @property
     def clear_accum(self):
         return self.clearAccum
 
@@ -114,10 +98,6 @@ class Gemm(Node, Scriptable):
     def is_tcgen05(self):
         return getattr(self, "isTcgen05", False)
 
-    @property
-    def sf_k_start(self):
-        return self.sfKStart
-
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
@@ -129,14 +109,14 @@ class Gemm(Node, Scriptable):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
+        thread_index: tirx.PrimExpr,
         mbar_phase_expr: tirx.PrimExpr,
     ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
-        return impl_class(self).lower(layout_map, target, thread_bounds, thread_var, mbar_phase_expr)
+        return impl_class(self).lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:
         """Select the appropriate GEMM instruction key based on target and thread configuration.

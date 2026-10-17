@@ -1,13 +1,18 @@
 import argparse
 import itertools
 import logging
+from pathlib import Path
+import sys
+
 import torch
 from triton.testing import do_bench
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "gemm_sp"))
 
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
-from tilelang.utils.sparse import get_e_factor
+from sparse_utils import get_e_factor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

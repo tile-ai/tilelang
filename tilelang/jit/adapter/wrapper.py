@@ -6,6 +6,7 @@ from tvm import IRModule
 from tvm.target import Target
 
 from .utils import (
+    is_ascend_target,
     is_metal_target,
     is_cutedsl_target,
     match_declare_kernel,
@@ -13,7 +14,6 @@ from .utils import (
     is_cuda_target,
     is_hip_target,
     is_cpu_target,
-    get_annotated_mod,
     pythonic_expr,
     parse_function_call_args,
     parse_tma_descriptor_args,
@@ -208,6 +208,17 @@ class BaseWrapper(ABC):
 logger = logging.getLogger(__name__)
 
 
+def _require_lowered_modules(
+    device_mod: IRModule | None,
+    host_mod: IRModule | None,
+) -> tuple[IRModule, IRModule]:
+    """Require adapter metadata to come from the compiler's lowering result."""
+    missing = [name for name, mod in (("device_mod", device_mod), ("host_mod", host_mod)) if mod is None]
+    if missing:
+        raise ValueError(f"Adapter source generation requires pre-lowered device_mod and host_mod; missing: {', '.join(missing)}.")
+    return device_mod, host_mod
+
+
 class TLCUDASourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
@@ -218,6 +229,7 @@ class TLCUDASourceWrapper:
         "float8_e5m2": "fp8_e5_t",
         "float64": "double",
         "int64": "int64_t",
+        "uint64": "uint64_t",
         "int32": "int",
         "uint32": "unsigned int",
         "bool": "int8_t",
@@ -446,12 +458,13 @@ class TLCUDASourceWrapper:
 
         return tma_descriptor_init
 
+    def get_cuda_host_adapter_include(self) -> str:
+        if is_cuda_target(self.target) and self.tma_descriptor_args is not None:
+            return "#include <cutlass/cuda_host_adapter.hpp>\n"
+        return ""
+
     def parse_source_information(self):
-        if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
-                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-            self.device_mod = device_mod
-            self.host_mod = host_mod
+        self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
         assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
@@ -615,10 +628,10 @@ class TLCUDASourceWrapper:
         # Create the host function wrapper for the CUDA kernel
         host_func = self.create_dispatch_func(code, function_informations)
         # Combine the source, initialization function, and host function to form the complete library code
-        lib_code = self.source + init_func + host_func
+        lib_code = self.source + self.get_cuda_host_adapter_include() + init_func + host_func
         return lib_code
 
-    def get_stream_type(self) -> dict[str, str]:
+    def get_stream_type(self) -> dict[str, str] | None:
         return {"name": "stream=cudaStreamDefault", "type": "cudaStream_t"}
 
     @property
@@ -841,11 +854,7 @@ class TLCPUSourceWrapper:
         return host_func
 
     def parse_source_information(self):
-        if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs), self.target:
-                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-            self.device_mod = device_mod
-            self.host_mod = host_mod
+        self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
         assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
@@ -904,6 +913,135 @@ class TLCPUSourceWrapper:
                 if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
                     return function
             raise ValueError("Cannot find primary function in the module.")
+
+
+class TLAscendSourceWrapper(TLCUDASourceWrapper):
+    """Wrapper for Ascend backend kernel source.
+
+    Ascend kernels use ``__global__ __vector__`` qualifiers and the triple-
+    chevron launch syntax ``<<<grid, smem, stream>>>`` (no block dim).
+    This wrapper reuses the CUDA wrapper infrastructure but overrides the
+    launch code generation and init/stream helpers for ACL runtime.
+    """
+
+    _TYPE_MAP = {
+        "float32": "float",
+        "float16": "half",
+        "bfloat16": "bfloat16_t",
+        "float8_e4m3": "fp8_e4_t",
+        "float8_e4m3fn": "fp8_e4_t",
+        "float8_e5m2": "fp8_e5_t",
+        "float8_e8m0fnu": "fp8_e8_t",
+        "float4_e2m1fn": "float4_e2m1x2_t",
+        "float64": "double",
+        "int64": "int64_t",
+        "int32": "int",
+        "uint32": "unsigned int",
+        "bool": "int8_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "int16": "int16_t",
+        "uint16": "uint16_t",
+    }
+
+    def __init__(
+        self,
+        scheduled_ir_module: IRModule,
+        source: str,
+        target: Target,
+        device_mod: IRModule | None = None,
+        host_mod: IRModule | None = None,
+        pass_configs: dict[str, Any] | None = None,
+    ):
+        super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
+
+    def get_declaration(self, declare_kernel_code: str) -> str:
+        # Ascend kernel declarations end with ')' before '{', no forward decl ';'
+        return declare_kernel_code.split("{")[0]
+
+    def create_dispatch_func(self, code, function_informations):
+        """Generate the host ``call()`` function with Ascend launch semantics.
+
+        Ascend uses ``<<<grid, smem, stream>>>`` (three arguments, no block
+        dim) and ACL error checking instead of CUDA equivalents.
+        """
+        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+
+        function_args = []
+        for param in self.prim_func.params:
+            if param in self.prim_func.buffer_map:
+                buffer = self.prim_func.buffer_map[param]
+                function_args.append(
+                    {
+                        "name": buffer.data.name,
+                        "type": self._lookup_type(buffer.dtype) + "* __restrict__",
+                    }
+                )
+            elif isinstance(param, tvm.tirx.Var):
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+            else:
+                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
+        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
+            if dyn_sym not in [arg["name"] for arg in function_args]:
+                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+
+        stream_type = self.get_stream_type()
+        if stream_type is not None:
+            function_args.append(stream_type)
+
+        def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
+
+        kernel_launch_code = """"""
+        for function_name, function_info in function_informations.items():
+            grid_info = function_info["grid_info"]
+            dynamic_smem_buf = function_info["dynamic_smem_buf"]
+            function_params = function_info["function_params"]
+
+            # Ascend kernel signature: __global__ __vector__ <ret> name(...)
+            # match_declare_kernel expects __global__ void, so find by name directly.
+            func_decl_pos = code.index(function_name + "(")
+            declaration = self.get_declaration(code[func_decl_pos:])
+            brace_pos = code.index("{", func_decl_pos)  # noqa: F841
+
+            smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
+
+            args_list = parse_function_call_args(declaration, function_args, function_params, {}, {})
+            assert len(function_params) == len(args_list), (
+                f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
+            )
+            call_args = ", ".join(args_list)
+            # Ascend triple-chevron: <<<grid, smem, stream>>> (no block dim)
+            # Ascend bisheng expects grid as a single unsigned int, not dim3
+            grid_dim = f"({self._pythonic_expr(grid_info[0])} * {self._pythonic_expr(grid_info[1])} * {self._pythonic_expr(grid_info[2])})"
+            stream_arg = "stream" if stream_type else "nullptr"
+            kernel_launch_code += f"\t{function_name}<<<{grid_dim}, {smem_str}, {stream_arg}>>>({call_args});\n"
+            kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
+
+        host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
+        return host_func
+
+    def get_init_func(self):
+        # Ascend does not need cudaFuncSetAttribute for dynamic shared memory
+        init_funcs = PREDEF_INIT_FUNC.format("")
+        return init_funcs
+
+    def update_lib_code(self, code: str):
+        # Prepend Ascend common header so TILELANG_CHECK macros and dim3 are available
+        # for both kernel code and wrapper code
+        ascend_header = "#include <tl_templates/ascend/common.h>\n"
+        lib_code = super().update_lib_code(code)
+        # The parent class combines source + init_func + host_func.
+        # We need the header at the very beginning, so prepend it to the final result.
+        if ascend_header not in lib_code:
+            lib_code = ascend_header + lib_code
+        return lib_code
+
+    def get_stream_type(self) -> dict[str, str]:
+        # aclrtStream is typedef void* (defined in acl_base_rt.h:46)
+        # Use void* directly to avoid depending on ACL headers in the host wrapper.
+        # The Cython caller will pass the raw handle obtained from
+        # torch.npu.current_stream().npu_stream.
+        return {"name": "stream=nullptr", "type": "void*"}
 
 
 class TLMetalSourceWrapper:
@@ -969,6 +1107,8 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
+        elif is_ascend_target(self.target):
+            wrapper_class = TLAscendSourceWrapper
         elif is_cpu_target(self.target):
             wrapper_class = TLCPUSourceWrapper
         elif is_metal_target(self.target):

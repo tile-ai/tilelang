@@ -13,7 +13,7 @@ def make_store_cluster_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_cluster_barrier([1])
@@ -43,7 +43,7 @@ def make_store_cluster_simt_no_barrier_kernel(N: int):
         A: T.Tensor((N,), "float32"),
         B: T.Tensor((N,), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((N,), "float32")
             s_dst = T.alloc_shared((N,), "float32")
 
@@ -91,7 +91,7 @@ def make_store_cluster_simt_barrier_kernel(M: int, N_full: int, N_tile: int):
         A: T.Tensor((M, N_tile), "float32"),
         B: T.Tensor((M, N_tile), "float32"),
     ):
-        with T.Kernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
             # Deliberately wider buffer: N_full > N_tile so the slice
             # [0:M, 0:N_tile] is non-contiguous in row-major storage.
             s_src = T.alloc_shared((M, N_full), "float32")
@@ -149,6 +149,34 @@ def test_tma_store_cluster():
         rtol=0,
         atol=0,
         err_msg="tma_store_cluster copy produced wrong result",
+    )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_store_cluster_non_16b_contiguous_fallback(capfd):
+    """A contiguous 508B copy must use the barrier-aware SIMT fallback."""
+    N = 127  # 127 * sizeof(float32) = 508 bytes
+    prim_func = make_store_cluster_kernel(N)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" not in src, f"Non-16B copy must not emit tma_store_cluster.\nKernel source:\n{src}"
+    assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
+    captured = capfd.readouterr()
+    warning_output = captured.out + captured.err
+    assert "Cluster bulk copy size" in warning_output
+    assert "508" in warning_output
+    assert "bytes is not a multiple of 16" in warning_output
+
+    A = torch.arange(N, dtype=torch.float32, device="cuda")
+    B = mod(A)
+    np.testing.assert_allclose(
+        B.cpu().numpy(),
+        A.cpu().numpy(),
+        rtol=0,
+        atol=0,
+        err_msg="Non-16B contiguous cluster-copy fallback produced wrong result",
     )
 
 
@@ -212,6 +240,32 @@ def test_store_cluster_multi_tma_barrier():
     )
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_store_cluster_non_16b_row_fallback(capfd):
+    """A non-contiguous copy with 124B rows must reject row-wise TMA."""
+    M, N_full, N_tile = 4, 64, 31  # Each row is 31 * 4 = 124 bytes
+    prim_func = make_store_cluster_simt_barrier_kernel(M, N_full, N_tile)
+    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+
+    src = mod.get_kernel_source()
+    assert "tl::tma_store_cluster" not in src, f"Non-16B rows must not emit tma_store_cluster.\nKernel source:\n{src}"
+    assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
+    assert "s_barrier[0].init(1)" in src, f"SIMT fallback must keep a single remote arrival.\nKernel source:\n{src}"
+    captured = capfd.readouterr()
+    assert "Cluster bulk copy row size is not a multiple of 16 bytes" in (captured.out + captured.err)
+
+    A = torch.arange(M * N_tile, dtype=torch.float32, device="cuda").reshape(M, N_tile)
+    B = mod(A)
+    np.testing.assert_allclose(
+        B.cpu().numpy(),
+        A.cpu().numpy(),
+        rtol=0,
+        atol=0,
+        err_msg="Non-16B row cluster-copy fallback produced wrong result",
+    )
+
+
 def make_store_cluster_3d_multi_tma_kernel(D: int, M: int, N_full: int, N_tile: int):
     """3-D slice copy decomposed into D*M tma_store_cluster calls.
 
@@ -226,7 +280,7 @@ def make_store_cluster_3d_multi_tma_kernel(D: int, M: int, N_full: int, N_tile: 
         A: T.Tensor((D, M, N_tile), "float32"),
         B: T.Tensor((D, M, N_tile), "float32"),
     ):
-        with T.Kernel(2, threads=D * M * N_tile, cluster_dims=(2, 1, 1)) as pid:
+        with T.ClusterKernel(2, threads=D * M * N_tile, cluster_dims=(2, 1, 1)) as pid:
             s_src = T.alloc_shared((D, M, N_full), "float32")
             s_dst = T.alloc_shared((D, M, N_full), "float32")
             s_barrier = T.alloc_cluster_barrier([1])

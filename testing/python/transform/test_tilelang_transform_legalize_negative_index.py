@@ -262,6 +262,36 @@ def test_buffer_load_vector_index_mixed_sign_ramp_in_kernel():
     _check(before, after)
 
 
+def test_buffer_load_vector_index_runtime_unknown_sign_ramp_in_kernel():
+    """
+    Test runtime-dependent vector ramp lanes whose sign cannot be proven statically.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                B[t, T.Ramp(0, 1, 4)] = A[T.Ramp(t - 2, 1, 4)]
+
+    @T.prim_func
+    def after(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                B[t, T.Ramp(0, 1, 4)] = A[
+                    T.Shuffle(
+                        [
+                            T.Select(t < 2, t + 1022, t - 2),
+                            T.Select(t < 1, t + 1023, t - 1),
+                            t,
+                            t + 1,
+                        ],
+                        [0, 1, 2, 3],
+                    )
+                ]
+
+    _check(before, after)
+
+
 def test_buffer_load_nested_buffer_loads():
     """
     Test legalization with nested buffer load expressions.
@@ -409,6 +439,36 @@ def test_buffer_store_vector_index_mixed_sign_ramp():
         vec = T.Ramp(-2, 1, 4)  # noqa: F841
         values = T.Ramp(0.0, 1.0, 4)
         A[T.Shuffle([1022, 1023, 0, 1], [0, 1, 2, 3])] = values
+
+    _check(before, after)
+
+
+def test_buffer_store_vector_index_runtime_unknown_sign_ramp():
+    """
+    Test runtime-dependent vector store ramp lanes whose sign cannot be proven statically.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                A[T.Ramp(t - 2, 1, 4)] = B[t, T.Ramp(0, 1, 4)]
+
+    @T.prim_func
+    def after(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
+        with T.Kernel(1, threads=1) as _:
+            for t in T.serial(4):
+                A[
+                    T.Shuffle(
+                        [
+                            T.Select(t < 2, t + 1022, t - 2),
+                            T.Select(t < 1, t + 1023, t - 1),
+                            t,
+                            t + 1,
+                        ],
+                        [0, 1, 2, 3],
+                    )
+                ] = B[t, T.Ramp(0, 1, 4)]
 
     _check(before, after)
 

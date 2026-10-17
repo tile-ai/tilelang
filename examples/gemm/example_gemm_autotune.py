@@ -159,7 +159,7 @@ def get_best_config(
             target="auto",
         )
         .set_profile_args(
-            supply_type=tl.TensorSupplyType.Integer,
+            supply_type=tl.TensorSupplyType.Auto,
             ref_prog=ref_program,
             skip_check=False,
             backend=profile_backend,

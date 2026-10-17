@@ -7,6 +7,8 @@ That would be awesome if you want to contribute something to TileLang!
 - [Report Bugs](#report-bugs)
 - [Ask Questions](#ask-questions)
 - [Submit Pull Requests](#submit-pull-requests)
+  - [Testing policy](#testing-policy)
+- [Coding Style](#coding-style)
 - [Setup Development Environment](#setup-development-environment)
 - [Install Develop Version](#install-develop-version)
 - [Lint Check](#lint-check)
@@ -29,12 +31,46 @@ Please ask questions in issues.
 
 ## Submit Pull Requests
 
-All pull requests are super welcomed and greatly appreciated! Issues in need of a solution are marked with a [`♥ help`](https://github.com/ianstormtaylor/TileLang/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%99%A5+help%22) label if you're looking for somewhere to start.
+All pull requests are super welcomed and greatly appreciated! Issues in need of a solution are marked with a [`♥ help`](https://github.com/tile-ai/tilelang/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%99%A5+help%22) label if you're looking for somewhere to start.
 
 If you're new to contributing to TileLang, you can follow the following guidelines before submitting a pull request.
 
-> [!NOTE]
-> Please include tests and docs with every pull request if applicable!
+### Testing policy
+
+- Provide appropriate regression coverage; a bug fix does not automatically require
+  a new standalone test.
+- Prefer extending existing tests with the smallest necessary case.
+- Add independent tests or parameter combinations only when they cover distinct
+  behavior not already covered.
+- Explain the additional coverage when introducing new tests.
+- Update documentation when applicable.
+
+For test placement, case selection, and examples, follow the
+[Testing Style Guide](docs/developer_guide/testing_style.md).
+
+## Coding Style
+
+Run the repository formatter on the files touched by your pull request:
+
+```bash
+bash format.sh --files <changed-file>...
+```
+
+Python code is checked with Ruff through pre-commit. C and C++ code is checked
+with clang-format, and TileLang-owned C++ APIs should follow the
+[C++ Style Guide](docs/developer_guide/cpp_style.md) for naming, TVM object
+usage, header boundaries, and incremental migration.
+
+For a focused C++ API naming or header-boundary cleanup, run the advisory audit
+locally:
+
+```bash
+python3 maint/scripts/audit_cpp_api_style.py
+```
+
+The audit is a review aid, not a blanket rename command. Check each finding for
+FFI visibility, generated code, backend shims, and external API constraints
+before changing it.
 
 ## Setup Development Environment
 

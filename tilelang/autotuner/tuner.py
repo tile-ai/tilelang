@@ -27,140 +27,32 @@ import os
 import sys
 import json
 import hashlib
-import signal
 import threading
 import traceback
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
+from tilelang.autotuner.report import TrialReporter
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
+from tilelang.utils.device import get_available_cpu_count
 from tilelang.autotuner.capture import get_autotune_inputs
-from tilelang.backend.target import determine_target
+from tilelang.engine.param import KernelParam
 from tilelang import __version__
 
+TargetLike = str | dict[str, object] | Target
 
-class TimeoutException(Exception):
-    pass
+ConfigArg = dict[str, Any]
+UnitItem = tuple[int, ConfigArg]
+UnitResult = tuple[int, ConfigArg, tilelang.JITKernel | None, Exception | None]
+CompileUnit = tuple[list[UnitItem], dict | None]
+BucketItem = tuple[int, ConfigArg, dict | None]
 
+# Reserved keys that are not kernel parameters but control compilation behavior
+_RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
 
-def _timeout_handler(signum, frame):  # pragma: no cover - signal handler
-    raise TimeoutException("Operation timed out")
-
-
-def _run_with_sigalrm(func, timeout, *args, **kwargs):
-    """POSIX path: ``SIGALRM`` interrupts ``func`` synchronously inside the
-    same thread. The runaway call actually stops, releasing CPU/GPU resources
-    held by e.g. a stuck CUDA benchmark.
-    """
-    prev_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(int(timeout))
-    try:
-        return func(*args, **kwargs)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, prev_handler)
-
-
-def _async_raise_in_thread(tid: int, exc_type: type) -> bool:
-    """Asynchronously raise ``exc_type`` in the thread identified by ``tid``.
-
-    Uses CPython's :c:func:`PyThreadState_SetAsyncExc` — the same primitive the
-    interpreter itself uses to deliver ``KeyboardInterrupt`` to the main thread,
-    and the Python-level analogue of POSIX ``SIGALRM``. This is the strongest
-    cross-thread cancellation available without breaking process invariants:
-
-    * ``TerminateThread`` (WINAPI) is rejected on purpose — Microsoft's own
-      documentation labels it dangerous because it leaves CRT locks, DLL
-      thread-detach callbacks, and (relevant here) CUDA driver state in an
-      inconsistent state, which can corrupt subsequent kernels.
-    * ``PyThreadState_SetAsyncExc`` only fires at Python bytecode boundaries,
-      so a thread stuck in a C call (e.g. ``cudaStreamSynchronize``) won't
-      respond until it returns to Python. POSIX ``SIGALRM`` has the same
-      practical limitation.
-
-    Returns ``True`` when the exception was queued, ``False`` otherwise.
-    """
-    import ctypes
-
-    set_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
-    set_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
-    set_exc.restype = ctypes.c_int
-
-    affected = set_exc(ctypes.c_ulong(tid), ctypes.py_object(exc_type))
-    if affected == 0:
-        return False
-    if affected > 1:
-        # If more than one thread was affected (should not happen with a
-        # single tid), undo the side-effect to avoid leaving threads with a
-        # pending async exception.
-        set_exc(ctypes.c_ulong(tid), None)
-        return False
-    return True
-
-
-def _run_with_thread(func, timeout, *args, **kwargs):
-    """Cross-platform fallback when ``SIGALRM`` is unavailable (Windows) or
-    when called outside the main thread (``signal.signal`` is restricted to
-    the main thread on POSIX).
-
-    Mirrors POSIX ``SIGALRM`` semantics as closely as Python allows by running
-    ``func`` **on the current thread** while a daemon watchdog thread sleeps
-    until the deadline. On timeout the watchdog uses
-    ``PyThreadState_SetAsyncExc`` to inject :class:`TimeoutException` back into
-    the caller, which surfaces at the next Python bytecode boundary.
-
-    Crucially, this preserves ``threading.local()``-backed state (e.g.
-    ``set_autotune_inputs``'s capture stack) — moving ``func`` onto a worker
-    thread would silently zero out that state and break callers that read it.
-    """
-    target_tid = threading.get_ident()
-    cancel = threading.Event()
-    fired = threading.Event()
-
-    def _watchdog():
-        if cancel.wait(timeout):
-            # ``func`` finished before the deadline — nothing to do.
-            return
-        if _async_raise_in_thread(target_tid, TimeoutException):
-            fired.set()
-
-    watchdog = threading.Thread(target=_watchdog, daemon=True, name="tl-tuner-watchdog")
-    watchdog.start()
-    try:
-        return func(*args, **kwargs)
-    except TimeoutException:
-        # Re-raise with the standard message regardless of whether the async
-        # exception we injected won the race against an in-flight Python
-        # exception in ``func``.
-        raise TimeoutException(f"Operation timed out after {timeout}s") from None
-    finally:
-        # Stop the watchdog. If we got here without timing out the watchdog is
-        # blocked in ``cancel.wait`` and will exit immediately. If the watchdog
-        # already fired, ``func`` raised TimeoutException above (caught and
-        # re-raised) — but a stray async exception may still be queued, so
-        # clear it defensively before the caller continues running Python code.
-        cancel.set()
-        if fired.is_set():
-            import ctypes
-
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(target_tid), ctypes.py_object(0))
-
-
-def run_with_timeout(func, timeout, *args, **kwargs):
-    """Run ``func`` under a deadline, raising :class:`TimeoutException` if exceeded.
-
-    Picks the strongest available primitive:
-
-    * **POSIX, main thread**: ``SIGALRM``. The deadline truly interrupts
-      ``func`` mid-execution and frees its resources.
-    * **Otherwise** (Windows, or POSIX off the main thread): a daemon
-      ``ThreadPoolExecutor``. The deadline only unblocks the caller; the
-      runaway worker keeps running until it returns on its own.
-    """
-    if hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
-        return _run_with_sigalrm(func, timeout, *args, **kwargs)
-    return _run_with_thread(func, timeout, *args, **kwargs)
+# Internal key used to pass per-config pass_configs through config_arg dicts
+_PASS_CONFIGS_KEY = "__pass_configs__"
 
 
 # Configure logging for the autotuner module
@@ -189,16 +81,6 @@ def _init_logger_handlers():
     _logger_handlers_initialized = True
 
 
-def get_available_cpu_count() -> int:
-    """Gets the number of CPU cores available to the current process."""
-    try:
-        cpu_count = len(os.sched_getaffinity(0))
-    except AttributeError:
-        cpu_count = os.cpu_count()
-
-    return cpu_count or 1
-
-
 def _normalize_value(value, sort_dict_items: bool = False):
     if isinstance(value, torch.Tensor):
         return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
@@ -214,11 +96,40 @@ def _normalize_value(value, sort_dict_items: bool = False):
     return value
 
 
+def _can_reuse_inputs(params: list[KernelParam], cached_params: list[KernelParam] | None, inputs: list[Any]) -> bool:
+    """Check cached inputs against the current signature as a whole."""
+    if cached_params is None or len(params) != len(inputs) or len(params) != len(cached_params):
+        return False
+
+    symbolic_dims: dict[Var, int] = {}
+    for param, cached_param, value in zip(params, cached_params, inputs):
+        if not isinstance(value, torch.Tensor):
+            # Python scalars do not retain their kernel dtype. Compare the
+            # signatures instead of duplicating backend scalar conversion rules.
+            if param.dtype != cached_param.dtype or len(param.shape) != len(cached_param.shape):
+                return False
+            continue
+
+        if param.torch_dtype() != value.dtype or len(param.shape) != value.ndim:
+            return False
+        for dim, size in zip(param.shape, value.shape):
+            if isinstance(dim, Var):
+                # Bind by Var identity across all inputs, not by variable name.
+                if symbolic_dims.setdefault(dim, size) != size:
+                    return False
+            elif dim != size:
+                return False
+
+    return True
+
+
 @dataclass
 class _BenchmarkWorkerState:
     jit_input_tensors: Any = None
+    jit_input_params: list[KernelParam] | None = None
     ref_input_tensors: Any = None
     ref_latency_cache: float | None = None
+    shared_best_latency: list[float] | None = None
 
 
 class AutoTuner:
@@ -243,9 +154,6 @@ class AutoTuner:
     def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
-        self.ref_latency_cache = None
-        self.jit_input_tensors = None
-        self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
 
@@ -275,9 +183,9 @@ class AutoTuner:
     def set_compile_args(
         self,
         out_idx: list[int] | int | None = None,
-        target: Literal["auto", "cuda", "hip", "metal"] | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
-        target_host: str | Target | None = None,
+        target: TargetLike | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] | None = None,
+        target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
     ):
@@ -285,7 +193,9 @@ class AutoTuner:
 
         Args:
             out_idx: List of output tensor indices.
-            target: Target platform. If None, reads from TILELANG_TARGET environment variable (defaults to "auto").
+            target: Target platform. If None, reads from TILELANG_DEFAULT_TARGET environment variable
+                (defaults to "auto"). Use a dict for target attributes, for example
+                {"kind": "cuda", "arch": "sm_90"}.
             execution_backend: Execution backend to use for kernel execution. If None, reads from
                 TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
             target_host: Target host for cross-compilation.
@@ -294,7 +204,8 @@ class AutoTuner:
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
 
         Environment Variables:
-            TILELANG_TARGET: Default compilation target (e.g., "cuda", "llvm"). Defaults to "auto".
+            TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a JSON
+                target config string). Defaults to "auto".
             TILELANG_EXECUTION_BACKEND: Default execution backend. Defaults to "auto".
             TILELANG_VERBOSE: Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
 
@@ -309,17 +220,15 @@ class AutoTuner:
         if verbose is None:
             verbose = env.get_default_verbose()
 
-        # Normalize target to a concrete TVM Target and resolve execution backend
-        t = Target(determine_target(target))
-        from tilelang.backend.execution_backend import resolve_execution_backend
+        from tilelang.backend.module import create_backend_context
 
-        resolved_backend = resolve_execution_backend(execution_backend, t)
+        backend_context = create_backend_context(target, target_host, execution_backend)
 
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=t,
-            execution_backend=resolved_backend,
-            target_host=target_host,
+            target=backend_context.target,
+            execution_backend=backend_context.execution_backend.name,
+            target_host=backend_context.target_host,
             verbose=verbose,
             pass_configs=pass_configs,
         )
@@ -353,11 +262,11 @@ class AutoTuner:
             max_mismatched_ratio: Maximum allowed mismatch ratio.
             skip_check: Whether to skip validation.
             manual_check_prog: Manual check program for validation.
-            cache_input_tensors: Whether to cache input tensors.
+            cache_input_tensors: Whether to reuse compatible input tensors across trials within each run.
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+            backend: Profiler backend - "event", "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -436,8 +345,22 @@ class AutoTuner:
                     "Please provide concrete inputs with `with set_autotune_inputs(...)`."
                 )
 
-    def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> AutotuneResult | None:
+    def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> str | None:
         """Generate a cache key for the auto-tuning process."""
+
+        # Arbitrary callbacks do not have a reliable persistent identity:
+        # importable functions may serialize by name, while closures may hold
+        # unpicklable runtime state. Avoid cache reuse rather than risk serving
+        # results produced with different input or validation behavior.
+        if any(
+            callback is not None
+            for callback in (
+                self.profile_args.ref_prog,
+                self.profile_args.supply_prog,
+                self.profile_args.manual_check_prog,
+            )
+        ):
+            return None
 
         # extract parameters from the function signature
         op_parameters = []
@@ -470,14 +393,34 @@ class AutoTuner:
         return result
 
     # Compile-related helpers
+    def _merge_pass_configs_into_compile_args(
+        self,
+        per_config_pass_configs: dict[str, Any] | None,
+    ) -> CompileArgs:
+        """Merge per-config pass_configs over global CompileArgs defaults."""
+        if not per_config_pass_configs:
+            return self.compile_args
+        merged = dict(self.compile_args.pass_configs or {})
+        merged.update(per_config_pass_configs)
+        return CompileArgs(
+            out_idx=self.compile_args.out_idx,
+            execution_backend=self.compile_args.execution_backend,
+            target=self.compile_args.target,
+            target_host=self.compile_args.target_host,
+            verbose=self.compile_args.verbose,
+            pass_configs=merged,
+        )
+
     def _default_compile(
         self,
         **config_arg,
     ) -> tilelang.JITKernel:
-        compile_args = self.compile_args
+        per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
+        compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         return compile_args.compile_program(self.fn(**config_arg))
 
     def _default_elaborate(self, **config_arg) -> PrimFunc:
+        config_arg.pop(_PASS_CONFIGS_KEY, None)
         return self.fn(**config_arg)
 
     def _ensure_jit_functions(
@@ -532,7 +475,7 @@ class AutoTuner:
 
     def _prepare_compile_execution(
         self,
-        config_args: list[dict[str, Any]],
+        config_args: list[ConfigArg],
         grouped_compile_active: bool,
         group_compile_size: int,
         compile_func: Callable[..., tilelang.JITKernel],
@@ -540,13 +483,13 @@ class AutoTuner:
     ) -> tuple[
         concurrent.futures.ThreadPoolExecutor,
         list[concurrent.futures.Future],
-        dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]],
+        dict[concurrent.futures.Future, list[UnitItem]],
         str,
     ]:
         num_workers = self._resolve_num_compile_workers()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures: list[concurrent.futures.Future] = []
-        future_to_unit: dict[concurrent.futures.Future, list[tuple[int, dict[str, Any]]]] = {}
+        future_to_unit: dict[concurrent.futures.Future, list[UnitItem]] = {}
 
         def cuda_device_wrapper(func: Callable[..., Any], device: int):
             def inner(**config_arg):
@@ -569,15 +512,16 @@ class AutoTuner:
                 elaborate_impl = cuda_device_wrapper(elaborate_func, device)
             return elaborate_impl
 
-        def compile_unit(unit_items: list[tuple[int, dict[str, Any]]]):
+        def compile_unit(unit_items: list[UnitItem], per_config_pass_configs=None):
             if grouped_compile_active:
+                effective_compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
                 return compile_grouped_unit_tvm_ffi(
                     unit_items=unit_items,
-                    compile_args=self.compile_args,
+                    compile_args=effective_compile_args,
                     elaborate_func=get_elaborate_func(),
                 )
             compile_impl = get_compile_func()
-            unit_results: list[tuple[int, dict[str, Any], tilelang.JITKernel | None, Exception | None]] = []
+            unit_results: list[UnitResult] = []
             for idx, config_arg in unit_items:
                 try:
                     jit_kernel = compile_impl(**config_arg)
@@ -586,17 +530,26 @@ class AutoTuner:
                     unit_results.append((idx, config_arg, None, e))
             return unit_results
 
-        compile_units: list[list[tuple[int, dict[str, Any]]]] = []
+        compile_units: list[CompileUnit] = []
         if grouped_compile_active:
-            for start in range(0, len(config_args), group_compile_size):
-                end = min(start + group_compile_size, len(config_args))
-                compile_units.append([(i, config_args[i]) for i in range(start, end)])
+            # Bucket configs by per-config pass_configs value
+            buckets: dict[tuple | None, list[BucketItem]] = {}
+            for i, cfg in enumerate(config_args):
+                pc = cfg.pop(_PASS_CONFIGS_KEY, None)
+                key = tuple(sorted(pc.items())) if pc else None
+                buckets.setdefault(key, []).append((i, cfg, pc))
+            for bucket_items in buckets.values():
+                per_pc = bucket_items[0][2]  # all items in bucket share same pass_configs
+                items = [(idx, cfg) for idx, cfg, _ in bucket_items]
+                for start in range(0, len(items), group_compile_size):
+                    end = min(start + group_compile_size, len(items))
+                    compile_units.append((items[start:end], per_pc))
         else:
             for i, config_arg in enumerate(config_args):
-                compile_units.append([(i, config_arg)])
+                compile_units.append(([(i, config_arg)], None))
 
-        for unit_items in compile_units:
-            future = pool.submit(compile_unit, unit_items)
+        for unit_items, per_pc in compile_units:
+            future = pool.submit(compile_unit, unit_items, per_pc)
             futures.append(future)
             future_to_unit[future] = unit_items
 
@@ -622,6 +575,26 @@ class AutoTuner:
                 logger.warning("Failed to bind benchmark worker to cuda:%s", worker_device)
                 logger.debug("Error: %s", traceback.format_exc())
 
+        benchmark_device = worker_device if torch.cuda.is_available() and target_kind == "cuda" else None
+
+        def _call_benchmark_target(
+            jit_kernel: tilelang.JITKernel,
+            benchmark_state: _BenchmarkWorkerState,
+        ) -> tuple[float, float | None]:
+            # Timeout mode runs benchmark_target in a fresh daemon thread, so
+            # scope the device at the actual call site.
+            def invoke():
+                return benchmark_target(
+                    jit_kernel=jit_kernel,
+                    benchmark_state=benchmark_state,
+                    benchmark_device=benchmark_device,
+                )
+
+            if benchmark_device is None:
+                return invoke()
+            with torch.cuda.device(benchmark_device):
+                return invoke()
+
         start_event.wait()
         queue_poll_timeout_s = 0.1
         while True:
@@ -637,8 +610,10 @@ class AutoTuner:
                     call_result_queue: queue.Queue = queue.Queue()
                     call_state = _BenchmarkWorkerState(
                         jit_input_tensors=worker_state.jit_input_tensors,
+                        jit_input_params=worker_state.jit_input_params,
                         ref_input_tensors=worker_state.ref_input_tensors,
                         ref_latency_cache=worker_state.ref_latency_cache,
+                        shared_best_latency=worker_state.shared_best_latency,
                     )
 
                     def _run_benchmark_target(
@@ -647,13 +622,8 @@ class AutoTuner:
                         _call_result_queue: queue.Queue = call_result_queue,
                     ):
                         try:
-                            latency, worker_ref_latency = benchmark_target(
-                                jit_kernel=_jit_kernel,
-                                benchmark_state=_worker_state,
-                            )
+                            latency, worker_ref_latency = _call_benchmark_target(_jit_kernel, _worker_state)
                             _call_result_queue.put(("ok", latency, worker_ref_latency, ""))
-                        except TimeoutException:
-                            _call_result_queue.put(("timeout", None, None, ""))
                         except Exception:
                             _call_result_queue.put(("error", None, None, traceback.format_exc()))
 
@@ -661,6 +631,8 @@ class AutoTuner:
                     benchmark_call_thread.start()
                     benchmark_call_thread.join(timeout=timeout)
                     if benchmark_call_thread.is_alive():
+                        # The timed-out call may still mutate its cached inputs.
+                        worker_state.jit_input_tensors = None
                         result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
                         continue
 
@@ -682,6 +654,7 @@ class AutoTuner:
 
                     if status == "ok":
                         worker_state.jit_input_tensors = call_state.jit_input_tensors
+                        worker_state.jit_input_params = call_state.jit_input_params
                         worker_state.ref_input_tensors = call_state.ref_input_tensors
                         worker_state.ref_latency_cache = call_state.ref_latency_cache
                         result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
@@ -690,13 +663,8 @@ class AutoTuner:
                     else:
                         result_queue.put((idx, config, jit_kernel, None, None, "error", error_text))
                 else:
-                    latency, worker_ref_latency = benchmark_target(
-                        jit_kernel=jit_kernel,
-                        benchmark_state=worker_state,
-                    )
+                    latency, worker_ref_latency = _call_benchmark_target(jit_kernel, worker_state)
                     result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
-            except TimeoutException:
-                result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
             except Exception:
                 result_queue.put((idx, config, jit_kernel, None, None, "error", traceback.format_exc()))
 
@@ -705,7 +673,9 @@ class AutoTuner:
         jit_kernel: tilelang.JITKernel,
         warmup: int,
         rep: int,
+        early_stop_factor: float,
         benchmark_state: _BenchmarkWorkerState,
+        benchmark_device: int | torch.device | None = None,
     ) -> tuple[float, float | None]:
         profile_args = self.profile_args
         supply_type = profile_args.supply_type
@@ -736,36 +706,21 @@ class AutoTuner:
         jit_input_tensors_cache = benchmark_state.jit_input_tensors
         ref_input_tensors_cache = benchmark_state.ref_input_tensors
         ref_latency_cache = benchmark_state.ref_latency_cache
+        params = profiler._get_params(with_output=False)
 
-        if cache_input_tensors:
-            params = profiler._get_params(with_output=False)
-            if jit_input_tensors_cache is None:
-                jit_input_tensors_cache = jit_input_tensors_supply()
-            else:
-                assert len(params) == len(jit_input_tensors_cache), "len(params) != len(jit_input_tensors_cache)"
-                for p, c in zip(params, jit_input_tensors_cache):
-                    if not isinstance(c, torch.Tensor):
-                        continue
-
-                    def shape_equal(a, b):
-                        return all(
-                            a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape)
-                        )
-
-                    if p.dtype != c.dtype or not shape_equal(p, c):
-                        logger.warning(
-                            "\nIncompatible input tensor properties detected between cached tensors and "
-                            "tensors regenerated for the current configuration trial. "
-                            "This can happen if different tuning configurations require different input shapes/dtypes "
-                            "and input tensor caching is enabled.\n"
-                            "To ensure fresh, compatible inputs are generated for every trial "
-                            "you can disable caching by setting:\n"
-                            "  `cache_input_tensors=False`\n"
-                            "within your `.set_compile_args(...)` call.\n"
-                        )
-                        jit_input_tensors_cache = jit_input_tensors_supply()
-                        break
-        else:
+        if not cache_input_tensors or jit_input_tensors_cache is None:
+            jit_input_tensors_cache = jit_input_tensors_supply()
+        elif not _can_reuse_inputs(params, benchmark_state.jit_input_params, jit_input_tensors_cache):
+            logger.warning(
+                "\nIncompatible input properties detected between cached inputs and "
+                "the current configuration trial. "
+                "This can happen if different tuning configurations require different input shapes/dtypes "
+                "and input tensor caching is enabled.\n"
+                "To ensure fresh, compatible inputs are generated for every trial "
+                "you can disable caching by setting:\n"
+                "  `cache_input_tensors=False`\n"
+                "within your `.set_profile_args(...)` call.\n"
+            )
             jit_input_tensors_cache = jit_input_tensors_supply()
 
         if (not skip_check) and (ref_prog is not None):
@@ -775,7 +730,15 @@ class AutoTuner:
                 profiler.assert_allclose(
                     ref_prog, input_tensors=jit_input_tensors_cache, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio
                 )
-        latency = profiler.do_bench(n_warmup=warmup, n_repeat=rep, input_tensors=jit_input_tensors_cache, backend=backend)
+        latency = profiler.do_bench(
+            n_warmup=warmup,
+            n_repeat=rep,
+            input_tensors=jit_input_tensors_cache,
+            backend=backend,
+            early_stop_baseline=(
+                benchmark_state.shared_best_latency[0] * early_stop_factor if benchmark_state.shared_best_latency is not None else None
+            ),
+        )
 
         if ref_latency_cache is None and ref_prog is not None:
             ref_input_tensors_cache = ref_input_tensors_supply()
@@ -785,9 +748,11 @@ class AutoTuner:
                 n_repeat=rep,
                 input_tensors=ref_input_tensors_cache,
                 backend=backend,
+                device=benchmark_device,
             )
 
         benchmark_state.jit_input_tensors = jit_input_tensors_cache
+        benchmark_state.jit_input_params = params
         benchmark_state.ref_input_tensors = ref_input_tensors_cache
         benchmark_state.ref_latency_cache = ref_latency_cache
 
@@ -868,6 +833,9 @@ class AutoTuner:
         group_compile_size: int = 2,
         benchmark_devices: list[int] | None = None,
         benchmark_multi_gpu: bool = False,
+        early_stop: bool = False,
+        early_stop_factor: float = 2.0,
+        on_trial: Callable[[dict], None] | None = None,
     ):
         """Run the auto-tuning process.
 
@@ -880,11 +848,23 @@ class AutoTuner:
             group_compile_size: Number of configurations in one compile unit.
             benchmark_devices: CUDA device ordinals used for benchmark workers when benchmark_multi_gpu=True.
             benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
+            early_stop: Whether to skip full benchmark when estimate exceeds best * early_stop_factor.
+            early_stop_factor: Multiplier for best latency to compute early stop threshold.
+            on_trial: Experimental, synchronous observer of detached outcome records.
+                Not part of the cache identity. Cache hits have no trial history.
+                Ordinary sink errors disable reporting without failing tuning.
+                Not supported with early_stop until estimated latency is distinguishable.
 
         Returns:
             AutotuneResult: Results of the auto-tuning process.
         """
         _init_logger_handlers()
+
+        if early_stop and early_stop_factor < 1.0:
+            raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
+        if on_trial is not None and early_stop:
+            raise ValueError("Trial reporting with early_stop is not supported in this prototype")
+        reporter = TrialReporter(on_trial, logger)
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
@@ -915,8 +895,9 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
+        cached_result = None
         with self._lock:
-            if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
+            if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
                     # Include PrimFunc name when hitting autotuner memory cache
@@ -927,18 +908,21 @@ class AutoTuner:
                         "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
                         kernel_name,
                     )
-                    return cached_result
+                else:
+                    # Then check disk cache
+                    cached_result = self._load_result_from_disk(key)
+                    if cached_result is not None:
+                        self._memory_cache[key] = cached_result
 
-                # Then check disk cache
-                result = self._load_result_from_disk(key)
-                if result is not None:
-                    # Populate memory cache with disk result
-                    self._memory_cache[key] = result
-                    return result
+        if cached_result is not None:
+            # Never invoke user code while holding the shared cache lock.
+            reporter.emit("cache_hit")
+            return cached_result
 
-        best_latency: float = 1e8
+        best_latency: float = float("inf")
         best_config: dict[str, Any] | None = None
         best_kernel: tilelang.JITKernel | None = None
+        shared_best_latency_ref: list[float] | None = [float("inf")] if early_stop else None
 
         compile_func, elaborate_func = self._ensure_jit_functions()
         self.jit_compile = compile_func
@@ -947,13 +931,15 @@ class AutoTuner:
         config_args = []
         for config in self.configs:
             new_kwargs = {}
+            per_config_pass_configs = config.get("pass_configs", None)
             keys = config.keys()
             for name, _ in parameters.items():
                 if name in config:
                     new_kwargs[name] = config[name]
-            unused_keys = set(keys) - set(new_kwargs.keys())
+            unused_keys = set(keys) - set(new_kwargs.keys()) - _RESERVED_CONFIG_KEYS
             if len(unused_keys) > 0:
                 raise ValueError(f"Unused keys in config: {unused_keys}")
+            new_kwargs[_PASS_CONFIGS_KEY] = per_config_pass_configs
             config_args.append(new_kwargs)
 
         if len(config_args) == 0:
@@ -976,7 +962,7 @@ class AutoTuner:
 
         if self._kernel_parameters is not None:
             key_args_tuple, key_kwargs_tuple = self._kernel_parameters
-            tunable_arguments = [key for key, _ in top_config.items()]
+            tunable_arguments = [key for key, _ in top_config.items() if key != _PASS_CONFIGS_KEY]
 
             def check_tunable_argument_value(key, parameters, key_args_tuple) -> bool:
                 params_list = list(parameters.keys())
@@ -993,13 +979,18 @@ class AutoTuner:
                 # compile the kernel with the provided parameters
                 jit_kernel = self.jit_compile()
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
-                self._memory_cache[key] = autotuner_result
+                if key is not None:
+                    self._memory_cache[key] = autotuner_result
+                reporter.emit("direct_jit")
                 return autotuner_result
 
         # After confirming tuning will actually run, validate that scalar
         # inputs can be supplied (either via supply_prog or set_autotune_inputs).
-        if hasattr(self, "_prim_func_for_validation"):
-            self._validate_input_supply_requirements(self._prim_func_for_validation, self.compile_args.out_idx)
+        # Build the prim_func from a concrete config so tunable parameters are
+        # bound to real values instead of their ``None`` defaults, which would
+        # otherwise crash inside TVM (e.g. ceildiv with a None extent).
+        prim_func_for_validation = elaborate_func(**top_config)
+        self._validate_input_supply_requirements(prim_func_for_validation, self.compile_args.out_idx)
 
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
@@ -1011,21 +1002,21 @@ class AutoTuner:
         )
 
         ref_latency = None
-        main_thread_benchmark_state = _BenchmarkWorkerState(
-            jit_input_tensors=self.jit_input_tensors,
-            ref_input_tensors=self.ref_input_tensors,
-            ref_latency_cache=self.ref_latency_cache,
-        )
+        # Keep inputs and reference timings local to this run. A later run may
+        # use another device or input supplier even with the same signature.
+        main_thread_benchmark_state = _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
 
         def _record_benchmark_result(latency: float, config: dict[str, Any], jit_kernel: tilelang.JITKernel, idx: int, progress_bar):
             nonlocal best_latency, best_config, best_kernel
             if latency < best_latency:
                 best_latency = latency
-                best_config = config
+                best_config = dict(self.configs[idx])
                 best_kernel = jit_kernel
+                if shared_best_latency_ref is not None:
+                    shared_best_latency_ref[0] = latency
 
             progress_bar.set_postfix({"best_latency": best_latency})
-            tqdm.write(f"Tuned Latency {latency} with config {config} at index {idx}")
+            tqdm.write(f"Tuned Latency {latency} with config {self.configs[idx]} at index {idx}")
 
         benchmark_worker_devices = benchmark_device_list if benchmark_multi_gpu_active else [benchmark_device_list[0]]
         benchmark_task_queues = [queue.Queue() for _ in benchmark_worker_devices]
@@ -1047,11 +1038,12 @@ class AutoTuner:
             self._benchmark_target,
             warmup=warmup,
             rep=rep,
+            early_stop_factor=early_stop_factor,
         )
 
         def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
             nonlocal benchmark_expected_results
-            queue_idx = idx % len(benchmark_task_queues)
+            queue_idx = min(len(benchmark_task_queues) - 1, idx * len(benchmark_task_queues) // max(1, len(config_args)))
             benchmark_task_queues[queue_idx].put((jit_kernel, config, idx))
             benchmark_expected_results += 1
 
@@ -1062,10 +1054,12 @@ class AutoTuner:
             progress_bar.update(1)
 
             if status == "timeout":
-                logger.warning(f"A timeout occurred while testing config {config}, checkout autotuner.log for more details")
+                reporter.emit("timeout", idx, self.configs[idx], validation="unknown")
+                logger.warning(f"A timeout occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 return
             if status == "error":
-                logger.warning(f"An error occurred while testing config {config}, checkout autotuner.log for more details")
+                reporter.emit("benchmark_error", idx, self.configs[idx], validation="unknown", error=error_text)
+                logger.warning(f"An error occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 if error_text:
                     logger.debug(f"Error: {error_text}")
                 return
@@ -1074,6 +1068,8 @@ class AutoTuner:
                 ref_latency = worker_ref_latency
             assert latency is not None
             _record_benchmark_result(latency=latency, config=config, jit_kernel=jit_kernel, idx=idx, progress_bar=progress_bar)
+            validation = "passed" if not self.profile_args.skip_check and self.profile_args.ref_prog is not None else "not_run"
+            reporter.emit("ok", idx, self.configs[idx], latency=latency, validation=validation)
 
         def _drain_benchmark_results(progress_bar, block: bool):
             while benchmark_processed_results < benchmark_expected_results:
@@ -1088,7 +1084,11 @@ class AutoTuner:
 
         # Start benchmark worker threads
         for worker_idx, worker_device in enumerate(benchmark_worker_devices):
-            worker_state = _BenchmarkWorkerState() if benchmark_multi_gpu_active else main_thread_benchmark_state
+            worker_state = (
+                _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
+                if benchmark_multi_gpu_active
+                else main_thread_benchmark_state
+            )
             worker_thread = threading.Thread(
                 target=self._benchmark_worker_loop,
                 args=(
@@ -1126,12 +1126,15 @@ class AutoTuner:
                         compile_progress.update(len(unit_items))
                         unit_indexes = [idx for idx, _ in unit_items]
                         logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
+                        for idx, _ in unit_items:
+                            reporter.emit("compile_error", idx, self.configs[idx], error=e)
                         continue
 
                     compile_progress.update(len(unit_results))
                     for idx, config, jit_kernel, error in unit_results:
                         if error is not None:
-                            logger.debug(f"Compilation failed for config {config} at index {idx} with error: {error}")
+                            reporter.emit("compile_error", idx, self.configs[idx], error=error)
+                            logger.debug(f"Compilation failed for config {self.configs[idx]} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
                         _enqueue_benchmark_task(jit_kernel=jit_kernel, config=config, idx=idx)
@@ -1160,10 +1163,6 @@ class AutoTuner:
             progress_bar.close()
             pool.shutdown()
 
-        self.jit_input_tensors = main_thread_benchmark_state.jit_input_tensors
-        self.ref_input_tensors = main_thread_benchmark_state.ref_input_tensors
-        self.ref_latency_cache = main_thread_benchmark_state.ref_latency_cache
-
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."
             logger.error(error_msg)
@@ -1184,14 +1183,15 @@ class AutoTuner:
             kernel=best_kernel,
         )
 
-        if self.compile_args.execution_backend in ("torch"):
-            logger.warning("DLPack backend does not support cache saving to disk.")
+        if self.compile_args.execution_backend == "torch":
+            logger.warning("Torch backend does not support cache saving to disk.")
         else:
             with self._lock:
-                if env.is_cache_enabled() and not env.is_autotune_cache_disabled():
+                if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                     self._save_result_to_disk(key, autotuner_result)
 
-        self._memory_cache[key] = autotuner_result
+        if key is not None:
+            self._memory_cache[key] = autotuner_result
 
         return autotuner_result
 
@@ -1226,9 +1226,39 @@ class AutoTuneImpl(Generic[_P, _T]):
     manual_check_prog: Callable = None
     cache_input_tensors: bool = False
     do_not_specialize: tuple[str, ...] | list[str] | None = None
+    early_stop: bool = False
+    early_stop_factor: float = 2.0
 
     def __post_init__(self):
         self._tuner_cache = {}
+        self._pass_configs_lock = threading.Lock()
+
+    def _make_jit_compile_func(self, mode: str, args: tuple, kwargs: dict) -> Callable[..., JITKernel]:
+        """Create a jit_compile closure for the given mode ('lazy' or 'eager').
+
+        All compilation paths are serialized under _pass_configs_lock because
+        per-config pass_configs temporarily mutates self.jit_impl.pass_configs.
+        """
+
+        def jit_compile(**config_arg):
+            per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
+            with self._pass_configs_lock:
+                original_pass_configs = self.jit_impl.pass_configs
+                if per_config_pass_configs is not None:
+                    merged_pc = dict(original_pass_configs or {})
+                    merged_pc.update(per_config_pass_configs)
+                    self.jit_impl.pass_configs = merged_pc
+
+                try:
+                    if per_config_pass_configs is None and mode == "lazy":
+                        return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
+                    merged = dict(kwargs)
+                    merged.update(config_arg)
+                    return self.jit_impl.compile(*args, **merged)
+                finally:
+                    self.jit_impl.pass_configs = original_pass_configs
+
+        return jit_compile
 
     def get_tunner(self):
         autotuner = (
@@ -1253,7 +1283,14 @@ class AutoTuneImpl(Generic[_P, _T]):
                 pass_configs=self.jit_impl.pass_configs,
             )
         )
-        autotuner.run = partial(autotuner.run, self.warmup, self.rep, self.timeout)
+        autotuner.run = partial(
+            autotuner.run,
+            self.warmup,
+            self.rep,
+            self.timeout,
+            early_stop=self.early_stop,
+            early_stop_factor=self.early_stop_factor,
+        )
         return autotuner
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
@@ -1261,10 +1298,6 @@ class AutoTuneImpl(Generic[_P, _T]):
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
         autotuner = self.get_tunner()
-        # Defer scalar-input validation to run(), after we know whether
-        # tuning will actually execute or be skipped because all tunable
-        # parameters are already provided by the caller.
-        autotuner._prim_func_for_validation = self.jit_impl.get_tir(*args, **kwargs)
 
         # Compute the cache key, excluding do_not_specialize parameters
         # so that changing them does not trigger re-autotuning.
@@ -1282,28 +1315,14 @@ class AutoTuneImpl(Generic[_P, _T]):
         if key not in self._tuner_cache:
 
             def jit_elaborate(**config_arg):
+                config_arg.pop(_PASS_CONFIGS_KEY, None)
                 merged = dict(kwargs)
                 merged.update(config_arg)
                 return self.jit_impl.get_tir(*args, **merged)
 
-            if mode == "lazy":
-
-                def jit_compile(**config_arg):
-                    return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
-
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
-            else:
-
-                def jit_compile(**config_arg):
-                    merged = dict(kwargs)
-                    merged.update(config_arg)
-                    return self.jit_impl.compile(*args, **merged)
-
-                autotuner.jit_compile = jit_compile
-                autotuner.jit_elaborate = jit_elaborate
-                autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
+            autotuner.jit_compile = self._make_jit_compile_func(mode, args, kwargs)
+            autotuner.jit_elaborate = jit_elaborate
+            autotuner.set_kernel_parameters(key, self.jit_impl.signature.parameters)
 
             artifact = autotuner.run()
             self._tuner_cache[key] = artifact.kernel, artifact.config
@@ -1317,7 +1336,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 return best_kernel
             exec_kwargs = dict(kwargs)
             if best_config is not None:
-                exec_kwargs.update(best_config)
+                exec_kwargs.update({k: v for k, v in best_config.items() if k not in _RESERVED_CONFIG_KEYS})
             _, kernel_args = self.jit_impl.func.parse_args(*args, **exec_kwargs)
             return best_kernel(*kernel_args.values())
 
@@ -1344,6 +1363,8 @@ def autotune(  # This is the new public interface
     manual_check_prog: Callable = None,
     cache_input_tensors: bool = False,
     do_not_specialize: tuple[str, ...] | list[str] | None = None,
+    early_stop: bool = False,
+    early_stop_factor: float = 2.0,
 ):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
@@ -1374,13 +1395,13 @@ def autotune(  # This is the new public interface
     rep : int, optional
         Number of repetitions for timing measurements.
     timeout : int, optional
-    target : Union[str, Target], optional
+    target : Union[str, dict, Target], optional
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
-    target_host : Union[str, Target], optional
+    target_host : Union[str, dict, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"], optional
+    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible
-        default per target (cuda->tvm_ffi, metal->torch, others->cython).
+        default declared by the target backend (e.g., cuda->tvm_ffi, metal->torch, pto->pto).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional
@@ -1420,6 +1441,8 @@ def autotune(  # This is the new public interface
                 manual_check_prog=manual_check_prog,
                 cache_input_tensors=cache_input_tensors,
                 do_not_specialize=do_not_specialize,
+                early_stop=early_stop,
+                early_stop_factor=early_stop_factor,
             )
 
         return decorator

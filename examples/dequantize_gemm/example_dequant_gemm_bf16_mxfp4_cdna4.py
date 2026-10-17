@@ -19,7 +19,7 @@ from tvm import DataType
 from tvm import tirx
 import torch
 
-from tilelang.quantize import get_mxfp_intrin_group
+from quantize import get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
@@ -43,7 +43,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
 
 def _get_target():
     """Return TVM hip target for gfx950."""
-    return tvm.target.Target("hip -mcpu=gfx950")
+    return tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
 
 
 def get_configs():
@@ -59,7 +59,7 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1], target="hip -mcpu=gfx950")
+@tilelang.jit(out_idx=[-1], target={"kind": "hip", "mcpu": "gfx950"})
 def matmul(
     M,
     N,
@@ -160,7 +160,7 @@ def matmul(
                     dtype=out_dtype,
                 )
 
-                for v in T.Parallel(local_size):
+                for v in T.vectorized(local_size):
                     B_dequantize_local_thread[v] *= Scale_local_thread_exponent[0]
 
                 for v in T.vectorized(0, local_size):

@@ -1,3 +1,5 @@
+import numpy as np
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -47,6 +49,43 @@ def test_basic_hoist():
                 T.evaluate(0)
 
     _check(before, expected)
+
+
+def test_hoist_preserves_non_unit_loop_step():
+    output_buffer = tvm.tirx.decl_buffer((6,), "int32", name="output")
+    cond_buffer = tvm.tirx.decl_buffer((1,), "int32", name="cond")
+    i = tvm.tirx.Var("i", "int32")
+    body = tvm.tirx.IfThenElse(
+        tvm.tirx.BufferLoad(cond_buffer, [0]) > 0,
+        tvm.tirx.BufferStore(output_buffer, 1, [i]),
+        None,
+    )
+    loop = tvm.tirx.For(
+        i,
+        1,
+        5,
+        tvm.tirx.ForKind.SERIAL,
+        body,
+        step=tvm.tirx.IntImm("int32", 2),
+    )
+    before = tvm.tirx.PrimFunc(
+        [output_buffer.data, cond_buffer.data],
+        loop,
+        buffer_map={
+            output_buffer.data: output_buffer,
+            cond_buffer.data: cond_buffer,
+        },
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(before)
+    mod = tl.transform.LoopUnswitching()(mod)
+    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+
+    output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
+    cond = tvm.runtime.tensor(np.ones(1, dtype="int32"))
+    executable["main"](output, cond)
+
+    np.testing.assert_array_equal(output.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
 
 def test_hoist_with_else():
@@ -291,6 +330,41 @@ def test_hoist_multiple_let_bound_variables():
     _check(before, expected)
 
 
+def test_unswitch_restores_ssa_after_simplify_keeps_bind():
+    """Copied flat Bind definitions must receive distinct Var identities."""
+
+    @T.prim_func
+    def before(out: T.Tensor((4,), T.int32), enabled: T.int32):
+        for i in range(4):
+            condition = enabled > 0
+            if condition:
+                out[i] = 1
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.Simplify()(mod)
+    mod = tl.transform.LoopUnswitching()(mod)
+
+    assert tvm.tirx.analysis.verify_ssa(mod["main"])
+    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+
+
+def test_unswitch_freshens_non_condition_bind_definitions():
+    """SSA repair must cover all copied Bind definitions, not only guards."""
+
+    @T.prim_func
+    def before(out: T.Tensor((4,), T.int32), enabled: T.int32):
+        for i in range(4):
+            value = i + 1
+            if enabled > 0:
+                out[i] = value
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.LoopUnswitching()(mod)
+
+    assert tvm.tirx.analysis.verify_ssa(mod["main"])
+    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+
+
 def test_multiple_identical_conditions():
     """Multiple if statements with the same condition should all be replaced."""
 
@@ -324,6 +398,99 @@ def test_multiple_identical_conditions():
                 T.evaluate(0)
 
     _check(before, expected)
+
+
+def test_same_buffer_rebuilt_load_conditions_are_replaced():
+    """Repeated loads from the same buffer/index are the same guard."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if P[0] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+    ):
+        if P[0] < 4:
+            for i in range(128):
+                B[i] = A[i]
+                C[i] = A[i] * T.float32(2.0)
+        else:
+            for _i in range(128):
+                T.evaluate(0)
+                T.evaluate(0)
+
+    _check(before, expected)
+
+
+def test_same_shape_different_buffer_conditions_are_not_collapsed():
+    """Structurally similar guards on different buffers are distinct."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+        Q: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if Q[0] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    _check(before, before)
+
+
+def test_same_buffer_different_index_conditions_are_not_collapsed():
+    """Guards on the same buffer but different indices are distinct."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+        P: T.Tensor((2,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if P[1] < 4:
+                C[i] = A[i] * T.float32(2.0)
+
+    _check(before, before)
+
+
+def test_call_checker_does_not_exclude_different_buffer_guard():
+    """Calls under a sibling guard on another buffer still block unswitching."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        P: T.Tensor((1,), T.int32),
+        Q: T.Tensor((1,), T.int32),
+    ):
+        for i in range(128):
+            if P[0] < 4:
+                B[i] = A[i]
+            if Q[0] < 4:
+                T.evaluate(T.call_extern("handle", "generic_op"))
+
+    _check(before, before)
 
 
 def test_multiple_identical_conditions_with_else():

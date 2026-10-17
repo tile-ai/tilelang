@@ -98,6 +98,67 @@ struct fp8_e5_t {
     return static_cast<float>(static_cast<hip_fp8_e5_t>(*this));
   }
 };
+
+// HIP's shuffle builtins do not provide exact overloads for TileLang's FP8
+// wrappers. Carry the raw byte through the native unsigned-int overload so the
+// exact FP8 bit pattern is preserved without widening through float.
+#define TL_DEFINE_FP8_SHFL_OVERLOADS(TYPE)                                     \
+  __device__ __forceinline__ TYPE __shfl(TYPE value, int src_lane,             \
+                                         int width = warpSize) {               \
+    TYPE result;                                                               \
+    result.data = static_cast<unsigned char>(                                  \
+        __shfl(static_cast<unsigned int>(value.data), src_lane, width));       \
+    return result;                                                             \
+  }                                                                            \
+  __device__ __forceinline__ TYPE __shfl_xor(TYPE value, int lane_mask,        \
+                                             int width = warpSize) {           \
+    TYPE result;                                                               \
+    result.data = static_cast<unsigned char>(                                  \
+        __shfl_xor(static_cast<unsigned int>(value.data), lane_mask, width));  \
+    return result;                                                             \
+  }                                                                            \
+  __device__ __forceinline__ TYPE __shfl_down(TYPE value, unsigned int delta,  \
+                                              int width = warpSize) {          \
+    TYPE result;                                                               \
+    result.data = static_cast<unsigned char>(                                  \
+        __shfl_down(static_cast<unsigned int>(value.data), delta, width));     \
+    return result;                                                             \
+  }                                                                            \
+  __device__ __forceinline__ TYPE __shfl_up(TYPE value, unsigned int delta,    \
+                                            int width = warpSize) {            \
+    TYPE result;                                                               \
+    result.data = static_cast<unsigned char>(                                  \
+        __shfl_up(static_cast<unsigned int>(value.data), delta, width));       \
+    return result;                                                             \
+  }
+
+TL_DEFINE_FP8_SHFL_OVERLOADS(fp8_e4_t)
+TL_DEFINE_FP8_SHFL_OVERLOADS(fp8_e5_t)
+
+#undef TL_DEFINE_FP8_SHFL_OVERLOADS
+
+template <typename ScalarType, typename PackedType>
+__device__ __forceinline__ ScalarType
+tl_fp8x2_get_lane(const PackedType &packed, int lane) {
+  ScalarType result;
+  result.data = static_cast<unsigned char>(
+      (static_cast<unsigned int>(packed.__x) >> (lane * 8)) & 0xffu);
+  return result;
+}
+
+template <typename PackedType, typename ScalarType>
+__device__ __forceinline__ void tl_fp8x2_set_lane(PackedType &packed, int lane,
+                                                  ScalarType value) {
+  if (lane == 0) {
+    // The result carrier is uninitialized before its first lane is written.
+    packed.__x = static_cast<decltype(packed.__x)>(value.data);
+    return;
+  }
+  packed.__x = static_cast<decltype(packed.__x)>(
+      (static_cast<unsigned int>(packed.__x) & 0x00ffu) |
+      (static_cast<unsigned int>(value.data) << 8));
+}
+
 // Note: E8M0 types are not supported in current HIP version
 // using fp8_e8_t = __hip_fp8_e8m0_fnuz;
 // using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;

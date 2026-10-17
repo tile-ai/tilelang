@@ -1,0 +1,358 @@
+"""Pass-timing tool for TileLang compilation pipelines.
+
+Records inclusive and self wall-clock duration for each pass using
+``time.monotonic()``. Data persists after PassContext exit for
+post-compilation reporting.
+
+Enabled via TILELANG_PASS_PROFILE=1 env var or
+PassConfigKey.TL_PASS_PROFILE pass config.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from tvm.ir import _ffi_instrument_api
+
+from tilelang.instrumentation import (
+    PassInstrumentationTool,
+    current_pass_instrument_context,
+)
+
+logger = logging.getLogger("tilelang.pass_timing")
+
+
+def _extract_kernel_label(mod) -> str:
+    """Derive a compact kernel label from the IRModule being compiled.
+
+    Returns the primary function's name (preferring ``global_symbol``,
+    falling back to the ``GlobalVar.name_hint``). When the module contains
+    multiple functions (e.g. grouped-device compilation), returns
+    ``"<first> +<N-1> more"``. Returns an empty string when no label can be
+    derived, so callers can simply omit the suffix.
+
+    This runs inside every pass callback and must never raise; any unexpected
+    error is swallowed and an empty string is returned.
+    """
+    try:
+        functions = getattr(mod, "functions", None) if mod is not None else None
+        if not functions:
+            return ""
+        names: list[str] = []
+        for gv, func in functions.items():
+            attrs = getattr(func, "attrs", None)
+            name = attrs.get("global_symbol") if attrs is not None else None
+            if name is None:
+                name = getattr(gv, "name_hint", None)
+            if name is None:
+                continue
+            name = str(name)
+            if name not in names:
+                names.append(name)
+        if not names:
+            return ""
+        if len(names) == 1:
+            return names[0]
+        return f"{names[0]} +{len(names) - 1} more"
+    except Exception:
+        return ""
+
+
+@dataclass
+class PassTimingRecord:
+    """Single completed pass execution record."""
+
+    name: str
+    duration_s: float
+    depth: int  # nesting depth (0 = top-level)
+    self_duration_s: float = 0.0
+    sequence: int = 0
+    kernel: str = ""
+
+
+@dataclass
+class _ActivePass:
+    name: str
+    start_time: float
+    depth: int
+    sequence: int
+    child_duration_s: float = 0.0
+    kernel: str = ""
+
+
+class _PassTimingState:
+    """Mutable callback state owned by the underlying TVM instrument."""
+
+    def __init__(self):
+        self.records: list[PassTimingRecord] = []
+        self.stack: list[_ActivePass] = []
+        self.next_sequence = 0
+
+    def enter_pass_ctx(self):
+        self.records.clear()
+        self.stack.clear()
+        self.next_sequence = 0
+
+    def exit_pass_ctx(self):
+        if self.stack:
+            logger.warning(
+                "Discarding %d incomplete pass timing frame(s): %s",
+                len(self.stack),
+                ", ".join(frame.name for frame in self.stack),
+            )
+            self.stack.clear()
+
+    def run_before_pass(self, mod, info):
+        self.stack.append(
+            _ActivePass(
+                name=info.name,
+                start_time=time.monotonic(),
+                depth=len(self.stack),
+                sequence=self.next_sequence,
+                kernel=_extract_kernel_label(mod),
+            )
+        )
+        self.next_sequence += 1
+
+    def run_after_pass(self, _mod, info):
+        if not self.stack or self.stack[-1].name != info.name:
+            expected = self.stack[-1].name if self.stack else "<none>"
+            logger.warning(
+                "Ignoring unmatched pass timing callback for %s (expected %s)",
+                info.name,
+                expected,
+            )
+            self.stack.clear()
+            return
+
+        frame = self.stack.pop()
+        duration_s = time.monotonic() - frame.start_time
+        self_duration_s = max(0.0, duration_s - frame.child_duration_s)
+        self.records.append(
+            PassTimingRecord(
+                name=frame.name,
+                duration_s=duration_s,
+                self_duration_s=self_duration_s,
+                depth=frame.depth,
+                sequence=frame.sequence,
+                kernel=frame.kernel,
+            )
+        )
+        if self.stack:
+            self.stack[-1].child_duration_s += duration_s
+
+
+class TileLangPassTimingInstrument:
+    """Per-pass timing instrument for tilelang compilation pipelines.
+
+    This is a plain-Python wrapper that creates a TVM ``PassInstrument``
+    internally. Callback state is kept separate so the native instrument does
+    not retain this wrapper.
+
+    Parameters
+    ----------
+    threshold_ms : float
+        Only show passes whose inclusive duration meets this threshold (ms).
+        0.0 means show all passes.
+    """
+
+    def __init__(self, threshold_ms: float = 0.0):
+        self._state = _PassTimingState()
+        self._records = self._state.records
+        self._stack = self._state.stack
+        self._threshold_ms = threshold_ms
+        self._instrument = self._create_tvm_instrument(self._state)
+
+    def _enter_pass_ctx(self):
+        self._state.enter_pass_ctx()
+
+    def _exit_pass_ctx(self):
+        self._state.exit_pass_ctx()
+
+    def _run_before_pass(self, info, mod=None):
+        self._state.run_before_pass(mod, info)
+
+    def _run_after_pass(self, info):
+        self._state.run_after_pass(None, info)
+
+    @staticmethod
+    def _create_tvm_instrument(state: _PassTimingState):
+        """Create an instrument whose callbacks do not retain the wrapper."""
+        return _ffi_instrument_api.PassInstrument(
+            "TileLangPassTimingInstrument",
+            state.enter_pass_ctx,
+            state.exit_pass_ctx,
+            None,
+            state.run_before_pass,
+            state.run_after_pass,
+        )
+
+    @property
+    def instrument(self):
+        """The underlying TVM PassInstrument to add to ``PassContext``."""
+        return self._instrument
+
+    @property
+    def records(self) -> list[PassTimingRecord]:
+        return sorted(self._records, key=lambda record: record.sequence)
+
+    @property
+    def total_duration_s(self) -> float:
+        # Sum only top-level passes to avoid double-counting nested passes.
+        return sum(record.duration_s for record in self._records if record.depth == 0)
+
+    def report(self, context: str | None = None) -> str:
+        """Generate a formatted timing report string."""
+        if not self._records:
+            message = "[tilelang pass timing] No passes recorded."
+            return f"{message} Context: {context}" if context else message
+
+        threshold_s = self._threshold_ms / 1000.0
+        total = self.total_duration_s
+        records = self.records
+        lines = []
+
+        def _display_name(record: PassTimingRecord) -> str:
+            return f"{record.name}({record.kernel})" if record.kernel else record.name
+
+        # Dynamic pass-name column width so the "(kernel)" suffix never breaks
+        # the table alignment. Only visible (post-threshold) rows are counted.
+        visible_names = [f"{'  ' * r.depth}{_display_name(r)}" for r in records if r.duration_s >= threshold_s]
+        name_col_width = max([43] + [len(n) for n in visible_names])
+        sep_width = name_col_width + 53
+
+        lines.append("=" * sep_width)
+        lines.append("TileLang Pass Timing Report")
+        if context:
+            lines.append(f"Context: {context}")
+        lines.append("=" * sep_width)
+        lines.append(f"Total: {total:.4f}s ({len(self._records)} passes)")
+        if self._threshold_ms > 0:
+            lines.append(f"(inclusive threshold: {self._threshold_ms:.1f}ms)")
+        lines.append("-" * sep_width)
+        lines.append(f"{'#':>3}  {'Pass Name':<{name_col_width}} {'Inclusive':>10} {'Self':>10}  {'Incl %':>7} {'Self %':>7}")
+        lines.append("-" * sep_width)
+
+        skipped = 0
+        for index, record in enumerate(records, 1):
+            if record.duration_s < threshold_s:
+                skipped += 1
+                continue
+            inclusive_pct = (record.duration_s / total * 100) if total > 0 else 0
+            self_pct = (record.self_duration_s / total * 100) if total > 0 else 0
+            name_col = f"{'  ' * record.depth}{_display_name(record)}"
+            lines.append(
+                f"{index:>3}  {name_col:<{name_col_width}} {record.duration_s:>9.4f}s "
+                f"{record.self_duration_s:>9.4f}s {inclusive_pct:>6.1f}% {self_pct:>6.1f}%"
+            )
+
+        lines.append("-" * sep_width)
+        sorted_records = sorted(
+            (record for record in self._records if record.duration_s >= threshold_s),
+            key=lambda record: record.duration_s,
+            reverse=True,
+        )
+        top_n = min(10, len(sorted_records))
+        if top_n > 0:
+            lines.append(f"Top {top_n} Slowest Passes by Inclusive Time:")
+            for rank, record in enumerate(sorted_records[:top_n], 1):
+                inclusive_pct = (record.duration_s / total * 100) if total > 0 else 0
+                lines.append(
+                    f"  {rank:>2}. {_display_name(record):<{name_col_width + 2}} {record.duration_s:>9.4f}s {inclusive_pct:>5.1f}%"
+                )
+
+        if skipped > 0:
+            lines.append(f"\n({skipped} passes skipped - under {self._threshold_ms:.1f}ms inclusive threshold)")
+
+        lines.append("=" * sep_width)
+        return "\n".join(lines)
+
+    def print_report(self, context: str | None = None):
+        """Print the timing report to the logger."""
+        logger.info("\n%s", self.report(context=context))
+
+
+@dataclass(frozen=True)
+class _PassTimingRun:
+    context: str | None
+    timing: TileLangPassTimingInstrument
+
+
+class PassTimingTool(PassInstrumentationTool):
+    """Per-compile owner of timing callbacks and their combined report."""
+
+    # Timing starts before, and finishes before, later instrument callbacks so
+    # their reporting/snapshot overhead is excluded from pass duration.
+    pass_instrument_priority = -100
+
+    def __init__(self, threshold_ms: float = 0.0):
+        self.threshold_ms = threshold_ms
+        self._runs: list[_PassTimingRun] = []
+        self._finished = False
+
+    def create_pass_instrument(self) -> object:
+        timing = TileLangPassTimingInstrument(threshold_ms=self.threshold_ms)
+        self._runs.append(
+            _PassTimingRun(
+                context=current_pass_instrument_context(),
+                timing=timing,
+            )
+        )
+        return timing.instrument
+
+    @property
+    def timings(self) -> tuple[TileLangPassTimingInstrument, ...]:
+        return tuple(run.timing for run in self._runs)
+
+    @property
+    def contexts(self) -> tuple[str | None, ...]:
+        return tuple(run.context for run in self._runs)
+
+    @property
+    def records(self) -> list[PassTimingRecord]:
+        return [record for run in self._runs for record in run.timing.records]
+
+    def report(self) -> str:
+        """Generate one compile report containing one section per PassContext."""
+        return "\n\n".join(run.timing.report(context=run.context) for run in self._runs)
+
+    def print_report(self) -> None:
+        """Print all PassContext timing sections in one logger call."""
+        if self._runs:
+            logger.info("\n%s", self.report())
+
+    def finish(self, error: BaseException | None) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.print_report()
+
+
+def create_pass_timing_tool(
+    pass_configs: Mapping[object, object] | None,
+) -> PassTimingTool | None:
+    """Create the per-compile timing tool when config or environment enables it."""
+    from tilelang import env
+    from tilelang.env import resolve_pass_profile_threshold_ms
+    from tilelang.transform import PassConfigKey
+
+    pass_configs = pass_configs or {}
+    if not (pass_configs.get(PassConfigKey.TL_PASS_PROFILE) or env.is_pass_profile_enabled()):
+        return None
+    threshold_ms = resolve_pass_profile_threshold_ms(
+        pass_configs,
+        PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS,
+        env.get_pass_profile_threshold_ms,
+    )
+    return PassTimingTool(threshold_ms=threshold_ms)
+
+
+__all__ = [
+    "PassTimingRecord",
+    "PassTimingTool",
+    "TileLangPassTimingInstrument",
+    "create_pass_timing_tool",
+]
