@@ -23,7 +23,7 @@
 
 #include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/int64_promoter.h"
+#include "common/index_predicate_rewriter.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
@@ -59,7 +59,8 @@ public:
     }
     auto writer = func.CopyOnWrite();
     pass.MarkBufferMapShapes(func);
-    writer->body = pass.VisitStmt(func->body);
+    Stmt rewritten = pass.VisitStmt(func->body);
+    writer->body = pass.index_predicate_rewriter_.Rewrite(rewritten);
     // The buffers in func->buffer_map are deliberately left
     // unflattened, as they are used for validation of user-provided
     // arguments.  The flattened buffers used in the updated
@@ -161,7 +162,12 @@ private:
     }
     // canonicalize shape
     for (size_t i = 0; i < flattened->shape.size(); ++i) {
-      writer->shape.Set(i, analyzer_->canonical_simplify(flattened->shape[i]));
+      const PrimExpr &shape = flattened->shape[i];
+      // Preserve recorded access nodes until their guards have been rewritten.
+      // The simplifier can clone loads while canonicalizing this metadata.
+      if (!index_predicate_rewriter_.HasPromotedAccess(shape)) {
+        writer->shape.Set(i, analyzer_->canonical_simplify(shape));
+      }
     }
     // Flattened indices already include buf->elem_offset (see
     // VisitBufferAccess). Zero elem_offset so later passes (e.g.
@@ -176,7 +182,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     bool store_returns_bool = (op->value.dtype() == DataType::Bool());
-    store = VisitBufferAccess(store);
+    IndexPredicateRewriter::Promoter promoter;
+    store = VisitBufferAccess(store, promoter);
 
     // Handle casts from the value's dtype to the dtype of the
     // backing array.
@@ -187,15 +194,16 @@ private:
           << "Expected int8 backing array for boolean tensor";
       auto writer = store.CopyOnWrite();
       writer->value = tvm::cast(DataType::Int(8), store->value);
-      return std::move(store);
     }
+    index_predicate_rewriter_.Record(store, promoter);
     return std::move(store);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     bool load_returns_bool = (op->dtype == DataType::Bool());
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    load = VisitBufferAccess(load);
+    IndexPredicateRewriter::Promoter promoter;
+    load = VisitBufferAccess(load, promoter);
     // Handle casts from dtype of the backing array to value's dtype.
     // TODO(Lunderberg): Move the handling of boolean into a
     // dedicated pass.
@@ -203,8 +211,10 @@ private:
       ICHECK_EQ(load->buffer->dtype, DataType::Int(8))
           << "Expected int8 backing array for boolean tensor";
       load.CopyOnWrite()->dtype = DataType::Int(8);
+      index_predicate_rewriter_.Record(load, promoter);
       return tvm::cast(DataType::Bool(), load);
     } else {
+      index_predicate_rewriter_.Record(load, promoter);
       return std::move(load);
     }
   }
@@ -218,13 +228,22 @@ private:
     }
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_GE(call->args.size(), 3)
-          << "tvm_access_ptr must have at least 3 arguments";
-      PrimExpr offset = call->args[2];
+      ICHECK_GE(call->args.size(), 4)
+          << "tvm_access_ptr must have offset and extent arguments";
+      IndexPredicateRewriter::Promoter promoter;
+      PrimExpr original_offset = call->args[2];
+      PrimExpr offset =
+          index_predicate_rewriter_.PrepareIndex(original_offset, promoter);
       if (NeedsInt64Promotion(offset)) {
-        Int64Promoter promoter;
-        call.CopyOnWrite()->args.Set(2, promoter(offset));
+        PrimExpr promoted = promoter(offset);
+        promoter.RecordExtent(original_offset, promoted, call->args[3]);
+        promoter.RecordExtent(offset, promoted, call->args[3]);
+        offset = promoted;
       }
+      if (!offset.same_as(call->args[2])) {
+        call.CopyOnWrite()->args.Set(2, offset);
+      }
+      index_predicate_rewriter_.Record(call, promoter);
     }
     return std::move(call);
   }
@@ -243,14 +262,22 @@ private:
     return max_value >= (type_max - 1) || min_value < type_min;
   }
 
-  Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
-                                          const Array<PrimExpr> &indices) {
-    auto flattened_indices = buffer->ElemOffset(indices);
+  Array<PrimExpr>
+  GetSimplifiedElemOffset(const Buffer &buffer, const Array<PrimExpr> &indices,
+                          IndexPredicateRewriter::Promoter &promoter) {
+    auto prepared_indices = indices.Map([&](const PrimExpr &index) {
+      return index_predicate_rewriter_.PrepareIndex(index, promoter);
+    });
+    auto flattened_indices = buffer->ElemOffset(prepared_indices);
     Array<PrimExpr> safe_indices;
-    Int64Promoter promoter;
-    for (const auto &index : flattened_indices) {
+    for (const auto &original_index : flattened_indices) {
+      PrimExpr index =
+          index_predicate_rewriter_.PrepareIndex(original_index, promoter);
       if (NeedsInt64Promotion(index)) {
-        safe_indices.push_back(promoter(index));
+        PrimExpr promoted = promoter(index);
+        promoter.RecordIndex(original_index, promoted);
+        promoter.RecordIndex(index, promoted);
+        safe_indices.push_back(promoted);
       } else {
         safe_indices.push_back(index);
       }
@@ -258,10 +285,12 @@ private:
     return this->IterMapSimplifyWithContext(safe_indices, false);
   }
 
-  template <typename Node> Node VisitBufferAccess(Node node) {
+  template <typename Node>
+  Node VisitBufferAccess(Node node,
+                         IndexPredicateRewriter::Promoter &promoter) {
     ICHECK(node->buffer.defined());
     auto flattened_indices =
-        GetSimplifiedElemOffset(node->buffer, node->indices);
+        GetSimplifiedElemOffset(node->buffer, node->indices, promoter);
     Buffer flattened_buffer = GetFlattenedBuffer(node->buffer);
 
     auto writer = node.CopyOnWrite();
@@ -284,10 +313,11 @@ private:
       max_values.push_back(range->min + range->extent - 1);
     }
 
+    IndexPredicateRewriter::Promoter promoter;
     Array<PrimExpr> flattened_min =
-        GetSimplifiedElemOffset(orig_buf, min_values);
+        GetSimplifiedElemOffset(orig_buf, min_values, promoter);
     Array<PrimExpr> flattened_max =
-        GetSimplifiedElemOffset(orig_buf, max_values);
+        GetSimplifiedElemOffset(orig_buf, max_values, promoter);
 
     Array<Range> flattened_ranges;
     ICHECK_EQ(flattened_min.size(), flattened_max.size());
@@ -309,6 +339,8 @@ private:
 
   /*! \brief Local var initializers preserved from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
+
+  IndexPredicateRewriter index_predicate_rewriter_;
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
