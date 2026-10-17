@@ -341,16 +341,18 @@ public:
               !IsAppropriateSharedMemory(GetRef<Var>(buf))) {
             return;
           }
-          if (std::find(pending_wgmma_buffers_.begin(),
-                        pending_wgmma_buffers_.end(),
-                        buf) == pending_wgmma_buffers_.end()) {
-            pending_wgmma_buffers_.push_back(buf);
+          for (const auto &pending : pending_wgmma_buffers_) {
+            if (pending.first == buf) {
+              return;
+            }
           }
+          pending_wgmma_buffers_.emplace_back(buf, scope_.size());
         });
       }
     } else if (op->op.same_as(tl::wait_wgmma()) ||
                op->op.same_as(tl::warpgroup_wait())) {
-      for (const VarNode *buf : pending_wgmma_buffers_) {
+      for (const auto &pending : pending_wgmma_buffers_) {
+        const VarNode *buf = pending.first;
         // Count the wait as a read, with the same scope attribution as a
         // BufferLoad.
         if (enable_aggressive_merge_) {
@@ -362,10 +364,20 @@ public:
         }
       }
       // wait(N) leaves up to N MMAs in flight; only a full wait retires them.
-      const auto *pending =
+      // A wait nested deeper than the descriptor initialization may sit in a
+      // branch that other paths skip, so it only retires operands initialized
+      // at its own scope depth or deeper.
+      const auto *count =
           op->args.empty() ? nullptr : op->args[0].as<IntImmNode>();
-      if (pending != nullptr && pending->value == 0) {
-        pending_wgmma_buffers_.clear();
+      if (count != nullptr && count->value == 0) {
+        const size_t wait_depth = scope_.size();
+        pending_wgmma_buffers_.erase(
+            std::remove_if(pending_wgmma_buffers_.begin(),
+                           pending_wgmma_buffers_.end(),
+                           [&](const auto &pending) {
+                             return pending.second >= wait_depth;
+                           }),
+            pending_wgmma_buffers_.end());
       }
     }
   }
@@ -417,7 +429,8 @@ private:
   // The size of the scope.
   size_t scope_level_{0};
   // Shared buffers read by WGMMAs that no full wait has retired yet.
-  std::vector<const VarNode *> pending_wgmma_buffers_;
+  // Each entry carries the scope depth of its descriptor initialization.
+  std::vector<std::pair<const VarNode *, size_t>> pending_wgmma_buffers_;
 };
 
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {

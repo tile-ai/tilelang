@@ -236,7 +236,7 @@ def test_wgmma_gemm_sliced_operand_correctness(M, N, K, num_k_tiles):
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
 
 
-def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64):
+def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64, conditional_first_wait=False):
     # B0 is last used syntactically by the first wgmma_gemm (via its descriptor), but the
     # MMA reads it until wait_wgmma. B1 is written in between and must not share B0's storage.
     @T.prim_func
@@ -255,6 +255,10 @@ def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64):
             T.copy(Q[b, 0:m, 0:d], A, disable_tma=True)
             T.copy(K[b, 0:m, 0:d], B0, disable_tma=True)
             T.wgmma_gemm(A, B0, C0, transpose_B=True, clear_accum=True)
+            if conditional_first_wait:  # noqa: SIM102 - the prim_func parser needs the nested form
+                # Only some CTAs retire the first wgmma here, so B0 must stay live until the final wait.
+                if b % 2 == 0:
+                    T.wait_wgmma(0)
             T.copy(K[b, m : 2 * m, 0:d], B1, disable_tma=True)
             T.wgmma_gemm(A, B1, C1, transpose_B=True, clear_accum=True)
             T.wait_wgmma(0)
@@ -267,11 +271,16 @@ def _make_async_wgmma_reuse_kernel(num_ctas=256, m=64, d=64):
 
 
 @tilelang.testing.requires_cuda
-def test_async_wgmma_operand_not_merged_before_wait():
-    # Compile-only: B0 and B1 must get distinct shared-memory offsets (#3525).
+@pytest.mark.parametrize("conditional_first_wait", [False, True])
+def test_async_wgmma_operand_not_merged_before_wait(conditional_first_wait):
+    # Compile-only: B0 and B1 must get distinct shared-memory offsets (#3525), also when an
+    # earlier wait_wgmma sits in a branch that other paths skip.
     import re
 
-    kernel = tilelang.compile(_make_async_wgmma_reuse_kernel(), target={"kind": "cuda", "arch": "sm_90a"})
+    kernel = tilelang.compile(
+        _make_async_wgmma_reuse_kernel(conditional_first_wait=conditional_first_wait),
+        target={"kind": "cuda", "arch": "sm_90a"},
+    )
     src = kernel.get_kernel_source()
     offsets = {}
     for name in ("B0", "B1"):
