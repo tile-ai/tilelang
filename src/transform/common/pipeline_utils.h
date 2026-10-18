@@ -15,6 +15,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 
 namespace tvm {
@@ -68,6 +69,66 @@ inline ffi::Array<Stmt> NormalizePipelineBody(const Stmt &body) {
 inline Stmt MakePipelineBody(const ffi::Array<Stmt> &stmts) {
   ICHECK(!stmts.empty());
   return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+}
+
+/*! \brief Conservatively compare pipeline accesses without thread domains.
+ *
+ * The two accesses may execute in different threads. A symbolic index shared
+ * by both regions therefore cannot establish disjointness by cancellation.
+ * Only dimensions with thread-independent constant bounds can rule out an
+ * overlap here. Distinct views of the same allocation also remain dependent.
+ */
+inline bool PipelineRegionsMayConflict(const BufferRegion &lhs,
+                                       const BufferRegion &rhs) {
+  if (!lhs->buffer->data.same_as(rhs->buffer->data)) {
+    return false;
+  }
+  if (!lhs->buffer.same_as(rhs->buffer) ||
+      lhs->region.size() != rhs->region.size()) {
+    return true;
+  }
+  arith::Analyzer analyzer;
+  if (!lhs->buffer->strides.empty()) {
+    // Logical coordinates need not be injective for an explicitly strided
+    // buffer. Compare physical offsets, requiring constant bounds so different
+    // threads cannot share a symbolic variable in the disjointness proof.
+    if (!lhs->buffer->axis_separators.empty()) {
+      return true;
+    }
+    auto physical_region = [&](const BufferRegion &region) {
+      ffi::Map<Var, arith::IntSet> domains;
+      ffi::Array<PrimExpr> indices;
+      for (const Range &range : region->region) {
+        Var index("region_index", range->min.dtype());
+        domains.Set(index, arith::IntSet::FromRange(range));
+        indices.push_back(index);
+      }
+      return arith::EvalSet(region->buffer->ElemOffset(indices)[0], domains);
+    };
+    arith::IntSet a = physical_region(lhs), b = physical_region(rhs);
+    if (a.HasLowerBound() && a.HasUpperBound() && b.HasLowerBound() &&
+        b.HasUpperBound() && as_const_int(analyzer.Simplify(a.min())) &&
+        as_const_int(analyzer.Simplify(a.max())) &&
+        as_const_int(analyzer.Simplify(b.min())) &&
+        as_const_int(analyzer.Simplify(b.max()))) {
+      return !arith::Intersect({a, b}).IsNothing();
+    }
+    return true;
+  }
+  for (size_t i = 0; i < lhs->region.size(); ++i) {
+    Range a = Range::FromMinExtent(analyzer.Simplify(lhs->region[i]->min),
+                                   analyzer.Simplify(lhs->region[i]->extent));
+    Range b = Range::FromMinExtent(analyzer.Simplify(rhs->region[i]->min),
+                                   analyzer.Simplify(rhs->region[i]->extent));
+    if (as_const_int(a->min) && as_const_int(a->extent) &&
+        as_const_int(b->min) && as_const_int(b->extent) &&
+        arith::Intersect(
+            {arith::IntSet::FromRange(a), arith::IntSet::FromRange(b)})
+            .IsNothing()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

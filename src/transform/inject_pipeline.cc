@@ -543,14 +543,18 @@ Stmt LowerAsyncCommitWaitAttrs(const Stmt &stmt) {
 void BuildDependencyGraph(const Array<SBlock> &blocks,
                           BlockDependencyGraph *dep_src2dst,
                           BlockDependencyGraph *dep_dst2src) {
-  std::unordered_map<Var, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+  using Writer = std::pair<SBlock, BufferRegion>;
+  std::unordered_map<Var, std::vector<Writer>, ObjectPtrHash, ObjectPtrEqual>
       buffer_writers;
 
   for (const SBlock &block : blocks) {
     for (const BufferRegion &read : block->reads) {
       auto it = buffer_writers.find(read->buffer->data);
       if (it != buffer_writers.end()) {
-        for (const SBlock &writer : it->second) {
+        for (const auto &[writer, write] : it->second) {
+          if (!PipelineRegionsMayConflict(write, read)) {
+            continue;
+          }
           if (dep_src2dst != nullptr) {
             (*dep_src2dst)[writer].push_back(block);
           }
@@ -561,7 +565,7 @@ void BuildDependencyGraph(const Array<SBlock> &blocks,
       }
     }
     for (const BufferRegion &write : block->writes) {
-      buffer_writers[write->buffer->data].push_back(block);
+      buffer_writers[write->buffer->data].emplace_back(block, write);
     }
   }
 }
@@ -1451,26 +1455,6 @@ private:
   }
 
   /*!
-   * \brief Check whether two regions have intersections.
-   * \param region1 The first region.
-   * \param region2 The second region.
-   * \return Whether region1 and region2 have intersections.
-   */
-  bool MayConflict(const Region &region1, const Region &region2) {
-    ICHECK(region1.size() == region2.size());
-    for (size_t i = 0; i < region1.size(); i++) {
-      Range dim1 = region1[i];
-      Range dim2 = region2[i];
-      auto int_set1 = arith::IntSet::FromRange(dim1);
-      auto int_set2 = arith::IntSet::FromRange(dim2);
-      if (arith::Intersect({int_set1, int_set2}).IsNothing()) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /*!
    * \brief Compute the number of versions need to maintain for buffer accessed
    * in the software pipeline.
    *
@@ -1529,7 +1513,7 @@ private:
           }
           if (writer_info.order < reader_info.order &&
               writer_info.stage < reader_info.stage &&
-              MayConflict((*it1)->region, (*it2)->region)) {
+              PipelineRegionsMayConflict(*it1, *it2)) {
             need_multi_version = true;
             break;
           }
@@ -2923,9 +2907,24 @@ private:
       }
       new_block = Downcast<SBlock>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
+      bool scheduled_bind = new_block->body.as<BindNode>() != nullptr;
       new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
+      if (scheduled_bind) {
+        // Replay can prepend Bind statements. Keep the whole chain in the
+        // consumer's lexical scope so ConvertSSA sees each iteration's value.
+        Array<Stmt> bindings;
+        for (const Stmt &stmt : FlattenTopLevelSeq(new_block->body)) {
+          Bind bind = Downcast<Bind>(stmt);
+          PrimExpr value = bind->value;
+          if (!is_one(inbound)) {
+            value = if_then_else(inbound, value, make_zero(value.dtype()));
+          }
+          bindings.push_back(Bind(bind->var, value, bind->span));
+        }
+        rewritten_stmt = MakePipelineBody(bindings);
+      }
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
