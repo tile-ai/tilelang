@@ -399,7 +399,8 @@ class DSLMutator(ast.NodeTransformer):
                 args=[node.iter.func, *node.iter.args],
                 keywords=node.iter.keywords,
             )
-            ast_set_span(call, (node.lineno, node.col_offset, node.lineno, node.col_offset))
+            # Argument expansion belongs to the user's call, not the generated helper.
+            ast.copy_location(call, node.iter)
             node.iter = call
         tmp = self.get_tmp()
         # names = self._parse_names(node.target)

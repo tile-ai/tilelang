@@ -155,3 +155,23 @@ def test_mutate_preserves_multiline_traceback(monkeypatch, method, offset):
         mutate(kernel).gen(builder)()
     frame = next(frame for frame in traceback.extract_tb(excinfo.value.__traceback__) if frame.name == "kernel")
     assert frame.lineno == first + offset
+
+
+@pytest.mark.parametrize("arguments, message", [("*42", "iterable"), ("**42", "mapping"), ('**{"n": 1}, **{"n": 2}', "multiple values")])
+def test_mutate_preserves_argument_unpacking_traceback(tmp_path, arguments, message):
+    import traceback
+
+    import tilelang.language as T
+
+    path = tmp_path / "argument_unpacking.py"
+    path.write_text(f"def kernel():\n    for i in (\n        range({arguments})\n    ):\n        pass\n")
+    spec = importlib.util.spec_from_file_location("argument_unpacking", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for invoke in (module.kernel, lambda: T.prim_func(module.kernel), lambda: mutate(module.kernel).gen(_TestBuilder())()):
+        with pytest.raises(TypeError, match=message) as excinfo:
+            invoke()
+        frame = next(frame for frame in traceback.extract_tb(excinfo.value.__traceback__) if frame.name == "kernel")
+        assert frame.filename == str(path)
+        assert frame.lineno == 3
