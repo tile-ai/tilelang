@@ -116,7 +116,10 @@ class GemmFMA(GemmBase):
         b_dtype = self.b_dtype
         accum_dtype = self.accum_dtype
         thread_nums = thread_bounds.extent
+        local_thread = thread_var - thread_bounds.min
 
+        # Uniform trip counts and explicit tail guards also cover tiles smaller
+        # than the participating thread count.
         if stage_A and stage_B:
 
             @T.prim_func
@@ -126,31 +129,37 @@ class GemmFMA(GemmBase):
                 B_stage = T.alloc_shared((b_rows, b_cols), b_dtype)
                 accum = T.alloc_local((1,), accum_dtype)
 
-                for a_flat in T.serial(thread_var, a_rows * a_cols, thread_nums):
-                    ai = a_flat // a_cols
-                    aj = a_flat % a_cols
-                    A_stage[ai, aj] = A_buf[tuple(A_other) + (a0 + ai, a1 + aj)]
-                for b_flat in T.serial(thread_var, b_rows * b_cols, thread_nums):
-                    bi = b_flat // b_cols
-                    bj = b_flat % b_cols
-                    B_stage[bi, bj] = B_buf[tuple(B_other) + (b0 + bi, b1 + bj)]
+                for a_group in T.serial(T.ceildiv(a_rows * a_cols, thread_nums)):
+                    a_flat = a_group * thread_nums + local_thread
+                    if a_flat < a_rows * a_cols:
+                        ai = a_flat // a_cols
+                        aj = a_flat % a_cols
+                        A_stage[ai, aj] = A_buf[tuple(A_other) + (a0 + ai, a1 + aj)]
+                for b_group in T.serial(T.ceildiv(b_rows * b_cols, thread_nums)):
+                    b_flat = b_group * thread_nums + local_thread
+                    if b_flat < b_rows * b_cols:
+                        bi = b_flat // b_cols
+                        bj = b_flat % b_cols
+                        B_stage[bi, bj] = B_buf[tuple(B_other) + (b0 + bi, b1 + bj)]
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
-                    i = c_flat // N
-                    j = c_flat % N
-                    if clear_accum:
-                        accum[0] = T.cast(0, accum_dtype)
-                    else:
-                        accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
-                    for k in T.serial(K):
-                        a_i = k if trans_A else i
-                        a_j = i if trans_A else k
-                        b_i = j if trans_B else k
-                        b_j = k if trans_B else j
-                        accum[0] += T.cast(A_stage[a_i, a_j], accum_dtype) * T.cast(B_stage[b_i, b_j], accum_dtype)
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
+                for c_group in T.serial(T.ceildiv(M * N, thread_nums)):
+                    c_flat = c_group * thread_nums + local_thread
+                    if c_flat < M * N:
+                        i = c_flat // N
+                        j = c_flat % N
+                        if clear_accum:
+                            accum[0] = T.cast(0, accum_dtype)
+                        else:
+                            accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
+                        for k in T.serial(K):
+                            a_i = k if trans_A else i
+                            a_j = i if trans_A else k
+                            b_i = j if trans_B else k
+                            b_j = k if trans_B else j
+                            accum[0] += T.cast(A_stage[a_i, a_j], accum_dtype) * T.cast(B_stage[b_i, b_j], accum_dtype)
+                        C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
 
         elif stage_A:
 
@@ -160,29 +169,33 @@ class GemmFMA(GemmBase):
                 A_stage = T.alloc_shared((a_rows, a_cols), a_dtype)
                 accum = T.alloc_local((1,), accum_dtype)
 
-                for a_flat in T.serial(thread_var, a_rows * a_cols, thread_nums):
-                    ai = a_flat // a_cols
-                    aj = a_flat % a_cols
-                    A_stage[ai, aj] = A_buf[tuple(A_other) + (a0 + ai, a1 + aj)]
+                for a_group in T.serial(T.ceildiv(a_rows * a_cols, thread_nums)):
+                    a_flat = a_group * thread_nums + local_thread
+                    if a_flat < a_rows * a_cols:
+                        ai = a_flat // a_cols
+                        aj = a_flat % a_cols
+                        A_stage[ai, aj] = A_buf[tuple(A_other) + (a0 + ai, a1 + aj)]
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
-                    i = c_flat // N
-                    j = c_flat % N
-                    if clear_accum:
-                        accum[0] = T.cast(0, accum_dtype)
-                    else:
-                        accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
-                    for k in T.serial(K):
-                        a_i = k if trans_A else i
-                        a_j = i if trans_A else k
-                        b_i = j if trans_B else k
-                        b_j = k if trans_B else j
-                        accum[0] += T.cast(A_stage[a_i, a_j], accum_dtype) * T.cast(
-                            B_buf[tuple(B_other) + (b0 + b_i, b1 + b_j)], accum_dtype
-                        )
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
+                for c_group in T.serial(T.ceildiv(M * N, thread_nums)):
+                    c_flat = c_group * thread_nums + local_thread
+                    if c_flat < M * N:
+                        i = c_flat // N
+                        j = c_flat % N
+                        if clear_accum:
+                            accum[0] = T.cast(0, accum_dtype)
+                        else:
+                            accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
+                        for k in T.serial(K):
+                            a_i = k if trans_A else i
+                            a_j = i if trans_A else k
+                            b_i = j if trans_B else k
+                            b_j = k if trans_B else j
+                            accum[0] += T.cast(A_stage[a_i, a_j], accum_dtype) * T.cast(
+                                B_buf[tuple(B_other) + (b0 + b_i, b1 + b_j)], accum_dtype
+                            )
+                        C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
 
         elif stage_B:
 
@@ -192,29 +205,33 @@ class GemmFMA(GemmBase):
                 B_stage = T.alloc_shared((b_rows, b_cols), b_dtype)
                 accum = T.alloc_local((1,), accum_dtype)
 
-                for b_flat in T.serial(thread_var, b_rows * b_cols, thread_nums):
-                    bi = b_flat // b_cols
-                    bj = b_flat % b_cols
-                    B_stage[bi, bj] = B_buf[tuple(B_other) + (b0 + bi, b1 + bj)]
+                for b_group in T.serial(T.ceildiv(b_rows * b_cols, thread_nums)):
+                    b_flat = b_group * thread_nums + local_thread
+                    if b_flat < b_rows * b_cols:
+                        bi = b_flat // b_cols
+                        bj = b_flat % b_cols
+                        B_stage[bi, bj] = B_buf[tuple(B_other) + (b0 + bi, b1 + bj)]
                 # Fragment staging is a cross-thread gather; consumers read all staged elements.
                 T.sync_threads()
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
-                    i = c_flat // N
-                    j = c_flat % N
-                    if clear_accum:
-                        accum[0] = T.cast(0, accum_dtype)
-                    else:
-                        accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
-                    for k in T.serial(K):
-                        a_i = k if trans_A else i
-                        a_j = i if trans_A else k
-                        b_i = j if trans_B else k
-                        b_j = k if trans_B else j
-                        accum[0] += T.cast(A_buf[tuple(A_other) + (a0 + a_i, a1 + a_j)], accum_dtype) * T.cast(
-                            B_stage[b_i, b_j], accum_dtype
-                        )
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
+                for c_group in T.serial(T.ceildiv(M * N, thread_nums)):
+                    c_flat = c_group * thread_nums + local_thread
+                    if c_flat < M * N:
+                        i = c_flat // N
+                        j = c_flat % N
+                        if clear_accum:
+                            accum[0] = T.cast(0, accum_dtype)
+                        else:
+                            accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
+                        for k in T.serial(K):
+                            a_i = k if trans_A else i
+                            a_j = i if trans_A else k
+                            b_i = j if trans_B else k
+                            b_j = k if trans_B else j
+                            accum[0] += T.cast(A_buf[tuple(A_other) + (a0 + a_i, a1 + a_j)], accum_dtype) * T.cast(
+                                B_stage[b_i, b_j], accum_dtype
+                            )
+                        C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
 
         else:
 
@@ -223,21 +240,23 @@ class GemmFMA(GemmBase):
                 """Accumulate C via scalar FMA."""
                 accum = T.alloc_local((1,), accum_dtype)
 
-                for c_flat in T.serial(thread_var, M * N, thread_nums):
-                    i = c_flat // N
-                    j = c_flat % N
-                    if clear_accum:
-                        accum[0] = T.cast(0, accum_dtype)
-                    else:
-                        accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
-                    for k in T.serial(K):
-                        a_i = k if trans_A else i
-                        a_j = i if trans_A else k
-                        b_i = j if trans_B else k
-                        b_j = k if trans_B else j
-                        accum[0] += T.cast(A_buf[tuple(A_other) + (a0 + a_i, a1 + a_j)], accum_dtype) * T.cast(
-                            B_buf[tuple(B_other) + (b0 + b_i, b1 + b_j)], accum_dtype
-                        )
-                    C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
+                for c_group in T.serial(T.ceildiv(M * N, thread_nums)):
+                    c_flat = c_group * thread_nums + local_thread
+                    if c_flat < M * N:
+                        i = c_flat // N
+                        j = c_flat % N
+                        if clear_accum:
+                            accum[0] = T.cast(0, accum_dtype)
+                        else:
+                            accum[0] = T.cast(C_buf[tuple(C_other) + (c0 + i, c1 + j)], accum_dtype)
+                        for k in T.serial(K):
+                            a_i = k if trans_A else i
+                            a_j = i if trans_A else k
+                            b_i = j if trans_B else k
+                            b_j = k if trans_B else j
+                            accum[0] += T.cast(A_buf[tuple(A_other) + (a0 + a_i, a1 + a_j)], accum_dtype) * T.cast(
+                                B_buf[tuple(B_other) + (b0 + b_i, b1 + b_j)], accum_dtype
+                            )
+                        C_buf[tuple(C_other) + (c0 + i, c1 + j)] = accum[0]
 
         return _Simplify(_gemm_fma, inline_let=True)

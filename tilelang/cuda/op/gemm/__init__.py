@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from tilelang.tileop.gemm.registry import register_gemm_impl
+import tvm_ffi
+
+from tilelang.tileop.gemm.registry import register_gemm_impl, resolve_gemm_impl
 from .gemm_fma import GEMM_INST_FMA, GemmFMA
 from .gemm_mma import GEMM_INST_MMA, GemmMMA
 from .gemm_mma_sm70 import GemmMMASm70
@@ -61,3 +63,9 @@ register_gemm_impl(
     _match_tcgen05,
     GemmTCGEN5BlockScaled,
 )
+
+
+@tvm_ffi.register_global_func("tl.cuda.get_mma_atom_k")
+def get_mma_atom_k(target, a_dtype):
+    impl = resolve_gemm_impl(GEMM_INST_MMA, target)
+    return impl.intrin_emitter_cls.get_mma_atom_k(a_dtype)

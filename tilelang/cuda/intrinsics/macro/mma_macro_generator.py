@@ -125,10 +125,16 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    @staticmethod
+    def get_mma_atom_k(a_dtype="float16"):
+        # The generic operand lane maps use a 256-bit K atom. Shorter hardware
+        # instructions need different maps, as in the SM75 emitter.
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        return 256 // a_dtype.bits
+
+    def _initialize_k_dim(self, a_dtype="float16"):
+        self.k_dim = self.get_mma_atom_k(a_dtype)
 
     def _initialize_m_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):

@@ -19,11 +19,13 @@ GEMM_INST_MMA = "cuda.mma"
 
 
 class GemmMMASm70(GemmBase):
+    intrin_emitter_cls = TensorCoreIntrinEmitter
+
     def infer_layout(self, target: Target, thread_nums: int):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        mma_emitter = self.intrin_emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
@@ -66,7 +68,7 @@ class GemmMMASm70(GemmBase):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        mma_emitter = self.intrin_emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,

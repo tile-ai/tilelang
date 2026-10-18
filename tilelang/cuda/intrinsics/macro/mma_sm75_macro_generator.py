@@ -8,17 +8,13 @@ from .mma_macro_generator import TensorCoreIntrinEmitter
 class TensorCoreIntrinEmitterSM75(TensorCoreIntrinEmitter):
     """SM75/Turing-specific MMA shape policy."""
 
-    def _initialize_k_dim(self, a_dtype="float16"):
+    @staticmethod
+    def get_mma_atom_k(a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if a_dtype.bits == 4:
-            self.k_dim = min(32, self.chunk)
-        elif a_dtype.bits == 8:
-            self.k_dim = min(16, self.chunk)
-        elif a_dtype.bits == 16:
-            self.k_dim = min(8, self.chunk)
-        else:
-            self.k_dim = min(256 // a_dtype.bits, self.chunk)
+        if a_dtype.bits in (4, 8, 16):
+            return 128 // a_dtype.bits
+        return TensorCoreIntrinEmitter.get_mma_atom_k(a_dtype)
 
     def _initialize_m_dim(self, a_dtype="float16"):
         super()._initialize_m_dim(a_dtype)

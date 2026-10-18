@@ -5,6 +5,7 @@
 
 #include "op/gemm.h"
 #include "support/check.h"
+#include <tvm/ffi/function.h>
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/builtin.h"
@@ -434,6 +435,17 @@ struct Gemm {
     }
     if (TargetIsAmpere(target) && !AllowAmpereMMA(op, target)) {
       FatalMmaSyncUnavailable(op, target);
+    }
+    // Query the selected emitter so instruction selection and lowering share
+    // the architecture-specific K atom. Partial atoms need the FMA fallback.
+    static const auto get_atom_k =
+        Function::GetGlobal("tl.cuda.get_mma_atom_k");
+    ICHECK(get_atom_k.has_value())
+        << "CUDA MMA emitter metadata is not registered";
+    int atom_k = (*get_atom_k)(target, op.a_->dtype).cast<int>();
+    ICHECK_GT(atom_k, 0);
+    if (op.k_ % atom_k != 0) {
+      return kCudaFMA;
     }
     return kCudaMMA;
   }
