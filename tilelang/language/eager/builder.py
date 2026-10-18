@@ -120,6 +120,9 @@ def unwrap_cond(expr):
     if isinstance(expr, (IntImm, FloatImm, StringImm)):
         return bool(expr.value)
     elif isinstance(expr, PrimExpr):
+        # TIR boolean operators require bool operands, not numeric truthiness.
+        if expr.dtype not in ("bool", "handle") and dt.dtype(expr.dtype).lanes == 1:
+            return unwrap_expr(expr != 0)
         return expr
     elif isinstance(expr, Buffer):
         raise TypeError(f"Buffer `{expr}` cannot be used as condition directly.")
@@ -823,9 +826,9 @@ class Builder(BaseBuilder):
         if isinstance(left, PrimExpr):
             with self.with_frame(BoolOpFrame()):
                 if op == "And":
-                    return tirx.And(left, right())
+                    return tirx.And(left, unwrap_cond(right()))
                 if op == "Or":
-                    return tirx.Or(left, right())
+                    return tirx.Or(left, unwrap_cond(right()))
                 if op == "Not":
                     return tirx.Not(left)
             raise RuntimeError(f"Unsupported boolean operator: {op}")
