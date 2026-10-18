@@ -244,6 +244,81 @@ def test_local_to_memory_with_branch_local_bind():
     _check(before, after)
 
 
+def test_local_to_memory_with_nested_guards():
+    """Nested guards must be conjoined on the generated copy-to loop."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 12:  # noqa: SIM102
+                if i < 8:
+                    b[i] = a_frag[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                if i < 12:  # noqa: SIM102
+                    if i < 8:
+                        b_local_cast[i] = T.cast(a_frag[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                if T.if_then_else(i_copy < 12, i_copy < 8, False):
+                    b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
+def test_memory_to_local_with_nested_guards():
+    """Nested guards must be conjoined on the generated copy-from loop."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 12:  # noqa: SIM102
+                if i < 8:
+                    a_frag[i] = b[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i_copy in T.vectorized(16):
+                if T.if_then_else(i_copy < 12, i_copy < 8, False):
+                    b_local_cast[i_copy] = b[i_copy]
+            for i in T.vectorized(16):
+                if i < 12:  # noqa: SIM102
+                    if i < 8:
+                        a_frag[i] = T.cast(b_local_cast[i], T.float32)
+
+    _check(before, after)
+
+
+def test_if_else_control_flow_skips_decoupling():
+    """Copy loops cannot represent branch-specific guards, so keep the source."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 8:
+                b[i] = a_frag[i]
+            else:
+                a_frag[i] = 0.0
+
+    _check(before, before)
+
+
 def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     """The pass must wrap cast buffers in a block annotated with
     lexical_alloc_scope, so StorageRewrite keeps them scoped to the use site."""
@@ -658,6 +733,53 @@ def test_codegen_pipelined_int64_index_cp_async_operands():
     assert gs_lines, "Expected cp_async_gs (global->shared) calls for disable_tma copy"
     for line in gs_lines:
         assert "_local_cast" not in line, f"cp_async operand points at local memory: {line.strip()}"
+
+
+def test_memory_dependent_guard_skips_decoupling():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 8:  # noqa: SIM102
+                if b[i] > T.float16(0):
+                    b[i] = local[i]
+
+    _check(before, before)
+
+
+def test_effectful_guard_skips_decoupling():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if T.call_extern("bool", "guard", i):
+                b[i] = local[i]
+
+    _check(before, before)
+
+
+def test_nested_guard_preserves_conditional_evaluation():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i != 0:  # noqa: SIM102
+                if 16 // i > 2:
+                    b[i] = local[i]
+
+    mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    copy_conditions = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.IfThenElse) and isinstance(node.then_case, tvm.tirx.BufferStore) and node.then_case.buffer.name == "b":
+            copy_conditions.append(node.condition)
+
+    tvm.tirx.stmt_functor.post_order_visit(mod["before"].body, collect)
+    assert len(copy_conditions) == 1
+    condition = copy_conditions[0]
+    assert isinstance(condition, tvm.tirx.Call)
+    assert condition.op.same_as(tvm.ir.Op.get("tirx.if_then_else"))
+    assert int(condition.args[2]) == 0
 
 
 if __name__ == "__main__":

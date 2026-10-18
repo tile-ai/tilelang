@@ -135,23 +135,6 @@ def _has_cast(stmt: Stmt) -> bool:
     return finder.found
 
 
-def _contains_seq_stmt(stmt: Stmt) -> bool:
-    """Check if statement contains SeqStmt (multiple statements).
-
-    When the For body has SeqStmt, the transformation is more complex
-    and we skip the optimization for now.
-    """
-    found = False
-
-    def visitor(node) -> None:
-        nonlocal found
-        if isinstance(node, SeqStmt):
-            found = True
-
-    post_order_visit(stmt, visitor)
-    return found
-
-
 def _expr_depends_on_var(expr: tirx.PrimExpr, var: Var) -> bool:
     """Check if an expression references the given Var."""
     found = False
@@ -299,14 +282,31 @@ def normalize_flat_binds(stmt: Stmt) -> Stmt:
 
 
 def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
-    """Extract IfThenElse condition from statement if present.
+    """Combine leading guards without evaluating an inner guard eagerly."""
+    condition: tirx.PrimExpr | None = None
+    while isinstance(stmt, IfThenElse) and stmt.else_case is None:
+        condition = stmt.condition if condition is None else tirx.if_then_else(condition, stmt.condition, tirx.const(False, "bool"))
+        stmt = stmt.then_case
+    return condition, stmt
 
-    Returns:
-        A tuple of (condition, inner_body). If no IfThenElse, returns (None, stmt).
-    """
-    if isinstance(stmt, IfThenElse) and stmt.else_case is None:
-        return stmt.condition, stmt.then_case
-    return None, stmt
+
+def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
+    """Only repeat guards that cannot observe or modify mutable state."""
+    if condition is None:
+        return True
+    pure = True
+
+    def visit(node):
+        nonlocal pure
+        if isinstance(node, BufferLoad):
+            pure = False
+        elif isinstance(node, Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
+                pure = False
+
+    post_order_visit(condition, visit)
+    return pure
 
 
 # Cast entry: (original buffer, original indices, cast buffer)
@@ -403,21 +403,13 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         if not _has_cast(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        # Skip SeqStmt (multiple statements) after inlining leading Bind nodes.
-        # A common frontend pattern is SeqStmt(Bind(...), BufferStore(...)),
-        # which is still a single compute statement after substitution.
-        if _contains_seq_stmt(normalized_body):
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Skip Evaluate roots. Decoupling splits the value edge of a BufferStore
-        # to insert a staging buffer; an Evaluate discards its result and stores
-        # nothing, so that edge does not exist and the transform is undefined.
-        # Opaque intrinsic statements such as `tl.ptx_cp_async(...)` land here,
-        # and their operands are address arguments with address-space
-        # constraints (dst must be shared, src must be global) that rewriting to
-        # local staging buffers would violate.
-        _, root_stmt = extract_if_condition(normalized_body)
-        if isinstance(root_stmt, Evaluate):
+        # Decoupling splits a single BufferStore value edge. Only leading
+        # guards can apply to every generated copy stage; compound statements
+        # and opaque Evaluate intrinsics have no such common store edge.
+        condition, root_stmt = extract_if_condition(normalized_body)
+        # Copy-in, compute, and copy-out each evaluate the guard. A memory
+        # read or effectful call need not return the same value at each stage.
+        if not isinstance(root_stmt, BufferStore) or not _can_repeat_condition(condition):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Collect all shared/global stores and loads
@@ -430,7 +422,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
         extent = op.extent.value
 
-        # Extract condition (from normalized body for correctness)
+        # Extract the complete condition from the body used for staging.
         condition, _ = extract_if_condition(normalized_body)
 
         # Create cast entries for stores and loads
