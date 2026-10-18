@@ -228,3 +228,37 @@ def test_npu_wall_synchronizes_selected_device(monkeypatch, accelerator):
     assert state.calls == [2] * 4
     assert state.synchronizations == [(torch.device("npu:2"), 2)] * 6
     assert not state.allocations
+
+
+@pytest.mark.parametrize("backend", ["cupti", "cudagraph", "msprof", "msprof_detail"])
+def test_non_event_backend_is_not_pruned_by_event_estimate(monkeypatch, accelerator, backend):
+    is_npu = backend.startswith("msprof")
+    # Only dispatch is under test; use the fake CUDA clock for every backend.
+    state = accelerator("cuda")
+    backend_calls = []
+    expected = object() if backend == "msprof_detail" else 1.5
+
+    def implementation(function, cache, n_repeat, *options, **kwargs):
+        assert state.current == 2
+        backend_calls.append(n_repeat)
+        function()
+        return expected
+
+    if is_npu:
+        from tilelang.profiler import msprof
+
+        monkeypatch.setattr(msprof, "bench_with_msprof", implementation)
+    else:
+        monkeypatch.setattr(bench, f"_bench_with_{backend}", implementation)
+    result = bench.do_bench(
+        state.function,
+        backend=backend,
+        device=2,
+        _n_warmup=1,
+        _n_repeat=2,
+        cache_size=1,
+        early_stop_baseline=0.01,
+    )
+    assert result is expected
+    assert backend_calls == [2]
+    assert state.current == 0
