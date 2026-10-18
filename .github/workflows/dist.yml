@@ -21,6 +21,10 @@ on:
       - .github/workflows/dist.yml
       # Exercised by the GPU wheel-test job below.
       - maint/scripts/smoke_test_wheel.py
+      # Exercised by the Windows CPU JIT wheel tests below.
+      - tilelang/jit/adapter/libgen.py
+      - tilelang/jit/adapter/wrapper.py
+      - testing/python/target/test_tilelang_codegen_clamp.py
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
@@ -317,8 +321,17 @@ jobs:
       - name: Test built wheels (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          PYTHONPATH: ""
+          TILELANG_DISABLE_CACHE: "1"
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          Remove-Item Env:CXX, Env:CC -ErrorAction SilentlyContinue
+          $cpuTestDir = Join-Path $env:RUNNER_TEMP "tilelang-cpu-wheel-tests"
+          New-Item -ItemType Directory -Force $cpuTestDir | Out-Null
+          # Copy the test outside the checkout so testing/conftest.py cannot
+          # prepend the source tree and hide a broken wheel installation.
+          Copy-Item testing/python/target/test_tilelang_codegen_clamp.py $cpuTestDir
           Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
             $wheel = $_.FullName
             Write-Host "Testing wheel: $wheel"
@@ -331,12 +344,22 @@ jobs:
             uv venv test-venv
             $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
 
-            uv pip install -v --python $python $wheel
-            Push-Location $env:RUNNER_TEMP
+            uv pip install -v --python $python $wheel pytest
+            Push-Location $cpuTestDir
             try {
-              & $python -c "import tilelang; print(tilelang.__version__)"
+              & $python -c "import sys, tilelang; from pathlib import Path; print(tilelang.__version__, tilelang.__file__); assert Path(tilelang.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())"
+              foreach ($disableClang in @("0", "1")) {
+                $env:TILELANG_DISABLE_CLANG_CL = $disableClang
+                $expectedCompiler = if ($disableClang -eq "0") { "clang-cl" } else { "cl" }
+                # Do not let the clang-cl run silently fall back to cl.exe.
+                & $python -c "import sys; from pathlib import Path; from tilelang.contrib.cc import get_cplus_compiler; compiler = get_cplus_compiler(); print('CPU JIT compiler:', compiler); assert compiler and Path(compiler).stem.lower() == sys.argv[1], compiler" $expectedCompiler
+                & $python -m pytest -q `
+                  test_tilelang_codegen_clamp.py::test_clamp_cpu_templates `
+                  test_tilelang_codegen_clamp.py::test_clamp_cpu_single_evaluation
+              }
             } finally {
               Pop-Location
+              Remove-Item Env:TILELANG_DISABLE_CLANG_CL -ErrorAction SilentlyContinue
             }
             Remove-Item -Recurse -Force test-venv
           }
