@@ -247,6 +247,40 @@ bool ForBodyContainsSeqStmt(const For &loop) {
   return has_seq_stmt;
 }
 
+// Both vector planning and cast staging use iteration ordinals. Raw TIR For
+// bounds describe [min, min + extent), so a positive step reduces the trip
+// count. Leave steps whose positive constant value is unknown to scalar
+// lowering.
+static Optional<For> NormalizeLoopDomain(const For &loop) {
+  if (is_zero(loop->min) && loop->HasTrivialStep()) {
+    return loop;
+  }
+  arith::Analyzer analyzer;
+  PrimExpr step = analyzer.Simplify(
+      loop->step.value_or(make_const(loop->loop_var.dtype(), 1)));
+  const auto *step_value = as_const_int(step);
+  if (!step_value || *step_value <= 0) {
+    return std::nullopt;
+  }
+
+  Var normalized_var(loop->loop_var->name_hint, loop->loop_var.dtype());
+  // Avoid extent + step - 1 overflowing near the index type's upper bound.
+  PrimExpr extent = analyzer.Simplify(
+      floordiv(loop->extent, step) +
+      cast(loop->extent.dtype(), floormod(loop->extent, step) != 0));
+  Stmt body = Substitute(loop->body,
+                         {{loop->loop_var, loop->min + normalized_var * step}});
+  return For(normalized_var, make_zero(normalized_var.dtype()), extent,
+             loop->kind, body, loop->thread_binding, loop->annotations,
+             std::nullopt, loop->span);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.NormalizeLoopDomain",
+                        NormalizeLoopDomain);
+}
+
 class VectorizePlanner : public arith::IRMutatorWithAnalyzer {
 public:
   explicit VectorizePlanner(arith::Analyzer *analyzer,
@@ -254,23 +288,29 @@ public:
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
+    Optional<For> normalized = NormalizeLoopDomain(node);
+    if (!normalized.defined()) {
+      return 1;
+    }
+    For normalized_node = normalized.value();
     Target target = Target::Current(false);
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
         MaxVectorLoadBits(
-            target, VectorizeFindMemoryAccess::MaySupportVectorize256(node));
+            target,
+            VectorizeFindMemoryAccess::MaySupportVectorize256(normalized_node));
 
     // Check if For body contains SeqStmt (multiple statements).
     // When there's SeqStmt, we use conservative strategy - treating local
     // buffers the same as memory buffers. The special local buffer optimization
     // (ignoring local buffer constraints) only applies to simple single
     // BufferStore cases.
-    bool has_seq_stmt = ForBodyContainsSeqStmt(node);
+    bool has_seq_stmt = ForBodyContainsSeqStmt(normalized_node);
 
     // Clear previous buffer info and collect new ones
     buffer_vector_infos_.clear();
-    this->operator()(node);
+    this->operator()(normalized_node);
 
     if (verbose) {
       std::cerr << "=== VectorizePlanner: Collected buffer vector sizes ==="
@@ -332,7 +372,7 @@ private:
     // a cast buffer for it, so classify it separately from memory accesses.
     // Stores are never broadcasts: same-address lane stores carry ordering
     // semantics and are either marked must-scalarize or kept as memory access.
-    if (info.is_store || info.indices.empty() || !inner_for_) {
+    if (info.is_store || info.indices.empty() || !inner_for_.defined()) {
       return false;
     }
     Array<PrimExpr> strides = GetBufferStrides(info.buffer);
@@ -517,17 +557,23 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *node) final {
-    inner_for_ = node;
+    Optional<For> normalized = NormalizeLoopDomain(GetRef<For>(node));
+    if (!normalized.defined()) {
+      loop_extent_vector_size_ = 1;
+      return GetRef<Stmt>(node);
+    }
+    For loop = normalized.value();
+    inner_for_ = loop;
     bool contains_nested_for = false;
     // Must analysis vectorization on the innermost loop
-    PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
+    PostOrderVisit(loop->body, [&](const ObjectRef &obj) {
       if (obj.as<ForNode>()) {
         contains_nested_for = true;
       }
     });
 
     if (!contains_nested_for) {
-      auto extent_ptr = as_const_int(analyzer_->Simplify(node->extent));
+      auto extent_ptr = as_const_int(analyzer_->Simplify(loop->extent));
       // Here I disable dynamic shape completely,
       //   In order to do it, the Planner should accept an analyzer with
       //   arithmetic info outside to prove the dividiblity of vector size
@@ -535,12 +581,12 @@ private:
       // tiling size is always static.
       if (!extent_ptr) {
         loop_extent_vector_size_ = 1;
-        return GetRef<Stmt>(node);
+        return loop;
       }
       loop_extent_vector_size_ =
           arith::ZeroAwareGCD(initial_vector_size_, *extent_ptr);
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(loop.get());
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
@@ -723,7 +769,7 @@ private:
     // For other call nodes, use PostOrderVisit to check buffer accesses
     // and determine if the given vector size is invariant
     auto check_buffer_access_invariant = [&](int target_vec_size) -> bool {
-      if (!inner_for_)
+      if (!inner_for_.defined())
         return true;
       bool all_invariant = true;
       PostOrderVisit(GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
@@ -784,7 +830,7 @@ private:
   }
 
   int ComputeAtomicVectorSize(const PrimExpr &destination) {
-    ICHECK(inner_for_)
+    ICHECK(inner_for_.defined())
         << "Atomic vectorization analysis requires a loop context";
 
     DataType dtype;
@@ -829,7 +875,7 @@ private:
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
-    if (!inner_for_) {
+    if (!inner_for_.defined()) {
       return;
     }
     int condition_vector_size = loop_extent_vector_size_;
@@ -849,7 +895,7 @@ private:
 
   void HandleTvmAccessPtr(const CallNode *node) {
     // tvm_access_ptr format: (ptype, data, offset, extent, rw_mask)
-    if (!inner_for_) {
+    if (!inner_for_.defined()) {
       return;
     }
     ICHECK(node->args.size() >= 3U)
@@ -980,7 +1026,7 @@ private:
     // same value can be shared across the lanes of each PTX cvt.rs.*
     // instruction. Halve the vector size until invariance holds, mirroring
     // the call-node fallback above.
-    if (inner_for_) {
+    if (inner_for_.defined()) {
       auto it = node->annotations.find("rbits");
       if (it != node->annotations.end()) {
         PrimExpr rbits = Downcast<PrimExpr>((*it).second);
@@ -1001,7 +1047,7 @@ private:
   VectorSizeConstraint ComputeBufferVectorSize(const Array<PrimExpr> &indices,
                                                const Buffer &buffer,
                                                bool is_store) {
-    if (!inner_for_)
+    if (!inner_for_.defined())
       return {initial_vector_size_, /*requires_scalarization=*/false};
 
     int buffer_vec_size = loop_extent_vector_size_;
@@ -1103,7 +1149,7 @@ private:
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
 
-  const ForNode *inner_for_{};
+  For inner_for_;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
@@ -1120,24 +1166,31 @@ private:
     auto ret = StmtExprMutator::VisitStmt_(node);
     if (inner_for_ == node) { // rewrite the innermost loop
       For fnode = ret.as<For>().value();
+      Optional<For> normalized = NormalizeLoopDomain(fnode);
+      if (!normalized.defined()) {
+        fnode.CopyOnWrite()->kind = ForKind::kSerial;
+        return fnode;
+      }
+      fnode = normalized.value();
       auto old_var = fnode->loop_var;
       auto extent_ptr = as_const_int(fnode->extent);
       ICHECK(extent_ptr) << fnode->extent;
-      int extent = *extent_ptr;
+      int64_t extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)
           << "extent: " << extent << " vector_size_: " << vector_size_
           << " for loop: " << fnode;
-      ICHECK(is_zero(fnode->min));
       if (extent == vector_size_) {
         fnode.CopyOnWrite()->kind = ForKind::kVectorized;
         return fnode;
       } else {
-        Var inner_var = Var("vec");
-        Var outer_var = Var(old_var->name_hint);
+        Var inner_var("vec", old_var.dtype());
+        Var outer_var(old_var->name_hint, old_var.dtype());
         Map<Var, PrimExpr> vmap;
         vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
         Stmt body = Substitute(fnode->body, vmap);
-        body = For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
+        body = For(inner_var, make_zero(old_var.dtype()),
+                   make_const(old_var.dtype(), vector_size_),
+                   ForKind::kVectorized, body);
         // TileLang uses ForKind::kParallel in frontend SIMT loops. After
         // vectorization, keep semantics equivalent but downgrade to serial so
         // subsequent passes (e.g. pragma-unroll) can run.
@@ -1145,9 +1198,10 @@ private:
         if (outer_kind == ForKind::kParallel) {
           outer_kind = ForKind::kSerial;
         }
-        body = For(outer_var, 0, extent / vector_size_, outer_kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->step,
-                   fnode->span);
+        body = For(outer_var, make_zero(old_var.dtype()),
+                   make_const(old_var.dtype(), extent / vector_size_),
+                   outer_kind, body, fnode->thread_binding, fnode->annotations,
+                   fnode->step, fnode->span);
         return body;
       }
     } else {

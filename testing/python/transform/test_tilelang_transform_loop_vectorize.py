@@ -35,6 +35,27 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
         return tl.transform.VectorizeLoop()(mod)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("start,stop,step,width", [(2, 6, 1, 2), (2, 8, 2, 1)])
+def test_nested_vectorized_loop_uses_inner_iteration_domain(start, stop, step, width):
+    tir = tvm.tirx
+    a = tir.decl_buffer((16,), "int32", name="A")
+    b = tir.decl_buffer((16,), "int32", name="B")
+    outer, inner = tir.Var("j", "int32"), tir.Var("i", "int32")
+    index = outer * 8 + inner
+    body = tir.BufferStore(b, tir.BufferLoad(a, [index]) + 1, [index])
+    inner_loop = tir.For(inner, start, stop - start, tir.ForKind.SERIAL, body, step=step)
+    main = tir.PrimFunc(
+        [a.data, b.data],
+        tir.For(outer, 0, 2, tir.ForKind.VECTORIZED, inner_loop),
+        buffer_map={a.data: a, b.data: b},
+    )
+
+    transformed = _run_vectorized_loop_legalizer(main)
+    assert _vectorized_extents(transformed["main"]) == ([width] if width > 1 else [])
+    assert not _undefined_local_vars(transformed["main"])
+
+
 def _atomic_op_names(func):
     names = []
 
