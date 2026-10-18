@@ -1,5 +1,4 @@
-"""Ascend auto-schedule annotations: multi-buffer version control and memory
-capacity overrides consumed by the Z3 scheduler."""
+"""Ascend storage placement, multi-buffer versions and scheduling capacity annotations."""
 
 from tvm.tirx import IntImm
 from tvm.tirx.script.builder.ir import sblock_attr
@@ -8,12 +7,48 @@ _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shar
 
 __all__ = [
     "annotate_buffer_versions",
+    "annotate_l1_offsets",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
 ]
 
 
 _VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter")
+
+
+def annotate_l1_offsets(buffer_offsets: dict):
+    """Fix every L1 storage's byte offset in the kernel's 512 KiB L1 memory.
+
+    This is a complete allocation plan for the Ascend scheduled pipeline.
+    Include every live L1 allocation. Offsets must be non-negative Python
+    integers divisible by 512. Each offset places the complete storage,
+    including all automatic buffer versions and physical layout padding.
+    Views of one storage share its offset; this does not change their indices.
+
+    The compiler validates the final physical allocation sizes, rejects
+    overlapping storages and capacity overflow, and never changes lifetime or
+    synchronization rules to satisfy a placement. Dynamic sizes and partial
+    plans are unsupported. Without this annotation, allocation is unchanged.
+
+    Example
+    -------
+    >>> T.annotate_l1_offsets({left: 0, right: 262144})
+    """
+    if not buffer_offsets:
+        raise ValueError("annotate_l1_offsets requires a complete, non-empty L1 placement map")
+    offsets = {}
+    for buffer, offset in buffer_offsets.items():
+        if buffer.scope() != "shared.l1":
+            raise ValueError(f"annotate_l1_offsets requires shared.l1 storage, got {buffer.scope()!r}")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or offset % 512:
+            raise ValueError(f"L1 byte offset must be a non-negative integer divisible by 512, got {offset!r}")
+        if offset >= 512 * 1024:
+            raise ValueError(f"L1 byte offset must be below the 512 KiB capacity, got {offset}")
+        data = buffer.data
+        if data in offsets and int(offsets[data]) != offset:
+            raise ValueError(f"Aliases of one L1 storage require the same byte offset: {buffer}")
+        offsets[data] = IntImm("int64", offset)
+    return sblock_attr({"tl.ascend_l1_offsets": offsets})
 
 
 def annotate_buffer_versions(buffer_versions_map: dict):

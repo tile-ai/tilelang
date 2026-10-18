@@ -292,7 +292,7 @@ private:
     }
     if (sequence.empty())
       return tirx::Evaluate(0);
-    return tirx::SeqStmt(std::move(sequence));
+    return tirx::SeqStmt::Flatten(std::move(sequence));
   }
 
   tirx::Stmt VisitStmt_(const tirx::AllocBufferNode *op) final {
@@ -411,7 +411,8 @@ private:
 
 template <typename Planner>
 tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
-                            bool disable_reuse, const Planner &planner) {
+                            bool disable_reuse, const Planner &planner,
+                            const std::string &required_scope = "") {
   AllocateCollector collector;
   collector(stmt);
   auto run = [&](SharedMemoryRewriter &rewriter,
@@ -440,7 +441,7 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
   std::sort(scopes.begin(), scopes.end());
   for (const std::string &scope : scopes) {
     const AllocationMap &allocations = collector.ascend_scope_allocs.at(scope);
-    if (allocations.size() <= 1)
+    if (allocations.size() <= 1 && scope != required_scope)
       continue;
     auto order = collector.ascend_scope_order.find(scope);
     const AllocationOrder empty_order;

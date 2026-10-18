@@ -6,11 +6,15 @@
 #ifndef TVM_TL_ASCEND_TARGET_UTILS_H_
 #define TVM_TL_ASCEND_TARGET_UTILS_H_
 
+#include <cstdint>
+
 #include <tvm/runtime/data_type.h>
 #include <tvm/target/target.h>
 
 namespace tvm {
 namespace tl {
+
+constexpr int64_t kAscendL1MemoryBytes = 512 * 1024;
 
 bool TargetIsAscend(Target target);
 bool IsAscendVectorizableFP8(DataType dtype);

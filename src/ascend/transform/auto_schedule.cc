@@ -113,7 +113,7 @@ inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
 
 inline int64_t GetL1MemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 512 * 1024; // 512 KB L1 cache on Ascend
+    return kAscendL1MemoryBytes;
   }
   return 0;
 }
