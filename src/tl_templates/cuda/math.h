@@ -51,6 +51,17 @@ namespace tl {
 // Pass operands by value: checking NaN must not re-evaluate the caller's
 // expression (which can, for example, be a returning atomic operation).
 TL_DEVICE float clamp(float x, float lo, float hi) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  // Inline PTX does not inherit --ftz. These intrinsics honor the compiler's
+  // FTZ policy while preserving signed zero, including for dynamic bounds.
+  x = __fmul_rn(x, 1.0f);
+  lo = __fmul_rn(lo, 1.0f);
+  hi = __fmul_rn(hi, 1.0f);
+  float result;
+  asm("max.NaN.f32 %0, %1, %2;" : "=f"(result) : "f"(x), "f"(lo));
+  asm("min.NaN.f32 %0, %1, %2;" : "=f"(result) : "f"(result), "f"(hi));
+  return result;
+#else
   if (isnan(x))
     return x;
   if (isnan(lo))
@@ -58,6 +69,7 @@ TL_DEVICE float clamp(float x, float lo, float hi) {
   if (isnan(hi))
     return hi;
   return fminf(fmaxf(x, lo), hi);
+#endif
 }
 
 TL_DEVICE double clamp(double x, double lo, double hi) {

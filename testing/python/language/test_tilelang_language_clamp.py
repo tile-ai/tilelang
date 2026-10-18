@@ -231,6 +231,74 @@ def test_clamp_vectorized_operands(dtype):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("fast_math", [False, True])
+@pytest.mark.parametrize("constant_bounds", [False, True])
+def test_clamp_fp32_special_values(fast_math, constant_bounds):
+    import torch
+
+    # Bit patterns retain signed zero, subnormals, and signaling NaNs.
+    positive_zero, negative_zero = 0x00000000, 0x80000000
+    one, negative_one = 0x3F800000, 0xBF800000
+    tiny, negative_tiny = 0x00000001, 0x80000001
+    infinity, negative_infinity = 0x7F800000, 0xFF800000
+    nan = 0x7F800001
+    if constant_bounds:
+        cases = [
+            (x, negative_one, one, expected)
+            for x, expected in [
+                (positive_zero, positive_zero),
+                (negative_zero, negative_zero),
+                (tiny, tiny),
+                (negative_tiny, negative_tiny),
+                (infinity, one),
+                (negative_infinity, negative_one),
+                (nan, nan),
+            ]
+        ]
+    else:
+        cases = [
+            (negative_zero, positive_zero, one, positive_zero),
+            (positive_zero, negative_one, negative_zero, negative_zero),
+            (negative_one, positive_zero, negative_zero, negative_zero),
+            (tiny, negative_one, one, tiny),
+            (negative_tiny, negative_one, one, negative_tiny),
+            (negative_one, tiny, one, tiny),
+            (one, negative_one, negative_tiny, negative_tiny),
+            (positive_zero, one, negative_one, negative_one),
+            (infinity, negative_one, one, one),
+            (negative_infinity, negative_one, one, negative_one),
+            (nan, negative_one, one, nan),
+            (positive_zero, nan, one, nan),
+            (positive_zero, negative_one, nan, nan),
+        ]
+    cases = (cases * 128)[:128]
+    values = torch.tensor(cases, dtype=torch.int64).to(torch.int32).view(torch.float32)
+    a, lo, hi, expected = [column.contiguous() for column in values.unbind(1)]
+    if fast_math:
+        # --use_fast_math flushes subnormal operands to signed zero.
+        expected_bits = expected.view(torch.int32)
+        subnormal = (expected_bits & 0x7FFFFFFF) < 0x00800000
+        expected_bits[subnormal] &= -0x80000000
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128,), "float32"), Lo: T.Tensor((128,), "float32"), Hi: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")
+    ):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(128):
+                C[i] = T.clamp(A[i], -1.0 if constant_bounds else Lo[i], 1.0 if constant_bounds else Hi[i])
+
+    kernel = tilelang.compile(main, target="cuda", compile_flags=["--use_fast_math"] if fast_math else [])
+    a, lo, hi = [tensor.cuda() for tensor in (a, lo, hi)]
+    output = torch.empty_like(a)
+    kernel(a, lo, hi, output)
+    output = output.cpu()
+    assert torch.equal(torch.isnan(output), torch.isnan(expected))
+    non_nan = ~torch.isnan(expected)
+    assert torch.equal(output.view(torch.int32)[non_nan], expected.view(torch.int32)[non_nan])
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.float64, T.float8_e4m3])
 def test_clamp_vector_input_scalar_bounds(dtype):
     import torch
