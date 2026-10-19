@@ -29,14 +29,14 @@ def metal_events(monkeypatch):
     def synchronize():
         state.synchronizations += 1
 
-    def flush(*, dtype):
+    def flush(*, dim, dtype):
         state.flushes += 1
         state.now += 0.25
 
     def empty(numel, *, dtype, device):
         assert torch.device(device).type == "mps"
         state.allocations.append((numel, dtype, torch.device(device)))
-        return SimpleNamespace(dtype=dtype, sum=flush)
+        return SimpleNamespace(dtype=dtype, view=lambda *shape: SimpleNamespace(sum=flush))
 
     def unexpected(*args, **kwargs):
         raise AssertionError("MPS event timing must not use CUDA APIs")

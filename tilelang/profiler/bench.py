@@ -209,8 +209,9 @@ def _do_bench_impl(
     # Warm the flush buffer once outside the timed estimate: the first
     # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
     # Read the buffer to evict L2 without dirty cache lines requiring writeback.
-    # Preserve the dtype to avoid a full-buffer int64 cast on torch_npu.
-    cache.sum(dtype=cache.dtype)
+    # Reduce independent chunks to avoid global reduction synchronization.
+    # Preserve the dtype to avoid a full-buffer int64 cast.
+    cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
@@ -218,7 +219,7 @@ def _do_bench_impl(
     end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
-        cache.sum(dtype=cache.dtype)
+        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
         fn()
     end_event.record()
     start_event.synchronize()

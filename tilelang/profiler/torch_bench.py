@@ -75,7 +75,7 @@ def bench_with_cuda_events(
 
     # Run benchmark iterations
     for i in range(n_repeat):
-        cache.sum(dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer
+        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer
         start_events[i].record()
         fn()
         end_events[i].record()
@@ -116,7 +116,7 @@ def bench_with_cupti(
             for _ in range(2):
                 for _ in range(n_repeat):
                     with torch.profiler.record_function(_CACHE_FLUSH_ID):
-                        cache.sum(dtype=cache.dtype)
+                        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
                     fn()
                 profiler.step()
 
@@ -174,7 +174,7 @@ def bench_with_cudagraph(
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         for i in range(n_retries):
-            cache.sum(dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer before replay
+            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer before replay
             start_events[i].record()
             g.replay()
             end_events[i].record()
