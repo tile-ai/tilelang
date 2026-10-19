@@ -1252,15 +1252,10 @@ public:
       }
     }
 
+    pipeline_parts = RelaxTrailingConsumerWaits(
+        std::move(pipeline_parts), PipelinedRetainGroups(pipeline_num_stages));
     Stmt stmt = pipeline_parts.size() == 1 ? pipeline_parts[0]
                                            : SeqStmt(pipeline_parts);
-    stmt = AsyncPipelineLoopWaitRelaxer(this)(stmt);
-    Array<Stmt> relaxed_pipeline_parts = FlattenTopLevelSeq(stmt);
-    relaxed_pipeline_parts =
-        RelaxTrailingConsumerWaits(std::move(relaxed_pipeline_parts),
-                                   PipelinedRetainGroups(pipeline_num_stages));
-    stmt = relaxed_pipeline_parts.size() == 1 ? relaxed_pipeline_parts[0]
-                                              : SeqStmt(relaxed_pipeline_parts);
 
     // Step 3: Make a new block only when the rewritten pipeline owns local
     // allocations.  When all buffers are already allocated by an outer block
@@ -1604,18 +1599,6 @@ private:
     Stmt stmt;
   };
 
-  enum class AsyncSyncStmtKind { kOther, kCommit, kWaitStatic, kWaitDynamic };
-
-  struct ClassifiedAsyncSyncStmt {
-    AsyncSyncStmtKind kind{AsyncSyncStmtKind::kOther};
-    int wait_n{0};
-  };
-
-  struct AsyncSyncSummary {
-    int commit{0};
-    int wait{0};
-  };
-
   enum class HeadAsyncSyncKind {
     kNone,
     kCommit,
@@ -1633,126 +1616,6 @@ private:
              kind == HeadAsyncSyncKind::kWaitDynamic ||
              kind == HeadAsyncSyncKind::kBlocked;
     }
-  };
-
-  enum class HeadSeqMode {
-    kSingletonOnly,
-    kTakeFirstElement,
-  };
-
-  struct DeterministicNoWaitCommitEffect {
-    bool deterministic{true};
-    bool has_wait{false};
-    int commit_groups{0};
-
-    static DeterministicNoWaitCommitEffect Unknown() {
-      DeterministicNoWaitCommitEffect effect;
-      effect.deterministic = false;
-      return effect;
-    }
-
-    static DeterministicNoWaitCommitEffect Wait() {
-      DeterministicNoWaitCommitEffect effect;
-      effect.has_wait = true;
-      return effect;
-    }
-  };
-
-  // Analyze a stmt for one specific question used by wait relaxation:
-  // can we prove that it contributes a deterministic number of commit groups
-  // without crossing a wait boundary? The analyzer exposes the effect as
-  // structured state instead of overloading std::optional<int> with both
-  // "unknown" and "has wait" meanings.
-  class DeterministicNoWaitCommitAnalyzer {
-  public:
-    explicit DeterministicNoWaitCommitAnalyzer(const PipelineRewriter *rewriter)
-        : rewriter_(rewriter) {}
-
-    DeterministicNoWaitCommitEffect Analyze(const Stmt &stmt) const {
-      if (stmt.as<BindNode>()) {
-        return DeterministicNoWaitCommitEffect{};
-      }
-      if (const auto *attr = stmt.as<AttrStmtNode>()) {
-        return AnalyzeAttr(attr);
-      }
-      if (const auto *seq = stmt.as<SeqStmtNode>()) {
-        DeterministicNoWaitCommitEffect effect;
-        for (const Stmt &s : seq->seq) {
-          effect = Combine(effect, Analyze(s));
-          if (!effect.deterministic) {
-            return effect;
-          }
-        }
-        return effect;
-      }
-      if (const auto *block = stmt.as<SBlockNode>()) {
-        return Analyze(block->body);
-      }
-      if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-        if (!is_one(realize->predicate)) {
-          return DeterministicNoWaitCommitEffect::Unknown();
-        }
-        return Analyze(realize->block->body);
-      }
-      if (const auto *for_node = stmt.as<ForNode>()) {
-        return AnalyzeFor(for_node);
-      }
-      if (stmt.as<IfThenElseNode>()) {
-        return DeterministicNoWaitCommitEffect::Unknown();
-      }
-      if (rewriter_->ContainsAsyncSyncScopes(stmt)) {
-        return DeterministicNoWaitCommitEffect::Unknown();
-      }
-      return {};
-    }
-
-  private:
-    DeterministicNoWaitCommitEffect
-    AnalyzeAttr(const AttrStmtNode *attr) const {
-      if (PipelineRewriter::IsAsyncWaitQueueScope(attr) ||
-          PipelineRewriter::IsAsyncWaitInflightCount(attr)) {
-        return DeterministicNoWaitCommitEffect::Wait();
-      }
-      if (PipelineRewriter::IsAsyncCommitQueueScope(attr)) {
-        auto effect = Analyze(attr->body);
-        if (!effect.deterministic) {
-          return effect;
-        }
-        ++effect.commit_groups;
-        return effect;
-      }
-      return Analyze(attr->body);
-    }
-
-    DeterministicNoWaitCommitEffect AnalyzeFor(const ForNode *for_node) const {
-      if (for_node->thread_binding.defined()) {
-        return DeterministicNoWaitCommitEffect::Unknown();
-      }
-      const int64_t *extent_imm = as_const_int(for_node->extent);
-      if (extent_imm == nullptr || *extent_imm < 0) {
-        return DeterministicNoWaitCommitEffect::Unknown();
-      }
-      auto effect = Analyze(for_node->body);
-      if (!effect.deterministic) {
-        return effect;
-      }
-      effect.commit_groups *= static_cast<int>(*extent_imm);
-      return effect;
-    }
-
-    static DeterministicNoWaitCommitEffect
-    Combine(const DeterministicNoWaitCommitEffect &lhs,
-            const DeterministicNoWaitCommitEffect &rhs) {
-      if (!lhs.deterministic || !rhs.deterministic) {
-        return DeterministicNoWaitCommitEffect::Unknown();
-      }
-      DeterministicNoWaitCommitEffect effect;
-      effect.has_wait = lhs.has_wait || rhs.has_wait;
-      effect.commit_groups = lhs.commit_groups + rhs.commit_groups;
-      return effect;
-    }
-
-    const PipelineRewriter *rewriter_;
   };
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
@@ -1818,14 +1681,13 @@ private:
       : public StmtFunctor<HeadAsyncSyncInfo(const Stmt &)> {
   public:
     static HeadAsyncSyncInfo Analyze(const PipelineRewriter *rewriter,
-                                     const Stmt &stmt, HeadSeqMode seq_mode) {
-      HeadAsyncSyncAnalyzer analyzer(rewriter, seq_mode);
+                                     const Stmt &stmt) {
+      HeadAsyncSyncAnalyzer analyzer(rewriter);
       return analyzer(stmt);
     }
 
-    HeadAsyncSyncAnalyzer(const PipelineRewriter *rewriter,
-                          HeadSeqMode seq_mode)
-        : rewriter_(rewriter), seq_mode_(seq_mode) {}
+    explicit HeadAsyncSyncAnalyzer(const PipelineRewriter *rewriter)
+        : rewriter_(rewriter) {}
 
     HeadAsyncSyncInfo VisitStmt_(const AttrStmtNode *op) final {
       if (IsAsyncWaitQueueScope(op)) {
@@ -1847,9 +1709,6 @@ private:
       if (op->seq.empty()) {
         return {};
       }
-      if (seq_mode_ == HeadSeqMode::kSingletonOnly && op->seq.size() != 1) {
-        return {HeadAsyncSyncKind::kBlocked, 0};
-      }
       return VisitStmt(op->seq[0]);
     }
 
@@ -1868,27 +1727,10 @@ private:
 
   private:
     const PipelineRewriter *rewriter_;
-    HeadSeqMode seq_mode_;
   };
 
-  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt,
-                                         HeadSeqMode seq_mode) const {
-    return HeadAsyncSyncAnalyzer::Analyze(this, stmt, seq_mode);
-  }
-
-  ClassifiedAsyncSyncStmt ClassifySimpleAsyncSyncStmt(const Stmt &stmt) const {
-    HeadAsyncSyncInfo info =
-        AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kSingletonOnly);
-    switch (info.kind) {
-    case HeadAsyncSyncKind::kCommit:
-      return {AsyncSyncStmtKind::kCommit, 0};
-    case HeadAsyncSyncKind::kWaitStatic:
-      return {AsyncSyncStmtKind::kWaitStatic, info.wait_n};
-    case HeadAsyncSyncKind::kWaitDynamic:
-      return {AsyncSyncStmtKind::kWaitDynamic, 0};
-    default:
-      return {};
-    }
+  HeadAsyncSyncInfo AnalyzeHeadAsyncSync(const Stmt &stmt) const {
+    return HeadAsyncSyncAnalyzer::Analyze(this, stmt);
   }
 
   bool ContainsAsyncSyncScopes(const Stmt &stmt) const {
@@ -1921,135 +1763,6 @@ private:
     return found;
   }
 
-  AsyncSyncSummary SummarizeAsyncSyncScopes(const Stmt &stmt) const {
-    AsyncSyncSummary summary;
-    PostOrderVisit(stmt, [&](const ObjectRef &obj) {
-      if (const auto *attr = obj.as<AttrStmtNode>()) {
-        if (IsAsyncCommitQueueScope(attr)) {
-          ++summary.commit;
-        } else if (IsAsyncWaitQueueScope(attr)) {
-          ++summary.wait;
-        }
-      }
-    });
-    return summary;
-  }
-
-  std::optional<int>
-  TryGetDeterministicNoWaitCommitGroups(const Stmt &stmt) const {
-    auto effect = DeterministicNoWaitCommitAnalyzer(this).Analyze(stmt);
-    if (!effect.deterministic || effect.has_wait) {
-      return std::nullopt;
-    }
-    return effect.commit_groups;
-  }
-
-  int GuaranteedNewGroupsBeforeNextWait(const Array<Stmt> &body,
-                                        int start_idx) const {
-    int guaranteed_groups = 0;
-    for (int i = start_idx, n = static_cast<int>(body.size()); i < n; ++i) {
-      AsyncSyncSummary summary = SummarizeAsyncSyncScopes(body[i]);
-      if (summary.wait > 0) {
-        break;
-      }
-      if (summary.commit == 0) {
-        continue;
-      }
-      if (auto commits = TryGetDeterministicNoWaitCommitGroups(body[i])) {
-        guaranteed_groups += *commits;
-        continue;
-      }
-      break;
-    }
-    return guaranteed_groups;
-  }
-
-  class WaitStaticInSimpleWrapperRewriter
-      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
-  public:
-    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
-                                  const Stmt &stmt, int new_wait_n) {
-      if (rewriter->ClassifySimpleAsyncSyncStmt(stmt).kind !=
-          AsyncSyncStmtKind::kWaitStatic) {
-        return Optional<Stmt>();
-      }
-      WaitStaticInSimpleWrapperRewriter rewrite(rewriter, new_wait_n);
-      return rewrite(stmt);
-    }
-
-    WaitStaticInSimpleWrapperRewriter(const PipelineRewriter *rewriter,
-                                      int new_wait_n)
-        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
-
-    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
-      if (IsAsyncWaitQueueScope(op)) {
-        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
-      }
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
-                      op->span);
-    }
-
-    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
-      if (op->seq.size() != 1) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> inner = VisitStmt(op->seq[0]);
-      if (!inner.defined()) {
-        return Optional<Stmt>();
-      }
-      return SeqStmt({inner.value()});
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = GetRef<SBlock>(op);
-      new_block.CopyOnWrite()->body = body.value();
-      return new_block;
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
-      if (!is_one(op->predicate)) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> body = VisitStmt(op->block->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = op->block;
-      new_block.CopyOnWrite()->body = body.value();
-      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
-    }
-
-    Optional<Stmt> VisitStmtDefault_(const Object *) final {
-      return Optional<Stmt>();
-    }
-
-  private:
-    const PipelineRewriter *rewriter_;
-    int new_wait_n_;
-  };
-
-  Optional<Stmt> RewriteWaitStaticInSimpleWrapper(const Stmt &stmt,
-                                                  int new_wait_n) const {
-    return WaitStaticInSimpleWrapperRewriter::Rewrite(this, stmt, new_wait_n);
-  }
-
-  std::optional<int> TryGetHeadStaticWaitCount(const Stmt &stmt) const {
-    HeadAsyncSyncInfo info =
-        AnalyzeHeadAsyncSync(stmt, HeadSeqMode::kTakeFirstElement);
-    if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
-      return info.wait_n;
-    }
-    return std::nullopt;
-  }
-
   class FirstStaticWaitCounter
       : public StmtFunctor<std::optional<int>(const Stmt &)> {
   public:
@@ -2063,8 +1776,8 @@ private:
         : rewriter_(rewriter) {}
 
     std::optional<int> VisitStmt_(const AttrStmtNode *op) final {
-      HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
-          GetRef<Stmt>(op), HeadSeqMode::kTakeFirstElement);
+      HeadAsyncSyncInfo info =
+          rewriter_->AnalyzeHeadAsyncSync(GetRef<Stmt>(op));
       if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
         return info.wait_n;
       }
@@ -2076,8 +1789,7 @@ private:
 
     std::optional<int> VisitStmt_(const SeqStmtNode *op) final {
       for (const Stmt &elem : op->seq) {
-        HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(
-            elem, HeadSeqMode::kTakeFirstElement);
+        HeadAsyncSyncInfo info = rewriter_->AnalyzeHeadAsyncSync(elem);
         if (info.kind == HeadAsyncSyncKind::kWaitStatic) {
           return info.wait_n;
         }
@@ -2109,81 +1821,6 @@ private:
 
   std::optional<int> TryGetFirstStaticWaitCount(const Stmt &stmt) const {
     return FirstStaticWaitCounter::Find(this, stmt);
-  }
-
-  class HeadStaticWaitInWrapperRewriter
-      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
-  public:
-    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
-                                  const Stmt &stmt, int new_wait_n) {
-      HeadStaticWaitInWrapperRewriter rewrite(rewriter, new_wait_n);
-      return rewrite(stmt);
-    }
-
-    HeadStaticWaitInWrapperRewriter(const PipelineRewriter *rewriter,
-                                    int new_wait_n)
-        : rewriter_(rewriter), new_wait_n_(new_wait_n) {}
-
-    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
-      if (IsAsyncWaitQueueScope(op)) {
-        return rewriter_->MakeStaticAsyncWaitStmtLike(op, new_wait_n_);
-      }
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
-                      op->span);
-    }
-
-    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
-      if (op->seq.empty()) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> first = VisitStmt(op->seq[0]);
-      if (!first.defined()) {
-        return Optional<Stmt>();
-      }
-      Array<Stmt> new_seq = op->seq;
-      new_seq.Set(0, first.value());
-      return SeqStmt(new_seq);
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = GetRef<SBlock>(op);
-      new_block.CopyOnWrite()->body = body.value();
-      return new_block;
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
-      if (!is_one(op->predicate)) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> body = VisitStmt(op->block->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = op->block;
-      new_block.CopyOnWrite()->body = body.value();
-      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
-    }
-
-    Optional<Stmt> VisitStmtDefault_(const Object *) final {
-      return Optional<Stmt>();
-    }
-
-  private:
-    const PipelineRewriter *rewriter_;
-    int new_wait_n_;
-  };
-
-  Optional<Stmt> RewriteHeadStaticWaitInWrapper(const Stmt &stmt,
-                                                int new_wait_n) const {
-    return HeadStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
 
   class FirstStaticWaitInWrapperRewriter
@@ -2265,230 +1902,6 @@ private:
                                                  int new_wait_n) const {
     return FirstStaticWaitInWrapperRewriter::Rewrite(this, stmt, new_wait_n);
   }
-
-  Stmt MaybeRelaxLoopWaits(const For &loop, int pre_outstanding_lb) const {
-    int retain = PipelinedRetainGroups(GetPipelineNumStages(loop.get()));
-    if (retain <= 0 || !loop.defined()) {
-      return loop;
-    }
-    const auto *seq = loop->body.as<SeqStmtNode>();
-    if (!seq || seq->seq.empty()) {
-      return loop;
-    }
-
-    Array<Stmt> body = seq->seq;
-    bool changed = false;
-    int outstanding_lb = std::max(0, pre_outstanding_lb);
-    int groups_since_wait_lb = 0;
-    bool seen_wait_boundary = false;
-
-    for (int i = 0, n = static_cast<int>(body.size()); i < n; ++i) {
-      ClassifiedAsyncSyncStmt cls = ClassifySimpleAsyncSyncStmt(body[i]);
-      if (cls.kind == AsyncSyncStmtKind::kCommit) {
-        ++outstanding_lb;
-        ++groups_since_wait_lb;
-        continue;
-      }
-      if (cls.kind == AsyncSyncStmtKind::kWaitDynamic) {
-        seen_wait_boundary = true;
-        outstanding_lb = 0;
-        groups_since_wait_lb = 0;
-        continue;
-      }
-      if (cls.kind == AsyncSyncStmtKind::kWaitStatic) {
-        int effective_wait_n = cls.wait_n;
-        if (cls.wait_n == 0) {
-          int groups_after_wait_lb =
-              GuaranteedNewGroupsBeforeNextWait(body, i + 1);
-          int per_sync_groups = groups_since_wait_lb;
-          bool uses_head_fallback =
-              (per_sync_groups == 0 && !seen_wait_boundary);
-          if (uses_head_fallback) {
-            per_sync_groups = 1;
-          }
-          int candidate_wait_n = std::max(0, retain * per_sync_groups);
-          bool enough_pre_outstanding =
-              !uses_head_fallback || outstanding_lb >= (candidate_wait_n + 1);
-          if (candidate_wait_n > 0 && enough_pre_outstanding &&
-              (!uses_head_fallback || groups_after_wait_lb > 0)) {
-            Optional<Stmt> rewritten_wait =
-                RewriteWaitStaticInSimpleWrapper(body[i], candidate_wait_n);
-            if (rewritten_wait.defined()) {
-              body.Set(i, rewritten_wait.value());
-              changed = true;
-              effective_wait_n = candidate_wait_n;
-            }
-          }
-        }
-        seen_wait_boundary = true;
-        outstanding_lb = std::min(outstanding_lb, effective_wait_n);
-        groups_since_wait_lb = 0;
-        continue;
-      }
-
-      AsyncSyncSummary summary = SummarizeAsyncSyncScopes(body[i]);
-      if (summary.wait == 0) {
-        if (auto commits = TryGetDeterministicNoWaitCommitGroups(body[i])) {
-          outstanding_lb += *commits;
-          groups_since_wait_lb += *commits;
-          continue;
-        }
-      }
-      if (summary.wait > 0) {
-        seen_wait_boundary = true;
-      }
-      outstanding_lb = 0;
-      groups_since_wait_lb = 0;
-    }
-
-    if (!changed) {
-      return loop;
-    }
-    For new_loop = loop;
-    new_loop.CopyOnWrite()->body = body.size() == 1 ? body[0] : SeqStmt(body);
-    return new_loop;
-  }
-
-  class LoopWaitsInSimpleWrapperRelaxer
-      : public StmtFunctor<Optional<Stmt>(const Stmt &)> {
-  public:
-    static Optional<Stmt> Rewrite(const PipelineRewriter *rewriter,
-                                  const Stmt &stmt, int pre_outstanding_lb) {
-      LoopWaitsInSimpleWrapperRelaxer relaxer(rewriter, pre_outstanding_lb);
-      return relaxer(stmt);
-    }
-
-    LoopWaitsInSimpleWrapperRelaxer(const PipelineRewriter *rewriter,
-                                    int pre_outstanding_lb)
-        : rewriter_(rewriter), pre_outstanding_lb_(pre_outstanding_lb) {}
-
-    Optional<Stmt> VisitStmt_(const ForNode *op) final {
-      For loop = GetRef<For>(op);
-      Stmt relaxed = rewriter_->MaybeRelaxLoopWaits(loop, pre_outstanding_lb_);
-      if (relaxed.same_as(loop)) {
-        return Optional<Stmt>();
-      }
-      return relaxed;
-    }
-
-    Optional<Stmt> VisitStmt_(const AttrStmtNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      return AttrStmt(op->node, op->attr_key, op->value, body.value(),
-                      op->span);
-    }
-
-    Optional<Stmt> VisitStmt_(const SeqStmtNode *op) final {
-      if (op->seq.size() != 1) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> inner = VisitStmt(op->seq[0]);
-      if (!inner.defined()) {
-        return Optional<Stmt>();
-      }
-      return SeqStmt({inner.value()});
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = GetRef<SBlock>(op);
-      new_block.CopyOnWrite()->body = body.value();
-      return new_block;
-    }
-
-    Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
-      if (!is_one(op->predicate)) {
-        return Optional<Stmt>();
-      }
-      Optional<Stmt> body = VisitStmt(op->block->body);
-      if (!body.defined()) {
-        return Optional<Stmt>();
-      }
-      SBlock new_block = op->block;
-      new_block.CopyOnWrite()->body = body.value();
-      return SBlockRealize(op->iter_values, op->predicate, new_block, op->span);
-    }
-
-    Optional<Stmt> VisitStmtDefault_(const Object *) final {
-      return Optional<Stmt>();
-    }
-
-  private:
-    const PipelineRewriter *rewriter_;
-    int pre_outstanding_lb_;
-  };
-
-  Optional<Stmt> RelaxLoopWaitsInSimpleWrapper(const Stmt &stmt,
-                                               int pre_outstanding_lb) const {
-    return LoopWaitsInSimpleWrapperRelaxer::Rewrite(this, stmt,
-                                                    pre_outstanding_lb);
-  }
-
-  class AsyncPipelineLoopWaitRelaxer : public StmtExprMutator {
-  public:
-    explicit AsyncPipelineLoopWaitRelaxer(const PipelineRewriter *rewriter)
-        : rewriter_(rewriter) {}
-
-    Stmt VisitStmt_(const SeqStmtNode *op) final {
-      Array<Stmt> visited;
-      visited.reserve(op->seq.size());
-      for (const Stmt &stmt : op->seq) {
-        visited.push_back(this->VisitStmt(stmt));
-      }
-
-      int outstanding_lb = 0;
-      for (int i = 0, n = static_cast<int>(visited.size()); i < n; ++i) {
-        Stmt current = visited[i];
-        Optional<Stmt> relaxed =
-            rewriter_->RelaxLoopWaitsInSimpleWrapper(current, outstanding_lb);
-        if (relaxed.defined()) {
-          current = relaxed.value();
-          visited.Set(i, current);
-        }
-        ClassifiedAsyncSyncStmt cls =
-            rewriter_->ClassifySimpleAsyncSyncStmt(current);
-        if (cls.kind == AsyncSyncStmtKind::kCommit) {
-          ++outstanding_lb;
-          continue;
-        }
-        if (cls.kind == AsyncSyncStmtKind::kWaitStatic) {
-          outstanding_lb = std::min(outstanding_lb, cls.wait_n);
-          continue;
-        }
-        if (cls.kind == AsyncSyncStmtKind::kWaitDynamic) {
-          outstanding_lb = 0;
-          continue;
-        }
-        AsyncSyncSummary summary = rewriter_->SummarizeAsyncSyncScopes(current);
-        if (summary.wait == 0) {
-          if (auto commits =
-                  rewriter_->TryGetDeterministicNoWaitCommitGroups(current)) {
-            outstanding_lb += *commits;
-            continue;
-          }
-        }
-        if (summary.wait > 0) {
-          outstanding_lb = 0;
-        }
-      }
-
-      if (visited.empty()) {
-        return Evaluate(0);
-      }
-      if (visited.size() == 1) {
-        return visited[0];
-      }
-      return SeqStmt(visited);
-    }
-
-  private:
-    const PipelineRewriter *rewriter_;
-  };
 
   Array<Stmt> RelaxTrailingConsumerWaits(Array<Stmt> seq, int retain) const {
     if (retain <= 0 || seq.size() <= 1) {
@@ -2643,8 +2056,8 @@ private:
         PrimExpr wait_count = PrimExpr(0);
         Optional<PrimExpr> producer_head =
             async_states_[producer_stage_idx].producer_head;
-        if (producer_head &&
-            ana_normalized->CanProve(producer_head.value() >= 0)) {
+        if (producer_head && ana_normalized->CanProve(producer_head.value() >=
+                                                      pipeline_loop_->min)) {
           wait_count = analyzer_.Simplify(producer_head.value() -
                                           new_stmts[i].access_index);
         }
@@ -2679,7 +2092,8 @@ private:
 
         PrimExpr wait_count = PrimExpr(0);
         if (latest_producer_head &&
-            ana_normalized->CanProve(latest_producer_head.value() >= 0)) {
+            ana_normalized->CanProve(latest_producer_head.value() >=
+                                     pipeline_loop_->min)) {
           wait_count = analyzer_.Simplify(
               (latest_producer_head.value() - new_stmts[i].access_index) *
                   num_commit_group +

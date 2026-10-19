@@ -47,8 +47,13 @@ def _collect_wait_args(func):
 
 
 def _find_pipelined_loop(func):
-    loops = [loop for loop in collect_nodes(func, tvm.tirx.For) if "tl_pipelined_num_stages" in loop.annotations]
-    assert loops, "Expected at least one loop annotated with tl_pipelined_num_stages"
+    # A symbolic loop start keeps prologue/epilogue as unrolled loops; return the serial steady-state loop.
+    loops = [
+        loop
+        for loop in collect_nodes(func, tvm.tirx.For)
+        if "tl_pipelined_num_stages" in loop.annotations and loop.kind == tvm.tirx.ForKind.SERIAL
+    ]
+    assert loops, "Expected at least one serial loop annotated with tl_pipelined_num_stages"
     return loops[0]
 
 
@@ -371,7 +376,7 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
     assert annotated == 0
 
 
-def test_async_pipeline_relaxes_loop_wait_and_descends_trailing_drain():
+def test_async_pipeline_loop_wait_spans_stage_distance_and_descends_trailing_drain():
     @T.prim_func
     def before(A: T.Tensor((40,), T.uint8), B: T.Tensor((40,), T.uint8)):
         S = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
@@ -405,8 +410,60 @@ def test_async_pipeline_relaxes_loop_wait_and_descends_trailing_drain():
     loop_waits = _collect_wait_args(loop.body)
     all_waits = _collect_wait_args(func)
 
-    assert loop_waits == [3], f"Expected relaxed loop wait to keep three groups in flight, got {loop_waits}"
+    assert loop_waits == [3], f"Expected loop wait to keep three groups in flight, got {loop_waits}"
     assert all_waits == [3, 2, 1, 0], f"Expected trailing waits to descend through the drain suffix, got {all_waits}"
+
+
+@pytest.mark.parametrize("symbolic_start", [False, True])
+def test_async_pipeline_drains_async_copy_consumed_in_its_own_stage(symbolic_start):
+    # Regression for #3526: copy_b is committed right before its same-stage consumer, so
+    # that consumer must wait for every group; only the prefetched copy_a may stay in flight.
+    @T.prim_func
+    def before(
+        A: T.Tensor((40,), T.uint8),
+        B: T.Tensor((40,), T.uint8),
+        C: T.Tensor((40,), T.uint8),
+        D: T.Tensor((40,), T.uint8),
+        start: T.int32,
+    ):
+        SA = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
+        SB = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
+        for i in T.serial(
+            start if symbolic_start else 0,
+            (start if symbolic_start else 0) + 5,
+            annotations={
+                "software_pipeline_stage": [0, 1, 1, 1],
+                "software_pipeline_order": [0, 1, 2, 3],
+                "software_pipeline_async_stages": [0, 1],
+                "software_pipeline_async_producers": [1, 0, 1, 0],
+                "software_pipeline_async_producer_groups": [0, -1, 1, -1],
+            },
+        ):
+            with T.sblock("copy_a"):
+                T.reads(A[i * 4 : i * 4 + 4])
+                T.writes(SA[0:4])
+                T.copy(A[i * 4 : i * 4 + 4], SA[0:4])
+            with T.sblock("consume_a"):
+                T.reads(SA[0:4])
+                T.writes(C[i * 4 : i * 4 + 4])
+                for j in range(4):
+                    C[i * 4 + j] = SA[j]
+            with T.sblock("copy_b"):
+                T.reads(B[i * 4 : i * 4 + 4])
+                T.writes(SB[0:4])
+                T.copy(B[i * 4 : i * 4 + 4], SB[0:4])
+            with T.sblock("consume_b"):
+                T.reads(SB[0:4])
+                T.writes(D[i * 4 : i * 4 + 4])
+                for j in range(4):
+                    D[i * 4 + j] = SB[j]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    loop_waits = _collect_wait_args(_find_pipelined_loop(mod["main"]).body)
+    assert loop_waits == [1, 0], f"Expected wait<1> before consume_a and wait<0> before consume_b, got {loop_waits}"
 
 
 def test_degenerate_pipeline_with_single_stage_is_not_expanded():
