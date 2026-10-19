@@ -35,7 +35,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.report import TrialReporter
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
-from tilelang.utils.device import get_available_cpu_count
+from tilelang.utils.device import get_available_cpu_count, get_current_device
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.engine.param import KernelParam
 from tilelang import __version__
@@ -281,14 +281,16 @@ class AutoTuner:
             cached_tensors_by_device = {}
 
             def supply_prog(_params, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
-                # derive the benchmark device from the captured tensors
-                src = next((t for t in _frozen_inputs if isinstance(t, torch.Tensor)), None)
-                target_device = src.device if src is not None else torch.device("cpu")
-                if target_device not in _cached_tensors_by_device:
-                    _cached_tensors_by_device[target_device] = [
-                        tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
+                # supply benchmark tensors on the current device of the active backend,
+                # like the default tensor supply
+                device = get_current_device()
+                if device is None:
+                    device = "cpu"
+                if device not in _cached_tensors_by_device:
+                    _cached_tensors_by_device[device] = [
+                        tensor.to(device=device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
-                return _cached_tensors_by_device[target_device]
+                return _cached_tensors_by_device[device]
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,

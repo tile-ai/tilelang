@@ -1,10 +1,14 @@
-"""`set_autotune_inputs` must keep captured tensors on their capture device.
+"""`set_autotune_inputs` must supply benchmark tensors on the current device.
 
 Before the fix, the frozen supply closure resolved its benchmark device to
 CUDA-or-CPU only, so on an NPU host every captured tensor was moved to CPU and
-each tuning trial failed with a launcher device mismatch (issue #3545).
+each tuning trial failed with a launcher device mismatch (issue #3545). Like
+the default tensor supply, benchmark tensors follow the current device of the
+active backend; workers bind their device, and inputs captured on another
+device are aligned to the device the benchmark runs on.
 """
 
+import pytest
 import torch
 
 import tilelang
@@ -42,9 +46,9 @@ def vecadd(n: int, block: int = 1024):
     return _vecadd_kernel(n, block)
 
 
-def _deterministic_inputs():
-    a = torch.arange(N, dtype=torch.float32, device="npu")
-    b = torch.arange(N, dtype=torch.float32, device="npu") * 2
+def _deterministic_inputs(device="npu"):
+    a = torch.arange(N, dtype=torch.float32, device=device)
+    b = torch.arange(N, dtype=torch.float32, device=device) * 2
     return a, b
 
 
@@ -56,6 +60,24 @@ def _isolate_autotune_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(env, "TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     tilelang.enable_cache()
     AutoTuner._memory_cache.clear()
+
+
+def _tune_with_recorded_supply(a, b, monkeypatch, tmp_path):
+    _isolate_autotune_cache(monkeypatch, tmp_path)
+    supplied_devices = []
+
+    def ref_prog(x, y):
+        supplied_devices.append((x.device, y.device))
+        return x + y
+
+    with set_autotune_inputs(a, b):
+        result = (
+            AutoTuner(_vecadd_config, configs=CONFIGS)
+            .set_compile_args(out_idx=[2])
+            .set_profile_args(warmup=1, rep=3, timeout=120, ref_prog=ref_prog)
+            .run(warmup=1, rep=3, timeout=120)
+        )
+    return result, supplied_devices
 
 
 @tilelang.testing.requires_ascend
@@ -71,27 +93,30 @@ def test_autotune_with_set_inputs_tunes_on_npu():
 
 
 @tilelang.testing.requires_ascend
-def test_set_inputs_supplies_benchmark_tensors_on_capture_device(monkeypatch, tmp_path):
-    _isolate_autotune_cache(monkeypatch, tmp_path)
-
+def test_set_inputs_supplies_benchmark_tensors_on_current_device(monkeypatch, tmp_path):
     a, b = _deterministic_inputs()
-    supplied_devices = []
 
-    def ref_prog(x, y):
-        supplied_devices.append((x.device.type, y.device.type))
-        return x + y
+    result, supplied_devices = _tune_with_recorded_supply(a, b, monkeypatch, tmp_path)
 
-    with set_autotune_inputs(a, b):
-        result = (
-            AutoTuner(_vecadd_config, configs=CONFIGS)
-            .set_compile_args(out_idx=[2])
-            .set_profile_args(warmup=1, rep=3, timeout=120, ref_prog=ref_prog)
-            .run(warmup=1, rep=3, timeout=120)
-        )
-
+    current = torch.device("npu", torch.npu.current_device())
     assert result.latency > 0
     assert supplied_devices
-    assert set(supplied_devices) == {("npu", "npu")}
+    assert set(supplied_devices) == {(current, current)}
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(torch.npu.device_count() < 2, reason="needs two visible NPU devices")
+def test_set_inputs_aligns_inputs_from_another_device(monkeypatch, tmp_path):
+    current = torch.npu.current_device()
+    other = next(i for i in range(torch.npu.device_count()) if i != current)
+    a, b = _deterministic_inputs(device=f"npu:{other}")
+
+    result, supplied_devices = _tune_with_recorded_supply(a, b, monkeypatch, tmp_path)
+
+    expected = torch.device("npu", current)
+    assert result.latency > 0
+    assert supplied_devices
+    assert set(supplied_devices) == {(expected, expected)}
 
 
 if __name__ == "__main__":
