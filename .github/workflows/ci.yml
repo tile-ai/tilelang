@@ -278,6 +278,9 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
+          # Pin uv: the version manifest lives on raw.githubusercontent.com, which is
+          # not reachable from every self-hosted runner (e.g. mainland China).
+          version: "0.13.1"
           python-version: ${{ matrix.python-version }}
           activate-environment: true
           # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
@@ -610,6 +613,9 @@ jobs:
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
+          # Pin uv: the version manifest lives on raw.githubusercontent.com, which is
+          # not reachable from every self-hosted runner (e.g. mainland China).
+          version: "0.13.1"
           python-version: "3.12"
           activate-environment: true
           enable-cache: false
