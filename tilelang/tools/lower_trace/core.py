@@ -250,16 +250,17 @@ class LowerTraceSession(PassInstrumentationTool):
             os.makedirs(self.run_dir, exist_ok=True)
         return self.run_dir
 
-    def get_codegen_output_path(self, role: Literal["device", "host"] = "device") -> str | None:
-        """Return this role's working-copy path and keep edit baselines separate."""
+    def get_codegen_output_path(self, role: Literal["device", "host"] | None = None) -> str | None:
+        """Return the role's working path, or the legacy path for an unspecified role."""
         if self.codegen_output is not _UNSET:
             output_path = self.codegen_output
-            if output_path is None or role == "device":
+            if output_path is None or role != "host":
                 return output_path  # type: ignore[return-value]
             stem, extension = os.path.splitext(output_path)
             return f"{stem}_host{extension}"
         if self.should_generate_html:
-            return os.path.join(self.ensure_script_dir(), f"codegen_{role}.cpp")
+            name = "codegen" if role is None else f"codegen_{role}"
+            return os.path.join(self.ensure_script_dir(), f"{name}.cpp")
         return None
 
     def allocate_index(self) -> int:
@@ -358,19 +359,19 @@ class LowerTraceSession(PassInstrumentationTool):
                 instrument.abort(error)
 
     def _resolve_codegen_edit(
-        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] = "device"
+        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] | None = None
     ) -> str | None:
         """Apply the baseline/working/current three-way source workflow."""
         with _codegen_path_lock(output_path):
             return self._resolve_codegen_edit_locked(codegen_text, output_path, index, role=role)
 
     def _resolve_codegen_edit_locked(
-        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] = "device"
+        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] | None = None
     ) -> str | None:
         """Resolve one codegen edit while holding the output-path lock."""
         original_path = output_path + ".original"
         latest_path = output_path + ".latest"
-        name = f"codegen_{role}"
+        name = "codegen" if role is None else f"codegen_{role}"
         try:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
             with open(latest_path, "w", encoding="utf-8") as latest_file:
@@ -440,7 +441,7 @@ class LowerTraceSession(PassInstrumentationTool):
             self.ensure_run_dir()
         before_text = str(event.mod)
         output_path = self.get_codegen_output_path(event.role)
-        name = f"codegen_{event.role}"
+        name = "codegen" if event.role is None else f"codegen_{event.role}"
 
         try:
             with pass_phase("codegen"):

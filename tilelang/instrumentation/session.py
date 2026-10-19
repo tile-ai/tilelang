@@ -28,12 +28,12 @@ _tool_factories: dict[str, Callable[[], PassInstrumentationTool]] = {}
 
 @dataclass(frozen=True)
 class CodegenEvent:
-    """One explicit backend code-generation call within a compile session."""
+    """One backend code-generation call; ``role=None`` means unspecified."""
 
     name: str
     mod: Any
     target: Any
-    role: Literal["device", "host"] = "device"
+    role: Literal["device", "host"] | None = None
 
 
 class PassInstrumentationTool:
@@ -255,9 +255,9 @@ def run_codegen_with_instrumentation(
     target: Any,
     call: Callable[[], _CodegenResult],
     *,
-    role: Literal["device", "host"] = "device",
+    role: Literal["device", "host"] | None = None,
 ) -> _CodegenResult:
-    """Run an explicit backend codegen call through the active session."""
+    """Run codegen through the active session, leaving omitted roles unspecified."""
     session = current_compile_pass_instrumentation()
     if session is None:
         return call()

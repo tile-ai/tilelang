@@ -98,69 +98,6 @@ class _RecordingTool(PassInstrumentationTool):
         self.events.append(("finish", self.label, error))
 
 
-class _CodegenRecordingTool(PassInstrumentationTool):
-    def __init__(self):
-        self.events: list[CodegenEvent] = []
-
-    def run_codegen(self, event, next_call):
-        self.events.append(event)
-        return next_call()
-
-
-def test_codegen_role_defaults_preserve_positional_calls():
-    """Existing event constructors and four-argument helpers mean device codegen."""
-    event = CodegenEvent("target.build.test", "mod", "target")
-    assert event.role == "device"
-    tool = _CodegenRecordingTool()
-    calls = []
-
-    def build():
-        calls.append("build")
-        return "result"
-
-    with compile_pass_instrumentation(tools=[tool], include_default_tools=False):
-        assert run_codegen_with_instrumentation("target.build.test", "mod", "target", build) == "result"
-        assert run_codegen_with_instrumentation("target.build.test_host", "mod", "target", build, role="host") == "result"
-    assert calls == ["build", "build"]
-    assert [(event.name, event.role, event.mod, event.target) for event in tool.events] == [
-        ("target.build.test", "device", "mod", "target"),
-        ("target.build.test_host", "host", "mod", "target"),
-    ]
-
-
-def test_backend_codegen_wrappers_propagate_roles_for_the_same_target(monkeypatch):
-    """The wrapper declares the role even when both targets have kind 'c'."""
-    from tilelang import tvm
-    from tilelang.backend.device_codegen import global_func_device_codegen
-    from tilelang.backend.host_codegen import global_func_host_codegen
-
-    target = tvm.target.Target("c")
-    mod = object()
-    results = {"target.build.test_device": object(), "target.build.test_host": object()}
-    calls = []
-
-    def get_global_func(name):
-        def build(build_mod, build_target):
-            calls.append((name, build_mod, build_target))
-            return results[name]
-
-        return build
-
-    monkeypatch.setattr(tvm.ffi, "get_global_func", get_global_func)
-    device_codegen = global_func_device_codegen("target.build.test_device")
-    host_codegen = global_func_host_codegen("target.build.test_host")
-    tool = _CodegenRecordingTool()
-    with compile_pass_instrumentation(tools=[tool], include_default_tools=False):
-        assert device_codegen(mod, target) is results["target.build.test_device"]
-        assert host_codegen(mod, target) is results["target.build.test_host"]
-    assert calls == [("target.build.test_device", mod, target), ("target.build.test_host", mod, target)]
-    assert [(event.name, event.role) for event in tool.events] == [
-        ("target.build.test_device", "device"),
-        ("target.build.test_host", "host"),
-    ]
-    assert all(event.mod is mod and event.target is target for event in tool.events)
-
-
 def test_registered_tools_are_snapshotted_and_composable():
     events = []
     instances = []

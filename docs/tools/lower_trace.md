@@ -108,6 +108,13 @@ only when the execution backend invokes host codegen. Each working file has its
 own baseline, latest output, and backups; host codegen cannot overwrite the
 device working file or its editing state.
 
+The standard backend wrappers explicitly identify each event as device or host
+codegen. Generic instrumentation calls that omit `role` leave it unspecified
+(`None`): these retain the `codegen` record name and default `codegen.cpp` working
+file. An explicit `codegen_output` path is used unchanged for such events.
+Custom callers should supply a role to distinguish device and host output;
+unspecified events share the legacy working file and edit state.
+
 ## Programmatic API
 
 For fine-grained control, IR Lower Trace exposes two layers of API.
