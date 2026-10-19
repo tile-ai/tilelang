@@ -1,7 +1,7 @@
 """Explicit pass inputs: these builders do not run any compiler passes.
 
 A unit carries a stage and one atomic task; a loop is a unit without a task.
-Assigned core masks are Vector=1, Cube=2, flexible scalar=3. core=0 creates
+Core masks are Vector0=1, Cube=2, Vector1=4, Vector=5, All=7. core=0 creates
 an unassigned task without a core_mask key; core=None omits the task wrapper.
 Tests choose the order, stages, version counts and guards independently of
 AutoSchedule's solution.
@@ -11,7 +11,7 @@ from testing.ascend._ir import copy, kernel, seq
 from tvm import tirx
 
 
-def unit(body, *, core=1, stage=0, guard=None, cost=None):
+def unit(body, *, core=5, stage=0, guard=None, cost=None):
     if core is not None:
         metadata = {"core_mask": tirx.IntImm("int64", core)} if core else {}
         if cost is not None:
@@ -22,7 +22,7 @@ def unit(body, *, core=1, stage=0, guard=None, cost=None):
     return tirx.AttrStmt({"stage": stage}, "tl.schedule_unit", 1, body)
 
 
-def copy_ring(*, mode="counter", versions=2, owners=1, guarded=False, prepared=False, core=1):
+def copy_ring(*, mode="counter", versions=2, owners=1, guarded=False, prepared=False, core=5):
     """A GM->UB->GM ring, either before Prepare or before Sync/Materialize.
 
     Prepared inputs explicitly carry the shared counter and epoch guards. This

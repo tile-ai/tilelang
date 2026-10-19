@@ -25,6 +25,7 @@ def global_func_host_codegen(global_func_name: str) -> HostCodegenFunc:
             mod,
             target_host,
             lambda: tvm.ffi.get_global_func(global_func_name)(mod, target_host),
+            role="host",
         )
 
     return build

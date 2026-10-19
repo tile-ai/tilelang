@@ -88,7 +88,7 @@ def ref_program(x, w, c=None, out_dtype="float32"):
     return out if c is None else out + c
 
 
-def run_regression_perf(M=8192, K=8192, N=8192, dtype="bfloat16", hf32=None, target="ascend", out_dtype="float32", acc=False):
+def run_regression_perf(M=8192, K=8192, N=8192, dtype="bfloat16", hf32=None, target=None, out_dtype="float32", acc=False):
     program = gemm(M, K, N, dtype=dtype, out_dtype=out_dtype, hf32=hf32, acc=acc)
     kernel = tilelang.compile(program, target=target, out_idx=None if acc else -1)
     a = torch.randn(M, K, device="npu").to(getattr(torch, dtype))
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         b = torch.randn(N, K, device="npu").to(getattr(torch, dtype))
         initial = torch.randn(M, N, device="npu", dtype=getattr(torch, out_dtype)) if acc else None
         program = gemm(M, K, N, dtype=dtype, out_dtype=out_dtype, hf32=hf32, acc=acc)
-        kernel = tilelang.compile(program, target="ascend", out_idx=None if acc else -1)
+        kernel = tilelang.compile(program, out_idx=None if acc else -1)
         if acc:
             result = initial.clone()
             kernel(a, b, result)
