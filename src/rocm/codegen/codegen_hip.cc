@@ -1556,7 +1556,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     // compile-time immediate. A software pipeline over a dynamic trip count can
     // emit a non-constant depth (e.g. `1 - ko`) in its drain phase. Since there
     // is no runtime form of the wait, fall back to a full wait (N=0: wait for
-    // all outstanding async copies), which is always a safe over-synchronization.
+    // all outstanding async copies), which is always a safe
+    // over-synchronization.
     int n = 0;
     if (const auto *imm = op->args[0].as<IntImmNode>()) {
       n = static_cast<int>(imm->value);
