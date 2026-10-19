@@ -2,15 +2,18 @@
 
 Counts describe unique static IR nodes within each visited function, following
 TVM's post-order visitor. They do not describe dynamic execution counts or order.
+Call queries automatically reuse an index of the most recently queried body.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
 
 from tilelang import tvm
 from tvm import tirx
 
 
-def _bodies(root, function):
+def _bodies(root, function, *, with_names=True):
     if function is not None and not isinstance(function, str):
         raise TypeError("function must be a global function name or None")
     if isinstance(root, tvm.IRModule):
@@ -26,7 +29,9 @@ def _bodies(root, function):
     if function is not None:
         raise ValueError("function can only be selected on an IRModule")
     if isinstance(root, tirx.PrimFunc):
-        name = str(root.attrs["global_symbol"]) if root.attrs and "global_symbol" in root.attrs else "<PrimFunc>"
+        name = "<PrimFunc>"
+        if with_names and root.attrs and "global_symbol" in root.attrs:
+            name = str(root.attrs["global_symbol"])
         return [(name, root.body)]
     if isinstance(root, (tirx.Stmt, tvm.ir.PrimExpr)):
         return [("<root>", root)]
@@ -53,6 +58,19 @@ def _resolve_op(op):
     return op
 
 
+@lru_cache(maxsize=1)
+def _call_index(body):
+    """Index one immutable body; keep function ownership outside the cache."""
+    calls = _collect(body, tirx.Call)
+    by_op: dict[tvm.ir.Op, list[tirx.Call]] = {}
+    for call in calls:
+        op = call.op
+        if isinstance(op, tvm.ir.Op):
+            # TVM Op keys compare by identity, even across Python handles.
+            by_op.setdefault(op, []).append(call)
+    return calls, by_op
+
+
 def collect_nodes(root, node_type, *, function: str | None = None) -> list:
     """Collect nodes of a TVM object type from bodies or an expression.
 
@@ -70,25 +88,37 @@ def collect_calls(root, *, op: str | tvm.ir.Op, function: str | None = None) -> 
 
     GlobalVar and other non-Op callees do not match. An unregistered name raises
     the Op registry's error instead of silently producing an empty result.
+    Consecutive queries of the same body share an internal LRU index. A new
+    body rebuilds the index, including after replacing a module function.
+    The returned list can be changed without affecting subsequent queries.
     """
     target = _resolve_op(op)
-    return [call for call in collect_nodes(root, tirx.Call, function=function) if call.op.same_as(target)]
+    return [call for _, body in _bodies(root, function, with_names=False) for call in _call_index(body)[1].get(target, ())]
 
 
 def assert_call_count(root, *, op: str | tvm.ir.Op, count: int, function: str | None = None) -> None:
-    """Assert a static call count, showing function ownership on failure."""
+    """Assert a static call count, showing function ownership on failure.
+
+    Reuse the same internal body index as collect_calls. Function selection
+    is resolved anew on every query; diagnostic ownership is read on failure.
+    """
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
         raise ValueError("count must be a non-negative integer")
     target = _resolve_op(op)
-    calls_by_function = [(name, _collect(body, tirx.Call)) for name, body in _bodies(root, function)]
-    matches = [(name, call) for name, calls in calls_by_function for call in calls if call.op.same_as(target)]
+    calls_by_function = []
+    matches = []
+    for index, (_, body) in enumerate(_bodies(root, function, with_names=False)):
+        calls, by_op = _call_index(body)
+        calls_by_function.append(calls)
+        matches.extend((index, call) for call in by_op.get(target, ()))
     if len(matches) == count:
         return
-    scope = ", ".join(name for name, _ in calls_by_function) or "<no PrimFuncs>"
+    names = [name for name, _ in _bodies(root, function)]
+    scope = ", ".join(names) or "<no PrimFuncs>"
     # Include other callees when the expected call is absent, but keep failures
     # bounded even for large generated functions.
-    nearby = matches or [(name, call) for name, calls in calls_by_function for call in calls]
-    details = [f"  {name}: {str(call)[:400]}" for name, call in nearby[:8]]
+    nearby = matches or [(index, call) for index, calls in enumerate(calls_by_function) for call in calls]
+    details = [f"  {names[index]}: {str(call)[:400]}" for index, call in nearby[:8]]
     if len(nearby) > 8:
         details.append(f"  ... {len(nearby) - 8} more call nodes")
     if not details:
@@ -101,6 +131,7 @@ def collect_extern_calls(root, *, symbol: str, function: str | None = None) -> l
 
     Other call operators, missing arguments and non-string symbols do not match.
     This function does not interpret prefixes, templates or regular expressions.
+    Reuse the same internal body index through collect_calls.
     """
     if not isinstance(symbol, str):
         raise TypeError("symbol must be a string")

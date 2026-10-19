@@ -4,7 +4,7 @@ import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from tilelang.testing.ir import collect_calls
+from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -36,16 +36,11 @@ def _collect_shuffle_elect(stmt):
 
 
 def _collect_barrier_blocks(stmt):
-    blocks = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            barrier_bufs = [buf for buf in node.alloc_buffers if buf.scope() in ("shared.barrier", "shared.cluster_barrier")]
-            if barrier_bufs:
-                blocks.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return blocks
+    return [
+        block
+        for block in collect_nodes(stmt, tvm.tirx.SBlock)
+        if any(buf.scope() in ("shared.barrier", "shared.cluster_barrier") for buf in block.alloc_buffers)
+    ]
 
 
 @tilelang.testing.requires_cuda
