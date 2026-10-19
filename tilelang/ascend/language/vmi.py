@@ -7,7 +7,7 @@ from functools import wraps
 
 from tvm import tirx
 from tvm.tirx import Buffer, BufferLoad, BufferRegion
-from tvm.tirx.script.builder.ir import bind as _bind
+from tvm.tirx.script.builder.ir import bind as _bind, sblock_attr as _sblock_attr
 from tvm.script.ir_builder import IRBuilder
 
 from tilelang.language.builtin import access_ptr
@@ -48,17 +48,21 @@ def alloc_local(shape, vreg_type):
 
 
 def alloc_var(dtype, *, size):
-    """Allocate a mutable VMI vector register variable.
+    """Allocate a mutable VMI data register slot.
 
-    This mirrors ``T.simd.alloc_var`` but preserves the VMI lane count in the
-    TIR vector dtype, allowing loop-carried VMI accumulators to be rebound
-    without eager-builder immutable-value diagnostics.
+    The TIR buffer keeps the numeric element dtype (a single lane is the
+    scalar dtype, more lanes are a vector dtype).  A block-level allocation
+    marker records that the slot is an explicit VMI data register, so lowering
+    and code generation do not have to infer that intent from the vector
+    dtype or from a later store.
     """
     lanes = _normalize_lanes(size, context="T.vmi.alloc_var(...)")
     elem = _scalar_dtype(dtype, context="T.vmi.alloc_var(...)")
     from tilelang.language.allocate import alloc_var as _alloc_var
 
-    return _alloc_var(f"{elem}x{lanes}", scope="local.var")
+    buffer = _alloc_var(f"{elem}x{lanes}", scope="local.var")
+    _sblock_attr({"tl.vmi.alloc_kind": {buffer.data: "data"}})
+    return buffer
 
 
 def _normalize_lanes(lanes: int, *, context: str) -> int:

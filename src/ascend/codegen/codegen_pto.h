@@ -208,33 +208,45 @@ private:
     kOtherVector,
     kUnknown,
   };
+  struct PtoValueInfo {
+    PtoValueKind kind{PtoValueKind::kUnknown};
+    // True only when the expression itself is a local.var BufferLoad, or a
+    // pure Var/Let-body/same-dtype-Cast alias of one.  It is a source fact for
+    // the grouped-vbrc compatibility check, not a VMI kind and not a
+    // descendant-containment test.
+    bool is_local_var_read_alias{false};
+  };
   struct PtoValueQueryContext; // query-local Let overrides + active Var set
   struct PtoOperandScanner;    // one-level immediate-operand classification
+  PtoValueInfo AnalyzePtoValue_(const PrimExpr &expr) const;
+  PtoValueInfo AnalyzePtoValue_(const PrimExpr &expr,
+                                PtoValueQueryContext *context) const;
+  PtoValueInfo AnalyzePtoValueUncached_(const PrimExpr &expr,
+                                        PtoValueQueryContext *context) const;
   PtoValueKind ClassifyPtoValue_(const PrimExpr &expr) const;
   PtoValueKind ClassifyPtoValue_(const PrimExpr &expr,
                                  PtoValueQueryContext *context) const;
-  PtoValueKind ClassifyPtoValueUncached_(const PrimExpr &expr,
-                                         PtoValueQueryContext *context) const;
   PtoValueKind ClassifyVmiCallResult_(const CallNode *op,
                                       PtoValueQueryContext *context) const;
-  PtoValueKind ClassifyBufferLoad_(const BufferLoadNode *op) const;
+  PtoValueInfo ClassifyBufferLoad_(const BufferLoadNode *op) const;
   PtoValueKind ClassifyOrdinaryExpr_(const PrimExpr &expr,
                                      PtoValueQueryContext *context) const;
   static const char *PtoValueKindName(PtoValueKind kind);
   void CheckPtoScalarOperand_(const PrimExpr &expr, const char *consumer) const;
   void CheckPtoVmiBridgeOperand_(const CallNode *op, const char *op_name,
-                                 PtoValueKind source_kind) const;
-  // Grouped vbrc also accepts numeric local.var reads through pure aliases.
-  // The source classification is unchanged; the consumer checks lanes == group.
-  // This does not infer the read's origin from mutable stores.
-  bool IsMutableRegisterGroupSource(const PrimExpr &source) const;
-  bool ResolvesToMutableRegisterRead(
-      const PrimExpr &expr,
-      std::unordered_map<const VarNode *, PrimExpr> *local_defs,
-      std::unordered_set<const VarNode *> *active) const;
+                                 const PtoValueInfo &source_info) const;
   bool IsVmiLocalRegisterBuffer(const BufferNode *buffer) const;
   void CheckVmiLocalRegisterIndex(const BufferNode *buffer,
                                   const PrimExpr &index) const;
+  // Explicit mutable VMI data slots carry `tl.vmi.alloc_kind` on the actual
+  // allocation.  The table is registered before any allocation is emitted.
+  struct PtoVmiSlotInfo {
+    DataType dtype;
+  };
+  void CollectVmiAllocSlots_(const Stmt &body);
+  void RegisterVmiAllocSlot_(const Buffer &buffer, const char *context);
+  const PtoVmiSlotInfo *FindVmiAllocSlot_(const BufferNode *buffer,
+                                          const char *context) const;
   bool HasAscendGemmL1(const PrimFunc &func) const;
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
@@ -287,6 +299,13 @@ private:
   // Persistent per-function SSA definitions used by PtoValueKind queries.
   // Registered at every Bind/Let entry and cleared in ResetFunctionState_.
   std::unordered_map<const VarNode *, PrimExpr> value_defs_;
+  // Actual VMI data allocations in the current function, keyed by buffer.data.
+  // Owning keys keep cloned Vars alive even if their first allocation node is
+  // replaced. Registered before allocation emission and cleared in
+  // ResetFunctionState_.
+  std::unordered_map<Var, PtoVmiSlotInfo, ffi::ObjectPtrHash,
+                     ffi::ObjectPtrEqual>
+      vmi_alloc_slots_;
   std::vector<PTOGemmEmitContext> gemm_emit_contexts_;
   std::unordered_map<Call, size_t, ObjectPtrHash, ObjectPtrEqual>
       gemm_emit_context_by_call_;
