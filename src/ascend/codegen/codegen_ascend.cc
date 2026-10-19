@@ -19,6 +19,7 @@
 #include "arith/pattern_match.h"
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "transform/common/attr.h"
 
@@ -150,6 +151,10 @@ bool IsAscendWarpReduceDType(DataType dtype) {
 }
 
 static std::string GetAscendScopeQualifier(const std::string &scope) {
+  // Keep scalar accesses volatile for the vendor compiler. SS accesses in
+  // TIR follow ordinary Buffer optimization and synchronization semantics.
+  if (scope == "shared.ss" || scope == "shared.ss.dyn")
+    return "volatile __ssbuf__";
   if (scope == "shared" || scope == "shared.dyn")
     return "__ubuf__";
   if (scope == "shared.l0a" || scope == "shared.l0a.dyn")
@@ -329,8 +334,8 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
   auto pass_ctx = tvm::transform::PassContext::Current();
   enable_fast_math_ =
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
-  decl_stream << "#include <tl_templates/ascend/common.h>\n";
-  decl_stream << "#include <tl_templates/ascend/debug.h>\n";
+  preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
+  preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
 }
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
@@ -541,6 +546,8 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   has_gemm_l0_ = false;
   has_gemm_l1_ = false;
+  has_philox_rng_ = false;
+  ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
   name_supply_->ReserveName("block_idx");
@@ -555,6 +562,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Pre-scan body to determine kernel mode (Mix / Vector / Cube)
   bool has_cube = false, has_vector = false;
+  bool has_vector_subcores = false;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
   int vector_count = 2;
@@ -565,6 +573,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       else if (block->name_hint == "VECTOR") {
         has_vector = true;
         if (auto opt = block->annotations.Get("vector_count")) {
+          has_vector_subcores = true;
           const auto *count = opt.value().as<IntImmNode>();
           ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
               << "Mixed-kernel vector_count must be the constant integer 1 or "
@@ -605,36 +614,38 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Conditionally include gemm.h when ascend_gemm_l1 is used
   if (has_gemm_l1_ && !has_gemm_l1_included_) {
-    decl_stream << "#include <tl_templates/ascend/gemm.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/gemm.h>\n";
     has_gemm_l1_included_ = true;
   }
 
   // Conditionally include nd2nz_copy.h when ascend_nd2nz_copy is used
   if (has_nd2nz_copy_ && !has_nd2nz_copy_included_) {
-    decl_stream << "#include <tl_templates/ascend/nd2nz_copy.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/nd2nz_copy.h>\n";
     has_nd2nz_copy_included_ = true;
   }
 
   // Conditionally include dcache_bypass.h when scalar global GM access emits
   // tl::read/write_gm_bypass_dcache
   if (has_gm_bypass_dcache_ && !has_gm_bypass_dcache_included_) {
-    decl_stream << "#include <tl_templates/ascend/dcache_bypass.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/dcache_bypass.h>\n";
     has_gm_bypass_dcache_included_ = true;
   }
 
   // Conditionally include philox_rng.h when tl.rng_init is used
   if (has_philox_rng_ && !has_philox_rng_included_) {
-    decl_stream << "#include <tl_templates/ascend/philox_rng.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/philox_rng.h>\n";
     has_philox_rng_included_ = true;
   }
 
   // sync_warp lowers to cooperative_groups::coalesced_threads().sync().
   if (has_cooperative_groups && !has_cooperative_groups_included_) {
-    decl_stream << "#include <simt_api/cooperative_groups.h>\n";
+    preamble_stream_ << "#include <simt_api/cooperative_groups.h>\n";
     has_cooperative_groups_included_ = true;
   }
 
-  if (has_cube && has_vector) {
+  if (has_vector && (has_cube || has_vector_subcores)) {
+    // An explicit subcore group needs the 1C2V launch geometry even when
+    // its Cube stream is empty. A pure Vector launch exposes only sid 0.
     kernel_mode_ = AscendKernelMode::kMix;
     mix_aiv_count_ = vector_count;
   } else if (has_cube) {
@@ -711,7 +722,7 @@ void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
   this->stream << "  asc_init();\n";
   // Emit the function-entry #line anchor after the compiler prologue, so the
   // directive's line mapping is not consumed by generated code.
-  CodeGenCWithLineDirectives::PreFunctionBody(f);
+  CodeGenTileLangCBase::PreFunctionBody(f);
 }
 
 ffi::Array<Var>
@@ -906,7 +917,7 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
   }
   if (op->name_hint == "SIMD_VF") {
     if (!has_simd_inst_included_) {
-      decl_stream << "#include <tl_templates/ascend/simd_inst.h>\n";
+      preamble_stream_ << "#include <tl_templates/ascend/simd_inst.h>\n";
       has_simd_inst_included_ = true;
     }
     auto captures = CollectVFCaptures(op);
@@ -3084,6 +3095,16 @@ void CodeGenTileLangAscend::VisitStmt_(const AllocBufferNode *op) {
     PrintType(dtype, stream);
     stream << " *" << vid << " = (" << qualifier << " ";
     PrintType(dtype, stream);
+    if (tl::IsSSBuffer(op->buffer)) {
+      ICHECK(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 2)
+          << "SS buffers require a MIX kernel with two AIVs";
+      auto elements = GetRef<AllocBuffer>(op).ConstantAllocationSize();
+      ICHECK(elements.has_value() && elements.value() > 0 &&
+             elements.value() <= 3072 / dtype.bytes())
+          << "SS allocations require a static total size of at most 3072 bytes";
+    }
+    // SS, like L1, starts at zero in its own address space. This is the
+    // dav-3510 device value returned by AscendC::GetSsbufBaseAddr().
     stream << " *)0;\n";
     alloc_storage_scope_[op->buffer->data.get()] = scope;
     RegisterHandleType(op->buffer->data.get(), dtype);
@@ -3650,6 +3671,11 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
 std::string CodeGenTileLangAscend::GetBufferRef(DataType t,
                                                 const BufferNode *buffer,
                                                 PrimExpr index) {
+  if (tl::IsSSBuffer(GetRef<Buffer>(buffer))) {
+    ICHECK(vf_mode_ == VFMode::kNone && t.is_uint() &&
+           (t.bits() == 32 || t.bits() == 64) && t.lanes() == 1)
+        << "SS supports scalar uint32/uint64 accesses outside VF blocks only";
+  }
   const VarNode *buffer_var = buffer->data.get();
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
@@ -3738,6 +3764,18 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             bool skip_first_arg,
                                             std::ostream &os) {
   DataType ret_dtype = GetRuntimeDataType(ret_type);
+  // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
+  // Select the scalar-core implementation using the existing VF context.
+  if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
+      global_symbol == "sqrtf") {
+    global_symbol = "AscendC::Std::sqrt";
+    if (!has_ascend_std_math_included_) {
+      // The Std headers use AscendC annotations from kernel_operator.h.
+      decl_stream << "#include <kernel_operator.h>\n";
+      decl_stream << "#include <utils/std/cmath.h>\n";
+      has_ascend_std_math_included_ = true;
+    }
+  }
   if (ret_dtype.is_fixed_length_vector()) {
     ValidateGenericVectorType("external call", ret_dtype);
     // Scalarize: for each lane, extract scalar args, call the scalar

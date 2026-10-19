@@ -23,6 +23,8 @@
  */
 
 #include "./dependency_analysis.h"
+#include "./task_annotations.h"
+#include "ascend/op/utils.h"
 
 #include <algorithm>
 #include <functional>
@@ -372,6 +374,19 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                           const std::vector<RegionAccess> &rhs_accesses) {
         for (const RegionAccess &lhs : lhs_accesses) {
           for (const RegionAccess &rhs : rhs_accesses) {
+            if (IsSharedBuffer(lhs.region->buffer) &&
+                IsSharedBuffer(rhs.region->buffer)) {
+              // A common UB offset (e.g. a hardware dual-copy destination)
+              // still names different physical memory on the two AIVs.
+              auto local_sid = [](const TaskNode *task) -> std::optional<int> {
+                if (IsVectorCore(task->GetCoreMask()))
+                  return VectorSid(task->GetCoreMask());
+                return GetTaskSubcore(task->stmt);
+              };
+              auto lhs_sid = local_sid(lhs.task), rhs_sid = local_sid(rhs.task);
+              if (lhs_sid && rhs_sid && *lhs_sid != *rhs_sid)
+                continue;
+            }
             const Var &lhs_storage = lhs.region->buffer->data;
             const Var &rhs_storage = rhs.region->buffer->data;
             ffi::Optional<Var> storage;

@@ -2,6 +2,7 @@
  * \file metal/codegen/codegen_metal.cc
  */
 #include "codegen_metal.h"
+#include "config.h"
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -102,21 +103,16 @@ CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
               << "};\n\n";
 }
 
-std::string CodeGenTileLangMetal::Finish() {
-  std::ostringstream code;
-  code << "#include <metal_stdlib>\n";
-  code << "#include <metal_simdgroup>\n";
+void CodeGenTileLangMetal::EmitPreamble_(std::ostream &os) const {
+  os << "#include <metal_stdlib>\n";
+  os << "#include <metal_simdgroup>\n";
   if (uses_cooperative_tensor_) {
-    code << "#include "
-            "<MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
+    os << "#include "
+          "<MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
   }
-  code << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
-          "unroll(full)\")\n";
-  code << "using namespace metal;\n\n";
-  code << decl_stream.str();
-  code << fwd_decl_stream.str();
-  code << stream.str();
-  return code.str();
+  os << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
+        "unroll(full)\")\n";
+  os << "using namespace metal;\n\n";
 }
 
 void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
@@ -301,6 +297,7 @@ void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
   if (needs_fragment_lane_vars_) {
     EnsureFragmentLaneVars();
   }
+  this->PreFunctionBody(func);
   this->PrintStmt(func->body);
   this->EndScope(func_scope);
   this->PrintIndent();
@@ -1756,6 +1753,7 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     source_maker << "// Function: " << func_name << "\n";
     CodeGenTileLangMetal cg(target);
     cg.Init(output_ssa);
+    cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
     auto f = Downcast<tirx::PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     TVM_FFI_ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
@@ -1797,6 +1795,7 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
     source_maker << "// Function: " << func_name << "\n";
     CodeGenTileLangMetal cg(target);
     cg.Init(output_ssa);
+    cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
     auto f = Downcast<tirx::PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     TVM_FFI_ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
