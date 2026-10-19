@@ -423,6 +423,55 @@ def test_reduce_partial_thread_barrier_rejects_discontiguous_warps():
 # test_reduce  (op × dtype × src_scope × dst_scope × threads × batch)
 # ---------------------------------------------------------------------------
 
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("N", [33, 35, 36, 63, 64, 65, 96, 100, 120, 126, 127, 128, 256])
+def test_reduce_sum_ragged_fragment(N):
+    @tilelang.jit(target="cuda")
+    def kernel(X: T.Tensor((1, N), "float32"), Y: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=128):
+            frag = T.alloc_fragment((1, N), "float32")
+            result = T.alloc_fragment((1,), "float32")
+            T.copy(X, frag)
+            T.reduce_sum(frag, result, dim=1)
+            T.copy(result, Y)
+
+    arange = torch.arange(N, device="cuda", dtype=torch.float32).reshape(1, N)
+    random = _make_input(1, N, "float32", _case_seed("ragged-sum", N))
+    signs = torch.where(torch.arange(N, device="cuda") % 2 == 0, 1.0, -1.0).reshape(1, N)
+    cancellation = signs * 10000 + random * 0.1
+    output = torch.empty((1,), device="cuda", dtype=torch.float32)
+    compiled = kernel.compile(arange, output)
+    for sample in (arange, torch.ones_like(arange), random, cancellation):
+        output.fill_(float("nan"))
+        compiled(sample, output)
+        torch.cuda.synchronize()
+        reference = sample.double().sum(dim=1).float()
+        # Cancellation error scales with the summands, not the small final sum.
+        atol = max(1e-4, 8 * torch.finfo(sample.dtype).eps * sample.abs().sum().item()) if sample is cancellation else 1e-4
+        torch.testing.assert_close(output, reference, rtol=0, atol=atol)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_sum_ragged_fragment_preserves_pinned_source():
+    N = 96
+
+    @tilelang.jit(target="cuda")
+    def kernel(X: T.Tensor((1, N), "float32"), Y: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=128):
+            frag = T.alloc_fragment((1, N), "float32")
+            result = T.alloc_fragment((1,), "float32")
+            T.annotate_layout({frag: T.Fragment((1, N), forward_thread_fn=lambda i, j: j, forward_index_fn=lambda i, j: 0)})
+            T.copy(X, frag)
+            T.reduce_sum(frag, result, dim=1)
+            T.copy(result, Y)
+
+    x = torch.ones((1, N), device="cuda")
+    y = torch.empty((1,), device="cuda")
+    with pytest.raises(Exception, match="replication|Inconsistent layouts|Layout may conflict"):
+        kernel.compile(x, y)
+
+
 # int types only support sum (no abssum/absmax for int in tilelang)
 REDUCE_CASES = [
     # (op,      dtype,       M,   N,   src_scope,    dst_scope,  threads, batch)

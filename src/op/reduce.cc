@@ -17,6 +17,7 @@
 #include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "../transform/loop_partition.h"
+#include "backend/common/target_utils.h"
 #include "builtin.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
@@ -162,6 +163,49 @@ static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
   return reducer_layout;
 }
 
+static Fragment MakeRaggedSumLayout(const ReduceOpNode &op,
+                                    const LayoutInferArgs &layout_args) {
+  if (!TargetIsCuda(layout_args.target) || layout_args.in_pipeline ||
+      !op.type->IsSum() || !op.clear || op.batch != 1 || op.dim != 1 ||
+      op.src->dtype != DataType::Float(32) || op.dst->dtype != op.src->dtype ||
+      op.src->shape.size() != 2 || op.dst->shape.size() != 1 ||
+      !is_one(op.src->shape[0]) || !is_one(op.dst->shape[0]) ||
+      !is_zero(layout_args.thread_bounds->min) ||
+      TargetCudaGetWarpSize(layout_args.target) != 32) {
+    return {};
+  }
+  const int64_t *threads = as_const_int(layout_args.thread_bounds->extent);
+  const int64_t *width = as_const_int(op.src->shape[1]);
+  if (threads == nullptr || width == nullptr || *threads != 128 ||
+      *width <= 32 || *width >= *threads || *threads % *width == 0) {
+    return {};
+  }
+  for (const BufferRegion &region : {op.srcRegion_, op.dstRegion_}) {
+    for (size_t i = 0; i < region->region.size(); ++i) {
+      if (!is_zero(region->region[i]->min) ||
+          !layout_args.analyzer->CanProveEqual(region->region[i]->extent,
+                                               region->buffer->shape[i])) {
+        return {};
+      }
+    }
+  }
+
+  // Use complete power-of-two groups so both the copy's inverse layout and
+  // the XOR reduction are valid. Odd widths need the one-lane fallback;
+  // ordinary divisible shapes never enter this candidate path.
+  int64_t group = 32;
+  while (*width % group != 0) {
+    group /= 2;
+  }
+  PrimExpr index = InputPlaceholder(1);
+  PrimExpr group_extent = make_const(index.dtype(), group);
+  PrimExpr thread =
+      ReplicationPlaceholder() * group_extent + floormod(index, group_extent);
+  return Fragment(op.src->shape, {floordiv(index, group_extent)}, thread,
+                  Integer(*threads / group), std::nullopt)
+      ->BindThreadRange(layout_args.thread_bounds);
+}
+
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -207,13 +251,26 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
   if (level >= InferLevel::kStrict)
     return {};
 
-  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
-      layout_args.layout_map.count(src)) {
-    auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
+  if (IsFragmentBuffer(src) && IsFragmentBuffer(dst)) {
+    LayoutMap inferred_layouts;
+    Fragment src_layout;
+    if (layout_args.layout_map.count(src)) {
+      src_layout = layout_args.layout_map[src].as<Fragment>().value();
+    } else if (level == InferLevel::kFree &&
+               !layout_args.strict_layout_map.count(src)) {
+      src_layout = MakeRaggedSumLayout(*this, layout_args);
+      if (src_layout.defined()) {
+        inferred_layouts.Set(src, src_layout);
+      }
+    }
+    if (!src_layout.defined()) {
+      return {};
+    }
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
 
     if (!layout_args.layout_map.count(dst)) {
-      return {{dst, reducer_layout}};
+      inferred_layouts.Set(dst, reducer_layout);
+      return inferred_layouts;
     }
 
     auto orig_dst_layout =
@@ -226,7 +283,9 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
       analyzer.Bind(Downcast<Var>(indices[i]),
                     Range(0, reducer_layout->InputShape()[i]));
     }
-    if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
+    if (analyzer.CanProve(orig_dst_layout->ReplicateExtent() >
+                          reducer_layout->ReplicateExtent()) ||
+        !ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
                                indices, analyzer)) {
       std::ostringstream oss;
       oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
@@ -238,6 +297,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
              "layout";
       throw LayoutConflictException(oss.str());
     }
+    return inferred_layouts;
   }
   return {};
 }
