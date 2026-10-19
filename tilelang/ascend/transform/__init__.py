@@ -70,8 +70,28 @@ def UnrollLoopSkipVF():
     This pre-AutoSchedule pass only materializes ``T.unroll(..., explicit=True)``
     loops. Non-explicit unroll hints, serial loops, and all VF block interiors
     are preserved for their later lowering stages.
+
+    Each cloned block rebuilds its ``tl.vmi.alloc_kind`` map from its own
+    cloned allocations.  Marker-carrying functions must run
+    ``NormalizePTOAllocMarkers`` first; a map that names allocations the
+    cloned block does not own is rejected with a diagnostic.  Functions
+    without markers need no extra preparation.
     """
     return _ffi_api.UnrollLoopSkipVF()  # type: ignore
+
+
+def NormalizePTOAllocMarkers():
+    """Rebuild VMI allocation markers on the allocations that own them.
+
+    Each SBlock's ``tl.vmi.alloc_kind`` map is rebuilt from the allocations
+    the block itself holds, and each marked statement allocation carries its
+    kind string directly.  Allocations, buffer data variables and numerics
+    stay untouched; entries whose allocation no longer exists are dropped.
+    Run it after binding the Ascend PTO target and before
+    ``UnrollLoopSkipVF``.  Functions without a PTO target pass through
+    unchanged.
+    """
+    return _ffi_api.NormalizePTOAllocMarkers()  # type: ignore
 
 
 def AutoSchedule():
@@ -297,6 +317,7 @@ __all__ = [
     "RestoreWhileLoops",
     "RewriteFp4ToFp4x2",
     "RewriteFlagToBuf",
+    "NormalizePTOAllocMarkers",
     "UnrollLoopSkipVF",
     "VectorizeParallelToPTO",
     "VerifyParallelToPTO",

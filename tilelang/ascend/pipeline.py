@@ -76,6 +76,10 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
+    # PTO functions normalize VMI allocation markers onto the owning
+    # allocations before the early unroll clones them.
+    if target_is_pto(target):
+        mod = ascend_transform.NormalizePTOAllocMarkers()(mod)
     # Materialize only user-requested explicit unrolls outside VF blocks so
     # LayoutInference and AutoSchedule can consume the expanded operations.
     mod = ascend_transform.UnrollLoopSkipVF()(mod)

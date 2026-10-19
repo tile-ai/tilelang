@@ -123,6 +123,24 @@ def _uint32_input(trial):
     return values
 
 
+def _uint32_mutable_input(trial):
+    """Vary the unsigned extremes so stale slot contents cannot pass.
+
+    The shared helper keeps UINT32_MAX in every input, which would make every
+    mutable reduction produce the same value.  Keep one boundary trial and
+    move both the high-bit maximum and the minimum for the rest.
+    """
+    generator = torch.Generator().manual_seed(20261017 + trial)
+    values = torch.randint(1000, 2**31 - 1, (128,), generator=generator).to(torch.uint32)
+    values[0] = 2**32 - 1 if trial == 0 else 2**31 + 1 + trial * 7919
+    values[1] = 2**31  # INT32_MAX + 1, high bit set
+    values[2] = 2**31 - 1
+    values[3] = 0 if trial == 0 else trial * 11 + 2
+    values[4] = 1 if trial == 0 else trial * 13 + 5
+    values[5] = 2**31 + 7 + trial * 31
+    return values
+
+
 def _float32_input(trial):
     generator = torch.Generator().manual_seed(20261017 + trial)
     values = torch.randn(128, generator=generator) * 1000.0
@@ -244,3 +262,118 @@ def test_scalar_buffer_load_after_vmi_store_device(npu):
         return [a], expected
 
     _run_trials(kernel, make_case, npu, trials=3)
+
+
+# ---------------------------------------------------------------------------
+# Explicit mutable VMI data slots (allocation marker)
+# ---------------------------------------------------------------------------
+def _mutable_slot(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work[0:128])
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                x = T.vmi.vload(work[0], size=128)
+                slot = T.vmi.alloc_var(dtype, size=1)
+                slot = T.vmi.vcmax(x, mask)
+                y = T.vmi.vbrc(slot, size=128, group=1)
+                T.vmi.vstore(y, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _mutable_slot_branch(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), scale: T.int32, C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((128,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                x = T.vmi.vload(work[0], size=128)
+                slot = T.vmi.alloc_var(dtype, size=1)
+                if scale > 0:
+                    slot = T.vmi.vcmax(x, mask)
+                else:
+                    slot = T.vmi.vcmin(x, mask)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=128, group=1), out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _mutable_register(dtype, lanes, group):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            src = T.alloc_shared((128,), dtype)
+            dst = T.alloc_shared((128,), dtype)
+            T.copy(A, src)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                slot = T.vmi.alloc_var(dtype, size=lanes)
+                slot = T.vmi.vload(src[0], size=lanes)
+                value = T.vmi.vbrc(slot, size=128, group=group)
+                T.vmi.vstore(value, dst[0], mask)
+            T.copy(dst, C)
+
+    return main
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "float32"])
+def test_single_lane_mutable_slot_device(npu, dtype):
+    kernel, source = _compile(_mutable_slot(dtype))
+    assert "slot = pto.vmi.vreg(1, " in source
+    assert "slot = pto.vmi.vcmax(x, mask)" in source
+
+    def make_case(trial):
+        if dtype == "uint32":
+            a = _uint32_mutable_input(trial)
+            expected = torch.full((128,), max(int(value) for value in a.tolist()), dtype=a.dtype)
+            return [a], expected
+        if dtype == "int32":
+            a = _int32_input(trial)
+        else:
+            a = _float32_input(trial)
+        expected = torch.full((128,), a.max().item(), dtype=a.dtype)
+        return [a], expected
+
+    _run_trials(kernel, make_case, npu, trials=5 if dtype == "float32" else 10)
+
+
+@pytest.mark.parametrize("dtype", ["int32", "float32"])
+def test_mutable_slot_branch_device(npu, dtype):
+    kernel, source = _compile(_mutable_slot_branch(dtype))
+    assert "if tl.as_logical_bool(0 < scale):" in source
+
+    def make_case(trial):
+        if dtype == "int32":
+            a = _int32_input(trial)
+        else:
+            a = _float32_input(trial)
+        positive = trial % 2 == 0
+        value = a.max().item() if positive else a.min().item()
+        expected = torch.full((128,), value, dtype=a.dtype)
+        return [a, 1 if positive else -1], expected
+
+    _run_trials(kernel, make_case, npu, trials=4)
+
+
+def test_multi_lane_mutable_slot_device(npu):
+    kernel, source = _compile(_mutable_register("float32", 4, 4))
+    assert "slot = pto.vmi.vreg(4, pto.f32)" in source
+
+    def make_case(trial):
+        a = _float32_input(trial)
+        # The VMI group-broadcast contract expands each group slot back to its
+        # logical group; size=128 and group=4 therefore give four 32-lane
+        # groups, and source lane k fills destination lanes [32k, 32k+32).
+        expected = a[:4].repeat_interleave(32)
+        return [a], expected
+
+    _run_trials(kernel, make_case, npu, trials=4)

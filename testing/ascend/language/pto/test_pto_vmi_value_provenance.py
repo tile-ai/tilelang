@@ -533,6 +533,268 @@ def test_mutable_register_grouped_vbrc_is_preserved():
 
 
 # ---------------------------------------------------------------------------
+# Explicit mutable VMI data slots (allocation marker)
+# ---------------------------------------------------------------------------
+_MARKER = "tl.vmi.alloc_kind"
+
+
+def _mutable_slot(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work[0:128])
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                x = T.vmi.vload(work[0], size=128)
+                slot = T.vmi.alloc_var(dtype, size=1)
+                slot = T.vmi.vcmax(x, mask)
+                y = T.vmi.vbrc(slot, size=128, group=1)
+                T.vmi.vstore(y, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _mutable_slot_branch(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), scale: T.int32, C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((128,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                x = T.vmi.vload(work[0], size=128)
+                slot = T.vmi.alloc_var(dtype, size=1)
+                if scale > 0:
+                    slot = T.vmi.vcmax(x, mask)
+                else:
+                    slot = T.vmi.vcmin(x, mask)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=128, group=1), out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _mutable_slot_runtime_carry(dtype, marked=True):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((128,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                mask1 = T.vmi.create_mask(1, size=1)
+                x = T.vmi.vload(work[0], size=128)
+                if marked:
+                    slot = T.vmi.alloc_var(dtype, size=1)
+                else:
+                    slot = T.alloc_var(dtype)
+                # Preloop VMI value, read and updated inside the runtime loop.
+                slot = T.vmi.vcmax(x, mask)
+                for _ in T.serial(2):
+                    old = slot
+                    slot = T.vmi.vadd(old, old, mask1)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=128, group=1), out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _mutable_slot_in_explicit_loop(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), dtype)
+            out = T.alloc_shared((128,), dtype)
+            T.copy(A, work[0:128])
+            for _ in T.unroll(2, explicit=True):
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(128, size=128)
+                    x = T.vmi.vload(work[0], size=128)
+                    slot = T.vmi.alloc_var(dtype, size=1)
+                    slot = T.vmi.vcmax(x, mask)
+                    T.vmi.vstore(T.vmi.vbrc(slot, size=128, group=1), out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _allocations(fn):
+    found = []
+    tirx.stmt_functor.post_order_visit(
+        fn.body,
+        lambda node: found.append(node) if isinstance(node, tirx.AllocBuffer) else None,
+    )
+    return found
+
+
+def _marked_allocations(fn):
+    return [node for node in _allocations(fn) if _MARKER in node.annotations]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "pto_type"),
+    [("int32", "pto.si32"), ("uint32", "pto.ui32"), ("float32", "pto.f32")],
+)
+def test_single_lane_mutable_slot_compiles_through_backend(dtype, pto_type):
+    kernel = _compile(_mutable_slot(dtype))
+    source = kernel.get_kernel_source()
+    assert f"slot = pto.vmi.vreg(1, {pto_type})" in source
+    assert "slot = pto.vmi.vcmax(x, mask)" in source
+    vbrc_line = _one(source, "pto.vmi.vbrc(")
+    assert "pto.vmi.vbrc(slot, group=1, size=128)" in vbrc_line
+    assert "pto.cast(" not in vbrc_line
+    assert source.count("pto.vmi.vcmax(") == 1
+
+
+@pytest.mark.parametrize(("dtype", "pto_type"), [("int32", "pto.si32"), ("float32", "pto.f32")])
+def test_single_lane_mutable_slot_annotation_reaches_device_ir(dtype, pto_type):
+    artifact, _, fn = _device_fn(_mutable_slot(dtype))
+    marked = _marked_allocations(fn)
+    assert len(marked) == 1, marked
+    (allocation,) = marked
+    assert str(allocation.annotations[_MARKER]) == "data"
+    assert allocation.buffer.scope() == "local.var"
+    assert str(allocation.buffer.dtype) == dtype
+    assert f"slot = pto.vmi.vreg(1, {pto_type})" in artifact.kernel_source
+
+
+def test_multi_lane_mutable_slot_annotation_reaches_device_ir():
+    artifact, _, fn = _device_fn(_mutable_register("float32", 4, 4))
+    marked = _marked_allocations(fn)
+    assert len(marked) == 1, marked
+    (allocation,) = marked
+    assert str(allocation.annotations[_MARKER]) == "data"
+    assert str(allocation.buffer.dtype) == "float32x4"
+    assert "slot = pto.vmi.vreg(4, pto.f32)" in artifact.kernel_source
+
+
+def test_explicit_loop_slot_markers_reach_device_ir():
+    artifact, _, fn = _device_fn(_mutable_slot_in_explicit_loop("int32"))
+    marked = _marked_allocations(fn)
+    assert len(marked) == 2, marked
+    assert all(str(node.annotations[_MARKER]) == "data" for node in marked)
+    assert not marked[0].buffer.data.same_as(marked[1].buffer.data)
+    assert artifact.kernel_source.count("= pto.vmi.vreg(1, pto.si32)") == 2
+    assert "pto.cast(slot" not in artifact.kernel_source
+
+
+@pytest.mark.parametrize("dtype", ["int32", "float32"])
+def test_mutable_slot_branch_updates_compile_through_backend(dtype):
+    source = _compile(_mutable_slot_branch(dtype)).get_kernel_source()
+    assert "if tl.as_logical_bool(0 < scale):" in source
+    assert "slot = pto.vmi.vcmax(x, mask)" in source
+    assert "slot = pto.vmi.vcmin(x, mask)" in source
+
+
+@pytest.mark.parametrize("dtype", ["int32", "float32"])
+def test_marked_slot_runtime_loop_carry_compiles_through_backend(dtype):
+    source = _compile(_mutable_slot_runtime_carry(dtype)).get_kernel_source()
+    assert "old = slot" in source
+    assert "slot = pto.vmi.vadd(old, old, mask1)" in source
+    assert "pto.cast(" not in _one(source, "pto.vmi.vbrc(")
+
+
+# ---------------------------------------------------------------------------
+# Direct codegen contracts for the allocation marker
+# ---------------------------------------------------------------------------
+def _marked_slot_buffer(dtype="int32"):
+    return tirx.decl_buffer((1,), dtype, name="slot", scope="local.var")
+
+
+def _marked_slot_allocation(slot):
+    return tirx.AllocBuffer(slot, annotations={_MARKER: "data"})
+
+
+def _vmi_producer(dtype="int32"):
+    return tirx.call_intrin(dtype, _Op("tl.vmi.vcmax"))
+
+
+def test_marked_slot_store_load_and_initialization():
+    slot = _marked_slot_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_slot_allocation(slot),
+            tirx.BufferStore(slot, _vmi_producer(), [0]),
+            tirx.Evaluate(_vbrc(tirx.BufferLoad(slot, [0]))),
+        ]
+    )
+    source = _raw_source(body)
+    assert "slot = pto.vmi.vreg(1, pto.si32)" in source
+    assert "slot = pto.vmi.vcmax()" in source
+    assert source.count("pto.vmi.vcmax(") == 1
+    vbrc_line = _one(source, "pto.vmi.vbrc(")
+    assert "pto.vmi.vbrc(slot, group=1, size=128)" in vbrc_line
+    assert "pto.cast(" not in vbrc_line
+
+
+def test_marked_slot_store_rejects_scalar_rhs():
+    slot = _marked_slot_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_slot_allocation(slot),
+            tirx.BufferStore(slot, tirx.IntImm("int32", 1), [0]),
+        ]
+    )
+    _expect_error(
+        "PTO VMI data slot store requires a VMI data RHS; got scalar",
+        lambda: _raw_source(body),
+    )
+
+
+def test_marked_slot_rejects_a_different_dtype_view():
+    slot = _marked_slot_buffer()
+    view = tirx.decl_buffer((1,), "float32", name="slot_view", data=slot.data, scope="local.var")
+    body = tirx.SeqStmt(
+        [
+            _marked_slot_allocation(slot),
+            tirx.BufferStore(view, tirx.FloatImm("float32", 0.0), [0]),
+        ]
+    )
+    _expect_error(
+        "a shared data Var must keep the allocation dtype",
+        lambda: _raw_source(body),
+    )
+
+
+def test_marked_slot_rejects_nonzero_index():
+    slot = _marked_slot_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_slot_allocation(slot),
+            tirx.BufferStore(slot, _vmi_producer(), [1]),
+        ]
+    )
+    _expect_error("PTO VMI data slot store expects index 0", lambda: _raw_source(body))
+
+    load_body = tirx.SeqStmt(
+        [
+            _marked_slot_allocation(slot),
+            tirx.Evaluate(_vbrc(tirx.BufferLoad(slot, [1]))),
+        ]
+    )
+    _expect_error("PTO VMI data slot load expects index 0", lambda: _raw_source(load_body))
+
+
+def test_unmarked_scalar_slot_still_rejects_a_vmi_store():
+    slot = tirx.decl_buffer((1,), "int32", name="plain", scope="local.var")
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(slot),
+            tirx.BufferStore(slot, _vmi_producer(), [0]),
+        ]
+    )
+    _expect_error(
+        "PTO local.var integer store expects a scalar; got VMI data",
+        lambda: _raw_source(body),
+    )
+
+
+# ---------------------------------------------------------------------------
 # C. Aliases, Let scoping, Var identity, per-function reset, cycles
 # ---------------------------------------------------------------------------
 def test_multi_level_alias_chain_keeps_vmi_data():
@@ -838,7 +1100,10 @@ def test_select_branch_rejects_vmi_data():
             tirx.Evaluate(tirx.Select(cond, data, tirx.IntImm("int32", 0))),
         ]
     )
-    _expect_error("PTO select branch expects a scalar; got VMI data", lambda: _raw_source(body, (cond,)))
+    _expect_error(
+        "PTO select branch expects a scalar; got VMI data",
+        lambda: _raw_source(body, (cond,)),
+    )
 
 
 # ---------------------------------------------------------------------------

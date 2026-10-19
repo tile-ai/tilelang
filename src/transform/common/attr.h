@@ -45,6 +45,12 @@ constexpr const char *kAssumeRequiresRuntimeCheck =
 // Compiler-internal physical buffer version count.
 constexpr const char *kBufferVersion = "tl.buffer_version";
 
+// Allocation category of a mutable VMI register slot.  Frontend blocks carry a
+// Var -> String map; after block lowering the allocation carries the String.
+// Parsing and contract checks live in transform/common/vmi_alloc.h.
+constexpr const char *kVmiAllocKind = "tl.vmi.alloc_kind";
+constexpr const char *kVmiAllocKindData = "data";
+
 // Attributes to implement SourceCodeBlock
 constexpr const char *kCodeBlockSource = "code_block_source";
 constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
