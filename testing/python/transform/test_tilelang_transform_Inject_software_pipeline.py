@@ -466,6 +466,48 @@ def test_async_pipeline_drains_async_copy_consumed_in_its_own_stage(symbolic_sta
     assert loop_waits == [1, 0], f"Expected wait<1> before consume_a and wait<0> before consume_b, got {loop_waits}"
 
 
+def test_async_pipeline_epilogue_waits_follow_consumer_stage_distance():
+    # One async producer read by consumers at two stage distances. In the first epilogue
+    # iteration the stage-1 consumer reads the group committed last, so its wait must be 0
+    # even though a later epilogue consumer also waits for 0.
+    @T.prim_func
+    def before(A: T.Tensor((24,), T.uint8), C: T.Tensor((24,), T.uint8), D: T.Tensor((24,), T.uint8)):
+        S = T.alloc_buffer((4,), dtype=T.uint8, scope="shared")
+        for i in T.serial(
+            0,
+            6,
+            annotations={
+                "software_pipeline_stage": [0, 1, 2],
+                "software_pipeline_order": [0, 1, 2],
+                "software_pipeline_async_stages": [0],
+                "software_pipeline_async_producers": [1, 0, 0],
+                "software_pipeline_async_producer_groups": [0, -1, -1],
+            },
+        ):
+            with T.sblock("copy"):
+                T.reads(A[i * 4 : i * 4 + 4])
+                T.writes(S[0:4])
+                T.copy(A[i * 4 : i * 4 + 4], S[0:4])
+            with T.sblock("consume_stage1"):
+                T.reads(S[0:4])
+                T.writes(C[i * 4 : i * 4 + 4])
+                for j in range(4):
+                    C[i * 4 + j] = S[j]
+            with T.sblock("consume_stage2"):
+                T.reads(S[0:4])
+                T.writes(D[i * 4 : i * 4 + 4])
+                for j in range(4):
+                    D[i * 4 + j] = S[j]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+
+    # prologue, steady-state loop, epilogue iteration 0 (both consumers), epilogue iteration 1
+    all_waits = _collect_wait_args(mod["main"])
+    assert all_waits == [1, 1, 0, 0], f"Expected the first epilogue wait to drain every group, got {all_waits}"
+
+
 def test_degenerate_pipeline_with_single_stage_is_not_expanded():
     @T.prim_func
     def before(B: T.Tensor((128,), T.float32)):
