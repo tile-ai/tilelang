@@ -467,7 +467,8 @@ jobs:
           # rejects it as "dubious ownership"; CMake's submodule check needs it.
           git config --global --add safe.directory '*'
 
-      - name: Build and test Ascend
+      - name: Set up environment and build Ascend
+        id: ascend-build
         shell: bash
         run: |
           # Keep the runner's preinstalled Torch/Torch-NPU stack.
@@ -483,6 +484,14 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
@@ -505,13 +514,32 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-          cd testing
-          for TARGET in ascend pto; do
-            echo "Running Ascend examples with TILELANG_DEFAULT_TARGET=${TARGET}"
-            TILELANG_DEFAULT_TARGET="${TARGET}" TILELANG_EXECUTION_BACKEND=auto \
-              python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
-          done
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
+      - name: Run AscendC examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run PTO examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: pto
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run Ascend unit tests
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 testing/ascend
 
   cutedsl:
     name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
