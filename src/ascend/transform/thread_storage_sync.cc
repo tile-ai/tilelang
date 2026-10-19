@@ -300,6 +300,19 @@ private:
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
+    if (thread_guard_depth_ == 0 && IsFullThreadExtent(tx_, bound_tx) &&
+        IsFullThreadExtent(ty_, bound_ty) &&
+        IsFullThreadExtent(tz_, bound_tz)) {
+      // No enclosing condition, loop bound, let binding, or block predicate
+      // references a thread variable, so every thread in the launch extent
+      // reaches this sync: the participating set is the full domain by
+      // construction. Skip the z3 certification below - it re-proves this
+      // same fact by enumeration, issuing up to one solver query per thread
+      // on a prover whose rlimit is shared with every earlier query in the
+      // compilation, so the enumeration can be cut short spuriously and fail
+      // the certification of an unconditionally full-extent sync.
+      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
+    }
     auto extent_tx = CalculateThreadExtent(tx_, &bound_tx);
     auto extent_ty = CalculateThreadExtent(ty_, &bound_ty);
     auto extent_tz = CalculateThreadExtent(tz_, &bound_tz);
@@ -409,9 +422,118 @@ private:
       } else if (iv->thread_tag == "threadIdx.z") {
         tz_ = iv;
       }
+      GuardDepthScope scope(this);
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+    if (op->attr_key == tvm::tirx::attr::tilelang_assume) {
+      GuardDepthScope scope(this);
+      EnterGuard guard(this, Downcast<PrimExpr>(op->node));
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
+
+  Stmt VisitStmt_(const AssertStmtNode *op) final {
+    // The base class emplaces the condition into the current constraint
+    // scope, and SeqStmt does not rescope: the constraint stays live for the
+    // rest of the enclosing scope, so the taint must persist likewise. The
+    // enclosing scope-creating visitor restores the depth on exit.
+    if (TaintsThread(op->condition)) {
+      ++thread_guard_depth_;
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    // Bind accumulates into the analyzer for the rest of the scope (SeqStmt
+    // siblings are not rescoped), so the taint must persist likewise.
+    if (TaintsThread(op->value)) {
+      let_tainted_.insert(op->var.get());
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    GuardDepthScope scope(this);
+    for (const auto &iter_var : op->iter_vars) {
+      if (TaintsThread(iter_var->dom->min) ||
+          TaintsThread(iter_var->dom->extent)) {
+        let_tainted_.insert(iter_var->var.get());
+      }
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    GuardDepthScope scope(this);
+    EnterGuard guard(this, op->condition);
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    GuardDepthScope scope(this);
+    EnterGuard guard_min(this, op->min);
+    EnterGuard guard_extent(this, op->extent);
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    bool was_tainted = let_tainted_.count(op->var.get()) != 0;
+    if (TaintsThread(op->value)) {
+      let_tainted_.insert(op->var.get());
+    } else {
+      let_tainted_.erase(op->var.get());
+    }
+    PrimExpr ret = IRMutatorWithAnalyzer::VisitExpr_(op);
+    if (was_tainted) {
+      let_tainted_.insert(op->var.get());
+    } else {
+      let_tainted_.erase(op->var.get());
+    }
+    return ret;
+  }
+
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    EnterGuard guard(this, op->predicate);
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  // Whether expr can exclude some threads of the launch extent, i.e. it
+  // references a thread variable directly or through a let binding.
+  bool TaintsThread(const PrimExpr &expr) const {
+    return UsesVar(expr, [this](const VarNode *v) {
+      return v == tx_->var.get() || v == ty_->var.get() ||
+             v == tz_->var.get() || let_tainted_.count(v) != 0;
+    });
+  }
+
+  struct EnterGuard {
+    EnterGuard(ThreadPartialSyncRewriter *self, const PrimExpr &expr)
+        : self_(self), active_(self->TaintsThread(expr)) {
+      if (active_) {
+        ++self_->thread_guard_depth_;
+      }
+    }
+    ~EnterGuard() {
+      if (active_) {
+        --self_->thread_guard_depth_;
+      }
+    }
+    ThreadPartialSyncRewriter *self_;
+    bool active_;
+  };
+
+  // Mirrors the analyzer's constraint scope: taints raised inside a region
+  // the base class visits under WithNewScope (if/for/block/attr bodies),
+  // e.g. by asserts, die with the region. Declare before any EnterGuard so
+  // the restore runs after the guard's own pop.
+  struct GuardDepthScope {
+    explicit GuardDepthScope(ThreadPartialSyncRewriter *self)
+        : self_(self), saved_(self->thread_guard_depth_) {}
+    ~GuardDepthScope() { self_->thread_guard_depth_ = saved_; }
+    ThreadPartialSyncRewriter *self_;
+    size_t saved_;
+  };
 
   bool IsFullThreadExtent(const IterVar &iv,
                           const arith::ConstIntBound &bound) {
@@ -432,6 +554,13 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  // Number of live guards (conditions, loop bounds, block predicates,
+  // asserts) that reference a thread variable; syncs under none of them
+  // reach every thread and skip partial-barrier certification. Mirrors the
+  // analyzer's constraint scope: guards from asserts persist across SeqStmt
+  // siblings and are restored by the enclosing scope-creating visitor.
+  size_t thread_guard_depth_ = 0;
+  std::unordered_set<const VarNode *> let_tainted_;
   int warp_size_;
 };
 
