@@ -440,11 +440,27 @@ jobs:
           fi
 
   ascend:
-    name: Ascend tests
+    name: ${{ matrix.suite.name }}
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: AscendC examples
+            target: ascend
+            path: examples/ascend
+            workers: 4
+          - name: PTO examples
+            target: pto
+            path: examples/ascend
+            workers: 4
+          - name: Ascend unit tests
+            target: ""
+            path: testing/ascend
+            workers: 32
     runs-on: linux-amd64-a5-4
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
@@ -453,6 +469,7 @@ jobs:
       PIP_USER: "0"
       USE_CUDA: "OFF"
       USE_ASCEND: "ON"
+      CMAKE_BUILD_PARALLEL_LEVEL: "64"
 
     steps:
       - name: Checkout repository
@@ -468,7 +485,6 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: Set up environment and build Ascend
-        id: ascend-build
         shell: bash
         run: |
           # Keep the runner's preinstalled Torch/Torch-NPU stack.
@@ -484,7 +500,7 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
-          # Persist the CANN environment for subsequent test steps.
+          # Persist the CANN environment for the test step.
           for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
             ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
             ASCEND_CUSTOM_OPP_PATH; do
@@ -514,32 +530,19 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-      - name: Run AscendC examples
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+      - name: Run ${{ matrix.suite.name }}
         shell: bash
         env:
-          TILELANG_DEFAULT_TARGET: ascend
-          TILELANG_EXECUTION_BACKEND: auto
+          TEST_TARGET: ${{ matrix.suite.target }}
+          TEST_PATH: ${{ matrix.suite.path }}
+          TEST_WORKERS: ${{ matrix.suite.workers }}
         run: |
           source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
-
-      - name: Run PTO examples
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
-        shell: bash
-        env:
-          TILELANG_DEFAULT_TARGET: pto
-          TILELANG_EXECUTION_BACKEND: auto
-        run: |
-          source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
-
-      - name: Run Ascend unit tests
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
-        shell: bash
-        run: |
-          source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 testing/ascend
+          if [[ -n "${TEST_TARGET}" ]]; then
+            export TILELANG_DEFAULT_TARGET="${TEST_TARGET}"
+            export TILELANG_EXECUTION_BACKEND=auto
+          fi
+          python -m pytest --verbose --durations=0 --maxfail=3 -n "${TEST_WORKERS}" "${TEST_PATH}"
 
   cutedsl:
     name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
