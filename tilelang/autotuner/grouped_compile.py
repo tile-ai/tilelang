@@ -186,8 +186,7 @@ def compile_grouped_unit_tvm_ffi(
                         backend_context=backend_context,
                     )
                     jit_kernel.artifact = artifact
-                    jit_kernel.adapter = adapter
-                    jit_kernel.torch_function = adapter.func
+                    jit_kernel._set_adapter(adapter)
 
                     unit_results.append((idx, config_arg, jit_kernel, None))
                 except Exception as e:
