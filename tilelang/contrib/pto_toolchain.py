@@ -19,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from tvm.contrib import utils
@@ -84,22 +85,19 @@ def _compile_ptodsl_to_pto(
     """
     Path(src_path).write_text(ptodsl_source, encoding="utf-8")
 
-    # Launch as a module, never by script path: a script path puts
-    # tilelang/contrib first on the subprocess sys.path, where the ptodsl
-    # compat package shadows the installed PTODSL frontend that the
-    # generated source imports. Inheriting the parent cwd keeps tilelang
-    # importable in dev checkouts that rely on the cwd.
     command = [
         sys.executable,
-        "-m",
-        "tilelang.contrib.ptodsl_compile",
+        str(Path(__file__).resolve().parent / "ptodsl_compile.py"),
         str(src_path),
         json.dumps(kernel_names),
         str(out_path),
     ]
     if verbose:
         print(f"PTODSL compile command: {' '.join(command)}")
+    t_start = time.perf_counter()
     result = subprocess.run(command, text=True, capture_output=True)
+    if verbose:
+        print(f"PTODSL->MLIR lowering: {time.perf_counter() - t_start:.3f}s")
     if result.returncode == 2:
         raise RuntimeError(
             f"PTODSL compiler frontend is unavailable in the current environment.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
