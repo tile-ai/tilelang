@@ -214,7 +214,7 @@ jobs:
 
       - name: Build wheels
         if: runner.os != 'Windows'
-        uses: pypa/cibuildwheel@v4.2
+        uses: pypa/cibuildwheel@v4.3
         with:
           package-dir: .
           output-dir: wheelhouse
