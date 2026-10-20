@@ -202,5 +202,20 @@ def test_ladder_transform_int8_micro_size_uses_actual_k_dim():
     assert emitter.local_size_out == 8
 
 
+@pytest.mark.parametrize(
+    "emitter_cls,chunk,atom_k",
+    [
+        (TensorCoreIntrinEmitter, 8, 16),
+        (TensorCoreIntrinEmitter, 20, 16),
+        (TensorCoreIntrinEmitterSM75, 4, 8),
+        (TensorCoreIntrinEmitterWithLadderTransform, 8, 16),
+    ],
+)
+def test_mma_emitter_rejects_partial_k_atom_without_gemm_dispatch(emitter_cls, chunk, atom_k):
+    with pytest.raises(ValueError, match=rf"tile K={chunk} must be divisible by {atom_k}") as error:
+        emitter_cls(warp_row_tiles=32, warp_col_tiles=32, chunk=chunk)
+    assert "zero-fill the extra K elements of both A and B" in str(error.value)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

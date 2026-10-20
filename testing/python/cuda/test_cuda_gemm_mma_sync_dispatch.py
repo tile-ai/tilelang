@@ -120,5 +120,5 @@ def test_gemm_k_shape_uses_architecture_specific_atom(arch, dtype, accum_dtype, 
 )
 def test_gemm_partial_k_atom_requires_padding(arch, dtype, accum_dtype, k, atom_k):
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
-    with target, pytest.raises(tvm.error.InternalError, match=rf"tile K={k} must be divisible by {atom_k}"):
+    with target, pytest.raises(ValueError, match=rf"tile K={k} must be divisible by {atom_k}"):
         tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)

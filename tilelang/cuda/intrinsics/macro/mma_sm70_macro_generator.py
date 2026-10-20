@@ -92,12 +92,8 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    @staticmethod
-    def get_mma_atom_k(a_dtype="float16"):
-        return 4
-
     def _initialize_k_dim(self, a_dtype="float16"):
-        self.k_dim = self.get_mma_atom_k(a_dtype)
+        self.k_dim = 4
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16):
         self.local_size_a = (m_dim * k_dim) // self.HALF_WARP_SIZE

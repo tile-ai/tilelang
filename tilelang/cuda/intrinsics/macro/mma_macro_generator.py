@@ -108,6 +108,13 @@ class TensorCoreIntrinEmitter:
         self.warp_col_tiles = warp_col_tiles
         self.chunk = chunk
         self._initialize_k_dim(self.a_dtype)
+        if self.chunk % self.k_dim != 0:
+            padded_k = (self.chunk // self.k_dim + 1) * self.k_dim
+            raise ValueError(
+                f"MMA tile K={self.chunk} must be divisible by {self.k_dim} "
+                f"for the current CUDA MMA emitter (A dtype={self.a_dtype}). "
+                f"Pad the K tile to {padded_k} and zero-fill the extra K elements of both A and B."
+            )
         self._initialize_m_dim(self.a_dtype)
         self._initialize_micro_size(self.M_DIM, self.k_dim)
         self._initialize_local_size(self.M_DIM, self.n_dim, self.k_dim, self.WARP_SIZE)
@@ -125,16 +132,12 @@ class TensorCoreIntrinEmitter:
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
 
-    @staticmethod
-    def get_mma_atom_k(a_dtype="float16"):
+    def _initialize_k_dim(self, a_dtype="float16"):
         # The generic operand lane maps use a 256-bit K atom. Shorter hardware
         # instructions need different maps, as in the SM75 emitter.
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        return 256 // a_dtype.bits
-
-    def _initialize_k_dim(self, a_dtype="float16"):
-        self.k_dim = self.get_mma_atom_k(a_dtype)
+        self.k_dim = 256 // a_dtype.bits
 
     def _initialize_m_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):

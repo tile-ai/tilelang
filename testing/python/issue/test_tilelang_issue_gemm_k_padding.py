@@ -38,7 +38,7 @@ def _make_gemm(m, n, k, tile_k, a_scope="shared", dtype="float16", accum_dtype="
 @pytest.mark.parametrize("m,k,a_scope", [(64, 20, "shared"), (64, 28, "shared"), (16, 20, "local.fragment")])
 def test_gemm_irregular_k_reports_padding_before_layout_errors(m, k, a_scope):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target, pytest.raises(tvm.error.InternalError, match=rf"tile K={k} must be divisible by 16") as error:
+    with target, pytest.raises(ValueError, match=rf"tile K={k} must be divisible by 16") as error:
         tilelang.lower(_make_gemm(m, 64, k, k, a_scope, accum_dtype="float16"), target=target)
     assert "Pad the K tile to 32 and zero-fill the extra K elements of both A and B" in str(error.value)
 
@@ -46,7 +46,7 @@ def test_gemm_irregular_k_reports_padding_before_layout_errors(m, k, a_scope):
 @tilelang.testing.requires_cuda
 def test_gemm_int4_fragment_requires_padding_before_staging():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target, pytest.raises(tvm.error.InternalError, match="tile K=32 must be divisible by 64"):
+    with target, pytest.raises(ValueError, match="tile K=32 must be divisible by 64"):
         tilelang.lower(_make_gemm(64, 64, 32, 32, "local.fragment", "int4", "int32", transpose_b=True), target=target)
 
 
