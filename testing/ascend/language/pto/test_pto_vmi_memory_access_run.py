@@ -12,15 +12,20 @@ generated-source order and MTE sync pair:
 
 * a DMA that writes only the non-zero ``[64,128)`` region feeding
   ``vload(work[64], size=64)``;
-* ``vstore(..., work[64])`` feeding a DMA that reads only ``[64,128)``.
+* ``vstore(..., work[64])`` feeding a DMA that reads only ``[64,128)``;
+* a padded view whose low group is written by DMA and read by a static
+  negative group stride, with both groups initialized for the reference.
 
 The remaining cases are one device-numerics representative per access mode:
-group dynamic stride (positive/zero/negative), block_stride, FP4 raw packed
-bytes (buffer and explicit-pointer forms), a packed (PK) narrowing store, an
-explicit ``access_ptr`` plus extra offset, and gather/scatter with non-zero
-bases (direct and explicit-pointer forms).  The device numerical reference is
-exact for copy-like kernels and an independent CPU computation (torch cast
-reference) for narrowing.
+block_stride, FP4 raw packed bytes (buffer and explicit-pointer forms), a
+packed (PK) narrowing store, an explicit ``access_ptr`` plus extra offset, and
+gather/scatter with non-zero bases (direct and explicit-pointer forms).  The
+device numerical reference is exact for copy-like kernels and an independent
+CPU computation (torch cast reference) for narrowing.
+
+A runtime group stride has no proven physical envelope, so those kernels are
+rejected at compile time and their diagnostics live in the structural suite;
+they are not claimed as device-passed here.
 
 Non-VMI lane counts such as ``size=80`` cannot be constructed by the PTODSL
 VMI API; their descriptor/backend evidence lives in the structural suite
@@ -242,36 +247,6 @@ def test_nonzero_store_to_dma_dependency_20_trials(npu):
 
 
 # ---------------------------------------------------------------------------
-# Group dynamic stride (positive / zero / negative)
-# ---------------------------------------------------------------------------
-def _dynamic_stride_kernel():
-    @T.prim_func
-    def main(A: T.Tensor((512,), F32), stride: T.int32, C: T.Tensor((128,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((512,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                mask = T.vmi.create_mask(128, size=128)
-                v = T.vmi.vload(work[192], size=128, group=2, stride=stride)
-                T.vmi.vstore(v, work[0], mask)
-            T.copy(work[0:128], C)
-
-    return main
-
-
-@pytest.mark.parametrize("stride", [128, 0, -128], ids=["positive", "zero", "negative"])
-def test_group_dynamic_stride_load(npu, stride):
-    kernel, _ = _compile(_dynamic_stride_kernel())
-
-    def make_case(trial):
-        a = _float_inputs((512,), trial)
-        second = 192 + stride
-        return [a, stride], torch.cat([a[192:256], a[second : second + 64]])
-
-    _run_trials(kernel, make_case, npu, trials=5)
-
-
-# ---------------------------------------------------------------------------
 # Block stride: stride 1/2, single and multi VL
 # ---------------------------------------------------------------------------
 def _block_expected(a, base, lanes, block_stride, vector=64, block=8):
@@ -429,6 +404,78 @@ def test_explicit_pointer_base32_extra16_reads_48(npu):
         return [a], a[48:112]
 
     _run_trials(kernel, make_case, npu, trials=5)
+
+
+# ---------------------------------------------------------------------------
+# Padded static negative group stride: both groups initialized
+# ---------------------------------------------------------------------------
+def _padded_group_kernel():
+    @T.prim_func
+    def main(L: T.Tensor((64,), F32), H: T.Tensor((64,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            out = T.alloc_shared((128,), F32)
+            view = T.StridedTensor((2, 128), (256, 1), F32, data=work.data, scope="shared.dyn")
+            T.copy(L, view[0, 0:64])  # low group, second group of the load
+            T.copy(H, view[1, 0:64])  # high group, first group of the load
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                v = T.vmi.vload(view[1, 0], size=128, group=2, stride=-256)
+                T.vmi.vstore(v, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def _assert_padded_group_same_view(func):
+    """Both input DMAs and the VMI read must name the same view Buffer object."""
+    calls = []
+    tirx.stmt_functor.post_order_visit(
+        func.body,
+        lambda node: calls.append(node) if isinstance(node, tirx.Call) else None,
+    )
+    vload_buffers = []
+    dma_destinations = []
+    for call in calls:
+        name = getattr(call.op, "name", "")
+        if name == "tl.vmi.vload":
+            source = call.args[0]
+            assert isinstance(source, tirx.Call) and getattr(source.op, "name", "") == "tl.access_ptr", source
+            vload_buffers.append(source.args[0].buffer)
+        elif name == "tl.tileop.ascend_copy":
+            dma_destinations.append(call.args[1].args[0])
+    assert len(vload_buffers) == 1, vload_buffers
+    view = vload_buffers[0]
+    same_view = [destination for destination in dma_destinations if destination.buffer.same_as(view)]
+    assert len(same_view) == 2, f"expected two DMAs into the VMI view, got {len(same_view)} of {len(dma_destinations)}"
+    indices = sorted(tuple(int(index) for index in destination.indices) for destination in same_view)
+    assert indices == [(0, 0), (1, 0)], indices
+    assert tuple(int(dim) for dim in view.shape) == (2, 128), view.shape
+    assert tuple(int(stride) for stride in view.strides) == (256, 1), view.strides
+
+
+def test_padded_group_negative_stride_20_trials(npu):
+    func = _padded_group_kernel()
+    _assert_padded_group_same_view(func)
+    kernel, source = _compile(func)
+    lines = source.splitlines()
+    # The low-group DMA is the only GM->UB copy without an address adjustment;
+    # the descriptor starts at the view origin and the instruction offset 256
+    # is counted exactly once.
+    _assert_mte2_to_v_then_load(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" not in line,
+        "), 256, group=2, size=128, stride=-256)",
+    )
+    vload_line = next(line for line in lines if "vmi.vload" in line)
+    assert "addptr" not in vload_line, vload_line
+
+    def make_case(trial):
+        low = _float_inputs((64,), trial, base=100.0, step=0.5)
+        high = _float_inputs((64,), trial, base=-250.0, step=0.25)
+        return [low, high], torch.cat([high, low])
+
+    _run_trials(kernel, make_case, npu, trials=20)
 
 
 # ---------------------------------------------------------------------------
