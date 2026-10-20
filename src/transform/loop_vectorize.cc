@@ -1259,27 +1259,6 @@ bool CanProveIndependent(const PrimExpr &expr, Var var,
   return false;
 }
 
-namespace {
-
-// Analyze an expression already expressed in zero-based iteration ordinals.
-bool IsExprInvariantInVectorBoundaryImpl(const PrimExpr &expr,
-                                         const Var &ordinal,
-                                         const PrimExpr &trip_count,
-                                         int target_vectorized_size,
-                                         arith::Analyzer *analyzer) {
-  if (target_vectorized_size == 1) {
-    return true;
-  }
-  analyzer->Bind(ordinal,
-                 Range::FromMinExtent(make_zero(ordinal.dtype()), trip_count));
-  PrimExpr aligned =
-      floordiv(ordinal, target_vectorized_size) * target_vectorized_size;
-  PrimExpr expr_aligned = Substitute(expr, {{ordinal, aligned}});
-  return analyzer->CanProveEqual(expr, expr_aligned);
-}
-
-} // namespace
-
 bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
                                      const PrimExpr &extent,
                                      int target_vectorized_size,
@@ -1296,8 +1275,12 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   analysis_expr =
       Substitute(analysis_expr, {{var, cast(var.dtype(), min) + ordinal}});
-  return IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, extent,
-                                             target_vectorized_size, analyzer);
+  analyzer->Bind(ordinal,
+                 Range::FromMinExtent(make_zero(ordinal.dtype()), extent));
+  PrimExpr aligned =
+      floordiv(ordinal, target_vectorized_size) * target_vectorized_size;
+  PrimExpr expr_aligned = Substitute(analysis_expr, {{ordinal, aligned}});
+  return analyzer->CanProveEqual(analysis_expr, expr_aligned);
 }
 
 bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
@@ -1308,30 +1291,29 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
   if (target_vectorized_size == 1) {
     return true;
   }
+  // The extent must be divisible by the selected vector width.
+  PrimExpr target_size_for_iter =
+      make_const(extent.dtype(), target_vectorized_size);
+  if (!analyzer->CanProveEqual(FloorMod(extent, target_size_for_iter), 0))
+    return false;
+
+  if (allow_broadcast &&
+      IsExprInvariantInVectorBoundary(expr, var, extent, target_vectorized_size,
+                                      analyzer, min)) {
+    return true;
+  }
+
   Var ordinal("ordinal", var.dtype());
   PrimExpr analysis_expr =
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   analysis_expr =
       Substitute(analysis_expr, {{var, cast(var.dtype(), min) + ordinal}});
-
-  // The extent must be divisible by the selected vector width.
-  PrimExpr target_size_for_iter =
-      make_const(extent.dtype(), target_vectorized_size);
   PrimExpr target_size_for_expr =
       make_const(analysis_expr.dtype(), target_vectorized_size);
   PrimExpr target_size_for_ordinal =
       make_const(ordinal.dtype(), target_vectorized_size);
   PrimExpr zero_ordinal = make_const(ordinal.dtype(), 0);
   PrimExpr zero_expr = make_const(analysis_expr.dtype(), 0);
-
-  if (!analyzer->CanProveEqual(FloorMod(extent, target_size_for_iter), 0))
-    return false;
-
-  if (allow_broadcast &&
-      IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, extent,
-                                          target_vectorized_size, analyzer)) {
-    return true;
-  }
 
   PrimExpr simplified_expr =
       analyzer->Simplify(Substitute(analysis_expr, {{ordinal, zero_ordinal}}));
