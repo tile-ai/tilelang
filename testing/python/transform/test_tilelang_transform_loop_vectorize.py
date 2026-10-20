@@ -220,6 +220,22 @@ def test_dynamic_outer_step_keeps_inner_vectorization():
     assert not _undefined_local_vars(planned["main"])
 
 
+@pytest.mark.parametrize("step", [0, -1, None], ids=["zero", "negative", "dynamic"])
+def test_vectorized_loop_rejects_unsupported_step(step):
+    tir = tvm.tirx
+    a = tir.decl_buffer((8,), "float32", name="A")
+    b = tir.decl_buffer((8,), "float32", name="B")
+    i = tir.Var("i", "int32")
+    params = [a, b]
+    if step is None:
+        step = tir.Var("step", "int32")
+        params.append(step)
+    body = tir.For(i, 0, 8, tir.ForKind.VECTORIZED, tir.BufferStore(b, a[i], [i]), step=step)
+    func = tir.PrimFunc(params, body)
+    with tvm.target.Target("c"), pytest.raises(tvm.error.InternalError, match="positive constant step"):
+        tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
 @pytest.mark.parametrize(

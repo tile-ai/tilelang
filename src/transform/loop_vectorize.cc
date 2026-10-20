@@ -69,16 +69,14 @@ PrimExpr GetLoopIndex(const PrimExpr &min, const PrimExpr &step,
 // Compute the iteration count for min, min + step, ... < min + extent.
 // extent is the index span: [2, 9) with step 2 has extent 7 but 4 iterations.
 // For a positive extent, the count is ceil(extent / step), independent of min.
-// The extent may be symbolic. Return nullopt unless step simplifies to a
-// positive constant. Callers handle non-positive extents (empty loops).
-Optional<PrimExpr> ComputeLoopTripCount(const PrimExpr &extent,
-                                        const PrimExpr &step,
-                                        arith::Analyzer *analyzer) {
+// The extent may be symbolic, but step must simplify to a positive constant.
+// Callers handle non-positive extents (empty loops).
+PrimExpr ComputeLoopTripCount(const PrimExpr &extent, const PrimExpr &step,
+                              arith::Analyzer *analyzer) {
   PrimExpr simplified_step = analyzer->Simplify(cast(extent.dtype(), step));
   const int64_t *step_value = as_const_int(simplified_step);
-  if (!step_value || *step_value <= 0) {
-    return std::nullopt;
-  }
+  ICHECK(step_value && *step_value > 0)
+      << "Loop trip count requires a positive constant step, got " << step;
   // Use the quotient and remainder to round up without the intermediate
   // addition in (extent + step - 1) / step, which can overflow the index dtype.
   return analyzer->Simplify(
@@ -562,10 +560,9 @@ private:
     });
 
     if (!contains_nested_for) {
-      Optional<PrimExpr> trips = ComputeLoopTripCount(
+      PrimExpr trips = ComputeLoopTripCount(
           node->extent, GetLoopStep(inner_for_.value()), analyzer_);
-      const int64_t *trip_count =
-          trips.defined() ? as_const_int(trips.value()) : nullptr;
+      const int64_t *trip_count = as_const_int(trips);
       // Splitting currently requires a static, positive number of iterations.
       if (!trip_count || *trip_count <= 0) {
         loop_extent_vector_size_ = 1;
@@ -1170,12 +1167,9 @@ private:
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
       PrimExpr step = GetLoopStep(fnode);
-      Optional<PrimExpr> trips =
-          ComputeLoopTripCount(fnode->extent, step, analyzer_);
-      ICHECK(trips.defined())
-          << "Unsupported vectorized loop domain: " << fnode;
-      auto extent_ptr = as_const_int(trips.value());
-      ICHECK(extent_ptr) << trips.value();
+      PrimExpr trips = ComputeLoopTripCount(fnode->extent, step, analyzer_);
+      auto extent_ptr = as_const_int(trips);
+      ICHECK(extent_ptr) << trips;
       int64_t extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)
           << "extent: " << extent << " vector_size_: " << vector_size_
@@ -1337,10 +1331,7 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
   if (target_vectorized_size == 1) {
     return true;
   }
-  Optional<PrimExpr> trips = ComputeLoopTripCount(extent, step, analyzer);
-  if (!trips.defined()) {
-    return false;
-  }
+  PrimExpr trip_count = ComputeLoopTripCount(extent, step, analyzer);
   // Groups begin at iteration ordinals 0, width, ... rather than logical
   // indices divisible by width. For i in [2, 6), i // 4 is not a broadcast
   // at width 4: its lane values are [0, 0, 1, 1].
@@ -1349,8 +1340,8 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   analysis_expr =
       Substitute(analysis_expr, {{var, GetLoopIndex(min, step, ordinal)}});
-  return IsExprInvariantInVectorBoundaryImpl(
-      analysis_expr, ordinal, trips.value(), target_vectorized_size, analyzer);
+  return IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, trip_count,
+                                             target_vectorized_size, analyzer);
 }
 
 bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
@@ -1361,11 +1352,7 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
   if (target_vectorized_size == 1) {
     return true;
   }
-  Optional<PrimExpr> trips = ComputeLoopTripCount(extent, step, analyzer);
-  if (!trips.defined()) {
-    return false;
-  }
-  PrimExpr trip_count = trips.value();
+  PrimExpr trip_count = ComputeLoopTripCount(extent, step, analyzer);
   Var ordinal("ordinal", var.dtype());
   PrimExpr analysis_expr =
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
