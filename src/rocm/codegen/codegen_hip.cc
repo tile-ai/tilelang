@@ -2392,6 +2392,15 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     PrintConst(const_f32.get(), os, p);
     os << ')';
     return;
+  } else if (op->dtype.is_float4_e2m1fn()) {
+    // fp4_e2_t only has a raw-byte constructor, so build the constant from a
+    // float at runtime via the device helper rather than the `T(<float>)` form
+    // used by the wider types above.
+    os << "__tl_float_to_fp4(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
+    return;
   }
   // Type code is kFloat
   switch (op->dtype.bits()) {
@@ -2428,6 +2437,13 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
 
 void CodeGenTileLangHIP::VisitExpr_(const FloatImmNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  // An fp4 constant is printed as a `__tl_float_to_fp4(...)` call declared in
+  // hip_fp4.h. Printing it can happen without PrintType ever running on the fp4
+  // type (e.g. a scalar store to an external fp4 buffer), so enable the header
+  // here too -- this is the only path that feeds an fp4 FloatImm to PrintConst.
+  if (op->dtype.is_float4_e2m1fn()) {
+    enable_fp4_ = true;
+  }
   PrintConst(op, os, this);
 }
 
