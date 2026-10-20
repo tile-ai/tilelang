@@ -4,6 +4,8 @@ import pytest
 
 from tilelang import tvm as tvm
 import tilelang.testing
+import tilelang.language as TL
+import torch
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tvm import tirx
 from tvm.script import tirx as T
@@ -1865,6 +1867,62 @@ def test_partial_sync_multidimensional_rectangle():
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 1
     assert barriers[0][1] == 64
+
+
+@tilelang.testing.requires_cuda
+def test_full_extent_sync_under_thread_independent_guards_compiles(monkeypatch):
+    """Regression: full-extent syncs guarded only by thread-independent
+    conditions must not be z3-certified. Certification enumerates satisfying
+    thread values with up to one solver query per value on a prover whose
+    rlimit is shared with every earlier query in the compilation, so it
+    could stop early and spuriously fail with "Cannot prove a thread
+    rectangle" for an unconditionally full-extent sync."""
+    # The failure is in compilation; never satisfy this test from the kernel
+    # cache (its key does not cover uncommitted source changes).
+    monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
+    H, K, BT, BS = 32, 64, 16, 64
+
+    @tilelang.jit(
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: False,
+        }
+    )
+    def build():
+        B, Tt = TL.dynamic("B, Tt")
+
+        @TL.prim_func
+        def main(g: TL.Tensor((B, Tt, H, K), "bfloat16"), gi: TL.Tensor((B, Tt, H, K), "float32")):
+            tpc = TL.ceildiv(Tt, BT)
+            with TL.Kernel(TL.ceildiv(K, BS), B * tpc, H, threads=128) as (i_sb, i_c, i_h):
+                i_n = i_c // tpc
+                bos = (i_c % tpc) * BT
+                g_shared = TL.alloc_shared((BT, BS), "float32")
+                mask_i = TL.alloc_shared((BT, BT), "float32")
+                gi_frag = TL.alloc_fragment((BT, BS), "float32")
+                if bos + BT <= Tt:
+                    TL.copy(g[i_n, bos : bos + BT, i_h, i_sb * BS : i_sb * BS + BS], g_shared)
+                else:
+                    for r, c in TL.Parallel(BT, BS):
+                        if bos + r < Tt:
+                            g_shared[r, c] = TL.Cast("float32", g[i_n, bos + r, i_h, c])
+                        else:
+                            g_shared[r, c] = 0.0
+                for r, c in TL.Parallel(BT, BT):
+                    mask_i[r, c] = TL.if_then_else(r >= c, 1.0, 0.0)
+                TL.gemm(mask_i, g_shared, gi_frag, clear_accum=True)
+                for r, c in TL.Parallel(BT, BS):
+                    gi[i_n, bos + r, i_h, i_sb * BS + c] = gi_frag[r, c]
+
+        return main
+
+    kernel = build()
+    B, Tt = 2, 4 * BT
+    g = torch.randn(B, Tt, H, K, device="cuda", dtype=torch.bfloat16)
+    gi = torch.empty(B, Tt, H, K, device="cuda", dtype=torch.float32)
+    kernel(g, gi)
+    ref = g.float().view(B, Tt // BT, BT, H, K).cumsum(dim=2).view(B, Tt, H, K)
+    torch.testing.assert_close(gi, ref, atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":
