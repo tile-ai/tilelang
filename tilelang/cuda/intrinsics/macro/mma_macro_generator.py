@@ -961,9 +961,6 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         )
         self._initialize_transform_kind(transform_kind_a, transform_kind_b)
 
-    def _initialize_k_dim(self, a_dtype="float16"):
-        self.k_dim = 256 // DataType(a_dtype).bits
-
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
         self.local_size_a = (m_dim * k_dim) // warp_size
         self.local_size_b = (n_dim * k_dim) // warp_size
