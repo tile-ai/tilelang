@@ -9,15 +9,27 @@ results live in ``test_pto_vmi_memory_access_run.py``).
 Contracts verified here:
 
 * ``T.vmi.vload``/``T.vmi.vstore`` access descriptors carry the true start
-  address and a per-access-mode effective extent, with the VMI instruction
-  offset fixed at 0, so the scheduler sees the actual accessed range.
+  address and a per-access-mode effective extent.  The VMI instruction offset
+  is zero unless a relocation candidate moves the source position into it;
+  descriptor base + instruction offset always equals the original access
+  address after the normal negative-index legalization, so the scheduler sees
+  the actual accessed range.
 * Ordinary continuous loads round up to full physical vectors; ordinary
   broadcast keeps the conservative extent; ``dintlv`` loads declare both
   results and a two-input ``dintlv`` store declares the full 2*N span (its
   PTODSL attribute is emitted as ``intlv``); group envelopes cover all
   groups (slot/broadcast count one element per group, a static negative
-  stride relocates the lowest address, a dynamic stride falls back to the
-  whole tight buffer); ``block_stride`` extents are measured in 32B blocks;
+  stride relocates the lowest address and compensates with the instruction
+  offset, a view whose strides are at least dense row-major declares its
+  logical prefix from the buffer origin, and a whole tight buffer is used
+  only when its envelope and every axis start are proven compatible with
+  the buffer).  A group or group stride without proven bounds is rejected
+  at compile time; a static negative stride is rejected only when no
+  complete descriptor can be constructed without changing the address,
+  and a single group's dynamic stride stays supported because it produces
+  no inter-group displacement.  ``block_stride`` extents are measured in
+  32B blocks; a dynamic or negative block stride is likewise rejected
+  instead of falling back to a fabricated range;
   genuine FP4 descriptors stay logical and are packed exactly once (odd
   starts are rejected); packed (PK) store extents stay logical target
   elements; an explicit ``access_ptr`` keeps the caller-declared descriptor
@@ -112,6 +124,16 @@ def _single(artifact, op_name):
     pairs = list(_iter_calls(artifact, op_name))
     assert len(pairs) == 1, f"expected exactly one {op_name}, got {len(pairs)}"
     return pairs[0]
+
+
+def _assert_descriptor_error(build, op, reason):
+    """Assert an unprovable footprint is rejected with the right op and reason."""
+    with pytest.raises(ValueError) as excinfo:
+        build()
+    message = str(excinfo.value)
+    assert f"{op} cannot construct a descriptor covering the complete physical access" in message, message
+    assert reason in message, message
+    return message
 
 
 def _ptr_position(call, op_name):
@@ -529,23 +551,92 @@ def test_group_static_negative_stride_relocates_lowest_address():
     assert _descriptor(artifact, "tl.vmi.vstore") == (64, 192, 2, 128)
 
 
-def test_group_dynamic_stride_declares_whole_tight_buffer():
+@pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+def test_group_dynamic_stride_has_no_proven_bounds(is_load):
+    """A runtime group stride has no finite envelope, even on a tight buffer."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32), stride: T.int32):
+            with T.Kernel(1):
+                work = T.alloc_shared((512,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    if is_load:
+                        mask = T.vmi.create_mask(128, size=128)
+                        v = T.vmi.vload(work[192], size=128, group=2, stride=stride)
+                        T.vmi.vstore(v, work[0], mask)
+                    else:
+                        v = T.vmi.vload(work[0], size=128)
+                        T.vmi.vstore(v, work[192], group=2, stride=stride)
+                T.copy(work, C)
+
+        return main
+
+    op = "T.vmi.vload" if is_load else "T.vmi.vstore"
+    _assert_descriptor_error(build, op, "group stride has no proven bounds")
+
+
+def test_group_negative_stride_below_view_origin_is_rejected():
+    """The envelope is finite, but no view descriptor expresses its low start."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((512,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    view = tvm.tirx.decl_buffer((2, 64), F32, data=work.data, strides=(128, 1), elem_offset=128, scope="shared.dyn")
+                    v = T.vmi.vload(view[0, 0], size=128, group=2, stride=-128)
+                    T.vmi.vstore(v, work[0])
+                T.copy(work, C)
+
+        return main
+
+    _assert_descriptor_error(build, "T.vmi.vload", "finite access envelope starts below the buffer view origin")
+
+
+def test_group_negative_stride_shifted_index_below_zero_is_rejected():
+    """Relocating a 1-D descriptor must not produce a negative buffer index."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((512,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    v = T.vmi.vload(work[64], size=128, group=2, stride=-128)
+                    T.vmi.vstore(v, work[0])
+                T.copy(work, C)
+
+        return main
+
+    _assert_descriptor_error(build, "T.vmi.vload", "finite access envelope starts below the buffer view origin")
+
+
+def test_group_negative_stride_dense_root_form_keeps_finite_descriptor():
+    """The equivalent root[128] form stays supported with address-preserving offset."""
+
     @T.prim_func
-    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32), stride: T.int32):
+    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
         with T.Kernel(1):
             work = T.alloc_shared((512,), F32)
             T.copy(A, work)
             with T.SimdVF():
-                v = T.vmi.vload(work[192], size=128, group=2, stride=stride)
-                T.vmi.vstore(v, work[192], group=2, stride=stride)
+                v = T.vmi.vload(work[128], size=128, group=2, stride=-128)
+                T.vmi.vstore(v, work[128], group=2, stride=-128)
             T.copy(work, C)
 
     artifact = _lower_pto(main)
-    assert _descriptor(artifact, "tl.vmi.vload") == (0, 512, 1, 192)
-    assert _descriptor(artifact, "tl.vmi.vstore") == (0, 512, 2, 192)
+    assert _descriptor(artifact, "tl.vmi.vload") == (0, 192, 1, 128)
+    assert _descriptor(artifact, "tl.vmi.vstore") == (0, 192, 2, 128)
 
 
-def test_group_negative_stride_nd_uses_whole_buffer_plan():
+def test_group_negative_stride_nd_uses_padded_origin_plan():
+    """A dense 2-D buffer meets the padded-origin layout condition."""
+
     @T.prim_func
     def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
         with T.Kernel(1):
@@ -558,6 +649,182 @@ def test_group_negative_stride_nd_uses_whole_buffer_plan():
 
     artifact = _lower_pto(main)
     assert _descriptor(artifact, "tl.vmi.vload") == (0, 256, 1, 192)
+
+
+@pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+def test_group_negative_stride_nd_negative_start_is_rejected(is_load):
+    """work[2,-32] legalizes to 160; relocating the descriptor would start at 96."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((4, 64), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    if is_load:
+                        mask = T.vmi.create_mask(128, size=128)
+                        v = T.vmi.vload(work[2, -32], size=128, group=2, stride=-64)
+                        T.vmi.vstore(v, work[0, 0], mask)
+                    else:
+                        v = T.vmi.vload(work[0, 0], size=128)
+                        T.vmi.vstore(v, work[2, -32], group=2, stride=-64)
+                T.copy(work, C)
+
+        return main
+
+    op = "T.vmi.vload" if is_load else "T.vmi.vstore"
+    _assert_descriptor_error(build, op, "negative-index legalization")
+
+
+# ---------------------------------------------------------------------------
+# Padded static negative group stride
+# ---------------------------------------------------------------------------
+def _padded_view_kernel(row=1, col=0):
+    view_data = {}
+
+    @T.prim_func
+    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            T.copy(A, work)
+            view = T.StridedTensor((2, 128), (256, 1), F32, data=work.data, scope="shared.dyn")
+            view_data["var"] = view.data
+            with T.SimdVF():
+                v = T.vmi.vload(view[row, col], size=128, group=2, stride=-256)
+                T.vmi.vstore(v, view[row, col], group=2, stride=-256)
+            T.copy(work, C)
+
+    return main, view_data["var"]
+
+
+def test_padded_group_negative_stride_uses_buffer_origin():
+    """view[1,0] with group stride -256 reads [0,320): the buffer origin covers it."""
+    main, view_data = _padded_view_kernel(1, 0)
+    artifact = _lower_pto(main)
+    load_func, load_call = _single(artifact, "tl.vmi.vload")
+    store_func, store_call = _single(artifact, "tl.vmi.vstore")
+    load_ptr = _resolve_binding(load_call.args[0], load_func)
+    store_ptr = _resolve_binding(store_call.args[1], store_func)
+
+    assert _descriptor(artifact, "tl.vmi.vload") == (0, 320, 1, 256)
+    assert _descriptor(artifact, "tl.vmi.vstore") == (0, 320, 2, 256)
+    # The descriptor keeps the original view storage and instruction offsets
+    # carry the source offset once: the first accessed element stays at 256.
+    assert load_ptr.args[1].same_as(view_data)
+    assert store_ptr.args[1].same_as(view_data)
+    assert _const(load_ptr.args[2]) + _const(load_call.args[1]) == 256
+    assert _const(store_ptr.args[2]) + _const(store_call.args[2]) == 256
+
+
+def test_padded_group_negative_stride_counts_elem_offset_once():
+    """The descriptor origin carries elem_offset; the relative offset excludes it."""
+    view_data = {}
+
+    @T.prim_func
+    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            T.copy(A, work)
+            view = tvm.tirx.decl_buffer((2, 128), F32, data=work.data, strides=(256, 1), elem_offset=16, scope="shared.dyn")
+            view_data["var"] = view.data
+            with T.SimdVF():
+                v = T.vmi.vload(view[1, 0], size=128, group=2, stride=-256)
+                T.vmi.vstore(v, view[1, 0], group=2, stride=-256)
+            T.copy(work, C)
+
+    artifact = _lower_pto(main)
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert _descriptor(artifact, "tl.vmi.vload") == (16, 320, 1, 256)
+    assert _descriptor(artifact, "tl.vmi.vstore") == (16, 320, 2, 256)
+    assert ptr.args[1].same_as(view_data["var"])
+    # elem_offset (16) + relative (256) still starts at element 272.
+    assert _const(ptr.args[2]) + _const(call.args[1]) == 272
+
+
+def _sync_events(ir):
+    """Ordered copy/sync/load events in evaluation order (one IR pass)."""
+    from testing.ascend._ir import calls as ir_calls
+    from testing.ascend._ir import statements as ir_statements
+
+    events = []
+    for stmt, _ in ir_statements(ir):
+        if not isinstance(stmt, (tvm.tirx.Evaluate, tvm.tirx.Bind)):
+            continue
+        for call in ir_calls(stmt, "tl.tileop.ascend_copy"):
+            destination = call.args[1].args[0]
+            events.append(("copy", tuple(int(index) for index in destination.indices)))
+        for call in ir_calls(stmt, "tl.ascend_set_flag"):
+            events.append(("set", str(getattr(call.args[0], "value", call.args[0]))))
+        for call in ir_calls(stmt, "tl.ascend_wait_flag"):
+            events.append(("wait", str(getattr(call.args[0], "value", call.args[0]))))
+        if ir_calls(stmt, "tl.vmi.vload"):
+            events.append(("vload", None))
+    return events
+
+
+def test_padded_low_group_dma_synchronizes_before_vmi_load():
+    """Only the low group is initialized, so no other DMA can mask a missing pair."""
+
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            out = T.alloc_shared((128,), F32)
+            view = T.StridedTensor((2, 128), (256, 1), F32, data=work.data, scope="shared.dyn")
+            T.copy(A, view[0, 0:64])
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                value = T.vmi.vload(view[1, 0], size=128, group=2, stride=-256)
+                T.vmi.vstore(value, out[0], mask)
+            T.copy(out, C)
+
+    from testing.ascend._ir import schedule as ir_schedule
+
+    events = _sync_events(ir_schedule(main, through="InsertSync", auto_schedule=True))
+    dma = [index for index, event in enumerate(events) if event == ("copy", (0, 0))]
+    assert len(dma) == 1, events
+    loads = [index for index, event in enumerate(events) if event[0] == "vload"]
+    assert len(loads) == 1, events
+    sets = [index for index, event in enumerate(events) if event == ("set", "MTE2_V")]
+    waits = [index for index, event in enumerate(events) if event == ("wait", "MTE2_V")]
+    assert sets and waits, f"missing MTE2->V pair for the low-group DMA: {events}"
+    set_index = next(index for index in sets if index > dma[0])
+    wait_index = next(index for index in waits if index > set_index)
+    assert dma[0] < set_index < wait_index < loads[0], events
+
+
+@pytest.mark.parametrize(
+    ("shape", "strides", "indices", "accepted"),
+    [
+        ((2, 128), (256, 1), (1, 0), True),
+        ((2, 128), (256, 1), (0, 0), False),
+        ((2, 128), (1, 2), (1, 0), False),
+        ((2, 128), (64, 1), (1, 0), False),
+        ((4, 128), (256, 1), (-1, 512), False),
+    ],
+    ids=["padded", "unproven-low", "transposed", "compressed", "negative-start"],
+)
+def test_padded_origin_plan_static_layout_boundaries(shape, strides, indices, accepted):
+    """The origin plan requires non-negative starts and an envelope above the origin.
+
+    A rejected source makes this candidate return ``None`` so the caller keeps
+    trying other constructions; only after every candidate fails does the
+    caller emit the unified diagnostic.
+    """
+    from tilelang.ascend.language import vmi as vmi_language
+
+    buffer = tvm.tirx.decl_buffer(shape, F32, name="view", strides=strides, scope="shared.dyn")
+    source = tvm.tirx.BufferLoad(buffer, list(indices))
+    plan = vmi_language._padded_origin_plan(source, low=-256, high=64)
+    if accepted:
+        assert plan is not None
+        assert plan[0] == 320
+        assert plan[1] is not None and plan[1].same_as(buffer)
+        assert _const(plan[2]) == 256
+    else:
+        assert plan is None
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +857,35 @@ def test_block_stride_envelope_uses_32b_blocks(dtype, size, block_stride, expect
     artifact = _lower_pto(main)
     assert _descriptor(artifact, "tl.vmi.vload") == (64, expected_extent, 1, 0)
     assert _descriptor(artifact, "tl.vmi.vstore") == (320, expected_extent, 2, 0)
+
+
+@pytest.mark.parametrize(
+    ("dynamic", "reason"),
+    [
+        (True, "block stride has no proven bounds"),
+        (False, "negative block-stride control words have no proven physical bounds"),
+    ],
+    ids=["dynamic", "negative"],
+)
+def test_block_stride_without_proven_bounds_is_rejected(dynamic, reason):
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((768,), F32), C: T.Tensor((768,), F32), block_stride: T.int32):
+            with T.Kernel(1):
+                work = T.alloc_shared((768,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(64, size=64)
+                    if dynamic:
+                        v = T.vmi.vload(work[64], size=64, block_stride=block_stride)
+                    else:
+                        v = T.vmi.vload(work[64], size=64, block_stride=-1)
+                    T.vmi.vstore(v, work[320], mask)
+                T.copy(work, C)
+
+        return main
+
+    _assert_descriptor_error(build, "T.vmi.vload", reason)
 
 
 # ---------------------------------------------------------------------------
