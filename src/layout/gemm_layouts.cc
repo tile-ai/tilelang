@@ -833,7 +833,7 @@ Layout MakeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   if ((!k_inner && element_size == 8) ||
       (mat_stride != 4 && mat_stride % 8 != 0))
     return MakeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
-  if (mat_continuous % (vector_size * 8) == 0)
+  else if (mat_continuous % (vector_size * 8) == 0)
     return MakeFullBankSwizzleLayout2D(mat_stride, mat_continuous,
                                        element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
