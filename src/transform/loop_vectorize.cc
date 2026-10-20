@@ -1264,9 +1264,6 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer,
                                      const PrimExpr &min) {
-  if (target_vectorized_size == 1) {
-    return true;
-  }
   // Groups begin at iteration ordinals 0, width, ... rather than logical
   // indices divisible by width. For i in [2, 6), i // 4 is not a broadcast
   // at width 4: its lane values are [0, 0, 1, 1].
