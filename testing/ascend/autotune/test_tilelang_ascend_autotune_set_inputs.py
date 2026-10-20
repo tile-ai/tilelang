@@ -15,10 +15,10 @@ import tilelang
 import tilelang.testing
 from tilelang.ascend import language as T
 from tilelang.autotuner import AutoTuner, set_autotune_inputs
-from tilelang.env import env
+from tilelang.env import CacheState, env
 
-N = 64 * 2048
-CONFIGS = [{"block": 1024}, {"block": 2048}]
+N = 64
+CONFIGS = [{"block": 32}, {"block": 64}]
 
 
 def _vecadd_kernel(n, block):
@@ -58,8 +58,8 @@ def _isolate_autotune_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     monkeypatch.setattr(env, "TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
-    tilelang.enable_cache()
-    AutoTuner._memory_cache.clear()
+    monkeypatch.setattr(CacheState, "_enabled", True)
+    monkeypatch.setattr(AutoTuner, "_memory_cache", {})
 
 
 def _tune_with_recorded_supply(a, b, monkeypatch, tmp_path):
@@ -93,21 +93,9 @@ def test_autotune_with_set_inputs_tunes_on_npu():
 
 
 @tilelang.testing.requires_ascend
-def test_set_inputs_supplies_benchmark_tensors_on_current_device(monkeypatch, tmp_path):
-    a, b = _deterministic_inputs()
-
-    result, supplied_devices = _tune_with_recorded_supply(a, b, monkeypatch, tmp_path)
-
-    current = torch.device("npu", torch.npu.current_device())
-    assert result.latency > 0
-    assert supplied_devices
-    assert set(supplied_devices) == {(current, current)}
-
-
-@tilelang.testing.requires_ascend
-@pytest.mark.parametrize("capture", ["cpu", "other_npu"])
-def test_set_inputs_aligns_captured_inputs_to_current_device(capture, monkeypatch, tmp_path):
-    device = "cpu"
+@pytest.mark.parametrize("capture", ["npu", "cpu", "other_npu"])
+def test_set_inputs_supplies_captured_inputs_on_current_device(capture, monkeypatch, tmp_path):
+    device = capture
     if capture == "other_npu":
         if torch.npu.device_count() < 2:
             pytest.skip("needs two visible NPU devices")
