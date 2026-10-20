@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
 
 
 def vectorize_access_legalize(M: int = 64, N: int = 64):
@@ -43,6 +44,53 @@ def assert_vectorize_access(M: int = 64, N: int = 64):
 
 def test_vectorize_access():
     assert_vectorize_access(64, 64)
+
+
+@tilelang.testing.requires_cuda
+def test_vectorized_nonzero_min_uses_aligned_vector_width():
+    @T.prim_func
+    def before(
+        A: T.Tensor((8,), T.int32),
+        B: T.Tensor((8,), T.int32),
+    ):
+        for value in T.vectorized(2, 6):
+            B[value] = A[value] + 1
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((8,), T.int32),
+        B: T.Tensor((8,), T.int32),
+    ):
+        for value_outer in T.serial(2):
+            for vec in T.vectorized(2):
+                B[2 + (value_outer * 2 + vec)] = A[2 + (value_outer * 2 + vec)] + 1
+
+    mod = tvm.IRModule.from_expr(before)
+    with tvm.target.Target("cuda"):
+        transformed = tl.transform.LegalizeVectorizedLoop()(mod)
+    tvm.ir.assert_structural_equal(transformed["before"].body, expected.body)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "dtype, start, extent, step, trips",
+    [("int64", 2, 1 << 32, 1, 1 << 32), ("int32", 0, (1 << 31) - 1, 2, 1 << 30), ("int64", 0, (1 << 63) - 1, 2, 1 << 62)],
+)
+def test_vectorized_split_preserves_large_domains(dtype, start, extent, step, trips):
+    tir = tvm.tirx
+    a = tir.decl_buffer((start + extent,), "int32", name="A")
+    i = tir.Var("i", dtype)
+    index = i // step
+    body = tir.BufferStore(a, a[index] + 1, [index])
+    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, body, step=step)
+    func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a})
+    with tvm.target.Target("cuda"):
+        mod = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    loops = []
+    tir.stmt_functor.post_order_visit(mod["main"].body, lambda node: loops.append(node) if isinstance(node, tir.For) else None)
+    assert len(loops) == 2
+    assert all(loop.loop_var.dtype == dtype for loop in loops)
+    assert int(loops[0].extent) * int(loops[1].extent) == trips
 
 
 if __name__ == "__main__":

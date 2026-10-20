@@ -67,8 +67,24 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
 
+// Logical indices and iteration ordinals are different coordinates. Keep the
+// complete domain when checking vector groups, including for copy IterVars.
+struct LoopDomain {
+  explicit LoopDomain(const For &loop);
+  explicit LoopDomain(const IterVar &iter);
+
+  PrimExpr IndexAt(const PrimExpr &ordinal) const;
+  ffi::Optional<PrimExpr> TripCount(arith::Analyzer *analyzer) const;
+
+  Var var;
+  PrimExpr min;
+  PrimExpr extent;
+  PrimExpr step;
+};
+
 // Check if expr is invariant within vector boundaries
-bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr,
+                                     const LoopDomain &domain,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
@@ -84,13 +100,12 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
  * simplify to a unit-stride Ramp whose base is divisible by the vector width.
  * Atomic destinations use this mode: four atomic additions to B[i // 4] update
  * the same element, whereas AtomicAddx4 would update four consecutive elements.
- * Alignment must hold for every group, not just at var == 0.
+ * Alignment must hold for every group, not just at the first iteration.
  *
  * The flag applies only to the analyzed address; an atomic's source value may
  * still broadcast. If the check fails, the planner can try a smaller width.
  */
-bool IndicesCanVectorize(const PrimExpr &expr, Var var,
-                         const PrimExpr &iter_var_size,
+bool IndicesCanVectorize(const PrimExpr &expr, const LoopDomain &domain,
                          int target_vectorized_size, arith::Analyzer *analyzer,
                          bool allow_broadcast = true);
 

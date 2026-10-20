@@ -135,23 +135,6 @@ def _has_cast(stmt: Stmt) -> bool:
     return finder.found
 
 
-def _contains_seq_stmt(stmt: Stmt) -> bool:
-    """Check if statement contains SeqStmt (multiple statements).
-
-    When the For body has SeqStmt, the transformation is more complex
-    and we skip the optimization for now.
-    """
-    found = False
-
-    def visitor(node) -> None:
-        nonlocal found
-        if isinstance(node, SeqStmt):
-            found = True
-
-    post_order_visit(stmt, visitor)
-    return found
-
-
 def _expr_depends_on_var(expr: tirx.PrimExpr, var: Var) -> bool:
     """Check if an expression references the given Var."""
     found = False
@@ -299,14 +282,37 @@ def normalize_flat_binds(stmt: Stmt) -> Stmt:
 
 
 def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
-    """Extract IfThenElse condition from statement if present.
+    """Combine leading guards without evaluating an inner guard eagerly."""
+    condition: tirx.PrimExpr | None = None
+    while isinstance(stmt, IfThenElse) and stmt.else_case is None:
+        condition = stmt.condition if condition is None else tirx.if_then_else(condition, stmt.condition, tirx.const(False, "bool"))
+        stmt = stmt.then_case
+    return condition, stmt
 
-    Returns:
-        A tuple of (condition, inner_body). If no IfThenElse, returns (None, stmt).
-    """
-    if isinstance(stmt, IfThenElse) and stmt.else_case is None:
-        return stmt.condition, stmt.then_case
-    return None, stmt
+
+def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
+    """Only repeat guards that cannot observe or modify mutable state."""
+    if condition is None:
+        return True
+    pure = True
+
+    def visit(node):
+        nonlocal pure
+        if isinstance(node, BufferLoad):
+            pure = False
+        elif isinstance(node, Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
+                pure = False
+
+    post_order_visit(condition, visit)
+    return pure
+
+
+def _iteration_ordinal(loop: For, index: tirx.PrimExpr) -> tirx.PrimExpr:
+    """Scratch buffers are indexed by iteration, not by the logical index."""
+    step = loop.step if loop.step is not None else tirx.const(1, loop.loop_var.dtype)
+    return (index - loop.min) // step
 
 
 # Cast entry: (original buffer, original indices, cast buffer)
@@ -394,6 +400,9 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             return self._make_for(op, new_body) if new_body is not op.body else op
         if not isinstance(op.extent, IntImm):
             return self._make_for(op, new_body) if new_body is not op.body else op
+        step = op.step if op.step is not None else tirx.const(1, op.loop_var.dtype)
+        if not isinstance(step, IntImm) or step.value <= 0 or op.extent.value <= 0:
+            return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Normalize flat Bind statements before all analysis. Bind is a
         # sequential SSA definition, not a tree-shaped LetStmt with a body.
@@ -403,21 +412,13 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         if not _has_cast(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        # Skip SeqStmt (multiple statements) after inlining leading Bind nodes.
-        # A common frontend pattern is SeqStmt(Bind(...), BufferStore(...)),
-        # which is still a single compute statement after substitution.
-        if _contains_seq_stmt(normalized_body):
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Skip Evaluate roots. Decoupling splits the value edge of a BufferStore
-        # to insert a staging buffer; an Evaluate discards its result and stores
-        # nothing, so that edge does not exist and the transform is undefined.
-        # Opaque intrinsic statements such as `tl.ptx_cp_async(...)` land here,
-        # and their operands are address arguments with address-space
-        # constraints (dst must be shared, src must be global) that rewriting to
-        # local staging buffers would violate.
-        _, root_stmt = extract_if_condition(normalized_body)
-        if isinstance(root_stmt, Evaluate):
+        # Decoupling splits a single BufferStore value edge. Only leading
+        # guards can apply to every generated copy stage; compound statements
+        # and opaque Evaluate intrinsics have no such common store edge.
+        condition, root_stmt = extract_if_condition(normalized_body)
+        # Copy-in, compute, and copy-out each evaluate the guard. A memory
+        # read or effectful call need not return the same value at each stage.
+        if not isinstance(root_stmt, BufferStore) or not _can_repeat_condition(condition):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Collect all shared/global stores and loads
@@ -428,10 +429,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             # Cast exists but no memory access → nothing to decouple
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        extent = op.extent.value
-
-        # Extract condition (from normalized body for correctness)
-        condition, _ = extract_if_condition(normalized_body)
+        trips = op.extent.value // step.value + (op.extent.value % step.value != 0)
+        extent = tirx.const(trips, op.loop_var.dtype)
 
         # Create cast entries for stores and loads
         store_entries = self._create_cast_entries(collector.stores, extent)
@@ -463,7 +462,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         load_replacement_entries = store_entries + load_entries
         compute_body = normalized_body
         if store_entries or load_entries:
-            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var)
+            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, _iteration_ordinal(op, op.loop_var))
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
         # Build copy-to-memory loops (after compute)
@@ -489,7 +488,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
     # ----- helpers -----
 
-    def _create_cast_entries(self, accesses: list[BufferStore | BufferLoad], extent: int) -> list[CastEntry]:
+    def _create_cast_entries(self, accesses: list[BufferStore | BufferLoad], extent: tirx.PrimExpr) -> list[CastEntry]:
         """Create local cast buffers for memory accesses.
 
         Each unique (buffer, indices) pair gets its own cast buffer.
@@ -547,18 +546,19 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
             # Substitute loop_var with copy_var in original indices
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
+            ordinal = _iteration_ordinal(op, copy_var)
 
             if direction == "to_memory":
                 copy_store: Stmt = BufferStore(
                     orig_buffer,
-                    BufferLoad(cast_buffer, [copy_var]),
+                    BufferLoad(cast_buffer, [ordinal]),
                     new_indices,
                 )
             else:
                 copy_store = BufferStore(
                     cast_buffer,
                     BufferLoad(orig_buffer, new_indices),
-                    [copy_var],
+                    [ordinal],
                 )
 
             # Wrap with condition if present
@@ -603,9 +603,9 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         )
         return SBlockRealize([], True, block)
 
-    def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var) -> Stmt:
+    def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], ordinal: tirx.PrimExpr) -> Stmt:
         """Replace memory accesses with cast buffer accesses."""
-        replacer = AccessReplacer(store_entries, load_entries, loop_var)
+        replacer = AccessReplacer(store_entries, load_entries, ordinal)
         return replacer.visit_stmt(stmt)
 
 
@@ -617,17 +617,17 @@ class AccessReplacer(tirx.PyStmtExprMutator):
     like a[i] and a[i+32] from the same buffer map to different cast buffers.
     """
 
-    def __init__(self, store_entries: list[CastEntry], load_entries: list[CastEntry], loop_var: Var):
+    def __init__(self, store_entries: list[CastEntry], load_entries: list[CastEntry], ordinal: tirx.PrimExpr):
         super().__init__()
         self.store_entries = store_entries
         self.load_entries = load_entries
-        self.loop_var = loop_var
+        self.ordinal = ordinal
 
     def visit_buffer_store_(self, op: BufferStore) -> Stmt:
         new_value = self.visit_expr(op.value)
         cast_buf = _find_cast_entry(self.store_entries, op.buffer, list(op.indices))
         if cast_buf is not None:
-            return BufferStore(cast_buf, new_value, [self.loop_var])
+            return BufferStore(cast_buf, new_value, [self.ordinal])
         if new_value is not op.value:
             return BufferStore(op.buffer, new_value, list(op.indices))
         return op
@@ -635,7 +635,7 @@ class AccessReplacer(tirx.PyStmtExprMutator):
     def visit_buffer_load_(self, op: BufferLoad) -> tirx.PrimExpr:
         cast_buf = _find_cast_entry(self.load_entries, op.buffer, list(op.indices))
         if cast_buf is not None:
-            return BufferLoad(cast_buf, [self.loop_var])
+            return BufferLoad(cast_buf, [self.ordinal])
         return op
 
 

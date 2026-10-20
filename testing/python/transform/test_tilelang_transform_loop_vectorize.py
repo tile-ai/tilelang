@@ -35,6 +35,27 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
         return tl.transform.VectorizeLoop()(mod)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("start,stop,step,width", [(2, 6, 1, 2), (2, 8, 2, 1)])
+def test_nested_vectorized_loop_uses_inner_iteration_domain(start, stop, step, width):
+    tir = tvm.tirx
+    a = tir.decl_buffer((16,), "int32", name="A")
+    b = tir.decl_buffer((16,), "int32", name="B")
+    outer, inner = tir.Var("j", "int32"), tir.Var("i", "int32")
+    index = outer * 8 + inner
+    body = tir.BufferStore(b, tir.BufferLoad(a, [index]) + 1, [index])
+    inner_loop = tir.For(inner, start, stop - start, tir.ForKind.SERIAL, body, step=step)
+    main = tir.PrimFunc(
+        [a.data, b.data],
+        tir.For(outer, 0, 2, tir.ForKind.VECTORIZED, inner_loop),
+        buffer_map={a.data: a, b.data: b},
+    )
+
+    transformed = _run_vectorized_loop_legalizer(main)
+    assert _vectorized_extents(transformed["main"]) == ([width] if width > 1 else [])
+    assert not _undefined_local_vars(transformed["main"])
+
+
 def _atomic_op_names(func):
     names = []
 
@@ -123,7 +144,9 @@ def _vectorized_extents(func):
     return extents
 
 
-def _plan_atomic_loop(index, pointer_form="access_ptr", dtype="float32", scope="global", shape=(64,), strides=None, elem_offset=0):
+def _plan_atomic_loop(
+    index, pointer_form="access_ptr", dtype="float32", scope="global", shape=(64,), strides=None, elem_offset=0, loop_min=0, step=1
+):
     """Check the planner before the execution vectorizer can scalarize anything."""
     tir = tvm.tirx
     i = tir.Var("i", "int32")
@@ -141,10 +164,60 @@ def _plan_atomic_loop(index, pointer_form="access_ptr", dtype="float32", scope="
     else:
         assert len(indices) == 1
         ptr = tir.tvm_access_ptr(tir.type_annotation(dtype), output.data, indices[0], 1, 3)
-    atomic = tir.call_intrin("handle", tvm.ir.Op.get("tl.atomic_add_elem_op"), ptr, source[i], 0)
-    body = tir.For(i, 0, 8, tir.ForKind.VECTORIZED, tir.Evaluate(atomic))
+    atomic = tir.call_intrin("handle", tvm.ir.Op.get("tl.atomic_add_elem_op"), ptr, source[(i - loop_min) // step], 0)
+    body = tir.For(i, loop_min, 8, tir.ForKind.VECTORIZED, tir.Evaluate(atomic), step=step)
     func = tir.PrimFunc([source, output, offset], body).with_attr("global_symbol", "main")
     return tvm.IRModule({"main": func})
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
+@pytest.mark.parametrize(
+    "loop_min,step,index,width",
+    [(2, 1, lambda i, _: i, 2), (-2, 1, lambda i, _: i + 2, 4), (2, 2, lambda i, _: (i - 2) // 2, 4)],
+)
+def test_atomic_plan_uses_full_loop_domain(loop_min, step, index, width, pointer_form):
+    mod = _plan_atomic_loop(index, pointer_form, loop_min=loop_min, step=step)
+    with _SM90_TARGET:
+        planned = tl.transform.LegalizeVectorizedLoop()(mod)
+        assert _vectorized_extents(planned["main"]) == [width]
+        lowered = tl.transform.FlattenBuffer()(tl.transform.LowerAccessPtr()(planned))
+        emitted = tl.transform.VectorizeLoop()(lowered)
+    assert _atomic_op_names(emitted["main"]) == [f"tl.atomic_addx{width}_elem_op"]
+    assert not _undefined_local_vars(emitted["main"])
+
+
+@pytest.mark.parametrize("access", ["broadcast", "condition"])
+def test_vector_group_boundary_is_relative_to_min(access):
+    tir = tvm.tirx
+    a = tir.decl_buffer((2,), "int32", name="A")
+    b = tir.decl_buffer((4,), "int32", name="B")
+    i = tir.Var("i", "int32")
+    if access == "broadcast":
+        body = tir.BufferStore(b, a[i // 4], [i - 2])
+    else:
+        body = tir.IfThenElse(i // 4 == 0, tir.BufferStore(b, i, [i - 2]), None)
+    func = tir.PrimFunc([a, b], tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body))
+    with tvm.target.Target("c"):
+        planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    # At width 4 the lane values of i // 4 are [0, 0, 1, 1], not uniform.
+    assert _vectorized_extents(planned["main"]) == [2]
+
+
+def test_dynamic_outer_step_keeps_inner_vectorization():
+    tir = tvm.tirx
+    a = tir.decl_buffer((32,), "float32", name="A")
+    b = tir.decl_buffer((32,), "float32", name="B")
+    j, i, step = [tir.Var(name, "int32") for name in ("j", "i", "step")]
+    index = j * 4 + i
+    inner = tir.For(i, 0, 4, tir.ForKind.SERIAL, tir.BufferStore(b, a[index] + 1, [index]))
+    func = tir.PrimFunc([a, b, step], tir.For(j, 0, 8, tir.ForKind.VECTORIZED, inner, step=step))
+    with tvm.target.Target("c"):
+        planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    assert _vectorized_extents(planned["main"]) == [4]
+    outer = planned["main"].body
+    assert outer.step.same_as(step)
+    assert not _undefined_local_vars(planned["main"])
 
 
 @tilelang.testing.requires_cuda
