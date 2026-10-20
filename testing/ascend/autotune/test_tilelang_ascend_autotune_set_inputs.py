@@ -105,15 +105,25 @@ def test_set_inputs_supplies_benchmark_tensors_on_current_device(monkeypatch, tm
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.skipif(torch.npu.device_count() < 2, reason="needs two visible NPU devices")
-def test_set_inputs_aligns_inputs_from_another_device(monkeypatch, tmp_path):
-    current = torch.npu.current_device()
-    other = next(i for i in range(torch.npu.device_count()) if i != current)
-    a, b = _deterministic_inputs(device=f"npu:{other}")
+@pytest.mark.parametrize("capture", ["cpu", "other_npu"])
+def test_set_inputs_aligns_captured_inputs_to_current_device(capture, monkeypatch, tmp_path):
+    device = "cpu"
+    if capture == "other_npu":
+        if torch.npu.device_count() < 2:
+            pytest.skip("needs two visible NPU devices")
+        other = next(i for i in range(torch.npu.device_count()) if i != torch.npu.current_device())
+        try:
+            # The alignment copy is cross-device, which some runtimes reject.
+            torch.empty(1, device=f"npu:{other}").to("npu")
+        except RuntimeError:
+            pytest.skip("cross-device copy is not available on this host")
+        device = f"npu:{other}"
+
+    a, b = _deterministic_inputs(device=device)
 
     result, supplied_devices = _tune_with_recorded_supply(a, b, monkeypatch, tmp_path)
 
-    expected = torch.device("npu", current)
+    expected = torch.device("npu", torch.npu.current_device())
     assert result.latency > 0
     assert supplied_devices
     assert set(supplied_devices) == {(expected, expected)}
