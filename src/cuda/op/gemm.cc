@@ -437,7 +437,7 @@ struct Gemm {
       FatalMmaSyncUnavailable(op, target);
     }
     // Query the selected emitter so instruction selection and lowering share
-    // the architecture-specific K atom. Partial atoms need the FMA fallback.
+    // the architecture-specific K atom. Partial atoms require explicit padding.
     static const auto get_atom_k =
         Function::GetGlobal("tl.cuda.get_mma_atom_k");
     ICHECK(get_atom_k.has_value())
@@ -445,7 +445,14 @@ struct Gemm {
     int atom_k = (*get_atom_k)(target, op.a_->dtype).cast<int>();
     ICHECK_GT(atom_k, 0);
     if (op.k_ % atom_k != 0) {
-      return kCudaFMA;
+      int64_t padded_k = (static_cast<int64_t>(op.k_) / atom_k + 1) * atom_k;
+      LOG(FATAL) << "T.gemm() tile K=" << op.k_ << " must be divisible by "
+                 << atom_k
+                 << " for the current CUDA MMA emitter (target=" << target
+                 << ", A dtype=" << op.a_->dtype << "). "
+                 << "Pad the K tile to " << padded_k
+                 << " and zero-fill the extra K elements of both A and B."
+                 << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
     }
     return kCudaMMA;
   }
