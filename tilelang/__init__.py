@@ -229,10 +229,10 @@ if not env.is_light_import():
     from . import metal as metal  # noqa: F401
     from . import webgpu as webgpu  # noqa: F401
 
-    if env.get_lower_trace_mode() is not None:
-        from .tools.lower_trace import enable as _lower_trace_enable
+    from .instrumentation.plugins import load_instrumentation_plugins as _load_instrumentation_plugins
 
-        _lower_trace_enable()
+    _load_instrumentation_plugins()
+    del _load_instrumentation_plugins
 del _lazy_load_lib
 
 # Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).

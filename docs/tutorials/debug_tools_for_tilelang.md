@@ -187,9 +187,11 @@ IR Lower Trace captures the TIR before and after every compiler pass — plus th
 final codegen step that produces C/CUDA/HIP source — and renders a terminal
 and/or HTML diff report. Use it when the IR looks correct at one lowering stage
 but is incorrect at a later stage. To trace the complete lowering pipeline
-without changing the program, set `TL_LOWER_TRACE` before starting Python:
+without changing the program, install `tilelang-devkit` into the same Python
+environment, then set `TL_LOWER_TRACE` before starting Python:
 
 ```bash
+pip install tilelang-devkit
 TL_LOWER_TRACE=terminal python my_script.py
 TL_LOWER_TRACE=html python my_script.py
 TL_LOWER_TRACE=both python my_script.py
@@ -198,7 +200,7 @@ TL_LOWER_TRACE=both python my_script.py
 For a focused comparison, apply a selected pass directly:
 
 ```python
-from tilelang.tools import lower_trace as lt
+import tilelang_devkit.lower_trace as lt
 
 results = lt.lower_trace(func, tilelang.transform.ThreadSync("shared"))
 ```
