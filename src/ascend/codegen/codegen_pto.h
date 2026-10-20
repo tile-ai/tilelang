@@ -238,15 +238,21 @@ private:
   bool IsVmiLocalRegisterBuffer(const BufferNode *buffer) const;
   void CheckVmiLocalRegisterIndex(const BufferNode *buffer,
                                   const PrimExpr &index) const;
-  // Explicit mutable VMI data slots carry `tl.vmi.alloc_kind` on the actual
-  // allocation.  The table is registered before any allocation is emitted.
-  struct PtoVmiSlotInfo {
+  // Explicit VMI register allocations carry `tl.vmi.alloc_kind` on the actual
+  // allocation.  One table holds both the mutable slot kind and the register
+  // array kind; consumers query the entry that matches their category.  The
+  // table is registered before any allocation is emitted.
+  struct PtoVmiAllocInfo {
+    ffi::String kind;
     DataType dtype;
   };
-  void CollectVmiAllocSlots_(const Stmt &body);
-  void RegisterVmiAllocSlot_(const Buffer &buffer, const char *context);
-  const PtoVmiSlotInfo *FindVmiAllocSlot_(const BufferNode *buffer,
-                                          const char *context) const;
+  void CollectVmiAllocations_(const Stmt &body);
+  void RegisterVmiAllocation_(const Buffer &buffer, const ffi::String &kind,
+                              const char *context);
+  const PtoVmiAllocInfo *FindVmiAllocSlot_(const BufferNode *buffer,
+                                           const char *context) const;
+  const PtoVmiAllocInfo *FindVmiAllocArray_(const BufferNode *buffer,
+                                            const char *context) const;
   bool HasAscendGemmL1(const PrimFunc &func) const;
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
@@ -299,13 +305,13 @@ private:
   // Persistent per-function SSA definitions used by PtoValueKind queries.
   // Registered at every Bind/Let entry and cleared in ResetFunctionState_.
   std::unordered_map<const VarNode *, PrimExpr> value_defs_;
-  // Actual VMI data allocations in the current function, keyed by buffer.data.
-  // Owning keys keep cloned Vars alive even if their first allocation node is
-  // replaced. Registered before allocation emission and cleared in
-  // ResetFunctionState_.
-  std::unordered_map<Var, PtoVmiSlotInfo, ffi::ObjectPtrHash,
+  // Actual VMI register allocations in the current function, keyed by
+  // buffer.data. Owning keys keep cloned Vars alive even if their first
+  // allocation node is replaced. Registered before allocation emission and
+  // cleared in ResetFunctionState_.
+  std::unordered_map<Var, PtoVmiAllocInfo, ffi::ObjectPtrHash,
                      ffi::ObjectPtrEqual>
-      vmi_alloc_slots_;
+      vmi_allocations_;
   std::vector<PTOGemmEmitContext> gemm_emit_contexts_;
   std::unordered_map<Call, size_t, ObjectPtrHash, ObjectPtrEqual>
       gemm_emit_context_by_call_;

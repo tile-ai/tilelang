@@ -518,6 +518,69 @@ def test_vmi_reinterpret_uses_vinterpret_cast():
 
 
 # ---------------------------------------------------------------------------
+# Pure SIMD register arrays stay on ordinary vector paths
+# ---------------------------------------------------------------------------
+def _pure_simd_array_reinterpret():
+    @T.prim_func
+    def main(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "int32")):
+        with T.Kernel(1):
+            src = T.alloc_shared((64,), "float32")
+            dst = T.alloc_shared((64,), "int32")
+            T.copy(X, src)
+            with T.SimdVF():
+                regs = T.simd.alloc_local((2,), "float32")
+                regs[0] = T.simd.vld(src[0])
+                y = T.reinterpret("int32x64", regs[0])
+                T.simd.vsts(dst[0], y)
+            T.copy(dst, Y)
+
+    return main
+
+
+def _pure_simd_array_cast():
+    @T.prim_func
+    def main(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "float16")):
+        with T.Kernel(1):
+            src = T.alloc_shared((64,), "float32")
+            dst = T.alloc_shared((64,), "float16")
+            T.copy(X, src)
+            with T.SimdVF():
+                regs = T.simd.alloc_local((2,), "float32")
+                regs[0] = T.simd.vld(src[0])
+                y = T.Cast("float16x64", regs[0])
+                T.simd.vsts(dst[0], y, dist="PK_B32")
+            T.copy(dst, Y)
+
+    return main
+
+
+def test_pure_simd_register_array_cast_uses_ordinary_cast():
+    # The array element reaches T.Cast through a pure SIMD allocation.  It must
+    # not enter the VMI cast guard and must keep the ordinary float cast path.
+    func = _pure_simd_array_cast()
+    assert "tl.vmi." not in func.script(), func.script()
+    source = _kernel_source(func)
+    assert "pto.vmi." not in source
+    cast_line = _one(source, "pto.cast(regs_tl_slot_0, pto.f16)")
+    assert cast_line.startswith("y = pto.cast(")
+    assert _one(source, "pto.vsts(").startswith("pto.vsts(y,")
+
+
+def test_pure_simd_register_array_reinterpret_compiles_through_backend():
+    # The pure SIMD program has no VMI frontend input.  Its register array only
+    # shares shape/dtype with a VMI register array; that must not classify it
+    # as VMI data, so the bit reinterpret stays on the ordinary vector path and
+    # still compiles.
+    func = _pure_simd_array_reinterpret()
+    assert "tl.vmi." not in func.script(), func.script()
+    source = _compile(func).get_kernel_source()
+    assert "pto.vbitcast(" in source
+    assert "pto.vmi." not in source
+    assert "pto.vbitcast(regs_tl_slot_0" in _one(source, "pto.vbitcast(")
+    assert _one(source, "pto.vsts(").startswith("pto.vsts(y,")
+
+
+# ---------------------------------------------------------------------------
 # B. Grouped-vbrc mutable local.var register compatibility
 # ---------------------------------------------------------------------------
 def test_mutable_register_grouped_vbrc_is_preserved():
@@ -700,6 +763,153 @@ def test_marked_slot_runtime_loop_carry_compiles_through_backend(dtype):
 
 
 # ---------------------------------------------------------------------------
+# VMI register arrays: allocation marker and value provenance
+# ---------------------------------------------------------------------------
+def _marked_array_buffer(shape=(2,), dtype="int32x64", name="regs"):
+    return tirx.decl_buffer(shape, dtype, name=name, scope="local")
+
+
+def _marked_array_allocation(regs):
+    return tirx.AllocBuffer(regs, annotations={_MARKER: "data_array"})
+
+
+def _vmi_array_alias_and_reinterpret():
+    @T.prim_func
+    def main(A: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "int32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((64,), "float32")
+            out = T.alloc_shared((64,), "int32")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                regs = T.vmi.alloc_local((2,), T.vmi.vreg(64, "float32"))
+                regs[0] = T.vmi.vload(work[0], size=64)
+                alias = regs[0]
+                regs[1] = alias
+                y = T.reinterpret("int32x64", regs[1])
+                T.vmi.vstore(y, out[0], mask)
+            T.copy(out, Y)
+
+    return main
+
+
+def test_vmi_register_array_alias_and_reinterpret_stay_vmi_data():
+    source = _compile(_vmi_array_alias_and_reinterpret()).get_kernel_source()
+    assert "regs_tl_slot_0 = None" in source
+    assert "regs_tl_slot_1 = None" in source
+    assert re.search(r"regs_tl_slot_0 = pto\.vmi\.vload\(", source), source
+    assert re.search(r"regs_tl_slot_1 = (regs_tl_slot_0|alias)\b", source), source
+    reinterpret_line = _one(source, "pto.vmi.vinterpret_cast(")
+    assert "regs_tl_slot_1" in reinterpret_line
+    assert "to_dtype=pto.si32" in reinterpret_line
+    assert "pto.cast(" not in reinterpret_line
+    assert "vbitcast" not in source
+
+
+def test_marked_register_array_same_dtype_cast_is_a_transparent_alias():
+    regs = _marked_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.BufferStore(regs, _vmi_producer("int32x64"), [0]),
+            tirx.BufferStore(regs, tirx.Cast("int32x64", tirx.BufferLoad(regs, [0])), [1]),
+        ]
+    )
+    source = _raw_source(body)
+    assert "regs_tl_slot_0 = pto.vmi.vcmax()" in source
+    assert "regs_tl_slot_1 = regs_tl_slot_0" in source
+
+
+def test_marked_register_array_generic_cast_is_rejected():
+    regs = _marked_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.Evaluate(tirx.Cast("float32x64", tirx.BufferLoad(regs, [0]))),
+        ]
+    )
+    _expect_error(
+        "PTO integer cast cannot consume VMI data",
+        lambda: _raw_source(body),
+    )
+
+
+def _vmi_array_multidim_update(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((256,), dtype), C: T.Tensor((320,), dtype)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), dtype)
+            out = T.alloc_shared((320,), dtype)
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                regs = T.vmi.alloc_local((2, 2), T.vmi.vreg(64, dtype))
+                for i in T.unroll(2, explicit=True):
+                    for j in T.unroll(2, explicit=True):
+                        regs[i, j] = T.vmi.vload(work[64 * (2 * i + j)], size=64)
+                slot = T.vmi.alloc_var(dtype, size=1)
+                slot = T.vmi.vcmax(regs[1, 0], mask)
+                for _ in T.serial(3):
+                    regs[1, 1] = T.vmi.vadds(regs[1, 1], 1, mask)
+                T.vmi.vstore(regs[0, 0], out[0], mask)
+                T.vmi.vstore(regs[0, 1], out[64], mask)
+                T.vmi.vstore(regs[1, 0], out[128], mask)
+                T.vmi.vstore(regs[1, 1], out[192], mask)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=64, group=1), out[256], mask)
+            T.copy(out, C)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    ("dtype", "pto_type"),
+    [("int32", "pto.si32"), ("uint32", "pto.ui32")],
+)
+def test_vmi_register_array_multidim_unroll_and_runtime_update_compile(dtype, pto_type):
+    source = _compile(_vmi_array_multidim_update(dtype)).get_kernel_source()
+    for index in range(4):
+        assert f"regs_tl_slot_{index} = None" in source
+    # The array is initialized as independent register names, never as one
+    # multi-lane vreg allocation.
+    assert "pto.vmi.vreg(4" not in source
+    assert f"slot = pto.vmi.vreg(1, {pto_type})" in source
+    assert source.count("pto.vmi.vload(") == 4
+    assert "regs_tl_slot_2" in _one(source, "slot = pto.vmi.vcmax(")
+    assert re.search(r"for \w+ in range\(0, 3, 1\):", source), source
+    vadds_line = _one(source, "pto.vmi.vadds(")
+    assert vadds_line.startswith("regs_tl_slot_3 = pto.vmi.vadds(regs_tl_slot_3, 1,")
+    vbrc_line = _one(source, "pto.vmi.vbrc(")
+    assert "pto.vmi.vbrc(slot, group=1, size=64)" in vbrc_line
+    assert "pto.cast(slot" not in vbrc_line
+    assert "pto.cast(regs_tl_slot" not in source
+
+
+def test_vmi_register_array_markers_reach_device_ir_after_flatten():
+    artifact, _, fn = _device_fn(_vmi_array_multidim_update("uint32"))
+    marked = [node for node in _marked_allocations(fn) if str(node.annotations[_MARKER]) == "data_array"]
+    assert len(marked) == 1, marked
+    (allocation,) = marked
+    buffer = allocation.buffer
+    assert buffer.scope() == "local"
+    assert str(buffer.dtype) == "uint32x64"
+    assert [int(dim) for dim in buffer.shape] == [4]
+
+    stores = []
+    loads = []
+
+    def visit(node):
+        if isinstance(node, tirx.BufferStore) and node.buffer.data.same_as(buffer.data):
+            stores.append(node)
+        elif isinstance(node, tirx.BufferLoad) and node.buffer.data.same_as(buffer.data):
+            loads.append(node)
+
+    tirx.stmt_functor.post_order_visit(fn.body, visit)
+    assert sorted({int(node.indices[0]) for node in stores}) == [0, 1, 2, 3]
+    assert sorted({int(node.indices[0]) for node in loads}) == [0, 1, 2, 3]
+    assert "regs_tl_slot_3 = pto.vmi.vadds(" in artifact.kernel_source
+
+
+# ---------------------------------------------------------------------------
 # Direct codegen contracts for the allocation marker
 # ---------------------------------------------------------------------------
 def _marked_slot_buffer(dtype="int32"):
@@ -792,6 +1002,262 @@ def test_unmarked_scalar_slot_still_rejects_a_vmi_store():
         "PTO local.var integer store expects a scalar; got VMI data",
         lambda: _raw_source(body),
     )
+
+
+def test_marked_register_array_rejects_a_different_dtype_view():
+    regs = _marked_array_buffer()
+    view = tirx.decl_buffer((2,), "float32x64", name="regs_view", data=regs.data, scope="local")
+    body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.Evaluate(_vbrc(tirx.BufferLoad(view, [0]))),
+        ]
+    )
+    _expect_error(
+        "a shared data Var must keep the allocation dtype",
+        lambda: _raw_source(body),
+    )
+
+
+def _unknown_vmi_call(dtype="int32x64"):
+    return tirx.call_intrin(dtype, _unknown_vmi_op())
+
+
+@pytest.mark.parametrize(
+    ("make_rhs", "kind_name"),
+    [
+        (lambda: tirx.call_intrin("int32x64", _Op("tl.vmi.vintlv")), "VMI pair"),
+        (lambda: _unknown_vmi_call(), "unknown"),
+        (
+            lambda: tirx.Add(
+                tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax")),
+                tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax")),
+            ),
+            "unknown",
+        ),
+    ],
+)
+def test_marked_register_array_store_rejects_non_data_rhs(make_rhs, kind_name):
+    regs = _marked_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.BufferStore(regs, make_rhs(), [0]),
+        ]
+    )
+    _expect_error(
+        f"PTO VMI register array store requires a VMI data RHS; got {kind_name}",
+        lambda: _raw_source(body),
+    )
+
+
+def test_marked_register_array_store_rejects_an_ordinary_vector_rhs():
+    regs = _marked_array_buffer()
+    plain = tirx.decl_buffer((2,), "int32x64", name="plain_regs", scope="local")
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(plain),
+            _marked_array_allocation(regs),
+            tirx.BufferStore(regs, tirx.BufferLoad(plain, [0]), [0]),
+        ]
+    )
+    _expect_error(
+        "PTO VMI register array store requires a VMI data RHS; got other vector",
+        lambda: _raw_source(body),
+    )
+
+
+def test_marked_register_array_cannot_be_used_as_an_address():
+    regs = _marked_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.Evaluate(tirx.address_of(tirx.BufferLoad(regs, [0]))),
+        ]
+    )
+    _expect_error(
+        "PTO VMI register array `regs` cannot be used as a memory address",
+        lambda: _raw_source(body),
+    )
+
+
+def test_marked_register_array_requires_constant_indices():
+    regs = _marked_array_buffer()
+    index = tirx.Var("i", "int32")
+    store_body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.BufferStore(regs, _vmi_producer("int32x64"), [index]),
+        ]
+    )
+    _expect_error(
+        "PTO VMI local register buffer `regs` requires a compile-time constant index",
+        lambda: _raw_source(store_body),
+    )
+
+    load_body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.Evaluate(_vbrc(tirx.BufferLoad(regs, [index]), group=64)),
+        ]
+    )
+    _expect_error(
+        "PTO VMI local register buffer `regs` requires a compile-time constant index",
+        lambda: _raw_source(load_body),
+    )
+
+
+def test_marked_register_array_cannot_use_simt_backing():
+    regs = _marked_array_buffer()
+    simt_body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.Evaluate(tirx.IntImm("int32", 0)),
+        ]
+    )
+    body = tirx.SBlock([], [], [], "SIMT_VF", simt_body)
+    _expect_error(
+        "PTO VMI register array `regs` cannot use SIMT local backing",
+        lambda: _raw_source(body),
+    )
+
+
+def test_vmi_allocation_table_resets_between_functions():
+    regs = _marked_array_buffer()
+    plain_slot = tirx.decl_buffer((1,), "int32", name="plain_slot", data=regs.data, scope="local.var")
+    array_body = tirx.SeqStmt(
+        [
+            _marked_array_allocation(regs),
+            tirx.BufferStore(regs, _vmi_producer("int32x64"), [0]),
+        ]
+    )
+    plain_body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(plain_slot),
+            tirx.BufferStore(plain_slot, tirx.IntImm("int32", 7), [0]),
+        ]
+    )
+    target = _target()
+    array_fn = tirx.PrimFunc([], array_body).with_attr("global_symbol", "a_array_fn").with_attr("target", target)
+    plain_fn = tirx.PrimFunc([], plain_body).with_attr("global_symbol", "b_plain_fn").with_attr("target", target)
+    module = tvm.IRModule(
+        {
+            tvm.ir.GlobalVar("a_array_fn"): array_fn,
+            tvm.ir.GlobalVar("b_plain_fn"): plain_fn,
+        }
+    )
+    source = _source_of(module)
+    array_section = _function_section(source, "a_array_fn")
+    plain_section = _function_section(source, "b_plain_fn")
+    assert "regs_tl_slot_0 = pto.vmi.vcmax()" in array_section
+    # The unmarked local.var in the next function reuses the same data Var and
+    # must not inherit the register-array category from the first function.
+    assert "regs_tl_slot" not in plain_section
+    assert "= 7" in plain_section
+
+
+def _plain_array_buffer(shape=(2,), dtype="int32x64", name="plain_regs"):
+    return tirx.decl_buffer(shape, dtype, name=name, scope="local")
+
+
+@pytest.mark.parametrize(
+    ("make_rhs", "kind_name"),
+    [
+        (lambda: _vmi_producer("int32x64"), "VMI data"),
+        (lambda: tirx.call_intrin("int32x64", _Op("tl.vmi.vintlv")), "VMI pair"),
+        (lambda: _unknown_vmi_call(), "unknown"),
+        (
+            lambda: tirx.Add(
+                tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax")),
+                tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax")),
+            ),
+            "unknown",
+        ),
+    ],
+)
+def test_ordinary_register_array_store_rejects_vmi_values(make_rhs, kind_name):
+    array = _plain_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(array),
+            tirx.BufferStore(array, make_rhs(), [0]),
+        ]
+    )
+    _expect_error(
+        f"PTO ordinary vector register array store requires an ordinary vector RHS; got {kind_name}",
+        lambda: _raw_source(body),
+    )
+
+
+def test_ordinary_register_array_store_rejects_vmi_aliases():
+    array = _plain_array_buffer()
+    producer = tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax"))
+    alias = tirx.Var("vmi_alias", "int32x64")
+    bind_body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(array),
+            tirx.Bind(alias, producer),
+            tirx.BufferStore(array, alias, [0]),
+        ]
+    )
+    _expect_error(
+        "PTO ordinary vector register array store requires an ordinary vector RHS; got VMI data",
+        lambda: _raw_source(bind_body),
+    )
+
+    let_var = tirx.Var("vmi_let", "int32x64")
+    let_body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(array),
+            tirx.BufferStore(
+                array,
+                tirx.Let(
+                    let_var,
+                    tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax")),
+                    let_var,
+                ),
+                [0],
+            ),
+        ]
+    )
+    _expect_error(
+        "PTO ordinary vector register array store requires an ordinary vector RHS; got VMI data",
+        lambda: _raw_source(let_body),
+    )
+
+
+def test_ordinary_register_array_store_keeps_its_ordinary_vector_route():
+    array = _plain_array_buffer()
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(array),
+            tirx.BufferStore(array, tirx.BufferLoad(array, [0]), [1]),
+        ]
+    )
+    source = _raw_source(body)
+    assert "plain_regs_tl_slot_0 = None" in source
+    assert "plain_regs_tl_slot_1 = plain_regs_tl_slot_0" in source
+
+
+def test_plain_local_var_and_local_fragment_stores_keep_their_routes():
+    slot = tirx.decl_buffer((1,), "int32", name="plain", scope="local.var")
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(slot),
+            tirx.BufferStore(slot, tirx.IntImm("int32", 5), [0]),
+        ]
+    )
+    assert "plain = pto.const(5, dtype=pto.si32)" in _raw_source(body)
+
+    frag = tirx.decl_buffer((2,), "int32x64", name="frag", scope="local.fragment")
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(frag),
+            tirx.BufferStore(frag, tirx.BufferLoad(frag, [0]), [1]),
+        ]
+    )
+    source = _raw_source(body)
+    assert "frag_tl_slot_1 = frag_tl_slot_0" in source
 
 
 # ---------------------------------------------------------------------------
