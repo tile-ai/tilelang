@@ -61,9 +61,11 @@ struct AllocMarkers {
  */
 inline ffi::String CheckAllocKind(const ffi::String &kind,
                                   const char *context) {
-  ICHECK(kind == tl::attr::kVmiAllocKindData)
+  ICHECK(kind == tl::attr::kVmiAllocKindData ||
+         kind == tl::attr::kVmiAllocKindDataArray)
       << context << " supports only `" << tl::attr::kVmiAllocKindData
-      << "` for `" << tl::attr::kVmiAllocKind << "`, got `" << kind << "`";
+      << "` and `" << tl::attr::kVmiAllocKindDataArray << "` for `"
+      << tl::attr::kVmiAllocKind << "`, got `" << kind << "`";
   return kind;
 }
 
@@ -118,6 +120,84 @@ inline void ValidateDataSlot(const tirx::BufferNode *buffer,
       << context << " `" << tl::attr::kVmiAllocKind
       << "` requires a numeric non-bool element type, got " << buffer->dtype
       << " for buffer `" << buffer->name << "`";
+}
+
+/*!
+ * \brief Check whether a dtype can back a VMI register array.
+ * \param dtype The allocation (vector) dtype.
+ * \return true for numeric, non-bool, non-handle element types.
+ *
+ * Unlike IsDataElementType this keeps every numeric width and lane count the
+ * frontend can construct; instruction-level limits stay with each operation.
+ */
+inline bool IsDataArrayElementType(DataType dtype) {
+  DataType element = dtype.is_vector() ? dtype.element_of() : dtype;
+  if (element.is_bool() || element.is_handle() || element.is_void()) {
+    return false;
+  }
+  return element.is_int() || element.is_uint() || element.is_float() ||
+         element.is_bfloat() || element.is_float8() || element.is_float6() ||
+         element.is_float4() || element.is_tfloat();
+}
+
+/*!
+ * \brief Validate the storage contract of one marked register array allocation.
+ * \param buffer The actual allocation.
+ * \param context Caller description used in diagnostics.
+ *
+ * Access views are checked separately by the consumers: flattening may change
+ * their rank and shape, so only the actual allocation must keep a positive,
+ * static, multidimensional shape.
+ */
+inline void ValidateDataArray(const tirx::BufferNode *buffer,
+                              const char *context) {
+  ICHECK(buffer != nullptr) << context << " received an undefined allocation";
+  ffi::String scope = ffi::GetRef<tirx::Buffer>(buffer).scope();
+  ICHECK(scope == "local") << context << " `" << tl::attr::kVmiAllocKind
+                           << "` `" << tl::attr::kVmiAllocKindDataArray
+                           << "` may only mark a local allocation, got scope `"
+                           << scope << "` for buffer `" << buffer->name << "`";
+  ICHECK(buffer->dtype.lanes() > 1)
+      << context << " `" << tl::attr::kVmiAllocKind << "` `"
+      << tl::attr::kVmiAllocKindDataArray
+      << "` requires a multi-lane vector element dtype, got " << buffer->dtype
+      << " for buffer `" << buffer->name << "`";
+  ICHECK(!buffer->shape.empty())
+      << context << " `" << tl::attr::kVmiAllocKind << "` `"
+      << tl::attr::kVmiAllocKindDataArray
+      << "` requires at least one array dimension, got a rank-0 allocation "
+         "for buffer `"
+      << buffer->name << "`";
+  for (const PrimExpr &dim : buffer->shape) {
+    const auto *extent = dim.as<tirx::IntImmNode>();
+    ICHECK(extent != nullptr && extent->value > 0)
+        << context << " `" << tl::attr::kVmiAllocKind << "` `"
+        << tl::attr::kVmiAllocKindDataArray
+        << "` requires every array dimension to be a positive compile-time "
+           "integer, got "
+        << dim << " for buffer `" << buffer->name << "`";
+  }
+  ICHECK(IsDataArrayElementType(buffer->dtype))
+      << context << " `" << tl::attr::kVmiAllocKind << "` `"
+      << tl::attr::kVmiAllocKindDataArray
+      << "` requires a numeric non-bool element type, got " << buffer->dtype
+      << " for buffer `" << buffer->name << "`";
+}
+
+/*!
+ * \brief Validate one marked allocation against the contract of its kind.
+ * \param buffer The actual allocation.
+ * \param kind The allocation kind.
+ * \param context Caller description used in diagnostics.
+ */
+inline void ValidateAllocation(const tirx::BufferNode *buffer,
+                               const ffi::String &kind, const char *context) {
+  ffi::String checked = CheckAllocKind(kind, context);
+  if (checked == tl::attr::kVmiAllocKindDataArray) {
+    ValidateDataArray(buffer, context);
+    return;
+  }
+  ValidateDataSlot(buffer, context);
 }
 
 /*!
@@ -260,11 +340,11 @@ inline void CollectAllocMarkers(const tirx::Stmt &stmt, AllocMarkers *markers,
     ICHECK(!buffers.empty()) << context << " `" << tl::attr::kVmiAllocKind
                              << "` marks a data Var without an allocation view";
     for (const tirx::Buffer &buffer : buffers) {
-      ValidateDataSlot(buffer.get(), context);
+      ValidateAllocation(buffer.get(), kind, context);
     }
     for (size_t i = 1; i < buffers.size(); ++i) {
       ICHECK(buffers[i]->dtype == buffers.front()->dtype)
-          << context << " marked VMI data slot has conflicting dtype views: "
+          << context << " marked VMI allocation has conflicting dtype views: "
           << buffers.front()->dtype << " vs " << buffers[i]->dtype;
     }
     markers->allocations[data] = buffers;

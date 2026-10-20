@@ -74,7 +74,7 @@ private:
   // identity-match one of the block's alloc_buffers; a key that does not
   // means the caller should run NormalizePTOAllocMarkers before lowering
   // marker-carrying functions.  Each matching allocation is checked against
-  // the marked-slot contract; unmarked allocations gain no check.
+  // the contract of its kind; unmarked allocations gain no check.
   static vmi::AllocKindMap GetBlockVmiAllocKinds(const SBlock &block) {
     auto annotation = block->annotations.find(tl::attr::kVmiAllocKind);
     if (annotation == block->annotations.end()) {
@@ -86,7 +86,7 @@ private:
       bool owned = false;
       for (const Buffer &buffer : block->alloc_buffers) {
         if (buffer->data.same_as(data)) {
-          vmi::ValidateDataSlot(buffer.get(), "LowerOpaqueBlock");
+          vmi::ValidateAllocation(buffer.get(), kind, "LowerOpaqueBlock");
           owned = true;
         }
       }

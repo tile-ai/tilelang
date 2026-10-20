@@ -377,3 +377,100 @@ def test_multi_lane_mutable_slot_device(npu):
         return [a], expected
 
     _run_trials(kernel, make_case, npu, trials=4)
+
+
+# ---------------------------------------------------------------------------
+# Register arrays: pure SIMD reinterpret and VMI multidim updates
+# ---------------------------------------------------------------------------
+def _simd_array_reinterpret():
+    @T.prim_func
+    def main(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "int32")):
+        with T.Kernel(1):
+            src = T.alloc_shared((64,), "float32")
+            dst = T.alloc_shared((64,), "int32")
+            T.copy(X, src)
+            with T.SimdVF():
+                regs = T.simd.alloc_local((2,), "float32")
+                regs[0] = T.simd.vld(src[0])
+                y = T.reinterpret("int32x64", regs[0])
+                T.simd.vsts(dst[0], y)
+            T.copy(dst, Y)
+
+    return main
+
+
+def test_pure_simd_register_array_reinterpret_device(npu):
+    kernel, source = _compile(_simd_array_reinterpret())
+    assert "pto.vbitcast(" in source, source
+    assert "pto.vmi." not in source, source
+
+    def make_case(trial):
+        generator = torch.Generator().manual_seed(20261021 + trial)
+        values = torch.randn((64,), generator=generator).to(torch.float32)
+        values[0] = -0.0 if trial % 2 else float("inf")
+        values[1] = 1.0
+        return [values], values.view(torch.int32)
+
+    _run_trials(kernel, make_case, npu, trials=4)
+
+
+def _uint32_values(values):
+    signed = [value - 2**32 if value >= 2**31 else value for value in values]
+    return torch.tensor(signed, dtype=torch.int32).view(torch.uint32)
+
+
+def _uint32_array_input(trial):
+    generator = torch.Generator().manual_seed(20261021 + trial)
+    values = [int(value) & 0xFFFFFFFF for value in torch.randint(-(2**31), 2**31 - 1, (256,), generator=generator).tolist()]
+    values[0] = 0xFFFFFFFF
+    values[64] = 0x80000000
+    values[128] = 0x7FFFFFFF
+    values[192] = 0xFFFFFFFE - (trial % 3)
+    values[193] = 0x80000001
+    values[194] = 0
+    return _uint32_values(values)
+
+
+def _vmi_array_multidim_update():
+    @T.prim_func
+    def main(A: T.Tensor((256,), "uint32"), C: T.Tensor((320,), "uint32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), "uint32")
+            out = T.alloc_shared((320,), "uint32")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                regs = T.vmi.alloc_local((2, 2), T.vmi.vreg(64, "uint32"))
+                for i in T.unroll(2, explicit=True):
+                    for j in T.unroll(2, explicit=True):
+                        regs[i, j] = T.vmi.vload(work[64 * (2 * i + j)], size=64)
+                slot = T.vmi.alloc_var("uint32", size=1)
+                slot = T.vmi.vcmax(regs[1, 0], mask)
+                for _ in T.serial(3):
+                    regs[1, 1] = T.vmi.vadds(regs[1, 1], 1, mask)
+                T.vmi.vstore(regs[0, 0], out[0], mask)
+                T.vmi.vstore(regs[0, 1], out[64], mask)
+                T.vmi.vstore(regs[1, 0], out[128], mask)
+                T.vmi.vstore(regs[1, 1], out[192], mask)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=64, group=1), out[256], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def test_vmi_register_array_multidim_update_device(npu):
+    kernel, source = _compile(_vmi_array_multidim_update())
+    assert "pto.vmi.vreg(4" not in source, source
+    assert "slot = pto.vmi.vreg(1, pto.ui32)" in source, source
+    assert re.search(r"regs_tl_slot_3 = pto\.vmi\.vadds\(", source), source
+
+    def make_case(trial):
+        values = _uint32_array_input(trial)
+        lanes = values.tolist()
+        expected = list(lanes)
+        for index in range(192, 256):
+            expected[index] = (lanes[index] + 3) % 2**32
+        expected.extend([max(lanes[128:192])] * 64)
+        return [values], _uint32_values(expected)
+
+    _run_trials(kernel, make_case, npu, trials=4)

@@ -21,11 +21,16 @@ from testing.ascend._ir import nodes
 
 _MARKER = "tl.vmi.alloc_kind"
 _DATA = "data"
+_DATA_ARRAY = "data_array"
 
 
 def _slot(name="slot", dtype="int32", lanes=1, scope="local.var"):
     element = dtype if lanes == 1 else f"{dtype}x{lanes}"
     return tirx.decl_buffer((1,), element, name=name, scope=scope)
+
+
+def _array(name="regs", shape=(2,), dtype="float32x64", scope="local"):
+    return tirx.decl_buffer(shape, dtype, name=name, scope=scope)
 
 
 def _marker(entries):
@@ -38,6 +43,15 @@ def _marker_blocks(ir):
 
 def _mapping(block):
     return block.annotations[_MARKER]
+
+
+def _seq_statements(stmt):
+    if isinstance(stmt, tirx.SeqStmt):
+        statements = []
+        for child in stmt.seq:
+            statements.extend(_seq_statements(child))
+        return statements
+    return [stmt]
 
 
 def _module(body):
@@ -107,6 +121,138 @@ def test_frontend_registers_each_explicit_slot_once():
     for key in keys:
         assert any(key.same_as(buffer.data) for buffer in vf.alloc_buffers)
     assert not keys[0].same_as(keys[1])
+
+
+def test_frontend_registers_array_and_slot_kind_per_allocation():
+    # A VMI data array and a pure SIMD register array can have identical
+    # shape, dtype, and scope.  Only the VMI allocation is marked, and its
+    # kind distinguishes it from a lane-1 slot.
+    import tilelang.ascend.language as T
+
+    @T.prim_func
+    def vmi_mix(A: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((128,), "float32")
+            out = T.alloc_shared((128,), "float32")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                x = T.vmi.vload(work[0], size=128)
+                regs_a = T.vmi.alloc_local((2,), T.vmi.vreg(64, "float32"))
+                regs_b = T.vmi.alloc_local((3,), T.vmi.vreg(64, "float32"))
+                slot = T.vmi.alloc_var("float32", size=1)
+                slot = T.vmi.vcmax(x, mask)
+                regs_a[0] = T.vmi.vload(work[0], size=64)
+                regs_b[1] = T.vmi.vload(work[64], size=64)
+                T.vmi.vstore(T.vmi.vbrc(slot, size=128, group=1), out[0], mask)
+            T.copy(out, C)
+
+    @T.prim_func
+    def simd_array(A: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((128,), "float32")
+            out = T.alloc_shared((128,), "float32")
+            T.copy(A, work)
+            with T.SimdVF():
+                regs = T.simd.alloc_local((2,), "float32")
+                regs[0] = T.simd.vld(work[0])
+                regs[1] = T.simd.vld(work[64])
+                T.simd.vsts(out[0], regs[0])
+            T.copy(out, C)
+
+    blocks = _marker_blocks(vmi_mix.body)
+    assert len(blocks) == 1, "the VMI block map is recorded once"
+    mapping = _mapping(blocks[0])
+    (vf,) = [block for block in nodes(vmi_mix.body, tirx.SBlock) if block.name_hint == "SIMD_VF"]
+    allocations = list(vf.alloc_buffers)
+    assert len(allocations) == 3
+    assert len(mapping) == len(allocations), "one entry per marked VMI allocation"
+
+    def kind_for(data):
+        matches = [str(value) for key, value in mapping.items() if key.same_as(data)]
+        assert len(matches) == 1, matches
+        return matches[0]
+
+    for allocation in allocations:
+        assert any(key.same_as(allocation.data) for key in mapping)
+        expected = "data" if allocation.scope() == "local.var" else "data_array"
+        assert kind_for(allocation.data) == expected
+
+    keys = list(mapping.keys())
+    for index, left in enumerate(keys):
+        for right in keys[index + 1 :]:
+            assert not left.same_as(right)
+
+    # The pure SIMD allocation has the same shape/dtype/scope as the VMI data
+    # array but never receives a marker.
+    assert not _marker_blocks(simd_array.body)
+    (simd_vf,) = [block for block in nodes(simd_array.body, tirx.SBlock) if block.name_hint == "SIMD_VF"]
+    (simd_regs,) = simd_vf.alloc_buffers
+    (vmi_regs,) = [buffer for buffer in allocations if buffer.name == "regs_a"]
+    assert tuple(int(dim) for dim in simd_regs.shape) == tuple(int(dim) for dim in vmi_regs.shape)
+    assert str(simd_regs.dtype) == str(vmi_regs.dtype)
+    assert simd_regs.scope() == vmi_regs.scope() == "local"
+
+
+def test_frontend_rejects_mask_and_handle_register_arrays():
+    # Only numeric data arrays are supported.  A mask element type would be
+    # reclassified as VMI data on read, and a handle is not register data.
+    import tilelang.ascend.language as T
+
+    def build(vreg_type):
+        @T.prim_func
+        def main(A: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")):
+            with T.Kernel(1):
+                work = T.alloc_shared((128,), "float32")
+                out = T.alloc_shared((128,), "float32")
+                T.copy(A, work)
+                with T.SimdVF():
+                    T.vmi.alloc_local((2,), vreg_type)
+                T.copy(out, C)
+
+        return main
+
+    with pytest.raises(TypeError, match="numeric non-bool"):
+        build(T.vmi.mask(128))
+    with pytest.raises(TypeError, match="numeric non-bool"):
+        build(T.vmi.vreg(64, "handle"))
+
+
+def test_frontend_accepts_wide_and_tfloat_array_elements():
+    # The element contract is numeric, not a width whitelist: float64 and the
+    # canonical tfloat32 vector descriptor are both valid register array
+    # elements.  This only covers allocation; neither width gains an
+    # instruction-level promise here.
+    import tilelang.ascend.language as T
+
+    def build(vreg_type):
+        @T.prim_func
+        def main(A: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")):
+            with T.Kernel(1):
+                work = T.alloc_shared((128,), "float32")
+                out = T.alloc_shared((128,), "float32")
+                T.copy(A, work)
+                with T.SimdVF():
+                    T.vmi.alloc_local((2,), vreg_type)
+                T.copy(out, C)
+
+        return main
+
+    cases = {
+        "float64x64": T.vmi.vreg(64, "float64"),
+        "custom[tfloat32]x64": T.vmi.vreg(64, T.tfloat32),
+    }
+    for expected, vreg_type in cases.items():
+        func = build(vreg_type)
+        (block,) = _marker_blocks(func.body)
+        (vf,) = [node for node in nodes(func.body, tirx.SBlock) if node.name_hint == "SIMD_VF"]
+        (allocation,) = vf.alloc_buffers
+        assert str(allocation.dtype) == expected
+        mapping = _mapping(block)
+        assert len(mapping) == 1
+        (key,) = mapping.keys()
+        assert key.same_as(allocation.data)
+        assert str(mapping[key]) == _DATA_ARRAY
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +368,27 @@ def test_normalize_moves_marker_to_allocation_owner():
         assert any(store.buffer.data.same_as(data) for data in originals)
 
 
+def test_normalize_array_marker_is_idempotent():
+    regs = _array()
+    vf = _vf(
+        tirx.BufferStore(regs, tirx.BufferLoad(regs, [0]), [1]),
+        alloc_buffers=[regs],
+    )
+    root = tirx.SBlock([], [], [], "tilelang_root", vf, annotations=_marker({regs.data: _DATA_ARRAY}))
+    once = _normalize_module(root)
+    twice = ascend.NormalizePTOAllocMarkers()(once)
+
+    # The rebuilt map already matches the recorded one, so a second run leaves
+    # the function untouched instead of adding another marker authority.
+    assert once["main"].body.same_as(twice["main"].body)
+
+    (owner,) = _marker_blocks(once["main"].body)
+    assert owner.name_hint == "SIMD_VF"
+    (key,) = _mapping(owner).keys()
+    assert key.same_as(regs.data)
+    assert str(_mapping(owner)[key]) == _DATA_ARRAY
+
+
 # ---------------------------------------------------------------------------
 # Early explicit unroll clones the marker with the allocation Var
 # ---------------------------------------------------------------------------
@@ -246,6 +413,7 @@ def test_unroll_copies_marker_to_each_cloned_vf_allocation():
     vfs = [block for block in nodes(after, tirx.SBlock) if block.name_hint == "SIMD_VF"]
     assert len(vfs) == 2
     data_vars = []
+    out_indices = []
     for vf in vfs:
         (allocation,) = vf.alloc_buffers
         mapping = _mapping(vf)
@@ -253,14 +421,163 @@ def test_unroll_copies_marker_to_each_cloned_vf_allocation():
         (key,) = mapping.keys()
         assert key.same_as(allocation.data)
         assert str(mapping[key]) == _DATA
+        # Each clone reads and writes its own slot only: one store of the
+        # induction value and one load feeding the distinct output store.
         stores, loads = _slot_uses(vf)
-        assert stores and all(store.buffer.data.same_as(allocation.data) for store in stores)
-        assert loads and all(load.buffer.data.same_as(allocation.data) for load in loads)
+        assert len(stores) == 1
+        assert stores[0].buffer.data.same_as(allocation.data)
+        assert len(loads) == 1
+        assert loads[0].buffer.data.same_as(allocation.data)
+        (out_store,) = [node for node in nodes(vf, tirx.BufferStore) if node.buffer.data.same_as(out.data)]
+        assert isinstance(out_store.value, tirx.BufferLoad)
+        assert out_store.value.buffer.data.same_as(allocation.data)
+        assert int(out_store.value.indices[0]) == 0
+        out_indices.append(int(out_store.indices[0]))
         data_vars.append(allocation.data)
     assert not data_vars[0].same_as(data_vars[1])
+    assert sorted(out_indices) == [0, 1]
 
     # No surviving map names the original data Var: each clone maps only its
     # own fresh allocation.
+    surviving_maps = [_mapping(block) for block in _marker_blocks(after)]
+    assert len(surviving_maps) == len(vfs)
+    for mapping in surviving_maps:
+        assert not any(key.same_as(slot.data) for key in mapping)
+    assert all(any(key.same_as(data) for data in data_vars) for mapping in surviving_maps for key in mapping)
+
+
+def test_unroll_clones_array_allocation_and_marker():
+    out = tirx.decl_buffer((2,), "float32x64", name="out")
+    regs = _array(name="regs")
+    # Same name, different data Var, and deliberately unmarked: the clone must
+    # follow identities, never names or allocation order.
+    twin = _array(name="regs")
+
+    def body(i):
+        marked = _vf(
+            tirx.SeqStmt(
+                [
+                    tirx.BufferStore(regs, tirx.BufferLoad(regs, [0]), [1]),
+                    tirx.BufferStore(out, tirx.BufferLoad(regs, [1]), [i]),
+                ]
+            ),
+            alloc_buffers=[regs],
+        )
+        unmarked = _vf(
+            tirx.BufferStore(twin, tirx.BufferLoad(twin, [0]), [0]),
+            alloc_buffers=[twin],
+        )
+        return tirx.SeqStmt([marked, unmarked])
+
+    root = tirx.SBlock([], [], [], "", _loop(body), annotations=_marker({regs.data: _DATA_ARRAY}))
+    after = _unroll(root)
+
+    vfs = [block for block in nodes(after, tirx.SBlock) if block.name_hint == "SIMD_VF"]
+    assert len(vfs) == 4, "both the marked array and its unmarked twin are cloned"
+    marked_vfs = [block for block in vfs if _MARKER in block.annotations]
+    assert len(marked_vfs) == 2
+    assert all(block.annotations[_MARKER] for block in marked_vfs)
+
+    data_vars = []
+    out_indices = []
+    for block in marked_vfs:
+        (allocation,) = block.alloc_buffers
+        mapping = _mapping(block)
+        (key,) = mapping.keys()
+        assert key.same_as(allocation.data)
+        assert str(mapping[key]) == _DATA_ARRAY
+        # Count the register accesses inside this clone block only: a single
+        # store into the clone array plus the two loads that feed that store
+        # and the output.  Selecting by data Var over the whole module would
+        # accept cross-clone uses.
+        stores = [node for node in nodes(block, tirx.BufferStore) if node.buffer.scope() == "local"]
+        loads = [node for node in nodes(block, tirx.BufferLoad) if node.buffer.scope() == "local"]
+        assert len(stores) == 1
+        assert stores[0].buffer.data.same_as(allocation.data)
+        assert len(loads) == 2
+        assert all(load.buffer.data.same_as(allocation.data) for load in loads)
+        (out_store,) = [node for node in nodes(block, tirx.BufferStore) if node.buffer.data.same_as(out.data)]
+        assert isinstance(out_store.value, tirx.BufferLoad)
+        assert out_store.value.buffer.data.same_as(allocation.data)
+        assert int(out_store.value.indices[0]) == 1
+        out_indices.append(int(out_store.indices[0]))
+        data_vars.append(allocation.data)
+    assert not data_vars[0].same_as(data_vars[1])
+    assert sorted(out_indices) == [0, 1]
+
+    # The unmarked twin allocations never receive an entry, and no surviving
+    # map names either original data Var.
+    twin_vars = []
+    for block in vfs:
+        if _MARKER in block.annotations:
+            continue
+        (twin,) = block.alloc_buffers
+        twin_vars.append(twin.data)
+        assert all(node.buffer.data.same_as(twin.data) for node in nodes(block, tirx.BufferStore) if node.buffer.scope() == "local")
+        assert all(node.buffer.data.same_as(twin.data) for node in nodes(block, tirx.BufferLoad) if node.buffer.scope() == "local")
+    assert len(twin_vars) == 2
+    for block in _marker_blocks(after):
+        for key in _mapping(block):
+            assert not key.same_as(regs.data)
+            assert not any(key.same_as(data) for data in twin_vars)
+
+
+def test_late_unroll_clones_marked_array_allocation_and_marker():
+    # LowerOpaqueBlock hands allocations to code generation as AllocBuffer
+    # statements.  If one is still inside an explicitly unrolled body at the
+    # late UnrollLoop pass, that pass clones the allocation.  Every clone must
+    # own a fresh data Var, keep the data_array string marker, and read/write
+    # only its own registers.
+    out = tirx.decl_buffer((2,), "int32x64", name="out", scope="local")
+    regs = _array(dtype="int32x64")
+    i = tirx.Var("i", "int32")
+    body = tirx.SeqStmt(
+        [
+            tirx.AllocBuffer(regs, annotations={_MARKER: _DATA_ARRAY}),
+            tirx.BufferStore(regs, tirx.BufferLoad(regs, [0]), [1]),
+            tirx.BufferStore(out, tirx.BufferLoad(regs, [1]), [i]),
+        ]
+    )
+    loop = tirx.For(
+        i,
+        0,
+        2,
+        tirx.ForKind.UNROLLED,
+        body,
+        annotations={"pragma_unroll_explicit": True},
+    )
+    after = tilelang.transform.UnrollLoop()(_module(loop))["main"].body
+
+    statements = _seq_statements(after)
+    assert not any(isinstance(stmt, tirx.For) for stmt in statements)
+    segments = []
+    for stmt in statements:
+        if isinstance(stmt, tirx.AllocBuffer):
+            segments.append((stmt, []))
+        else:
+            assert segments, "a cloned statement appeared before its allocation"
+            segments[-1][1].append(stmt)
+    assert len(segments) == 2
+
+    data_vars = []
+    out_indices = []
+    for allocation, clone_body in segments:
+        assert str(allocation.annotations[_MARKER]) == _DATA_ARRAY
+        data = allocation.buffer.data
+        assert not data.same_as(regs.data)
+        stores = [node for stmt in clone_body for node in nodes(stmt, tirx.BufferStore)]
+        loads = [node for stmt in clone_body for node in nodes(stmt, tirx.BufferLoad)]
+        assert len([node for node in stores if node.buffer.data.same_as(data)]) == 1
+        assert len(loads) == 2
+        assert all(node.buffer.data.same_as(data) for node in loads)
+        (out_store,) = [node for node in stores if node.buffer.data.same_as(out.data)]
+        assert isinstance(out_store.value, tirx.BufferLoad)
+        assert out_store.value.buffer.data.same_as(data)
+        assert int(out_store.value.indices[0]) == 1
+        out_indices.append(int(out_store.indices[0]))
+        data_vars.append(data)
+    assert not data_vars[0].same_as(data_vars[1])
+    assert sorted(out_indices) == [0, 1]
 
 
 def test_unroll_rejects_map_outside_the_allocation_owner():
@@ -333,3 +650,120 @@ def test_lower_opaque_rejects_malformed_annotation_container(make_marker, messag
     )
     with pytest.raises(tvm.error.InternalError, match=message):
         _lower_opaque(tirx.SBlockRealize([], True, block))
+
+
+@pytest.mark.parametrize("realized", [False, True], ids=["direct", "realized"])
+def test_lower_opaque_transfers_array_kind_and_leaves_unmarked_alloc(realized):
+    regs = _array(shape=(2, 3))
+    slot = _slot()
+    plain = _array(name="plain", shape=(2, 3))
+    body = tirx.SeqStmt(
+        [
+            tirx.BufferStore(regs, tirx.BufferLoad(regs, [1, 2]), [1, 2]),
+            tirx.BufferStore(plain, tirx.BufferLoad(plain, [0, 0]), [0, 0]),
+            tirx.BufferStore(slot, tirx.IntImm("int32", 3), [0]),
+        ]
+    )
+    block = tirx.SBlock(
+        [],
+        [],
+        [],
+        "",
+        body,
+        alloc_buffers=[regs, slot, plain],
+        annotations=_marker({regs.data: _DATA_ARRAY, slot.data: _DATA}),
+    )
+    wrapped = tirx.SBlockRealize([], True, block) if realized else block
+    after = _lower_opaque(wrapped)
+
+    allocations = {node.buffer.name: node for node in nodes(after, tirx.AllocBuffer)}
+    assert str(allocations["regs"].annotations[_MARKER]) == _DATA_ARRAY
+    assert str(allocations["slot"].annotations[_MARKER]) == _DATA
+    assert _MARKER not in allocations["plain"].annotations
+    # The block map is consumed, not duplicated next to the allocations.
+    assert not _marker_blocks(after)
+
+
+@pytest.mark.parametrize("dtype", ["float64x64", "custom[tfloat32]x64"])
+def test_lower_opaque_accepts_wide_and_tfloat_array_markers(dtype):
+    # The shared allocation validator accepts every numeric width, including
+    # float64 and tfloat32, and excludes only bool/handle.  This is the marker
+    # contract, not instruction support for those element widths.
+    regs = _array(dtype=dtype)
+    block = tirx.SBlock(
+        [],
+        [],
+        [],
+        "",
+        tirx.BufferStore(regs, tirx.BufferLoad(regs, [0]), [1]),
+        alloc_buffers=[regs],
+        annotations=_marker({regs.data: _DATA_ARRAY}),
+    )
+    after = _lower_opaque(tirx.SBlockRealize([], True, block))
+    (allocation,) = [node for node in nodes(after, tirx.AllocBuffer)]
+    assert str(allocation.annotations[_MARKER]) == _DATA_ARRAY
+    assert str(allocation.buffer.dtype) == dtype
+
+
+def test_lower_opaque_rejects_invalid_allocation_markers():
+    def lowered(buffer, kind):
+        block = tirx.SBlock(
+            [],
+            [],
+            [],
+            "",
+            tirx.Evaluate(0),
+            alloc_buffers=[buffer],
+            annotations={_MARKER: {buffer.data: kind}},
+        )
+        return _lower_opaque(tirx.SBlockRealize([], True, block))
+
+    regs = _array()
+    with pytest.raises(tvm.error.InternalError, match="supports only"):
+        lowered(regs, "mask_array")
+    with pytest.raises(tvm.error.InternalError, match="may only mark a local.var allocation"):
+        lowered(regs, _DATA)
+    with pytest.raises(tvm.error.InternalError, match="may only mark a local allocation"):
+        lowered(_slot(), _DATA_ARRAY)
+    with pytest.raises(tvm.error.InternalError, match="numeric non-bool element type"):
+        lowered(_array(name="bool_regs", dtype="boolx64"), _DATA_ARRAY)
+    with pytest.raises(tvm.error.InternalError, match="multi-lane vector element dtype"):
+        lowered(tirx.decl_buffer((2,), "float32", name="lane1", scope="local"), _DATA_ARRAY)
+    with pytest.raises(tvm.error.InternalError, match="positive compile-time integer"):
+        lowered(_array(name="dynamic", shape=(tirx.Var("n", "int32"),)), _DATA_ARRAY)
+    with pytest.raises(tvm.error.InternalError, match="positive compile-time integer"):
+        lowered(_array(name="empty", shape=(0,)), _DATA_ARRAY)
+
+
+# ---------------------------------------------------------------------------
+# Array markers survive flattening and keep one register index per element
+# ---------------------------------------------------------------------------
+def test_flatten_preserves_array_marker_and_index():
+    regs = _array(shape=(2, 3))
+    body = tirx.BufferStore(regs, tirx.BufferLoad(regs, [0, 0]), [1, 2])
+    block = tirx.SBlock(
+        [],
+        [],
+        [],
+        "",
+        body,
+        alloc_buffers=[regs],
+        annotations=_marker({regs.data: _DATA_ARRAY}),
+    )
+    lowered = _lower_opaque(tirx.SBlockRealize([], True, block))
+    (allocation,) = nodes(lowered, tirx.AllocBuffer)
+    assert str(allocation.annotations[_MARKER]) == _DATA_ARRAY
+
+    mod = tvm.IRModule({"main": tirx.PrimFunc([], lowered)})
+    flat = tilelang.transform.FlattenBuffer()(mod)["main"].body
+
+    (flat_allocation,) = nodes(flat, tirx.AllocBuffer)
+    assert flat_allocation.buffer.data.same_as(regs.data)
+    assert tuple(int(dim) for dim in flat_allocation.buffer.shape) == (6,)
+    assert str(flat_allocation.buffer.dtype) == "float32x64"
+    assert str(flat_allocation.annotations[_MARKER]) == _DATA_ARRAY
+
+    (store,) = nodes(flat, tirx.BufferStore)
+    assert int(store.indices[0]) == 5, "one register index per array element"
+    (load,) = nodes(flat, tirx.BufferLoad)
+    assert int(load.indices[0]) == 0

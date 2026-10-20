@@ -2144,7 +2144,7 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
   loop_condition_snapshot_ids_.clear();
   simd_pair_vars_.clear();
   value_defs_.clear();
-  vmi_alloc_slots_.clear();
+  vmi_allocations_.clear();
   gemm_emit_contexts_.clear();
   gemm_emit_context_by_call_.clear();
   gemm_zero_addr_emitted_ = false;
@@ -2167,7 +2167,7 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
   ResetFunctionState_();
-  CollectVmiAllocSlots_(func->body);
+  CollectVmiAllocations_(func->body);
   name_supply_->ReserveName("pto");
   name_supply_->ReserveName("scalar");
   name_supply_->ReserveName("tl");
@@ -2591,11 +2591,18 @@ void CodeGenTileLangPTO::EmitInlineSimtVF(const SBlockNode *op,
 std::string CodeGenTileLangPTO::GetPointerExpr(const VarNode *buffer_var,
                                                DataType elem_dtype,
                                                const PrimExpr &index) {
-  // A marked mutable VMI slot is a register value, not addressable storage.
-  // address_of / tl.access_ptr / tvm_access_ptr must not expose it as a
-  // pointer or reinterpret it through another dtype view.
-  ICHECK(vmi_alloc_slots_.find(GetRef<Var>(buffer_var)) ==
-         vmi_alloc_slots_.end())
+  // A marked VMI allocation is a register value, not addressable storage.
+  // address_of / tl.access_ptr / tvm_access_ptr must not expose either kind
+  // as a pointer or reinterpret it through another dtype view.
+  auto vmi_allocation = vmi_allocations_.find(GetRef<Var>(buffer_var));
+  if (vmi_allocation != vmi_allocations_.end() &&
+      vmi_allocation->second.kind == tl::attr::kVmiAllocKindDataArray) {
+    LOG(FATAL) << "PTO VMI register array `" << buffer_var->name_hint
+               << "` cannot be used as a memory address; VMI register arrays "
+                  "only support BufferLoad/BufferStore at constant register "
+                  "indices";
+  }
+  ICHECK(vmi_allocation == vmi_allocations_.end())
       << "PTO VMI data slot `" << buffer_var->name_hint
       << "` cannot be used as a memory address; VMI register slots only "
          "support BufferLoad/BufferStore at index 0";
@@ -2936,6 +2943,11 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
     DataType elem =
         buffer->dtype.is_vector() ? buffer->dtype.element_of() : buffer->dtype;
     if (inside_simtvf_body_) {
+      ICHECK(FindVmiAllocArray_(buffer.get(),
+                                "PTO VMI register array allocation") == nullptr)
+          << "PTO VMI register array `" << buffer->name
+          << "` cannot use SIMT local backing; VMI register arrays are emitted "
+             "as independent Python register names";
       ICHECK(IsSupportedSIMTLocalStorageType(buffer->dtype))
           << "PTO SIMT local allocation supports float16, bfloat16, "
              "float32, int8, uint8, int32, uint32, and "
@@ -3662,8 +3674,11 @@ void CodeGenTileLangPTO::RestoreMixedSectionVariables(
 
 bool CodeGenTileLangPTO::IsVmiLocalRegisterBuffer(
     const BufferNode *buffer) const {
-  return !inside_simtvf_body_ && ScopeOfBuffer(buffer) == "local" &&
-         buffer->dtype.lanes() > 1;
+  // Storage category comes only from the explicit allocation marker.  Shape,
+  // dtype and scope are contract checks on the marked allocation, never a
+  // substitute for the marker: an ordinary SIMD register array with the same
+  // buffer facts must stay on the ordinary vector paths.
+  return FindVmiAllocArray_(buffer, "PTO VMI register array access") != nullptr;
 }
 
 void CodeGenTileLangPTO::CheckVmiLocalRegisterIndex(
@@ -3682,38 +3697,47 @@ void CodeGenTileLangPTO::CheckVmiLocalRegisterIndex(
       << index;
 }
 
-void CodeGenTileLangPTO::RegisterVmiAllocSlot_(const Buffer &buffer,
-                                               const char *context) {
-  tl::vmi::ValidateDataSlot(buffer.get(), context);
-  auto it = vmi_alloc_slots_.find(buffer->data);
-  if (it == vmi_alloc_slots_.end()) {
-    vmi_alloc_slots_.emplace(buffer->data, PtoVmiSlotInfo{buffer->dtype});
+void CodeGenTileLangPTO::RegisterVmiAllocation_(const Buffer &buffer,
+                                                const ffi::String &kind,
+                                                const char *context) {
+  tl::vmi::ValidateAllocation(buffer.get(), kind, context);
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end()) {
+    vmi_allocations_.emplace(buffer->data,
+                             PtoVmiAllocInfo{kind, buffer->dtype});
     return;
   }
+  ICHECK(it->second.kind == kind)
+      << context << " found conflicting `" << tl::attr::kVmiAllocKind
+      << "` entries for one VMI allocation: " << it->second.kind << " vs "
+      << kind;
   ICHECK(it->second.dtype == buffer->dtype)
-      << context
-      << " found conflicting dtypes for one VMI data slot: " << it->second.dtype
-      << " vs " << buffer->dtype;
+      << context << " found conflicting dtypes for one VMI allocation: "
+      << it->second.dtype << " vs " << buffer->dtype;
 }
 
-void CodeGenTileLangPTO::CollectVmiAllocSlots_(const Stmt &body) {
+void CodeGenTileLangPTO::CollectVmiAllocations_(const Stmt &body) {
   // Shared collection validates only marked data Vars and every allocation
   // view that shares a marked Var.  A block map alone never creates an
   // allocation and is ignored without an active owner.
   tl::vmi::AllocMarkers markers;
   tl::vmi::CollectAllocMarkers(body, &markers, "PTO codegen");
-  for (const auto &entry : markers.allocations) {
-    for (const Buffer &buffer : entry.second) {
-      RegisterVmiAllocSlot_(buffer, "PTO codegen");
+  for (const auto &[data, kind] : markers.kinds) {
+    auto allocation = markers.allocations.find(data);
+    ICHECK(allocation != markers.allocations.end())
+        << "PTO codegen lost the allocation views of a marked VMI data Var";
+    for (const Buffer &buffer : allocation->second) {
+      RegisterVmiAllocation_(buffer, kind, "PTO codegen");
     }
   }
 }
 
-const CodeGenTileLangPTO::PtoVmiSlotInfo *
+const CodeGenTileLangPTO::PtoVmiAllocInfo *
 CodeGenTileLangPTO::FindVmiAllocSlot_(const BufferNode *buffer,
                                       const char *context) const {
-  auto it = vmi_alloc_slots_.find(buffer->data);
-  if (it == vmi_alloc_slots_.end()) {
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end() ||
+      it->second.kind != tl::attr::kVmiAllocKindData) {
     return nullptr;
   }
   tl::vmi::ValidateDataSlot(buffer, context);
@@ -3722,6 +3746,35 @@ CodeGenTileLangPTO::FindVmiAllocSlot_(const BufferNode *buffer,
       << "` through dtype " << buffer->dtype
       << ", but the allocation has dtype " << it->second.dtype
       << "; a shared data Var must keep the allocation dtype";
+  return &it->second;
+}
+
+const CodeGenTileLangPTO::PtoVmiAllocInfo *
+CodeGenTileLangPTO::FindVmiAllocArray_(const BufferNode *buffer,
+                                       const char *context) const {
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end() ||
+      it->second.kind != tl::attr::kVmiAllocKindDataArray) {
+    return nullptr;
+  }
+  // Flattening may change the access view's rank and shape, so only the
+  // storage category and the exact element dtype are rechecked here.  The
+  // positive static allocation shape was validated when the table was built.
+  ICHECK(buffer->dtype == it->second.dtype)
+      << context << " accesses VMI register array `" << buffer->name
+      << "` through dtype " << buffer->dtype
+      << ", but the allocation has dtype " << it->second.dtype
+      << "; a shared data Var must keep the allocation dtype";
+  ffi::String scope = ScopeOfBuffer(buffer);
+  ICHECK(scope == "local")
+      << context << " VMI register array view must use scope `local`, got `"
+      << scope << "` for buffer `" << buffer->name << "`";
+  ICHECK(buffer->dtype.lanes() > 1 &&
+         tl::vmi::IsDataArrayElementType(buffer->dtype))
+      << context
+      << " VMI register array view requires a numeric non-bool "
+         "multi-lane element dtype, got "
+      << buffer->dtype << " for buffer `" << buffer->name << "`";
   return &it->second;
 }
 
@@ -8759,12 +8812,38 @@ void CodeGenTileLangPTO::VisitStmt_(const BufferStoreNode *op) {
     ICHECK(!op->predicate.defined())
         << "PTO VMI local register buffers do not support predicated stores";
     CheckVmiLocalRegisterIndex(op->buffer.get(), op->indices[0]);
+    // A marked array reads back as VMI data, so each store must keep that
+    // storage contract instead of silently upgrading an ordinary vector.
+    PtoValueKind kind = ClassifyPtoValue_(op->value);
+    ICHECK(kind == PtoValueKind::kVmiData)
+        << "PTO VMI register array store requires a VMI data RHS; got "
+        << PtoValueKindName(kind) << " (" << op->value.dtype()
+        << ", lanes=" << op->value.dtype().lanes() << "): " << op->value;
+    ICHECK(op->value.dtype() == op->buffer->dtype)
+        << "PTO VMI register array store dtype/lanes must match the "
+           "allocation: array "
+        << op->buffer->dtype << " vs value " << op->value.dtype();
     PrintIndent();
     stream << GetVectorLocalRef(op->buffer->data.get(), op->indices[0],
                                 "PTO VMI local register buffer store")
            << " = " << RemoveOutermostParentheses(PrintExpr_(op->value))
            << "\n";
     return;
+  }
+
+  // Ordinary local vector register arrays do not carry an explicit storage
+  // category.  Refuse to store a VMI value there: the later read would be an
+  // ordinary vector again, silently losing the VMI identity.  SIMT-backed
+  // local storage, local.var compatibility paths and local.fragment have their
+  // own emission routes and keep their existing contracts.
+  if (!inside_simtvf_body_ && ScopeOfBuffer(op->buffer.get()) == "local" &&
+      op->buffer->dtype.lanes() > 1) {
+    PtoValueKind kind = ClassifyPtoValue_(op->value);
+    ICHECK(kind == PtoValueKind::kOtherVector)
+        << "PTO ordinary vector register array store requires an ordinary "
+           "vector RHS; got "
+        << PtoValueKindName(kind)
+        << "; use T.vmi.alloc_local for VMI data arrays: " << op->value;
   }
 
   ICHECK_EQ(op->indices.size(), 1)

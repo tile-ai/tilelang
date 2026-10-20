@@ -17,17 +17,37 @@ from .frame import inside_simdvf as _inside_simdvf
 _Op = tirx.op.Op.get
 
 
+# Numeric element type codes accepted for VMI register arrays.  These are the
+# DLDataType codes int=0, uint=1, float=2, bfloat=4, float8=7..14,
+# float6=15..16, float4=17, tfloat32=130 and float4_e2m1_unpacked=131; bool,
+# handle and void are excluded.  The set mirrors IsDataArrayElementType in
+# transform/common/vmi_alloc.h: every numeric width is allowed and
+# instruction-level width limits belong to the individual operations.
+_NUMERIC_ELEMENT_TYPE_CODES = frozenset({0, 1, 2, 4, *range(7, 18), 130, 131})
+
+
+def _is_numeric_element(dtype) -> bool:
+    return int(dtype.type_code) in _NUMERIC_ELEMENT_TYPE_CODES
+
+
 def alloc_local(shape, vreg_type):
     """Allocate a statically indexed array of VMI vector registers.
 
-    ``vreg_type`` is a vector dtype produced by :func:`vreg`.  The resulting
-    buffer may only be indexed by compile-time values, such as induction
-    variables from ``T.unroll(..., explicit=True)`` on the PTO backend.
+    ``vreg_type`` is a numeric vector dtype produced by :func:`vreg`; bool/mask
+    and handle element types are rejected.  The resulting buffer may only be
+    indexed by compile-time values, such as induction variables from
+    ``T.unroll(..., explicit=True)`` on the PTO backend.
+
+    A block-level allocation marker records that the array is an explicit VMI
+    data allocation, so lowering and code generation do not infer that intent
+    from the vector dtype of an ordinary SIMD allocation.
     """
     require_vmi_scope("T.vmi.alloc_local(...)")
     dtype = _dtype(vreg_type)
     if int(getattr(dtype, "lanes", 1)) <= 1:
         raise TypeError(f"T.vmi.alloc_local(...) expects a VMI vector type produced by T.vmi.vreg(...), got {dtype}")
+    if not _is_numeric_element(dtype):
+        raise TypeError(f"T.vmi.alloc_local(...) requires a numeric non-bool vector element type, got {dtype}")
 
     dims = shape if _is_sequence(shape) else (shape,)
     normalized_shape = []
@@ -44,7 +64,9 @@ def alloc_local(shape, vreg_type):
 
     from tilelang.language.allocate import alloc_local as _alloc_local
 
-    return _alloc_local(tuple(normalized_shape), dtype, scope="local")
+    buffer = _alloc_local(tuple(normalized_shape), dtype, scope="local")
+    _sblock_attr({"tl.vmi.alloc_kind": {buffer.data: "data_array"}})
+    return buffer
 
 
 def alloc_var(dtype, *, size):
