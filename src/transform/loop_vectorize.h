@@ -67,13 +67,19 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
 
-// Check if expr is invariant within vector boundaries
-bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const For &loop,
+// Check if expr is invariant within groups of consecutive loop iterations.
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
+                                     const PrimExpr &min,
+                                     const PrimExpr &extent,
+                                     const PrimExpr &step,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
 /*!
  * \brief Check whether an element-offset expression supports a vector width.
+ *
+ * Iteration k has logical index min + k * step in [min, min + extent).
+ * Widths greater than one require a provably positive constant step.
  *
  * With allow_broadcast=true, offsets invariant within a vector group are
  * accepted. For example, loading A[i // 4] at width 4 can load one element and
@@ -89,13 +95,10 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const For &loop,
  * The flag applies only to the analyzed address; an atomic's source value may
  * still broadcast. If the check fails, the planner can try a smaller width.
  */
-bool IndicesCanVectorize(const PrimExpr &expr, const For &loop,
-                         int target_vectorized_size, arith::Analyzer *analyzer,
-                         bool allow_broadcast = true);
-
-// Unit-step iteration domains used by copy lowering, where no For exists yet.
-bool IndicesCanVectorize(const PrimExpr &expr, const IterVar &iter,
-                         int target_vectorized_size, arith::Analyzer *analyzer,
+bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
+                         const PrimExpr &min, const PrimExpr &extent,
+                         const PrimExpr &step, int target_vectorized_size,
+                         arith::Analyzer *analyzer,
                          bool allow_broadcast = true);
 
 } // namespace tl
