@@ -1197,15 +1197,12 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
       local_tensor.OffsetOf(local_indices_transformed).back();
   if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
       IndicesCanVectorize(local_indices_flattened, col_var->var,
-                          col_var->dom->min, col_var->dom->extent,
-                          make_const(col_var->var.dtype(), 1), 2, analyzer)) {
+                          col_var->dom->extent, 2, analyzer)) {
     is_transposed = false;
   } else if (analyzer->CanProveEqual(matrix_8x8_thread_map_trans,
                                      local_layout_thread_map) &&
              IndicesCanVectorize(local_indices_flattened, row_var->var,
-                                 row_var->dom->min, row_var->dom->extent,
-                                 make_const(row_var->var.dtype(), 1), 2,
-                                 analyzer)) {
+                                 row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
   } else {
     return LowerNormal(op, lower_args, analyzer);
@@ -1221,9 +1218,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   }
   const int elems_per_reg = 4 / shared_elem_bytes;
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
-  if (!IndicesCanVectorize(flattened_indice, col_var->var, col_var->dom->min,
-                           col_var->dom->extent,
-                           make_const(col_var->var.dtype(), 1),
+  if (!IndicesCanVectorize(flattened_indice, col_var->var, col_var->dom->extent,
                            use_m16n8_stmatrix ? 16 : 8, analyzer)) {
     return LowerNormal(op, lower_args, analyzer);
   }
@@ -1241,9 +1236,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
                                        FloorMod(col_var->var, 8) +
                                        FloorDiv(packed_var, 2) * 8}});
     if (!IndicesCanVectorize(packed_index, packed_var,
-                             make_zero(packed_var.dtype()),
-                             make_const(packed_var.dtype(), 4),
-                             make_const(packed_var.dtype(), 1), 4, analyzer,
+                             make_const(packed_var.dtype(), 4), 4, analyzer,
                              /*allow_broadcast=*/false)) {
       return LowerNormal(op, lower_args, analyzer);
     }
