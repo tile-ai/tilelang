@@ -1,5 +1,7 @@
 """Numerical checks for DeepGEMM schedulers and scale conversion."""
 
+import os
+
 import pytest
 import torch
 import tilelang.testing
@@ -37,6 +39,10 @@ def test_fp8_batched_scales():
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
 def test_bf16_m_grouped_padding():
     a, b = _input((512, 64), 0), _input((2, 32, 64), 1)
     a[17:256] = 0
@@ -93,6 +99,10 @@ def test_bf16_dense_bias():
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support FP32-to-BF16 conversion yet",
+)
 def test_fp8_quantization_epilogue():
     batches, m, n, k = 2, 17, 256, 64
     a, b = _input((batches, m, k), 0), _input((batches, n, k), 1)
@@ -115,6 +125,10 @@ def test_fp8_quantization_epilogue():
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO codegen does not support tl.simd.vst2 yet",
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_stochastic_rounding(dtype):
     a = (_input((17, 128), 0) / 7).to(dtype)

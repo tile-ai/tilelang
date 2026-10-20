@@ -128,8 +128,8 @@ def quantize_fp8(values, output, scales):
                 value = T.simd.vmul(T.simd.vld(values[row, group * 128]), T.reinterpret(inverse, "bfloat16x128"))
                 zero = T.simd.vdup(T.bfloat16(0), "bfloat16")
                 f32lo, f32hi = T.simd.vintlv(zero, value)
-                fp8lo = T.simd.vcvt(T.reinterpret(f32lo, "float32x64"), "float8_e4m3fn", mask_f32, sat=True, part=0)
-                fp8hi = T.simd.vcvt(T.reinterpret(f32hi, "float32x64"), "float8_e4m3fn", mask_f32, sat=True, part=0)
+                fp8lo = T.simd.vcvt(T.reinterpret(f32lo, "float32x64"), "float8_e4m3fn", mask_f32)
+                fp8hi = T.simd.vcvt(T.reinterpret(f32hi, "float32x64"), "float8_e4m3fn", mask_f32)
                 compact, unused = T.simd.vdintlv(T.reinterpret(fp8lo, "uint16x128"), T.reinterpret(fp8hi, "uint16x128"))
                 # Keep the packed bytes unsigned so Bisheng can fuse the pack
                 # and store. Reinterpreting as FP8 prevents that combination.
@@ -216,15 +216,7 @@ def stochastic_round_bf16(values, n_idx, num_rows, num_cols):
                 column[0] = T.simd.vadds(column[0], T.uint32(64), mask)
 
 
-def make_store_output(
-    config,
-    major_a,
-    major_b,
-    *,
-    blockscaled=False,
-    epilogue_kind="identity",
-    direct_store=False,
-):
+def make_store_output(config, major_a, major_b, *, blockscaled=False, epilogue_kind="identity"):
     """Drain all MAD tiles in a block; GM stores exclude FP8 load/fixpipe padding."""
     MAD_M, MAD_N = config.mad_m, config.mad_n
     num_mad_m_tiles = config.block_m // MAD_M
@@ -240,17 +232,6 @@ def make_store_output(
             quantize_fp8(values, output, scales)
         elif epilogue_kind == "stochastic":
             stochastic_round_bf16(values, n_idx, rows, cols)
-
-    @T.macro
-    def postprocess_mad_block(scales, gm_sfd, m_idx, n_idx, rows, cols, batch_idx, shape_n):
-        if epilogue_kind == "fp8":
-            sf_col = (batch_idx * shape_n + n_idx) // 64
-            T.assume_no_conflict(gm_sfd)
-            T.copy(
-                scales[0 : cols // 64, 0:rows],
-                gm_sfd[sf_col : sf_col + cols // 64, m_idx : m_idx + rows],
-                l2_cache_ctrl=config.l2_ctrl_store_cd,
-            )
 
     @T.macro
     def store_output(
@@ -285,7 +266,7 @@ def make_store_output(
                         if n_mad_idx < actual_n:
                             eff_mad_n = clamp(actual_n - n_mad_idx, 0, MAD_N)
                             load_mad_n = align_up(eff_mad_n, 32) if blockscaled and major_b == Major.MN else eff_mad_n
-                            if direct_store:
+                            if config.direct_store:
                                 T.copy(
                                     l0c[m_mad_tile_idx, n_mad_tile_idx, 0:eff_mad_m, 0:eff_mad_n],
                                     matrix_region(gm_d, m_idx + m_mad_idx, n_idx + n_mad_idx, eff_mad_m, eff_mad_n, batch_idx),
@@ -319,16 +300,17 @@ def make_store_output(
                                             matrix_region(gm_d, m_idx + m_mad_idx, n_idx + n_mad_idx, eff_mad_m, eff_mad_n, batch_idx),
                                             l2_cache_ctrl=config.l2_ctrl_store_cd,
                                         )
-                                        postprocess_mad_block(
-                                            sf_ub,
-                                            gm_sfd,
-                                            m_idx + m_mad_idx,
-                                            n_idx + n_mad_idx,
-                                            eff_mad_m,
-                                            eff_mad_n,
-                                            batch_idx,
-                                            gm_d.shape[-1],
-                                        )
+                                        if epilogue_kind == "fp8":
+                                            sf_col = (batch_idx * gm_d.shape[-1] + (n_idx + n_mad_idx)) // 64
+                                            T.assume_no_conflict(gm_sfd)
+                                            T.copy(
+                                                sf_ub[0 : eff_mad_n // 64, 0:eff_mad_m],
+                                                gm_sfd[
+                                                    sf_col : sf_col + eff_mad_n // 64,
+                                                    m_idx + m_mad_idx : m_idx + m_mad_idx + eff_mad_m,
+                                                ],
+                                                l2_cache_ctrl=config.l2_ctrl_store_cd,
+                                            )
                             epilogue_idx += 1
 
     return store_output

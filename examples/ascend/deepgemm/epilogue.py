@@ -39,10 +39,10 @@ class BF16StochasticRounding(Epilogue):
     kind = "stochastic"
 
 
-def resolve(d, c=None, alpha=None, epilogue=None, *, allow_pair=False, allow_fp8=False, dense=False):
+def resolve(d, c=None, alpha=None, epilogue=None, *, allow_fp8=False, dense=False):
     sfd = None
     if isinstance(d, (tuple, list)):
-        if not allow_pair or len(d) != 2:
+        if not allow_fp8 or len(d) != 2:
             raise TypeError("A (D, SFD) output pair is supported only by fp8_bmm/fp8_einsum")
         d, sfd = d
     if sum(x is not None for x in (epilogue, alpha, sfd)) > 1:

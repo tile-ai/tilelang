@@ -10,18 +10,7 @@ from .copy import make_gm_to_l1_copy, make_scale_copy
 from .epilogue import make_store_output, zero_empty_groups
 
 
-def _build_kernel(
-    m,
-    n,
-    k,
-    major_a,
-    major_b,
-    out_dtype,
-    accumulate,
-    config,
-    gemm_type,
-    epilogue_kind="identity",
-):
+def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind="identity"):
     shape_m = m if m is not None else T.dynamic("shape_m")
     shape_n = n if n is not None else T.dynamic("shape_n")
     shape_k = k if k is not None else T.dynamic("shape_k")
@@ -48,7 +37,6 @@ def _build_kernel(
         config,
         major_a,
         major_b,
-        direct_store=config.direct_store,
         epilogue_kind=epilogue_kind,
         blockscaled=True,
     )
@@ -67,8 +55,7 @@ def _build_kernel(
         return T.StridedTensor(shape, strides, dtype)
 
     a_type = tensor("a", physical_shape(shape_m, shape_k, major_a), "float8_e4m3fn", batched)
-    b_shape = physical_shape(shape_n, shape_k, major_b)
-    b_type = tensor("b", b_shape, "float8_e4m3fn", batched or m_grouped)
+    b_type = tensor("b", physical_shape(shape_n, shape_k, major_b), "float8_e4m3fn", batched or m_grouped)
     sfa_type = tensor("sfa", (shape_sf_k, shape_m), "int16", batched)
     sfb_type = tensor("sfb", (shape_sf_k, shape_n), "int16", batched or m_grouped)
     d_type = tensor("d", (shape_m, shape_n), out_dtype, batched or k_grouped)
@@ -118,8 +105,8 @@ def _build_kernel(
             l1_sfb = T.alloc_l1((BLOCK_N, sf_pairs_per_chunk), "int16")
             l0a = T.alloc_l0a((MAD_M, MAD_K), "float8_e4m3fn")
             l0b = T.alloc_l0b((MAD_N, MAD_K), "float8_e4m3fn")
-            l0_sfa = T.alloc_l0a_sf(l0a, sf_dtype="int16", sf_shape=(*l0a.shape[:-1], MAD_K // MX_SF_DIVISOR))
-            l0_sfb = T.alloc_l0b_sf(l0b, sf_dtype="int16", sf_shape=(*l0b.shape[:-1], MAD_K // MX_SF_DIVISOR))
+            l0_sfa = T.alloc_l0a_sf(l0a, sf_dtype="int16")
+            l0_sfb = T.alloc_l0b_sf(l0b, sf_dtype="int16")
             l0c = T.alloc_l0c((num_mad_m_tiles, num_mad_n_tiles, MAD_M, MAD_N), "float32")
             epilogue_ub = T.alloc_shared((MAD_M, MAD_N), ub_dtype)
             output_ub = T.view(epilogue_ub, (output_m, MAD_N), dtype=out_dtype)
@@ -226,35 +213,13 @@ def _build_kernel(
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
-def build_fp8_gemm(
-    m,
-    n,
-    k,
-    major_a,
-    major_b,
-    out_dtype,
-    accumulate,
-    config,
-    epilogue_kind="identity",
-    gemm_type=GemmType.Normal,
-):
+def build_fp8_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, epilogue_kind="identity", gemm_type=GemmType.Normal):
     return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind)
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
 def build_fp8_batched_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, epilogue_kind="identity"):
-    return _build_kernel(
-        m,
-        n,
-        k,
-        major_a,
-        major_b,
-        out_dtype,
-        accumulate,
-        config,
-        GemmType.Batched,
-        epilogue_kind,
-    )
+    return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Batched, epilogue_kind)
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)

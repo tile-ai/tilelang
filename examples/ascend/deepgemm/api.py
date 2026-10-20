@@ -45,10 +45,6 @@ class BindingLayout(str, enum.Enum):
         return self.value[1] == "n"
 
 
-def _input_dtype(tensor):
-    return str(tensor.dtype).removeprefix("torch.")
-
-
 def _check_quantized_pair(a, b):
     if a.dtype != torch.float8_e4m3fn or b.dtype != torch.float8_e4m3fn:
         # TODO: the heuristic models FP4/dequant, but those kernels are separate work.
@@ -206,8 +202,8 @@ def _get_gemm_desc(
         m=m,
         n=n,
         k=k,
-        a_dtype=_input_dtype(a),
-        b_dtype=_input_dtype(b),
+        a_dtype=str(a.dtype).removeprefix("torch."),
+        b_dtype=str(b.dtype).removeprefix("torch."),
         cd_dtype=out_dtype,
         major_a=major_a,
         major_b=major_b,
@@ -495,7 +491,7 @@ def fp8_bmm(a, b, d, c=None, recipe=(1, 1, 32), compiled_dims="nk", epilogue=Non
     b_data, sfb = _fp8_operand(b, "b")
     if a_data.dtype != torch.float8_e4m3fn or b_data.dtype != torch.float8_e4m3fn:
         raise TypeError("fp8_bmm supports FP8/FP8 inputs; FP4/dequant kernels are TODO")
-    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue, allow_pair=True, allow_fp8=True)
+    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue, allow_fp8=True)
     desc = _get_gemm_desc(
         GemmType.Batched,
         a_data,

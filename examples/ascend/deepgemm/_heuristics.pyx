@@ -684,7 +684,7 @@ cdef inline GemmConfig select_gemm_config_impl(GemmDesc d, GemmDtype dtype):
     cdef int64_t k_limit, best_k_cost, block_k, mad_cycles, load_cycles, full_epilogue_bytes, resident_row_bytes
     cdef int64_t a_matrix_bytes, avg_block_bytes, b_elem_bits, b_matrix_bytes, best_cost, block_cap, block_m, block_n
     cdef int64_t compute_k, cost, k, m_index, n_index, m_alignment, m_end, m_start, max_block_k, min_block_k
-    cdef int64_t min_first_load_time_ns, min_memory_time_ns, n_alignment, n_end, n_limit, n_start, num_batches, num_blocks
+    cdef int64_t min_first_load_time_ns, min_memory_time_ns, n_alignment, n_end, n_limit, n_start, num_batches
     cdef int64_t num_m_blocks, num_n_blocks, num_waves, store_hint, choice
     hw = get_hw_desc()
     k = d.num_groups * d.expected_k if is_k_grouped(d.gemm_type) else d.k

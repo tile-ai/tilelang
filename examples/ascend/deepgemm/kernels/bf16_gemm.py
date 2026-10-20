@@ -28,13 +28,7 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
     copy_a = make_gm_to_l1_copy(major_a, config.l2_ctrl_a)
     copy_b = make_gm_to_l1_copy(major_b, config.l2_ctrl_b)
     compute_k_block = make_compute(config, major_a, major_b)
-    store_output = make_store_output(
-        config,
-        major_a,
-        major_b,
-        direct_store=config.direct_store,
-        epilogue_kind=epilogue_kind,
-    )
+    store_output = make_store_output(config, major_a, major_b, epilogue_kind=epilogue_kind)
 
     batched = gemm_type == GemmType.Batched
     m_grouped = gemm_type == GemmType.MGroupedContiguousWithPsumLayout
