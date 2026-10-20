@@ -1,5 +1,7 @@
 """AscendLowerTileOp maps logical copy regions to DMA instruction geometry."""
 
+import math
+
 import pytest
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
@@ -11,7 +13,7 @@ from tilelang.layout import (
     make_ascend_sf_layout,
 )
 from tvm import tirx
-from testing.ascend._ir import allocated_buffer, calls, nodes
+from testing.ascend._ir import allocated_buffer, calls, nodes, kernel
 
 
 def _region(buffer, extents=None, mins=None):
@@ -24,7 +26,7 @@ def _region(buffer, extents=None, mins=None):
     )
 
 
-def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings=None, wrap=None, **kwargs):
+def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings=None, wrap=None, normalize=False, **kwargs):
     copy = T.copy(src_region if src_region is not None else src, dst_region if dst_region is not None else dst, **kwargs)
     buffers = [src, dst]
     for buffer in layouts or {}:
@@ -47,7 +49,10 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings
     params += tirx.analysis.undefined_vars(body, params)
     func = tirx.PrimFunc(params, body, buffer_map={b.data: b for b in globals_}).with_attr("target", target)
     with target:
-        return transform.AscendLowerTileOp()(tvm.IRModule({"main": func}))
+        mod = tvm.IRModule({"main": func})
+        if normalize:
+            mod = transform.NormalizeAscendFractalStorage()(mod)
+        return transform.AscendLowerTileOp()(mod)
 
 
 def _equal(actual, expected):
@@ -163,21 +168,204 @@ def test_nonrepresentable_dma_geometry_is_rejected(scope):
         _lower(src, dst, dst_region=_region(dst, [6, 4] if scope == "shared.l1" else [2, 3, 4]), layouts=layout)
 
 
+@pytest.mark.parametrize("explicit", [False, True], ids=["compact-default", "explicit-l0-pitch"])
 @pytest.mark.parametrize("symbolic", [False, True], ids=["static-region", "dynamic-region"])
-@pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
-def test_l1_to_l0_pitch_comes_from_the_compact_destination_region(symbolic, scope):
-    m, k = (tirx.Var("m", "int32"), tirx.Var("k", "int32")) if symbolic else (17, 18)
-    src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope=scope)
+@pytest.mark.parametrize(
+    "src_scope,dst_scope",
+    [
+        ("shared.l1", "shared.l0a"),
+        ("shared.l1", "shared.l0b"),
+        ("shared.l1.dyn", "shared.l0a.dyn"),
+        ("shared.l1.dyn", "shared.l0b.dyn"),
+    ],
+)
+def test_l1_to_l0_compact_pitch_can_be_overridden(explicit, symbolic, src_scope, dst_scope):
+    m, k = (T.min(T.max(tirx.Var(name, "int32"), 1), 64) for name in ("m", "k")) if symbolic else (17, 18)
+    src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope=src_scope)
+    dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope=dst_scope)
     after = _lower(
         src,
         dst,
         _region(src, [m, k]),
         _region(dst, [m, k]),
         layouts={src: make_ascend_nz_layout(src), dst: make_ascend_major_k_layout(dst)},
+        l0_pitch=4 if explicit else None,
     )
-    (copy,) = calls(after, "tl.ascend_load_cbuf_to_ca" if scope.endswith("a") else "tl.ascend_load_cbuf_to_cb")
-    _equal(copy.args[4:8], [T.ceildiv(m, 16), T.ceildiv(k, 16), 4, T.ceildiv(m, 16)])
+    (copy,) = calls(after, "tl.ascend_load_cbuf_to_ca" if dst_scope.startswith("shared.l0a") else "tl.ascend_load_cbuf_to_cb")
+    _equal(copy.args[4:8], [T.ceildiv(m, 16), T.ceildiv(k, 16), 4, 4 if explicit else T.ceildiv(m, 16)])
+
+
+@pytest.mark.parametrize(
+    "dtype,major_mn,transpose,leading,offset,geometry",
+    [
+        ("bfloat16", False, False, False, 4608, [2, 4, 2, 4, 4, 4, 0]),
+        ("bfloat16", True, False, True, 5120, [2, 4, 2, 4, 4, 8, 1]),
+        ("bfloat16", False, True, False, 5120, [2, 4, 2, 4, 4, 8, 1]),
+        ("bfloat16", True, True, False, 4608, [2, 4, 2, 4, 4, 4, 0]),
+        ("float32", True, False, False, 4608, [2, 8, 2, 8, 4, 8, 1]),
+        ("float8_e4m3fn", True, False, False, 10240, [4, 2, 4, 2, 8, 8, 1]),
+    ],
+    ids=["ordinary", "v-leading-plane", "explicit-transpose", "transpose-cancels", "fp32", "fp8"],
+)
+def test_partial_l0_copy_uses_full_pitch_and_mapped_destination_origin(dtype, major_mn, transpose, leading, offset, geometry):
+    rows = 128 if dtype == "float8_e4m3fn" else 64
+    plane = [2, 3] if leading else []
+    index = [1, 2] if leading else []
+    src = tirx.decl_buffer((*plane, rows, 128), dtype, name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((*plane, *((128, rows) if transpose else (rows, 128))), dtype, name="dst", scope="shared.l0b")
+    shape, origin = [rows // 2, 64], [rows // 2, 64]
+    after = _lower(
+        src,
+        dst,
+        _region(src, [1] * len(plane) + shape, index + origin),
+        _region(dst, [1] * len(plane) + (shape[::-1] if transpose else shape), index + (origin[::-1] if transpose else origin)),
+        layouts={src: make_ascend_major_k_layout(src), dst: (make_ascend_major_mn_layout if major_mn else make_ascend_major_k_layout)(dst)},
+        transpose=transpose,
+        l0_pitch=geometry[5],
+    )
+    (load,) = calls(after, "tl.ascend_load_cbuf_to_cb")
+    base = 5 * rows * 128 if leading else 0
+    _equal([load.args[0].args[2], load.args[1].args[2]], [base + offset, base])
+    _equal(load.args[2:], geometry)
+
+
+@pytest.mark.parametrize(
+    "src_min,dst_min,extent,l0_pitch,diagnostic",
+    [
+        ([0, 0], [32, 0], [32, 32], None, "requires an explicit l0_pitch"),
+        ([0, 0], [8, 0], [16, 32], 4, "destination row16 origin"),
+        ([0, 0], [16, 8], [16, 32], 4, "destination C0 origin"),
+        ([8, 0], [16, 0], [16, 32], 4, "source row16 origin"),
+        ([0, 0], [48, 0], [32, 32], 4, "destination region exceeds"),
+        ([48, 0], [16, 0], [32, 32], 4, "source region exceeds"),
+        ([0, 0], [16, 0], [24, 32], 4, "source row16 extent"),
+    ],
+)
+@pytest.mark.parametrize("normalize", [False, True], ids=["lower", "normalize-and-lower"])
+def test_partial_l0_copy_rejects_misalignment_and_offset_overflow(src_min, dst_min, extent, l0_pitch, diagnostic, normalize):
+    src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
+    with pytest.raises(ValueError, match=diagnostic):
+        _lower(
+            src,
+            dst,
+            _region(src, extent, src_min),
+            _region(dst, extent, dst_min),
+            layouts={src: make_ascend_major_k_layout(src), dst: make_ascend_major_k_layout(dst)},
+            l0_pitch=l0_pitch,
+            normalize=normalize,
+        )
+
+
+@pytest.mark.parametrize(
+    "v_layout,oversized,full_m",
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    ids=["q-compact-m", "v-compact-n", "oversized", "full-m-partial-drain"],
+)
+def test_explicit_l0_pitch_controls_offsets_and_keeps_plane_capacity(v_layout, oversized, full_m):
+    src = tirx.decl_buffer((2, 64, 64), "bfloat16", name="src", scope="shared.l1")
+    a = tirx.decl_buffer((2, 64, 64), "bfloat16", name="a", scope="shared.l0a")
+    b = tirx.decl_buffer((2, 64, 64), "bfloat16", name="b", scope="shared.l0b")
+    c = tirx.decl_buffer((2, 64, 64), "float32", name="c", scope="shared.l0c")
+    ub = tirx.decl_buffer((16, 64), "float32", name="ub", scope="shared")
+    dst = b if v_layout else a
+    m, n = (64, 24) if v_layout else (24, 64)
+    if full_m:
+        m = 64
+    pitch = ((n if v_layout else m) + 15) // 16
+    statements = []
+    for part in range(2):
+        origin = [1, part * 32, 0] if v_layout else [1, 0, part * 32]
+        region = [1, 64 if oversized or full_m else 32, 32]
+        statements.append(tirx.Evaluate(T.copy(_region(src, region, origin), _region(dst, region, origin), l0_pitch=pitch)))
+    if not v_layout:
+        statements.append(tirx.Evaluate(T.copy(_region(c, [1, 16, 64], [1, 0, 0]), ub, l0_pitch=pitch)))
+    mod = kernel(
+        tirx.SeqStmt(statements),
+        buffers=[src, a, b, c, ub],
+        annotations={
+            "layout_map": {
+                src: make_ascend_major_k_layout(src),
+                a: make_ascend_major_k_layout(a),
+                b: (make_ascend_major_mn_layout if v_layout else make_ascend_major_k_layout)(b),
+                c: make_ascend_l0c_layout(c),
+            },
+        },
+    )
+    with tvm.target.Target("ascend"):
+        if oversized:
+            with pytest.raises(ValueError, match="l0_pitch"):
+                transform.AscendLowerTileOp()(mod)
+            return
+        after = transform.AscendLowerTileOp()(mod)
+    loads = calls(after, "tl.ascend_load_cbuf_to_cb" if v_layout else "tl.ascend_load_cbuf_to_ca")
+    _equal([load.args[7] for load in loads], [pitch, pitch])
+    _equal([load.args[0].args[2] for load in loads], [4096, 4096 + 2 * pitch * 256])
+    _equal([load.args[1].args[2] for load in loads], [4096, 4096])
+    assert math.prod(int(x) for x in allocated_buffer(after, dst.name).shape) == 2 * 64 * 64
+    if not v_layout:
+        (drain,) = calls(after, "tl.ascend_copy_matrix_cc_to_ub")
+        _equal([drain.args[6]], [pitch * 16])  # Only 16 rows are drained; l0_pitch describes the larger tile.
+
+
+@pytest.mark.parametrize(
+    "src_scope,dst_scope,pitch",
+    [
+        ("shared.l0c", "global", 4),
+        ("shared.l0c.dyn", "global", 4),
+        ("shared.l0c.dyn", "shared", 4),
+        ("shared.l0c.dyn", "shared.dyn", 4),
+        ("shared.l0c", "global", 1),
+        ("shared.l0c", "global", 5),
+        ("shared.l0c", "shared", 1),
+        ("shared.l0c", "shared", 5),
+    ],
+)
+def test_l0c_copy_explicit_pitch_covers_region_and_fits_capacity(src_scope, dst_scope, pitch):
+    src = tirx.decl_buffer((64, 64), "float32", name="src", scope=src_scope)
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope=dst_scope)
+
+    def lower():
+        return _lower(src, dst, _region(src, [32, 64]), layouts={src: make_ascend_l0c_layout(src)}, l0_pitch=pitch)
+
+    if pitch != 4:
+        with pytest.raises(ValueError, match="l0_pitch must cover the source region and fit capacity"):
+            lower()
+    else:
+        (drain,) = calls(lower(), "tl.ascend_copy_matrix_cc_to_gm" if dst_scope == "global" else "tl.ascend_copy_matrix_cc_to_ub")
+        _equal([drain.args[6]], [64])
+
+
+def test_explicit_dynamic_l0_pitch_maps_each_iteration_independently():
+    src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
+    i = tirx.Var("i", "int32")
+    after = _lower(
+        src,
+        dst,
+        _region(src, [32 + 16 * i, 32], [0, 32]),
+        _region(dst, [32 + 16 * i, 32], [0, 32]),
+        layouts={src: make_ascend_major_k_layout(src), dst: make_ascend_major_k_layout(dst)},
+        l0_pitch=2 + i,
+        wrap=lambda body: tirx.For(i, 0, 3, tirx.ForKind.SERIAL, body),
+    )
+    (load,) = calls(after, "tl.ascend_load_cbuf_to_ca")
+    _equal([load.args[7], load.args[0].args[2]], [2 + i, 2 * (2 + i) * 256])
+
+
+@pytest.mark.parametrize("l0_pitch,error", [(0, ValueError), (-1, ValueError), (True, TypeError), (1.5, TypeError)])
+def test_copy_l0_pitch_rejects_invalid_values(l0_pitch, error):
+    src = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l1")
+    dst = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l0a")
+    with pytest.raises(error, match="l0_pitch"):
+        T.copy(src, dst, l0_pitch=l0_pitch)
+
+
+def test_copy_l0_pitch_is_only_supported_on_l0_paths():
+    src = tirx.decl_buffer((64, 64), "bfloat16")
+    dst = tirx.decl_buffer((64, 64), "bfloat16", scope="shared.l1")
+    with pytest.raises(ValueError, match="l0_pitch is supported only"):
+        T.copy(src, dst, l0_pitch=4)
 
 
 def test_pad_value_is_set_before_the_padded_dma():
@@ -220,7 +408,7 @@ def test_transposed_load_validates_physical_groups_and_destination_capacity(impl
         return _lower(src, dst, _region(src, [k, mn]), layouts=layouts, transpose=not implicit)
 
     if error:
-        with pytest.raises(tvm.error.InternalError, match=error):
+        with pytest.raises(ValueError, match=error):
             run()
     else:
         (load,) = calls(run(), "tl.ascend_load_cbuf_to_ca")
@@ -249,7 +437,7 @@ def test_alignment_checks_only_nonempty_iterations_but_preserves_the_guard(axis,
         )
 
     if misaligned:
-        with pytest.raises(tvm.error.InternalError, match=diagnostic):
+        with pytest.raises(ValueError, match=diagnostic):
             run()
     else:
         after = run()
@@ -376,3 +564,19 @@ def test_dynamic_sf_copy_requires_proven_data_capacity(axis, lower_bound, upper_
     (load,) = calls(lower(), "tl.ascend_load_ca_sf")
     if lower_bound <= upper_bound:
         _equal(load.args[4:6], [tirx.floordiv(n + 15, 16), 1] if axis == "mn" else [1, n])
+
+
+@pytest.mark.parametrize("normalize", [False, True])
+def test_sf_tail_source_fits_its_fractal_allocation(normalize):
+    src = tirx.decl_buffer((24, 4), "uint8", name="src", scope="shared.l1")
+    data = tirx.decl_buffer((32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((24, 4), "uint8", name="sf", scope="shared.l0a.sf")
+    after = _lower(
+        src,
+        sf,
+        layouts={src: make_ascend_sf_layout(src), data: make_ascend_major_k_layout(data)},
+        bindings={sf.data: data.data},
+        normalize=normalize,
+    )
+    (load,) = calls(after, "tl.ascend_load_ca_sf")
+    _equal(load.args[4:8], [2, 2, 2, 2])

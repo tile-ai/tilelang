@@ -176,6 +176,7 @@ struct TaskResourceUsage {
 struct TaskAccessInfo {
   std::vector<BufferRegion> read_regions;
   std::vector<BufferRegion> write_regions;
+  Map<Var, Optional<PrimExpr>> l0_pitches;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
 };
@@ -397,12 +398,15 @@ inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
   return task_analysis_detail::SpecialRegisterWriteAnalyzer::Analyze(stmt);
 }
 
-inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
-  MemoryAccessDetector memory_detector;
+inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
+                                          const LayoutMap &layouts = {}) {
+  MemoryAccessDetector memory_detector(
+      MemoryAccessDetector::AccessMode::kLogical, layouts);
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
   result.read_regions = memory_detector.GetReadRegions();
   result.write_regions = memory_detector.GetWriteRegions();
+  result.l0_pitches = memory_detector.GetL0Pitches();
   result.read_vars = memory_detector.GetReadVars();
   result.write_vars = memory_detector.GetWriteVars();
   return result;
@@ -629,6 +633,10 @@ inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
     task->AddReadRegion(region);
   for (const BufferRegion &region : accesses.write_regions)
     task->AddWriteRegion(region);
+  auto pitches = task->GetL0Pitches();
+  for (const auto &[storage, pitch] : accesses.l0_pitches)
+    MergeL0Pitch(&pitches, storage, pitch);
+  task->SetL0Pitches(pitches);
   for (const Var &var : accesses.read_vars)
     task->AddReadVar(var);
   for (const Var &var : accesses.write_vars)
