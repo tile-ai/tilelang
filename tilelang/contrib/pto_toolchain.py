@@ -168,6 +168,8 @@ def extract_aicore_binary(so_path: str | Path) -> bytearray:
         if image[name_start:name_end] == b".aicore_binary":
             if size == 0:
                 raise RuntimeError(f"{so_path} has an empty .aicore_binary section.")
+            if offset + size > len(image):
+                raise RuntimeError(f"{so_path} declares a .aicore_binary section beyond the end of the image.")
             return bytearray(image[offset : offset + size])
     raise RuntimeError(f"{so_path} has no .aicore_binary section.")
 
