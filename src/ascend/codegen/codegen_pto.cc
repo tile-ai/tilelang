@@ -998,6 +998,156 @@ private:
   arith::Analyzer analyzer_;
 };
 
+// Path guards are combined with plain And/Or and the analysis relies on
+// Analyzer::Simplify to absorb the result. The simplifier neither removes
+// duplicate operands (`A || A` is returned unchanged) nor factors
+// `(X && c) || (X && !c)` back into `X`, so a guard doubles at every branch
+// and loop merge. Measured on one 256-expert / top-8 MoE routing kernel: the
+// guard reaches 21948 TIR nodes that carry only 7 distinct atoms (the hottest
+// one repeated 4320 times), a single Simplify call on it takes 55s, and the
+// prover queries that follow take 16s each -- Z3's timeout and rlimit only
+// bound the search, not the internalization of such a formula, so codegen
+// never finishes. A synthetic equivalent (one non-constant outer guard plus N
+// sequential if/then/else inside a dynamic loop, no MAD at all) grows as
+// 20/66/238/914/3606/14362/57374/229410 nodes for N=2..16 and hangs at N=16.
+//
+// Normalizing to a deduplicated DNF with the conjuncts shared by every
+// disjunct factored out keeps the guard at its semantic size: both steps are
+// exact for side-effect-free boolean operands (idempotence and distributivity),
+// and Restrict() already refuses to correlate conditions that are not pure.
+// On the synthetic case the guard stays at 8 nodes for every N; on the MoE
+// kernel the whole analysis drops from "never finishes" to 49.5ms and the
+// generated source is byte-identical.
+using GuardConjuncts = std::vector<PrimExpr>;
+using GuardDnf = std::vector<GuardConjuncts>;
+
+inline void CollectGuardConjuncts(const PrimExpr &expr, GuardConjuncts &out) {
+  if (const auto *node = expr.as<AndNode>()) {
+    CollectGuardConjuncts(node->a, out);
+    CollectGuardConjuncts(node->b, out);
+    return;
+  }
+  out.push_back(expr);
+}
+
+inline void CollectGuardDnf(const PrimExpr &expr, GuardDnf &out) {
+  if (const auto *node = expr.as<OrNode>()) {
+    CollectGuardDnf(node->a, out);
+    CollectGuardDnf(node->b, out);
+    return;
+  }
+  GuardConjuncts conjuncts;
+  CollectGuardConjuncts(expr, conjuncts);
+  out.push_back(std::move(conjuncts));
+}
+
+inline PrimExpr BuildGuardAnd(const GuardConjuncts &operands) {
+  PrimExpr result = operands[0];
+  for (size_t i = 1; i < operands.size(); ++i) {
+    result = result && operands[i];
+  }
+  return result;
+}
+
+inline PrimExpr BuildGuardOr(const std::vector<PrimExpr> &operands) {
+  PrimExpr result = operands[0];
+  for (size_t i = 1; i < operands.size(); ++i) {
+    result = result || operands[i];
+  }
+  return result;
+}
+
+// Exact structural membership / set equality. Once guards are normalized the
+// operand counts stay small, so the quadratic scans are cheap and, unlike
+// hashing alone, cannot merge two distinct operands on a hash collision.
+inline bool GuardContains(const GuardConjuncts &conjuncts,
+                          const PrimExpr &needle) {
+  ffi::StructuralEqual equal;
+  for (const PrimExpr &conjunct : conjuncts) {
+    if (equal(conjunct, needle))
+      return true;
+  }
+  return false;
+}
+
+inline bool GuardSameSet(const GuardConjuncts &a, const GuardConjuncts &b) {
+  if (a.size() != b.size())
+    return false;
+  for (const PrimExpr &conjunct : a) {
+    if (!GuardContains(b, conjunct))
+      return false;
+  }
+  return true;
+}
+
+inline PrimExpr NormalizeGuard(const PrimExpr &expr) {
+  if (!expr.defined() || (!expr.as<AndNode>() && !expr.as<OrNode>())) {
+    return expr;
+  }
+  GuardDnf dnf;
+  CollectGuardDnf(expr, dnf);
+
+  // Deduplicate conjuncts within each disjunct, drop identities and absorbers,
+  // then drop duplicate disjuncts. First-seen order is preserved so the
+  // generated source stays deterministic.
+  GuardDnf disjuncts;
+  for (GuardConjuncts &conjuncts : dnf) {
+    GuardConjuncts unique;
+    bool unsatisfiable = false;
+    for (const PrimExpr &conjunct : conjuncts) {
+      if (is_zero(conjunct)) {
+        unsatisfiable = true;
+        break;
+      }
+      if (is_one(conjunct) || GuardContains(unique, conjunct))
+        continue;
+      unique.push_back(conjunct);
+    }
+    if (unsatisfiable)
+      continue;
+    if (unique.empty())
+      return const_true(); // one disjunct is unconditional
+    bool duplicate = false;
+    for (const GuardConjuncts &kept : disjuncts) {
+      if (GuardSameSet(kept, unique)) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate)
+      disjuncts.push_back(std::move(unique));
+  }
+  if (disjuncts.empty())
+    return const_false();
+  if (disjuncts.size() == 1)
+    return BuildGuardAnd(disjuncts[0]);
+
+  // Factor the conjuncts shared by every disjunct back out.
+  GuardConjuncts head;
+  for (const PrimExpr &conjunct : disjuncts[0]) {
+    bool shared = true;
+    for (size_t i = 1; i < disjuncts.size(); ++i) {
+      if (!GuardContains(disjuncts[i], conjunct)) {
+        shared = false;
+        break;
+      }
+    }
+    if (shared)
+      head.push_back(conjunct);
+  }
+  std::vector<PrimExpr> tails;
+  for (const GuardConjuncts &conjuncts : disjuncts) {
+    GuardConjuncts rest;
+    for (const PrimExpr &conjunct : conjuncts) {
+      if (!GuardContains(head, conjunct))
+        rest.push_back(conjunct);
+    }
+    tails.push_back(rest.empty() ? const_true() : BuildGuardAnd(rest));
+  }
+  PrimExpr tail = tails.size() == 1 ? tails[0] : BuildGuardOr(tails);
+  return head.empty() ? tail : (BuildGuardAnd(head) && tail);
+}
+
 // Retain guards for immutable SSA conditions split apart by AutoSchedule.
 struct MmadDirectionState {
   PrimExpr m = const_false();
@@ -1016,6 +1166,14 @@ public:
       std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
 
   static DirectionMap Analyze(const PrimFunc &func) {
+    // The flow state accumulates one boolean guard per branch and loop merge,
+    // and Mask() queries the prover about each of them. A kernel without any
+    // MAD/GEMM-L1 call can never contribute a map entry, so skip the walk
+    // instead of paying prover cost (per loop, and Z3 is unbounded by default)
+    // for a result that is empty by construction.
+    if (!HasMmadCalls(func)) {
+      return {};
+    }
     PTOMmadDirectionAnalyzer analyzer;
     analyzer.VisitStmt(func->body, FromMask(kM));
     DirectionMap result;
@@ -1035,6 +1193,21 @@ private:
 
   using State = MmadDirectionState;
 
+  static bool HasMmadCalls(const PrimFunc &func) {
+    bool found = false;
+    tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (found)
+        return;
+      if (const auto *call = node.as<CallNode>()) {
+        found = call->op.same_as(tl::ascend_mad()) ||
+                call->op.same_as(tl::ascend_mad_mx()) ||
+                call->op.same_as(tl::ascend_gemm_l1()) ||
+                call->op.same_as(tl::ascend_blockscaled_gemm_l1());
+      }
+    });
+    return found;
+  }
+
   static State FromMask(uint8_t mask) {
     return {make_const(DataType::Bool(), (mask & kM) != 0),
             make_const(DataType::Bool(), (mask & kN) != 0)};
@@ -1045,8 +1218,14 @@ private:
            (analyzer_.CanProve(!state.n) ? 0 : kN);
   }
 
+  // Normalize before and after Simplify: normalization keeps the guard at its
+  // semantic size, which is what makes the Simplify call affordable at all.
+  PrimExpr Combine(const PrimExpr &expr) {
+    return NormalizeGuard(analyzer_.Simplify(NormalizeGuard(expr)));
+  }
+
   State Merge(const State &a, const State &b) {
-    return {analyzer_.Simplify(a.m || b.m), analyzer_.Simplify(a.n || b.n)};
+    return {Combine(a.m || b.m), Combine(a.n || b.n)};
   }
 
   State Restrict(const State &state, const PrimExpr &condition) {
@@ -1055,8 +1234,7 @@ private:
     if (SideEffect(condition) != CallEffectKind::kPure) {
       return state;
     }
-    return {analyzer_.Simplify(state.m && condition),
-            analyzer_.Simplify(state.n && condition)};
+    return {Combine(state.m && condition), Combine(state.n && condition)};
   }
 
   FlowState AnalyzeLoop(const Stmt &body, State incoming, bool must_execute,
@@ -1110,6 +1288,19 @@ private:
             Merge(then_out.breaks, else_out.breaks)};
   }
   FlowState VisitStmt_(const ForNode *op, State state) final {
+    // Decide constant trip counts without the prover: generated loops are
+    // usually constant after unrolling, and every query below costs a Z3
+    // check over the (possibly large) accumulated flow state.
+    if (const auto *imm = op->extent.as<IntImmNode>()) {
+      if (imm->value <= 0) {
+        VisitStmt(op->body, {});
+        return {state, {}};
+      }
+      if (imm->value == 1) {
+        return SingleTripLoop(op, state);
+      }
+      return AnalyzeLoop(op->body, state, /*must_execute=*/true);
+    }
     if (analyzer_.CanProve(op->extent <= 0)) {
       // Codegen can still emit the body. Record its MADs as unreachable
       // without allowing its direction setters to affect subsequent code.
@@ -1118,16 +1309,19 @@ private:
     }
     if (analyzer_.CanProveEqual(op->extent,
                                 make_const(op->extent.dtype(), 1))) {
-      // A single-trip loop has no backedge. Both normal completion and break
-      // leave the loop, so merge them directly into its fallthrough state.
-      FlowState body_out = VisitStmt(op->body, state);
-      State exits = Merge(body_out.fallthrough, body_out.breaks);
-      Map<Var, PrimExpr> values{{op->loop_var, op->min}};
-      return {{analyzer_.Simplify(Substitute(exits.m, values)),
-               analyzer_.Simplify(Substitute(exits.n, values))},
-              {}};
+      return SingleTripLoop(op, state);
     }
     return AnalyzeLoop(op->body, state, analyzer_.CanProve(op->extent > 0));
+  }
+  FlowState SingleTripLoop(const ForNode *op, State state) {
+    // A single-trip loop has no backedge. Both normal completion and break
+    // leave the loop, so merge them directly into its fallthrough state.
+    FlowState body_out = VisitStmt(op->body, state);
+    State exits = Merge(body_out.fallthrough, body_out.breaks);
+    Map<Var, PrimExpr> values{{op->loop_var, op->min}};
+    return {{Combine(Substitute(exits.m, values)),
+             Combine(Substitute(exits.n, values))},
+            {}};
   }
   FlowState VisitStmt_(const WhileNode *op, State state) final {
     PrimExpr condition = analyzer_.Simplify(op->condition);
@@ -1177,7 +1371,7 @@ private:
       if (Mask(state) == 0) {
         return {{}, {}};
       }
-      PrimExpr reachable = analyzer_.Simplify(state.m || state.n);
+      PrimExpr reachable = Combine(state.m || state.n);
       return {direction->value == "n" ? State{const_false(), reachable}
                                       : State{reachable, const_false()},
               {}};
