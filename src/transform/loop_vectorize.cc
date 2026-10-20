@@ -56,34 +56,6 @@ namespace {
 PrimExpr SimplifyExprForAnalyzer(const PrimExpr &expr, int scale,
                                  arith::Analyzer *analyzer);
 
-PrimExpr GetLoopStep(const For &loop) {
-  return loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
-}
-
-PrimExpr GetLoopIndex(const PrimExpr &min, const PrimExpr &step,
-                      const PrimExpr &ordinal) {
-  // Default min/step constants are int32; preserve the loop index dtype.
-  return cast(ordinal.dtype(), min) + ordinal * cast(ordinal.dtype(), step);
-}
-
-// Compute the iteration count for min, min + step, ... < min + extent.
-// extent is the index span: [2, 9) with step 2 has extent 7 but 4 iterations.
-// For a positive extent, the count is ceil(extent / step), independent of min.
-// The extent may be symbolic, but step must simplify to a positive constant.
-// Callers handle non-positive extents (empty loops).
-PrimExpr ComputeLoopTripCount(const PrimExpr &extent, const PrimExpr &step,
-                              arith::Analyzer *analyzer) {
-  PrimExpr simplified_step = analyzer->Simplify(cast(extent.dtype(), step));
-  const int64_t *step_value = as_const_int(simplified_step);
-  ICHECK(step_value && *step_value > 0)
-      << "Loop trip count requires a positive constant step, got " << step;
-  // Use the quotient and remainder to round up without the intermediate
-  // addition in (extent + step - 1) / step, which can overflow the index dtype.
-  return analyzer->Simplify(
-      floordiv(extent, simplified_step) +
-      cast(extent.dtype(), floormod(extent, simplified_step) != 0));
-}
-
 } // namespace
 
 /*!
@@ -370,8 +342,7 @@ private:
     }
     return IsExprInvariantInVectorBoundary(
         elem_offset, inner_for_->loop_var, inner_for_->extent,
-        initial_vector_size_, analyzer_, inner_for_->min,
-        GetLoopStep(inner_for_));
+        initial_vector_size_, analyzer_, inner_for_->min);
   }
 
   VectorConstraintKind ClassifyConstraint(const BufferVectorInfo &info) const {
@@ -482,8 +453,7 @@ private:
       }
       if (!IndicesCanVectorize(elem_offset, inner_for_->loop_var,
                                inner_for_->extent, vector_size, analyzer_,
-                               /*allow_broadcast=*/true, inner_for_->min,
-                               GetLoopStep(inner_for_))) {
+                               /*allow_broadcast=*/true, inner_for_->min)) {
         int old_vector_size = vector_size;
         vector_size = arith::ZeroAwareGCD(vector_size, info.vector_size);
         if (verbose) {
@@ -551,8 +521,7 @@ private:
   Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = GetRef<For>(node);
     bool contains_nested_for = false;
-    // Only the innermost domain determines lane grouping. In particular, an
-    // unknown outer step must not prevent analysis of a regular inner loop.
+    // Only the innermost domain determines lane grouping.
     PostOrderVisit(Downcast<Stmt>(node->body), [&](const ObjectRef &obj) {
       if (obj.as<ForNode>()) {
         contains_nested_for = true;
@@ -560,16 +529,15 @@ private:
     });
 
     if (!contains_nested_for) {
-      PrimExpr trips = ComputeLoopTripCount(node->extent,
-                                            GetLoopStep(inner_for_), analyzer_);
-      const int64_t *trip_count = as_const_int(trips);
-      // Splitting currently requires a static, positive number of iterations.
-      if (!trip_count || *trip_count <= 0) {
+      PrimExpr extent = analyzer_->Simplify(node->extent);
+      const int64_t *extent_ptr = as_const_int(extent);
+      // Splitting currently requires a unit step and a static, positive extent.
+      if (!node->HasTrivialStep() || !extent_ptr || *extent_ptr <= 0) {
         loop_extent_vector_size_ = 1;
         return GetRef<Stmt>(node);
       }
       loop_extent_vector_size_ =
-          arith::ZeroAwareGCD(initial_vector_size_, *trip_count);
+          arith::ZeroAwareGCD(initial_vector_size_, *extent_ptr);
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
@@ -770,8 +738,7 @@ private:
           }
           if (!IsExprInvariantInVectorBoundary(
                   elem_offset, inner_for_->loop_var, inner_for_->extent,
-                  target_vec_size, analyzer_, inner_for_->min,
-                  GetLoopStep(inner_for_))) {
+                  target_vec_size, analyzer_, inner_for_->min)) {
             all_invariant = false;
           }
         } else if (auto *store = obj.as<BufferStoreNode>()) {
@@ -784,8 +751,7 @@ private:
           }
           if (!IsExprInvariantInVectorBoundary(
                   elem_offset, inner_for_->loop_var, inner_for_->extent,
-                  target_vec_size, analyzer_, inner_for_->min,
-                  GetLoopStep(inner_for_))) {
+                  target_vec_size, analyzer_, inner_for_->min)) {
             all_invariant = false;
           }
         } else if (auto *call = obj.as<CallNode>()) {
@@ -796,8 +762,7 @@ private:
             PrimExpr offset = call->args[2];
             if (!IsExprInvariantInVectorBoundary(
                     offset, inner_for_->loop_var, inner_for_->extent,
-                    target_vec_size, analyzer_, inner_for_->min,
-                    GetLoopStep(inner_for_))) {
+                    target_vec_size, analyzer_, inner_for_->min)) {
               all_invariant = false;
             }
           }
@@ -857,8 +822,7 @@ private:
     while (vector_size > 1 &&
            !IndicesCanVectorize(offset, inner_for_->loop_var,
                                 inner_for_->extent, vector_size, analyzer_,
-                                /*allow_broadcast=*/false, inner_for_->min,
-                                GetLoopStep(inner_for_))) {
+                                /*allow_broadcast=*/false, inner_for_->min)) {
       vector_size /= 2;
     }
     return vector_size;
@@ -877,8 +841,7 @@ private:
     while (condition_vector_size > 1 &&
            !IsExprInvariantInVectorBoundary(
                condition, inner_for_->loop_var, inner_for_->extent,
-               condition_vector_size, analyzer_, inner_for_->min,
-               GetLoopStep(inner_for_))) {
+               condition_vector_size, analyzer_, inner_for_->min)) {
       condition_vector_size /= 2;
     }
     buffer_vector_infos_.push_back(
@@ -956,8 +919,7 @@ private:
     while (access_vec_size > 1 &&
            !IndicesCanVectorize(offset_s, inner_for_->loop_var,
                                 inner_for_->extent, access_vec_size, analyzer_,
-                                /*allow_broadcast=*/true, inner_for_->min,
-                                GetLoopStep(inner_for_))) {
+                                /*allow_broadcast=*/true, inner_for_->min)) {
       access_vec_size /= 2;
     }
     // Record as a memory-like constraint if we can resolve the buffer.
@@ -1026,8 +988,7 @@ private:
         while (cast_vector_size > 1 &&
                !IsExprInvariantInVectorBoundary(
                    rbits, inner_for_->loop_var, inner_for_->extent,
-                   cast_vector_size, analyzer_, inner_for_->min,
-                   GetLoopStep(inner_for_))) {
+                   cast_vector_size, analyzer_, inner_for_->min)) {
           cast_vector_size /= 2;
         }
       }
@@ -1071,7 +1032,7 @@ private:
     while (try_vec_size >= min_vec_size) {
       is_invariant = IsExprInvariantInVectorBoundary(
           elem_offset, inner_for_->loop_var, inner_for_->extent, try_vec_size,
-          analyzer_, inner_for_->min, GetLoopStep(inner_for_));
+          analyzer_, inner_for_->min);
       if (is_invariant) {
         buffer_vec_size = try_vec_size;
         break;
@@ -1104,8 +1065,7 @@ private:
     while (buffer_vec_size > 1 &&
            !IndicesCanVectorize(elem_offset, inner_for_->loop_var,
                                 inner_for_->extent, buffer_vec_size, analyzer_,
-                                /*allow_broadcast=*/true, inner_for_->min,
-                                GetLoopStep(inner_for_))) {
+                                /*allow_broadcast=*/true, inner_for_->min)) {
       buffer_vec_size /= 2;
     }
     return {buffer_vec_size, /*requires_scalarization=*/false};
@@ -1165,10 +1125,11 @@ private:
     if (inner_for_.same_as(GetRef<For>(node))) { // rewrite the innermost loop
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
-      PrimExpr step = GetLoopStep(fnode);
-      PrimExpr trips = ComputeLoopTripCount(fnode->extent, step, analyzer_);
-      auto extent_ptr = as_const_int(trips);
-      ICHECK(extent_ptr) << trips;
+      ICHECK(fnode->HasTrivialStep())
+          << "Vectorization currently requires a unit loop step";
+      PrimExpr simplified_extent = analyzer_->Simplify(fnode->extent);
+      auto extent_ptr = as_const_int(simplified_extent);
+      ICHECK(extent_ptr) << simplified_extent;
       int64_t extent = *extent_ptr;
       ICHECK(extent % vector_size_ == 0)
           << "extent: " << extent << " vector_size_: " << vector_size_
@@ -1179,16 +1140,14 @@ private:
       Var inner_var("vec", dtype);
       if (extent == vector_size_) {
         Stmt body =
-            Substitute(fnode->body,
-                       {{old_var, GetLoopIndex(fnode->min, step, inner_var)}});
+            Substitute(fnode->body, {{old_var, fnode->min + inner_var}});
         return For(inner_var, zero, width, ForKind::kVectorized, body,
                    fnode->thread_binding, fnode->annotations, std::nullopt,
                    fnode->span);
       } else {
         Var outer_var(old_var->name_hint, dtype);
         Map<Var, PrimExpr> vmap;
-        vmap.Set(old_var,
-                 GetLoopIndex(fnode->min, step, outer_var * width + inner_var));
+        vmap.Set(old_var, fnode->min + (outer_var * width + inner_var));
         Stmt body = Substitute(fnode->body, vmap);
         body = For(inner_var, zero, width, ForKind::kVectorized, body,
                    std::nullopt, {}, std::nullopt, fnode->span);
@@ -1325,12 +1284,10 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
                                      const PrimExpr &extent,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer,
-                                     const PrimExpr &min,
-                                     const PrimExpr &step) {
+                                     const PrimExpr &min) {
   if (target_vectorized_size == 1) {
     return true;
   }
-  PrimExpr trip_count = ComputeLoopTripCount(extent, step, analyzer);
   // Groups begin at iteration ordinals 0, width, ... rather than logical
   // indices divisible by width. For i in [2, 6), i // 4 is not a broadcast
   // at width 4: its lane values are [0, 0, 1, 1].
@@ -1338,29 +1295,28 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
   PrimExpr analysis_expr =
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   analysis_expr =
-      Substitute(analysis_expr, {{var, GetLoopIndex(min, step, ordinal)}});
-  return IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, trip_count,
+      Substitute(analysis_expr, {{var, cast(var.dtype(), min) + ordinal}});
+  return IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, extent,
                                              target_vectorized_size, analyzer);
 }
 
 bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
                          const PrimExpr &extent, int target_vectorized_size,
                          arith::Analyzer *analyzer, bool allow_broadcast,
-                         const PrimExpr &min, const PrimExpr &step) {
+                         const PrimExpr &min) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1) {
     return true;
   }
-  PrimExpr trip_count = ComputeLoopTripCount(extent, step, analyzer);
   Var ordinal("ordinal", var.dtype());
   PrimExpr analysis_expr =
       PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   analysis_expr =
-      Substitute(analysis_expr, {{var, GetLoopIndex(min, step, ordinal)}});
+      Substitute(analysis_expr, {{var, cast(var.dtype(), min) + ordinal}});
 
-  // The number of iterations, not the logical extent, must be divisible.
+  // The extent must be divisible by the selected vector width.
   PrimExpr target_size_for_iter =
-      make_const(trip_count.dtype(), target_vectorized_size);
+      make_const(extent.dtype(), target_vectorized_size);
   PrimExpr target_size_for_expr =
       make_const(analysis_expr.dtype(), target_vectorized_size);
   PrimExpr target_size_for_ordinal =
@@ -1368,11 +1324,11 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
   PrimExpr zero_ordinal = make_const(ordinal.dtype(), 0);
   PrimExpr zero_expr = make_const(analysis_expr.dtype(), 0);
 
-  if (!analyzer->CanProveEqual(FloorMod(trip_count, target_size_for_iter), 0))
+  if (!analyzer->CanProveEqual(FloorMod(extent, target_size_for_iter), 0))
     return false;
 
   if (allow_broadcast &&
-      IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, trip_count,
+      IsExprInvariantInVectorBoundaryImpl(analysis_expr, ordinal, extent,
                                           target_vectorized_size, analyzer)) {
     return true;
   }
@@ -1388,9 +1344,8 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
   // Bind thread range
   Var v0("v0", ordinal.dtype()), v1("v1", ordinal.dtype());
   analyzer->Bind(v0, Range(zero_ordinal, target_size_for_ordinal));
-  analyzer->Bind(
-      v1, Range(zero_ordinal, analyzer->Simplify(
-                                  FloorDiv(trip_count, target_size_for_iter))));
+  analyzer->Bind(v1, Range(zero_ordinal, analyzer->Simplify(FloorDiv(
+                                             extent, target_size_for_iter))));
   PrimExpr expr_transformed = analyzer->Simplify(Substitute(
       analysis_expr, {{ordinal, v1 * target_size_for_ordinal + v0}}));
   Vectorizer vectorizer(v0, target_size_for_ordinal);

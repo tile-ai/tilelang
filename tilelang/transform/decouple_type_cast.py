@@ -309,12 +309,6 @@ def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
     return pure
 
 
-def _iteration_ordinal(loop: For, index: tirx.PrimExpr) -> tirx.PrimExpr:
-    """Scratch buffers are indexed by iteration, not by the logical index."""
-    step = loop.step if loop.step is not None else tirx.const(1, loop.loop_var.dtype)
-    return (index - loop.min) // step
-
-
 # Cast entry: (original buffer, original indices, cast buffer)
 # Each unique (buffer, indices) pair gets its own entry, so that accesses
 # like a[i] and a[i+32] from the same buffer are handled correctly.
@@ -395,13 +389,12 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # Recursively visit body to handle nested loops
         new_body = self.visit_stmt(op.body)
 
-        # Only transform vectorized loops with static extent
+        # Only transform unit-step vectorized loops with static positive extent.
         if op.kind != ForKind.VECTORIZED:
             return self._make_for(op, new_body) if new_body is not op.body else op
-        if not isinstance(op.extent, IntImm):
+        if not isinstance(op.extent, IntImm) or op.extent.value <= 0:
             return self._make_for(op, new_body) if new_body is not op.body else op
-        step = op.step if op.step is not None else tirx.const(1, op.loop_var.dtype)
-        if not isinstance(step, IntImm) or step.value <= 0 or op.extent.value <= 0:
+        if op.step is not None and (not isinstance(op.step, IntImm) or op.step.value != 1):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Normalize flat Bind statements before all analysis. Bind is a
@@ -429,8 +422,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             # Cast exists but no memory access → nothing to decouple
             return self._make_for(op, new_body) if new_body is not op.body else op
 
-        trips = op.extent.value // step.value + (op.extent.value % step.value != 0)
-        extent = tirx.const(trips, op.loop_var.dtype)
+        extent = op.extent
 
         # Create cast entries for stores and loads
         store_entries = self._create_cast_entries(collector.stores, extent)
@@ -462,7 +454,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         load_replacement_entries = store_entries + load_entries
         compute_body = normalized_body
         if store_entries or load_entries:
-            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, _iteration_ordinal(op, op.loop_var))
+            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var - op.min)
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
         # Build copy-to-memory loops (after compute)
@@ -546,7 +538,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
             # Substitute loop_var with copy_var in original indices
             new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
-            ordinal = _iteration_ordinal(op, copy_var)
+            ordinal = copy_var - op.min
 
             if direction == "to_memory":
                 copy_store: Stmt = BufferStore(

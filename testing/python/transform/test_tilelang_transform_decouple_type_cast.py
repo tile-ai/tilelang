@@ -118,10 +118,11 @@ def test_memory_to_local_nonzero_min():
     _check(before, after)
 
 
-@pytest.mark.parametrize("loop_min, extent, step", [(2, 4, None), (0, 8, 2), (2, 7, 2), ("symbolic", 8, 2)])
-def test_decouple_preserves_logical_loop_domain(loop_min, extent, step):
+@pytest.mark.parametrize("loop_min", [2, "symbolic"])
+def test_decouple_preserves_logical_loop_domain(loop_min):
     """RMW staging uses ordinals while all three loops retain their domain."""
     tir = tvm.tirx
+    extent = 4
     if loop_min == "symbolic":
         loop_min = tir.Var("start", "int32")
         scalar_params = [loop_min]
@@ -132,7 +133,7 @@ def test_decouple_preserves_logical_loop_domain(loop_min, extent, step):
     value = tir.Cast("float16", tir.Cast("float32", a[i]) + tir.const(1, "float32"))
     before = tir.PrimFunc(
         [a.data, *scalar_params],
-        tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [i]), step=step),
+        tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [i])),
         buffer_map={a.data: a},
     ).with_attr("global_symbol", "main")
 
@@ -141,25 +142,22 @@ def test_decouple_preserves_logical_loop_domain(loop_min, extent, step):
     cast_buf = tir.decl_buffer((4,), "float16", name="a_local_cast", scope="local")
     copy_from_var = tir.Var("copy_from", "int32")
     copy_to_var = tir.Var("copy_to", "int32")
-    loop_step = step if step is not None else 1
     copy_from = tir.For(
         copy_from_var,
         loop_min,
         extent,
         tir.ForKind.VECTORIZED,
-        tir.BufferStore(cast_buf, a[copy_from_var], [(copy_from_var - loop_min) // loop_step]),
-        step=step,
+        tir.BufferStore(cast_buf, a[copy_from_var], [copy_from_var - loop_min]),
     )
-    ordinal = (i - loop_min) // loop_step
+    ordinal = i - loop_min
     compute_value = tir.Cast("float16", tir.Cast("float32", cast_buf[ordinal]) + tir.const(1, "float32"))
-    compute = tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(cast_buf, compute_value, [ordinal]), step=step)
+    compute = tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(cast_buf, compute_value, [ordinal]))
     copy_to = tir.For(
         copy_to_var,
         loop_min,
         extent,
         tir.ForKind.VECTORIZED,
-        tir.BufferStore(a, cast_buf[(copy_to_var - loop_min) // loop_step], [copy_to_var]),
-        step=step,
+        tir.BufferStore(a, cast_buf[copy_to_var - loop_min], [copy_to_var]),
     )
     block = tir.SBlock(
         [],
@@ -178,17 +176,17 @@ def test_decouple_preserves_logical_loop_domain(loop_min, extent, step):
 @pytest.mark.parametrize("decouple", [False, True])
 @pytest.mark.parametrize("index_dtype", ["int32", "int64"])
 @pytest.mark.parametrize(
-    "start, extent, step, values",
-    [(2, 4, None, [2, 3, 4, 5]), (2, 4, 2, [2, 4]), (2, 7, 2, [2, 4, 6, 8]), (-3, 7, 2, [-3, -1, 1, 3]), (2, 0, 1, []), (2, 1, 4, [2])],
+    "start, extent, values",
+    [(2, 4, [2, 3, 4, 5]), (-3, 4, [-3, -2, -1, 0]), (2, 0, []), (2, 1, [2])],
 )
-def test_loop_domain_execution(decouple, index_dtype, start, extent, step, values):
+def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values):
     """Legalization preserves the number of iterations and their logical values."""
     tir = tvm.tirx
     a = tir.decl_buffer((8,), "float32", name="a")
     i = tir.Var("i", index_dtype)
-    index = (i - start) // (step if step is not None else 1)
+    index = i - start
     value = tir.Cast("float32", tir.Cast("float64", a[index]) + tir.Cast("float64", i))
-    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [index]), step=step)
+    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [index]))
     func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a}).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
     with tvm.target.Target("c"):
@@ -206,14 +204,19 @@ def test_loop_domain_execution(decouple, index_dtype, start, extent, step, value
     np.testing.assert_array_equal(output.numpy(), expected)
 
 
-def test_symbolic_step_remains_scalar():
-    """A runtime step must not be treated as a fixed iteration count."""
+@pytest.mark.parametrize("step", [2, None], ids=["nonunit", "dynamic"])
+def test_nonunit_step_remains_scalar(step):
+    """The unit-step transformations leave other loop steps unchanged."""
     tir = tvm.tirx
     a = tir.decl_buffer((8,), "float32", name="a")
-    i, step = tir.Var("i", "int32"), tir.Var("step", "int32")
+    i = tir.Var("i", "int32")
+    params = [a.data]
+    if step is None:
+        step = tir.Var("step", "int32")
+        params.append(step)
     value = tir.Cast("float32", tir.Cast("float64", a[i]) + tir.const(1, "float64"))
     body = tir.BufferStore(a, value, [i])
-    before = tir.PrimFunc([a.data, step], tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body, step=step), buffer_map={a.data: a})
+    before = tir.PrimFunc(params, tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body, step=step), buffer_map={a.data: a})
     expected = before.with_body(tir.For(i, 2, 4, tir.ForKind.SERIAL, body, step=step))
     with tvm.target.Target("c"):
         mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))

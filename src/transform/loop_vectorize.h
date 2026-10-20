@@ -67,21 +67,19 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
 
-// Check if expr is invariant within groups of consecutive loop iterations.
-// Defaults describe a zero-based, unit-step loop of the given extent.
+// Check if expr is invariant within groups of consecutive unit-step iterations.
+// The minimum defaults to zero.
 bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
                                      const PrimExpr &extent,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer,
-                                     const PrimExpr &min = 0,
-                                     const PrimExpr &step = 1);
+                                     const PrimExpr &min = 0);
 
 /*!
  * \brief Check whether an element-offset expression supports a vector width.
  *
- * Iteration k has logical index min + k * step in [min, min + extent).
- * Defaults describe a zero-based, unit-step loop of the given extent.
- * Widths greater than one require a provably positive constant step.
+ * For unit-step loops, iteration k has logical index min + k in
+ * [min, min + extent). The minimum defaults to zero.
  *
  * With allow_broadcast=true, offsets invariant within a vector group are
  * accepted. For example, loading A[i // 4] at width 4 can load one element and
@@ -100,7 +98,7 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
 bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
                          const PrimExpr &extent, int target_vectorized_size,
                          arith::Analyzer *analyzer, bool allow_broadcast = true,
-                         const PrimExpr &min = 0, const PrimExpr &step = 1);
+                         const PrimExpr &min = 0);
 
 } // namespace tl
 } // namespace tvm
