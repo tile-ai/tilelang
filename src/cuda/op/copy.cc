@@ -1196,13 +1196,12 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
   if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
-      IndicesCanVectorize(local_indices_flattened, LoopDomain(col_var), 2,
-                          analyzer)) {
+      IndicesCanVectorize(local_indices_flattened, col_var, 2, analyzer)) {
     is_transposed = false;
   } else if (analyzer->CanProveEqual(matrix_8x8_thread_map_trans,
                                      local_layout_thread_map) &&
-             IndicesCanVectorize(local_indices_flattened, LoopDomain(row_var),
-                                 2, analyzer)) {
+             IndicesCanVectorize(local_indices_flattened, row_var, 2,
+                                 analyzer)) {
     is_transposed = true;
   } else {
     return LowerNormal(op, lower_args, analyzer);
@@ -1218,7 +1217,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   }
   const int elems_per_reg = 4 / shared_elem_bytes;
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
-  if (!IndicesCanVectorize(flattened_indice, LoopDomain(loop_vars.back()),
+  if (!IndicesCanVectorize(flattened_indice, loop_vars.back(),
                            use_m16n8_stmatrix ? 16 : 8, analyzer)) {
     return LowerNormal(op, lower_args, analyzer);
   }
@@ -1238,7 +1237,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
     IterVar packed_iter(Range::FromMinExtent(make_zero(packed_var.dtype()),
                                              make_const(packed_var.dtype(), 4)),
                         packed_var, IterVarType::kDataPar);
-    if (!IndicesCanVectorize(packed_index, LoopDomain(packed_iter), 4, analyzer,
+    if (!IndicesCanVectorize(packed_index, packed_iter, 4, analyzer,
                              /*allow_broadcast=*/false)) {
       return LowerNormal(op, lower_args, analyzer);
     }

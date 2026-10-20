@@ -67,24 +67,8 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
 
-// Logical indices and iteration ordinals are different coordinates. Keep the
-// complete domain when checking vector groups, including for copy IterVars.
-struct LoopDomain {
-  explicit LoopDomain(const For &loop);
-  explicit LoopDomain(const IterVar &iter);
-
-  PrimExpr IndexAt(const PrimExpr &ordinal) const;
-  ffi::Optional<PrimExpr> TripCount(arith::Analyzer *analyzer) const;
-
-  Var var;
-  PrimExpr min;
-  PrimExpr extent;
-  PrimExpr step;
-};
-
 // Check if expr is invariant within vector boundaries
-bool IsExprInvariantInVectorBoundary(const PrimExpr &expr,
-                                     const LoopDomain &domain,
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const For &loop,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
@@ -105,7 +89,12 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr,
  * The flag applies only to the analyzed address; an atomic's source value may
  * still broadcast. If the check fails, the planner can try a smaller width.
  */
-bool IndicesCanVectorize(const PrimExpr &expr, const LoopDomain &domain,
+bool IndicesCanVectorize(const PrimExpr &expr, const For &loop,
+                         int target_vectorized_size, arith::Analyzer *analyzer,
+                         bool allow_broadcast = true);
+
+// Unit-step iteration domains used by copy lowering, where no For exists yet.
+bool IndicesCanVectorize(const PrimExpr &expr, const IterVar &iter,
                          int target_vectorized_size, arith::Analyzer *analyzer,
                          bool allow_broadcast = true);
 
