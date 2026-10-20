@@ -173,13 +173,15 @@ const Im2ColImpl &ResolveIm2ColImpl(Target target) {
 
 Stmt LowerIm2ColForTarget(const Im2ColOpNode &op, const LowerArgs &lower_args,
                           arith::Analyzer *analyzer) {
-  return ResolveIm2ColImpl(lower_args.target).lower(op, lower_args, analyzer);
+  const auto &impl = ResolveIm2ColImpl(lower_args.target);
+  ICHECK(impl.lower)
+      << "SIMT im2col must be logically lowered before scheduling";
+  return impl.lower(op, lower_args, analyzer);
 }
 
 bool MatchAnyIm2ColTarget(Target /*target*/) { return true; }
 
-Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
-                     arith::Analyzer *analyzer) {
+Stmt LowerIm2ColLogical(const Im2ColOpNode &op, arith::Analyzer *analyzer) {
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
   const BufferRegion &dst_region = op.dstRegion_;
@@ -197,9 +199,10 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   analyzer->Bind(i, Range::FromMinExtent(make_zero(i.dtype()), block_m));
   analyzer->Bind(j, Range::FromMinExtent(make_zero(j.dtype()), block_k));
 
-  PrimExpr h_dim = src->shape[1];
-  PrimExpr w_dim = src->shape[2];
-  PrimExpr c_dim = src->shape[3];
+  const auto &source = op.srcRegion_->region;
+  PrimExpr h_dim = source[1]->extent;
+  PrimExpr w_dim = source[2]->extent;
+  PrimExpr c_dim = source[3]->extent;
   PrimExpr out_h =
       FloorDiv(h_dim + 2 * op.padding_ - (op.kernel_ - 1) * op.dilation_ - 1,
                op.stride_) +
@@ -219,12 +222,18 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                       FloorMod(FloorDiv(k, c_dim), op.kernel_) * op.dilation_ -
                       op.padding_;
 
-  PrimExpr in_bound = And(And(access_h >= make_zero(access_h.dtype()),
-                              access_w >= make_zero(access_w.dtype())),
-                          And(access_h < h_dim, access_w < w_dim));
-
+  PrimExpr batch = FloorDiv(m, out_hw);
+  // Only coordinate arithmetic is eager; the load itself remains lazy.
+  PrimExpr in_bound = const_true();
+  for (const PrimExpr &condition :
+       Array<PrimExpr>{m >= 0, batch < source[0]->extent, k >= 0,
+                       k < op.kernel_ * op.kernel_ * c_dim, access_h >= 0,
+                       access_h < h_dim, access_w >= 0, access_w < w_dim}) {
+    in_bound = bitwise_and(in_bound, condition);
+  }
   PrimExpr value = BufferLoad(
-      src, {FloorDiv(m, out_hw), access_h, access_w, FloorMod(k, c_dim)});
+      src, {source[0]->min + batch, source[1]->min + access_h,
+            source[2]->min + access_w, source[3]->min + FloorMod(k, c_dim)});
   value = if_then_else(in_bound, value, make_zero(dst->dtype));
 
   Array<PrimExpr> dst_indices;
@@ -242,26 +251,12 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
 
   Stmt body = BufferStore(dst, value, dst_indices);
   body = For(j, make_zero(j.dtype()), block_k, ForKind::kParallel, body);
-  body = For(i, make_zero(i.dtype()), block_m, ForKind::kParallel, body);
-
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(Downcast<For>(body)));
-  auto par_op = ParallelOp(fused_loop);
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    par_op->InferLayout({lower_args.target,
-                         lower_args.thread_bounds,
-                         lower_args.layout_map,
-                         analyzer,
-                         lower_args.buffer_remap,
-                         {}},
-                        level);
+  Map<String, Any> annotations;
+  for (const auto &[key, value] : op.annotations_) {
+    annotations.Set(key, value);
   }
-  auto loop_layout = par_op->GetLoopLayout();
-  return LowerParallelLoop(
-      par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+  return For(i, make_zero(i.dtype()), block_m, ForKind::kParallel, body,
+             std::nullopt, annotations);
 }
 
 bool RegisterDefaultIm2Col() {
@@ -269,7 +264,8 @@ bool RegisterDefaultIm2Col() {
       "default.Im2Col",
       MatchAnyIm2ColTarget,
       0,
-      LowerIm2ColSIMT,
+      nullptr,
+      LowerIm2ColLogical,
   });
   return true;
 }
@@ -277,6 +273,17 @@ bool RegisterDefaultIm2Col() {
 const bool default_im2col_registered = RegisterDefaultIm2Col();
 
 } // namespace
+
+bool Im2ColUsesTMA(Target target) { return ResolveIm2ColImpl(target).is_tma; }
+
+Optional<Stmt> Im2ColOpNode::LowerLogical(Target target,
+                                          arith::Analyzer *analyzer) const {
+  auto expand = ResolveIm2ColImpl(target).lower_logical;
+  if (expand) {
+    return expand(*this, analyzer);
+  }
+  return std::nullopt;
+}
 
 void RegisterCopyImpl(CopyImpl impl) {
   ICHECK(impl.name != nullptr);
@@ -289,7 +296,7 @@ void RegisterCopyImpl(CopyImpl impl) {
 void RegisterIm2ColImpl(Im2ColImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
-  ICHECK(impl.lower != nullptr);
+  ICHECK((impl.lower != nullptr) != (impl.lower_logical != nullptr));
   Im2ColImplRegistry().push_back(impl);
 }
 

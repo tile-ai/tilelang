@@ -2835,6 +2835,8 @@ bool RegisterCudaIm2Col() {
       },
       100,
       cuda::Im2Col::Lower,
+      nullptr,
+      true,
   });
   return true;
 }
