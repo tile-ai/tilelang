@@ -5,7 +5,7 @@ and performance optimization through configuration search.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import tilelang
 from tilelang import tvm as tvm
@@ -28,11 +28,20 @@ import sys
 import json
 import hashlib
 import threading
+import tempfile
 import traceback
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.report import TrialReporter
+from tilelang.autotuner._process import ProcessWorker, WorkerCancelled, WorkerError
+from tilelang.autotuner.benchmark import (
+    bind_benchmark_device,
+    collect_benchmark_artifacts,
+    export_kernel,
+    make_worker_factory,
+    serialize_profile,
+)
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.utils.device import get_available_cpu_count
@@ -265,7 +274,8 @@ class AutoTuner:
             cache_input_tensors: Whether to reuse compatible input tensors across trials within each run.
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
-            timeout: Maximum time per configuration.
+            timeout: Seconds per benchmark trial, including loading, inputs, validation and GPU synchronization.
+                Nonpositive values disable isolation and the deadline. Compilation and worker startup are separate.
             backend: Profiler backend - "event", "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
@@ -567,106 +577,70 @@ class AutoTuner:
         benchmark_target: Callable[..., tuple[float, float | None]],
         timeout: int,
         worker_state: _BenchmarkWorkerState,
+        stop_event: threading.Event,
+        process_factory: bytes | None,
     ) -> None:
-        if target_kind == "cuda":
-            try:
-                torch.cuda.set_device(worker_device)
-            except Exception:
-                logger.warning("Failed to bind benchmark worker to cuda:%s", worker_device)
-                logger.debug("Error: %s", traceback.format_exc())
-
-        benchmark_device = worker_device if torch.cuda.is_available() and target_kind == "cuda" else None
-
-        def _call_benchmark_target(
-            jit_kernel: tilelang.JITKernel,
-            benchmark_state: _BenchmarkWorkerState,
-        ) -> tuple[float, float | None]:
-            # Timeout mode runs benchmark_target in a fresh daemon thread, so
-            # scope the device at the actual call site.
-            def invoke():
-                return benchmark_target(
-                    jit_kernel=jit_kernel,
-                    benchmark_state=benchmark_state,
-                    benchmark_device=benchmark_device,
-                )
-
-            if benchmark_device is None:
-                return invoke()
-            with torch.cuda.device(benchmark_device):
-                return invoke()
-
-        start_event.wait()
-        queue_poll_timeout_s = 0.1
-        while True:
-            try:
-                item = worker_queue.get(timeout=queue_poll_timeout_s)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            jit_kernel, config, idx = item
-            try:
-                if timeout > 0:
-                    call_result_queue: queue.Queue = queue.Queue()
-                    call_state = _BenchmarkWorkerState(
-                        jit_input_tensors=worker_state.jit_input_tensors,
-                        jit_input_params=worker_state.jit_input_params,
-                        ref_input_tensors=worker_state.ref_input_tensors,
-                        ref_latency_cache=worker_state.ref_latency_cache,
-                        shared_best_latency=worker_state.shared_best_latency,
-                    )
-
-                    def _run_benchmark_target(
-                        _jit_kernel: tilelang.JITKernel = jit_kernel,
-                        _worker_state: _BenchmarkWorkerState = call_state,
-                        _call_result_queue: queue.Queue = call_result_queue,
-                    ):
-                        try:
-                            latency, worker_ref_latency = _call_benchmark_target(_jit_kernel, _worker_state)
-                            _call_result_queue.put(("ok", latency, worker_ref_latency, ""))
-                        except Exception:
-                            _call_result_queue.put(("error", None, None, traceback.format_exc()))
-
-                    benchmark_call_thread = threading.Thread(target=_run_benchmark_target, daemon=True)
-                    benchmark_call_thread.start()
-                    benchmark_call_thread.join(timeout=timeout)
-                    if benchmark_call_thread.is_alive():
-                        # The timed-out call may still mutate its cached inputs.
-                        worker_state.jit_input_tensors = None
-                        result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
-                        continue
-
+        process = None
+        try:
+            benchmark_device = bind_benchmark_device(worker_device, target_kind) if timeout <= 0 else None
+            while not start_event.wait(timeout=0.1):
+                if stop_event.is_set():
+                    return
+            while not stop_event.is_set():
+                try:
+                    item = worker_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                jit_kernel, config, idx, artifact_path = item
+                if timeout > 0 and process is None:
+                    # A startup/recovery failure is fatal, not a failed config.
+                    new_process = ProcessWorker(process_factory, stop_event)
                     try:
-                        status, latency, worker_ref_latency, error_text = call_result_queue.get_nowait()
-                    except queue.Empty:
-                        result_queue.put(
-                            (
-                                idx,
-                                config,
-                                jit_kernel,
-                                None,
-                                None,
-                                "error",
-                                "Benchmark call thread exited without returning a result.",
-                            )
+                        new_process.start()
+                    except TimeoutError as exc:
+                        raise WorkerError("Benchmark worker startup/recovery exceeded its 60 second deadline") from exc
+                    process = new_process
+                status, error_text = None, ""
+                latency, worker_ref_latency = None, None
+                try:
+                    if process is not None:
+                        best = worker_state.shared_best_latency
+                        latency, worker_ref_latency = process.call(
+                            {"path": str(artifact_path), "best_latency": best[0] if best is not None else None}, timeout
                         )
-                        continue
-
-                    if status == "ok":
-                        worker_state.jit_input_tensors = call_state.jit_input_tensors
-                        worker_state.jit_input_params = call_state.jit_input_params
-                        worker_state.ref_input_tensors = call_state.ref_input_tensors
-                        worker_state.ref_latency_cache = call_state.ref_latency_cache
-                        result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
-                    elif status == "timeout":
-                        result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
                     else:
-                        result_queue.put((idx, config, jit_kernel, None, None, "error", error_text))
-                else:
-                    latency, worker_ref_latency = _call_benchmark_target(jit_kernel, worker_state)
-                    result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
-            except Exception:
-                result_queue.put((idx, config, jit_kernel, None, None, "error", traceback.format_exc()))
+                        benchmark_device = bind_benchmark_device(worker_device, target_kind)
+                        latency, worker_ref_latency = benchmark_target(
+                            jit_kernel=jit_kernel, benchmark_state=worker_state, benchmark_device=benchmark_device
+                        )
+                except WorkerCancelled:
+                    raise
+                except TimeoutError:
+                    logger.warning("Benchmark config %s exceeded %s seconds; terminating its process.", idx, timeout)
+                    status = "timeout"
+                except Exception:
+                    status, error_text = "error", traceback.format_exc()
+                if status is not None and process is not None:
+                    # Publish completion only after the process is dead, even for
+                    # the last trial. Exceptions can also poison a CUDA context.
+                    failed_process = process
+                    process = None
+                    failed_process.close()
+                result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, status, error_text))
+        except WorkerCancelled:
+            pass
+        except BaseException:
+            stop_event.set()
+            result_queue.put((None, None, None, None, None, "fatal", traceback.format_exc()))
+        finally:
+            if process is not None:
+                try:
+                    process.close(graceful=not stop_event.is_set())
+                except BaseException:
+                    stop_event.set()
+                    result_queue.put((None, None, None, None, None, "fatal", traceback.format_exc()))
 
     def _benchmark_target(
         self,
@@ -765,6 +739,8 @@ class AutoTuner:
         target_kind: str,
     ) -> tuple[bool, list[int]]:
         current_device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        if target_kind == "ascend":
+            current_device = torch.npu.current_device()
         single_device = [current_device]
 
         if not benchmark_multi_gpu:
@@ -842,7 +818,8 @@ class AutoTuner:
         Args:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
-            timeout: Maximum time per configuration.
+            timeout: Seconds per benchmark trial, including loading, inputs, validation and GPU synchronization.
+                Nonpositive values disable isolation and the deadline. Compilation and worker startup are separate.
             use_pipeline: Whether to pipeline benchmarking with compilation.
             enable_grouped_compile: Whether to enable grouped compilation.
             group_compile_size: Number of configurations in one compile unit.
@@ -859,6 +836,15 @@ class AutoTuner:
             AutotuneResult: Results of the auto-tuning process.
         """
         _init_logger_handlers()
+
+        # Direct AutoTuner users may leave CompileArgs at its "auto" defaults.
+        # Workers need the resolved backend and device kind before they start.
+        from tilelang.backend.module import create_backend_context
+
+        context = create_backend_context(self.compile_args.target, self.compile_args.target_host, self.compile_args.execution_backend)
+        self.compile_args = replace(
+            self.compile_args, target=context.target, target_host=context.target_host, execution_backend=context.execution_backend.name
+        )
 
         if early_stop and early_stop_factor < 1.0:
             raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
@@ -992,14 +978,10 @@ class AutoTuner:
         prim_func_for_validation = elaborate_func(**top_config)
         self._validate_input_supply_requirements(prim_func_for_validation, self.compile_args.out_idx)
 
-        # Launch compile tasks
-        pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
-            config_args=config_args,
-            grouped_compile_active=grouped_compile_active,
-            group_compile_size=group_compile_size,
-            compile_func=compile_func,
-            elaborate_func=elaborate_func,
-        )
+        # Fail before launching work if callbacks cannot cross the process boundary.
+        profile_payload = serialize_profile(self.profile_args) if timeout > 0 else None
+        if timeout > 0 and self.compile_args.execution_backend not in ("tvm_ffi", "cython", "nvrtc", "cutedsl", "pto"):
+            raise ValueError(f"Isolated autotuning does not support backend {self.compile_args.execution_backend!r}; use timeout=0")
 
         ref_latency = None
         # Keep inputs and reference timings local to this run. A later run may
@@ -1022,6 +1004,7 @@ class AutoTuner:
         benchmark_task_queues = [queue.Queue() for _ in benchmark_worker_devices]
         benchmark_result_queue: queue.Queue = queue.Queue()
         benchmark_start_event = threading.Event()
+        benchmark_stop_event = threading.Event()
         benchmark_threads: list[threading.Thread] = []
         benchmark_expected_results = 0
         benchmark_processed_results = 0
@@ -1029,11 +1012,6 @@ class AutoTuner:
         if use_pipeline:
             benchmark_start_event.set()
 
-        if timeout > 0:
-            logger.warning(
-                "Benchmark timeout is enforced in benchmark workers by running each benchmark call "
-                "in a daemon sub-thread and waiting up to the configured timeout."
-            )
         benchmark_target = partial(
             self._benchmark_target,
             warmup=warmup,
@@ -1044,12 +1022,18 @@ class AutoTuner:
         def _enqueue_benchmark_task(jit_kernel: tilelang.JITKernel, config: dict[str, Any], idx: int):
             nonlocal benchmark_expected_results
             queue_idx = min(len(benchmark_task_queues) - 1, idx * len(benchmark_task_queues) // max(1, len(config_args)))
-            benchmark_task_queues[queue_idx].put((jit_kernel, config, idx))
+            artifact_path = None
+            if timeout > 0:
+                artifact_path = Path(artifact_directory.name) / str(idx)
+                export_kernel(jit_kernel, artifact_path)
+            benchmark_task_queues[queue_idx].put((jit_kernel, config, idx, artifact_path))
             benchmark_expected_results += 1
 
         def _process_benchmark_result(result_item, progress_bar):
             nonlocal benchmark_processed_results, ref_latency
             idx, config, jit_kernel, latency, worker_ref_latency, status, error_text = result_item
+            if status == "fatal":
+                raise WorkerError(error_text)
             benchmark_processed_results += 1
             progress_bar.update(1)
 
@@ -1067,6 +1051,8 @@ class AutoTuner:
             if worker_ref_latency is not None:
                 ref_latency = worker_ref_latency
             assert latency is not None
+            if timeout > 0:
+                collect_benchmark_artifacts(jit_kernel, Path(artifact_directory.name) / str(idx))
             _record_benchmark_result(latency=latency, config=config, jit_kernel=jit_kernel, idx=idx, progress_bar=progress_bar)
             validation = "passed" if not self.profile_args.skip_check and self.profile_args.ref_prog is not None else "not_run"
             reporter.emit("ok", idx, self.configs[idx], latency=latency, validation=validation)
@@ -1082,39 +1068,55 @@ class AutoTuner:
                     break
                 _process_benchmark_result(result_item, progress_bar)
 
-        # Start benchmark worker threads
-        for worker_idx, worker_device in enumerate(benchmark_worker_devices):
-            worker_state = (
-                _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
-                if benchmark_multi_gpu_active
-                else main_thread_benchmark_state
-            )
-            worker_thread = threading.Thread(
-                target=self._benchmark_worker_loop,
-                args=(
-                    worker_device,
-                    benchmark_task_queues[worker_idx],
-                    benchmark_result_queue,
-                    benchmark_start_event,
-                    target_kind,
-                    benchmark_target,
-                    timeout,
-                    worker_state,
-                ),
-                daemon=True,
-            )
-            worker_thread.start()
-            benchmark_threads.append(worker_thread)
-
-        compile_progress = tqdm(total=len(config_args), desc=compile_desc)
+        artifact_directory = tempfile.TemporaryDirectory(prefix="tilelang-autotune-")
+        pool = None
+        compile_progress = None
         progress_bar = tqdm(total=len(config_args), desc="Bench configurations")
-        pending_futures = set(futures)
-
-        # Main thread loop to process compile results and feed benchmark tasks, end when all compile tasks are done.
         try:
+            # Supervisor threads own each subprocess, including its cleanup.
+            for worker_idx, worker_device in enumerate(benchmark_worker_devices):
+                worker_state = (
+                    _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
+                    if benchmark_multi_gpu_active
+                    else main_thread_benchmark_state
+                )
+                process_factory = (
+                    make_worker_factory(profile_payload, worker_device, target_kind, warmup, rep, early_stop_factor)
+                    if timeout > 0
+                    else None
+                )
+                worker_thread = threading.Thread(
+                    target=self._benchmark_worker_loop,
+                    args=(
+                        worker_device,
+                        benchmark_task_queues[worker_idx],
+                        benchmark_result_queue,
+                        benchmark_start_event,
+                        target_kind,
+                        benchmark_target,
+                        timeout,
+                        worker_state,
+                        benchmark_stop_event,
+                        process_factory,
+                    ),
+                    daemon=True,
+                )
+                worker_thread.start()
+                benchmark_threads.append(worker_thread)
+
+            pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
+                config_args=config_args,
+                grouped_compile_active=grouped_compile_active,
+                group_compile_size=group_compile_size,
+                compile_func=compile_func,
+                elaborate_func=elaborate_func,
+            )
+            compile_progress = tqdm(total=len(config_args), desc=compile_desc)
+            pending_futures = set(futures)
             while pending_futures:
                 done, pending_futures = concurrent.futures.wait(
                     pending_futures,
+                    timeout=0.1,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
 
@@ -1152,16 +1154,29 @@ class AutoTuner:
             progress_bar.total = max(progress_bar.n, benchmark_processed_results)
             progress_bar.refresh()
         finally:
+            benchmark_stop_event.set()
             benchmark_start_event.set()
-            for worker_queue in benchmark_task_queues:
-                worker_queue.put(None)
+            cleanup_error = None
             for worker_thread in benchmark_threads:
-                worker_thread.join(timeout=1.0)
+                worker_thread.join(timeout=3 * ProcessWorker.SHUTDOWN_TIMEOUT + 1)
                 if worker_thread.is_alive():
-                    logger.warning("Benchmark worker thread did not exit cleanly before shutdown.")
-            compile_progress.close()
+                    if timeout > 0:
+                        cleanup_error = WorkerError("Benchmark supervisor did not exit; aborting autotuning")
+                    else:
+                        logger.warning("Benchmark worker thread did not exit cleanly before shutdown.")
+            # Teardown failures must not be hidden by a successful last trial.
+            while not benchmark_result_queue.empty():
+                result = benchmark_result_queue.get_nowait()
+                if result[5] == "fatal":
+                    cleanup_error = WorkerError(result[6])
+            if compile_progress is not None:
+                compile_progress.close()
             progress_bar.close()
-            pool.shutdown()
+            if pool is not None:
+                pool.shutdown(cancel_futures=True)
+            artifact_directory.cleanup()
+            if cleanup_error is not None:
+                raise cleanup_error
 
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."

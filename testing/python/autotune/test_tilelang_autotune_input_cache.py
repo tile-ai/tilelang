@@ -22,17 +22,19 @@ def _benchmark_input_configs(kernel, supply, ref_prog):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("timeout", [0, 20])
 @pytest.mark.parametrize("cache_inputs", [True, False])
 @pytest.mark.parametrize("symbolic", [False, True])
-def test_autotune_reuses_compatible_inputs(cache_inputs, symbolic):
-    supplied = []
+def test_autotune_reuses_compatible_inputs(tmp_path, timeout, cache_inputs, symbolic):
+    supplies = tmp_path / "supplies.txt"
 
     def supply(params):
         inputs = [
             torch.ones(tuple(256 if isinstance(dim, T.Var) else int(dim) for dim in p.shape), dtype=p.torch_dtype(), device="cuda")
             for p in params
         ]
-        supplied.append(inputs)
+        with supplies.open("a") as f:
+            f.write("supply\n")
         return inputs
 
     def kernel(threads):
@@ -50,22 +52,24 @@ def test_autotune_reuses_compatible_inputs(cache_inputs, symbolic):
         AutoTuner(kernel, configs=[{"threads": 64}, {"threads": 128}])
         .set_compile_args(out_idx=[1], target="cuda")
         .set_profile_args(supply_prog=supply, ref_prog=lambda x: x + 1, cache_input_tensors=cache_inputs)
-        .run(warmup=1, rep=1)
+        .run(warmup=1, rep=1, timeout=timeout)
     )
     # The reference benchmark has its own inputs.
-    assert len(supplied) == (2 if cache_inputs else 3)
-    x = supplied[0][0]
+    assert len(supplies.read_text().splitlines()) == (2 if cache_inputs else 3)
+    x = torch.ones(256, device="cuda")
     torch.testing.assert_close(result.kernel(x), x + 1)
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("timeout", [0, 20])
 @pytest.mark.parametrize("change", ["rank", "extent", "dtype"])
-def test_autotune_refreshes_incompatible_inputs(change):
-    supplied = []
+def test_autotune_refreshes_incompatible_inputs(tmp_path, timeout, change):
+    supplies = tmp_path / "supplies.txt"
 
     def supply(params):
         inputs = [torch.ones(tuple(p.shape), dtype=p.torch_dtype(), device="cuda") for p in params]
-        supplied.append(inputs)
+        with supplies.open("a") as f:
+            f.write("supply\n")
         return inputs
 
     def kernel(variant):
@@ -84,9 +88,9 @@ def test_autotune_refreshes_incompatible_inputs(change):
         AutoTuner(kernel, configs=[{"variant": 0}, {"variant": 1}])
         .set_compile_args(out_idx=[1], target="cuda")
         .set_profile_args(supply_prog=supply, ref_prog=lambda x: x, cache_input_tensors=True)
-        .run(warmup=1, rep=1)
+        .run(warmup=1, rep=1, timeout=timeout)
     )
-    assert len(supplied) == 3
+    assert len(supplies.read_text().splitlines()) == 3
     param = result.kernel.params[0]
     x = torch.ones(tuple(param.shape), dtype=param.torch_dtype(), device="cuda")
     torch.testing.assert_close(result.kernel(x), x)
@@ -167,6 +171,7 @@ def _add_one(threads):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("change_supplier", [False, True])
 def test_autotune_refreshes_inputs_between_runs(change_supplier):
+    # Observe Python callback side effects in the current process.
     supplied = []
     expected_value = 1
 
@@ -187,14 +192,14 @@ def test_autotune_refreshes_inputs_between_runs(change_supplier):
         .set_compile_args(out_idx=[1], target="cuda")
         .set_profile_args(supply_prog=make_supply(1), ref_prog=reference, cache_input_tensors=True)
     )
-    tuner.run(warmup=1, rep=1)
+    tuner.run(warmup=1, rep=1, timeout=0)
     assert len(supplied) == 2
 
     if change_supplier:
         expected_value = 7
         tuner.set_profile_args(supply_prog=make_supply(7), ref_prog=reference, cache_input_tensors=True)
 
-    result = tuner.run(warmup=1, rep=1)
+    result = tuner.run(warmup=1, rep=1, timeout=0)
     # Each run supplies inputs once for both trials and once for reference timing.
     assert len(supplied) == 4
     x = supplied[-1][0]
@@ -226,7 +231,7 @@ def test_autotune_refreshes_inputs_when_device_changes():
     next_device = (first_device + 1) % torch.cuda.device_count()
     for run_index, device in enumerate((first_device, next_device), start=1):
         with torch.cuda.device(device):
-            result = tuner.run(warmup=1, rep=1)
+            result = tuner.run(warmup=1, rep=1, timeout=0)
             assert len(supplied) == run_index * 2
             assert all(inputs[0].device == torch.device("cuda", device) for inputs in supplied[-2:])
             x = supplied[-1][0]

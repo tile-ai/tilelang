@@ -1,6 +1,7 @@
 """Regression test for #1967: CuTeDSL autotune cache saved .py as .so → "invalid ELF header"."""
 
 import os
+from pathlib import Path
 import pytest
 import tilelang
 import tilelang.testing
@@ -108,7 +109,10 @@ def test_cutedsl_autotune_cache_roundtrip(tmp_path):
         ref = a + b
 
         # Pass 1: cache miss
-        torch.testing.assert_close(vec_add(N)(a, b), ref, atol=1e-5, rtol=1e-5)
+        kernel = vec_add(N)
+        assert Path(kernel.adapter.libpath).with_suffix(".cubin").exists()
+        assert not kernel.adapter.pymodule._cubin_needs_generation
+        torch.testing.assert_close(kernel(a, b), ref, atol=1e-5, rtol=1e-5)
 
         # Pass 2: clear memory cache → force disk reload (was "invalid ELF header" before fix)
         AutoTuner._memory_cache.clear()

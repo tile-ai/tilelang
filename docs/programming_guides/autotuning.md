@@ -237,15 +237,37 @@ Tips
 
 ## Parallel Compilation/Benchmarking and Timeouts
 
-The tuner compiles configurations in parallel using a thread pool and benchmarks
-them with a per‑config timeout. On CUDA, each worker sets the current device to
-avoid context issues.
+The tuner compiles configurations in parallel using a thread pool. When
+`timeout > 0`, each benchmark worker uses a separate process with its own inputs
+and CUDA context. Compiled artifacts are exported and loaded in the worker;
+live kernels and CUDA allocations are never shared with it.
 
 Notes
-- `timeout` is enforced portably by running each benchmark call in a daemon
-  thread and waiting for at most the configured duration. A timed-out native or
-  CUDA call cannot be forcibly stopped, so its daemon thread may continue until
-  the underlying call returns.
+- `timeout` is measured in seconds from dispatch of each compiled artifact. It
+  includes loading the artifact, supplying inputs, correctness checks, timing
+  and final GPU synchronization. Compilation, artifact export and serialization
+  of callbacks are outside this deadline. Worker startup and CUDA context
+  initialization have a separate 60 second deadline.
+- On timeout, the worker is terminated and reaped before the trial is reported
+  complete, including the last trial. Shutdown waits at most two seconds after
+  termination, then escalates to a kill and waits another two seconds. A fresh
+  worker handles subsequent trials. Benchmark exceptions and process crashes
+  also discard the worker and its input/reference caches.
+- Failure to start or reap a worker aborts tuning. Restarting a process cannot
+  guarantee recovery from a GPU/driver failure; a failed CUDA context
+  initialization is reported as a recovery error.
+- `ref_prog`, `supply_prog` and `manual_check_prog` execute in the worker.
+  Serializable closures and captured inputs are supported. Captured CPU/CUDA
+  tensors are copied; CUDA copies use the worker's device. Callback mutations
+  are local to that process and are not reflected in the caller. Create locks
+  and streams inside callbacks instead of capturing them. Unsupported captured
+  resources raise an error before tuning starts.
+- `timeout <= 0` runs benchmarks in the current process without a deadline and
+  supports callbacks that rely on shared Python state. Backends without artifact
+  reload support also require this mode. Process mode supports `tvm_ffi`,
+  `cython`, `nvrtc`, `cutedsl` and `pto` artifacts.
+- Workers start in fresh interpreters without re-executing the caller's
+  `__main__`, so scripts and notebooks do not need a multiprocessing main guard.
 - Logs are written to `autotuner.log` in the working directory.
 
 ## Caching
