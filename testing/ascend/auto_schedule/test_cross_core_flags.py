@@ -17,7 +17,8 @@ def _program(reservation):
             accum = T.alloc_l0c((16, 16), "float32")
             temp = T.alloc_shared((8, 16), "float32")
             # This is an InsertSync input: Fixpipe produces UB and MTE3 reads
-            # it. GEMM, layout inference and device execution are irrelevant.
+            # it. Layout inference prepares the scheduling input; no GEMM or
+            # device execution is needed for this flag-allocation contract.
             T.dual_copy(accum, temp)
             if reservation == "sparse":
                 T.ascend_sync_inter_arrive("PIPE_FIX", 15)
@@ -67,7 +68,7 @@ def _generated_slots(mod, operation):
 )
 def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserved):
     with tvm.transform.PassContext(config={"tl.Simplify": {"enable_simplify_let_inline": False}}):
-        before = schedule(_program(reservation), through="ResolveCore", auto_schedule=False)
+        before = schedule(_program(reservation), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         mod = transform.InsertSync()(before)
     sets = _generated_slots(mod, "set")
     waits = _generated_slots(mod, "wait")
@@ -78,7 +79,7 @@ def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserve
 
 def test_unbounded_explicit_flag_is_rejected():
     with pytest.raises(tvm.error.InternalError, match="integer range cannot be bounded"):
-        before = schedule(_program("unbounded"), through="ResolveCore", auto_schedule=False)
+        before = schedule(_program("unbounded"), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         transform.InsertSync()(before)
 
 
@@ -152,7 +153,7 @@ def test_alternating_epilogue_uses_each_aiv_flag_bank(versions):
                     T.copy(accum, ub)
                     T.copy(ub, C[i, :, :])
 
-    before = schedule(main, through="ResolveCore", auto_schedule=False)
+    before = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     (owner,) = nodes(before, tirx.For)
     counters = list(owner.annotations["tl.multi_buffer_counter_map"].values())
     assert len(counters) == 2 and not counters[0].same_as(counters[1])
@@ -259,6 +260,75 @@ def test_alternating_aiv_writers_without_cube_ordering_are_rejected(scope):
     before = schedule(main, through="ResolveCore", auto_schedule=False)
     with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
         transform.InsertSync()(before)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("to_cube", [False, True], ids=["cube-to-aivs", "aivs-to-cube"])
+@pytest.mark.parametrize("versions", [1, 3], ids=["publication", "ring-reuse"])
+def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
+    ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
+    view = tirx.decl_buffer((1,), "uint64", data=ss.data) if packed else ss
+    out = tirx.decl_buffer((2,), "uint32", name="out")
+    if to_cube:
+        tasks = [unit(tirx.BufferStore(ss, tirx.const(7, "uint32"), [sid]), core=core) for sid, core in enumerate((1, 4))]
+        value = tirx.Cast("uint32", view[0]) if packed else ss[0] + ss[1]
+        tasks.append(unit(tirx.BufferStore(out, value, [0]), core=2))
+    else:
+        writes = [tirx.BufferStore(view, tirx.const(7, view.dtype), [i]) for i in range(1 if packed else 2)]
+        tasks = [unit(seq(*writes), core=2)]
+        tasks += [unit(tirx.BufferStore(out, ss[sid], [sid]), core=core) for sid, core in enumerate((1, 4))]
+    body = seq(*tasks)
+    annotations = {"tl.split_subcores": True}
+    i = tirx.Var("i", "int32")
+    if versions > 1:
+        body = unit(tirx.For(i, 0, 8, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ss.data]}), core=None)
+        annotations["tl.buffer_versions_map"] = {ss.data: versions}
+    before = kernel(body, buffers=[ss], params=[out], annotations=annotations)
+    after = transform.InsertSync()(before)
+    endpoints = {"set": [], "wait": []}
+    for task in nodes(after, tirx.AttrStmt):
+        if task.attr_key != "tl.ascend_task":
+            continue
+        for operation, events in endpoints.items():
+            for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
+                assert int(call.args[0]) == 4 and call.args[1].value == "PIPE_S"
+                events.append((int(task.node["core_mask"]), tvm.arith.Analyzer().simplify(call.args[2])))
+    if versions > 1:
+        initial, drained = (
+            {int(slot) + (16 if core == 4 else 0) for core, slot in endpoints[operation] if isinstance(slot, tirx.IntImm)}
+            for operation in ("set", "wait")
+        )
+        assert initial == drained and len(initial) == 2 * versions
+        for operation, events in endpoints.items():
+            dynamic = [(core, slot) for core, slot in events if not isinstance(slot, tirx.IntImm)]
+            assert len(dynamic) == 4  # Publication and reuse, separately for both AIVs.
+            bases = [(core, tvm.arith.Analyzer().simplify(slot - i % versions)) for core, slot in dynamic]
+            assert all(isinstance(base, tirx.IntImm) for _, base in bases)
+            endpoints[operation] = [(core, int(base)) for core, base in bases]
+        for sid, core in enumerate((1, 4)):
+            for operation, peer in (("set", "wait"), ("wait", "set")):
+                vector = {slot + 16 * sid for endpoint, slot in endpoints[operation] if endpoint == core}
+                cube = {slot for endpoint, slot in endpoints[peer] if endpoint == 2 and 16 * sid <= slot < 16 * (sid + 1)}
+                assert vector == cube and len(vector) == 1
+        return
+    endpoints = {operation: [(core, int(slot)) for core, slot in events] for operation, events in endpoints.items()}
+    vectors = endpoints["set" if to_cube else "wait"]
+    cube = endpoints["wait" if to_cube else "set"]
+    assert {core for core, _ in vectors} == {1, 4}
+    assert len(vectors) == len(cube) == 2
+    assert set(cube) == {(2, slot + (16 if core == 4 else 0)) for core, slot in vectors}
+
+
+def test_ss_disjoint_aiv_read_modify_write_needs_no_sync():
+    ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
+    before = kernel(
+        seq(*(unit(tirx.BufferStore(ss, ss[sid] + 1, [sid]), core=core) for sid, core in enumerate((1, 4)))),
+        buffers=[ss],
+        annotations={"tl.split_subcores": True},
+    )
+    after = transform.InsertSync()(before)
+    assert not calls(after, "tl.ascend_cross_core_set_flag")
+    assert not calls(after, "tl.ascend_cross_core_wait_flag")
 
 
 if __name__ == "__main__":

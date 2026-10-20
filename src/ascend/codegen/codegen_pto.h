@@ -45,6 +45,8 @@ protected:
 
   void VisitExpr_(const BroadcastNode *op,
                   std::ostream &os) override; // NOLINT(*)
+  void VisitExpr_(const RampNode *op,
+                  std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const LetNode *op,

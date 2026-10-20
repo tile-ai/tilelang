@@ -43,18 +43,23 @@ def test_physical_versions_use_the_prepared_clock(mode, owners, guarded, version
 
 
 @pytest.mark.parametrize(
-    "shape, dtype, pitch",
-    [((4, 4), "float32", 16), ((4,), "float32", 16), ((32,), "float16", 32)],
-    ids=["reshape", "subview", "reinterpret"],
+    "scope, base_dtype, shape, dtype, pitch",
+    [
+        ("shared.dyn", "float32", (4, 4), "float32", 16),
+        ("shared.dyn", "float32", (4,), "float32", 16),
+        ("shared.dyn", "float32", (32,), "float16", 32),
+        ("shared.ss", "uint32", (8,), "uint64", 8),
+    ],
+    ids=["reshape", "subview", "reinterpret", "ss-packed"],
 )
-def test_aliases_use_allocation_pitch(shape, dtype, pitch):
-    base = tirx.decl_buffer((16,), "float32", name="base", scope="shared.dyn")
+def test_aliases_use_allocation_pitch(scope, base_dtype, shape, dtype, pitch):
+    base = tirx.decl_buffer((16,), base_dtype, name="base", scope=scope)
     alias = tirx.decl_buffer(shape, dtype, name="alias", data=base.data)
     counter = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
     i = tirx.Var("i", "int32")
     alias_index = [0] * len(shape)
     body = seq(
-        unit(tirx.BufferStore(base, tirx.const(1, "float32"), [0])), unit(tirx.BufferStore(alias, tirx.const(2, dtype), alias_index))
+        unit(tirx.BufferStore(base, tirx.const(1, base_dtype), [0])), unit(tirx.BufferStore(alias, tirx.const(2, dtype), alias_index))
     )
     loop = tirx.For(
         i,
@@ -75,6 +80,7 @@ def test_aliases_use_allocation_pitch(shape, dtype, pitch):
     assert tuple(int(dim) for dim in alias_store.buffer.shape) == (2, *shape)
     assert int(base_store.buffer.strides[0]) == 16
     assert int(alias_store.buffer.strides[0]) == pitch
+    assert tuple(int(dim) for dim in allocated_buffer(after, "base").shape) == (2, 16)
     assert alias_store.buffer.data.same_as(base_store.buffer.data)
     tvm.ir.assert_structural_equal(alias_store.indices[0], base_store.indices[0])
 

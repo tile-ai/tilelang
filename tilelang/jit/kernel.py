@@ -144,9 +144,7 @@ class JITKernel(Generic[_P, _T]):
             assert func_name is not None, "func must have global_symbol"
             logger.info(f"TileLang completes to compile kernel `{func_name}`")
 
-        # The adapter's function is assigned as the callable function for this instance.
-        self.adapter = adapter
-        self.torch_function = adapter.func
+        self._set_adapter(adapter)
 
     @classmethod
     def from_database(
@@ -189,7 +187,7 @@ class JITKernel(Generic[_P, _T]):
                 supports_callee_allocated_outputs=instance.execution_backend_spec.supports_callee_allocated_outputs,
             )
 
-        instance.adapter = instance._create_adapter_from_database(
+        adapter = instance._create_adapter_from_database(
             func_or_mod=func,
             params=params,
             result_idx=out_idx,
@@ -200,8 +198,16 @@ class JITKernel(Generic[_P, _T]):
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
-        instance.torch_function = instance.adapter.func
+        instance._set_adapter(adapter)
         return instance
+
+    def _set_adapter(self, adapter: BaseKernelAdapter) -> None:
+        """Install a fresh adapter and apply the selected callable wrapper once."""
+        wrapper = self.execution_backend_spec.wrap_callable
+        if wrapper is not None:
+            adapter.func = wrapper(adapter.func, self.prim_func)
+        self.adapter = adapter
+        self.torch_function = adapter.func
 
     def __call__(self, *args: _P.args, **kwds: _P.kwargs) -> _T:
         """
