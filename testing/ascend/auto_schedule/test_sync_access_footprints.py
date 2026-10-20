@@ -5,7 +5,10 @@ import pytest
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
-from testing.ascend._ir import calls, schedule
+from tilelang.layout import make_ascend_nz_layout
+from testing.ascend._ir import calls, copy, kernel, schedule, seq
+from testing.ascend.auto_schedule._scheduled_ir import unit
+from tvm import tirx
 
 
 def _events(program, disable_reuse=False, auto_schedule=False):
@@ -15,6 +18,69 @@ def _events(program, disable_reuse=False, auto_schedule=False):
         return {
             (operation, call.args[0].value) for operation in ("set", "wait") for call in calls(after, "tl.ascend_" + operation + "_flag")
         }
+
+
+@pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])
+@pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
+@pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
+def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope):
+    src = tirx.decl_buffer((48, 16), "bfloat16", name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope=scope)
+    load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
+    padding = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
+    fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
+    # The copy normalizer exposes its two transferred row16 blocks. Fill
+    # keeps the explicitly requested eight rows.
+    before = kernel(
+        seq(fill, load) if fill_first else seq(load, fill),
+        buffers=[src, dst],
+        annotations={"layout_map": {src: make_ascend_nz_layout(src), dst: make_ascend_nz_layout(dst)}},
+    )
+    before = transform.NormalizeAscendFractalStorage()(before)
+    after = transform.InsertSync()(before)
+    pipe = "MTE2_MTE1" if fill_first else "MTE1_MTE2"
+    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
+    if row == 24:
+        assert len(events) == 2
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+    else:
+        assert not events
+
+
+def test_l0_load_matches_explicit_transfer_region_conflicts():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            left = T.alloc_l1((32, 16), "bfloat16")
+            right = T.alloc_l1((32, 16), "bfloat16")
+            dst = T.alloc_l0a((32, 16), "bfloat16")
+            T.assume_conflict(left[:24, :], right[:32, :], cross=False)
+            with T.Stage(0):
+                T.fill(left[:24, :], 0)
+                # The source is already prepared at this sync-only boundary.
+                T.copy(right[:32, :], dst[:32, :])
+
+    events = _events(main)
+    assert ("set", "MTE2_MTE1") in events
+    assert ("wait", "MTE2_MTE1") in events
+
+
+@pytest.mark.parametrize("fill_first", [False, True])
+@pytest.mark.parametrize("row", [16, 24], ids=["overlap", "adjacent"])
+def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
+    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
+    # A pointer consumer declares 24 rows. Unlike the L1->L0 load above,
+    # this access contract does not imply a whole-fractal read of 32 rows.
+    read = unit(tirx.Evaluate(tirx.call_extern("int32", "read_l1", T.access_ptr(src[0, 0], "r", 24, 16))), core=2)
+    region = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
+    fill = unit(tirx.Evaluate(T.fill(region, 0)), core=2)
+    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[src])
+    after = transform.InsertSync()(before)
+    pipe = "MTE2_S" if fill_first else "S_MTE2"
+    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
+    assert len(events) == (2 if row == 16 else 0)
+    if events:
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 
 
 @pytest.mark.parametrize("disable_reuse", [False, True])

@@ -40,6 +40,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include "ascend/layout/ascend_layouts.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
@@ -118,7 +119,9 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
                         const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
-                        const ConflictHintList &root_conflicts) {
+                        const ConflictHintList &root_conflicts,
+                        Optional<PrimExpr> a_pitch,
+                        Optional<PrimExpr> b_pitch) {
   const bool cross = offset != 0;
   if (cross && loop == nullptr)
     return false;
@@ -210,21 +213,35 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   }
   loop_ctx.Merge(a_local_ctx).Merge(b_local_ctx).Populate(ana);
 
-  // Freshen mutable reads (BufferLoads etc.) inline in the region bounds, per
-  // side: a read written verbatim in both bounds is not provably equal across
-  // the two access points (a store may sit between them), so it must become an
-  // independent unknown on each side.
   FreshenMutableReads freshen_a(FreshenMutableReads::Mode::kSnapshot);
   FreshenMutableReads freshen_b(FreshenMutableReads::Mode::kSnapshot);
+  size_t compared_dims = ndim;
+  const Buffer &buffer = a_region->buffer;
+  if (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer)) {
+    bool same_pitch = false;
+    if (a_pitch.defined() && b_pitch.defined()) {
+      PrimExpr equal = freshen_a(Substitute(a_pitch.value(), a_sub)) ==
+                       freshen_b(Substitute(b_pitch.value(), b_sub));
+      same_pitch = ana.CanProve(equal) || ana.z3_prover.CanProve(equal);
+    }
+    // L0 matrix regions may overlap unless their pitches are provably equal.
+    if (!same_pitch)
+      compared_dims = ndim > 2 ? ndim - 2 : 0;
+  }
   PrimExpr any_dim_disjoint = Bool(false);
-  for (size_t i = 0; i < ndim; ++i) {
+  for (size_t i = 0; i < compared_dims; ++i) {
     PrimExpr a_min = freshen_a(Substitute(a_rng[i]->min, a_sub));
-    PrimExpr a_max =
-        freshen_a(Substitute(a_rng[i]->min + a_rng[i]->extent - 1, a_sub));
+    PrimExpr a_extent = freshen_a(Substitute(a_rng[i]->extent, a_sub));
     PrimExpr b_min = freshen_b(Substitute(b_rng[i]->min, b_sub));
-    PrimExpr b_max =
-        freshen_b(Substitute(b_rng[i]->min + b_rng[i]->extent - 1, b_sub));
-    any_dim_disjoint = any_dim_disjoint || (a_max < b_min) || (b_max < a_min);
+    PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
+    // A half-open endpoint can exceed the int32 index range by one even
+    // for an ordinary single-element access.
+    PrimExpr a_end =
+        cast(DataType::Int(64), a_min) + cast(DataType::Int(64), a_extent);
+    PrimExpr b_end =
+        cast(DataType::Int(64), b_min) + cast(DataType::Int(64), b_extent);
+    any_dim_disjoint = any_dim_disjoint || (a_extent <= 0) || (b_extent <= 0) ||
+                       (a_end <= b_min) || (b_end <= a_min);
   }
   any_dim_disjoint = ana.Simplify(any_dim_disjoint);
   // Raw Z3 as a fallback catches the infeasible-context case that Analyzer's
@@ -404,8 +421,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
                 if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                        rhs.task->outer_ctx, rhs.region, loop, d,
-                                       /*num_storage_owners=*/0,
-                                       root_conflicts)) {
+                                       /*num_storage_owners=*/0, root_conflicts,
+                                       lhs.task->GetL0Pitch(lhs_storage),
+                                       rhs.task->GetL0Pitch(rhs_storage))) {
                   add_pair(storage, d, lhs.task, rhs.task);
                   break;
                 }
@@ -420,7 +438,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
               if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                      rhs.task->outer_ctx, rhs.region, loop,
                                      distance, get_num_storage_owners(storage),
-                                     root_conflicts)) {
+                                     root_conflicts,
+                                     lhs.task->GetL0Pitch(lhs_storage),
+                                     rhs.task->GetL0Pitch(rhs_storage))) {
                 add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
                          rhs.task,
                          owner_exclusion ? DependencyKind::kOwnerExclusion
