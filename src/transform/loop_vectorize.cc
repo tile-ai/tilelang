@@ -66,16 +66,21 @@ PrimExpr GetLoopIndex(const PrimExpr &min, const PrimExpr &step,
   return cast(ordinal.dtype(), min) + ordinal * cast(ordinal.dtype(), step);
 }
 
-Optional<PrimExpr> GetLoopTripCount(const PrimExpr &extent,
-                                    const PrimExpr &step,
-                                    arith::Analyzer *analyzer) {
+// Compute the iteration count for min, min + step, ... < min + extent.
+// extent is the index span: [2, 9) with step 2 has extent 7 but 4 iterations.
+// For a positive extent, the count is ceil(extent / step), independent of min.
+// The extent may be symbolic. Return nullopt unless step simplifies to a
+// positive constant. Callers handle non-positive extents (empty loops).
+Optional<PrimExpr> ComputeLoopTripCount(const PrimExpr &extent,
+                                        const PrimExpr &step,
+                                        arith::Analyzer *analyzer) {
   PrimExpr simplified_step = analyzer->Simplify(cast(extent.dtype(), step));
   const int64_t *step_value = as_const_int(simplified_step);
   if (!step_value || *step_value <= 0) {
     return std::nullopt;
   }
-  // Unlike (extent + step - 1) / step, this does not overflow near the
-  // index dtype's upper bound. A non-positive extent is handled by the caller.
+  // Use the quotient and remainder to round up without the intermediate
+  // addition in (extent + step - 1) / step, which can overflow the index dtype.
   return analyzer->Simplify(
       floordiv(extent, simplified_step) +
       cast(extent.dtype(), floormod(extent, simplified_step) != 0));
@@ -557,7 +562,7 @@ private:
     });
 
     if (!contains_nested_for) {
-      Optional<PrimExpr> trips = GetLoopTripCount(
+      Optional<PrimExpr> trips = ComputeLoopTripCount(
           node->extent, GetLoopStep(inner_for_.value()), analyzer_);
       const int64_t *trip_count =
           trips.defined() ? as_const_int(trips.value()) : nullptr;
@@ -1166,7 +1171,7 @@ private:
       auto old_var = fnode->loop_var;
       PrimExpr step = GetLoopStep(fnode);
       Optional<PrimExpr> trips =
-          GetLoopTripCount(fnode->extent, step, analyzer_);
+          ComputeLoopTripCount(fnode->extent, step, analyzer_);
       ICHECK(trips.defined())
           << "Unsupported vectorized loop domain: " << fnode;
       auto extent_ptr = as_const_int(trips.value());
@@ -1332,7 +1337,7 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
   if (target_vectorized_size == 1) {
     return true;
   }
-  Optional<PrimExpr> trips = GetLoopTripCount(extent, step, analyzer);
+  Optional<PrimExpr> trips = ComputeLoopTripCount(extent, step, analyzer);
   if (!trips.defined()) {
     return false;
   }
@@ -1356,7 +1361,7 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
   if (target_vectorized_size == 1) {
     return true;
   }
-  Optional<PrimExpr> trips = GetLoopTripCount(extent, step, analyzer);
+  Optional<PrimExpr> trips = ComputeLoopTripCount(extent, step, analyzer);
   if (!trips.defined()) {
     return false;
   }
