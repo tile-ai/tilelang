@@ -332,7 +332,7 @@ private:
     // a cast buffer for it, so classify it separately from memory accesses.
     // Stores are never broadcasts: same-address lane stores carry ordering
     // semantics and are either marked must-scalarize or kept as memory access.
-    if (info.is_store || info.indices.empty() || !inner_for_.defined()) {
+    if (info.is_store || info.indices.empty()) {
       return false;
     }
     Array<PrimExpr> strides = GetBufferStrides(info.buffer);
