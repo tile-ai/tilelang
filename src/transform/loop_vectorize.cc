@@ -363,15 +363,15 @@ private:
     if (info.is_store || info.indices.empty() || !inner_for_.defined()) {
       return false;
     }
-    const For &loop = inner_for_.value();
     Array<PrimExpr> strides = GetBufferStrides(info.buffer);
     PrimExpr elem_offset = 0;
     for (size_t i = 0; i < info.indices.size(); ++i) {
       elem_offset += info.indices[i] * strides[i];
     }
     return IsExprInvariantInVectorBoundary(
-        elem_offset, loop->loop_var, loop->extent, initial_vector_size_,
-        analyzer_, loop->min, GetLoopStep(loop));
+        elem_offset, inner_for_->loop_var, inner_for_->extent,
+        initial_vector_size_, analyzer_, inner_for_->min,
+        GetLoopStep(inner_for_));
   }
 
   VectorConstraintKind ClassifyConstraint(const BufferVectorInfo &info) const {
@@ -471,7 +471,6 @@ private:
     // The simple memory strategy may select a width larger than a deferred
     // local/fragment or broadcast-load constraint. Re-check its indices at the
     // selected boundary and fold the original width back in when needed.
-    const For &loop = inner_for_.value();
     for (const BufferVectorInfo &info : accesses) {
       if (vector_size <= info.vector_size || info.indices.empty()) {
         continue;
@@ -481,9 +480,10 @@ private:
       for (size_t i = 0; i < info.indices.size(); ++i) {
         elem_offset += info.indices[i] * strides[i];
       }
-      if (!IndicesCanVectorize(elem_offset, loop->loop_var, loop->extent,
-                               vector_size, analyzer_, /*allow_broadcast=*/true,
-                               loop->min, GetLoopStep(loop))) {
+      if (!IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                               inner_for_->extent, vector_size, analyzer_,
+                               /*allow_broadcast=*/true, inner_for_->min,
+                               GetLoopStep(inner_for_))) {
         int old_vector_size = vector_size;
         vector_size = arith::ZeroAwareGCD(vector_size, info.vector_size);
         if (verbose) {
@@ -560,8 +560,8 @@ private:
     });
 
     if (!contains_nested_for) {
-      PrimExpr trips = ComputeLoopTripCount(
-          node->extent, GetLoopStep(inner_for_.value()), analyzer_);
+      PrimExpr trips = ComputeLoopTripCount(node->extent,
+                                            GetLoopStep(inner_for_), analyzer_);
       const int64_t *trip_count = as_const_int(trips);
       // Splitting currently requires a static, positive number of iterations.
       if (!trip_count || *trip_count <= 0) {
@@ -756,7 +756,6 @@ private:
     auto check_buffer_access_invariant = [&](int target_vec_size) -> bool {
       if (!inner_for_.defined())
         return true;
-      const For &loop = inner_for_.value();
       bool all_invariant = true;
       PostOrderVisit(GetRef<PrimExpr>(node), [&](const ObjectRef &obj) {
         if (!all_invariant)
@@ -770,8 +769,9 @@ private:
             elem_offset += transformed_indices[i] * strides[i];
           }
           if (!IsExprInvariantInVectorBoundary(
-                  elem_offset, loop->loop_var, loop->extent, target_vec_size,
-                  analyzer_, loop->min, GetLoopStep(loop))) {
+                  elem_offset, inner_for_->loop_var, inner_for_->extent,
+                  target_vec_size, analyzer_, inner_for_->min,
+                  GetLoopStep(inner_for_))) {
             all_invariant = false;
           }
         } else if (auto *store = obj.as<BufferStoreNode>()) {
@@ -783,8 +783,9 @@ private:
             elem_offset += transformed_indices[i] * strides[i];
           }
           if (!IsExprInvariantInVectorBoundary(
-                  elem_offset, loop->loop_var, loop->extent, target_vec_size,
-                  analyzer_, loop->min, GetLoopStep(loop))) {
+                  elem_offset, inner_for_->loop_var, inner_for_->extent,
+                  target_vec_size, analyzer_, inner_for_->min,
+                  GetLoopStep(inner_for_))) {
             all_invariant = false;
           }
         } else if (auto *call = obj.as<CallNode>()) {
@@ -794,8 +795,9 @@ private:
               call->args.size() >= 3) {
             PrimExpr offset = call->args[2];
             if (!IsExprInvariantInVectorBoundary(
-                    offset, loop->loop_var, loop->extent, target_vec_size,
-                    analyzer_, loop->min, GetLoopStep(loop))) {
+                    offset, inner_for_->loop_var, inner_for_->extent,
+                    target_vec_size, analyzer_, inner_for_->min,
+                    GetLoopStep(inner_for_))) {
               all_invariant = false;
             }
           }
@@ -820,7 +822,6 @@ private:
     ICHECK(inner_for_.defined())
         << "Atomic vectorization analysis requires a loop context";
 
-    const For &loop = inner_for_.value();
     DataType dtype;
     String storage_scope;
     PrimExpr offset;
@@ -854,9 +855,10 @@ private:
     // its destination cannot broadcast. Search smaller widths here, before
     // partitioning/layout choices and before rewriting the loop body.
     while (vector_size > 1 &&
-           !IndicesCanVectorize(
-               offset, loop->loop_var, loop->extent, vector_size, analyzer_,
-               /*allow_broadcast=*/false, loop->min, GetLoopStep(loop))) {
+           !IndicesCanVectorize(offset, inner_for_->loop_var,
+                                inner_for_->extent, vector_size, analyzer_,
+                                /*allow_broadcast=*/false, inner_for_->min,
+                                GetLoopStep(inner_for_))) {
       vector_size /= 2;
     }
     return vector_size;
@@ -866,7 +868,6 @@ private:
     if (!inner_for_.defined()) {
       return;
     }
-    const For &loop = inner_for_.value();
     int condition_vector_size = loop_extent_vector_size_;
     PrimExpr condition = cond;
     if (condition_vector_size > 1) {
@@ -875,8 +876,9 @@ private:
     }
     while (condition_vector_size > 1 &&
            !IsExprInvariantInVectorBoundary(
-               condition, loop->loop_var, loop->extent, condition_vector_size,
-               analyzer_, loop->min, GetLoopStep(loop))) {
+               condition, inner_for_->loop_var, inner_for_->extent,
+               condition_vector_size, analyzer_, inner_for_->min,
+               GetLoopStep(inner_for_))) {
       condition_vector_size /= 2;
     }
     buffer_vector_infos_.push_back(
@@ -888,7 +890,6 @@ private:
     if (!inner_for_.defined()) {
       return;
     }
-    const For &loop = inner_for_.value();
     ICHECK(node->args.size() >= 3U)
         << "tvm_access_ptr requires at least 3 args";
 
@@ -953,10 +954,10 @@ private:
       offset_s = SimplifyExprForAnalyzer(offset, access_vec_size, analyzer_);
     }
     while (access_vec_size > 1 &&
-           !IndicesCanVectorize(offset_s, loop->loop_var, loop->extent,
-                                access_vec_size, analyzer_,
-                                /*allow_broadcast=*/true, loop->min,
-                                GetLoopStep(loop))) {
+           !IndicesCanVectorize(offset_s, inner_for_->loop_var,
+                                inner_for_->extent, access_vec_size, analyzer_,
+                                /*allow_broadcast=*/true, inner_for_->min,
+                                GetLoopStep(inner_for_))) {
       access_vec_size /= 2;
     }
     // Record as a memory-like constraint if we can resolve the buffer.
@@ -1019,14 +1020,14 @@ private:
     // instruction. Halve the vector size until invariance holds, mirroring
     // the call-node fallback above.
     if (inner_for_.defined()) {
-      const For &loop = inner_for_.value();
       auto it = node->annotations.find("rbits");
       if (it != node->annotations.end()) {
         PrimExpr rbits = Downcast<PrimExpr>((*it).second);
         while (cast_vector_size > 1 &&
                !IsExprInvariantInVectorBoundary(
-                   rbits, loop->loop_var, loop->extent, cast_vector_size,
-                   analyzer_, loop->min, GetLoopStep(loop))) {
+                   rbits, inner_for_->loop_var, inner_for_->extent,
+                   cast_vector_size, analyzer_, inner_for_->min,
+                   GetLoopStep(inner_for_))) {
           cast_vector_size /= 2;
         }
       }
@@ -1044,7 +1045,6 @@ private:
     if (!inner_for_.defined())
       return {initial_vector_size_, /*requires_scalarization=*/false};
 
-    const For &loop = inner_for_.value();
     int buffer_vec_size = loop_extent_vector_size_;
 
     // Transform indices using layout_map if present
@@ -1070,8 +1070,8 @@ private:
     int try_vec_size = buffer_vec_size;
     while (try_vec_size >= min_vec_size) {
       is_invariant = IsExprInvariantInVectorBoundary(
-          elem_offset, loop->loop_var, loop->extent, try_vec_size, analyzer_,
-          loop->min, GetLoopStep(loop));
+          elem_offset, inner_for_->loop_var, inner_for_->extent, try_vec_size,
+          analyzer_, inner_for_->min, GetLoopStep(inner_for_));
       if (is_invariant) {
         buffer_vec_size = try_vec_size;
         break;
@@ -1085,7 +1085,7 @@ private:
 
     // 3. If element offset is independent with loop_var, ignore it.
     bool is_independent =
-        CanProveIndependent(elem_offset, loop->loop_var, analyzer_);
+        CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
     // For ordinary BufferStore, if indices are invariant or independent with
     // loop_var, vectorization would turn scalar lane stores into a broadcast
     // store. Keep those scalar. This is also the guard that keeps reducer
@@ -1102,10 +1102,10 @@ private:
     }
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
-           !IndicesCanVectorize(elem_offset, loop->loop_var, loop->extent,
-                                buffer_vec_size, analyzer_,
-                                /*allow_broadcast=*/true, loop->min,
-                                GetLoopStep(loop))) {
+           !IndicesCanVectorize(elem_offset, inner_for_->loop_var,
+                                inner_for_->extent, buffer_vec_size, analyzer_,
+                                /*allow_broadcast=*/true, inner_for_->min,
+                                GetLoopStep(inner_for_))) {
       buffer_vec_size /= 2;
     }
     return {buffer_vec_size, /*requires_scalarization=*/false};
@@ -1146,7 +1146,7 @@ private:
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
 
-  Optional<For> inner_for_;
+  For inner_for_;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
@@ -1162,8 +1162,7 @@ private:
   Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = GetRef<For>(node);
     auto ret = StmtExprMutator::VisitStmt_(node);
-    if (inner_for_.value().same_as(
-            GetRef<For>(node))) { // rewrite the innermost loop
+    if (inner_for_.same_as(GetRef<For>(node))) { // rewrite the innermost loop
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
       PrimExpr step = GetLoopStep(fnode);
@@ -1216,7 +1215,7 @@ private:
     }
   }
 
-  Optional<For> inner_for_;
+  For inner_for_;
   const int vector_size_;
   arith::Analyzer *analyzer_;
 };
