@@ -46,7 +46,7 @@ def _codegen(body_builder):
         .with_attr("global_symbol", "main")
         .with_attr("target", tvm.target.Target({"kind": "ascend", "keys": ["pto"]}))
     )
-    build = tvm.get_global_func("target.build.tilelang_pto")
+    build = tvm.get_global_func("target.build.tilelang_pto_without_compile")
     source = build(tvm.IRModule({"main": func}), tvm.target.Target({"kind": "ascend", "keys": ["pto"]})).inspect_source()
     ast.parse(source)
     return source
