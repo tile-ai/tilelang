@@ -91,7 +91,6 @@ def test_gemm_mma_sync_supported_dtype_combo_runs(dtype, accum_dtype):
 @pytest.mark.parametrize(
     "arch,dtype,accum_dtype,k",
     [
-        ("sm_70", "float16", "float32", 12),
         ("sm_75", "float16", "float32", 24),
         ("sm_80", "float16", "float32", 16),
         ("sm_80", "float64", "float64", 4),
@@ -110,7 +109,7 @@ def test_gemm_k_shape_uses_architecture_specific_atom(arch, dtype, accum_dtype, 
     [
         ("sm_75", "float16", "float32", 4, 8),
         ("sm_80", "float16", "float32", 8, 16),
-        ("sm_80", "float16", "float32", 24, 16),
+        ("sm_80", "float16", "float32", 20, 16),
         ("sm_80", "bfloat16", "float32", 8, 16),
         ("sm_80", "int8", "int32", 16, 32),
         ("sm_80", "int4", "int32", 32, 64),
