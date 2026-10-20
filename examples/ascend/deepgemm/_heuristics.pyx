@@ -51,6 +51,14 @@ cdef struct GemmDesc:
     int64_t num_cores
     int64_t outer_stride_a
     int64_t outer_stride_b
+    int64_t outer_stride_d
+    int64_t output_alignment
+    bint compiled_k
+    bint compiled_n
+    bint identity_epilogue
+    bint with_bias
+    int64_t stride_batch_a
+    int64_t stride_batch_b
 
 
 cdef struct GemmConfig:
@@ -69,11 +77,18 @@ cdef struct GemmConfig:
     int64_t l2_ctrl_b
     int64_t l2_ctrl_store_cd
     int64_t num_blocks
+    bint direct_store
+    bint dual_aiv_dequant
+    bint resident_a
+    bint resident_b
+    bint resident_sf
 
 
 cdef struct GemmDtype:
     int64_t elem_bits
     int64_t epilogue_elem_bits
+    int64_t output_elem_bits
+    bint with_fp8_cast
     bint has_sf
     bint dequant_b
 
@@ -92,6 +107,8 @@ cdef struct HWDesc:
     int64_t l1_to_l0_bytes_per_cycle
     int64_t l1_to_l0_sf_bytes_per_cycle
     int64_t ub_to_l1_bytes_per_cycle
+    int64_t l0c_to_ub_bytes_per_cycle
+    int64_t fp4_decode_bytes_per_cycle
     int64_t num_pipe_events
     int64_t num_intra_block_events
     int64_t num_ai_cores
@@ -116,6 +133,8 @@ cdef inline HWDesc get_hw_desc() noexcept:
         l1_to_l0_bytes_per_cycle=256,
         l1_to_l0_sf_bytes_per_cycle=32,
         ub_to_l1_bytes_per_cycle=128,
+        l0c_to_ub_bytes_per_cycle=128,
+        fp4_decode_bytes_per_cycle=64,
         num_pipe_events=8,
         num_intra_block_events=16,
         num_ai_cores=32,
@@ -128,11 +147,12 @@ cdef inline HWDesc get_hw_desc() noexcept:
 
 cdef inline GemmDtype get_gemm_dtype(object desc):
     cdef GemmDtype dtype
-    # FP8 output requires an output-SF epilogue that these kernels do not expose.
-    if desc.cd_dtype not in ("bfloat16", "float32"):
+    if desc.cd_dtype not in ("bfloat16", "float32", "float8_e4m3fn"):
         raise ValueError(f"Unsupported output dtype: {desc.cd_dtype}")
-    dtype = GemmDtype(elem_bits=0, epilogue_elem_bits=32, has_sf=False, dequant_b=False)
-    dtype.epilogue_elem_bits = 32 if desc.with_alpha or desc.cd_dtype != "bfloat16" else 16
+    dtype = GemmDtype(elem_bits=0, epilogue_elem_bits=32, output_elem_bits=32, with_fp8_cast=False, has_sf=False, dequant_b=False)
+    dtype.with_fp8_cast = desc.cd_dtype == "float8_e4m3fn"
+    dtype.output_elem_bits = 8 if dtype.with_fp8_cast else 16 if desc.cd_dtype == "bfloat16" else 32
+    dtype.epilogue_elem_bits = 16 if dtype.with_fp8_cast or (desc.cd_dtype == "bfloat16" and desc.epilogue_kind == "identity") else 32
     if desc.a_dtype == "bfloat16" and desc.b_dtype == "bfloat16":
         dtype.elem_bits = 16
     elif desc.a_dtype == "float4_e2m1fn_x2" and desc.b_dtype == "float4_e2m1fn_x2":
@@ -232,6 +252,7 @@ cdef inline int64_t load_time_ns(
     cdef HWDesc hw
     cdef int64_t gm_time, l2_bytes, l2_time, wave_cores
     hw = get_hw_desc()
+    total_gm_bytes = min(total_gm_bytes, total_load_bytes)
     l2_bytes = total_load_bytes - total_gm_bytes
     wave_cores = num_waves * hw.num_ai_cores
     gm_time = ceil_mul_div(total_gm_bytes, wave_cores, num_blocks * num_batches * hw.gm_bw_gbps)
@@ -269,7 +290,7 @@ cdef inline bint make_gemm_candidate(
 
     num_l0_stages = 2
     align_m = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_a) else FRAC_MN
-    align_n = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_b) else FRAC_MN
+    align_n = 64 if d.with_bias else 128 if dtype.with_fp8_cast else get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_b) else FRAC_MN
     for split in range(3):
         split_m = 2 if split == 2 else 1
         split_n = 2 if split == 1 else 1
@@ -319,10 +340,10 @@ cdef inline bint make_gemm_candidate(
     num_blocks = ceil_div(d.m, block_m) * ceil_div(d.n, block_n) * num_batches
     num_epilogue_stages = min(
         hw.num_intra_block_events,
-        UB_SIZE_BYTES // (mad_m * mad_n * dtype.epilogue_elem_bits // 8),
+        UB_SIZE_BYTES // (mad_m * mad_n * dtype.epilogue_elem_bits // 8 + (block_n * dtype.output_elem_bits // 8 if d.with_bias else 0) + (mad_m * mad_n // 32 if dtype.with_fp8_cast else 0)),
         ceil_div(num_blocks, d.num_cores) * num_cd_stages,
     )
-    if num_epilogue_stages < num_cd_stages:
+    if num_epilogue_stages * (1 if dtype.dequant_b else 2) < num_cd_stages:
         return False
 
     num_m_blocks, num_n_blocks = ceil_div(d.m, block_m), ceil_div(d.n, block_n)
@@ -342,6 +363,9 @@ cdef inline bint make_gemm_candidate(
         l2_ctrl_b=L2_LD_NOTALLOC_KEEP if num_m_blocks <= 2 and num_n_blocks > num_m_blocks else L2_LD_NORMAL_FV,
         l2_ctrl_store_cd=L2_ST_NORMAL_FV,
         num_blocks=d.num_cores,
+        direct_store=False,
+        dual_aiv_dequant=False,
+        resident_a=False, resident_b=False, resident_sf=False,
     )
 
     return True
@@ -399,6 +423,7 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     cdef int64_t num_waves, prefetch_compute_ns, prefetch_k, reuse_b, sf_bytes, sf_overlap_time_ns, sf_row_bytes
     cdef int64_t sf_startup_time_ns, sfa_block_bytes, sfb_block_bytes, swizzle_a_bytes, swizzle_b_bytes, tail_a_bytes
     cdef int64_t tail_compute_m, tail_compute_ns, tail_m, tail_memory_delay_ns, tail_memory_ns, tail_sfa_bytes
+    cdef int64_t wa_block_bytes, wb_block_bytes, a_load_blocks, b_load_blocks, sfa_load_blocks, sfb_load_blocks
     hw = get_hw_desc()
     m, n = d.m, d.n
     k = d.expected_k if is_k_grouped(d.gemm_type) else d.k
@@ -420,8 +445,12 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     load_m = num_m_blocks * block_m if is_m_grouped(d.gemm_type) else m
     sfa_block_bytes = sf_load_bytes(block_m, k, load_m, dtype.has_sf, c.block_k)
     sfb_block_bytes = sf_load_bytes(block_n, k, n, dtype.has_sf, c.block_k)
-    a_block_bytes = gm_load_bytes(block_m, k, load_m, dtype.elem_bits, d.major_a, d.outer_stride_a, c.block_k) + sfa_block_bytes
-    b_block_bytes = gm_load_bytes(block_n, k, n, b_elem_bits, d.major_b, d.outer_stride_b, c.block_k) + sfb_block_bytes
+    wa_block_bytes = gm_load_bytes(block_m, k, load_m, dtype.elem_bits, d.major_a, d.outer_stride_a, c.block_k)
+    wb_block_bytes = gm_load_bytes(block_n, k, n, b_elem_bits, d.major_b, d.outer_stride_b, c.block_k)
+    if dtype.elem_bits == 16 and c.resident_a and is_k_major(d.major_a):
+        wa_block_bytes = block_m * align(k * 2, hw.l2_sector_bytes)
+    a_block_bytes = wa_block_bytes + sfa_block_bytes
+    b_block_bytes = wb_block_bytes + sfb_block_bytes
     l2_a_row_bytes = 0 if c.l2_ctrl_a == L2_LD_NOTALLOC_KEEP else sf_row_bytes + ceil_div(k * dtype.elem_bits, 8)
     l2_b_row_bytes = 0 if c.l2_ctrl_b == L2_LD_NOTALLOC_KEEP else sf_row_bytes + ceil_div(k * b_elem_bits, 8)
 
@@ -443,15 +472,28 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     if c.l2_ctrl_b == L2_LD_NOTALLOC_KEEP:
         num_b_gm_blocks = num_blocks * num_batches
 
+    a_load_blocks = min(num_blocks, d.num_cores) * num_batches if c.resident_a and num_m_blocks == 1 else num_blocks * num_batches
+    b_load_blocks = (min(num_blocks, d.num_cores * (d.num_groups if is_m_grouped(d.gemm_type) else 1)) * num_batches
+                     if c.resident_b and num_n_blocks == 1 else num_blocks * num_batches)
+    sfa_load_blocks = a_load_blocks if c.resident_sf else num_blocks * num_batches
+    sfb_load_blocks = b_load_blocks if c.resident_sf else num_blocks * num_batches
+    # Broadcast operands can be retained across batches; SF is batch-specific.
+    if dtype.has_sf and is_batched(d.gemm_type):
+        if c.resident_a and d.stride_batch_a == 0:
+            a_load_blocks //= num_batches
+        if c.resident_b and d.stride_batch_b == 0:
+            b_load_blocks //= num_batches
     load_a_time_ns = load_time_ns(
-        num_a_gm_blocks * a_block_bytes, num_blocks * num_batches * a_block_bytes, num_waves, num_blocks, num_batches
+        num_a_gm_blocks * a_block_bytes, a_load_blocks * wa_block_bytes + sfa_load_blocks * sfa_block_bytes,
+        num_waves, num_blocks, num_batches,
     )
     load_b_time_ns = load_time_ns(
-        num_b_gm_blocks * b_block_bytes, num_blocks * num_batches * b_block_bytes, num_waves, num_blocks, num_batches
+        num_b_gm_blocks * b_block_bytes, b_load_blocks * wb_block_bytes + sfb_load_blocks * sfb_block_bytes,
+        num_waves, num_blocks, num_batches,
     )
     contiguous_bytes = (block_n if is_k_major(d.major_b) else c.block_k) // 2 * hw.fractal_row_bytes
     dequant_bytes = (
-        num_waves * block_n * k * dtype.elem_bits // 8 * align(contiguous_bytes, hw.ub_to_l1_bytes_per_cycle) // contiguous_bytes
+        ceil_div(b_load_blocks, d.num_cores) * block_n * k * dtype.elem_bits // 8 * align(contiguous_bytes, hw.ub_to_l1_bytes_per_cycle) // contiguous_bytes
         if dtype.dequant_b
         else 0
     )
@@ -494,7 +536,8 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     first_sf_k = min(k, c.block_k * c.sf_k_blocks)
     first_sfa_bytes = sf_load_bytes(block_m, first_sf_k, load_m, dtype.has_sf, c.block_k)
     first_sfb_bytes = sf_load_bytes(block_n, first_sf_k, n, dtype.has_sf, c.block_k)
-    first_a_bytes = gm_load_bytes(block_m, first_k, load_m, dtype.elem_bits, d.major_a, d.outer_stride_a, c.block_k) + first_sfa_bytes
+    first_a_bytes = (a_block_bytes if dtype.elem_bits == 16 and c.resident_a else
+                     gm_load_bytes(block_m, first_k, load_m, dtype.elem_bits, d.major_a, d.outer_stride_a, c.block_k) + first_sfa_bytes)
     first_b_bytes = gm_load_bytes(block_n, first_k, n, b_elem_bits, d.major_b, d.outer_stride_b, c.block_k) + first_sfb_bytes
     first_stage_time_ns = (
         ceil_div(load_a_time_ns * first_a_bytes, a_block_bytes)
@@ -514,7 +557,7 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     num_l0b_loads = 1 if block_n == c.mad_n and c.block_k <= c.mad_k * c.num_l0_stages else block_m // c.mad_m
     num_l0_rows = num_waves * (block_m * num_l0a_loads + block_n * num_l0b_loads)
     a_bytes = num_waves * block_m * num_l0a_loads * k * dtype.elem_bits // 8
-    b_bytes = num_waves * block_n * num_l0b_loads * k * dtype.elem_bits // 8
+    b_bytes = (1 if dtype.elem_bits == 16 and c.resident_b else num_waves) * block_n * num_l0b_loads * k * dtype.elem_bits // 8
     a_contiguous_bytes = (c.mad_m if is_k_major(d.major_a) else c.mad_k) * hw.fractal_row_bytes
     b_contiguous_bytes = (c.mad_n if is_k_major(d.major_b) else c.mad_k) * hw.fractal_row_bytes
     ab_bytes = (
@@ -531,17 +574,118 @@ cdef inline int64_t get_gemm_cost(GemmDesc d, GemmDtype dtype, GemmConfig c, Gem
     return max(compute_bound_time_ns, memory_time_ns + last_compute_time_ns)
 
 
+cdef inline int64_t get_gemm_output_cost(GemmDesc d, GemmDtype dtype, GemmConfig c) noexcept:
+    cdef HWDesc hw = get_hw_desc()
+    cdef int64_t waves = ceil_div(ceil_div(d.m, c.block_m) * ceil_div(d.n, c.block_n), d.num_cores)
+    cdef int64_t values = min(d.m, c.block_m) * min(d.n, c.block_n)
+    cdef int64_t fix_ns = ceil_div(values * dtype.epilogue_elem_bits // 8 * 1000, hw.l0c_to_ub_bytes_per_cycle * hw.aic_clock_mhz)
+    cdef int64_t gm_bytes = values * dtype.output_elem_bits // 8 * (1 + d.acc) + (values // 32 if dtype.with_fp8_cast else 0)
+    cdef int64_t gm_ns = ceil_div(gm_bytes * hw.num_ai_cores, hw.gm_bw_gbps)
+    cdef int64_t bias_bytes = (1 if dtype.dequant_b else 2) * min(d.n, c.block_n) * dtype.output_elem_bits // 8 if d.with_bias else 0
+    cdef int64_t bias_ns = ceil_div(bias_bytes * hw.num_ai_cores, hw.gm_bw_gbps)
+    cdef int64_t vector_values = align(min(d.m, c.block_m), c.mad_m) * align(min(d.n, c.block_n), c.mad_n)
+    cdef int64_t vector_ns = ceil_div(ceil_div(vector_values * 4, 256) * 1000, hw.aic_clock_mhz) if d.with_bias else 0
+    if d.with_bias and c.num_epilogue_stages >= 2 and waves >= 2:
+        return waves * max(fix_ns, bias_ns + gm_ns + vector_ns)
+    return waves * (max(fix_ns, gm_ns) if c.direct_store else max(fix_ns, bias_ns) + gm_ns + vector_ns)
+
+
+cdef inline int64_t get_gemm_refinement_cost(GemmDesc d, GemmDtype dtype, GemmConfig c):
+    cdef HWDesc hw = get_hw_desc()
+    cdef GemmComputeCost compute = get_gemm_compute_cost(d, dtype, c.block_m, c.block_n)
+    cdef int64_t cost = get_gemm_cost(d, dtype, c, compute, _INT64_MAX)
+    cdef int64_t waves, loads, blocks, batches, decoded_bytes, decode_ns, store_ns, b_load_blocks
+    if dtype.elem_bits == 16 and d.m < c.block_m:
+        waves = ceil_div(ceil_div(d.n, c.block_n), d.num_cores)
+        loads = (1 if c.resident_a else waves * ceil_div(d.k, c.block_k)) + waves * ceil_div(d.k, c.block_k)
+        cost += ceil_div(loads * 64 * 1000, hw.aic_clock_mhz)
+    if dtype.dequant_b:
+        blocks = ceil_div(d.m, c.block_m) * ceil_div(d.n, c.block_n)
+        batches = d.num_groups if is_batched(d.gemm_type) or is_k_grouped(d.gemm_type) else 1
+        b_load_blocks = (min(blocks, d.num_cores * (d.num_groups if is_m_grouped(d.gemm_type) else 1)) * batches
+                         if c.resident_b else blocks * batches)
+        if c.resident_b and is_batched(d.gemm_type) and d.stride_batch_b == 0:
+            b_load_blocks //= batches
+        decoded_bytes = ceil_div(b_load_blocks, d.num_cores) * c.block_n * (d.expected_k if is_k_grouped(d.gemm_type) else d.k)
+        decode_ns = ceil_div(decoded_bytes * 1000, (2 if c.dual_aiv_dequant else 1) * hw.fp4_decode_bytes_per_cycle * hw.aic_clock_mhz)
+        store_ns = ceil_div(decoded_bytes * 1000, hw.ub_to_l1_bytes_per_cycle * hw.aic_clock_mhz)
+        cost += max(0, decode_ns - max(compute.time_ns, store_ns))
+    return cost + get_gemm_output_cost(d, dtype, c)
+
+
+cdef inline GemmConfig refine_gemm_pipeline(GemmDesc d, GemmDtype dtype, GemmConfig c):
+    cdef HWDesc hw = get_hw_desc()
+    cdef int64_t stride_d = d.outer_stride_d or d.n
+    cdef int64_t align_m = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_a) else 1
+    cdef int64_t align_n = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_b) else FRAC_MN
+    cdef GemmConfig candidate
+    cdef int64_t num_m_blocks = ceil_div(d.m, c.block_m)
+    cdef int64_t num_n_blocks = ceil_div(d.n, c.block_n)
+    cdef int64_t num_waves = ceil_div(num_m_blocks * num_n_blocks, d.num_cores)
+    cdef int64_t resident_k = d.expected_k if is_k_grouped(d.gemm_type) else d.k
+    cdef int64_t a_bytes, b_bytes, num_l1_stages
+    if (d.gemm_type == GemmType.Normal and d.identity_epilogue
+        and (dtype.elem_bits != 4 or (is_k_major(d.major_a) and is_k_major(d.major_b)))
+        and (not d.acc or dtype.output_elem_bits == 32) and d.m % align_m == 0 and d.n % align_n == 0
+        and d.output_alignment == 0 and stride_d * dtype.epilogue_elem_bits // 8 % 32 == 0
+        and (ceil_div(d.m, c.block_m) * ceil_div(d.n, c.block_n) <= d.num_cores
+             or (d.m <= c.block_m and c.mad_n * dtype.epilogue_elem_bits // 8 % hw.l2_sector_bytes == 0))):
+        candidate = c
+        candidate.direct_store = True
+        if get_gemm_output_cost(d, dtype, candidate) <= get_gemm_output_cost(d, dtype, c):
+            c = candidate
+    if (d.gemm_type == GemmType.Normal and d.compiled_k) or (dtype.has_sf and (d.compiled_k or is_k_grouped(d.gemm_type))):
+        candidate = c
+        if dtype.elem_bits == 16:
+            a_bytes = c.block_m * align(d.k, FRAC_MN) * 2
+            b_bytes = c.block_n * c.block_k * 2
+            num_l1_stages = min(hw.num_pipe_events, (L1_SIZE_BYTES - a_bytes) // b_bytes) if a_bytes < L1_SIZE_BYTES else 0
+            if d.m <= c.block_m and num_l1_stages > c.num_l0_stages:
+                candidate.resident_a = True
+                candidate.num_l1_stages = num_l1_stages
+            candidate.resident_b = (num_n_blocks == 1 and num_waves > 1 and c.block_n == c.mad_n
+                                    and d.k <= c.mad_k * c.num_l0_stages)
+        elif resident_k <= c.num_l1_stages * c.block_k and num_waves >= 2:
+            candidate.resident_a = num_m_blocks == 1
+            candidate.resident_b = (num_n_blocks == 1 and (not dtype.dequant_b or not is_m_grouped(d.gemm_type)
+                                                         or ceil_div(resident_k, c.block_k) >= 2))
+            candidate.resident_sf = (candidate.resident_a or candidate.resident_b) and resident_k <= c.sf_k_blocks * c.block_k
+        if get_gemm_refinement_cost(d, dtype, candidate) <= get_gemm_refinement_cost(d, dtype, c):
+            c = candidate
+    if dtype.dequant_b and c.direct_store:
+        candidate = c
+        candidate.dual_aiv_dequant = True
+        if get_gemm_refinement_cost(d, dtype, candidate) < get_gemm_refinement_cost(d, dtype, c):
+            c = candidate
+    return c
+
+
+cdef inline int64_t get_gemm_k_cost(GemmDesc d, GemmDtype dtype, GemmConfig c):
+    cdef HWDesc hw = get_hw_desc()
+    cdef int64_t waves = ceil_div(ceil_div(d.m, c.block_m) * ceil_div(d.n, c.block_n), d.num_cores)
+    cdef int64_t mad_cycles = ceil_div(2 * c.mad_m * c.mad_n * c.mad_k, get_mad_flops_per_cycle(dtype.elem_bits))
+    cdef int64_t load_cycles = ceil_div((c.mad_m + c.mad_n) * c.mad_k * dtype.elem_bits, 8 * hw.l1_to_l0_bytes_per_cycle)
+    cdef int64_t num_mads = c.block_m // c.mad_m * (c.block_n // c.mad_n)
+    cdef int64_t issue_cycles = 64 if dtype.elem_bits == 16 else 40 if dtype.elem_bits == 4 else 116
+    cdef int64_t issue_ns = ceil_div(waves * num_mads * ceil_div(d.k, c.mad_k) * issue_cycles * 1000, hw.aic_clock_mhz)
+    cdef int64_t turnovers = d.k // c.block_k * max(0, c.block_k // c.mad_k - c.num_l0_stages) + max(0, ceil_div(d.k % c.block_k, c.mad_k) - c.num_l0_stages)
+    if dtype.has_sf:
+        load_cycles += ceil_div((c.mad_m + c.mad_n) * c.mad_k * 2, hw.sf_elements_per_pair * hw.l1_to_l0_sf_bytes_per_cycle)
+    return get_gemm_refinement_cost(d, dtype, c) + issue_ns + ceil_div(waves * num_mads * turnovers * max(mad_cycles, load_cycles) * 1000, hw.aic_clock_mhz)
+
+
 cdef inline GemmConfig select_gemm_config_impl(GemmDesc d, GemmDtype dtype):
     """Select legal tiles using integer costs, pruning, and deterministic tie-breaking."""
     cdef GemmComputeCost compute_cost
     cdef GemmConfig config
     cdef GemmConfig fitted
     cdef HWDesc hw
-    cdef GemmConfig wider
+    cdef GemmConfig wider, primary, candidate
+    cdef int64_t k_limit, best_k_cost, block_k, mad_cycles, load_cycles, full_epilogue_bytes, resident_row_bytes
     cdef int64_t a_matrix_bytes, avg_block_bytes, b_elem_bits, b_matrix_bytes, best_cost, block_cap, block_m, block_n
     cdef int64_t compute_k, cost, k, m_index, n_index, m_alignment, m_end, m_start, max_block_k, min_block_k
     cdef int64_t min_first_load_time_ns, min_memory_time_ns, n_alignment, n_end, n_limit, n_start, num_batches, num_blocks
-    cdef int64_t num_m_blocks, num_n_blocks, num_tiles, num_waves, store_hint
+    cdef int64_t num_m_blocks, num_n_blocks, num_waves, store_hint, choice
     hw = get_hw_desc()
     k = d.num_groups * d.expected_k if is_k_grouped(d.gemm_type) else d.k
     compute_k = d.expected_k if is_k_grouped(d.gemm_type) else d.k
@@ -551,7 +695,7 @@ cdef inline GemmConfig select_gemm_config_impl(GemmDesc d, GemmDtype dtype):
     b_matrix_bytes = d.n * compute_k * b_elem_bits // 8
     block_cap = 256 if dtype.elem_bits == 4 or dtype.dequant_b else 512
     m_alignment = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_a) else FRAC_MN
-    n_alignment = get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_b) else FRAC_MN
+    n_alignment = 128 if dtype.with_fp8_cast else get_mad_alignment_k(dtype.elem_bits) if is_mn_major(d.major_b) else FRAC_MN
     m_start, m_end = m_alignment, min(block_cap, align(d.m, m_alignment))
     n_start, n_end = n_alignment, block_cap
     if is_m_grouped(d.gemm_type):
@@ -595,15 +739,78 @@ cdef inline GemmConfig select_gemm_config_impl(GemmDesc d, GemmDtype dtype):
     if config.block_m == 0:
         return config
 
-    num_waves = ceil_div(ceil_div(d.m, config.block_m) * ceil_div(d.n, config.block_n), d.num_cores)
+    num_m_blocks, num_n_blocks = ceil_div(d.m, config.block_m), ceil_div(d.n, config.block_n)
+    num_waves = ceil_div(num_m_blocks * num_n_blocks, d.num_cores)
     store_hint = L2_ST_NORMAL_FV if d.acc and num_waves >= 4 and ceil_div(d.k, config.block_k) >= 16 else L2_ST_NOTALLOC_CLEAN
-    num_blocks = config.num_blocks
-    if d.gemm_type in (GemmType.Normal, GemmType.Batched):
-        # Launch only cores that own an output tile; keep the selected geometry.
-        num_tiles = ceil_div(d.m, config.block_m) * ceil_div(d.n, config.block_n) * num_batches
-        num_blocks = min(num_blocks, num_tiles)
     config.l2_ctrl_store_cd = store_hint
-    config.num_blocks = num_blocks
+    config = refine_gemm_pipeline(d, dtype, config)
+    if (d.gemm_type == GemmType.Normal and d.compiled_k
+        and d.k % (hw.sf_elements_per_pair if dtype.has_sf else FRAC_MN) == 0
+        and (not dtype.dequant_b or d.k <= config.num_l1_stages * config.block_k)):
+        primary = config
+        best_k_cost = get_gemm_k_cost(d, dtype, config)
+        k_limit = min(d.k, L1_SIZE_BYTES * 8 // ((primary.block_m + primary.block_n) * dtype.elem_bits))
+        block_k = min_block_k
+        while block_k <= k_limit:
+            if block_k != primary.block_k and not (d.k <= primary.block_k and block_k < d.k):
+                if make_gemm_candidate(d, dtype, primary.block_m, primary.block_n, block_k, &candidate):
+                    mad_cycles = ceil_div(2 * primary.mad_m * primary.mad_n * primary.mad_k, get_mad_flops_per_cycle(dtype.elem_bits))
+                    load_cycles = ceil_div(min(primary.mad_m, primary.mad_n) * primary.mad_k * dtype.elem_bits, 8 * hw.l1_to_l0_bytes_per_cycle)
+                    if (candidate.mad_m == primary.mad_m and candidate.mad_n == primary.mad_n
+                        and (not dtype.has_sf or candidate.num_l1_stages >= primary.num_l1_stages)
+                        and (candidate.mad_k == primary.mad_k or mad_cycles <= load_cycles)):
+                        candidate.l2_ctrl_store_cd = primary.l2_ctrl_store_cd
+                        candidate = refine_gemm_pipeline(d, dtype, candidate)
+                        cost = get_gemm_k_cost(d, dtype, candidate)
+                        if cost < best_k_cost:
+                            best_k_cost, config = cost, candidate
+            block_k *= 2
+    # Bias may need two output stages to overlap the drain with the next block.
+    if d.with_bias and config.num_epilogue_stages == 1 and get_gemm_output_cost(d, dtype, config) > get_gemm_cost(d, dtype, config, get_gemm_compute_cost(d, dtype, config.block_m, config.block_n), _INT64_MAX):
+        primary = config
+        for choice in range(2):
+            block_m = primary.block_m - m_alignment if choice == 0 else primary.block_m
+            block_n = primary.block_n if choice == 0 else primary.block_n - max(n_alignment, 64)
+            if (block_m < m_start or block_n < n_start
+                or (block_m != primary.block_m and is_mn_major(d.major_a))
+                or (block_n != primary.block_n and is_mn_major(d.major_b))):
+                continue
+            if not make_gemm_candidate(d, dtype, block_m, block_n, primary.block_k, &candidate):
+                continue
+            if candidate.num_epilogue_stages < 2 or candidate.mad_k != primary.mad_k or candidate.num_l1_stages < primary.num_l1_stages:
+                continue
+            candidate.l2_ctrl_store_cd = primary.l2_ctrl_store_cd
+            candidate = refine_gemm_pipeline(d, dtype, candidate)
+            if get_gemm_k_cost(d, dtype, candidate) < get_gemm_k_cost(d, dtype, config):
+                config = candidate
+    full_epilogue_bytes = (config.block_m * config.block_n * dtype.epilogue_elem_bits // 8
+                           + (config.block_n * dtype.output_elem_bits // 8 if d.with_bias else 0)
+                           + (config.block_m * config.block_n // 32 if dtype.with_fp8_cast else 0))
+    if (dtype.elem_bits == 4 and config.block_m * config.mad_k * config.num_l0_stages * dtype.elem_bits <= L0A_SIZE_BYTES * 8
+        and config.block_n * config.mad_k * config.num_l0_stages * dtype.elem_bits <= L0B_SIZE_BYTES * 8
+        and full_epilogue_bytes * config.num_epilogue_stages <= UB_SIZE_BYTES):
+        candidate = config
+        candidate.mad_m, candidate.mad_n = config.block_m, config.block_n
+        if get_gemm_k_cost(d, dtype, candidate) <= get_gemm_k_cost(d, dtype, config):
+            config = candidate
+    if (dtype.dequant_b and config.direct_store and not config.dual_aiv_dequant and d.gemm_type == GemmType.Normal
+        and num_m_blocks == 1 and num_waves > 1 and not d.acc and config.block_m == config.mad_m
+        and 2 * config.block_m * hw.fp4_decode_bytes_per_cycle <= get_mad_flops_per_cycle(dtype.elem_bits)
+        and d.n * dtype.epilogue_elem_bits // 8 % hw.l2_sector_bytes == 0
+        and config.block_n * dtype.epilogue_elem_bits // 8 % hw.l2_sector_bytes == 0
+        and 2 * config.block_m * config.block_n * 4 <= L0C_SIZE_BYTES
+        and is_k_major(d.major_a) and is_k_major(d.major_b) and d.compiled_n
+        and d.compiled_k and d.k > config.block_k and d.k % config.block_k == 0
+        and ceil_div(d.n, config.block_n * d.num_cores) * (d.k // config.block_k) > config.num_l1_stages):
+        config.dual_aiv_dequant = True
+    resident_row_bytes = ceil_div(d.k * dtype.elem_bits, 8) + ceil_div(d.k, hw.sf_elements_per_pair) * 2
+    if (dtype.elem_bits == 4 and d.gemm_type == GemmType.Normal and is_mn_major(d.major_a) and is_mn_major(d.major_b)
+        and config.block_n * dtype.elem_bits == hw.fractal_row_bytes * 8 and d.k <= config.block_k
+        and config.l2_ctrl_b == L2_LD_NOTALLOC_KEEP and (d.m + d.n) * resident_row_bytes <= hw.l2_size_bytes):
+        candidate = config
+        candidate.l2_ctrl_b = L2_LD_NORMAL_FV
+        if get_gemm_k_cost(d, dtype, candidate) <= get_gemm_k_cost(d, dtype, config):
+            config = candidate
     return config
 
 
@@ -626,6 +833,14 @@ def select_gemm_config(desc, config_type):
         num_cores=desc.num_cores,
         outer_stride_a=desc.outer_stride_a,
         outer_stride_b=desc.outer_stride_b,
+        outer_stride_d=desc.outer_stride_d,
+        output_alignment=desc.output_alignment,
+        compiled_k="k" in desc.compiled_dims,
+        compiled_n="n" in desc.compiled_dims,
+        identity_epilogue=desc.epilogue_kind == "identity",
+        with_bias=desc.epilogue_kind == "bias",
+        stride_batch_a=desc.stride_batch_a,
+        stride_batch_b=desc.stride_batch_b,
     )
     # The tensor API handles empty GEMMs before calling the heuristic. Keep
     # invalid direct calls away from C division, with a useful error instead.
@@ -660,4 +875,9 @@ def select_gemm_config(desc, config_type):
         c.l2_ctrl_b,
         c.l2_ctrl_store_cd,
         c.num_blocks,
+        bool(c.direct_store),
+        bool(c.dual_aiv_dequant),
+        bool(c.resident_a),
+        bool(c.resident_b),
+        bool(c.resident_sf),
     )
