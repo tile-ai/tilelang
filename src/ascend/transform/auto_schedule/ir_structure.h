@@ -556,6 +556,16 @@ public:
   void SetWriteRegions(const std::vector<BufferRegion> &regions) {
     write_regions_ = regions;
   }
+  const Map<Var, Optional<PrimExpr>> &GetL0Pitches() const {
+    return l0_pitches_;
+  }
+  Optional<PrimExpr> GetL0Pitch(const Var &storage) const {
+    auto it = l0_pitches_.find(storage);
+    return it == l0_pitches_.end() ? Optional<PrimExpr>() : (*it).second;
+  }
+  void SetL0Pitches(const Map<Var, Optional<PrimExpr>> &pitches) {
+    l0_pitches_ = pitches;
+  }
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
   void SetWriteVars(const std::vector<Var> &vars) { write_vars_ = vars; }
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
@@ -588,6 +598,14 @@ public:
     substitute_vars(write_vars_);
     substitute_regions(read_regions_);
     substitute_regions(write_regions_);
+    Map<Var, Optional<PrimExpr>> pitches;
+    for (const auto &[storage, pitch] : l0_pitches_) {
+      pitches.Set(storage.same_as(old_var) ? new_var : storage,
+                  pitch.defined() ? Optional<PrimExpr>(
+                                        Substitute(pitch.value(), substitution))
+                                  : std::nullopt);
+    }
+    l0_pitches_ = std::move(pitches);
     outer_ctx = outer_ctx.Substitute(substitution);
     stmt = Substitute(stmt, substitution);
     SubstituteVarInGuards(old_var, new_var);
@@ -657,6 +675,7 @@ private:
   // Logical access regions. Physical footprints are derived from current IR.
   std::vector<BufferRegion> read_regions_;
   std::vector<BufferRegion> write_regions_;
+  Map<Var, Optional<PrimExpr>> l0_pitches_;
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
 

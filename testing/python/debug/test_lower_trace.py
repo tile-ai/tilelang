@@ -719,7 +719,7 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
 
     _run_codegen(trace, mock_build, "target.build.tilelang_cuda_without_compile")
 
-    codegen_records = [record for record in trace.records if record.name == "codegen"]
+    codegen_records = [record for record in trace.records if record.status == _core.STATUS_CODEGEN]
     assert codegen_records, "no codegen record found"
     assert codegen_records[-1].index > nested_idx[0], "codegen index not after nested pass"
     indices = [record.index for record in trace.records]
