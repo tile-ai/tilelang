@@ -43,6 +43,9 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
+    # Preserve pipeline scheduling units before expanding query expressions.
+    mod = tilelang.transform.LowerLogicalReduction()(mod)
+
     mod = tilelang.transform.LayoutInference()(mod)
     mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)

@@ -130,6 +130,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
+    # Materialize expression-local work after pipeline scheduling has kept
+    # each query with its consumer, but before parallel layout inference.
+    mod = tilelang.transform.LowerLogicalReduction()(mod)
+
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Plan physical storage/communication for reducer v2 epochs and

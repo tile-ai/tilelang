@@ -138,6 +138,10 @@ class PassConfigKey(str, Enum):
     numerically), as a field escape hatch if a narrow plan ever miscompiles,
     and for plan-choice A/B measurement. Default: False"""
 
+    TL_DISABLE_PARALLEL_LOGICAL_REDUCTION = "tl.disable_parallel_logical_reduction"
+    """Use logical thread-local scans instead of cooperative any_of/all_of
+    reductions. Useful for differential validation and measurements. Default: False"""
+
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 

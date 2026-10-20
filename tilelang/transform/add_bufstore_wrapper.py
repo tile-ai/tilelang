@@ -1,4 +1,4 @@
-from tvm.tirx import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm
+from tvm.tirx import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, Call, IntImm
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 from tvm.tirx.transform import prim_func_pass
 
@@ -70,6 +70,14 @@ def AddWrapperForSingleBufStore():
                     local_buffers.append(buffer)
             return local_buffers, fragment_buffers
 
+        def ignore_logical_query_inputs(node):
+            # These calls return a scalar query result. Their access_ptr base
+            # describes the reduction input, not ownership of fragment[0].
+            # LowerLogicalReduction materializes their parallel work later.
+            if isinstance(node, Call) and getattr(node.op, "name", None) in ("tl.any_of", "tl.all_of"):
+                return IntImm("bool", 0)
+            return None
+
         def collect_buffer_indices(statement) -> dict[Buffer, list[int]]:
             """
             Maps each buffer to its access indices.
@@ -127,13 +135,14 @@ def AddWrapperForSingleBufStore():
 
                 # Only transform if not inside tile operations and no thread bindings
                 if tile_operation_depth == 0 and len(thread_bound_variables) == 0:
+                    scalar_accesses = ir_transform(statement, ignore_logical_query_inputs, None)
                     # Skip if no fragment buffers are accessed
-                    _, fragment_buffers = collect_buffer_accesses(statement)
+                    _, fragment_buffers = collect_buffer_accesses(scalar_accesses)
                     if len(fragment_buffers) == 0:
                         return statement
 
                     # Validate fragment buffer indices - only index 0 is supported
-                    buffer_indices = collect_buffer_indices(statement)
+                    buffer_indices = collect_buffer_indices(scalar_accesses)
                     for buffer, indices in buffer_indices.items():
                         if buffer.scope() != "local.fragment":
                             continue

@@ -176,6 +176,15 @@ def LegalizeSafeMemoryAccess():
     return _ffi_api.LegalizeSafeMemoryAccess()  # type: ignore
 
 
+def LowerLogicalReduction():
+    """Expand logical reduction expressions at their evaluation sites.
+
+    Uniform shared/global scans use Parallel and reducer v2. Other scans
+    retain thread-local execution with explicit logical buffer indices.
+    """
+    return _ffi_api.LowerLogicalReduction()
+
+
 def LowerAccessPtr():
     """Lower TileLang frontend `tl.access_ptr` to `tir.builtin.tvm_access_ptr`.
 
