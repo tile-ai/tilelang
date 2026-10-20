@@ -239,3 +239,23 @@ def test_scheduled_l0_branches_preserve_direction():
     source = tilelang.lower(main, target="pto").kernel_source
     ast.parse(source)
     assert _mad_directions(source) == [True, False, False]
+
+
+@pytest.mark.parametrize("num_guards", [16, 32, 64])
+@pytest.mark.parametrize("with_mad", [False, True])
+def test_repeated_mutable_guards_do_not_expand_direction_state(num_guards, with_mad):
+    def body(flag, value, mad):
+        stores = [_if(value[0] > 0, tirx.BufferStore(value, i, [0])) for i in range(num_guards)]
+        # A pure outer guard makes the direction predicate nonconstant. The
+        # mutable inner guards preserve it on both paths, requiring idempotent
+        # merges even when MAD analysis cannot be skipped.
+        inner = [_set("n"), *stores]
+        if with_mad:
+            inner.append(mad())
+        inner.append(_set("m"))
+        result = [_if(flag > 0, tirx.SeqStmt(inner))]
+        if with_mad:
+            result.append(mad())
+        return result
+
+    assert _mad_directions(_codegen(body)) == ([True, False] if with_mad else [])
