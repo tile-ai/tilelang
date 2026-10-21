@@ -3,11 +3,16 @@
 import torch
 import tilelang
 from tilelang import tvm
-from examples.ascend.flashmla.core import PASS_CONFIG, sparse_attention
 
 
-def prepare_decode(param, inputs):
+def prepare_decode(param, inputs, *, implementation="manual"):
     """Prepare the PR's packed KV inputs without changing their quantization."""
+    if implementation == "manual":
+        from examples.ascend.flashmla.core import PASS_CONFIG, sparse_attention
+    elif implementation == "staged":
+        from examples.ascend.flashmla.staged import PASS_CONFIG, sparse_attention
+    else:
+        raise ValueError(f"Unknown implementation: {implementation}")
     nq = param.decode.b * param.s_q
     q = inputs.q.reshape(nq, 64, 512)
     main = inputs.kv_scope
@@ -66,11 +71,12 @@ def prepare_decode(param, inputs):
         extra_storage_bytes=ekv.numel(),
         cache_hint=int(reuse_cache),
     )
-    params = list(func.params[:9]) + list(func.params[10:])
-    param_set = set(params)
-    func = tvm.tirx.PrimFunc(
-        params, func.body, func.ret_type, {var: buf for var, buf in func.buffer_map.items() if var in param_set}, func.attrs
-    )
+    if implementation == "manual":
+        params = list(func.params[:9]) + list(func.params[10:])
+        param_set = set(params)
+        func = tvm.tirx.PrimFunc(
+            params, func.body, func.ret_type, {var: buf for var, buf in func.buffer_map.items() if var in param_set}, func.attrs
+        )
     kernel = tilelang.compile(
         func,
         target="ascend",

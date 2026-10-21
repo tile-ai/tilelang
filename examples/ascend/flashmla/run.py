@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--mode", choices=["smoke", "correctness", "bench"], default="smoke")
-    parser.add_argument("--implementation", choices=["both", "reference", "manual"], default="both")
+    parser.add_argument("--implementation", choices=["both", "all", "reference", "manual", "staged"], default="both")
     parser.add_argument("--output", type=Path, default=Path("results.json"))
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--repeat", type=int, default=10)
@@ -31,7 +31,7 @@ def main():
     import lib
     import ref
     import kernelkit as kk
-    from examples.ascend.flashmla import manual
+    from examples.ascend.flashmla import manual, staged
 
     torch.npu.set_device(0)
     torch.npu.set_op_timeout_ms(30000)
@@ -83,10 +83,12 @@ def main():
             inputs.topk_length[0] = 0
         torch.npu.synchronize()
         funcs = {}
-        if args.implementation in ("reference", "both"):
+        if args.implementation in ("reference", "both", "all"):
             funcs["reference"] = partial(lib.run_flash_mla_sparse_fwd, param, inputs)
-        if args.implementation in ("manual", "both"):
-            kernel = manual.compile_prefill(
+        for name, implementation in (("manual", manual), ("staged", staged)):
+            if args.implementation != name and args.implementation != "all" and not (args.implementation == "both" and name == "manual"):
+                continue
+            kernel = implementation.compile_prefill(
                 param.s_q,
                 param.s_kv,
                 param.topk,
@@ -96,13 +98,13 @@ def main():
                 q_strides=tuple(inputs.q.stride()),
                 index_stride=inputs.indices.stride(0),
             )
-            source_path = args.output.parent / args.output.stem / f"manual_{param.s_q}_{param.s_kv}_{param.topk}.asc"
+            source_path = args.output.parent / args.output.stem / f"{name}_{case_id}_{param.s_q}_{param.s_kv}_{param.topk}.asc"
             source_path.parent.mkdir(parents=True, exist_ok=True)
             source_path.write_text(kernel.get_kernel_source())
             print("Compiled cache:", getattr(kernel, "_tilelang_cache_path", None), flush=True)
             sink_arg = inputs.attn_sink if inputs.attn_sink is not None else torch.zeros(64, dtype=torch.float32)
             lengths_arg = inputs.topk_length if inputs.topk_length is not None else torch.full((param.s_q,), param.topk, dtype=torch.int32)
-            funcs["manual"] = partial(kernel, inputs.q, inputs.kv.view(param.s_kv, 512), inputs.indices.squeeze(1), sink_arg, lengths_arg)
+            funcs[name] = partial(kernel, inputs.q, inputs.kv.view(param.s_kv, 512), inputs.indices.squeeze(1), sink_arg, lengths_arg)
         outputs = {}
         for name, fn in funcs.items():
             print(f"Launching {name}", flush=True)
@@ -121,7 +123,7 @@ def main():
             "index_strides": list(inputs.indices.stride()),
             "correctness": {},
         }
-        if args.mode != "bench":
+        if args.mode != "bench" or "reference" not in outputs:
             expected_bf16, expected, expected_max, expected_lse = ref.ref_sparse_attn_fwd(param, inputs)
             for name, (out, maximum, lse) in outputs.items():
                 checks = [
