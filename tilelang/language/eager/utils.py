@@ -3,7 +3,7 @@ import ast
 import inspect
 import os
 from typing import Any, Literal
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from tilelang import env
 from hashlib import sha256
 from tvm import tirx
@@ -90,14 +90,24 @@ def get_compiled_object(source: str | ast.AST, name: str, filename: str = None, 
     return locs[name]
 
 
-def construct_strides(shape: tuple[Any, ...], allow_prim_expr: bool = True) -> tuple[Any, ...]:
-    """Construct row-major strides from shape."""
+def construct_strides(shape: Sequence[Any], allow_prim_expr: bool = True) -> tuple[Any, ...]:
+    """Construct contiguous row-major strides from ``shape``.
+
+    This is the single source of truth for default (contiguous) strides in the
+    Python frontend; ``T.Tensor``, ``T.out`` and ``retrieve_stride`` all route
+    here so they cannot drift apart.
+
+    The result always has the same rank as ``shape``. In particular a rank-0
+    (scalar) shape yields an empty stride tuple, matching the TIR convention
+    that ``len(buffer.strides)`` is either ``0`` or ``len(buffer.shape)``.
+    Entries may be ``int`` or ``PrimExpr`` depending on ``shape``; pass
+    ``allow_prim_expr=False`` to require fully static strides.
+    """
     strides = []
     stride = 1
-    for s in shape[::-1]:
+    for s in reversed(shape):
         strides.append(stride)
         stride *= s
         if not allow_prim_expr and isinstance(stride, tirx.PrimExpr):
             raise ValueError("Cannot construct strides with PrimExpr when allow_prim_expr is False.")
-    strides = tuple(reversed(strides))
-    return strides
+    return tuple(reversed(strides))

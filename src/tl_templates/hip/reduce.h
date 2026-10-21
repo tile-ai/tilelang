@@ -12,13 +12,13 @@ struct SumOp {
 
 struct MaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return ck_tile::max(x, y);
+    return tl::max(x, y);
   }
 };
 
 struct MinOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return ck_tile::min(x, y);
+    return tl::min(x, y);
   }
 };
 

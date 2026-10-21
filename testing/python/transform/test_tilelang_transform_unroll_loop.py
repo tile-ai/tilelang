@@ -1,4 +1,5 @@
 import tilelang
+import pytest
 from tilelang import tvm
 from tvm.script import ir as I
 from tvm.script import tirx as T
@@ -70,6 +71,57 @@ def test_unroll_explicit_loops_preserves_dynamic_and_factor_loops():
     assert [loop.loop_var.name for loop in loops] == ["j", "k"]
     assert loops[0].kind == tvm.tirx.ForKind.UNROLLED
     assert int(loops[1].annotations["pragma_unroll_factor"]) == 4
+
+
+def test_explicit_unroll_rejects_break_targeting_loop():
+    @I.ir_module
+    class Before:
+        @T.prim_func
+        def main(A: T.Buffer((2,), "int32")):
+            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
+                A[i] = i
+                if A[i] != 0:
+                    T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
+
+    with pytest.raises(ValueError, match="cannot be fully expanded"):
+        tilelang.transform.UnrollLoop()(Before)
+
+
+def test_non_explicit_unroll_allows_break():
+    @I.ir_module
+    class Before:
+        @T.prim_func
+        def main(A: T.Buffer((2,), "int32")):
+            for i in T.unroll(2):
+                A[i] = i
+                if A[i] != 0:
+                    T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
+
+    after = tilelang.transform.UnrollLoop()(Before)
+    assert isinstance(after["main"].body, tvm.tirx.For)
+    assert after["main"].body.kind == tvm.tirx.ForKind.UNROLLED
+
+
+def test_explicit_unroll_allows_break_targeting_nested_loop():
+    @I.ir_module
+    class Before:
+        @T.prim_func
+        def main(A: T.Buffer((4,), "int32")):
+            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
+                for j in T.serial(2):
+                    A[i * 2 + j] = j
+                    if A[i * 2 + j] != 0:
+                        T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
+
+    after = tilelang.transform.UnrollLoop()(Before)
+    loops = []
+    post_order_visit(
+        after["main"].body,
+        lambda node: loops.append(node) if isinstance(node, tvm.tirx.For) else None,
+    )
+
+    assert len(loops) == 2
+    assert all(loop.kind == tvm.tirx.ForKind.SERIAL for loop in loops)
 
 
 if __name__ == "__main__":

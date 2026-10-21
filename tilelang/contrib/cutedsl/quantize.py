@@ -2,9 +2,8 @@
 # Licensed under the MIT License.
 """
 Quantization/dequantization functions for CuTeDSL backend.
-These implement the same functionality as the CUDA templates in
-examples/dequantize_gemm/quantize/lop3.py.
-using inline PTX via llvm.inline_asm.
+These implement the same functionality as the CUDA templates in tilelang/quantize/lop3.py
+using CUTLASS primitives where available, with local inline asm kept for FP4 twiddling.
 """
 
 __all__ = [
@@ -20,8 +19,9 @@ __all__ = [
 
 import cutlass
 import cutlass.cute as cute
+from cutlass.experimental import primitives as prims
 from cutlass._mlir.dialects import llvm, arith
-from cutlass.base_dsl.typing import Uint32
+from cutlass.base_dsl.typing import Int32, Uint32
 from cutlass.cutlass_dsl import T, dsl_user_op
 
 
@@ -31,6 +31,38 @@ FP16_TOP_MAGIC_NUM = 0x64006400
 IMMLUT = (0xF0 & 0xCC) | 0xAA  # = 0xea = 234
 MEDIAN_NUM_UNSIGNED = 0x64006400
 MEDIAN_NUM_SIGNED = 0x64086408
+
+
+@dsl_user_op
+def _lop3(a: Uint32, b: int, c: int, lut: int, *, loc=None, ip=None) -> Uint32:
+    if not isinstance(lut, int):
+        raise TypeError("lop3 lut must be an integer constant")
+    return Uint32(
+        prims.inline_ptx(
+            f"lop3.b32 {{$w0}}, {{$r0}}, {{$r1}}, {{$r2}}, {lut & 0xFF};",
+            write_only_types=[Uint32],
+            read_only_args=[Uint32(a), Uint32(b), Uint32(c)],
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def _sub_f16x2_i32(a: Int32, b: Int32, *, loc=None, ip=None) -> Int32:
+    return Int32(
+        llvm.inline_asm(
+            T.i32(),
+            [Int32(a).ir_value(loc=loc, ip=ip), Int32(b).ir_value(loc=loc, ip=ip)],
+            "sub.f16x2 $0, $1, $2;",
+            "=r,r,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 @dsl_user_op
@@ -49,26 +81,8 @@ def _lop3_sub_f16x2_unsigned(i4s: Uint32, shift: int, *, loc=None, ip=None) -> U
     # Shift right
     shifted = Uint32(arith.shrui(Uint32(i4s).ir_value(), Uint32(shift).ir_value()))
 
-    # LOP3 + sub in single asm block
-    # immLut=234 (0xea), BOTTOM_MASK=0x000f000f, FP16_TOP_MAGIC_NUM=0x64006400
-    # MEDIAN_NUM_UNSIGNED=0x64006400
-    result = Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [shifted.ir_value()],
-            "{ .reg .b32 tmp, median; "
-            "lop3.b32 tmp, $1, 0x000f000f, 0x64006400, 0xea; "
-            "mov.b32 median, 0x64006400; "
-            "sub.f16x2 $0, tmp, median; }",
-            "=r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
-    return result
+    tmp = _lop3(shifted, BOTTOM_MASK, FP16_TOP_MAGIC_NUM, IMMLUT, loc=loc, ip=ip)
+    return Uint32(_sub_f16x2_i32(Int32(tmp), Int32(MEDIAN_NUM_UNSIGNED), loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -76,24 +90,8 @@ def _lop3_sub_f16x2_signed(i4s: Uint32, shift: int, *, loc=None, ip=None) -> Uin
     """LOP3 + sub.f16x2 for signed i4 to f16x2 decode."""
     shifted = Uint32(arith.shrui(Uint32(i4s).ir_value(), Uint32(shift).ir_value()))
 
-    # MEDIAN_NUM_SIGNED=0x64086408
-    result = Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [shifted.ir_value()],
-            "{ .reg .b32 tmp, median; "
-            "lop3.b32 tmp, $1, 0x000f000f, 0x64006400, 0xea; "
-            "mov.b32 median, 0x64086408; "
-            "sub.f16x2 $0, tmp, median; }",
-            "=r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
-    return result
+    tmp = _lop3(shifted, BOTTOM_MASK, FP16_TOP_MAGIC_NUM, IMMLUT, loc=loc, ip=ip)
+    return Uint32(_sub_f16x2_i32(Int32(tmp), Int32(MEDIAN_NUM_SIGNED), loc=loc, ip=ip))
 
 
 def decode_i4u_to_f16(src_ptr, dst_ptr, N: int = 8):
@@ -243,14 +241,11 @@ def _pack_bf16_high(r0: Uint32, r1: Uint32, *, loc=None, ip=None) -> Uint32:
     """Pack high 16-bits of r0 and r1 into one uint32."""
     # r0[31:16] -> result[15:0], r1[31:16] -> result[31:16]
     return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [Uint32(r0).ir_value(), Uint32(r1).ir_value()],
-            "prmt.b32 $0, $1, $2, 0x7632;",
-            "=r,r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
+        prims.prmt(
+            Uint32(r0),
+            0x7632,
+            prims.PermuteMode.DEFAULT,
+            hi=Uint32(r1),
             loc=loc,
             ip=ip,
         )
@@ -262,14 +257,11 @@ def _pack_bf16_low(r0: Uint32, r1: Uint32, *, loc=None, ip=None) -> Uint32:
     """Pack low 16-bits of r0 and r1 into one uint32."""
     # r0[15:0] -> result[15:0], r1[15:0] -> result[31:16]
     return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [Uint32(r0).ir_value(), Uint32(r1).ir_value()],
-            "prmt.b32 $0, $1, $2, 0x5410;",
-            "=r,r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
+        prims.prmt(
+            Uint32(r0),
+            0x5410,
+            prims.PermuteMode.DEFAULT,
+            hi=Uint32(r1),
             loc=loc,
             ip=ip,
         )

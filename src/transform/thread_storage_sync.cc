@@ -28,6 +28,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/ir/expr.h"
 #include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
@@ -237,6 +238,29 @@ private:
   const std::unordered_set<const Object *> &syncs_;
 };
 
+namespace {
+
+PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
+  DataType index_dtype = DataType::Int(64);
+  PrimExpr linear_thread_id = make_const(index_dtype, 0);
+  PrimExpr stride = make_const(index_dtype, 1);
+  static const char *kThreadTags[] = {"threadIdx.x", "threadIdx.y",
+                                      "threadIdx.z"};
+  for (const char *thread_tag : kThreadTags) {
+    for (const auto &iv : thread_vars) {
+      if (iv->thread_tag != thread_tag)
+        continue;
+      PrimExpr index = Cast(index_dtype, iv->var - iv->dom->min);
+      linear_thread_id = linear_thread_id + index * stride;
+      stride = stride * Cast(index_dtype, iv->dom->extent);
+      break;
+    }
+  }
+  return linear_thread_id;
+}
+
+} // namespace
+
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
@@ -271,22 +295,21 @@ private:
   }
 
   Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
-    // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
+    auto extent_tx = CalculateThreadExtent(tx_, &bound_tx);
+    auto extent_ty = CalculateThreadExtent(ty_, &bound_ty);
+    auto extent_tz = CalculateThreadExtent(tz_, &bound_tz);
+    if (extent_tx == 0 || extent_ty == 0 || extent_tz == 0) {
+      return Evaluate(0);
+    }
 
-    // Check if all threads are participating (full extent)
     if (IsFullThreadExtent(tx_, bound_tx) &&
         IsFullThreadExtent(ty_, bound_ty) &&
         IsFullThreadExtent(tz_, bound_tz)) {
       return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
-
-    // Calculate thread extents
-    auto extent_tx = CalculateThreadExtent(tx_, bound_tx);
-    auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
-    auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
 
     // Create or get barrier info
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
@@ -295,6 +318,7 @@ private:
 
     auto [barrier_id, thread_count] =
         GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+    ICHECK_LT(barrier_id, 16U) << "[ThreadSync] Too many partial-sync barriers";
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -334,35 +358,43 @@ private:
     return {barrier_id, thread_count};
   }
 
-  /*!
-   * \brief Calculate the number of threads that satisfy current constraints.
-   *
-   * This method uses Z3's model enumeration (AllSAT) to precisely count
-   * how many thread IDs satisfy all current constraints. This is essential
-   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
-   * gives us the range [0, 127] but the actual number of satisfying threads
-   * is 32 (i.e., 0, 4, 8, ..., 124).
-   *
-   * Falls back to range-based calculation if Z3 enumeration fails or returns
-   * an invalid result.
-   */
-  size_t CalculateThreadExtent(const IterVar &iv,
-                               const arith::ConstIntBound &bound) {
+  // Certify a contiguous interval, including when ConstIntBound is loose.
+  size_t CalculateThreadExtent(const IterVar &iv, arith::ConstIntBound *bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
+      *bound = arith::ConstIntBound(0, 0);
       return 1;
     }
-    auto extent = *as_const_int(iv->dom->extent);
-    // Always use Z3 enumeration to count satisfying values.
-    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
-    // detect. Z3 enumeration will return the exact count of satisfying values.
-    int64_t z3_count =
-        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
-    if (z3_count > 0) {
-      return static_cast<size_t>(z3_count);
+    int64_t lower = (*bound)->min_value;
+    int64_t upper = (*bound)->max_value;
+    if (lower > upper) {
+      return 0;
     }
-
-    // Fallback to range-based calculation if Z3 enumeration failed
-    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
+    int64_t width = upper - lower + 1;
+    int64_t count = analyzer_->z3_prover.CountSatisfyingValues(iv->var, width);
+    if (count == 0 && analyzer_->z3_prover.CanProve(Bool(false))) {
+      return 0;
+    }
+    ICHECK_GT(count, 0) << "[ThreadSync] Cannot prove a thread rectangle";
+    if (count == width) {
+      return count;
+    }
+    upper -= count - 1;
+    while (lower < upper) {
+      int64_t mid = lower + (upper - lower + 1) / 2;
+      if (analyzer_->z3_prover.CanProve(iv->var >=
+                                        make_const(iv->var.dtype(), mid))) {
+        lower = mid;
+      } else {
+        upper = mid - 1;
+      }
+    }
+    upper = lower + count - 1;
+    // Count may stop early; containment certifies that these are all values.
+    ICHECK(analyzer_->z3_prover.CanProve(iv->var <=
+                                         make_const(iv->var.dtype(), upper)))
+        << "[ThreadSync] Cannot prove a thread rectangle";
+    *bound = arith::ConstIntBound(lower, upper);
+    return count;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -381,22 +413,12 @@ private:
 
   bool IsFullThreadExtent(const IterVar &iv,
                           const arith::ConstIntBound &bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      return true;
-    }
-
-    if (!iv->dom.defined()) {
-      return true;
-    }
-
-    const auto *min_node = iv->dom->min.as<IntImmNode>();
-    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
-
-    int64_t min = min_node->value;
-    int64_t extent = extent_node->value;
-    int64_t max = min + extent - 1;
-
-    return min == bound->min_value && max == bound->max_value;
+    auto range = iter_vars_.Get(iv->var);
+    return !range ||
+           (bound->min_value == 0 &&
+            analyzer_->CanProveEqual(range.value()->extent,
+                                     make_const(range.value()->extent.dtype(),
+                                                bound->max_value + 1)));
   }
 
   // Member variables
@@ -437,9 +459,9 @@ struct ConditionThreadProperty {
  * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
  * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * Only runtime-dependent, non-uniform conditions need to force sync hoisting.
- * In addition, some non-uniform threadIdx-only conditions still need hoisting
- * when ThreadPartialSyncRewriter cannot handle them.
+ * Runtime-dependent, non-uniform conditions use the existing conservative
+ * hoisting path. Thread-only conditions that otherwise remain in place need a
+ * warp-uniformity proof before ThreadPartialSyncRewriter can lower them safely.
  */
 class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
@@ -708,7 +730,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     LOG(FATAL) << "Thread variable " << tag << " not found";
     return IterVar();
   }
-
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
    *        \p condition, using the live constraint set as premises.
@@ -744,6 +765,42 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
                               tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
     return analyzer.CanProve(agree);
+  }
+
+  /*! \brief Return whether every hardware warp agrees on \p condition. */
+  bool IsWarpUniformCondition(const PrimExpr &condition) {
+    Map<Var, PrimExpr> sub1, sub2;
+    for (const auto &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
+        continue;
+      sub1.Set(iv->var, Var(iv->var->name_hint + "<T1>", iv->var.dtype()));
+      sub2.Set(iv->var, Var(iv->var->name_hint + "<T2>", iv->var.dtype()));
+    }
+    if (sub1.empty()) {
+      return true;
+    }
+
+    DataType index_dtype = DataType::Int(64);
+    PrimExpr linear_thread_id = MakeLinearThreadId(env_threads_);
+
+    ConstrSet cset = GetConstrSet();
+    ConstrSet c1 =
+        cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
+    ConstrSet c2 =
+        cset.RenameFrom("<T2>", sub2, std::nullopt, /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+
+    PrimExpr lhs = Substitute(condition, sub1);
+    PrimExpr rhs = Substitute(condition, sub2);
+    PrimExpr linear1 = Substitute(linear_thread_id, sub1);
+    PrimExpr linear2 = Substitute(linear_thread_id, sub2);
+    PrimExpr warp_size = make_const(index_dtype, warp_size_);
+    PrimExpr same_warp =
+        FloorDiv(linear1, warp_size) == FloorDiv(linear2, warp_size);
+    PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
+                              tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
+    return analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree));
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -903,10 +960,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * buffer reads, writes, and synchronization events under the condition's
    * constraints.
    *
-   * IMPORTANT: If syncs are inserted inside an if-statement with a non-uniform
-   * condition (i.e., the condition depends on threadIdx), we must hoist the
-   * sync to before the if-statement. Otherwise, only some threads will reach
-   * the sync point, causing a deadlock.
+   * IMPORTANT: Before preserving a partial barrier in a thread-divergent
+   * branch, prove that every hardware warp agrees on branch participation.
+   * Conditions already handled by the legacy conservative hoisting path keep
+   * that behavior for compatibility.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
@@ -991,39 +1048,56 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
                                              let_var_properties_, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
-      auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
+      auto must_hoist = [&](const PrimExpr &branch_condition,
+                            const char *branch_name) {
+        auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
+        bool may_hoist =
+            condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+        bool proven_uniform =
+            may_hoist && IsBlockUniformCondition(branch_condition);
+        bool is_block_uniform =
+            condition_prop.is_block_uniform || proven_uniform;
+        bool should_hoist =
+            (condition_prop.depends_on_runtime && !is_block_uniform) ||
+            (condition_prop.requires_hoist && !proven_uniform);
 
-      // The estimate calls anything mentioning a thread variable divergent; ask
-      // the prover before hoisting. Only added to it, never subtracted, and
-      // only asked when something below could act on the answer.
-      bool may_hoist =
-          condition_prop.depends_on_runtime || condition_prop.requires_hoist;
-      bool proven_uniform = may_hoist && IsBlockUniformCondition(op->condition);
-      bool is_block_uniform = condition_prop.is_block_uniform || proven_uniform;
-      // requires_hoist means the participation count was not established, so
-      // ThreadPartialSyncRewriter cannot emit `bar.sync id, count`. Uniformity
-      // answers that: the barrier is reached by the whole block or by nobody,
-      // and a plain __syncthreads() is right. Only a proof counts, not the
-      // heuristic.
-      if ((condition_prop.depends_on_runtime && !is_block_uniform) ||
-          (condition_prop.requires_hoist && !proven_uniform)) {
+        if (!should_hoist && !is_block_uniform &&
+            !IsWarpUniformCondition(branch_condition)) {
+          LOG(FATAL)
+              << "[ThreadSync] Cannot lower a required shared-memory sync "
+                 "inside the "
+              << branch_name
+              << " branch: its participating threads are not warp-uniform. "
+                 "A partial barrier requires every non-exited thread in each "
+                 "participating warp to reach the barrier. Condition: "
+              << branch_condition;
+        }
+        return should_hoist;
+      };
+
+      bool hoist_then =
+          !syncs_in_then.empty() && must_hoist(op->condition, "then");
+      bool hoist_else = !syncs_in_else.empty() &&
+                        must_hoist(tirx::Not(op->condition), "else");
+      if (hoist_then || hoist_else) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync out of an if whose condition is not "
                "safe for an in-if sync. This is not a fix: both ends of the "
                "conflict are inside the branch, so the hoisted barrier no "
                "longer separates them and the race remains. Constraining the "
                "condition -- a T.assume on the parameters it reads -- keeps "
-               "the "
-               "barrier in place instead. Condition: "
+               "the barrier in place instead. Condition: "
             << op->condition;
-        for (const auto &sync : syncs_in_then) {
-          syncs_inserted_.erase(sync);
+        if (hoist_then) {
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
         }
-        for (const auto &sync : syncs_in_else) {
-          syncs_inserted_.erase(sync);
+        if (hoist_else) {
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
         }
-
-        // Insert sync before the if-statement itself
         insert_syncs(op);
       }
     }
@@ -1063,7 +1137,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         const Op &call_op = opt.value();
         return call_op.same_as(tl::tma_load()) ||
                call_op.same_as(tl::tma_load_im2col()) ||
-               call_op.same_as(tl::tma_load_multicast());
+               call_op.same_as(tl::tma_load_multicast()) ||
+               call_op.same_as(tl::tma_load_gather4());
       }
       return false;
     }();
@@ -1253,6 +1328,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = StorageScope::Create(s);
         curr_stmt_.access.emplace_back(std::move(e));
       }
+    } else if (op->op.same_as(tl::sync_grid())) {
+      // grid.sync() synchronizes every thread of every block and is a full
+      // memory fence, so it subsumes a block-level barrier for any storage
+      // scope planned here.
+      ICHECK(allow_append_);
+      AccessEntry e{.cset = {constr_stack_}};
+      e.threads = env_threads();
+      e.type = kSync;
+      e.scope = sync_scope_;
+      curr_stmt_.access.emplace_back(std::move(e));
     } else {
       ConstrVisitor::VisitExpr_(op);
     }
@@ -1355,7 +1440,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
       // Loop-carried dependency analysis using symbolic iteration shift.
       // We compare accesses at iteration i (end of loop, stored in
-      // reads/writes) with accesses at iteration i+1 (beginning of next
+      // reads/writes) with accesses at iteration i+step (beginning of next
       // iteration). By substituting loop_var -> loop_var + step in the "next
       // iteration" indices, we can precisely determine if there's a true
       // dependency.
@@ -1520,6 +1605,16 @@ private:
     PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
     PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
     PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    // A touched interval relaxed to (half-)unbounded carries TVM's symbolic
+    // infinity sentinels, which are handle-typed vars: comparing them against
+    // integer offsets throws a dtype mismatch inside tvm::less. An unbounded
+    // side can never prove disjointness anyway (e.g. an atomic whose index is
+    // a data-dependent load), so answer conservatively.
+    for (const PrimExpr &bound : {lhs_min, lhs_max, rhs_min, rhs_max}) {
+      if (!bound.dtype().is_int() && !bound.dtype().is_uint()) {
+        return false;
+      }
+    }
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
@@ -1650,9 +1745,8 @@ private:
    * loop_var + step in the "next iteration" access indices and check if they
    * overlap with the "current iteration" access indices.
    *
-   * This approach can prove that accesses like A[i] and A[i+1] are disjoint
-   * (no loop-carry dependency), while correctly detecting dependencies like
-   * A[i] and A[i-1] (loop-carry dependency with distance 1).
+   * For unit-step loops, this proves that A[i] and A[i+1] are disjoint and
+   * detects the distance-one dependency between A[i] and A[i-1].
    *
    * \param prev The access entry from the previous/current iteration
    * \param curr The access entry to check against
@@ -1705,11 +1799,13 @@ private:
     // prev represents access at iteration i (end of loop body)
     // curr represents access at iteration i+step (beginning of next iteration)
     Map<Var, PrimExpr> loop_shift_sub;
+    PrimExpr adjusted_extent;
     if (loop != nullptr) {
-      // Get loop step, default to 1 if not specified
-      PrimExpr step = make_const(loop->loop_var.dtype(), 1);
-      // Substitute loop_var -> loop_var + step for the "next iteration"
+      PrimExpr step =
+          loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
       loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
+      // Only iterations with i + step < min + extent have a successor.
+      adjusted_extent = loop->extent - step;
     }
 
     // Check if indices are the same (considering loop shift)
@@ -1749,11 +1845,6 @@ private:
       }
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
-        // For loop-carry analysis, we compare iteration i with iteration i+1.
-        // Since i+1 must be a valid iteration, i can only range from min to
-        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent =
-            loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
@@ -1801,24 +1892,20 @@ private:
 
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
-        // For loop-carry analysis, we compare iteration i with iteration i+1.
-        // Since i+1 must be a valid iteration, i can only range from min to
-        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent =
-            loop->extent - make_const(loop->extent.dtype(), 1);
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
-      // For WAW (Write-after-Write) and RAR (Read-after-Read), we should use
-      // the same thread variables because:
-      // - WAW: doesn't create true data dependency, only need to check if the
-      //   same thread overwrites its own data across iterations
-      // - RAR: no dependency at all
-      // For RAW (Read-after-Write) and WAR (Write-after-Read), we need to use
-      // different thread variables to check cross-thread dependencies.
-      bool same_access_type = (prev.type == kWrite && curr.type == kWrite) ||
-                              (prev.type == kRead && curr.type == kRead);
+      // A same-iteration WAW must model two distinct threads: program order
+      // already orders writes from one thread, while writes from different
+      // threads may target the same address and require a barrier. Keep the
+      // existing loop-carried WAW model unchanged; correctly extending that
+      // case also requires shifting its constraints and placing the barrier
+      // inside the loop.
+      bool is_same_iteration_waw =
+          loop == nullptr && prev.type == kWrite && curr.type == kWrite;
+      bool use_distinct_threads =
+          prev.type != curr.type || is_same_iteration_waw;
 
       PrimExpr thread_condition = Bool(false);
       Map<Var, PrimExpr> prev_sub, curr_sub;
@@ -1828,14 +1915,13 @@ private:
         Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
         Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
 
-        if (same_access_type) {
-          // For WAW/RAR: use a single shared Var object for both prev and curr
-          // This allows the analyzer to see they reference the same thread
+        if (!use_distinct_threads) {
+          // For RAR/loop-carried WAW, share the thread instance.
           Var shared_var(thread_names[idx], old_prev_var.dtype());
           prev_sub.Set(old_prev_var, shared_var);
           curr_sub.Set(old_curr_var, shared_var);
         } else {
-          // For RAW/WAR: use different Var objects to model cross-thread access
+          // For RAW/WAR/same-iteration WAW: model cross-thread access.
           Var prev_var(std::string(thread_names[idx]) + "1",
                        old_prev_var.dtype());
           Var curr_var(std::string(thread_names[idx]) + "2",
@@ -1846,15 +1932,14 @@ private:
           curr_sub.Set(old_curr_var, curr_var);
         }
       }
-      if (!same_access_type) {
+      if (use_distinct_threads) {
         analyzer.EnterConstraint(thread_condition);
       }
       // Two instances in one analyzer, so per-instance binds need their own
-      // copy; see ConstrSet::RenameFrom. They differ when they are two threads
-      // (RAW/WAR) or two iterations of one thread (loop carry); a same-type
-      // pair within one iteration is one execution, where renaming would only
-      // lose the bind.
-      if (!same_access_type || loop != nullptr) {
+      // copy; see ConstrSet::RenameFrom. They differ for cross-thread proofs
+      // (RAW/WAR/same-iteration WAW) or for two loop iterations. Otherwise the
+      // pair represents one execution, where renaming would only lose the bind.
+      if (use_distinct_threads || loop != nullptr) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);
         curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,

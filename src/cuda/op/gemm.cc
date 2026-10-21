@@ -78,12 +78,11 @@ bool CheckWgmma(const GemmNode &op) {
 }
 
 bool AllowTcgen5Mma(const GemmNode &op, Target target) {
-  bool scope_ok = (IsSharedBuffer(op.a_) || op.a_.scope() == "shared.tmem") &&
-                  IsSharedBuffer(op.b_) && op.c_.scope() == "shared.tmem";
+  bool scope_ok = (IsSharedBuffer(op.a_) || IsTmemBuffer(op.a_)) &&
+                  IsSharedBuffer(op.b_) && IsTmemBuffer(op.c_);
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype =
-      (op.a_.scope() == "shared.tmem") ? op.b_->dtype : op.a_->dtype;
+  DataType ab_dtype = IsTmemBuffer(op.a_) ? op.b_->dtype : op.a_->dtype;
   return GetTCGEN5MMAMeta(op.m_, op.n_, op.k_, ab_dtype, op.c_->dtype).first;
 }
 
@@ -144,6 +143,51 @@ bool AllowTuringMma(const GemmNode &op) {
   return false;
 }
 
+bool AllowAmpereMMA(const GemmNode &op, Target target) {
+  DataType a = op.a_->dtype, b = op.b_->dtype, c = op.c_->dtype;
+  if (a.is_float8() && b.is_float8()) {
+    return TargetHasSMVersionGE(target, 89) &&
+           (c == DataType::Float(16) || c == DataType::Float(32));
+  }
+  if (a != b) {
+    return false;
+  }
+  if (a == DataType::Float(16)) {
+    return c == DataType::Float(16) || c == DataType::Float(32);
+  }
+  if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
+    return c == DataType::Int(32);
+  }
+  if (a.is_tfloat32() && b.is_tfloat32()) {
+    return c == DataType::Float(32);
+  }
+  if (a == DataType::BFloat(16))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(32))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(64))
+    return c == DataType::Float(64);
+  return false;
+}
+
+// fp8 (.e4m3/.e5m2) mma.sync atoms first exist on SM89; the SM80/SM86 MMA
+// path has none. CUTLASS compiles the missing atom into
+// CUTE_INVALID_CONTROL_PATH, so without this gate nvcc succeeds and the
+// device traps at launch with a bare `device-side assert triggered`.
+bool NeedsSm89Fp8Mma(const GemmNode &op) {
+  return op.a_->dtype.is_float8() || op.b_->dtype.is_float8();
+}
+
+void FatalFp8MmaUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL) << "T.gemm() with fp8 operands requires a CUDA target with fp8 "
+                "mma.sync atoms (SM89+), but got target="
+             << target << " with A(dtype=" << op.a_->dtype
+             << "), B(dtype=" << op.b_->dtype
+             << "). SM80/SM86 have no .e4m3/.e5m2 mma instruction; the kernel "
+                "would compile and then trap at launch."
+             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -164,6 +208,17 @@ void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
              << ", dtype=" << op.c_->dtype << "), M=" << op.m_
              << ", N=" << op.n_ << ", K=" << op.k_ << "."
              << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+}
+
+void FatalMmaSyncUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL)
+      << "T.gemm requires native mma.sync lowering on Ampere/Ada, "
+         "but the operand dtype configuration is not supported. Got target="
+      << target << ", A(scope=" << op.a_.scope() << ", dtype=" << op.a_->dtype
+      << "), B(scope=" << op.b_.scope() << ", dtype=" << op.b_->dtype
+      << "), C(scope=" << op.c_.scope() << ", dtype=" << op.c_->dtype
+      << "), M=" << op.m_ << ", N=" << op.n_ << ", K=" << op.k_ << "."
+      << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
 }
 
 std::pair<int, int>
@@ -360,20 +415,6 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
-    if (op.sfaRegion_.defined() || op.sfbRegion_.defined()) {
-      if (!op.sfaRegion_.defined() || !op.sfbRegion_.defined()) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires both SFA and SFB "
-                      "scale-factor regions.";
-      }
-      if (!TargetIsSM120(target)) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires an SM120 CUDA target, "
-                      "but got target="
-                   << target << "."
-                   << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
-      }
-      return kCudaMMABlockScaled;
-    }
-
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -385,6 +426,14 @@ struct Gemm {
     }
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
+    }
+    // Reached only by the mma.sync path: WGMMA/TCGEN05 returned above, and
+    // Volta/Turing demote fp8 to kCudaFMA.
+    if (NeedsSm89Fp8Mma(op) && !TargetHasSMVersionGE(target, 89)) {
+      FatalFp8MmaUnavailable(op, target);
+    }
+    if (TargetIsAmpere(target) && !AllowAmpereMMA(op, target)) {
+      FatalMmaSyncUnavailable(op, target);
     }
     return kCudaMMA;
   }
@@ -464,16 +513,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         uint32_t desc = GetTCGEN5InstrDesc(
             atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
             b_is_k_major, scale_in_a, scale_in_b);
-        return Integer(static_cast<int64_t>(desc));
-      });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
-         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
-         int a_sf_id, int b_sf_id) {
-        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
-            atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
         return Integer(static_cast<int64_t>(desc));
       });
 }

@@ -1,20 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, Any
+from typing import Any, Literal
 from collections.abc import Callable
 from tilelang import tvm as tvm
-from tvm import IRModule, tirx
 from tvm.target import Target
-from tilelang.engine.lower import (
-    get_device_call,
-    get_host_call,
-    determine_target,
-    canon_target_host,
-    is_cpu_device_backend,
-)
-from tilelang.backend.pass_pipeline.pipeline import resolve_pipeline
-from tilelang.engine.semantic_check import PreLowerSemanticCheck
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
@@ -110,46 +100,12 @@ def is_metal_target(target: Target) -> bool:
     return target.kind.name == "metal"
 
 
+def is_ascend_target(target: Target) -> bool:
+    return target.kind.name == "ascend"
+
+
 def is_cutedsl_target(target: Target) -> bool:
     return target.kind.name == "cuda" and "cutedsl" in target.keys
-
-
-def get_annotated_mod(
-    func_or_mod: tirx.PrimFunc | tvm.IRModule,
-    target: str | Target = "auto",
-    target_host: str | Target | None = None,
-    model_type: Literal["device", "host", "all"] = "all",
-) -> IRModule | tuple[IRModule, IRModule]:
-    # Validate model_type early
-    if model_type not in {"device", "host", "all"}:
-        raise ValueError(f"Invalid model type: {model_type}")
-
-    # Convert PrimFunc to IRModule if needed
-    mod = func_or_mod
-    if isinstance(func_or_mod, tirx.PrimFunc):
-        mod = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
-
-    # Handle target and target_host
-    if isinstance(target, str):
-        target = determine_target(target)
-    target_host = tvm.target.Target(canon_target_host(target, target_host))
-    target = tvm.target.Target(target, target_host)
-
-    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
-    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
-
-    # Apply transformations
-    PreLowerSemanticCheck(mod)
-    mod = resolve_pipeline(target).lower(mod, target)
-
-    # Define dispatch dictionary for different model types
-    dispatch = {
-        "device": lambda m: tirx.transform.Filter(_is_device_call)(m),
-        "host": lambda m: tirx.transform.Filter(_is_host_call)(m),
-        "all": lambda m: (tirx.transform.Filter(_is_device_call)(m), tirx.transform.Filter(_is_host_call)(m)),
-    }
-
-    return dispatch[model_type](mod)
 
 
 def pythonic_expr(
@@ -158,6 +114,8 @@ def pythonic_expr(
     ignore_cast: bool = False,
     floor_div_op: str = "/",
     func_name_map: dict[str, str] | None = None,
+    expression_style: Literal["legacy", "python", "cxx"] = "legacy",
+    var_name_map: dict[tvm.tirx.Var, str] | None = None,
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -172,11 +130,40 @@ def pythonic_expr(
                       pass '//' explicitly.
         func_name_map: Optional mapping for rendered helper function names, e.g.
                        {"max": "std::max"} when generating C++.
+        expression_style: Controls conditional and logical operator spelling.
+                          ``legacy`` preserves the historical output.
+        var_name_map: Optional identity-based names for variables in generated wrappers.
     Returns:
         A string representation of the expression.
     """
     if not isinstance(expr, tvm.tirx.PrimExpr):
         return str(expr)
+
+    default_cxx_type_map = {
+        "bool": "bool",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "int16": "int16_t",
+        "uint16": "uint16_t",
+        "int32": "int32_t",
+        "uint32": "uint32_t",
+        "int64": "int64_t",
+        "uint64": "uint64_t",
+        "float32": "float",
+        "float64": "double",
+    }
+
+    def _target_type(dtype: tvm.DataType) -> str:
+        dtype_name = str(dtype)
+        if dtype_map is not None:
+            mapped = dtype_map.get(dtype_name)
+            if mapped is not None:
+                return mapped
+        if expression_style == "cxx":
+            mapped = default_cxx_type_map.get(dtype_name)
+            if mapped is not None:
+                return mapped
+        raise ValueError(f"No target type mapping for dtype {dtype_name}")
 
     # 1. Define operator precedence (higher value means higher precedence)
     # Based on Python's operator precedence
@@ -210,7 +197,10 @@ def pythonic_expr(
             return
 
         if isinstance(node, tvm.tirx.Var):
-            s, p = node.name, ATOMIC_PRECEDENCE
+            s, p = (
+                (var_name_map.get(node, node.name) if var_name_map is not None else node.name),
+                ATOMIC_PRECEDENCE,
+            )
         elif isinstance(node, (tvm.tirx.IntImm, tvm.tirx.FloatImm)):
             s, p = str(node.value), ATOMIC_PRECEDENCE
         elif isinstance(node, tvm.tirx.Cast):
@@ -219,7 +209,7 @@ def pythonic_expr(
             if ignore_cast:
                 s = value_str
             else:
-                type_str = node.dtype if dtype_map is None else dtype_map[node.dtype]
+                type_str = _target_type(node.dtype) if dtype_map is not None or expression_style == "cxx" else node.dtype
                 s = f"({type_str}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
@@ -252,8 +242,8 @@ def pythonic_expr(
                 tvm.tirx.GE: ">=",
                 tvm.tirx.EQ: "==",
                 tvm.tirx.NE: "!=",
-                tvm.tirx.And: "and",
-                tvm.tirx.Or: "or",
+                tvm.tirx.And: "&&" if expression_style == "cxx" else "and",
+                tvm.tirx.Or: "||" if expression_style == "cxx" else "or",
             }
             op_str = f" {op_map[type(node)]} "
             my_precedence = PRECEDENCE[type(node)]
@@ -272,12 +262,30 @@ def pythonic_expr(
 
             s = f"{a_str}{op_str}{b_str}"
             p = my_precedence
+        elif isinstance(node, tvm.tirx.Select):
+            condition_str, _ = node_to_result_map[node.condition]
+            true_str, _ = node_to_result_map[node.true_value]
+            false_str, _ = node_to_result_map[node.false_value]
+            if expression_style == "cxx":
+                s = f"({condition_str} ? {true_str} : {false_str})"
+            elif expression_style == "python":
+                s = f"({true_str} if {condition_str} else {false_str})"
+            else:
+                s = str(node)
+            p = ATOMIC_PRECEDENCE
         elif isinstance(node, (tvm.tirx.Min, tvm.tirx.Max)):
             op_name = "min" if isinstance(node, tvm.tirx.Min) else "max"
             if func_name_map is not None:
                 op_name = func_name_map.get(op_name, op_name)
+            elif expression_style == "cxx":
+                op_name = f"std::{op_name}"
             a_str, _ = node_to_result_map[node.a]
             b_str, _ = node_to_result_map[node.b]
+            if expression_style == "cxx":
+                # std::min/max require both arguments to deduce the same T.
+                # IntImm/FloatImm rendering intentionally omits authored
+                # dtype, so specify the TIR result dtype explicitly.
+                op_name = f"{op_name}<{_target_type(node.dtype)}>"
             s = f"{op_name}({a_str}, {b_str})"
             # Function calls have high precedence
             p = PRECEDENCE.get(tvm.tirx.Call, ATOMIC_PRECEDENCE)

@@ -350,7 +350,7 @@ void TVMFFIABIBuilder::BindDLTensors(
 
     // Scan buffer shape for symbolic variables
     for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      if (buffer->dtype.bits() < 8) {
+      if (buffer->dtype.bits() * buffer->dtype.lanes() < 8) {
         break;
       }
 
@@ -542,9 +542,11 @@ void TVMFFIABIBuilder::BindDLTensors(
       cond =
           cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
     }
-    // Allow with bits < 8 to match any type with the same total bit count at
-    // runtime (PyTorch uses int8 as storage for FP4).
-    bool data_is_subtype = buffer->dtype.bits() < 8;
+    // Allow sub-byte logical elements to match any type with the same total
+    // bit count at runtime (PyTorch uses int8 or FP4x2 as storage for FP4).
+    const int logical_element_bits =
+        buffer->dtype.bits() * buffer->dtype.lanes();
+    bool data_is_subtype = logical_element_bits < 8;
     if (data_is_subtype) {
       // Get the pre-created shape buffer for reading runtime shape
       Buffer buf_shape = shape_buffer_map[arg_name];
@@ -588,17 +590,15 @@ void TVMFFIABIBuilder::BindDLTensors(
     Buffer buf_shape = shape_buffer_map[arg_name];
 
     // Bind symbolic variables from buffer shape
-    // For subtype (bits < 8), the runtime tensor has packed shape where
-    // the last dimension is divided by the packing factor k = 8 / bits.
+    // For subtype (total bits < 8), the runtime tensor has packed shape where
+    // the last dimension is divided by k = 8 / logical element bits.
     // For example, fp4 (4 bits) has k=2, so logical shape [m, 16] becomes
     // runtime shape [m, 8]. We need to solve for symbolic variables from
     // this packed shape.
     if (data_is_subtype) {
       // For subtype, bind symbolic variables from the packed shape.
-      // The packing factor k = 8 / bits (number of elements packed into one
-      // storage unit)
-      int bits = buffer->dtype.bits();
-      int pack_factor = 8 / bits;
+      // Number of logical elements packed into one byte-sized storage unit.
+      int pack_factor = 8 / logical_element_bits;
 
       // Build a mapping from logical shape dimensions to runtime shape
       // expressions For all dimensions except the last, runtime_shape[k] ==
@@ -781,7 +781,7 @@ void TVMFFIABIBuilder::BindDLTensors(
     }
 
     // strides field
-    // For subbyte types (bits < 8), stride semantics need special handling
+    // For sub-byte logical elements, stride semantics need special handling
     // due to packed storage. The relationship is:
     // - Last dimension: logical_stride = runtime_stride (packing is within
     // elements)
@@ -790,8 +790,7 @@ void TVMFFIABIBuilder::BindDLTensors(
       // For subtype, only process strides if there are explicit strides
       // with symbolic variables that need binding
       if (!buffer->strides.empty()) {
-        int bits = buffer->dtype.bits();
-        int pack_factor = 8 / bits;
+        int pack_factor = 8 / logical_element_bits;
 
         Buffer buf_strides =
             decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},

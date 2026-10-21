@@ -82,6 +82,7 @@ def grouped_gemm(
 
         m_start_padded = bx * block_M
 
+        cur_batch_idx = 0
         for i in range(batch_count):
             in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
             cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
@@ -150,10 +151,8 @@ def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K,
     )
     ref_output = torch_gmm(A, B, batch_sizes, batch_offsets, trans_b)
 
-    if torch.allclose(out, ref_output, rtol=0.01, atol=0.01):
-        print("✅ Tilelang and Torch match")
-    else:
-        print("❌ Tilelang and Torch mismatch")
+    torch.testing.assert_close(out, ref_output, rtol=0.01, atol=0.01)
+    print("✅ Tilelang and Torch match")
 
     if profile:
         from tilelang.profiler import do_bench

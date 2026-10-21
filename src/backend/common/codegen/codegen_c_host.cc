@@ -1,26 +1,8 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file codegen_c_host.cc
  */
 #include "codegen_c_host.h"
+#include "config.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -33,6 +15,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "op/builtin.h"
 
 // For escaping strings embedded into generated C sources
 #include "support/str_escape.h"
@@ -52,32 +36,32 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
-  decl_stream << "// tilelang target: " << target_str << "\n";
-  decl_stream << "#define TVM_EXPORTS\n";
-  decl_stream << "#include \"tvm/runtime/base.h\"\n";
-  decl_stream << "#include \"tvm/runtime/c_backend_api.h\"\n";
-  decl_stream << "#include \"tvm/ffi/c_api.h\"\n";
-  decl_stream << "#include <math.h>\n";
+  preamble_stream_ << "// tilelang target: " << target_str << "\n";
+  preamble_stream_ << "#define TVM_EXPORTS\n";
+  preamble_stream_ << "#include \"tvm/runtime/base.h\"\n";
+  preamble_stream_ << "#include \"tvm/runtime/c_backend_api.h\"\n";
+  preamble_stream_ << "#include \"tvm/ffi/c_api.h\"\n";
+  preamble_stream_ << "#include <math.h>\n";
   // snprintf for richer assert messages with actual values
-  decl_stream << "#include <stdio.h>\n";
-  decl_stream << "#include <stdbool.h>\n";
+  preamble_stream_ << "#include <stdio.h>\n";
+  preamble_stream_ << "#include <stdbool.h>\n";
   // Portable alignment specifier: MSVC uses __declspec(align(N)), every other
   // compiler nvcc invokes (gcc/clang) accepts __attribute__((aligned(N))).
-  decl_stream << "#if defined(_MSC_VER)\n";
-  decl_stream << "#define TL_ALIGN(N) __declspec(align(N))\n";
-  decl_stream << "#else\n";
-  decl_stream << "#define TL_ALIGN(N) __attribute__((aligned(N)))\n";
-  decl_stream << "#endif\n";
+  preamble_stream_ << "#if defined(_MSC_VER)\n";
+  preamble_stream_ << "#define TL_ALIGN(N) __declspec(align(N))\n";
+  preamble_stream_ << "#else\n";
+  preamble_stream_ << "#define TL_ALIGN(N) __attribute__((aligned(N)))\n";
+  preamble_stream_ << "#endif\n";
 
-  decl_stream << "#ifdef __OBJC__\n";
-  decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
-  decl_stream << "#include \"tvm/ffi/function.h\"\n";
+  preamble_stream_ << "#ifdef __OBJC__\n";
+  preamble_stream_ << "#include \"tvm/runtime/device_api.h\"\n";
+  preamble_stream_ << "#include \"tvm/ffi/function.h\"\n";
 
-  decl_stream << "#include <Metal/Metal.h>\n";
-  decl_stream << "#include <Foundation/Foundation.h>\n";
+  preamble_stream_ << "#include <Metal/Metal.h>\n";
+  preamble_stream_ << "#include <Foundation/Foundation.h>\n";
 
-  decl_stream << "#include <torch/mps.h>\n";
-  decl_stream << "#endif\n";
+  preamble_stream_ << "#include <torch/mps.h>\n";
+  preamble_stream_ << "#endif\n";
 
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
@@ -364,7 +348,19 @@ std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
 void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
                               std::ostream &os) { // NOLINT(*)
   using namespace tvm::tirx;
-  if (op->op.same_as(builtin::tvm_stack_alloca())) {
+  if (op->op.same_as(tl::tvm_ffi_call_with_result())) {
+    ICHECK_EQ(op->args.size(), 4U);
+    const auto *func_name = op->args[0].as<StringImmNode>();
+    const auto *num_args = op->args[2].as<IntImmNode>();
+    ICHECK(func_name != nullptr);
+    ICHECK(num_args != nullptr);
+
+    std::string packed_func_name = GetPackedName(op);
+    PrintGetFuncFromBackend(func_name->value, packed_func_name);
+    os << "TVMFFIFunctionCall(" << packed_func_name << ", (TVMFFIAny*) "
+       << PrintExpr(op->args[1]) << ", " << num_args->value << ", (TVMFFIAny*) "
+       << PrintExpr(op->args[3]) << ")";
+  } else if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string &type = op->args[0].as<StringImmNode>()->value;
     const IntImmNode *num = op->args[1].as<IntImmNode>();
@@ -402,6 +398,25 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   } else {
     tvm::codegen::CodeGenC::VisitExpr_(op, os);
   }
+}
+
+void CodeGenCHost::VisitStmt_(const tvm::tirx::EvaluateNode *op) { // NOLINT(*)
+  using namespace tvm::tirx;
+  if (const auto *call = op->value.as<CallNode>()) {
+    if (call->op.same_as(builtin::tvm_struct_set())) {
+      ICHECK_EQ(call->args.size(), 4U);
+      const auto *field = call->args[2].as<IntImmNode>();
+      ICHECK(field != nullptr);
+      if (field->value == builtin::kDLTensorShape) {
+        std::string ref = GetStructRef(call->args[3].dtype(), call->args[0],
+                                       call->args[1], builtin::kDLTensorShape);
+        PrintIndent();
+        stream << ref << " = (int64_t*)" << PrintExpr(call->args[3]) << ";\n";
+        return;
+      }
+    }
+  }
+  tvm::codegen::CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenCHost::VisitStmt_(
@@ -523,6 +538,7 @@ Module BuildTileLangCHost(IRModule mod, Target target) {
 
   CodeGenCHost cg;
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str(), devices);
+  cg.SetEmitLineDirectives(tl_config::EmitLineDirectivesEnabled());
   cg.SetConstantsByteAlignment(
       target->GetAttr<::tvm::Integer>("constants-byte-alignment").value_or(16));
 

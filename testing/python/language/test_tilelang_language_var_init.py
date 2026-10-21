@@ -31,8 +31,6 @@ def test_alloc_var_rejects_unrepresentable_float32_initializer() -> None:
                 A[0] = value
 
 
-# TODO: var init is not supported on hip.
-@tilelang.testing.requires_cuda
 def test_var_assign() -> None:
     @tilelang.jit(out_idx=-1)
     def jit_kernel():

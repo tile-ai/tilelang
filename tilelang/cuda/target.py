@@ -38,30 +38,44 @@ def _detect_torch_cuda_arch() -> str | None:
     return f"sm_{nvcc.get_target_arch(cap)}" if cap else None
 
 
-def _cuda_target_from_arch(arch: str | None) -> Target | str:
-    """Build a CUDA target while preserving the legacy bare string fallback."""
+def _cuda_target_from_arch(arch: str | None) -> Target:
+    """Build a concrete-arch CUDA target, refusing a bare "cuda" (TVM would
+    silently fill arch=sm_50 and mis-compile). Guards auto-detect and explicit
+    target="cuda" alike; an explicit arch compiles without a GPU."""
     if arch is None:
-        return "cuda"
+        raise ValueError(
+            "CUDA target has no arch and no GPU is available to detect one. "
+            "Pin the arch for your target GPU, e.g. "
+            "tilelang.compile(func, target={'kind': 'cuda', 'arch': 'sm_90a'}) or "
+            'TILELANG_DEFAULT_TARGET=\'{"kind": "cuda", "arch": "sm_90a"}\'.'
+        )
     return Target({"kind": "cuda", "arch": arch})
 
 
-def _detect_cuda_target() -> Target | str | None:
+def _detect_cuda_target() -> Target | None:
     import torch
 
     if torch.version.hip is not None:
         return None
     if not check_cuda_availability():
         return None
+    # A CUDA toolkit alone does not make this a CUDA host. check_cuda_availability
+    # only looks for a toolkit/nvcc path, so a machine that merely has the CUDA
+    # toolkit installed -- a cross-compilation host, or an NPU box with the CUDA
+    # headers alongside the NPU stack -- would otherwise be auto-detected as
+    # CUDA. Auto-detection returns the first backend that claims to be
+    # available, so that mis-detection also shadows the NPU. Require an actually
+    # usable device; an explicit target="cuda" still works everywhere.
+    if not torch.cuda.is_available():
+        return None
 
-    arch = _detect_torch_cuda_arch()
-    return _cuda_target_from_arch(arch)
+    return _cuda_target_from_arch(_detect_torch_cuda_arch())
 
 
 def normalize_cuda_target(target: TargetLike) -> Target | None:
     if not isinstance(target, str) or target.strip() != "cuda":
         return None
-    normalized = _cuda_target_from_arch(_detect_torch_cuda_arch())
-    return normalized if isinstance(normalized, Target) else None
+    return _cuda_target_from_arch(_detect_torch_cuda_arch())
 
 
 def _with_cutedsl_key(target: Target | str) -> Target:

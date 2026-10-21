@@ -7,6 +7,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls, collect_nodes
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -19,20 +20,9 @@ def _apply(func):
     return tl.cuda.transform.LowerSharedTmem()(mod)
 
 
-def _collect_calls(stmt, op_name):
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", None) == op_name:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
-
-
 def _num_cols_allocated(body):
     """Columns passed to each tcgen05.alloc, in the order they are issued."""
-    return [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_init_tensor_memory")]
+    return [int(call.args[1]) for call in collect_calls(body, op="tl.ptx_init_tensor_memory")]
 
 
 def _tmem_addresses(body):
@@ -44,23 +34,18 @@ def _tmem_addresses(body):
     """
     addresses = []
 
-    def visitor(node):
-        if not isinstance(node, tvm.tirx.Evaluate):
-            return
+    for node in collect_nodes(body, tvm.tirx.Evaluate):
         value = node.value
         if isinstance(value, tvm.tirx.BufferLoad):
             addresses.append((value.buffer.name, 0))
         elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.BufferLoad):
             addresses.append((value.a.buffer.name, int(value.b)))
 
-    tvm.tirx.stmt_functor.post_order_visit(body, visitor)
     return addresses
 
 
 def _int_imms(expr):
-    values = []
-    tvm.tirx.stmt_functor.post_order_visit(expr, lambda node: values.append(int(node)) if isinstance(node, tvm.tirx.IntImm) else None)
-    return values
+    return [int(node) for node in collect_nodes(expr, tvm.tirx.IntImm)]
 
 
 @tilelang.testing.requires_cuda
@@ -88,7 +73,7 @@ def test_narrow_buffers_join_a_wide_allocation():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [512]
-    assert [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_deallocate_tensor_memory")] == [512]
+    assert [int(call.args[1]) for call in collect_calls(body, op="tl.ptx_deallocate_tensor_memory")] == [512]
     assert _tmem_addresses(body) == [
         ("C_tmem", 0),
         ("C_tmem", 384),
@@ -225,19 +210,11 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
             T.evaluate(SF_tmem[0, stage * 4])
 
     body = _apply(func)["main"].body
-    assert _num_cols_allocated(body) == [512]
-    addresses = _collect_calls(body, "tl.ptx_init_tensor_memory")
+    addresses = collect_calls(body, op="tl.ptx_init_tensor_memory")
+    assert [int(call.args[1]) for call in addresses] == [512]
     assert len(addresses) == 1
 
-    dynamic_address = []
-    tvm.tirx.stmt_functor.post_order_visit(
-        body,
-        lambda node: (
-            dynamic_address.append(node.value)
-            if isinstance(node, tvm.tirx.Evaluate) and not isinstance(node.value, tvm.tirx.Call)
-            else None
-        ),
-    )
+    dynamic_address = [node.value for node in collect_nodes(body, tvm.tirx.Evaluate) if not isinstance(node.value, tvm.tirx.Call)]
     assert len(dynamic_address) == 1
     assert 384 in _int_imms(dynamic_address[0])
 

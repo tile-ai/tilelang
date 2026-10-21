@@ -81,6 +81,8 @@ public:
     host_buffer_map_ = func->buffer_map;
   }
 
+  void SetSourceSpan(const Span &span) { source_span_ = span; }
+
   tirx::Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
     if (op->attr_key == tvm::attr::kTarget) {
       found_device_region_ = true;
@@ -481,6 +483,12 @@ private:
     // code.
 
     bool can_propagate_errors = [&]() {
+      // Target kinds whose kernel ABI cannot return a status code override
+      // the device-type heuristic through this attribute.
+      if (auto status_return =
+              device_target->GetAttr<Bool>("supports_kernel_status_return")) {
+        return static_cast<bool>(status_return.value());
+      }
       auto kind = device_target->GetTargetDeviceType();
       return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
     }();
@@ -516,6 +524,9 @@ private:
     }
 
     tirx::PrimFunc device_func(params, body, kernel_ret_type);
+    if (source_span_.defined()) {
+      device_func.CopyOnWrite()->span = source_span_;
+    }
     Map<String, Any> device_attrs = {
         {tvm::attr::kTarget, device_target},
         {tirx::attr::kNoAlias, true},
@@ -563,6 +574,8 @@ private:
   IRModule *device_mod_;
   // Generate new GlobalVar for the kernel
   std::function<GlobalVar()> var_supply_;
+  // Source span of the host PrimFunc, carried onto split device kernels.
+  Span source_span_;
   // Collect assumes in host side
   Array<tirx::AttrStmt> host_assumes_;
 };
@@ -571,6 +584,7 @@ tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
                                std::function<GlobalVar()> var_supply) {
   HostDeviceSplitter splitter(device_mod, std::move(var_supply));
   splitter.SetHostFuncSignature(func);
+  splitter.SetSourceSpan(func->span);
   // Propagate non-restrict parameter list from host func to device kernels
   if (auto opt =
           func->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {

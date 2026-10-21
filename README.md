@@ -13,15 +13,17 @@
 [Installation](https://tilelang.com/get_started/Installation.html) ·
 [Examples](https://github.com/tile-ai/tilelang/tree/main/examples) ·
 [Releases](https://github.com/tile-ai/tilelang/releases) ·
-[Contributing](https://github.com/tile-ai/tilelang/blob/main/CONTRIBUTING.md)
+[Contributing](https://github.com/tile-ai/tilelang/blob/main/CONTRIBUTING.md) ·
+[TileLang (Ascend 950)](./tilelang/ascend/README.md)
 </div>
 
-Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
+Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU/NPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
 
 <img src="./images/MatmulExample.png" alt="TileLang tiled matrix multiplication example" />
 
 ## Latest News
 
+- **2026-09-30 — [Ascend 950 backend](./tilelang/ascend/README.md):** TileLang now officially supports Huawei Ascend 950 NPUs with native code generation, automatic scheduling and synchronization, SIMD/SIMT vector programming, etc. Explore the Ascend examples for GEMM, FlashAttention, and more.
 - **2026-08-04 — [TileLang LSP open sourced](https://github.com/tile-ai/tilelang-lsp):** published a Language Server Protocol implementation for TileLang with inlay hints for buffer shapes, dtypes, scopes, and inferred layouts, plus hover details and precise diagnostics.
 - **2026-08-03 — [TileLang v0.1.13](https://github.com/tile-ai/tilelang/releases/tag/v0.1.13):** shipped the multi-backend language dialect, source locations in compiler diagnostics, new CUDA and Metal hardware paths, and a broad set of correctness fixes. This release removes several legacy APIs; read the compatibility notes before upgrading.
 - **2026-07-30 — [SM120 NVF4 block-scaled MMA](https://github.com/tile-ai/tilelang/pull/2364):** added an optimized Blackwell path for `T.mma_gemm_blockscaled` and a corresponding SM120 example.
@@ -110,21 +112,26 @@ See [all releases](https://github.com/tile-ai/tilelang/releases) for complete ch
 
 ## Platform and Backend Support
 
-TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. Hardware-specific instructions and optimizations remain subject to the selected architecture.
+TileLang is evolving into a multi-backend compiler (**TileLang-X**) built around a modular backend abstraction. See the [backend architecture](tilelang/backend/README.md) for the design, or ask a coding agent to use the [backend integration skill](.agents/skills/tilelang-backend/SKILL.md) when porting TileLang to a new backend.
+
+The currently supported backends are listed below. `Primary` identifies TileLang's core backend, while `Supported` and `Experimental` backends are implemented in the main repository. `Ecosystem` adapters live in separate repositories, are not included in TileLang release wheels, and may follow independent compatibility schedules. Prebuilt wheels are available for Linux x86-64/AArch64, Windows x86-64, and macOS arm64.
+
+TileLang uses `Target` objects to represent compilation targets. The default `auto` target detects CUDA, HIP, Metal, and Ascend devices; select an explicit target when compiling for another backend or architecture. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 | Backend | Target | Platforms and hardware | Support level | Notes |
 | --- | --- | --- | --- | --- |
 | NVIDIA CUDA | `cuda` | Linux x86-64/AArch64, Windows x86-64; code paths from SM70 through SM120 | Primary | Release wheels and CI coverage; TMA, WGMMA, and TMEM features require the corresponding GPU architecture. |
-| AMD ROCm/HIP | `hip` | Linux; CDNA and RDNA GPUs, including gfx942/gfx950 paths | Supported | Included in Linux wheels; a ROCm runtime is required. ROCm CI is temporarily disabled. |
+| AMD ROCm/HIP | `hip` | Linux; CDNA and RDNA GPUs, including gfx942/gfx950 paths | Supported | Included in Linux wheels; a ROCm runtime is required. CI runs on a self-hosted gfx942 (MI300X) runner; gfx950 is not yet covered. |
+| Huawei Ascend 950 | `ascend` | Linux; Ascend 950 NPUs | Supported | Build from source with `USE_ASCEND=ON`; requires CANN and `torch_npu`. See the [Ascend guide](./tilelang/ascend/README.md). |
 | Apple Metal | `metal` | macOS on Apple silicon | Supported | Release wheels and CI coverage; Metal 4 cooperative tensors are available on supported M5 systems. |
 | LLVM CPU | `llvm` | Host CPUs | Experimental | Build from source with `USE_LLVM=ON`; LLVM 15 or newer is required. |
 | NVIDIA CuTe DSL | `cutedsl` | NVIDIA GPUs | Experimental | Requires `nvidia-cutlass-dsl`. |
 | WebGPU | `webgpu` | WebGPU runtimes | Experimental | Code generation and runtime integration are still evolving. |
-| Huawei Ascend | Ascend C / NPU IR | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
-| MetaX MACA | MACA adapter | MetaX C500 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
+| Huawei Ascend A2/A3 | `ascendc` / `pto` / `npuir` | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
+| MetaX MACA | `maca` | MetaX C500 and C600 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
 | Moore Threads MUSA | `musa` | S5000, S4000, and M1000 | Ecosystem | Developed in [tilelang-musa](https://github.com/tile-ai/tilelang-musa) and released independently. |
-
-Prebuilt wheels are published for Linux x86-64/AArch64, Windows x86-64, and macOS arm64. Ecosystem adapters live in separate repositories, are not included in the main TileLang release wheels, and may follow different compatibility schedules. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
+| HYGON | `hcu` | Linux; BW1000, BW1100, BW150 and K100_AI | Ecosystem | Developed in [tilelang-hygon](https://github.com/tile-ai/tilelang-hygon); requires the DTK software stack. |
+| Sunrise-AI TANG | `tang` | Sunrise S2 and S3 | Ecosystem | Developed in [tilelang-sunrise](https://github.com/tile-ai/tilelang-sunrise). The TANG software stack is required. |
 
 ## Installation
 
@@ -145,6 +152,8 @@ Nightly wheels provide recent features and fixes before the next stable release:
 ```bash
 pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
+
+On AMD GPUs the same Linux wheels work out of the box: install a ROCm build of PyTorch first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/rocm7.0`), then `pip install tilelang`. A host ROCm installation is required at runtime; see the [ROCm notes](https://tilelang.com/get_started/Installation.html#installing-on-amd-gpus-rocm) in the installation guide.
 
 Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a custom TVM checkout, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
 
@@ -200,7 +209,7 @@ print("GEMM + ReLU passed.")
 - **GEMM and quantization:** [GEMM](https://github.com/tile-ai/tilelang/tree/main/examples/gemm), [grouped GEMM](https://github.com/tile-ai/tilelang/tree/main/examples/grouped_gemm), [FP8 GEMM](https://github.com/tile-ai/tilelang/tree/main/examples/gemm_fp8), [dequantization GEMM](https://github.com/tile-ai/tilelang/tree/main/examples/dequantize_gemm), and [block-scaled GEMM](https://github.com/tile-ai/tilelang/tree/main/examples/blockscaled_gemm_sm100)
 - **Attention and sequence models:** [FlashAttention](https://github.com/tile-ai/tilelang/tree/main/examples/flash_attention), [Flash Decoding](https://github.com/tile-ai/tilelang/tree/main/examples/flash_decoding), [block-sparse attention](https://github.com/tile-ai/tilelang/tree/main/examples/blocksparse_attention), [linear attention](https://github.com/tile-ai/tilelang/tree/main/examples/linear_attention), and [GDN](https://github.com/tile-ai/tilelang/tree/main/examples/gdn)
 - **Model workloads:** [DeepSeek MLA](https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_mla), [DeepSeek V3.2](https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_v32), [DeepSeek V4](https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_v4), and [DeepSeek mHC](https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_mhc)
-- **Architecture-specific kernels:** [AMD](https://github.com/tile-ai/tilelang/tree/main/examples/amd), [SM100](https://github.com/tile-ai/tilelang/tree/main/examples/gemm_sm100), and [SM120](https://github.com/tile-ai/tilelang/tree/main/examples/gemm_sm120)
+- **Architecture-specific kernels:** [AMD](https://github.com/tile-ai/tilelang/tree/main/examples/amd), [TCGEN05](https://github.com/tile-ai/tilelang/tree/main/examples/gemm_tcgen05), and [SM120](https://github.com/tile-ai/tilelang/tree/main/examples/gemm_sm120)
 - **Compiler and debugging tools:** [analyzer](https://github.com/tile-ai/tilelang/tree/main/examples/analyze), [layout visualization](https://github.com/tile-ai/tilelang/tree/main/examples/plot_layout), [AutoDD](https://github.com/tile-ai/tilelang/tree/main/examples/autodd), and [IKET](https://github.com/tile-ai/tilelang/tree/main/examples/iket)
 
 Browse the [complete examples directory](https://github.com/tile-ai/tilelang/tree/main/examples) for additional operators, tests, and architecture-specific implementations.

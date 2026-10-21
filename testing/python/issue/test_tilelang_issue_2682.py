@@ -13,6 +13,7 @@ import tilelang.testing
 NUM_ELEMENTS = 4
 
 
+@tilelang.testing.requires_cuda
 def test_vectorized_select():
     @T.prim_func
     def kernel(

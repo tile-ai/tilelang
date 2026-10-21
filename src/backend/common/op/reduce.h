@@ -54,29 +54,6 @@ inline Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
-  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
-  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
-  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
-
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto thd = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
-  }
-
-  return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
-      ->CondenseReplicateVar()
-      ->BindThreadRange(src_layout->ThreadRange());
-}
-
 /*!
  * \brief Resolve the participating thread range of a scalar AllReduce.
  *
@@ -202,6 +179,16 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
       << "(threads / scale) to be a positive power of two, got "
       << logical_width << " (threads=" << reducing_threads
       << ", scale=" << scale << ")";
+  // The butterfly pairs thread t with t ^ (scale * k).  That only moves the
+  // reduce coordinate when the non-reduced part of the thread index occupies
+  // the bits below `scale`, i.e. when `scale` is itself a power of two.
+  // Otherwise the pairs straddle reduce groups (and replicas) and the result
+  // is silently wrong or reads outside the workspace.
+  ICHECK(tirx::is_const_power_of_two_integer(Integer(scale), &shift))
+      << op_name << ": XOR-butterfly AllReduce requires scale (the thread "
+      << "stride between consecutive reduce participants) to be a power of "
+      << "two, got " << scale << " (threads=" << reducing_threads
+      << "). Pad the non-reduced fragment extent to a power of two.";
 }
 
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
@@ -633,6 +620,11 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  static void CheckAllReduceWidth(int reducing_threads, int scale,
+                                  const char *op_name, Target) {
+    reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+  }
+
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
                          const Buffer &dst_buffer,
                          const LowerArgs &lower_args) {
@@ -670,8 +662,7 @@ template <typename Impl> struct ReduceLowerer {
       return indices;
     };
 
-    int vsize =
-        Impl::GetPreferredVectorizedSize(dst_buffer->dtype, lower_args.target);
+    int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
     const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
@@ -764,7 +755,11 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
+      auto red_layout = ComputeReducerLayout(src_layout, op.dim);
+      // Lower in the canonical reduced shape while preserving the destination's
+      // physical register indices, replication, and participating thread range.
+      dst_layout = Downcast<Fragment>(
+          dst_layout->Reshape(red_layout->InputShape(), analyzer));
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
 
@@ -855,8 +850,7 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                     lower_args.target);
+        int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -1007,14 +1001,13 @@ template <typename Impl> struct ReduceLowerer {
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
-          reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                      "tl.reduce");
+          Impl::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                    "tl.reduce", lower_args.target);
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                       lower_args.target);
+          int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();
@@ -1031,7 +1024,8 @@ template <typename Impl> struct ReduceLowerer {
                                   ? clear_buffer->dtype.with_lanes(vsize)
                                   : clear_buffer->dtype;
           PrimExpr workspace;
-          bool need_workspace = reducing_threads > 32;
+          bool need_workspace = Impl::AllReduceNeedsWorkspace(
+              reducing_threads, thread_step.scale, lower_args.target);
           if (need_workspace) {
             int ws_size = block_threads * eff_batch;
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
@@ -1201,8 +1195,8 @@ template <typename Impl> struct ReduceLowerer {
 
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
-        reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                    "tl.reduce");
+        Impl::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                  "tl.reduce", lower_args.target);
         auto thread_offset = lower_args.thread_bounds->min;
         PrimExpr all_threads = lower_args.thread_bounds->extent;
         if (reducing_threads > 32 &&
@@ -1217,7 +1211,8 @@ template <typename Impl> struct ReduceLowerer {
             thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
-        if (reducing_threads > 32) {
+        if (Impl::AllReduceNeedsWorkspace(reducing_threads, thread_step.scale,
+                                          lower_args.target)) {
           int workspace_size =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           PrimExpr workspace =

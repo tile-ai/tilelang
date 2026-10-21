@@ -380,13 +380,18 @@ def _tl_encode_ue4m3_scale_byte_ceil(x):
 
 
 def _tl_decode_ue4m3_scale_byte(code):
+    code = code & 0x7F
     exponent = (code >> 3) & 0x0F
     mantissa = code & 0x07
     mantissa_f32 = T.cast(mantissa, T.float32)
     normal_bits = T.cast(((exponent + 120) << 23) | (mantissa << 20), T.uint32)
     normal = T.reinterpret(normal_bits, T.float32)
     subnormal = mantissa_f32 * 0.125 * _UE4M3_MIN_NORMAL
-    return T.if_then_else(exponent == 0, subnormal, normal)
+    value = T.if_then_else(exponent == 0, subnormal, normal)
+    # 0x7F is the reserved NaN code. The bit-pattern path above would decode it as
+    # 480.0, which exceeds _UE4M3_MAX and is not a representable UE4M3 value, so
+    # mirror the host reference decode_ue4m3_scale_bytes and return NaN.
+    return T.if_then_else(code == 0x7F, T.float32(float("nan")), value)
 
 
 def _tl_ue4m3_scale_byte_inverse(code):

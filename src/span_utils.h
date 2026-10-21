@@ -39,6 +39,16 @@ inline std::string FormatSpan(const Span &span) {
 }
 
 /*!
+ * \brief Fill in the given span on every Stmt node in the subtree whose span
+ *        is undefined. Nodes that already carry a span are left untouched, so
+ *        lowered code inherits the source line of the statement it was
+ *        lowered from without overriding finer-grained spans.
+ * \note No-op when `span` is undefined. Spans never participate in structural
+ *       equality or hashing, so stamping does not change compilation results.
+ */
+void StampSubtreeSpans(const tirx::Stmt &stmt, const Span &span);
+
+/*!
  * \brief Suffix for error messages pointing at a source location, e.g.
  *        "\n  --> /path/to/kernel.py:21:1". Empty when no span is available.
  */

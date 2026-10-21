@@ -15,15 +15,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenC {
+class CodeGenTileLangCUDA final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangCUDA();
-  std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f);
@@ -33,8 +32,9 @@ public:
                          std::ostream &os) final; // NOLINT(*)
   void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
                         PrimExpr rhs,
-                        std::ostream &os) final;      // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
+                        std::ostream &os) final;                // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) final;           // NOLINT(*)
+  void PrintVecConstructor(DataType t, std::ostream &os) final; // NOLINT(*)
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
@@ -57,6 +57,8 @@ public:
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
+  void VisitExpr_(const NotNode *op, std::ostream &os) final;
+  void VisitStmt_(const AssertStmtNode *op) final;
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
@@ -70,6 +72,7 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
   void ReserveKeywordsAsUnique_();
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
@@ -82,6 +85,29 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  bool TryEmitPackedBinaryOp_(const std::string &op, DataType result_type,
+                              const PrimExpr &lhs, const PrimExpr &rhs,
+                              std::ostream &os);
+  bool TryEmitPackedComparison_(const std::string &op, DataType result_type,
+                                DataType lhs_type, DataType rhs_type,
+                                const std::string &lhs, const std::string &rhs,
+                                const std::string &result);
+  void EmitScalarizedBinaryOp_(const std::string &op, DataType result_type,
+                               DataType lhs_type, DataType rhs_type,
+                               const std::string &lhs, const std::string &rhs,
+                               const std::string &result);
+  bool TryEmitFastMathCall_(const Call &call, std::ostream &os);
+  bool TryEmitIEEEMathCall_(const Call &call, std::ostream &os);
+  bool TryEmitPackedMathCall_(const Call &call, std::ostream &os);
+  // Emit a vector op of dtype t as lanes/2 packed x2 calls (tl::mul2,
+  // tl::fma2, ...). All args must already have dtype t; requires
+  // CanEmitPackedX2Math(t).
+  void EmitPackedX2Call(const std::string &tl_func, DataType t,
+                        const std::vector<PrimExpr> &args, std::ostream &os);
+  // Emit a vector op of dtype t as one scalar call per lane.
+  void EmitPerLaneScalarCall(const std::string &func_name, DataType t,
+                             const std::vector<PrimExpr> &args,
+                             std::ostream &os);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }

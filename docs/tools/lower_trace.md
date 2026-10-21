@@ -18,8 +18,9 @@ the older `TILELANG_PASS_DIFF` tool, it adds:
 - **Edit-and-recompile workflow** — edit the generated codegen source on disk
   and rerun; your edits are injected back into compilation (with conflict
   detection).
-- **Multi-run accumulation** — repeated compilations in the same process are
-  tagged with `run2_`, `run3_`, … prefixes, so you can diff across runs.
+- **Per-compilation isolation** — each kernel compilation owns its records,
+  pass indices, pipeline scopes, and report lifecycle. Concurrent kernels do
+  not write into one shared in-memory trace.
 - **Raw `.tir` dumps** — before/after IR for every pass is written to disk,
   keyed by phase and pass index.
 - **Crash-safe incremental HTML** — the report is flushed after every pass, so
@@ -47,9 +48,10 @@ TL_LOWER_TRACE=both python3 my_script.py
 python3 my_script.py
 ```
 
-TileLang reads this setting when `tilelang` is imported and installs a process-
-wide hook around TVM pass execution. Setting the variable after importing
-TileLang does not enable the hook for that process.
+TileLang reads this setting when `tilelang` is imported and registers a tool
+factory for future compilation sessions. It does not patch TVM's default
+`PassContext` or global codegen functions. To change the setting after import,
+call `enable()` programmatically.
 
 When HTML output is enabled, a stable symlink `<script_dir>/report.html` is
 maintained and points to the latest run's report. Open it directly in a browser:
@@ -71,13 +73,16 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
 ```text
 <TL_LOWER_TRACE_DIR>/
 └── <script_name>/                      # derived from sys.argv[0], e.g. "my_script"
-    ├── report.html                # symlink → latest run's report
-    ├── codegen.cpp                     # generated codegen source (editable, see below)
-    ├── codegen.cpp.original            # baseline snapshot for edit/recompile workflow
-    ├── codegen.cpp.latest              # actual codegen output of the most recent run
+    ├── report.html                     # symlink → latest run's report
+    ├── codegen_device.cpp              # generated device source (editable, see below)
+    ├── codegen_device.cpp.original     # device baseline for edit/recompile workflow
+    ├── codegen_device.cpp.latest       # latest generated device source
+    ├── codegen_host.cpp                # generated CPU wrapper, when host codegen runs
+    ├── codegen_host.cpp.original       # independent host baseline
+    ├── codegen_host.cpp.latest         # latest generated host source
     └── .run_records/
-        └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>/
-            ├── report.html        # this run's full report
+        └── run_<YYYYMMDD_HHMMSS_ffffff>_<pid>_<unique-id>/
+            ├── report.html             # this run's full report
             ├── pipeline_c/             # one subdir per phase (example)
             │   ├── 00_BindTarget_before.tir
             │   ├── 00_BindTarget_after.tir
@@ -86,8 +91,10 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
             ├── phase2_optimize/        # another phase (illustrative)
             │   └── ...
             ├── codegen/
-            │   ├── 42_codegen_before.tir
-            │   └── 42_codegen_after.cpp
+            │   ├── 42_codegen_device_before.tir
+            │   ├── 42_codegen_device_after.cpp
+            │   ├── 49_codegen_host_before.tir
+            │   └── 49_codegen_host_after.cpp
             └── unscoped/               # passes outside any pipeline window
                 └── ...
 ```
@@ -95,6 +102,18 @@ A single run produces the following layout under `TL_LOWER_TRACE_DIR`:
 Each phase gets its own subdirectory; passes are numbered globally (`00_`, `01_`,
 …) so ordering is unambiguous. Codegen records write the *after* artifact as
 `.cpp` (the generated source), while ordinary passes use `.tir` for both sides.
+Both device and host records belong to the `codegen` phase, with names
+`codegen_device` and `codegen_host` respectively. Host files and records appear
+only when the execution backend invokes host codegen. Each working file has its
+own baseline, latest output, and backups; host codegen cannot overwrite the
+device working file or its editing state.
+
+The standard backend wrappers explicitly identify each event as device or host
+codegen. Generic instrumentation calls that omit `role` leave it unspecified
+(`None`): these retain the `codegen` record name and default `codegen.cpp` working
+file. An explicit `codegen_output` path is used unchanged for such events.
+Custom callers should supply a role to distinguish device and host output;
+unspecified events share the legacy working file and edit state.
 
 ## Programmatic API
 
@@ -117,8 +136,8 @@ results = lt.lower_trace(func, transform.Simplify(), mode="terminal")
 results = lt.lower_trace(
     func,
     [
-        ("Annotate",   tvm.tirx.transform.AnnotateDeviceRegions()),
-        ("Split",      tvm.tirx.transform.SplitHostDevice()),
+        ("Annotate", tvm.tirx.transform.AnnotateDeviceRegions()),
+        ("Split", tvm.tirx.transform.SplitHostDevice()),
         ("ThreadSync", transform.ThreadSync("shared")),
     ],
     mode="both",
@@ -138,7 +157,7 @@ Returns a `list[dict]` with one entry per pass step, each containing `name`,
 `before_script`, `after_script`, `diff_lines`, `insertions`, `deletions`, and
 `changed`.
 
-### Global hook: `enable()` / `disable()` / `reset()`
+### Compilation instrumentation: `enable()` / `disable()`
 
 To trace the *entire* compilation pipeline of a real kernel (what the
 environment variable does, but programmatically):
@@ -160,18 +179,25 @@ vars (or sensible defaults) when omitted.
 | --- | --- | --- |
 | `mode` | Force a trace mode: `"terminal"`, `"html"`, `"both"`, or `None` to disable. | `TL_LOWER_TRACE` env var |
 | `trace_dir` | Base output directory. | `TL_LOWER_TRACE_DIR`, then `./tmp/lower_trace_dir` |
-| `codegen_output` | Path to save the generated codegen source (enables the edit-recompile workflow). Pass `None` explicitly to suppress. Defaults to `<script_dir>/codegen.cpp` in `html`/`both` mode; `None` (no file) in `terminal` mode unless overridden. |
+| `codegen_output` | Device working-file path; a host working-file path is derived when host codegen runs. Pass `None` explicitly to suppress both working files. | `<script_dir>/codegen_device.cpp` and `<script_dir>/codegen_host.cpp` in `html`/`both` mode; no working files in `terminal` mode |
 
-`enable()` is idempotent — calling it multiple times is safe.
+An explicit `codegen_output="foo.cpp"` writes device source to `foo.cpp` and
+host source to `foo_host.cpp`. The host path inserts `_host` before the final
+extension: `foo.kernel.cpp` becomes `foo.kernel_host.cpp`, and a path without an
+extension, such as `foo`, becomes `foo_host`. Each path has its own `.original`,
+`.latest`, and backup files. Setting `codegen_output=None` suppresses these
+stable working files and their edit state, while codegen records still appear
+in the trace and raw snapshots remain available.
 
-#### When to use `reset()` and `disable()`
+`enable()` is idempotent — calling it multiple times is safe. Its values are
+snapshotted when a compilation begins, so changing them cannot mutate a kernel
+that is already compiling.
 
-Both are **optional** and only needed in specific scenarios:
+#### When to use `disable()`
 
 | Function | When to call | What it does |
 | --- | --- | --- |
-| `reset()` | Compiling **multiple kernels in the same process** and you want each kernel's report to start fresh (instead of accumulating into one combined report) | Clears collected records while keeping the hook active. Without it, records accumulate across compilations, tagged with `run2_`, `run3_`, … prefixes — which is desirable if you *want* to compare runs side by side. |
-| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Restores the original `Pass.__call__`, `PassPipeline.lower`, and codegen FFIs, and clears all state. |
+| `disable()` | You want to **disable tracing for subsequent compilations** within the same process (e.g. a long-running service that only traces the first kernel) | Unregisters the tool factory. A compilation already in progress keeps its own session and completes normally. |
 
 ```python
 from tilelang.tools import lower_trace as lt
@@ -181,11 +207,7 @@ lt.enable(mode="both")
 # First kernel — traced.
 kernel1 = tilelang.compile(func_a)
 
-# Optional: clear records so kernel2 gets its own clean report.
-# Omit this line if you prefer a combined multi-run report.
-lt.reset()
-
-# Second kernel — traced (into a fresh report if lt.reset() was called).
+# Second kernel — traced into its own session and report automatically.
 kernel2 = tilelang.compile(func_b)
 
 # Optional: disable tracing for any further compilations.
@@ -193,10 +215,9 @@ lt.disable()
 ```
 
 :::{note}
-If neither `lt.reset()` nor `lt.disable()` is called, tracing stays active for
-the lifetime of the process and the final HTML report is generated automatically
-at exit. This is the simplest workflow and is sufficient for most one-off
-scripts.
+If `lt.disable()` is not called, tracing stays active for future compilations.
+Each HTML report is finalized when its owning compilation exits, including when
+that compilation raises.
 :::
 
 ## HTML Report Features
@@ -228,49 +249,61 @@ IR Lower Trace HTML report.
 
 ## Codegen Source Capture & Edit-Recompile Workflow
 
-When tracing is enabled, the final codegen step (TIR → C/CUDA/HIP/…) is
-intercepted. The generated source is written to `<script_dir>/codegen.cpp` (or
-the path passed to `codegen_output=`), so you can inspect — and even edit — the
-code that will actually be compiled.
+When tracing is enabled, device and host codegen steps (TIR → C/CUDA/HIP/…)
+are intercepted separately. Device source runs on the GPU or NPU and contains
+the computation, device memory transfers, and synchronization. Host source
+runs on the CPU and wraps runtime operations such as argument checks, output
+allocation, and launching the device kernel.
+
+In `html`/`both` mode, the generated sources are written to
+`<script_dir>/codegen_device.cpp` and `<script_dir>/codegen_host.cpp` by default.
+For CUDA and Ascend, `tvm_ffi` invokes both device and host codegen; `nvrtc` and
+`cython` do not invoke a separate host codegen step at this layer. Their runtime
+adapters still provide CPU-side launch logic. Only backends that invoke host
+codegen produce `codegen_host.cpp`.
 
 To support editing the generated code and re-running with your edits applied,
-IR Lower Trace maintains **three cooperating files**:
+IR Lower Trace maintains **three cooperating files for each codegen role**.
+The device files are shown below; the host files use the same suffixes on
+`codegen_host.cpp` and keep an independent edit state:
 
 | File | Role |
 | --- | --- |
-| `codegen.cpp` | **Working copy** — user-editable. This is what gets compiled when you rerun. |
-| `codegen.cpp.original` | **Baseline** — the codegen snapshot the working copy was last synced from. Written only on init or re-sync, never blindly overwritten. |
-| `codegen.cpp.latest` | **Latest codegen output** — the actual output of the most recent run, overwritten every run for diff reference. |
+| `codegen_device.cpp` | **Working copy** — user-editable. Edits are recompiled when the backend supports the workflow described below. |
+| `codegen_device.cpp.original` | **Baseline** — the codegen snapshot the working copy was last synced from. Written only on init or re-sync, never blindly overwritten. |
+| `codegen_device.cpp.latest` | **Latest codegen output** — the actual output of the most recent run, overwritten every run for diff reference. |
 
 On each run a three-way comparison (baseline / working copy / current codegen
 output) decides how to proceed:
 
-| Situation | `codegen.cpp` vs `.original` | `.latest` vs `.original` | Action | Console tag |
+| Situation | Working copy vs `.original` | `.latest` vs `.original` | Action | Console tag |
 | --- | --- | --- | --- | --- |
 | No change | identical | identical | Compile with codegen output as-is | — |
-| Codegen changed only | identical | **differs** | Regenerate `codegen.cpp` and `.original` from new codegen | `REGENERATED` |
+| Codegen changed only | identical | **differs** | Regenerate the working copy and `.original` from new codegen | `REGENERATED` |
 | User edited only | **differs** | identical | Inject the working copy (`PATCHED`) | `PATCHED` |
 | Both changed, working == latest | **differs** | **differs** (working matches latest) | Advance baseline; use working copy | `SYNCED` |
 | Both changed, working != latest | **differs** | **differs** (working differs from latest) | **CONFLICT** — back up working copy → `.bak` (*conflict backup*) and old baseline → `.original.bak`, then regenerate from new codegen | `CONFLICT` |
-| First run (no baseline) | — | — | Initialise `.original`, copy to `codegen.cpp` | (init) |
-| `codegen.cpp` exists without baseline | — | — | Back up pre-existing `codegen.cpp` → `.bak` (*safety backup*), then initialise baseline | `INIT-BACKUP` |
+| First run (no baseline) | — | — | Initialise `.original`, copy to the working file | (init) |
+| Working copy exists without baseline | — | — | Back up the pre-existing working file → `.bak` (*safety backup*), then initialise baseline | `INIT-BACKUP` |
 
 > **Note on `.bak` files:** The backups created by `CONFLICT` and `INIT-BACKUP`
 > serve different purposes. `INIT-BACKUP` preserves a pre-existing
-> `codegen.cpp` of unknown origin before the trace tool takes it over.
+> working file of unknown origin before the trace tool takes it over.
 > `CONFLICT` preserves the user's edits before a codegen change overwrites them.
 > Recover `CONFLICT` edits with
-> `diff codegen.cpp.original.bak codegen.cpp.bak`.
+> `diff codegen_device.cpp.original.bak codegen_device.cpp.bak` for the device
+> working copy, or the equivalent command with `codegen_host.cpp` for the host
+> working copy. These backup files are created only when needed.
 
 ### Typical Workflow
 
-1. **Inspect** — Run once with `TL_LOWER_TRACE=1`. Open `codegen.cpp` to read
+1. **Inspect** — Run once with `TL_LOWER_TRACE=1`. Open `codegen_device.cpp` to read
    the generated source.
-2. **Edit** — Modify `codegen.cpp` (e.g. add a `printf`, tweak a loop). Do *not*
+2. **Edit** — Modify `codegen_device.cpp` (e.g. add a `printf`, tweak a loop). Do *not*
    touch `.original`.
-3. **Rerun** — Run again. Because `codegen.cpp` differs from `.original` but
-   codegen output is unchanged, you'll see `PATCHED from …/codegen.cpp` and your
-   edited source is compiled.
+3. **Rerun** — Run again. Because `codegen_device.cpp` differs from `.original`
+   but codegen output is unchanged, you'll see
+   `PATCHED from …/codegen_device.cpp` and your edited source is compiled.
 4. **Iterate** — Keep editing and rerunning. Each run re-injects your working
    copy.
 5. **If codegen itself changes** (e.g. you modified the TileLang program) — two
@@ -278,10 +311,10 @@ output) decides how to proceed:
    - If your edits happen to match the new codegen output → `SYNCED` (baseline
      advances, your edits preserved).
    - If both your edits and codegen changed and they differ → `CONFLICT`. Your
-     working copy is backed up to `codegen.cpp.bak` and the old baseline to
-     `codegen.cpp.original.bak`. Recover your edits with
-     `diff codegen.cpp.original.bak codegen.cpp.bak`, then re-apply them against
-     the freshly regenerated `codegen.cpp`.
+     working copy is backed up to `codegen_device.cpp.bak` and the old baseline to
+     `codegen_device.cpp.original.bak`. Recover your edits with
+     `diff codegen_device.cpp.original.bak codegen_device.cpp.bak`, then re-apply
+     them against the freshly regenerated `codegen_device.cpp`.
 
 :::{note}
 **Backend requirements for edit-and-recompile.** The edit-and-recompile
@@ -292,7 +325,7 @@ NVRTC / Cython / CuTeDSL.
 
 The default `tvm_ffi` backend pre-compiles device code to a binary (PTX/hsaco)
 from TIR during codegen. When the `tvm_ffi` backend is active and you edit
-`codegen.cpp`, you'll see a `NOTE` message indicating that your edits are
+`codegen_device.cpp`, you'll see a `NOTE` message indicating that your edits are
 recorded in the trace for diff viewing but were **not recompiled**. To use
 edit-and-recompile, switch to a source-compiling backend:
 
@@ -303,25 +336,36 @@ tilelang.compile(..., execution_backend="nvrtc")
 # For HIP targets:
 tilelang.compile(..., execution_backend="cython")
 ```
+
+Capturing host source and preserving host edits does not add host
+edit-and-recompile support; the existing backend requirements still apply.
 :::
 
 ## How It Works
 
-IR Lower Trace installs three layers of transparent hooks (all via
-`monkey-patch`, restored by `disable()`):
+Instrumentation sessions are owned by complete compiler entry points such as
+`tilelang.compile()`, `tilelang.lower()`, and grouped compilation. Lower-level
+pipeline and codegen components contribute events to the active session but do
+not create standalone sessions themselves.
 
-1. **`tvm.ir.transform.Pass.__call__`** — every pass invocation is intercepted
-   to capture `str(mod)` before and after, compute `+`/`−` line counts, and
-   append a `LowerRecord`. Passes that run outside any pipeline window are
-   tagged with the `unscoped` phase.
-2. **`PassPipeline.lower`** (new architecture) or **phase functions** (legacy
-   architecture) — sets the current phase context so passes invoked within a
-   pipeline run are grouped under a label like `pipeline_c`. Legacy phase
-   functions are discovered via AST scanning (`_discover_passes`) and bytecode
-   inspection.
-3. **Codegen FFI** (`target.build.tilelang_cuda`, `…_hip`, `…_c`, `…_llvm`,
-   etc.) — captures the final TIR → source lowering and drives the three-file
-   edit-recompile workflow described above.
+IR Lower Trace uses three cooperating layers:
+
+1. **TVM `PassInstrument`** — before/after callbacks capture `str(mod)`,
+   compute `+`/`−` line counts, and append a `LowerRecord`. The shared nested
+   callback stack records depth and parent relationships, including passes
+   invoked internally by another TVM pass. Passes outside a pipeline window
+   are tagged with the `unscoped` phase.
+2. **Explicit `PassPipeline.lower` scope** — contributes a context-local phase
+   to the caller-owned session so passes in a backend pipeline are grouped
+   under labels such as `pipeline_c`. The pipeline does not create or finalize
+   the compile session. This is a normal pipeline boundary, not a class
+   monkey-patch.
+3. **Explicit backend codegen hook** — TileLang's device/host codegen registry
+   routes each `target.build.*` call through the active compile session. This
+   captures final TIR → source lowering, labels events as device or host, and
+   drives each role's three-file edit-recompile workflow without replacing a
+   process-global FFI. When no session is active, the registry invokes the
+   underlying codegen directly.
 
 Pass records are appended **at runtime** (not pre-registered), so conditional
 passes that are skipped at runtime — e.g. `LetInline` when
@@ -329,17 +373,18 @@ passes that are skipped at runtime — e.g. `LetInline` when
 phantom/skipped slots. The HTML report is flushed **incrementally** after every
 pass (O(n) total cost), so partial results survive even a crash or `SIGKILL`.
 
-When the same process compiles multiple kernels, each `PassPipeline.lower`
-invocation increments a run counter and tags phases with a `run2_`, `run3_`, …
-prefix; all records accumulate into a single report so you can compare runs side
-by side.
+When one logical compilation uses multiple PassContexts (for example grouped
+lowering followed by device and host codegen), they obtain fresh callback
+objects from the same compile session. Their records share one monotonic index
+inside that session. A different compilation starts from index zero with a new
+record list.
 
 :::{note}
-The pipeline hook wraps `tvm.ir.transform.Pass.__call__` for the entire
-process, so it observes TVM passes outside the immediate `tilelang.compile()`
-call as well. Capturing IR and, in HTML mode, rewriting the report after every
-pass adds debugging overhead. Leave the feature disabled for normal builds and
-benchmarks.
+`enable()` affects TileLang-managed compilation sessions only; it never mutates
+the PassContext that happens to be current at enable time. For a standalone TVM
+PassContext, `lt.create_pass_instrument()` remains available for manual use.
+Capturing IR and, in HTML mode, rewriting the report after every pass adds
+debugging overhead. Leave the feature disabled for normal builds and benchmarks.
 :::
 
 ## Choosing an Output Mode

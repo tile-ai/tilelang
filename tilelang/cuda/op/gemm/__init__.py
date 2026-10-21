@@ -9,6 +9,7 @@ from .gemm_mma_sm70 import GemmMMASm70
 from .gemm_mma_sm75 import GemmMMASm75
 from .gemm_mma_sm120 import GEMM_INST_MMA_BLOCK_SCALED, GemmMMASm120BlockScaled
 from .gemm_tcgen05 import GEMM_INST_TCGEN05, GemmTCGEN5
+from .gemm_tcgen05_blockscaled import GEMM_INST_TCGEN05_BLOCK_SCALED, GemmTCGEN5BlockScaled
 from .gemm_wgmma import GEMM_INST_WGMMA, GemmWGMMA
 from tilelang.cuda.target import target_is_cuda, target_is_sm120, target_is_turing, target_is_volta
 
@@ -54,3 +55,9 @@ register_gemm_impl(
 register_gemm_impl("cuda.fma", GEMM_INST_FMA, _match_fma, GemmFMA)
 register_gemm_impl("cuda.wgmma", GEMM_INST_WGMMA, _match_wgmma, GemmWGMMA)
 register_gemm_impl("cuda.tcgen05", GEMM_INST_TCGEN05, _match_tcgen05, GemmTCGEN5)
+register_gemm_impl(
+    "cuda.tcgen05_blockscaled",
+    GEMM_INST_TCGEN05_BLOCK_SCALED,
+    _match_tcgen05,
+    GemmTCGEN5BlockScaled,
+)

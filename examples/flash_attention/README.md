@@ -34,7 +34,6 @@ def flash_attention(
         scores_sum = T.alloc_fragment([block_M], accum_dtype)
         logsum = T.alloc_fragment([block_M], accum_dtype)
 
-
         # Copy a block of Q from global memory to Q_shared
         T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
 
@@ -42,9 +41,7 @@ def flash_attention(
         T.fill(acc_o, 0)
         T.fill(logsum, 0)
         T.fill(scores_max, -T.infinity(accum_dtype))
-        loop_range = (
-            T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
-        )
+        loop_range = T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
         # Pipeline the loop to overlap copies/gemm stages
         for k in T.Pipelined(loop_range, num_stages=num_stages):
@@ -53,9 +50,7 @@ def flash_attention(
 
             if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.if_then_else(
-                        bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype)
-                    )
+                    acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype))
             else:
                 T.clear(acc_s)
 

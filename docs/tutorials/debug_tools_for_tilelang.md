@@ -108,20 +108,22 @@ import tilelang.language as T
 from tilelang import tvm
 from tilelang.engine.callback import register_cuda_postproc_callback
 
+
 @register_cuda_postproc_callback
 def tilelang_callback_cuda_postproc(code, _):
-    print(code) # print the final CUDA code
+    print(code)  # print the final CUDA code
     code = "// modified by tilelang_callback_cuda_postproc\n" + code
     return code
+
 
 kernel = tilelang.compile(matmul, target="cuda")
 kernel_source = kernel.get_kernel_source()
 print(kernel_source)
-'''
+"""
 // modified by tilelang_callback_cuda_postproc
 #include "cuda_runtime.h"
 ...
-'''
+"""
 ```
 
 ### Runtime Debug Prints with `T.print`
@@ -262,9 +264,10 @@ The core helpers can also be used directly:
 from tilelang.tools.pass_visualizer.viewer import build_pass_data, emit_html
 
 name, stages = build_pass_data(
-    "path/to/kernel.py", factory=None, target="auto",
-    kwargs={"M": 1024, "N": 1024, "K": 1024,
-            "block_M": 128, "block_N": 128, "block_K": 32},
+    "path/to/kernel.py",
+    factory=None,
+    target="auto",
+    kwargs={"M": 1024, "N": 1024, "K": 1024, "block_M": 128, "block_N": 128, "block_K": 32},
     source=open("path/to/kernel.py").read(),
 )
 html = emit_html(name, stages)

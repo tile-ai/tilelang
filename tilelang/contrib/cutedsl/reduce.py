@@ -26,9 +26,7 @@ __all__ = [
 
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.typing import Int32
-from cutlass._mlir.dialects import nvvm
-from cutlass.cute.arch.nvvm_wrappers import shuffle_sync_op
+from cutlass.experimental import primitives as prims
 
 
 def min(a, b, c=None):
@@ -97,25 +95,15 @@ class BitXorOp:
 
 
 def bar_sync(barrier_id, number_of_threads):
-    cute.arch.barrier(barrier_id=barrier_id, number_of_threads=number_of_threads)
+    prims.barrier_cta_sync(barrier_id, thread_count=number_of_threads)
 
 
 def bar_sync_ptx(barrier_id, number_of_threads):
-    from cutlass._mlir.dialects import llvm
-
-    llvm.inline_asm(
-        None,
-        [Int32(barrier_id).ir_value(), Int32(number_of_threads).ir_value()],
-        "bar.sync $0, $1;",
-        "r,r",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-    )
+    prims.barrier_cta_sync(barrier_id, thread_count=number_of_threads)
 
 
 # Import shuffle functions from warp module
-from .warp import __shfl_sync, __shfl_up_sync, __shfl_down_sync
+from .warp import __shfl_sync, __shfl_up_sync, __shfl_down_sync, _shfl_xor_sync
 
 
 def _warp_prefix_sum_forward(val, lane, MASK=0xFFFFFFFF):
@@ -281,11 +269,13 @@ class CumSum1D:
     Template params:
         threads: Number of threads
         reverse: Whether to cumsum in reverse order
+        thread_offset: First participating thread in the block
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool], thread_offset: cutlass.Constexpr[int] = 0):
         self.threads = threads
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
@@ -300,6 +290,7 @@ class CumSum1D:
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
 
         src_tensor = cute.make_tensor(src, (N,))
@@ -318,12 +309,20 @@ class CumSum2D:
         threads: Number of threads (must be power of 2, 32-1024)
         dim: Axis along which to cumsum (0 or 1)
         reverse: Whether to cumsum in reverse order
+        thread_offset: First participating thread in the block
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(
+        self,
+        threads: cutlass.Constexpr[int],
+        dim: cutlass.Constexpr[int],
+        reverse: cutlass.Constexpr[bool],
+        thread_offset: cutlass.Constexpr[int] = 0,
+    ):
         self.threads = threads
         self.dim = dim
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
         self.TILE_H = threads // self.WARP_SIZE
 
@@ -340,6 +339,7 @@ class CumSum2D:
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
@@ -367,15 +367,17 @@ class CumMax1D:
     Based on tl::CumMax1D from scan.h
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool], thread_offset: cutlass.Constexpr[int] = 0):
         self.threads = threads
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
     def run(self, src: cute.Pointer, dst: cute.Pointer, N):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
 
         src_tensor = cute.make_tensor(src, (N,))
@@ -391,16 +393,24 @@ class CumMax2D:
     Based on tl::CumMax2D from scan.h
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(
+        self,
+        threads: cutlass.Constexpr[int],
+        dim: cutlass.Constexpr[int],
+        reverse: cutlass.Constexpr[bool],
+        thread_offset: cutlass.Constexpr[int] = 0,
+    ):
         self.threads = threads
         self.dim = dim
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
     def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
@@ -509,10 +519,10 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
                 if self.batch_size > 1:
                     x_tensor = cute.make_tensor(x, (self.batch_size,))
                     for i in range(self.batch_size):
-                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        other = _shfl_xor_sync(x_tensor[i], offset)
                         x_tensor[i] = self.reducer()(x_tensor[i], other)
                 else:
-                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    other = _shfl_xor_sync(x, offset)
                     x = self.reducer()(x, other)
 
             if offset == self.scale:
@@ -550,10 +560,10 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
                 if self.batch_size > 1:
                     x_tensor = cute.make_tensor(x, (self.batch_size,))
                     for i in range(self.batch_size):
-                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        other = _shfl_xor_sync(x_tensor[i], offset)
                         x_tensor[i] = self.reducer()(x_tensor[i], other)
                 else:
-                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    other = _shfl_xor_sync(x, offset)
                     x = self.reducer()(x, other)
 
             if offset == self.scale:
