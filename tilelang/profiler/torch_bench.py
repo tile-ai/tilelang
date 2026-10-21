@@ -163,7 +163,7 @@ def bench_with_cudagraph(
     with torch.cuda.stream(stream):
         # Construct a CUDA graph with `n_repeat` unrolled function calls to minimize host overhead.
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
+        with torch.cuda.graph(g, stream=stream):
             for _ in range(n_repeat):
                 fn()
 
