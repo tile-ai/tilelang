@@ -194,6 +194,21 @@ struct BitXorOp {
   }
 };
 
+// Logical reductions carry normalized 0/1 integers. Keep their identity
+// distinct from bitwise reductions so full warps can use predicate votes, while
+// other groups reuse the bitwise combine in the butterfly fallback.
+struct AllOp : BitAndOp {
+  static TL_DEVICE int warp_reduce(int value) {
+    return __all_sync(0xffffffffu, value);
+  }
+};
+
+struct AnyOp : BitOrOp {
+  static TL_DEVICE int warp_reduce(int value) {
+    return __any_sync(0xffffffffu, value);
+  }
+};
+
 // Barrier policy: wraps __syncthreads().
 // The phase template parameter is ignored (all phases use the same barrier).
 struct SyncThreadsBarrier {
@@ -256,6 +271,8 @@ struct AllReduce {
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return x;
+    } else if constexpr (kUseWarpVote) {
+      return Reducer::warp_reduce(x);
     } else {
       return butterfly_reduce_scalar(x, red_buf);
     }
@@ -267,12 +284,24 @@ struct AllReduce {
   static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return;
+    } else if constexpr (kUseWarpVote) {
+#pragma unroll
+      for (int i = 0; i < batch_size; i++) {
+        x[i] = Reducer::warp_reduce(x[i]);
+      }
     } else {
       butterfly_reduce_batch(x, red_buf);
     }
   }
 
 private:
+  // A full, contiguous warp is one reduce group only when scale == 1.
+  // Cross-warp reductions reach this leaf after their shared-memory exchanges;
+  // smaller or interleaved groups retain the shuffle path.
+  static constexpr bool kUseWarpVote =
+      threads == 32 && scale == 1 && thread_offset % 32 == 0 &&
+      (std::is_same_v<Reducer, AllOp> || std::is_same_v<Reducer, AnyOp>);
+
   using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
                          batch_size, workspace_stride>;
 

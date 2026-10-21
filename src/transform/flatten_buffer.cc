@@ -186,7 +186,14 @@ private:
       ICHECK_EQ(store->buffer->dtype, DataType::Int(8))
           << "Expected int8 backing array for boolean tensor";
       auto writer = store.CopyOnWrite();
-      writer->value = tvm::cast(DataType::Int(8), store->value);
+      if (op->value.as<BufferLoadNode>()) {
+        // A bool-to-bool copy can copy the backing byte directly. Casting
+        // through bool again introduces bool vectors that device codegen may
+        // not represent (for example boolx8 on CUDA).
+        writer->value = Downcast<Cast>(store->value)->value;
+      } else {
+        writer->value = tvm::cast(DataType::Int(8), store->value);
+      }
       return std::move(store);
     }
     return std::move(store);

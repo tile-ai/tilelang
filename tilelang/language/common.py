@@ -86,6 +86,8 @@ from .experimental.gemm_sp_op import (  # noqa: F401
 from .fill_op import fill, clear  # noqa: F401
 from .reduce_op import (
     reduce,  # noqa: F401
+    reduce_any,  # noqa: F401
+    reduce_all,  # noqa: F401
     reduce_max,  # noqa: F401
     reduce_min,  # noqa: F401
     reduce_sum,  # noqa: F401
@@ -295,6 +297,8 @@ _LOCAL_EXPORTS = (
     "make_tensor_from_addr",
     "meta_class",
     "reduce",
+    "reduce_any",
+    "reduce_all",
     "reduce_absmax",
     "reduce_abssum",
     "reduce_bitand",

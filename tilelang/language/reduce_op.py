@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 from typing import Literal
-from tvm import tirx
-from tilelang.language.common import copy, macro, alloc_fragment, evaluate
+from tvm import DataType, arith, tirx
+from tilelang.language.common import copy, macro, alloc_fragment, evaluate, fill
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
-from tilelang.utils.language import is_shared, is_fragment, is_local
+from tilelang.utils.language import is_shared, is_fragment, is_local, is_full_region
+from tilelang._typing import BufferLikeType
 from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
@@ -18,7 +19,7 @@ def _legalize_dim(buffer: tirx.Buffer, dim: int):
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
 
-ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
+ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor", "any", "all"]
 
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
@@ -26,7 +27,7 @@ def reduce(
     buffer: tirx.Buffer,
     out: tirx.Buffer,
     reduce_type: ReduceKind,
-    dim: int,
+    dim: int | None,
     clear: bool,
     batch: int = 1,
     annotations: dict | None = None,
@@ -57,6 +58,59 @@ def reduce(
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_region = to_buffer_region(out)
     out_buffer = out_region.buffer
+    is_logical = reduce_type in ("any", "all")
+    if is_logical:
+        source_region = to_buffer_region(buffer)
+        source_buffer = source_region.buffer
+        analyzer = arith.Analyzer()
+        for name, region in (("input", source_region), ("output", out_region)):
+            if not (is_shared(region) or is_fragment(region)):
+                raise ValueError(f"reduce_{reduce_type} requires a shared or fragment {name} buffer, got {region.buffer.scope()}")
+            for axis, extent in zip(region.region, region.buffer.shape):
+                if (
+                    analyzer.can_prove(axis.min < 0)
+                    or analyzer.can_prove(axis.extent < 0)
+                    or analyzer.can_prove(axis.min + axis.extent > extent)
+                ):
+                    raise ValueError(f"reduce_{reduce_type} {name} region is out of bounds for buffer {region.buffer.name}")
+                if not isinstance(analyzer.simplify(axis.extent), tirx.IntImm):
+                    raise ValueError(
+                        f"reduce_{reduce_type} currently requires statically known region extents for fragment lowering; "
+                        "use a fixed-size tile with neutral padding"
+                    )
+        source_dtype = source_buffer.dtype
+        if DataType(source_dtype).lanes != 1 or not (
+            source_dtype == "bool"
+            or source_dtype.startswith(("int", "uint"))
+            or source_dtype in ("float16", "bfloat16", "float32", "float64")
+        ):
+            raise TypeError(f"reduce_{reduce_type} requires a boolean, integer, or floating-point input, got {source_dtype}")
+        if out_buffer.dtype != "bool":
+            raise TypeError(f"reduce_{reduce_type} requires a bool output, got {out_buffer.dtype}")
+        if source_buffer.data.same_as(out_buffer.data) and (
+            not source_buffer.same_as(out_buffer)
+            or all(
+                analyzer.can_prove(a.min < b.min + b.extent) and analyzer.can_prove(b.min < a.min + a.extent)
+                for a, b in zip(source_region.region, out_region.region)
+            )
+        ):
+            raise ValueError(
+                f"reduce_{reduce_type} requires non-overlapping input and output regions; aliased buffer views are unsupported"
+            )
+        for name, region in (("input", source_region), ("output", out_region)):
+            if is_fragment(region) and not is_full_region(region):
+                raise ValueError(
+                    f"reduce_{reduce_type} currently requires a full fragment {name}; "
+                    "copy the full fragment to shared memory before selecting a subregion"
+                )
+        if dim is None:
+            dim = -1  # Native whole-region logical reduction.
+        else:
+            if not isinstance(dim, int) or isinstance(dim, bool):
+                raise TypeError(f"reduce_{reduce_type} dim must be an integer or None, got {dim}")
+            dim = _legalize_dim(buffer, dim)
+            if not 0 <= dim < len(source_region.region):
+                raise ValueError(f"reduce_{reduce_type} axis {dim} is out of range for input rank {len(source_region.region)}")
     if reduce_type in ("bitand", "bitor", "bitxor"):
         # Both faces must be integral: a float source would otherwise be silently
         # value-cast to an integer before the bitwise reduction runs.
@@ -68,13 +122,29 @@ def reduce(
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out_region)
-    expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
-    if list(out_shape) not in expected_shapes:
+    if is_logical and (dim == -1 or len(buf_shape) == 1):
+        expected_shapes = [[1]]
+    else:
+        expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
+    valid_shape = (
+        any(
+            len(out_shape) == len(shape) and all(analyzer.can_prove_equal(a, b) for a, b in zip(out_shape, shape))
+            for shape in expected_shapes
+        )
+        if is_logical
+        else list(out_shape) in expected_shapes
+    )
+    if not valid_shape:
         expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
             f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
         )
+
+    if is_logical and any(analyzer.can_prove(extent == 0) for extent in buf_shape):
+        if clear and not any(analyzer.can_prove(extent == 0) for extent in out_shape):
+            evaluate(fill(out, tirx.const(reduce_type == "all", "bool")))
+        return
 
     annotations = _normalize_annotations(annotations)
     if batch > 1:
@@ -177,6 +247,38 @@ def reduce(
             raise ValueError(f"Invalid buffer scopes: {buf_scope} and {out_scope}")
 
     reduce_macro(buffer, out, reduce_type, dim, clear)
+
+
+def reduce_any(
+    buffer: BufferLikeType, out: BufferLikeType, dim: int | None = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
+    """Reduce ``element != 0`` with logical OR into a bool output buffer.
+
+    Input and output must be full fragment buffers or shared buffers/rectangular
+    regions with static extents. ``dim`` defaults to the last axis; ``None``
+    reduces the whole region into an output of shape ``(1,)``. Axis reductions
+    accept either a removed axis or an extent-one axis in the output, using
+    ``(1,)`` for a one-dimensional input. Fragment subregions are not yet supported.
+
+    The identity, including for an empty region, is false. With ``clear=False``,
+    OR the result with the initialized output. Input and output must not overlap.
+    Floating-point NaNs are true; both signs of zero are false. ``batch`` and
+    ``annotations`` have the same meaning as in the other reduction APIs.
+    """
+    reduce(buffer, out, "any", dim, clear, batch=batch, annotations=annotations)
+
+
+def reduce_all(
+    buffer: BufferLikeType, out: BufferLikeType, dim: int | None = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
+    """Reduce ``element != 0`` with logical AND into a bool output buffer.
+
+    The shape, scope, dtype, and option contracts match :func:`reduce_any`.
+    The identity, including for an empty region, is true. With ``clear=False``,
+    AND the result with the initialized output. The complete logical region is
+    reduced, including elements distributed across fragment owners.
+    """
+    reduce(buffer, out, "all", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_max(

@@ -83,6 +83,52 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
+  if (node->type->IsLogical()) {
+    for (const Buffer &buffer : {node->src, node->dst}) {
+      CHECK(IsSharedBuffer(buffer) || IsFragmentBuffer(buffer), ValueError)
+          << "reduce_" << reduce_type
+          << " requires shared or fragment buffers, got " << buffer.scope();
+    }
+    DataType src_dtype = node->src->dtype;
+    CHECK(src_dtype.is_scalar() &&
+              (src_dtype.is_bool() || src_dtype.is_int() ||
+               src_dtype.is_uint() || src_dtype.is_float16() ||
+               src_dtype == DataType::Float(32) ||
+               src_dtype == DataType::Float(64) || src_dtype.is_bfloat16()),
+          ValueError)
+        << "reduce_" << reduce_type
+        << " requires a boolean, integer, or floating-point input, got "
+        << src_dtype;
+    CHECK(node->dst->dtype == DataType::Bool(), ValueError)
+        << "reduce_" << reduce_type << " requires a bool output, got "
+        << node->dst->dtype;
+    CHECK(node->dim >= -1 &&
+              node->dim < static_cast<int>(node->src->shape.size()),
+          ValueError)
+        << "reduce_" << reduce_type << " axis " << node->dim
+        << " is out of range for input rank " << node->src->shape.size();
+
+    arith::Analyzer analyzer;
+    for (const BufferRegion &region : {node->srcRegion_, node->dstRegion_}) {
+      for (size_t i = 0; i < region->region.size(); ++i) {
+        const Range &range = region->region[i];
+        CHECK(
+            analyzer.CanProveEqual(range->min, 0) &&
+                analyzer.CanProveEqual(range->extent, region->buffer->shape[i]),
+            ValueError)
+            << "reduce_" << reduce_type
+            << " requires subregions to be materialized before native lowering";
+        const auto *extent = range->extent.as<IntImmNode>();
+        CHECK(extent && extent->value > 0, ValueError)
+            << "reduce_" << reduce_type
+            << " requires non-empty static regions in native lowering; "
+               "the frontend handles empty reductions";
+      }
+    }
+    CHECK(!node->src->data.same_as(node->dst->data), ValueError)
+        << "reduce_" << reduce_type
+        << " requires non-overlapping input and output";
+  }
   // Optional "batch" annotation: number of output elements per batched
   // AllReduce call (default 1 = scalar).
   if (auto opt = annotations.Get("batch")) {
@@ -126,6 +172,19 @@ AccessRegions ReduceOpNode::GetAccessRegions() const {
 TileOperator ReduceOpNode::Clone() const {
   auto op = make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
+}
+
+Fragment ReduceOpNode::NormalizeSourceLayoutForReduction(
+    const Fragment &layout, arith::Analyzer *analyzer) const {
+  if (dim != -1) {
+    return layout;
+  }
+  ICHECK(type->IsLogical());
+  PrimExpr extent = Integer(1);
+  for (const PrimExpr &size : layout->InputShape()) {
+    extent = analyzer->Simplify(extent * size);
+  }
+  return Downcast<Fragment>(layout->Reshape({extent}, analyzer));
 }
 
 static Array<PrimExpr> InputPlaceholders(size_t n) {
@@ -184,8 +243,11 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
 
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       layout_args.layout_map.count(src)) {
-    auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
-    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
+    auto src_layout = NormalizeSourceLayoutForReduction(
+        layout_args.layout_map[src].as<Fragment>().value(),
+        layout_args.analyzer);
+    int reduce_dim = ReductionDim();
+    auto reducer_layout = ComputeReducerLayout(src_layout, reduce_dim);
 
     // Match the frontend's reduction shape contract before Reshape, which
     // only checks the total element count.
@@ -193,7 +255,8 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (dst->shape.size() == src_layout->InputShape().size()) {
       // Keeping the reduced axis requires its extent to be one.
       expected_shape = src_layout->InputShape();
-      expected_shape.Set(dim, make_const(expected_shape[dim].dtype(), 1));
+      expected_shape.Set(reduce_dim,
+                         make_const(expected_shape[reduce_dim].dtype(), 1));
     }
     bool valid_shape = dst->shape.size() == expected_shape.size();
     for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
