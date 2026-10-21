@@ -508,24 +508,6 @@ public:
     return pinfo.IsCopyStage();
   }
 
-  static const BufferLoadNode *MatchGlobalLoad(const PrimExpr &expr) {
-    if (const auto *load = expr.as<BufferLoadNode>()) {
-      return IsGlobalBuffer(load->buffer) ? load : nullptr;
-    }
-    return nullptr;
-  }
-
-  static const BufferStoreNode *MatchSingleBufferStore(const Stmt &stmt) {
-    if (const auto *store = stmt.as<BufferStoreNode>()) {
-      return store;
-    }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      return seq->seq.size() == 1 ? MatchSingleBufferStore(seq->seq[0])
-                                  : nullptr;
-    }
-    return nullptr;
-  }
-
   static bool ArePureExprs(const Array<PrimExpr> &exprs) {
     return std::all_of(exprs.begin(), exprs.end(), [](const PrimExpr &expr) {
       return SideEffect(expr) <= CallEffectKind::kPure;
@@ -542,32 +524,27 @@ public:
       }
       return IsTotalZeroFillCopyStmt(loop->body, true);
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      return seq->seq.size() == 1
-                 ? IsTotalZeroFillCopyStmt(seq->seq[0], inside_parallel)
-                 : false;
-    }
     const auto *conditional = stmt.as<IfThenElseNode>();
     if (!inside_parallel || conditional == nullptr ||
         !conditional->else_case.defined() ||
         SideEffect(conditional->condition) > CallEffectKind::kPure) {
       return false;
     }
-    const BufferStoreNode *copy =
-        MatchSingleBufferStore(conditional->then_case);
-    const BufferStoreNode *zero_fill =
-        MatchSingleBufferStore(conditional->else_case.value());
+    const auto *copy = conditional->then_case.as<BufferStoreNode>();
+    const auto *zero_fill =
+        conditional->else_case.value().as<BufferStoreNode>();
     if (copy == nullptr || zero_fill == nullptr ||
         !copy->buffer.same_as(zero_fill->buffer) ||
         !IsSharedBuffer(copy->buffer) ||
         !StructuralEqual()(copy->indices, zero_fill->indices) ||
-        !ArePureExprs(copy->indices) || !ArePureExprs(zero_fill->indices) ||
-        copy->predicate.defined() || zero_fill->predicate.defined()) {
+        !ArePureExprs(copy->indices) || copy->predicate.defined() ||
+        zero_fill->predicate.defined()) {
       return false;
     }
-    const BufferLoadNode *load = MatchGlobalLoad(copy->value);
-    return load != nullptr && ArePureExprs(load->indices) &&
-           !load->predicate.defined() && IsZeroBitPattern(zero_fill->value);
+    const auto *load = copy->value.as<BufferLoadNode>();
+    return load != nullptr && IsGlobalBuffer(load->buffer) &&
+           ArePureExprs(load->indices) && !load->predicate.defined() &&
+           IsZeroBitPattern(zero_fill->value);
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
