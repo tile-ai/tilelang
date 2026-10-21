@@ -314,6 +314,14 @@ cdef class PTOKernelWrapper:
                 tensor_list[i] = inputs[ins_idx]
                 ins_idx += 1
 
+        # Scalar parameters are already launch inputs, rather than implicit
+        # tensor-shape symbols. Resolve them before allocating the outputs.
+        scalar_values = {
+            var: tensor_list[index]
+            for index, var in enumerate(self.scalar_param_vars or [])
+            if var is not None
+        }
+
         # Prepare output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
@@ -322,6 +330,9 @@ cdef class PTOKernelWrapper:
                 # Now working with native Python list, no FFI calls needed
                 for s in self.param_shapes[i]:
                     if isinstance(s, tirx.Var):
+                        if s in scalar_values:
+                            shape.append(scalar_values[s])
+                            continue
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):
                                 ref_id, ref_tensor_idx, ref_shape_idx, storage_scale = self.dynamic_symbolic_map[key]

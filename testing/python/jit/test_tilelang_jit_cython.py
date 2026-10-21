@@ -6,6 +6,70 @@ import torch
 import pytest
 
 
+@pytest.mark.parametrize("backend", ["cython", "pto"])
+@pytest.mark.parametrize("rows", [0, 3])
+@pytest.mark.parametrize("trailing_shape", [(), (16,)])
+def test_scalar_parameter_output_shapes(backend, rows, trailing_shape):
+    """Explicit scalar dimensions allocate every output without extra ABI args."""
+    from tilelang.engine.param import KernelParam
+
+    if backend == "cython":
+        from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter as Adapter, CythonKernelWrapper as Wrapper
+    else:
+        from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter as Adapter, PTOKernelWrapper as Wrapper
+
+    size = tvm.tirx.Var("rows", "int64")
+    outputs = [tvm.tirx.decl_buffer((size, *trailing_shape), "float32", name=name) for name in ("first", "last")]
+    source = tvm.tirx.decl_buffer((16,), "float32", name="source")
+    buffers = [outputs[0], source, outputs[1]]
+    func = tvm.tirx.PrimFunc(
+        [outputs[0].data, size, source.data, outputs[1].data],
+        tvm.tirx.Evaluate(0),
+        buffer_map={buffer.data: buffer for buffer in buffers},
+    )
+    adapter = Adapter.__new__(Adapter)
+    adapter.ir_module = tvm.IRModule({"main": func})
+    adapter.result_idx = [0, 3]
+    adapter.target = tvm.target.Target("c")
+
+    class CaptureLibrary:
+        def call(self, *args):
+            self.args = args
+            return 0
+
+    lib = CaptureLibrary()
+    params = [
+        KernelParam.from_buffer(outputs[0]),
+        KernelParam.from_var(size),
+        KernelParam.from_buffer(source),
+        KernelParam.from_buffer(outputs[1]),
+    ]
+    adapter.params = params
+    wrapper = Wrapper([0, 3], params, lib, lambda: torch.device("cpu"), lambda device: 0)
+    wrapper.set_dynamic_symbolic_map(adapter._process_dynamic_symbolic())
+    wrapper.set_dynamic_symbolic_sources(adapter._process_dynamic_symbolic_sources())
+    wrapper.set_scalar_param_vars(adapter._process_scalar_param_vars())
+    wrapper.set_ptr_map(adapter._process_ptr_map())
+    wrapper.set_buffer_dtype_map(adapter._process_buffer_dtype())
+    wrapper.set_buffer_device_map(
+        {func.buffer_map[param].name: (index, torch.device("cpu")) for index, param in enumerate(func.params) if param in func.buffer_map}
+    )
+    shapes, strides, contiguous, *extra = adapter._process_static_buffer_infos()
+    wrapper.set_static_shape_map(shapes)
+    wrapper.set_static_strides_map(strides)
+    wrapper.set_static_contiguous_list(contiguous)
+    if backend == "pto":
+        wrapper.set_param_storage_metadata(adapter._process_param_storage_metadata())
+        wrapper.set_dynamic_strides_map(extra[0])
+
+    results = wrapper.forward([rows, torch.empty(16)], stream=0)
+    for result in results:
+        assert result.shape == (rows, *trailing_shape)
+        assert result.device == torch.device("cpu")
+    assert len(lib.args) == 5  # Four authored parameters and the stream.
+    assert lib.args[1].value == rows
+
+
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
 def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     """Each non-null carrier must retain whether it supplies a shape or stride."""
