@@ -7,7 +7,7 @@ from .common import MX_SF_DIVISOR, align_up, clamp, scale_region
 from .copy import make_l1_to_l0_copy
 
 
-def make_compute(config, major_a, major_b, *, blockscaled=False):
+def make_compute(config, major_a, major_b, *, blockscaled=False, operand_bits=8):
     """Bind the operand layouts, optional MX scales, and MAD instruction at compile time."""
     MAD_M, MAD_N, MAD_K = config.mad_m, config.mad_n, config.mad_k
     assert config.block_k % MAD_K == 0
@@ -48,12 +48,12 @@ def make_compute(config, major_a, major_b, *, blockscaled=False):
                 m_mad_idx = m_mad_tile_idx * MAD_M
                 if m_mad_idx < actual_m:
                     eff_mad_m = clamp(actual_m - m_mad_idx, 0, MAD_M)
-                    load_mad_m = align_up(eff_mad_m, 32) if blockscaled and major_a == Major.MN else eff_mad_m
+                    load_mad_m = align_up(eff_mad_m, 256 // operand_bits) if blockscaled and major_a == Major.MN else eff_mad_m
                     for n_mad_tile_idx in T.Unroll(num_mad_n_tiles, explicit=True):
                         n_mad_idx = n_mad_tile_idx * MAD_N
                         if n_mad_idx < actual_n:
                             eff_mad_n = clamp(actual_n - n_mad_idx, 0, MAD_N)
-                            load_mad_n = align_up(eff_mad_n, 32) if blockscaled and major_b == Major.MN else eff_mad_n
+                            load_mad_n = align_up(eff_mad_n, 256 // operand_bits) if blockscaled and major_b == Major.MN else eff_mad_n
                             for k_mad_tile_idx in T.serial(
                                 T.ceildiv(aligned_k, MAD_K),
                                 annotations={

@@ -219,3 +219,59 @@ def test_transform_sf_passthrough_and_empty():
         output = api._transform_sf_into_required_layout(scale, mn, k, (1, 1, 32), is_sfa=True)
         assert output.shape == (mn, (k + 63) // 64)
         assert output.dtype == torch.int16
+
+
+def _fp4_input(shape, seed):
+    codes = torch.randint(0, 16, shape, dtype=torch.uint8, generator=torch.Generator().manual_seed(seed))
+    table = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+    packed = (codes[..., ::2] | (codes[..., 1::2] << 4)).view(torch.int8)
+    return packed.npu(), table[codes.long()]
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("mn_major,k", [(False, 130), (True, 65)])
+def test_fp4_dense_alpha_accumulation(mn_major, k):
+    m, n = 18, 80
+    a, ref_a = _fp4_input((k, m) if mn_major else (m, k), 0)
+    b, ref_b = _fp4_input((k, n) if mn_major else (n, k), 1)
+    if mn_major:
+        a, b, ref_a, ref_b = a.T, b.T, ref_a.T, ref_b.T
+    sfa = torch.full((m, (k + 31) // 32), 0.5, device="npu")
+    sfb = torch.full((n, (k + 31) // 32), 0.25, device="npu")
+    c = _input((m, n), 2)
+    d = c.npu()
+    api.fp8_fp4_gemm_nt((a, sfa), (b, sfb), d, c=d, alpha=0.5)
+    torch.testing.assert_close(d.cpu(), (ref_a @ ref_b.T) * 0.0625 + c, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
+def test_fp4_m_grouped_padding():
+    a, ref_a = _fp4_input((512, 130), 0)
+    b, ref_b = _fp4_input((2, 80, 130), 1)
+    a[17:256] = ref_a[17:256] = 0
+    a[289:] = ref_a[289:] = 0
+    sfa = torch.ones((512, 5), device="npu")
+    sfb = torch.ones((2, 80, 5), device="npu")
+    layout = torch.tensor([17, 289], dtype=torch.int32, device="npu")
+    d = torch.empty((512, 80), dtype=torch.bfloat16, device="npu")
+    api.m_grouped_fp8_fp4_gemm_nt_contiguous((a, sfa), (b, sfb), d, layout)
+    expected = torch.cat((ref_a[:256] @ ref_b[0].T, ref_a[256:] @ ref_b[1].T))
+    torch.testing.assert_close(d.cpu(), expected.bfloat16(), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_fp4_k_grouped_scale_tail():
+    a, ref_a = _fp4_input((385, 16), 0)
+    b, ref_b = _fp4_input((385, 32), 1)
+    sfa = torch.ones((13, 16), device="npu")
+    sfb = torch.ones((13, 32), device="npu")
+    c = _input((2, 16, 32), 2)
+    d = torch.empty_like(c, device="npu")
+    layout = torch.tensor([65, 385], dtype=torch.int32, device="npu")
+    api.k_grouped_fp8_gemm_tn_contiguous((a, sfa), (b, sfb), d, [65, 129], layout, c=c.npu())
+    expected = torch.stack((ref_a[:65].T @ ref_b[:65], ref_a[256:].T @ ref_b[256:])) + c
+    torch.testing.assert_close(d.cpu(), expected, rtol=0, atol=0)
