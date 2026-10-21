@@ -104,82 +104,77 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     CHECK(node->dst->dtype == DataType::Bool(), TypeError)
         << "reduce_" << reduce_type << " requires a bool output, got "
         << node->dst->dtype;
-    CHECK(node->dim >= -1 &&
-              node->dim < static_cast<int>(node->src->shape.size()),
-          ValueError)
-        << "reduce_" << reduce_type << " axis " << node->dim
-        << " is out of range for input rank " << node->src->shape.size();
-
-    arith::Analyzer analyzer;
-    // Validate original regions before shared operands are materialized. The
-    // same checks also protect native fragment-to-fragment calls.
-    if (node->src->data.same_as(node->dst->data)) {
-      bool overlaps = node->src.same_as(node->dst);
-      for (size_t i = 0; overlaps && i < node->srcRegion_->region.size(); ++i) {
-        const Range &a = node->srcRegion_->region[i];
-        const Range &b = node->dstRegion_->region[i];
-        overlaps = analyzer.CanProve(a->min < b->min + b->extent) &&
-                   analyzer.CanProve(b->min < a->min + a->extent);
-      }
-      CHECK(node->src.same_as(node->dst) && !overlaps, ValueError)
-          << "reduce_" << reduce_type
-          << " requires non-overlapping input and output regions; "
-             "aliased buffer views are unsupported";
+  } else if (node->type->IsBitAnd() || node->type->IsBitOr() ||
+             node->type->IsBitXor()) {
+    for (const auto &[name, buffer] :
+         {std::pair{"input", node->src}, {"output", node->dst}}) {
+      DataType dtype = buffer->dtype;
+      CHECK(dtype.is_bool() || dtype.is_int() || dtype.is_uint(), ValueError)
+          << "reduce_" << reduce_type << " requires an integer/bool " << name
+          << " buffer, got dtype " << dtype;
     }
-    for (const auto &[name, region] :
-         {std::pair{"input", node->srcRegion_}, {"output", node->dstRegion_}}) {
-      for (size_t i = 0; i < region->region.size(); ++i) {
-        const Range &range = region->region[i];
-        if (IsFragmentBuffer(region->buffer)) {
-          CHECK(analyzer.CanProveEqual(range->min, 0) &&
-                    analyzer.CanProveEqual(range->extent,
-                                           region->buffer->shape[i]),
-                ValueError)
-              << "reduce_" << reduce_type
-              << " currently requires a full fragment " << name
-              << "; copy the full fragment to shared memory before "
-                 "selecting a subregion";
-        }
-        PrimExpr simplified_extent = analyzer.Simplify(range->extent);
-        const auto *extent = simplified_extent.as<IntImmNode>();
-        CHECK(extent && extent->value >= 0, ValueError)
-            << "reduce_" << reduce_type
-            << " requires non-negative static region extents in native "
-               "lowering; "
-               "use a fixed-size tile with neutral padding";
-      }
-    }
-
-    Array<PrimExpr> reduced_shape, kept_shape;
-    if (node->dim == -1 || node->srcRegion_->region.size() == 1) {
-      reduced_shape = kept_shape = {Integer(1)};
-    } else {
-      for (size_t i = 0; i < node->srcRegion_->region.size(); ++i) {
-        PrimExpr extent = node->srcRegion_->region[i]->extent;
-        kept_shape.push_back(i == node->dim ? make_const(extent.dtype(), 1)
-                                            : extent);
-        if (i != node->dim) {
-          reduced_shape.push_back(extent);
-        }
-      }
-    }
-    auto matches_shape = [&](const Array<PrimExpr> &shape) {
-      if (shape.size() != node->dstRegion_->region.size()) {
-        return false;
-      }
-      for (size_t i = 0; i < shape.size(); ++i) {
-        if (!analyzer.CanProveEqual(shape[i],
-                                    node->dstRegion_->region[i]->extent)) {
-          return false;
-        }
-      }
-      return true;
-    };
-    CHECK(matches_shape(reduced_shape) || matches_shape(kept_shape), ValueError)
-        << "Invalid reduce output shape for reduce_" << reduce_type << ": "
-        << node->dstRegion_ << ", expected " << reduced_shape << " or "
-        << kept_shape;
   }
+
+  arith::Analyzer analyzer;
+  const auto &src_region = node->srcRegion_->region;
+  const auto &dst_region = node->dstRegion_->region;
+  bool whole_region = node->type->IsLogical() && node->dim == -1;
+  CHECK(whole_region ||
+            (node->dim >= 0 && node->dim < static_cast<int>(src_region.size())),
+        ValueError)
+      << "reduce_" << reduce_type << " axis " << node->dim
+      << " is out of range for input rank " << src_region.size();
+
+  // Shared operands are staged through fragments by the language API. These
+  // restrictions belong to that path, not to the reduction kind or local path.
+  for (const auto &[name, region] :
+       {std::pair{"input", node->srcRegion_}, {"output", node->dstRegion_}}) {
+    if (!IsSharedBuffer(region->buffer) && !IsFragmentBuffer(region->buffer)) {
+      continue;
+    }
+    for (size_t i = 0; i < region->region.size(); ++i) {
+      const Range &range = region->region[i];
+      if (IsFragmentBuffer(region->buffer)) {
+        CHECK(
+            analyzer.CanProveEqual(range->min, 0) &&
+                analyzer.CanProveEqual(range->extent, region->buffer->shape[i]),
+            ValueError)
+            << "reduce_" << reduce_type
+            << " currently requires a full fragment " << name
+            << "; copy the full fragment to shared memory before "
+               "selecting a subregion";
+      }
+      PrimExpr simplified_extent = analyzer.Simplify(range->extent);
+      const auto *extent = simplified_extent.as<IntImmNode>();
+      CHECK(extent && extent->value >= 0, ValueError)
+          << "reduce_" << reduce_type
+          << " requires non-negative static region extents for fragment "
+             "lowering; use a fixed-size tile with neutral padding";
+    }
+  }
+
+  Array<PrimExpr> expected_shape;
+  if (whole_region || (src_region.size() == 1 && (IsFragmentBuffer(node->dst) ||
+                                                  IsSharedBuffer(node->dst)))) {
+    expected_shape = {Integer(1)};
+  } else {
+    for (size_t i = 0; i < src_region.size(); ++i) {
+      PrimExpr extent = src_region[i]->extent;
+      if (i != node->dim) {
+        expected_shape.push_back(extent);
+      } else if (src_region.size() == dst_region.size()) {
+        expected_shape.push_back(make_const(extent.dtype(), 1));
+      }
+    }
+  }
+  bool valid_shape = expected_shape.size() == dst_region.size();
+  for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
+    valid_shape =
+        analyzer.CanProveEqual(expected_shape[i], dst_region[i]->extent);
+  }
+  CHECK(valid_shape, ValueError)
+      << "Invalid reduce output shape for reduce_" << reduce_type << ": "
+      << node->dstRegion_ << ", expected " << expected_shape;
   // Optional "batch" annotation: number of output elements per batched
   // AllReduce call (default 1 = scalar).
   if (auto opt = annotations.Get("batch")) {
@@ -300,24 +295,6 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     int reduce_dim = ReductionDim();
     auto reducer_layout = ComputeReducerLayout(src_layout, reduce_dim);
 
-    // Match the frontend's reduction shape contract before Reshape, which
-    // only checks the total element count.
-    Array<PrimExpr> expected_shape = reducer_layout->InputShape();
-    if (dst->shape.size() == src_layout->InputShape().size()) {
-      // Keeping the reduced axis requires its extent to be one.
-      expected_shape = src_layout->InputShape();
-      expected_shape.Set(reduce_dim,
-                         make_const(expected_shape[reduce_dim].dtype(), 1));
-    }
-    bool valid_shape = dst->shape.size() == expected_shape.size();
-    for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
-      valid_shape =
-          layout_args.analyzer->CanProveEqual(dst->shape[i], expected_shape[i]);
-    }
-    ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst->shape
-                        << " for " << dst << ", expected " << expected_shape
-                        << " when reducing axis " << dim << " of "
-                        << src->shape;
     reducer_layout = Downcast<Fragment>(
         reducer_layout->Reshape(dst->shape, layout_args.analyzer));
 

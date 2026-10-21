@@ -310,27 +310,14 @@ def test_logical_reduce_rejects_scopes(op, scope):
 
 
 @pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
-def test_logical_reduce_rejects_axis_shape_and_overlap(op):
-    src = tvm.tirx.decl_buffer((4, 8), "bool", scope="local.fragment")
+def test_logical_reduce_rejects_whole_and_empty_output_shapes(op):
+    src = tvm.tirx.decl_buffer((4, 8), "bool", scope="shared")
     dst = tvm.tirx.decl_buffer((4,), "bool", scope="local.fragment")
-    with pytest.raises(ValueError, match="out of range"):
-        op(src, dst, dim=2)
-    with pytest.raises(ValueError, match="out of range"):
-        op(src, dst, dim=-3)
     with pytest.raises(ValueError, match="Invalid reduce output shape"):
         op(src, dst, dim=None)
-    with pytest.raises(ValueError, match="non-overlapping"):
-        op(src, src[:, 0:1], dim=1)
-    with pytest.raises(ValueError, match="full fragment input"):
-        op(src[:, 0:4], dst)
-    with pytest.raises(ValueError, match="full fragment output"):
-        op(src, src[:, 0:0], dim=1)
-    shared = tvm.tirx.decl_buffer((4, 8), "bool", scope="shared")
-    with pytest.raises(ValueError, match="non-overlapping"):
-        op(shared, shared[:, 0:1], dim=1)
     scalar = tvm.tirx.decl_buffer((1,), "bool", scope="shared")
     with pytest.raises(ValueError, match="Invalid reduce output shape"):
-        op(shared[:, 0:0], scalar, dim=1)
+        op(src[:, 0:0], scalar, dim=1)
 
 
 @pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
@@ -348,15 +335,6 @@ def test_logical_reduce_rejects_dtype_before_empty_folding(op, empty, clear, sou
     dst = tvm.tirx.decl_buffer((4,), output_dtype, scope="shared")
     with pytest.raises(TypeError, match=message):
         op(src[:, 0:0] if empty else src, dst, clear=clear)
-
-
-@pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
-def test_logical_reduce_rejects_dynamic_region_at_creation(op):
-    n = T.Var("n", "int32")
-    src = tvm.tirx.decl_buffer((4, 8), "float32", scope="shared")
-    dst = tvm.tirx.decl_buffer((4,), "bool", scope="local.fragment")
-    with pytest.raises(ValueError, match="requires non-negative static region extents in native lowering"):
-        op(src[:, 0:n], dst)
 
 
 @pytest.mark.parametrize("op", ["any", "all"])

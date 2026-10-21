@@ -72,59 +72,32 @@ def reduce(
                 raise ValueError(f"reduce_{reduce_type} axis is out of range for input rank {len(retrieve_shape(buffer))}")
         else:
             dim = -1
-        # Construct the native TileOp before expansion so it sees original
-        # shared regions and validates even reductions folded to fill/no-op.
-        call = tirx.call_intrin(
-            "handle",
-            tirx.op.Op.get(_REDUCE_OP_KEY),
-            to_tile_region(buffer, access_type="r"),
-            to_tile_region(out_region, access_type="w" if clear else "rw"),
-            reduce_type,
-            dim,
-            clear,
-            annotations=annotations,
-        )
-        _ffi_api.ReduceOp(call.args, call.annotations)
+
+    # Validate every reduction through the native constructor before shared
+    # operands are staged or an empty logical reduction is folded away.
+    call = tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get(_REDUCE_OP_KEY),
+        to_tile_region(buffer, access_type="r"),
+        to_tile_region(out_region, access_type="w" if clear else "rw"),
+        reduce_type,
+        dim,
+        clear,
+        annotations=annotations,
+    )
+    _ffi_api.ReduceOp(call.args, call.annotations)
+
+    if reduce_type in ("any", "all"):
         analyzer = arith.Analyzer()
         if any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(buffer)):
             if clear and not any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(out_region)):
                 evaluate(fill(out, tirx.const(reduce_type == "all", "bool")))
             return
-    if reduce_type in ("bitand", "bitor", "bitxor"):
-        # Both faces must be integral: a float source would otherwise be silently
-        # value-cast to an integer before the bitwise reduction runs.
-        buf_dtype = _get_buffer(buffer).dtype
-        if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
-    if reduce_type not in ("any", "all"):
-        # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-        buf_shape = retrieve_shape(buffer)
-        out_shape = retrieve_shape(out_region)
-        expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
-        if list(out_shape) not in expected_shapes:
-            expected_shapes_str = " or ".join(map(str, expected_shapes))
-            raise ValueError(
-                f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
-                f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
-            )
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.
     if is_local(buffer) and out_buffer.scope() in ("local", "local.var"):
-        return evaluate(
-            tirx.call_intrin(
-                "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
-                to_tile_region(buffer, access_type="r"),
-                to_tile_region(out_buffer, access_type="w"),
-                reduce_type,
-                dim,
-                clear,
-                annotations=annotations,
-            )
-        )
+        return evaluate(call)
 
     @macro
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
