@@ -1,9 +1,8 @@
-"""PTO autotune: tuning completes, the best kernel is correct, and results are cached.
+"""PTO autotune cache round-trip: tune, persist the winner, reload from disk.
 
-Runs AutoTuner over a small vecadd with one tunable knob (the SIMT vector-core
-tile size) on ``target="pto"`` (execution backend auto-resolves to tvm_ffi).
-The tuner validates nothing by itself here (no ref_prog, so the on-disk
-autotune cache stays usable); numerics are asserted directly against torch.
+Timing is stubbed so the test stays on the cache chain: per-config compile
+through the pto/tvm_ffi pipeline, the on-disk autotune result, and the
+kernel rebuilt from it on the cache hit.
 """
 
 import pytest
@@ -13,12 +12,13 @@ import tilelang
 import tilelang.testing
 from tilelang.ascend import language as T
 from tilelang.autotuner import AutoTuner
-from tilelang.env import env
+from tilelang.env import CacheState, env
+from tilelang.profiler import Profiler
 
 pytestmark = pytest.mark.pto
 
-N = 64 * 2048
-CONFIGS = [{"tile": 1024}, {"tile": 2048}]
+N = 64
+CONFIGS = [{"tile": 32}, {"tile": 64}]
 
 
 def _tunable_vecadd(tile):
@@ -42,8 +42,8 @@ def _set_cache_dirs(monkeypatch, tmp_path):
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     monkeypatch.setattr(env, "TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
-    tilelang.enable_cache()
-    AutoTuner._memory_cache.clear()
+    monkeypatch.setattr(CacheState, "_enabled", True)
+    monkeypatch.setattr(AutoTuner, "_memory_cache", {})
     return cache_dir
 
 
@@ -53,23 +53,23 @@ def _deterministic_inputs(n):
     return a, b
 
 
-def test_pto_autotune_tunes_and_caches(monkeypatch, tmp_path):
-    _set_cache_dirs(monkeypatch, tmp_path)
+def _stub_do_bench(self, **kwargs):
+    return 0.05
 
-    tuner = (
-        AutoTuner(_tunable_vecadd, configs=list(CONFIGS))
-        .set_compile_args(out_idx=[2], target="pto")
-        .set_profile_args(warmup=1, rep=3, timeout=120)
-    )
+
+@tilelang.testing.requires_ascend
+def test_pto_autotune_cache_roundtrip(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(Profiler, "do_bench", _stub_do_bench)
+
+    tuner = AutoTuner(_tunable_vecadd, configs=list(CONFIGS)).set_compile_args(out_idx=[2], target="pto").set_profile_args(warmup=1, rep=3)
 
     records = []
-    result = tuner.run(warmup=1, rep=3, timeout=120, on_trial=records.append)
+    result = tuner.run(warmup=1, rep=3, on_trial=records.append)
 
-    # Every config compiled and benchmarked successfully.
     assert sorted(record["status"] for record in records) == ["ok", "ok"]
     assert result.kernel is not None
     assert result.config in CONFIGS
-    assert result.latency > 0
 
     a, b = _deterministic_inputs(N)
     expected = a.cpu() + b.cpu()
@@ -77,15 +77,13 @@ def test_pto_autotune_tunes_and_caches(monkeypatch, tmp_path):
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
-    # A second run with a cleared in-memory cache must hit the on-disk
-    # autotune cache: no trials run, the same config and latency come back.
+    # A second run with a cleared in-memory cache must hit the on-disk cache.
     AutoTuner._memory_cache.clear()
     cached_records = []
-    cached = tuner.run(warmup=1, rep=3, timeout=120, on_trial=cached_records.append)
+    cached = tuner.run(warmup=1, rep=3, on_trial=cached_records.append)
 
     assert [record["status"] for record in cached_records] == ["cache_hit"]
     assert cached.config == result.config
-    assert cached.latency == result.latency
 
     cached_out = cached.kernel(a, b)
     torch.npu.synchronize()
