@@ -1,5 +1,6 @@
 """Special-register dependencies participate in scheduling and core placement."""
 
+import inspect
 from unittest.mock import patch
 
 import pytest
@@ -160,19 +161,50 @@ def test_cube_mode_schedule_preserves_iteration_order(mode, enable_offset, start
         tvm.ir.assert_structural_equal(child.body.body, operations[index])
 
 
-def test_manual_stages_break_scalar_pipe_ties_by_iteration():
+@pytest.mark.parametrize("stages", [(0, 0), (0, 1), (6, 10), (1, 0)], ids=["same", "ascending", "nonadjacent", "descending"])
+def test_manual_scalar_issue_order_survives_stage_ties(stages):
     operations = [tirx.Evaluate(T.set_hf32_mode("nearest_even")), tirx.Evaluate(T.set_mmad_direction("n"))]
-    body = seq(*(unit(op, core=0, stage=stage, cost=(1, 1)) for stage, op in enumerate(operations)))
+    body = seq(*(unit(op, core=0, stage=stage, cost=(1, 1)) for stage, op in zip(stages, operations)))
     loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
     before = kernel(unit(loop, core=None, stage=-1))
     # These independent setters share PIPE_Scalar, which has no resource
-    # exclusion. The real solver chooses II=1, forcing equal issue phases.
-    # The earlier logical iteration takes precedence over per-pipe source order.
+    # exclusion. Ascending stages need distinct phases so the reconstruction
+    # tie-break cannot reverse manual source order; other stage orders may tie.
     after = transform.AutoSchedule()(before)
     children = after["main"].body.block.body.body.body.seq
-    assert [int(child.node["stage"]) for child in children] == [1, 0]
-    for child, op in zip(children, reversed(operations)):
+    assert [int(child.node["stage"]) for child in children] == list(stages)
+    for child, op in zip(children, operations):
         tvm.ir.assert_structural_equal(child.body.body, op)
+
+
+@pytest.mark.parametrize("cores", [(1, 4), (1, 2), (2, 4)], ids=["aiv0-aiv1", "aiv0-aic", "aic-aiv1"])
+@pytest.mark.parametrize("in_loop", [False, True], ids=["sequence", "loop"])
+def test_manual_pipe_order_does_not_order_distinct_physical_cores(cores, in_loop):
+    sources = [tirx.decl_buffer((64,), "float32", name=f"A{i}") for i in range(2)]
+    buffers = [
+        tirx.decl_buffer((64,), "float32", name=f"tile{i}", scope="shared.l1" if core == 2 else "shared.dyn")
+        for i, core in enumerate(cores)
+    ]
+    stages = (0, 1) if in_loop else (0, 0)
+    body = seq(*(unit(copy(source, buffer), core=core, stage=stage, cost=(1, 1))
+                 for source, buffer, core, stage in zip(sources, buffers, cores, stages)))
+    if in_loop:
+        loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
+        body = unit(loop, core=None, stage=-1)
+    name = "z3_schedule_loop_python" if in_loop else "z3_schedule_seq_python"
+    original = getattr(z3_scheduler, name)
+    inputs = []
+
+    def capture(*args, **kwargs):
+        inputs.append(dict(inspect.signature(original).bind(*args, **kwargs).arguments))
+        return original(*args, **kwargs)
+
+    with patch.object(z3_scheduler, name, side_effect=capture):
+        transform.AutoSchedule()(kernel(body, buffers=buffers, params=sources))
+    (actual,) = inputs
+    # Equal pipe names on separate cores do not impose manual issue order.
+    # Shared HBM resources may independently require resource exclusion.
+    assert actual["pipe_order_deps"] == []
 
 
 @pytest.mark.parametrize("mode", ["hf32", "mmad-direction"])
