@@ -1,5 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang as tl
+import pytest
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 from tvm.tirx.stmt_functor import post_order_visit
@@ -696,7 +697,8 @@ def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy():
     assert async_groups == [0, -1]
 
 
-def test_pipeline_planning_keeps_nonzero_fallback_copy_synchronous():
+@pytest.mark.parametrize("fallback", [pytest.param(1.0, id="nonzero"), pytest.param(-0.0, id="negative_zero")])
+def test_pipeline_planning_keeps_unsupported_fallback_copy_synchronous(fallback):
     @T.prim_func
     def before(
         A: T.Tensor((130,), T.float16),
@@ -709,7 +711,7 @@ def test_pipeline_planning_keeps_nonzero_fallback_copy_synchronous():
                     if ko * 128 + i < 130:
                         A_shared[i] = A[ko * 128 + i]
                     else:
-                        A_shared[i] = T.float16(1)
+                        A_shared[i] = T.float16(fallback)
                 B[ko] = A_shared[0]
 
     mod = _run_pipeline_planning(before, sm80_target)

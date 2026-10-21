@@ -508,19 +508,6 @@ public:
     return pinfo.IsCopyStage();
   }
 
-  static bool IsZeroValue(const PrimExpr &expr) {
-    if (const auto *broadcast = expr.as<BroadcastNode>()) {
-      return IsZeroValue(broadcast->value);
-    }
-    if (const auto *float_imm = expr.as<FloatImmNode>()) {
-      return float_imm->value == 0.0;
-    }
-    if (const auto *int_imm = expr.as<IntImmNode>()) {
-      return int_imm->value == 0;
-    }
-    return false;
-  }
-
   static const BufferLoadNode *MatchGlobalLoad(const PrimExpr &expr) {
     if (const auto *load = expr.as<BufferLoadNode>()) {
       return IsGlobalBuffer(load->buffer) ? load : nullptr;
@@ -580,7 +567,7 @@ public:
     }
     const BufferLoadNode *load = MatchGlobalLoad(copy->value);
     return load != nullptr && ArePureExprs(load->indices) &&
-           !load->predicate.defined() && IsZeroValue(zero_fill->value);
+           !load->predicate.defined() && IsZeroBitPattern(zero_fill->value);
   }
 
   bool IsPureCopyStmt(const Stmt &stmt) const {
