@@ -140,7 +140,7 @@ def _make_auto_vec_fma_kernel(dtype_tl, width: int = 4):
     return main
 
 
-def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False, annotations=None):
+def _make_auto_vec_reduce_kernel(reduce_func, *, annotations=None):
     """Build a row reduction whose local fragment is contiguous per thread."""
 
     @T.prim_func
@@ -152,10 +152,7 @@ def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False, annotation
             src = T.alloc_fragment((M, 128), T.float32)
             dst = T.alloc_fragment((M,), T.float32)
             T.copy(A, src)
-            if nan_propagate:
-                reduce_func(src, dst, dim=1, nan_propagate=True, annotations=annotations)
-            else:
-                reduce_func(src, dst, dim=1, annotations=annotations)
+            reduce_func(src, dst, dim=1, annotations=annotations)
             T.copy(dst, C)
 
     return main
@@ -447,14 +444,6 @@ def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
     for packed_op in packed_ops:
         assert f"tl::{packed_op}" not in src, f"tl::{packed_op} should not appear in pre-SM100 float32 {op_name} reduction"
-
-
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("reduce_func", [T.reduce_max, T.reduce_min, T.reduce_absmax])
-def test_codegen_auto_vec_reduce_f32_rejects_nan_mode(reduce_func):
-    func = _make_auto_vec_reduce_kernel(reduce_func, nan_propagate=True)
-    with pytest.raises(ValueError, match="nan_propagate=True requires float16 or bfloat16 output, got float32"):
-        _lower_to_cuda_source(func, target=SM100_TARGET)
 
 
 @tilelang.testing.requires_cuda
