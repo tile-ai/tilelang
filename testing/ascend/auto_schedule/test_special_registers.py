@@ -186,8 +186,12 @@ def test_manual_pipe_order_does_not_order_distinct_physical_cores(cores, in_loop
         for i, core in enumerate(cores)
     ]
     stages = (0, 1) if in_loop else (0, 0)
-    body = seq(*(unit(copy(source, buffer), core=core, stage=stage, cost=(1, 1))
-                 for source, buffer, core, stage in zip(sources, buffers, cores, stages)))
+    body = seq(
+        *(
+            unit(copy(source, buffer), core=core, stage=stage, cost=(1, 1))
+            for source, buffer, core, stage in zip(sources, buffers, cores, stages)
+        )
+    )
     if in_loop:
         loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
         body = unit(loop, core=None, stage=-1)
