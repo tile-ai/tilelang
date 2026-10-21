@@ -1954,10 +1954,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 
   // Handle conversion from bfloat16 to float32
   if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32) {
-    // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
+    // Expand each bf16 lane directly into the high 16 bits of an fp32 lane.
     if (lanes == 2 || lanes == 4 || lanes == 8) {
-      PrintVectorizedCast("__bfloat1622float2", "__nv_bfloat162", "float2", "",
-                          true, false);
+      PrintVectorizedCast("tl::__tl_cvt_bf16x2_to_f32x2", "__nv_bfloat162",
+                          "float2", "", true, false);
       return;
     }
   }

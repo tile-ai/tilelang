@@ -90,12 +90,26 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
         (T.float16, T.float32, "__half22float2", 4),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
-        (T.bfloat16, T.float32, "__bfloat1622float2", 2),
-        (T.bfloat16, T.float32, "__bfloat1622float2", 4),
+        (T.bfloat16, T.float32, "tl::__tl_cvt_bf16x2_to_f32x2", 2),
+        (T.bfloat16, T.float32, "tl::__tl_cvt_bf16x2_to_f32x2", 4),
+        (T.bfloat16, T.float32, "tl::__tl_cvt_bf16x2_to_f32x2", 8),
     ],
 )
 def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):
     run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
+
+
+@tilelang.testing.requires_cuda
+def test_bf16_to_float32_all_bit_patterns():
+    # Include signed zeros, subnormals, infinities, and every NaN payload.
+    # Repeat each pattern in both packed lanes, with different neighbours.
+    bits = torch.arange(65536, dtype=torch.int32, device="cuda")
+    packed = torch.stack((bits, bits.flip(0)), dim=1).flatten()
+    src = packed.to(torch.int16).view(torch.bfloat16)
+    dst = torch.empty(src.numel(), dtype=torch.float32, device="cuda")
+    kernel = vectorized_cast_kernel(src.numel(), T.bfloat16, T.float32)
+    kernel(src, dst)
+    assert torch.equal(dst.view(torch.int32), packed << 16)
 
 
 @tilelang.testing.requires_cuda
