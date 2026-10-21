@@ -479,6 +479,84 @@ def test_padded_group_negative_stride_20_trials(npu):
 
 
 # ---------------------------------------------------------------------------
+# Explicit descriptor crossing a row: seeded tail + DMA head, one 128 load
+# ---------------------------------------------------------------------------
+def _cross_row_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            out = T.alloc_shared((128,), F32)
+            with T.SimdVF():
+                seed = T.vmi.vbrc(T.float32(23), size=64)
+                mask = T.vmi.create_mask(64, size=64)
+                T.vmi.vstore(seed, work[0, 64], mask)
+            T.copy(A, work[1, 0:64])  # producer DMA: only the head of row 1
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                ptr = T.access_ptr(work[0, 64], "r", extent=192)
+                v = T.vmi.vload(ptr, size=128)
+                T.vmi.vstore(v, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def test_cross_row_descriptor_20_trials(npu):
+    kernel, source = _compile(_cross_row_kernel())
+    lines = source.splitlines()
+    seed = _line_index(lines, lambda line: "vmi.vstore" in line and ", 64)" in line, what="seed vstore")
+    _assert_addptr_pointer_use(source, ", 64)", "vmi.vload({name}, 0, size=128)")
+    _assert_mte2_to_v_then_load(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" in line and ", 128)" in line,
+        "size=128)",
+    )
+    vload = _line_index(lines, lambda line: "vmi.vload" in line, what="vmi.vload")
+    assert seed < vload, "row-0 seed store must precede the consumer load"
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], torch.cat([torch.full((64,), 23.0), a])
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Ordinary broadcast: one-element descriptor fed by a real DMA producer
+# ---------------------------------------------------------------------------
+def _broadcast_descriptor_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            out = T.alloc_shared((128,), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                v = T.vmi.vload(work[0, 64], size=128, dist_mode="brc")
+                T.vmi.vstore(v, out[0])
+            T.copy(out, C)
+
+    return main
+
+
+def test_broadcast_descriptor_20_trials(npu):
+    kernel, source = _compile(_broadcast_descriptor_kernel())
+    assert 'dist_mode="brc"' in source, source
+    _assert_mte2_to_v_then_load(
+        source.splitlines(),
+        lambda line: "mte_gm_ub" in line,
+        "size=128)",
+    )
+
+    def make_case(trial):
+        a = _float_inputs((256,), trial)
+        return [a], a[64].reshape(1).expand(128).clone()
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
 # Gather / scatter with non-zero direct and explicit-pointer bases
 # ---------------------------------------------------------------------------
 def _gather_kernel(explicit_pointer):
