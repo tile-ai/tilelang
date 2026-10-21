@@ -45,7 +45,7 @@ bool ValueIsReplicaSafe(const PrimExpr &value) {
 }
 
 /*! \brief One projection step of the induced-layout construction: identical
- *  to backend::reduce::ComputeReducerLayout minus the scale-ordered
+ *  to ComputeReducerLayout minus the scale-ordered
  *  CondenseReplicateVar (which would destroy the low-bits combine/copy
  *  boundary) and the thread-range bind (done once after the final,
  *  boundary-preserving condensation). The projected dim's lanes take the
@@ -264,6 +264,11 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
     if (!is_power_of_two(step.extent)) {
       return reject("collective width is not a power of two");
     }
+    // The XOR butterfly can only address the reduce coordinate when the
+    // thread stride between consecutive participants is a power of two.
+    if (!is_power_of_two(step.scale)) {
+      return reject("collective thread stride is not a power of two");
+    }
     int reducing_threads = step.ReducingThreads();
     if (reducing_threads > thread_extent) {
       return reject("collective width exceeds the participant extent");
@@ -406,7 +411,8 @@ TileOperator ReducerInitOpNode::Clone() const {
 }
 
 TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
-    .set_num_inputs(1)
+    // reducer region plus an optional init value.
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -659,7 +665,9 @@ TileOperator FinalizeReducerOpNode::Clone() const {
 }
 
 TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
-    .set_num_inputs(1)
+    // user form: reducer region; materialized form appends the combine-op
+    // enum and the flattened (reducing_threads, scale) plan pairs.
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

@@ -111,6 +111,7 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 | case | what it pins |
 |---|---|
 | `elementwise_copy` | Baseline: both models must agree on the coalesced, vectorized roundtrip layout. Primary equal-score anchor. |
+| `atomic_destination` | Atomic destination legality selects the loop layout: contiguous fp16 lanes retain width 2, while repeated destinations plan scalar lanes. |
 | `fp8_copy` | 1-byte dtype: the 16-element vector width at the wide end of the shared width policy. |
 | `broadcast_read` | Issue #1729. The models disagree **by design**: register-count keeps the thread-collapsed legacy pathology (golden documents it); io-aware must pick full replication + a non-replicated coalesced loop (enforced by `check`). |
 | `transposed_store` | Load and store pull the layout in opposite directions; goldens record each model's trade-off. fp32 variant: the models pick different layouts — benchmark-worthy. |

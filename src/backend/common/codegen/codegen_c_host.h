@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_base.h"
 #include "tvm/target/codegen.h"
 #include <tvm/tirx/expr.h>
 
@@ -22,8 +22,7 @@ namespace tl {
 using namespace ffi;
 
 // TileLang copy of TVM's CodeGenCHost, under the tl namespace.
-// Inherits from tvm::codegen::CodeGenC.
-class CodeGenCHost : public tvm::codegen::CodeGenC {
+class CodeGenCHost : public tvm::codegen::CodeGenTileLangCBase {
 public:
   CodeGenCHost();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,

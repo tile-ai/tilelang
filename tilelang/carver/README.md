@@ -153,7 +153,7 @@ class CUDA(TileDevice):
         self.warp_size = device.warp_size
         ...
         self.transaction_size = [32, 128]  # bytes
-        self.bandwidth = [750, 12080]     # MB/s, approximate
+        self.bandwidth = [750, 12080]  # MB/s, approximate
         self.available_tensor_instructions = None
 
     def get_avaliable_tensorintrin_shapes(self):
@@ -173,13 +173,7 @@ One of Carver’s main benefits is its adaptability. Here are a examples for tri
 
 Given a Carver hint like:
 ```python
-{
-  'block': [32, 64],
-  'warp': [16, 32],
-  'rstep': [128],
-  'use_tc': True,
-  'vectorize': {'A_reindex': 8, 'B_reindex': 8}
-}
+{"block": [32, 64], "warp": [16, 32], "rstep": [128], "use_tc": True, "vectorize": {"A_reindex": 8, "B_reindex": 8}}
 ```
 You might interpret this in **Triton** as:
 - `block_m = 32, block_n = 64, block_k = 128`

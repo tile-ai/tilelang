@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 import tilelang
 from tilelang.backend import get_backend
@@ -26,29 +27,26 @@ def cuda_target_module(monkeypatch):
     set, so on a ROCm runner it never reaches the arch logic these tests cover.
     Pinning hip to None keeps the assertions about that logic runner-independent.
     """
-    import torch
-
     from tilelang.cuda import target as cuda_target
 
     monkeypatch.setattr(torch.version, "hip", None, raising=False)
     return cuda_target
 
 
-def test_cuda_auto_without_gpu_rejects_instead_of_silent_sm50(monkeypatch, cuda_target_module):
-    # CUDA toolkit present but no GPU: auto detection must raise an actionable
-    # error, NOT return a bare "cuda" target (which TVM fills to sm_50).
+def test_cuda_auto_without_gpu_falls_through(monkeypatch, cuda_target_module):
+    # A toolkit alone must not stop auto-detection from trying other backends.
     cuda_target = cuda_target_module
 
     monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: None)
-    with pytest.raises(ValueError, match="arch"):
-        cuda_target._detect_cuda_target()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert cuda_target._detect_cuda_target() is None
 
 
 def test_cuda_auto_with_gpu_returns_concrete_arch(monkeypatch, cuda_target_module):
     cuda_target = cuda_target_module
 
     monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
     target = cuda_target._detect_cuda_target()
     assert isinstance(target, Target)

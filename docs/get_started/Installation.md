@@ -156,8 +156,10 @@ python -c "import tilelang; print(tilelang.__version__)"
 ```
 
 Some useful CMake options you can toggle while configuring:
-- `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when CUDA headers are found).
-- `-DUSE_ROCM=ON` selects ROCm support when building on AMD GPUs.
+
+- `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when a CUDA toolkit is found, except on macOS).
+- `-DUSE_ROCM=ON|OFF` enables ROCm support (default ON on Linux).
+- `-DUSE_ASCEND=ON|OFF` enables Ascend support (default ON on Linux).
 - `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
 - `-DUSE_LLVM=ON` enables the LLVM backend for CPU codegen.
 
@@ -341,9 +343,16 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly
 ## Install Configs
 
 ### Build-time environment variables
-`USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
 
-`USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
+Backend options are independent. CMake variables, including `-DUSE_*=...` arguments and existing cache entries, take precedence over environment variables. Environment variables initialize options in a fresh build directory; use `-D` arguments to change an existing configuration.
+
+`USE_CUDA`: Enables CUDA support, default: `ON` when a host or pip-provided CUDA toolkit is found, except on macOS. Set `CUDAToolkit_ROOT` to select a different CUDA toolkit.
+
+`USE_ROCM`: Enables ROCm support, default: `ON` on Linux and `OFF` elsewhere. The default HIP stubs and vendored headers allow building without a ROCm installation. Set `USE_ROCM=<rocm_sdk>` to use a custom SDK path.
+
+`USE_ASCEND`: Enables Ascend support, default: `ON` on Linux and `OFF` elsewhere. The default Ascend stub and local ACL declarations allow building without CANN.
+
+Running kernels still requires the selected backend's compiler, runtime, and device. Set `USE_CUDA=OFF USE_ROCM=OFF USE_ASCEND=OFF` to disable all three backends.
 
 `USE_METAL`: If to enable Metal support, default: `ON` on Darwin.
 

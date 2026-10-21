@@ -45,5 +45,48 @@ def test_vectorize_access():
     assert_vectorize_access(64, 64)
 
 
+@tilelang.testing.requires_cuda
+def test_vectorized_nonzero_min_uses_aligned_vector_width():
+    @T.prim_func
+    def before(
+        A: T.Tensor((8,), T.int32),
+        B: T.Tensor((8,), T.int32),
+    ):
+        for value in T.vectorized(2, 6):
+            B[value] = A[value] + 1
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((8,), T.int32),
+        B: T.Tensor((8,), T.int32),
+    ):
+        for value_outer in T.serial(2):
+            for vec in T.vectorized(2):
+                B[2 + (value_outer * 2 + vec)] = A[2 + (value_outer * 2 + vec)] + 1
+
+    mod = tvm.IRModule.from_expr(before)
+    with tvm.target.Target("cuda"):
+        transformed = tl.transform.LegalizeVectorizedLoop()(mod)
+    tvm.ir.assert_structural_equal(transformed["before"].body, expected.body)
+
+
+@tilelang.testing.requires_cuda
+def test_vectorized_split_preserves_large_int64_extent():
+    tir = tvm.tirx
+    start, extent = 2, 1 << 32
+    a = tir.decl_buffer((start + extent,), "int32", name="A")
+    i = tir.Var("i", "int64")
+    body = tir.BufferStore(a, a[i] + 1, [i])
+    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, body)
+    func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a})
+    with tvm.target.Target("cuda"):
+        mod = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    loops = []
+    tir.stmt_functor.post_order_visit(mod["main"].body, lambda node: loops.append(node) if isinstance(node, tir.For) else None)
+    assert len(loops) == 2
+    assert all(loop.loop_var.dtype == "int64" for loop in loops)
+    assert int(loops[0].extent) * int(loops[1].extent) == extent
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

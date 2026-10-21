@@ -18,7 +18,7 @@ import sys
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from tilelang.env import env
@@ -85,7 +85,6 @@ _SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset(
         "target.build.tilelang_cpp",
         "target.build.tilelang_webgpu",
         "target.build.tilelang_ascend",
-        "target.build.tilelang_ascend_pto",
     }
 )
 
@@ -251,11 +250,17 @@ class LowerTraceSession(PassInstrumentationTool):
             os.makedirs(self.run_dir, exist_ok=True)
         return self.run_dir
 
-    def get_codegen_output_path(self) -> str | None:
+    def get_codegen_output_path(self, role: Literal["device", "host"] | None = None) -> str | None:
+        """Return the role's working path, or the legacy path for an unspecified role."""
         if self.codegen_output is not _UNSET:
-            return self.codegen_output  # type: ignore[return-value]
+            output_path = self.codegen_output
+            if output_path is None or role != "host":
+                return output_path  # type: ignore[return-value]
+            stem, extension = os.path.splitext(output_path)
+            return f"{stem}_host{extension}"
         if self.should_generate_html:
-            return os.path.join(self.ensure_script_dir(), "codegen.cpp")
+            name = "codegen" if role is None else f"codegen_{role}"
+            return os.path.join(self.ensure_script_dir(), f"{name}.cpp")
         return None
 
     def allocate_index(self) -> int:
@@ -353,15 +358,20 @@ class LowerTraceSession(PassInstrumentationTool):
             if isinstance(observer, _LowerTraceObserver) and observer.session is self and instrument.pending_events:
                 instrument.abort(error)
 
-    def _resolve_codegen_edit(self, codegen_text: str, output_path: str, index: int) -> str | None:
+    def _resolve_codegen_edit(
+        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] | None = None
+    ) -> str | None:
         """Apply the baseline/working/current three-way source workflow."""
         with _codegen_path_lock(output_path):
-            return self._resolve_codegen_edit_locked(codegen_text, output_path, index)
+            return self._resolve_codegen_edit_locked(codegen_text, output_path, index, role=role)
 
-    def _resolve_codegen_edit_locked(self, codegen_text: str, output_path: str, index: int) -> str | None:
+    def _resolve_codegen_edit_locked(
+        self, codegen_text: str, output_path: str, index: int, *, role: Literal["device", "host"] | None = None
+    ) -> str | None:
         """Resolve one codegen edit while holding the output-path lock."""
         original_path = output_path + ".original"
         latest_path = output_path + ".latest"
+        name = "codegen" if role is None else f"codegen_{role}"
         try:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
             with open(latest_path, "w", encoding="utf-8") as latest_file:
@@ -371,14 +381,14 @@ class LowerTraceSession(PassInstrumentationTool):
                 if os.path.isfile(output_path):
                     shutil.copyfile(output_path, output_path + ".bak")
                     print(
-                        f"  [lower_trace] codegen/{index:02d}_codegen: INIT-BACKUP — "
+                        f"  [lower_trace] codegen/{index:02d}_{name}: INIT-BACKUP — "
                         f"{_ANSI_BOLD}{_ANSI_YELLOW}{output_path}{_ANSI_RESET} existed without baseline, "
                         f"backed up to {_ANSI_BOLD}{_ANSI_YELLOW}{output_path}.bak{_ANSI_RESET}"
                     )
                 with open(original_path, "w", encoding="utf-8") as original_file:
                     original_file.write(codegen_text)
                 shutil.copyfile(original_path, output_path)
-                print(f"  [lower_trace] codegen source initialized at: {_ANSI_GREEN}{output_path}{_ANSI_RESET}")
+                print(f"  [lower_trace] {name} source initialized at: {_ANSI_GREEN}{output_path}{_ANSI_RESET}")
                 return None
 
             with open(original_path, encoding="utf-8") as original_file:
@@ -395,16 +405,16 @@ class LowerTraceSession(PassInstrumentationTool):
                     original_file.write(codegen_text)
                 with open(output_path, "w", encoding="utf-8") as working_file:
                     working_file.write(codegen_text)
-                print(f"  {_ANSI_CYAN}[lower_trace] codegen/{index:02d}_codegen: REGENERATED (codegen changed, no user edits){_ANSI_RESET}")
+                print(f"  {_ANSI_CYAN}[lower_trace] codegen/{index:02d}_{name}: REGENERATED (codegen changed, no user edits){_ANSI_RESET}")
                 return None
             if user_edited and not codegen_changed:
-                print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{index:02d}_codegen: PATCHED (user edits){_ANSI_RESET}")
+                print(f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{index:02d}_{name}: PATCHED (user edits){_ANSI_RESET}")
                 return working_text
             if working_text.rstrip() == codegen_text.rstrip():
                 with open(original_path, "w", encoding="utf-8") as original_file:
                     original_file.write(codegen_text)
                 print(
-                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{index:02d}_codegen: "
+                    f"  {_ANSI_BOLD}{_ANSI_GREEN}[lower_trace] codegen/{index:02d}_{name}: "
                     f"SYNCED (user edits and codegen changed to the same source){_ANSI_RESET}"
                 )
                 return working_text
@@ -416,11 +426,11 @@ class LowerTraceSession(PassInstrumentationTool):
             with open(output_path, "w", encoding="utf-8") as working_file:
                 working_file.write(codegen_text)
             print(
-                f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_codegen: "
+                f"  {_ANSI_BOLD}{_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_{name}: "
                 f"CONFLICT (codegen restored; user edits saved in .bak){_ANSI_RESET}"
             )
         except Exception as exc:
-            print(f"  {_ANSI_RED}[lower_trace] WARNING: codegen file I/O failed: {exc}{_ANSI_RESET}")
+            print(f"  {_ANSI_RED}[lower_trace] WARNING: {name} file I/O failed: {exc}{_ANSI_RESET}")
         return None
 
     def run_codegen(self, event: CodegenEvent, next_call: Callable[[], Any]) -> Any:
@@ -430,7 +440,8 @@ class LowerTraceSession(PassInstrumentationTool):
         if self.should_generate_html:
             self.ensure_run_dir()
         before_text = str(event.mod)
-        output_path = self.get_codegen_output_path()
+        output_path = self.get_codegen_output_path(event.role)
+        name = "codegen" if event.role is None else f"codegen_{event.role}"
 
         try:
             with pass_phase("codegen"):
@@ -441,7 +452,7 @@ class LowerTraceSession(PassInstrumentationTool):
             self.append_record(
                 LowerRecord(
                     phase="codegen",
-                    name="codegen",
+                    name=name,
                     index=index,
                     before_text=before_text,
                     after_text="",
@@ -450,7 +461,7 @@ class LowerTraceSession(PassInstrumentationTool):
                     error_msg=str(error),
                 )
             )
-            print(f"  [lower_trace] codegen/{index:02d}_codegen: FAILED ({error})")
+            print(f"  [lower_trace] codegen/{index:02d}_{name}: FAILED ({error})")
             raise
 
         # Allocate after the backend call: passes invoked by codegen must sort
@@ -462,13 +473,13 @@ class LowerTraceSession(PassInstrumentationTool):
         try:
             codegen_text = _inspect_module_source(result)
             if output_path:
-                patched_text = self._resolve_codegen_edit(codegen_text, output_path, index)
+                patched_text = self._resolve_codegen_edit(codegen_text, output_path, index, role=event.role)
             after_text = patched_text if patched_text is not None else codegen_text
             add_count, del_count = _count_line_changes(before_text, after_text)
             self.append_record(
                 LowerRecord(
                     phase="codegen",
-                    name="codegen",
+                    name=name,
                     index=index,
                     before_text=before_text,
                     after_text=after_text,
@@ -479,17 +490,17 @@ class LowerTraceSession(PassInstrumentationTool):
                 )
             )
             path_suffix = f"  →  {_ANSI_BLUE}{output_path}{_ANSI_RESET}" if output_path else ""
-            print(f"  [lower_trace] codegen/{index:02d}_codegen: CODEGEN (+{add_count}/-{del_count}){path_suffix}")
+            print(f"  [lower_trace] codegen/{index:02d}_{name}: CODEGEN (+{add_count}/-{del_count}){path_suffix}")
             if self.should_generate_html:
                 with contextlib.suppress(Exception):
                     self.flush_html()
         except Exception as exc:
-            print(f"  {_ANSI_RED}[lower_trace] WARNING: post-codegen tracing failed: {exc}{_ANSI_RESET}")
+            print(f"  {_ANSI_RED}[lower_trace] WARNING: post-codegen tracing failed ({name}): {exc}{_ANSI_RESET}")
 
         if self.should_print_terminal:
             from .diff import print_diff
 
-            print_diff(before_text, after_text, "codegen (TIR before)", "codegen (source after)")
+            print_diff(before_text, after_text, f"{name} (TIR before)", f"{name} (source after)")
 
         if patched_text is None:
             return result
@@ -504,7 +515,7 @@ class LowerTraceSession(PassInstrumentationTool):
             elif target_kind == "hip":
                 backend_hint = " Use execution_backend='cython' for edit-and-recompile support."
             print(
-                f"  {_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_codegen: NOTE — user edits in "
+                f"  {_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_{name}: NOTE — user edits in "
                 f"{output_path} are recorded for diff viewing, but were NOT recompiled because this "
                 f"backend already built a binary from TIR.{backend_hint}{_ANSI_RESET}"
             )

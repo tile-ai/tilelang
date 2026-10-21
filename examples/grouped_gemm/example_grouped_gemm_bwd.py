@@ -217,10 +217,9 @@ def run_tilelang_grouped_gemm(
     O.backward(dO, retain_graph=True)
     dB, B.grad = B.grad.clone(), None
 
-    if torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2) and torch.allclose(dB, dB_ref, rtol=1e-2, atol=1e-2):
-        print("✅ Tilelang and Torch match")
-    else:
-        print("❌ Tilelang and Torch mismatch")
+    torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dB, dB_ref, rtol=1e-2, atol=1e-2)
+    print("✅ Tilelang and Torch match")
 
     if profile:
         from tilelang.profiler import do_bench

@@ -1034,13 +1034,24 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
     if (const auto *imm = coalesced_width->as<IntImmNode>()) {
-      int expected = imm->value;
-      // Verify that vector_size is divisible by expected
-      if (vector_size % expected != 0) {
-        LOG(FATAL) << "Vector size " << vector_size
-                   << " is not divisible by coalesced width " << expected;
+      int64_t expected = imm->value;
+      if (expected <= 0) {
+        LOG(FATAL) << "coalesced_width must be a positive integer, but got "
+                   << expected;
       }
-      vector_size = expected;
+      // The hint is an upper bound: take the widest width the geometry
+      // supports without exceeding it. Any divisor of vector_size inherits
+      // the alignment and contiguity already proven for vector_size.
+      int64_t effective = std::min<int64_t>(expected, vector_size);
+      while (vector_size % effective != 0)
+        --effective;
+      if (effective != expected) {
+        LOG(WARNING)
+            << "Requested coalesced_width=" << expected
+            << " is incompatible with the geometry-supported vector width "
+            << vector_size << "; using " << effective << " instead.";
+      }
+      vector_size = static_cast<int>(effective);
     } else {
       LOG(FATAL) << "coalesced_width should be an IntImmNode.";
     }

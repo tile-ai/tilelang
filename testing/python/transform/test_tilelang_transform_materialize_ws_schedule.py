@@ -7,14 +7,14 @@ BindTarget and MaterializeKernelLaunch. The target is pinned so the tests
 are independent of the machine and of the production pipeline.
 """
 
-import re
-
 import pytest
 
 import tilelang
 import tilelang.testing
 from tilelang import language as T
 from tilelang import tvm
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
+from tvm import tirx
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
@@ -26,8 +26,155 @@ def _materialize(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(_TARGET)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
-    mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
-    return mod
+    transformed = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
+    _assert_no_ws_annotations(transformed)
+    return transformed
+
+
+def _assert_no_ws_annotations(func):
+    markers = {"tl.ws_schedule", "tl.ws_op_id"}
+    assert markers.isdisjoint(func.attrs.keys() if func.attrs else ())
+    for node in collect_nodes(func, tvm.runtime.Object):
+        assert markers.isdisjoint(getattr(node, "annotations", {}))
+        if isinstance(node, tirx.AttrStmt):
+            assert node.attr_key not in markers
+
+
+def _buffer(root, name):
+    buffers = [buf for block in collect_nodes(root, tirx.SBlock) for buf in block.alloc_buffers]
+    buffers.extend(node.buffer for node in collect_nodes(root, tirx.AllocBuffer))
+    if isinstance(root, tirx.PrimFunc):
+        buffers.extend(root.buffer_map.values())
+    matches = [buf for buf in buffers if buf.name == name]
+    assert len(matches) == 1, f"Expected one buffer {name}, got {len(matches)}"
+    return matches[0]
+
+
+def _barrier(func, name, counts=None):
+    buffer = _buffer(func, name)
+    assert buffer.scope() == "shared.barrier"
+    initializers = [
+        block.annotations["barrier_init"][buffer.data]
+        for block in collect_nodes(func, tirx.SBlock)
+        if "barrier_init" in block.annotations and buffer.data in block.annotations["barrier_init"]
+    ]
+    assert len(initializers) == 1, f"Missing or duplicated barrier initialization for {name}"
+    values = initializers[0]
+    assert len(buffer.shape) == 1 and int(buffer.shape[0]) == len(values)
+    assert all(isinstance(value, tirx.IntImm) and value.dtype == "int32" for value in values)
+    if counts is not None:
+        assert [int(value) for value in values] == counts
+    return buffer
+
+
+def _barrier_calls(root, op, buffer):
+    return [
+        call
+        for call in collect_calls(root, op=op)
+        if call.args and isinstance(call.args[0], tirx.BufferLoad) and call.args[0].buffer.data.same_as(buffer.data)
+    ]
+
+
+def _nreg_args(root):
+    calls = collect_calls(root, op="tl.set_max_nreg")
+    assert all(len(call.args) == 2 and all(isinstance(arg, tirx.IntImm) for arg in call.args) for call in calls)
+    return [tuple(int(arg) for arg in call.args) for call in calls]
+
+
+def _role_branches(func):
+    (launch,) = [
+        attr
+        for attr in collect_nodes(func, tirx.AttrStmt)
+        if attr.attr_key == "thread_extent" and isinstance(attr.node, tirx.IterVar) and attr.node.thread_tag == "threadIdx.x"
+    ]
+    (custom,) = [attr for attr in collect_nodes(launch.body, tirx.AttrStmt) if attr.attr_key == "kCustomWarpSpecialization"]
+    assert int(custom.value) == 1
+    branches = []
+    lo = 0
+    body = custom.body
+    while isinstance(body, tirx.IfThenElse):
+        condition = body.condition
+        assert isinstance(condition, tirx.LT) and condition.a.same_as(launch.node.var)
+        assert isinstance(condition.b, tirx.IntImm)
+        hi = int(condition.b)
+        assert lo < hi <= int(launch.value)
+        branches.append((lo, hi, body.then_case))
+        lo, body = hi, body.else_case
+        assert body is not None
+    branches.append((lo, int(launch.value), body))
+    return branches
+
+
+def _role_body(func, first_thread):
+    (body,) = [body for lo, _, body in _role_branches(func) if lo == first_thread]
+    return body
+
+
+def _assert_stmt_order(root, *statements):
+    """Require direct siblings in one lexical scope, in execution order."""
+    for seq in collect_nodes(root, tirx.SeqStmt):
+        positions = [next((i for i, child in enumerate(seq.seq) if child.same_as(stmt)), -1) for stmt in statements]
+        if positions and positions[0] >= 0 and all(a < b for a, b in zip(positions, positions[1:])):
+            return
+    raise AssertionError("Expected ordered siblings in one SeqStmt")
+
+
+def _call_stmt(root, call):
+    (stmt,) = [stmt for stmt in collect_nodes(root, tirx.Evaluate) if stmt.value.same_as(call)]
+    return stmt
+
+
+def _assert_versioned_access(root, buffer, version):
+    loads = [load for load in collect_nodes(root, tirx.BufferLoad) if load.buffer.data.same_as(buffer.data)]
+    assert loads, f"Missing accesses to {buffer.name}"
+    for load in loads:
+        assert len(load.indices) == len(load.buffer.shape)
+        tvm.ir.assert_structural_equal(load.indices[0], version)
+    return loads
+
+
+def _copy_region_loads(call):
+    assert len(call.args) == 2
+    loads = []
+    for region in call.args:
+        assert isinstance(region, tirx.Call) and region.op.same_as(tvm.ir.Op.get("tl.region"))
+        assert isinstance(region.args[0], tirx.BufferLoad)
+        loads.append(region.args[0])
+    return loads
+
+
+def _assert_counter_updates(root, buffer, updates):
+    assert isinstance(root, tirx.SeqStmt)
+    stores = [store for store in collect_nodes(root, tirx.BufferStore) if store.buffer.data.same_as(buffer.data)]
+    initializers = [store for store in stores if isinstance(store.value, tirx.IntImm) and int(store.value) == 0]
+    assert len(initializers) == 1 and len(stores) == updates + 1
+    initializer = initializers[0]
+    assert initializer.value.dtype == buffer.dtype
+    (position,) = [i for i, stmt in enumerate(root.seq) if stmt.same_as(initializer)]
+    for stmt in root.seq[:position]:
+        assert not any(load.buffer.data.same_as(buffer.data) for load in collect_nodes(stmt, tirx.BufferLoad))
+    expected = tirx.BufferLoad(buffer, [0]) + 1
+    for store in stores:
+        assert len(store.indices) == 1 and int(store.indices[0]) == 0
+        if not store.same_as(initializer):
+            tvm.ir.assert_structural_equal(store.value, expected)
+    return initializer
+
+
+def _assert_phase_counter(func, role, *, pipeline="buf", updates=1):
+    counter = _buffer(role, pipeline + "_phase")
+    assert counter.scope() == "local" and counter.dtype == "int32" and [int(dim) for dim in counter.shape] == [1]
+    _assert_counter_updates(role, counter, updates)
+    barriers = [_barrier(func, pipeline + suffix) for suffix in ("_full", "_empty")]
+    waits = [call for barrier in barriers for call in _barrier_calls(role, "tl.mbarrier_wait_parity", barrier)]
+    assert waits
+    for call in waits:
+        tvm.ir.assert_structural_equal(call.args[0].indices[0], tirx.BufferLoad(counter, [0]) % int(call.args[0].buffer.shape[0]))
+
+
+def _assert_no_undefined_vars(func):
+    bound = [*func.params, *(buf.data for buf in func.buffer_map.values())]
+    assert not tirx.analysis.undefined_vars(func.body, bound)
 
 
 def _smem_pipeline_kernel(
@@ -118,19 +265,10 @@ def _smem_pipeline_kernel(
 @tilelang.testing.requires_cuda
 def test_basic_two_role_transform():
     func = _materialize(_smem_pipeline_kernel())
-    script = str(func)
-    # Warp-specialized branches on the thread var, in warp order.
-    assert 'T.launch_thread("threadIdx.x", 256)' in script
-    assert "if tx < 32:" in script
-    assert "T.set_max_nreg(40, 0)" in script
-    assert "T.set_max_nreg(224, 1)" in script
-    # The roles carry their own setmaxnreg: marked custom WS so the late
-    # reg-alloc pass stays out.
-    assert 'T.attr(0, "kCustomWarpSpecialization", 1)' in script
-    # The schedule annotation is consumed.
-    assert "ws_schedule" not in script
-    # Every scheduling marker is stripped.
-    assert "ws_op_id" not in script
+    # Check the actual thread partition and each branch's register budget.
+    branches = _role_branches(func)
+    assert [(lo, hi) for lo, hi, _ in branches] == [(0, 32), (32, 128), (128, 256)]
+    assert [_nreg_args(body) for _, _, body in branches] == [[(40, 0)], [(40, 0)], [(224, 1)]]
 
 
 @tilelang.testing.requires_cuda
@@ -163,45 +301,41 @@ def test_scalar_op_annotations_preserved():
             T.atomic_min(B[0], A[0], annotations={T.WSID: "atomic_min"})
             T.atomic_add(B[0], A[0], annotations={T.WSID: "atomic_add"})
 
-    script = str(_materialize(kernel))
-    assert "T.copy(" in script
-    assert script.count("atomic_") >= 3
-    assert "ws_schedule" not in script and "ws_op_id" not in script
+    func = _materialize(kernel)
+    for op in ("tl.tileop.copy", "tl.atomic_max_elem_op", "tl.atomic_min_elem_op", "tl.atomic_add_elem_op"):
+        assert_call_count(func, op=op, count=1)
 
 
 @tilelang.testing.requires_cuda
 def test_buffer_multi_versioning():
     func = _materialize(_smem_pipeline_kernel(depth=3))
-    script = str(func)
-    # The pipeline buffer gains a leading version dimension of `depth`.
-    assert "A_shared = T.sblock_alloc_buffer((3, 64, 64)" in script
-    # Accesses index the acquired version (phase % depth).
-    assert re.search(r"A_shared\[\(?i(?:_\d+)? % 3\)?, 0, 0\]", script), script
+    shared = _buffer(func, "A_shared")
+    assert [int(dim) for dim in shared.shape] == [3, 64, 64]
+    for first_thread in (0, 128):
+        (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
+        loads = _assert_versioned_access(loop.body, shared, loop.loop_var % 3)
+        for load in loads:
+            assert [int(index) for index in load.indices[1:]] == [0, 0]
 
 
 @tilelang.testing.requires_cuda
 def test_barrier_counts_tma_and_threads():
     func = _materialize(_smem_pipeline_kernel())
-    script = str(func)
-    # Producer side: the TMA data rides the tx-count and one elected
-    # arrive fused into the copy closes the arrival count.
-    assert "buf_full: [1, 1]" in script
-    # Consumer side: synchronous fragment reads -> all 128 consumer threads.
-    assert "buf_empty: [128, 128]" in script
+    # TMA's elected arrive and all 128 synchronous consumer threads.
+    _barrier(func, "buf_full", [1, 1])
+    _barrier(func, "buf_empty", [128, 128])
 
 
 @tilelang.testing.requires_cuda
 def test_tma_copy_conversion_carries_barrier():
     func = _materialize(_smem_pipeline_kernel())
-    script = str(func)
-    # The producer copy is converted to tma_copy with the full barrier
-    # attached; as the last copy of a pure-TMA commit cycle it also
-    # carries the cycle's single elected arrive, so the commit entry
-    # emits no arrive of its own.
-    assert "T.tma_copy(" in script
-    assert "barrier=buf_full" in script
-    assert "emit_arrive=1" in script
-    assert "T.ptx_arrive_barrier(buf_full" not in script
+    producer = _role_body(func, 0)
+    (loop,) = collect_nodes(producer, tirx.For)
+    (copy,) = collect_calls(producer, op="tl.tileop.tma_copy")
+    full = _barrier(func, "buf_full")
+    tvm.ir.assert_structural_equal(copy.annotations["barrier"], tirx.BufferLoad(full, [loop.loop_var % 2]))
+    assert isinstance(copy.annotations["emit_arrive"], tirx.IntImm) and int(copy.annotations["emit_arrive"]) == 1
+    assert not _barrier_calls(func, "tirx.ptx_arrive_barrier", full)
 
 
 @tilelang.testing.requires_cuda
@@ -252,10 +386,17 @@ def test_guarded_tma_copy_keeps_unconditional_syncs():
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    assert "buf_full: [32, 32]" in script
-    assert "emit_arrive" not in script
-    assert "T.ptx_arrive_barrier(buf_full" in script
+    full = _barrier(func, "buf_full", [32, 32])
+    producer = _role_body(func, 0)
+    (loop,) = collect_nodes(producer, tirx.For)
+    (copy,) = collect_calls(loop.body, op="tl.tileop.tma_copy")
+    assert "emit_arrive" not in copy.annotations
+    (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
+    tvm.ir.assert_structural_equal(guard.condition, loop.loop_var < 3)
+    assert_call_count(guard.then_case, op="tl.tileop.tma_copy", count=1)
+    (wait,) = collect_calls(loop.body, op="tl.mbarrier_wait_parity")
+    (arrive,) = _barrier_calls(loop.body, "tirx.ptx_arrive_barrier", full)
+    _assert_stmt_order(loop.body, _call_stmt(loop.body, wait), guard, _call_stmt(loop.body, arrive))
 
 
 @tilelang.testing.requires_cuda
@@ -306,11 +447,11 @@ def test_cp_async_with_sync_work_keeps_both_arrives():
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    assert "cp_async_barrier_noinc(buf_full" in script
-    assert "T.ptx_arrive_barrier(buf_full" in script
-    # One deferred + one plain arrive per producer thread (32 + 32).
-    assert "buf_full: [64, 64]" in script
+    # One deferred and one plain arrive per producer thread (32 + 32).
+    full = _barrier(func, "buf_full", [64, 64])
+    producer = _role_body(func, 0)
+    assert len(_barrier_calls(producer, "tl.ptx_cp_async_barrier_noinc", full)) == 1
+    assert len(_barrier_calls(producer, "tirx.ptx_arrive_barrier", full)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -364,12 +505,12 @@ def test_prefer_instruction_cp_async_selects_cp_async_atom():
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    assert "no_implicit_async_commit_wait" in script
-    assert "cp_async_barrier_noinc(buf_full" in script
-    # The deferred arrive is the only producer arrive (32 threads).
-    assert "buf_full: [32, 32]" in script
-    assert "T.ptx_arrive_barrier(buf_full" not in script
+    producer = _role_body(func, 0)
+    (copy,) = collect_calls(producer, op="tl.tileop.copy")
+    assert int(copy.annotations["no_implicit_async_commit_wait"]) == 1
+    full = _barrier(func, "buf_full", [32, 32])
+    assert len(_barrier_calls(producer, "tl.ptx_cp_async_barrier_noinc", full)) == 1
+    assert not _barrier_calls(func, "tirx.ptx_arrive_barrier", full)
 
 
 @tilelang.testing.requires_cuda
@@ -381,11 +522,15 @@ def test_unsupported_preferred_copy_rejected():
 @tilelang.testing.requires_cuda
 def test_consumer_wait_parity():
     func = _materialize(_smem_pipeline_kernel(depth=2))
-    script = str(func)
-    # Producer waits for empty with inverted parity; consumer waits for full
-    # with plain parity.
-    assert "T.mbarrier_wait_parity(buf_empty" in script
-    assert "T.mbarrier_wait_parity(buf_full" in script
+    for first_thread, name in ((0, "buf_empty"), (128, "buf_full")):
+        role = _role_body(func, first_thread)
+        (loop,) = collect_nodes(role, tirx.For)
+        barrier = _barrier(func, name)
+        (wait,) = _barrier_calls(loop.body, "tl.mbarrier_wait_parity", barrier)
+        parity = tirx.bitwise_and(loop.loop_var // 2, 1)
+        if first_thread == 0:
+            parity = tirx.bitwise_xor(parity, 1)
+        tvm.ir.assert_structural_equal(wait.args, tvm.runtime.convert([tirx.BufferLoad(barrier, [loop.loop_var % 2]), parity]))
 
 
 @tilelang.testing.requires_cuda
@@ -393,8 +538,10 @@ def test_uniform_stages_cancel():
     # When ALL of a role's sync stages agree, the offsets cancel and the
     # loop is emitted unshifted (the documented loop-equivalence).
     func = _materialize(_smem_pipeline_kernel(consumer_wait_stage=1, consumer_release_stage=1))
-    script = str(func)
-    assert "for i in range(4):" in script  # original extent, no guards
+    for first_thread in (0, 128):
+        (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
+        assert loop.kind == tirx.ForKind.SERIAL and int(loop.min) == 0 and int(loop.extent) == 4
+        assert not collect_nodes(loop.body, tirx.IfThenElse)
 
 
 def _stage_offset_kernel(extent):
@@ -463,21 +610,18 @@ def test_stage_offset_unrolls_prologue_epilogue():
     steady-state loop with no per-iteration boundary checks, and an
     explicit epilogue step."""
     func = _materialize(_stage_offset_kernel(4))
-    script = str(func)
-    # The producer's steady state covers iterations [1, 4) and carries no
-    # boundary checks; the stage-1 entries address the previous logical
-    # iteration.
-    assert "for i in range(1, 4):" in script
-    assert "i >= 1" not in script and "1 <= i" not in script
-    assert "if i < 4" not in script
-    # Prologue (the stage-0 entries at iteration 0) precedes the loop;
-    # epilogue (the stage-1 entries at iteration 3) follows it.
-    producer = script[script.find("T.set_max_nreg(40, 0)") :]
-    assert "T.region(C_shared[(i - 1) % 2, 0, 0]" in producer, producer
-    prologue = producer.find("T.mbarrier_wait_parity(a_empty_1[0], 1)")
-    loop = producer.find("for i in range(1, 4):")
-    epilogue = producer.find("T.mbarrier_wait_parity(c_empty_1[1], 0)")
-    assert 0 <= prologue < loop < epilogue
+    producer = _role_body(func, 0)
+    (loop,) = collect_nodes(producer, tirx.For)
+    assert loop.kind == tirx.ForKind.SERIAL and int(loop.min) == 1 and int(loop.extent) == 3
+    assert not collect_nodes(loop.body, tirx.IfThenElse)
+    _assert_versioned_access(loop.body, _buffer(func, "C_shared"), (loop.loop_var - 1) % 2)
+    prologue, epilogue = [stmt for stmt in producer.seq if isinstance(stmt, tirx.IfThenElse)]
+    _assert_stmt_order(producer, prologue, loop, epilogue)
+    for step, name, index, parity in ((prologue, "a_empty", 0, 1), (epilogue, "c_empty", 1, 0)):
+        assert isinstance(step.condition, tirx.IntImm) and int(step.condition) == 1
+        barrier = _barrier(func, name)
+        (wait,) = _barrier_calls(step.then_case, "tl.mbarrier_wait_parity", barrier)
+        tvm.ir.assert_structural_equal(wait.args, tvm.runtime.convert([tirx.BufferLoad(barrier, [index]), tirx.IntImm("int32", parity)]))
 
 
 @tilelang.testing.requires_cuda
@@ -488,13 +632,11 @@ def test_short_static_loop_folds_to_prologue_epilogue():
     steady-state loop."""
     func = _materialize(_stage_offset_kernel(1))
     mod = tilelang.transform.Simplify()(tvm.IRModule.from_expr(func))
-    script = str(mod["main"])
-    producer = script[script.find("T.set_max_nreg(40, 0)") : script.find("T.set_max_nreg(224, 1)")]
-    # One cycle of each pipeline, no loop, no residual constant guards.
-    assert producer.count("T.mbarrier_wait_parity(a_empty") == 1
-    assert producer.count("T.mbarrier_wait_parity(c_empty") == 1
-    assert "for " not in producer
-    assert "T.bool(True)" not in producer
+    producer = _role_body(mod["main"], 0)
+    for name in ("a_empty", "c_empty"):
+        assert len(_barrier_calls(producer, "tl.mbarrier_wait_parity", _barrier(mod["main"], name))) == 1
+    assert not collect_nodes(producer, tirx.For)
+    assert not collect_nodes(producer, tirx.IfThenElse)
 
 
 @tilelang.testing.requires_cuda
@@ -649,13 +791,17 @@ def test_empty_defs_op_duplicated_across_roles():
             T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # Both roles run their own copy: once in the producer branch, once in
-    # the consumer branch — at the root and inside the loop scope alike.
-    assert script.count("T.fill(") == 2
-    assert script.count("probe[r] + T.float16(1.0)") == 2
-    # Scheduling metadata is fully consumed.
-    assert "ws_op_id" not in script
+    probe = _buffer(func, "probe")
+    # The same fill node is shared by both role bodies; query each role's
+    # lexical occurrence rather than counting unique nodes in the function.
+    for first_thread in (0, 128):
+        role = _role_body(func, first_thread)
+        assert_call_count(role, op="tl.tileop.fill", count=1)
+        (store,) = [store for store in collect_nodes(role, tirx.BufferStore) if store.buffer.data.same_as(probe.data)]
+        (loop,) = [loop for loop in collect_nodes(role, tirx.For) if loop.kind == tirx.ForKind.PARALLEL]
+        assert int(loop.extent) == 64
+        tvm.ir.assert_structural_equal(store.indices, tvm.runtime.convert([loop.loop_var]))
+        tvm.ir.assert_structural_equal(store.value, tirx.BufferLoad(probe, store.indices) + tirx.FloatImm("float16", 1.0))
 
 
 @tilelang.testing.requires_cuda
@@ -715,17 +861,19 @@ def test_raw_ptx_cp_async_is_opaque():
                 T.copy(B_frag, B_out[i, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # The op is cloned as-is (its own group sync included); the commit is
-    # the plain per-thread arrive of the producer warp.
-    assert "cp_async_barrier_noinc" not in script
-    assert "T.ptx_commit_group()" in script
-    assert "T.ptx_wait_group(0)" in script
-    assert "T.ptx_arrive_barrier(buf_full" in script
-    assert "buf_full: [32, 32]" in script
-    assert "buf_empty: [128, 128]" in script
-    # The version dimension joins the access_ptr base load.
-    assert "B_shared[i % 2, 0]" in script
+    producer = _role_body(func, 0)
+    assert_call_count(func, op="tl.ptx_cp_async_barrier_noinc", count=0)
+    assert_call_count(producer, op="tirx.ptx_commit_group", count=1)
+    (wait,) = collect_calls(producer, op="tirx.ptx_wait_group")
+    assert len(wait.args) == 1 and int(wait.args[0]) == 0
+    full = _barrier(func, "buf_full", [32, 32])
+    _barrier(func, "buf_empty", [128, 128])
+    assert len(_barrier_calls(producer, "tirx.ptx_arrive_barrier", full)) == 1
+    shared = _buffer(func, "B_shared")
+    for first_thread in (0, 128):
+        (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
+        for load in _assert_versioned_access(loop.body, shared, loop.loop_var % 2):
+            tvm.ir.assert_structural_equal(load.indices, tvm.runtime.convert([loop.loop_var % 2, tirx.IntImm("int32", 0)]))
 
 
 def _guarded_scope_kernel(guard_on_pipeline_buffer=False):
@@ -791,10 +939,12 @@ def test_guarded_scope_loop():
     roles evaluate the same uniform condition, so a false guard skips the
     scope's sync entries together and the pipeline phases stay aligned."""
     func = _materialize(_guarded_scope_kernel())
-    script = str(func)
-    # One guarded loop per role branch.
-    assert script.count("if flag[0] > 0:") == 2
-    assert "ws_op_id" not in script
+    flag = _buffer(func, "flag")
+    for first_thread in (0, 128):
+        role = _role_body(func, first_thread)
+        (guard,) = collect_nodes(role, tirx.IfThenElse)
+        tvm.ir.assert_structural_equal(guard.condition, tirx.BufferLoad(flag, [0]) > 0)
+        assert len(collect_nodes(guard.then_case, tirx.For)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -897,16 +1047,14 @@ def test_while_scope_counter_phases():
     state ops are duplicated per role, and each role re-evaluates the
     uniform condition."""
     func = _materialize(_while_scope_kernel())
-    script = str(func)
-    # One while per role, both on the scheduler state.
-    assert script.count("while sched_linear_idx[0] < 4:") == 2
-    # The scheduler init/advance runs in both roles.
-    assert script.count("sched_current_iter[0] = 0") == 2
-    assert script.count("sched_current_iter[0] = sched_current_iter[0] + 1") == 2
-    # Phases are runtime counters, bumped at the commit/release entries.
-    assert "buf_phase" in script
-    assert script.count("buf_phase[0] = buf_phase[0] + 1") == 2
-    assert "ws_op_id" not in script
+    linear = _buffer(func, "sched_linear_idx")
+    current = _buffer(func, "sched_current_iter")
+    for first_thread in (0, 128):
+        role = _role_body(func, first_thread)
+        (loop,) = collect_nodes(role, tirx.While)
+        tvm.ir.assert_structural_equal(loop.condition, tirx.BufferLoad(linear, [0]) < 4)
+        _assert_counter_updates(role, current, 1)
+        _assert_phase_counter(func, role)
 
 
 @tilelang.testing.requires_cuda
@@ -916,15 +1064,17 @@ def test_while_scope_stage_offset_prologue_epilogue():
     an epilogue step (the late-stage entries, guarded by the completed
     trip count) instead of per-iteration boundary guards."""
     func = _materialize(_while_scope_kernel(shifted=True))
-    script = str(func)
-    # The consumer's shifted body: prologue `if cond`, then the while,
-    # then the trip-guarded drain step.
-    consumer = script[script.find("T.set_max_nreg(224, 1)") :]
-    prologue = consumer.find("if sched_linear_idx[0] < 4:")
-    kernel_loop = consumer.find("while sched_linear_idx[0] < 4:")
-    drain = consumer.find("if 1 <= loop_wave_trips[0]:")
-    assert 0 <= prologue < kernel_loop < drain
-    assert "loop_wave_trips[0] = loop_wave_trips[0] + 1" in consumer
+    consumer = _role_body(func, 128)
+    (loop,) = collect_nodes(consumer, tirx.While)
+    prologue, drain = [stmt for stmt in consumer.seq if isinstance(stmt, tirx.IfThenElse)]
+    _assert_stmt_order(consumer, prologue, loop, drain)
+    tvm.ir.assert_structural_equal(prologue.condition, loop.condition)
+    trips = _buffer(consumer, "loop_wave_trips")
+    initializer = _assert_counter_updates(consumer, trips, 2)
+    _assert_stmt_order(consumer, initializer, prologue, loop, drain)
+    tvm.ir.assert_structural_equal(drain.condition, tirx.LE(tirx.IntImm("int32", 1), tirx.BufferLoad(trips, [0])))
+    for part in (prologue.then_case, loop.body):
+        assert len([store for store in collect_nodes(part, tirx.BufferStore) if store.buffer.data.same_as(trips.data)]) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -1031,11 +1181,14 @@ def test_distinct_guards_stay_distinct():
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # Both source conditions survive; merging under one guard would delete
-    # the `< 1` condition.
-    assert "< 1" in script
-    assert "< 2" in script
+    consumer = _role_body(func, 128)
+    (loop,) = collect_nodes(consumer, tirx.For)
+    guards = collect_nodes(loop.body, tirx.IfThenElse)
+    assert len(guards) == 2
+    for guard, bound in zip(guards, (1, 2)):
+        tvm.ir.assert_structural_equal(guard.condition, loop.loop_var < bound)
+        assert_call_count(guard.then_case, op="tl.tileop.copy", count=1)
+    _assert_stmt_order(loop.body, *guards)
 
 
 @tilelang.testing.requires_cuda
@@ -1084,13 +1237,16 @@ def test_ws_op_wrapper_groups_statements():
                     T.copy(A_frag, B[i * 64, 0])
 
     func = _materialize(kernel)
-    script = str(func)
-    # Both statements of the group emitted once, in the consumer branch,
-    # with the pipeline read version-rebound.
-    consumer = script[script.find("T.set_max_nreg(224, 1)") :]
-    assert consumer.count("T.copy(T.region(A_shared[i % 2") == 1, consumer
-    assert consumer.count("T.copy(T.region(A_frag[") == 1, consumer
-    assert "ws_op_id" not in script
+    consumer = _role_body(func, 128)
+    (loop,) = collect_nodes(consumer, tirx.For)
+    read, write = collect_calls(loop.body, op="tl.tileop.copy")
+    read_src, read_dst = _copy_region_loads(read)
+    write_src, write_dst = _copy_region_loads(write)
+    shared, frag, output = (_buffer(func, name) for name in ("A_shared", "A_frag", "B"))
+    assert read_src.buffer.data.same_as(shared.data) and read_dst.buffer.data.same_as(frag.data)
+    assert write_src.buffer.data.same_as(frag.data) and write_dst.buffer.data.same_as(output.data)
+    tvm.ir.assert_structural_equal(read_src.indices[0], loop.loop_var % 2)
+    _assert_stmt_order(loop.body, _call_stmt(loop.body, read), _call_stmt(loop.body, write))
 
 
 @tilelang.testing.requires_cuda
@@ -1162,8 +1318,17 @@ def test_var_use_requires_defining_op_in_role():
     with pytest.raises(Exception, match="does not run earlier in that role"):
         _materialize(_bind_guard_kernel(bind_in_consumer=False))
     # Placing the Bind in both roles (it has no pipeline operands) is legal.
-    script = str(_materialize(_bind_guard_kernel(bind_in_consumer=True)))
-    assert script.count("lim") >= 2
+    func = _materialize(_bind_guard_kernel(bind_in_consumer=True))
+    _assert_no_undefined_vars(func)
+    for first_thread in (0, 128):
+        role = _role_body(func, first_thread)
+        (loop,) = collect_nodes(role, tirx.For)
+        (bind,) = collect_nodes(loop.body, tirx.Bind)
+        assert isinstance(bind.value, tirx.BufferLoad) and bind.value.buffer.data.same_as(_buffer(func, "A").data)
+        if first_thread == 128:
+            (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
+            assert isinstance(guard.condition, tirx.GT) and guard.condition.a.same_as(bind.var)
+            _assert_stmt_order(loop.body, bind, guard)
 
 
 @tilelang.testing.requires_cuda
@@ -1227,10 +1392,30 @@ def test_bind_under_stage_shift_freshens_per_slice():
                 T.copy(C_shared, C_frag, annotations={T.WSID: "read_c"})
 
     func = _materialize(kernel)
-    assert tvm.tirx.analysis.verify_ssa(func)
-    script = str(func)
-    # Prologue and steady state each bind their own copy of `v`.
-    assert len(set(re.findall(r"v_ws\d+", script))) >= 2
+    assert tirx.analysis.verify_ssa(func)
+    _assert_no_undefined_vars(func)
+    producer = _role_body(func, 0)
+    binds = collect_nodes(producer, tirx.Bind)
+    assert len(binds) == 2 and not binds[0].var.same_as(binds[1].var)
+    for bind in binds:
+        assert isinstance(bind.value, tirx.BufferLoad) and bind.value.buffer.data.same_as(_buffer(func, "A").data)
+    guards = [guard for guard in collect_nodes(producer, tirx.IfThenElse) if isinstance(guard.condition, tirx.GT)]
+    assert len(guards) == 2
+    for bind, guard in zip(binds, guards):
+        assert guard.condition.a.same_as(bind.var)
+    # The prologue Bind is emitted under a constant-true step guard. Its
+    # enclosing step executes before the source guard using that Bind.
+    (prologue,) = [
+        stmt
+        for stmt in producer.seq
+        if isinstance(stmt, tirx.IfThenElse)
+        and isinstance(stmt.condition, tirx.IntImm)
+        and int(stmt.condition) == 1
+        and any(bind.same_as(binds[0]) for bind in collect_nodes(stmt.then_case, tirx.Bind))
+    ]
+    _assert_stmt_order(producer, prologue, guards[0])
+    (loop,) = collect_nodes(producer, tirx.For)
+    _assert_stmt_order(loop.body, binds[1], guards[1])
 
 
 @tilelang.testing.requires_cuda
@@ -1348,10 +1533,13 @@ def test_versions_reshape_and_view_aliases_by_storage():
     """T.view / T.reshape aliases share their allocation's storage, so they
     join its pipeline and index the same acquired version."""
     for use_view in (False, True):
-        script = str(_materialize(_alias_pipeline_kernel(use_view)))
-        assert "ws_schedule" not in script
-        assert "shared_pipe_full" in script
-        assert "shared = T.sblock_alloc_buffer((2, 64)" in script
+        func = _materialize(_alias_pipeline_kernel(use_view))
+        _barrier(func, "shared_pipe_full")
+        shared = _buffer(func, "shared")
+        assert [int(dim) for dim in shared.shape] == [2, 64]
+        for first_thread in (0, 128):
+            (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
+            _assert_versioned_access(loop.body, shared, loop.loop_var % 2)
 
 
 @tilelang.testing.requires_cuda
@@ -1463,12 +1651,12 @@ def test_kernel_metadata_attrs_preserved():
     T.annotate_min_blocks_per_sm) wrap the statements that follow them:
     the pass schedules through them and re-wraps the rebuilt body."""
     func = _materialize(_smem_pipeline_kernel(kernel_edit="metadata_attrs"))
-    script = str(func)
-    swizzle = script.find('"threadblock_swizzle_pattern"')
-    min_blocks = script.find('"tl.min_blocks_per_sm"')
-    branch = script.find("if tx < 32:")
-    assert 0 <= swizzle < min_blocks < branch
-    assert "T.tma_copy(" in script
+    (swizzle,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "threadblock_swizzle_pattern"]
+    (min_blocks,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "tl.min_blocks_per_sm"]
+    (custom,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "kCustomWarpSpecialization"]
+    assert swizzle.body.same_as(min_blocks) and min_blocks.body.same_as(custom)
+    assert int(min_blocks.value) == 2
+    assert_call_count(func, op="tl.tileop.tma_copy", count=1)
 
 
 @tilelang.testing.requires_cuda
@@ -1521,11 +1709,14 @@ def test_nonzero_loop_base_phase():
                 T.copy(A_frag, B[(i - 3) * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # The phase is (i - 3): version indices and parities derive from it, so
-    # the raw loop var must never reach a barrier index / parity position.
-    assert "- 3) % 2" in script
-    assert re.search(r"\bi(_\d+)? % 2", script) is None
+    shared = _buffer(func, "A_shared")
+    for first_thread in (0, 128):
+        (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
+        assert int(loop.min) == 3 and int(loop.extent) == 4
+        version = (loop.loop_var - 3) % 2
+        _assert_versioned_access(loop.body, shared, version)
+        for wait in collect_calls(loop.body, op="tl.mbarrier_wait_parity"):
+            tvm.ir.assert_structural_equal(wait.args[0].indices[0], version)
 
 
 @tilelang.testing.requires_cuda
@@ -1805,16 +1996,14 @@ def test_sequential_scope_loop_kinds():
     loop whose num_stages this pass consumes; a T.unroll scope keeps its
     unroll kind); T.Parallel loops cannot."""
     # A plain T.serial scope materializes like a T.Pipelined one.
-    script = str(_materialize(_scope_kind_kernel(T.serial)))
-    assert "T.mbarrier_wait_parity(" in script
-    assert '"num_stages"' not in script
-
-    # A T.unroll scope materializes the same, keeping the unroll kind.
-    script = str(_materialize(_scope_kind_kernel(T.unroll)))
-    assert "T.mbarrier_wait_parity(" in script
-    assert "T.unroll(4)" in script
-
-    # A T.Parallel loop cannot be a scope.
+    for ctor, kind in ((T.serial, tirx.ForKind.SERIAL), (T.unroll, tirx.ForKind.UNROLLED)):
+        func = _materialize(_scope_kind_kernel(ctor))
+        for first_thread in (0, 128):
+            role = _role_body(func, first_thread)
+            (loop,) = collect_nodes(role, tirx.For)
+            assert loop.kind == kind and int(loop.extent) == 4
+            assert "num_stages" not in loop.annotations
+            assert_call_count(loop.body, op="tl.mbarrier_wait_parity", count=1)
     with pytest.raises(Exception, match="must be a sequential loop"):
         _materialize(_scope_kind_kernel(T.Parallel))
 
@@ -1868,12 +2057,15 @@ def test_op_node_loop():
                     T.copy(A_frag[:, s * 32 : (s + 1) * 32], B[i * 64, s * 32])
 
     func = _materialize(kernel)
-    script = str(func)
-    # The unroll survives as a loop inside the consumer branch (op-node
-    # loops keep their kind), with the pipeline version index applied to
-    # A_shared inside it -- statements inside op-node loops need no ids.
-    assert "T.unroll(2)" in script
-    assert "A_shared[i % 2, 0, s * 32]" in script
+    consumer = _role_body(func, 128)
+    (outer,) = [loop for loop in collect_nodes(consumer, tirx.For) if loop.kind == tirx.ForKind.SERIAL]
+    (inner,) = [loop for loop in collect_nodes(outer.body, tirx.For) if loop.kind == tirx.ForKind.UNROLLED]
+    assert int(inner.extent) == 2
+    shared = _buffer(func, "A_shared")
+    for load in _assert_versioned_access(inner.body, shared, outer.loop_var % 2):
+        tvm.ir.assert_structural_equal(
+            load.indices, tvm.runtime.convert([outer.loop_var % 2, tirx.IntImm("int32", 0), inner.loop_var * 32])
+        )
 
 
 @tilelang.testing.requires_cuda
@@ -1881,9 +2073,8 @@ def test_idle_donor_branch():
     # Roles cover warps [0,1) and [4,8) of 8: warps 1-4 form a gap branch
     # and warps beyond the last role donate registers too.
     func = _materialize(_smem_pipeline_kernel())
-    script = str(func)
-    # The gap branch donates registers down to the smallest donor budget.
-    assert script.count("T.set_max_nreg(40, 0)") >= 2
+    assert _nreg_args(_role_body(func, 32)) == [(40, 0)]
+    assert _nreg_args(func).count((40, 0)) >= 2
 
 
 @tilelang.testing.requires_cuda
@@ -1907,17 +2098,23 @@ def test_unscheduled_kernel_untouched():
 
 
 @tilelang.testing.requires_cuda
-def test_tcgen05_async_arrive_count():
+@pytest.mark.parametrize("blockscaled", [False, True])
+def test_tcgen05_async_arrive_count(blockscaled):
     """A gemm accumulating into TMEM signals with tcgen05.commit: the full
     barrier of the accumulator pipeline gets arrive count 1, and the smem
     release below the gemm becomes a tcgen05_mma_arrive."""
+    tile = 128 if blockscaled else 64
+    dtype = T.float8_e4m3fn if blockscaled else T.float16
 
     @T.prim_func
-    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+    def kernel(A: T.Tensor((4 * tile, tile), dtype), B: T.Tensor((tile, tile), T.float32)):
         with T.Kernel(1, threads=128) as _:
-            A_shared = T.alloc_shared((64, 64), T.float16)
-            C_tmem = T.alloc_tmem((64, 64), T.float32)
-            C_frag = T.alloc_fragment((64, 64), T.float32)
+            A_shared = T.alloc_shared((tile, tile), dtype)
+            C_tmem = T.alloc_tmem((tile, tile), T.float32)
+            C_frag = T.alloc_fragment((tile, tile), T.float32)
+            if blockscaled:
+                SFA = T.alloc_tmem((tile, 4), T.uint32)
+                SFB = T.alloc_tmem((tile, 4), T.uint32)
 
             T.annotate_ws_schedule(
                 T.WSSchedule(
@@ -1971,29 +2168,84 @@ def test_tcgen05_async_arrive_count():
             )
 
             for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
-                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
-                T.gemm(
-                    A_shared,
-                    A_shared,
-                    C_tmem,
-                    transpose_B=True,
-                    clear_accum=i == 0,
-                    annotations={T.WSID: "gemm_C"},
-                )
+                T.copy(A[i * tile, 0], A_shared, annotations={T.WSID: "copy_in"})
+                if blockscaled:
+                    T.gemm_blockscaled(
+                        A_shared,
+                        A_shared,
+                        C_tmem,
+                        SFA,
+                        SFB,
+                        transpose_B=True,
+                        clear_accum=i == 0,
+                        k_start=i * tile,
+                        sf_a_granularity_k=128,
+                        sf_b_granularity_k=128,
+                        annotations={T.WSID: "gemm_C"},
+                    )
+                else:
+                    T.gemm(
+                        A_shared,
+                        A_shared,
+                        C_tmem,
+                        transpose_B=True,
+                        clear_accum=i == 0,
+                        annotations={T.WSID: "gemm_C"},
+                    )
             T.copy(C_tmem, C_frag, annotations={T.WSID: "copy_C"})
             T.copy(C_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # The gemm is converted to the async tcgen05 form.
-    assert "T.tcgen05_gemm(" in script
+    calls = [
+        call
+        for op in ("gemm", "gemm_blockscaled", "tcgen05_gemm", "tcgen05_gemm_blockscaled")
+        for call in collect_calls(func, op="tl.tileop." + op)
+    ]
+    (call,) = calls
+    # Scheduling converts each GEMM to its explicit asynchronous CUDA op.
+    explicit_op = "tcgen05_gemm_blockscaled" if blockscaled else "tcgen05_gemm"
+    assert call.op.name == "tl.tileop." + explicit_op
+    gemm = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    assert gemm.isTcgen05
+    assert gemm.mbar is None
+    if blockscaled:
+        assert gemm.sfaRegion.buffer.name == "SFA"
+        assert gemm.sfbRegion.buffer.name == "SFB"
+
+    # The scheduled op must lower without a per-op barrier or an implicit
+    # wait/arrival: the schedule's synchronization points publish completion.
+    with _TARGET:
+        layouts = gemm.infer_layout(_TARGET, 32)
+        lowered = gemm.lower(layouts, _TARGET, tvm.ir.Range(32, 64), tvm.tirx.Var("tx", "int32"), tvm.tirx.const(0, "int32"))
+    assert_call_count(lowered, op="tl.mbarrier_wait_parity", count=0)
+    assert_call_count(lowered, op="tl.tcgen05_mma_arrive", count=0)
+    mma_op = "ptx_tcgen05_mma_blockscaled_ss" if blockscaled else "ptx_tcgen05_mma_ss"
+    assert collect_calls(lowered, op="tl." + mma_op)
     # smem_empty and acc_full are signaled by the tensor core: count 1 each.
-    assert "smem_empty: [1, 1]" in script
-    assert "acc_full: [1]" in script
+    smem_empty = _barrier(func, "smem_empty", [1, 1])
+    acc_full = _barrier(func, "acc_full", [1])
     # Synchronous epilogue reads release acc with all 128 threads.
-    assert "acc_empty: [128]" in script
+    _barrier(func, "acc_empty", [128])
     # The MMA-side releases are tcgen05 commits.
-    assert "T.tcgen05_mma_arrive(" in script
+    arrives = collect_calls(func, op="tl.tcgen05_mma_arrive")
+    assert len(arrives) == 2
+    for barrier in (smem_empty, acc_full):
+        pointers = [
+            call.args[0]
+            for call in arrives
+            if len(call.args) == 1
+            and isinstance(call.args[0], tirx.Call)
+            and call.args[0].op.same_as(tvm.ir.Op.get("tirx.tvm_access_ptr"))
+            and len(call.args[0].args) == 5
+            and call.args[0].args[1].same_as(barrier.data)
+        ]
+        assert len(pointers) == 1
+        pointer = pointers[0]
+        assert int(pointer.args[4]) == 3
+        analyzer = tvm.arith.Analyzer()
+        assert analyzer.can_prove(pointer.args[2] >= 0)
+        assert analyzer.can_prove(pointer.args[2] < barrier.shape[0])
+        assert analyzer.can_prove(pointer.args[3] >= 1)
 
 
 @tilelang.testing.requires_cuda
@@ -2052,9 +2304,8 @@ def test_runtime_phase_counter_for_multi_cycle_body():
                 T.copy(A_frag, B[i * 128 + 64, 0], annotations={T.WSID: "copy_out2"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # Both roles track their buf phase with a local counter.
-    assert "buf_phase" in script
+    for first_thread in (0, 128):
+        _assert_phase_counter(func, _role_body(func, first_thread), updates=2)
 
 
 @tilelang.testing.requires_cuda
@@ -2216,9 +2467,8 @@ def test_nested_pipelines_on_one_storage():
     access resolves against the innermost binding whose scope contains
     it."""
     func = _materialize(_nested_pipeline_kernel())
-    script = str(func)
-    assert "buf_full" in script and "buf_empty" in script
-    assert "buf_outer_full" in script and "buf_outer_empty" in script
+    for name in ("buf_full", "buf_empty", "buf_outer_full", "buf_outer_empty"):
+        _barrier(func, name)
 
 
 @tilelang.testing.requires_cuda
@@ -2403,11 +2653,9 @@ def test_nested_pipeline_outer_ring():
     slot — from its span, or (the joint-role produce) from the role's own
     phase."""
     func = _materialize(_nested_ring_kernel())
-    script = str(func)
-    assert "buf_outer_full" in script and "buf_outer_empty" in script
-    # One version dimension per binding, outermost first: the outer
-    # ring's 2 slots and the inner binding's pinned 1.
-    assert "(2, 1, 64, 64)" in script
+    for name in ("buf_outer_full", "buf_outer_empty"):
+        _barrier(func, name)
+    assert [int(dim) for dim in _buffer(func, "A_shared").shape] == [2, 1, 64, 64]
 
 
 @tilelang.testing.requires_cuda
@@ -2494,10 +2742,8 @@ def test_scope_use_publishes_observed_writes():
     before leaving the loop, so a plain per-thread arrive suffices (the
     collapsed scope use is synchronous)."""
     func = _materialize(_observer_producer_kernel())
-    script = str(func)
-    # Full side: the Worker's 128 per-thread arrives; empty side: Out's 32.
-    assert "buf_outer_full: [128]" in script
-    assert "buf_outer_empty: [32]" in script
+    _barrier(func, "buf_outer_full", [128])
+    _barrier(func, "buf_outer_empty", [32])
 
 
 @tilelang.testing.requires_cuda
@@ -2704,11 +2950,14 @@ def test_source_guard_follows_shifted_iteration():
                 T.copy(C_shared, C_frag, annotations={T.WSID: "read_c"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # copy_c runs at stage 1: inside the loop its source guard (i < 3)
-    # follows the shifted iteration, and no boundary guard joins it.
-    assert re.search(r"if i - 1 < 3", script), script
-    assert "i >= 1" not in script and "1 <= i" not in script
+    producer = _role_body(func, 0)
+    (loop,) = collect_nodes(producer, tirx.For)
+    assert int(loop.min) == 1 and int(loop.extent) == 3
+    (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
+    tvm.ir.assert_structural_equal(guard.condition, loop.loop_var - 1 < 3)
+    (copy,) = collect_calls(guard.then_case, op="tl.tileop.tma_copy")
+    _, dest = _copy_region_loads(copy)
+    assert dest.buffer.data.same_as(_buffer(func, "C_shared").data)
 
 
 @tilelang.testing.requires_cuda
@@ -2782,9 +3031,9 @@ def test_idle_warps_adopt_warpgroup_nreg():
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    assert script.count("T.set_max_nreg(80, 1)") == 2
-    assert script.count("T.set_max_nreg(40, 0)") == 1  # consumer warpgroup
+    args = _nreg_args(func)
+    assert args.count((80, 1)) == 2
+    assert args.count((40, 0)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -2817,12 +3066,14 @@ def test_two_scheduled_kernels_in_one_function():
             T.copy(B, A, annotations={T.WSID: "cp2"})
 
     func = _materialize(kernel)
-    script = str(func)
-    # Each kernel's own binding is widened to its own schedule's warps.
-    assert 'T.launch_thread("threadIdx.x", 128)' in script
-    assert 'T.launch_thread("threadIdx.x", 256)' in script
-    assert script.count("T.set_max_nreg(224, 1)") == 2
-    assert "ws_schedule" not in script and "ws_op_id" not in script
+    launches = [
+        attr
+        for attr in collect_nodes(func, tirx.AttrStmt)
+        if attr.attr_key == "thread_extent" and isinstance(attr.node, tirx.IterVar) and attr.node.thread_tag == "threadIdx.x"
+    ]
+    assert sorted(int(launch.value) for launch in launches) == [128, 256]
+    for launch in launches:
+        assert _nreg_args(launch.body).count((224, 1)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -2997,8 +3248,8 @@ def test_guarded_scope_syncs_use_phase_counter():
                     T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    script = str(func)
-    assert "buf_phase" in script
+    for first_thread in (0, 128):
+        _assert_phase_counter(func, _role_body(func, first_thread))
 
 
 @tilelang.testing.requires_cuda

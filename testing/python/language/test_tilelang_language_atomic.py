@@ -1340,6 +1340,9 @@ def test_atomic_add_contended_bf16():
     # bf16 is the dtype whose pre-SM80 add is a CAS loop; float32 contention is
     # already covered by the multi-block test_atomic_add above.
     run_atomic_add_contended(128, 128, T.bfloat16)
+    # With more elements than threads the loop vectorizes; the shared constant
+    # destination must stay scalar instead of widening to AtomicAddx2.
+    run_atomic_add_contended(256, 128, T.bfloat16)
 
 
 @tilelang.jit
@@ -1413,6 +1416,155 @@ def test_atomic_add_bf16_compiles_for_sm75():
         "AtomicAddx4Ret(",
     ):
         assert helper in source, f"{helper} not exercised by the sm_75 kernel"
+
+
+# ======================= Invariant atomic destination =======================
+
+_INV_N = 64
+_INV_EXTENT = 8
+
+
+def _invariant_index(which, i):
+    if which == 0:  # contiguous, aligned
+        return i
+    if which == 1:  # contiguous with an even base
+        return i + 2
+    if which == 2:  # invariant within the 2-lane boundary
+        return i // 2
+    if which == 3:  # invariant, aligned base
+        return (i // 2) * 2
+    if which == 4:  # constant destination
+        return 0
+    if which == 5:  # invariant, odd base
+        return (i // 2) * 2 + 1
+    if which == 6:  # two-periodic: agrees on lanes 0/1, repeats at width 4
+        return i % 2
+    raise ValueError(f"unknown case {which}")
+
+
+# (which, dtype, max_width): bound on the vector width the destination may use.
+# A destination with a valid contiguous run of k elements bounds at k (4 is the
+# widest any target emits), so the assertion is target independent.
+_INVARIANT_CASES = [
+    (0, T.float16, 4),  # B[i]
+    (1, T.float16, 4),  # B[i+2]
+    (2, T.float16, 1),  # B[i//2]
+    (3, T.float16, 1),  # B[(i//2)*2]
+    (4, T.float16, 1),  # B[0]
+    (5, T.float16, 1),  # B[(i//2)*2+1]
+    (6, T.float32, 2),  # B[i%2]: only lanes 0/1 form a valid run
+]
+
+
+@tilelang.jit
+def atomic_add_invariant_program(which, dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[_invariant_index(which, i)], A_local[i])
+
+    return atomic_add_invariant
+
+
+@tilelang.jit
+def atomic_add_invariant_shared_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_shared(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            B_shared = T.alloc_shared((_INV_N,), dtype)
+            for i in T.Parallel(_INV_N):
+                B_shared[i] = B[i]
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B_shared[i // 2], A_local[i])
+            for i in T.Parallel(_INV_N):
+                B[i] = B_shared[i]
+
+    return atomic_add_invariant_shared
+
+
+@tilelang.jit
+def atomic_add_invariant_memory_order_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_memory_order(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[i // 2], A_local[i], memory_order="relaxed")
+
+    return atomic_add_invariant_memory_order
+
+
+def _invariant_reference(which, a):
+    ref = torch.zeros(_INV_N, dtype=a.dtype, device=a.device)
+    for i in range(_INV_EXTENT):
+        ref[_invariant_index(which, i)] += a[i]
+    return ref
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("which,dtype,max_width", _INVARIANT_CASES + [(2, T.float32, 1), (5, T.float32, 1)])
+def test_atomic_add_invariant_destination(which, dtype, max_width):
+    kernel = atomic_add_invariant_program(which, dtype)
+    widths = [int(w) for w in re.findall(r"AtomicAddx(\d)", kernel.get_kernel_source())]
+    assert all(w <= max_width for w in widths), (which, widths, max_width)
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=getattr(torch, dtype), device="cuda")
+    b = torch.zeros(_INV_N, dtype=getattr(torch, dtype), device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("program", [atomic_add_invariant_shared_program, atomic_add_invariant_memory_order_program])
+def test_atomic_add_invariant_shared_and_memory_order(program):
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
+    kernel = program()
+    assert "AtomicAddx" not in kernel.get_kernel_source()
+    b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(2, a), atol=0, rtol=0)
+
+
+@tilelang.jit
+def atomic_add_dynamic_rows_program(indirect):
+    rows = T.dynamic("rows")
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 256), T.bfloat16), B: T.Tensor((rows, 256), T.float32), indices: T.Tensor((4,), T.int64)):
+        with T.Kernel(1, threads=128):
+            values = T.alloc_fragment((4, 256), T.float32)
+            for i, j in T.Parallel(4, 256):
+                values[i, j] = A[i, j]
+                if indirect:
+                    T.atomic_add(B[indices[i], j], values[i, j])
+                else:
+                    T.atomic_add(B[i, j], values[i, j])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("indirect", [False, True])
+def test_atomic_add_dynamic_rows_keep_x4(indirect):
+    """Dynamic/indirect row offsets need int64 arithmetic but retain x4 lanes."""
+    kernel = atomic_add_dynamic_rows_program(indirect)
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+    a = torch.randint(1, 5, (4, 256), device="cuda").to(torch.bfloat16)
+    b = torch.zeros((8, 256), dtype=torch.float32, device="cuda")
+    indices = torch.tensor([0, 1, 0, 1], dtype=torch.int64, device="cuda")
+    kernel(a, b, indices)
+    ref = torch.zeros_like(b)
+    ref.index_add_(0, indices if indirect else torch.arange(4, device="cuda"), a.float())
+    torch.testing.assert_close(b, ref, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

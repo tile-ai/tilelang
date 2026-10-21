@@ -46,9 +46,9 @@ sections explain the mechanisms behind this path.
 ```python
 with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
     T.gemm(
-        A[by * block_M:(by + 1) * block_M, 0:K],
-        B[0:K, bx * block_N:(bx + 1) * block_N],
-        C[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N],
+        A[by * block_M : (by + 1) * block_M, 0:K],
+        B[0:K, bx * block_N : (bx + 1) * block_N],
+        C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
         clear_accum=True,
     )
 ```

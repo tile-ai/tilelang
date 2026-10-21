@@ -47,7 +47,7 @@ class KernelCache:
     _memory_cache = {}  # In-memory cache dictionary
     _staging_cleanup_lock = threading.Lock()
     _last_cleaned_staging_root: str | None = None
-    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
+    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
@@ -138,7 +138,7 @@ class KernelCache:
 
     @staticmethod
     def _get_base_key() -> dict:
-        base = {"version": __version__}
+        base = {"version": __version__, "platform": platform.machine()}
         if env.should_use_kernel_cache_lib_stamp():
             lib_stamp = KernelCache._get_tilelang_lib_stamp()
             if lib_stamp:
@@ -244,7 +244,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: list[int],
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] = "tvm_ffi",
         args=None,
         target: str | Target = "auto",
         target_host: str | Target = None,
@@ -290,7 +290,7 @@ class KernelCache:
         *args,
         target: str | Target | None = None,
         target_host: str | Target | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None = None,
         verbose: bool,
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
@@ -823,13 +823,12 @@ class KernelCache:
         required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
         if not required_names.issubset(files):
             return False
-        verify_hash = env.should_verify_cache_hash()
         for name, meta in entries:
             path = os.path.join(cache_path, name)
             try:
                 if os.path.getsize(path) != meta["size"]:
                     return False
-                if verify_hash and name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
+                if name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
                     return False
             except (OSError, KeyError, TypeError):
                 return False
