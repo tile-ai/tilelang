@@ -6,16 +6,16 @@ synchronized to upstream `d85a70a97218fec25856f8b5c969f167ad96dc1e` on 2026-10-2
 Apply the compiler prerequisites before building the staged kernel.
 The source does not use `T.IssuePhase`, and its API is excluded from these proposals.
 
-| Compiler change | Fork branch |
-| --- | --- |
-| Support native NZ output for L0C-to-UB copies | [codex/ascend-l0c-ub-nz](https://github.com/Denverjin/tilelang/tree/codex/ascend-l0c-ub-nz) |
-| Preserve Cube configuration phases across manual stages | [codex/ascend-cube-register-phases](https://github.com/Denverjin/tilelang/tree/codex/ascend-cube-register-phases) |
-| Select AIV streams outside scheduled pipelines | [codex/ascend-aiv-stream-selection](https://github.com/Denverjin/tilelang/tree/codex/ascend-aiv-stream-selection) |
-| Preserve complete periodic buffer lifetimes | [codex/ascend-periodic-buffer-lifetimes](https://github.com/Denverjin/tilelang/tree/codex/ascend-periodic-buffer-lifetimes) |
-| Establish buffer placement hints from exact L1 offsets | [codex/ascend-buffer-placement-hints](https://github.com/Denverjin/tilelang/tree/codex/ascend-buffer-placement-hints) |
-| Preserve physical views and pointer units during layout lowering | [codex/ascend-layout-pointer-units](https://github.com/Denverjin/tilelang/tree/codex/ascend-layout-pointer-units) |
-| Reuse storage and L0B rings for explicit conflict hints | [codex/ascend-conflict-storage-rings](https://github.com/Denverjin/tilelang/tree/codex/ascend-conflict-storage-rings) |
-| Preserve manual source order across physical phase ties | [codex/ascend-manual-pipe-order](https://github.com/Denverjin/tilelang/tree/codex/ascend-manual-pipe-order) |
+| Compiler change | Pull request | Fork branch |
+| --- | --- | --- |
+| Support native NZ output for L0C-to-UB copies | [#5](https://github.com/Denverjin/tilelang/pull/5) | [codex/ascend-l0c-ub-nz](https://github.com/Denverjin/tilelang/tree/codex/ascend-l0c-ub-nz) |
+| Preserve Cube configuration phases across manual stages | [#6](https://github.com/Denverjin/tilelang/pull/6) | [codex/ascend-cube-register-phases](https://github.com/Denverjin/tilelang/tree/codex/ascend-cube-register-phases) |
+| Select AIV streams outside scheduled pipelines | [#7](https://github.com/Denverjin/tilelang/pull/7) | [codex/ascend-aiv-stream-selection](https://github.com/Denverjin/tilelang/tree/codex/ascend-aiv-stream-selection) |
+| Preserve complete periodic buffer lifetimes | [#8](https://github.com/Denverjin/tilelang/pull/8) | [codex/ascend-periodic-buffer-lifetimes](https://github.com/Denverjin/tilelang/tree/codex/ascend-periodic-buffer-lifetimes) |
+| Establish buffer placement hints from exact L1 offsets | [#9](https://github.com/Denverjin/tilelang/pull/9) | [codex/ascend-buffer-placement-hints](https://github.com/Denverjin/tilelang/tree/codex/ascend-buffer-placement-hints) |
+| Preserve physical views and pointer units during layout lowering | [#10](https://github.com/Denverjin/tilelang/pull/10) | [codex/ascend-layout-pointer-units](https://github.com/Denverjin/tilelang/tree/codex/ascend-layout-pointer-units) |
+| Reuse storage and L0B rings for explicit conflict hints | [#11](https://github.com/Denverjin/tilelang/pull/11) | [codex/ascend-conflict-storage-rings](https://github.com/Denverjin/tilelang/tree/codex/ascend-conflict-storage-rings) |
+| Preserve manual source order across physical phase ties | [#12](https://github.com/Denverjin/tilelang/pull/12) | [codex/ascend-manual-pipe-order](https://github.com/Denverjin/tilelang/tree/codex/ascend-manual-pipe-order) |
 
 The additional NZ pitch, compact-allocation, and access-footprint prerequisite
 is already proposed upstream as [tile-ai/tilelang#3530](https://github.com/tile-ai/tilelang/pull/3530).
