@@ -27,7 +27,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         V: T.Tensor(shape_kv, dtype),
         Output: T.Tensor(shape_q, dtype),
     ):
-        glse = T.alloc_global([batch, heads, num_split, seqlen_q], dtype)
+        glse = T.alloc_global([batch, heads, num_split, seqlen_q], accum_dtype)
         Output_partial = T.alloc_global(part_shape, dtype)  # [batch, seqlen_q, heads, num_split, dim]
         # split
         with T.Kernel(T.ceildiv(seqlen_q, block_M), heads * batch, num_split, threads=_KERNEL_THREADS) as (bx, by, bz):
@@ -120,7 +120,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             po_local = T.alloc_fragment([block_M, dim], dtype)
             o_accum_local = T.alloc_fragment([block_M, dim], accum_dtype)
             o_shared = T.alloc_shared([block_M, dim], dtype)
-            lse_local = T.alloc_fragment([num_split, block_M], dtype)
+            lse_local = T.alloc_fragment([num_split, block_M], accum_dtype)
             lse_local_split = T.alloc_fragment([block_M], accum_dtype)
             lse_logsum_local = T.alloc_fragment([block_M], accum_dtype)
             lse_max_local = T.alloc_fragment([block_M], accum_dtype)
@@ -203,12 +203,16 @@ def compile_flashattn_for_current_device(batch, heads, seqlen_q, seqlen_kv, dim,
 
 def ref_program(Q, K, V, causal):
     assert causal is False
+    output_dtype = Q.dtype
+    Q = Q.float()
+    K = K.float()
+    V = V.float()
     dim = Q.size(-1)
     scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     attention_weights = F.softmax(scores, dim=-1)
     output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
-    return output
+    return output.to(output_dtype)
 
 
 def reduce_ref(Q, K, V, glse, Output_partial, causal):
