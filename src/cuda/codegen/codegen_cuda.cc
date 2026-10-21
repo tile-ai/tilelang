@@ -1888,18 +1888,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // 2. Add a new if statement like the one below.
   // 3. In src/cuda/target_utils.cc, allow this vectorizable cast.
 
-  // `round` is lowerable only for an explicit set of (source dtype, destination
-  // dtype, mode) combinations: PTX `cvt.rs` takes an f32 source, a 32-bit
-  // `rbits` operand and one of the packed destinations listed below. The check
-  // has to happen before the branches -- a branch that cannot honour the
-  // request either calls a helper with a fixed rounding mode or falls through
-  // to the elementwise fallback, so the annotation would be dropped silently,
-  // while the same cast written as a scalar loop is rejected.
-  //
-  // Keeping this as a table rather than as a test on the source dtype is what
-  // lets a future mode (say `rn`/`rz`) support further sources: list the
-  // combinations it lowers together with their lowering, and everything
-  // unlisted stays rejected.
+  // Validate supported dtype/rounding combinations before conversion branches
+  // can silently ignore the requested mode.
   auto round_is_supported = [&]() {
     if (cast_round.empty()) {
       return true;
