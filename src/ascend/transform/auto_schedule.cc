@@ -609,7 +609,6 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
           resource_deps.emplace_back(i, j);
         }
         if (manual_schedule &&
-            (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) != 0 &&
             (NodeResourceMask(nodes[i]) & NodeResourceMask(nodes[j])) != 0) {
           pipe_order_deps.emplace_back(i, j);
         }
@@ -1034,7 +1033,6 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
         resource_deps.emplace_back(i, j);
       }
       if (manual_schedule &&
-          (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) != 0 &&
           (NodeResourceMask(nodes[i]) & NodeResourceMask(nodes[j])) != 0) {
         pipe_order_deps.emplace_back(i, j);
       }
