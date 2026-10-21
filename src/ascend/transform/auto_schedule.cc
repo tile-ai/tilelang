@@ -63,6 +63,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/buffer_offsets.h"
 #include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
@@ -104,11 +105,8 @@ inline bool HasSimtVF(const tirx::Stmt &stmt) {
 }
 
 inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
-  constexpr int64_t kPhysicalUnifiedBufferSize = 248 * 1024;
-  constexpr int64_t kSimtVFThreadContextSize = 32 * 1024;
-  return HasSimtVF(kernel_body)
-             ? kPhysicalUnifiedBufferSize - kSimtVFThreadContextSize
-             : kPhysicalUnifiedBufferSize;
+  return HasSimtVF(kernel_body) ? kAscendUBMemoryBytes - kAscendSimtContextBytes
+                                : kAscendUBMemoryBytes;
 }
 
 inline int64_t GetL1MemoryLimit(Target target) {
@@ -120,21 +118,21 @@ inline int64_t GetL1MemoryLimit(Target target) {
 
 inline int64_t GetL0CMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 256 * 1024; // 256 KB L0C buffer on Ascend
+    return kAscendL0CMemoryBytes;
   }
   return 0;
 }
 
 inline int64_t GetL0AMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 64 * 1024; // 64 KB L0A buffer on Ascend
+    return kAscendL0ABMemoryBytes;
   }
   return 0;
 }
 
 inline int64_t GetL0BMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 64 * 1024; // 64 KB L0B buffer on Ascend
+    return kAscendL0ABMemoryBytes;
   }
   return 0;
 }
@@ -1404,7 +1402,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetMemoryLimit("shared.l0a", GetL0AMemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0b", GetL0BMemoryLimit(target));
   // One SS pool is shared by AIC and both AIVs, unlike per-AIV UB storage.
-  unit_builder.SetMemoryLimit("shared.ss", 3 * 1024);
+  unit_builder.SetMemoryLimit("shared.ss", kAscendSSMemoryBytes);
   constexpr int64_t kUnlimitedMemory = 1LL << 40;
   for (const String &scope : metadata.unlimit_memory_scopes) {
     unit_builder.SetMemoryLimit(scope, kUnlimitedMemory);
@@ -1450,7 +1448,30 @@ tvm::transform::Pass AutoSchedule() {
               context.root, context.outer_ctx, MakeAutoScheduleExtraInfo);
           BufferVersionMap buffer_version_overrides =
               scheduled_tir.metadata.buffer_versions;
+          BufferOffsets offsets;
+          if (auto value = context.root->annotations.Get(kBufferOffsets)) {
+            offsets = ParseBufferOffsets(value.value());
+            // Validate before AutoSchedule replaces frontend overrides with
+            // inferred counts. A mode-only annotation does not fix storage
+            // size.
+            for (const auto &[storage, offset] : offsets) {
+              auto versions = buffer_version_overrides.Get(storage);
+              ICHECK(versions.has_value() && versions.value() > 0)
+                  << kBufferOffsets << " requires an explicit version count in "
+                  << "T.annotate_buffer_versions for storage " << storage;
+            }
+          }
           ScheduleSingleKernel(context.root->body, target, &scheduled_tir);
+          for (const auto &[storage, offset] : offsets) {
+            int requested = buffer_version_overrides.at(storage);
+            int selected =
+                scheduled_tir.metadata.buffer_versions.Get(storage).value_or(1);
+            ICHECK_EQ(selected, requested)
+                << "Cannot place storage " << storage << ": requested "
+                << requested << " versions but AutoSchedule selected "
+                << selected
+                << "; the buffer must be eligible for the requested versions";
+          }
           WarnOnUnappliedBufferVersionOverrides(
               buffer_version_overrides, scheduled_tir.metadata.buffer_versions);
           return EncodeScheduledTIR(std::move(scheduled_tir));

@@ -67,5 +67,44 @@ def test_conflicting_alias_annotations(first, second, message):
                 T.annotate_buffer_versions({ub: first, alias: second})
 
 
+@pytest.mark.parametrize("specification", [None, "auto", "iteration", "counter", "manual"])
+def test_placement_requires_an_explicit_version_count(specification):
+    from tilelang import tvm
+    from testing.ascend._ir import schedule_snapshots
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 64), "float32"), C: T.Tensor((4, 64), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_offsets({ub: 32})
+            if specification == "manual":
+                T.annotate_manual_multi_buffer({ub: 1})
+            elif specification is not None:
+                T.annotate_buffer_versions({ub: specification})
+            for i in T.Pipelined(4, num_stages=2):
+                T.copy(A[i, :], ub)
+                T.copy(ub, C[i, :])
+
+    with pytest.raises(tvm.error.InternalError, match="explicit version count.*annotate_buffer_versions"):
+        schedule_snapshots(main, ["tl.AutoSchedule"])
+
+
+def test_placement_rejects_unapplied_fixed_versions():
+    from tilelang import tvm
+    from testing.ascend._ir import schedule_snapshots
+
+    @T.prim_func
+    def main(A: T.Tensor((64,), "float32"), C: T.Tensor((64,), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({ub: 2})
+            T.annotate_buffer_offsets({ub: 32})
+            T.copy(A, ub)
+            T.copy(ub, C)
+
+    with pytest.raises(tvm.error.InternalError, match="requested 2 versions.*selected 1"):
+        schedule_snapshots(main, ["tl.AutoSchedule"])
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -25,7 +25,7 @@
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
 #include "buffer_alias.h"
-#include "l1_buffer_offsets.h"
+#include "buffer_offsets.h"
 
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
@@ -764,10 +764,10 @@ tvm::transform::Pass LowerScheduledTIR() {
                             body);
             writer->annotations.erase(kAivStorageMap);
           }
-          if (auto offsets = root->annotations.Get(kL1BufferOffsets)) {
-            body = AttrStmt(ParseL1BufferOffsets(offsets.value()),
-                            kL1BufferOffsets, Integer(1), std::move(body));
-            writer->annotations.erase(kL1BufferOffsets);
+          if (auto offsets = root->annotations.Get(kBufferOffsets)) {
+            body = AttrStmt(ParseBufferOffsets(offsets.value()), kBufferOffsets,
+                            Integer(1), std::move(body));
+            writer->annotations.erase(kBufferOffsets);
           }
           writer->annotations.erase(kSplitSubcores);
           writer->body = std::move(body);

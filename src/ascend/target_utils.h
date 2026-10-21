@@ -14,7 +14,12 @@
 namespace tvm {
 namespace tl {
 
+constexpr int64_t kAscendUBMemoryBytes = 248 * 1024;
+constexpr int64_t kAscendSimtContextBytes = 32 * 1024;
 constexpr int64_t kAscendL1MemoryBytes = 512 * 1024;
+constexpr int64_t kAscendL0ABMemoryBytes = 64 * 1024;
+constexpr int64_t kAscendL0CMemoryBytes = 256 * 1024;
+constexpr int64_t kAscendSSMemoryBytes = 3 * 1024;
 
 bool TargetIsAscend(Target target);
 bool IsAscendVectorizableFP8(DataType dtype);

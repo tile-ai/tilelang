@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -410,16 +411,18 @@ private:
 };
 
 template <typename Planner>
-tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
-                            bool disable_reuse, const Planner &planner,
-                            const std::string &required_scope = "") {
+tirx::Stmt
+MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
+                 bool disable_reuse, const Planner &planner,
+                 const std::unordered_set<std::string> &required_scopes = {}) {
   AllocateCollector collector;
   collector(stmt);
   auto run = [&](SharedMemoryRewriter &rewriter,
                  const AllocationMap &allocations,
                  const AllocationOrder &allocation_order,
                  const std::string &target_scope) {
-    if (disable_reuse || target_scope == "shared.ss") {
+    if (disable_reuse ||
+        (target_scope == "shared.ss" && !required_scopes.count(target_scope))) {
       rewriter.PlanNoReuse();
     } else {
       rewriter.SetPlan(planner(stmt, allocations, allocation_order,
@@ -428,7 +431,8 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
     stmt = rewriter(std::move(stmt));
   };
 
-  if (collector.dyn_shmem_allocs.size() > 1) {
+  if (collector.dyn_shmem_allocs.size() > 1 ||
+      required_scopes.count("shared.dyn")) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs, verbose,
                                   align_bytes);
     run(rewriter, collector.dyn_shmem_allocs, collector.dyn_shmem_order, "");
@@ -441,7 +445,7 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
   std::sort(scopes.begin(), scopes.end());
   for (const std::string &scope : scopes) {
     const AllocationMap &allocations = collector.ascend_scope_allocs.at(scope);
-    if (allocations.size() <= 1 && scope != required_scope)
+    if (allocations.size() <= 1 && !required_scopes.count(scope))
       continue;
     auto order = collector.ascend_scope_order.find(scope);
     const AllocationOrder empty_order;

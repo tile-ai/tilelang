@@ -7,7 +7,7 @@ _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shar
 
 __all__ = [
     "annotate_buffer_versions",
-    "annotate_l1_offsets",
+    "annotate_buffer_offsets",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
 ]
@@ -16,39 +16,66 @@ __all__ = [
 _VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter")
 
 
-def annotate_l1_offsets(buffer_offsets: dict):
-    """Fix every L1 storage's byte offset in the kernel's 512 KiB L1 memory.
+# Physical pools on dav-3510: (base alignment, capacity), in bytes.
+_BUFFER_PLACEMENT_SCOPES = {
+    "shared.dyn": (32, 248 * 1024),
+    "shared.l1": (512, 512 * 1024),
+    "shared.l0a": (512, 64 * 1024),
+    "shared.l0b": (512, 64 * 1024),
+    "shared.l0c": (1024, 256 * 1024),
+    "shared.ss": (32, 3 * 1024),
+}
 
-    This is a complete allocation plan for the Ascend scheduled pipeline.
-    Include every live L1 allocation. Offsets must be non-negative Python
-    integers divisible by 512. Each offset places the complete storage,
-    including all automatic buffer versions and physical layout padding.
-    Views of one storage share its offset; this does not change their indices.
 
-    The compiler validates the final physical allocation sizes, rejects
-    overlapping storages and capacity overflow, and never changes lifetime or
-    synchronization rules to satisfy a placement. Dynamic sizes and partial
-    plans are unsupported. Without this annotation, allocation is unchanged.
+def annotate_buffer_offsets(buffer_offsets: dict):
+    """Place on-chip buffers at exact byte offsets within their memory pools.
+
+    Supports UB, L1, L0A, L0B, L0C and SS in the Ascend scheduled pipeline.
+    Each placed storage must also have an explicit positive version count in
+    :func:`annotate_buffer_versions`, including ``1`` for unversioned storage.
+    A mode without a count, inferred versions, and manual multi-buffer metadata
+    alone do not satisfy this requirement. Annotation order does not matter.
+
+    Offsets are non-negative Python integers, aligned to 32 bytes for UB/SS,
+    512 for L1/L0A/L0B, and 1024 for L0C. A placement includes all physical
+    versions and layout padding; views of one storage share the same base.
+    Bound L0 scale-factor handles follow their data buffer's placement.
+
+    Partial maps are allowed. Other allocations in a placed pool use the first
+    aligned free interval, without storage reuse. Overlap is rejected even for
+    disjoint lifetimes or positive conflict hints. Different pools and private
+    AIV UBs have independent addresses; common UB storage reserves both UBs.
+    Placement does not change synchronization or ownership.
+
+    Every allocation in a placed pool must have a positive static physical size
+    and fit its hardware capacity, including the 32 KiB UB reservation for SIMT.
+    Pools without placements retain their ordinary allocation behavior.
 
     Example
     -------
-    >>> T.annotate_l1_offsets({left: 0, right: 262144})
+    >>> T.annotate_buffer_versions({left: 2, accum: 1})
+    >>> T.annotate_buffer_offsets({left: 262144, accum: 1024})
     """
     if not buffer_offsets:
-        raise ValueError("annotate_l1_offsets requires a complete, non-empty L1 placement map")
+        raise ValueError("annotate_buffer_offsets requires a non-empty placement map")
     offsets = {}
     for buffer, offset in buffer_offsets.items():
-        if buffer.scope() != "shared.l1":
-            raise ValueError(f"annotate_l1_offsets requires shared.l1 storage, got {buffer.scope()!r}")
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or offset % 512:
-            raise ValueError(f"L1 byte offset must be a non-negative integer divisible by 512, got {offset!r}")
-        if offset >= 512 * 1024:
-            raise ValueError(f"L1 byte offset must be below the 512 KiB capacity, got {offset}")
+        scope = buffer.scope()
+        if scope not in _BUFFER_PLACEMENT_SCOPES:
+            raise ValueError(
+                f"annotate_buffer_offsets does not support storage scope {scope!r}; "
+                "expected UB, L1, L0A, L0B, L0C or SS. Place bound L0 scale-factor handles through their data buffer."
+            )
+        alignment, capacity = _BUFFER_PLACEMENT_SCOPES[scope]
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or offset % alignment:
+            raise ValueError(f"{scope} byte offset must be a non-negative integer divisible by {alignment}, got {offset!r}")
+        if offset >= capacity:
+            raise ValueError(f"{scope} byte offset must be below the {capacity}-byte capacity, got {offset}")
         data = buffer.data
         if data in offsets and int(offsets[data]) != offset:
-            raise ValueError(f"Aliases of one L1 storage require the same byte offset: {buffer}")
+            raise ValueError(f"Aliases of one storage require the same byte offset: {buffer}")
         offsets[data] = IntImm("int64", offset)
-    return sblock_attr({"tl.ascend_l1_offsets": offsets})
+    return sblock_attr({"tl.ascend_buffer_offsets": offsets})
 
 
 def annotate_buffer_versions(buffer_versions_map: dict):

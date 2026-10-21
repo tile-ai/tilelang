@@ -38,8 +38,8 @@
 #include "transform/loop_partition.h"
 
 #include "ascend/transform/buffer_alias.h"
+#include "ascend/transform/buffer_offsets.h"
 #include "ascend/transform/buffer_version.h"
-#include "ascend/transform/l1_buffer_offsets.h"
 #include "ascend/transform/vf_regions.h"
 
 namespace tvm {
@@ -334,8 +334,8 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
-    ICHECK(!op->annotations.count(kL1BufferOffsets))
-        << kL1BufferOffsets << " requires the Ascend scheduled pipeline; "
+    ICHECK(!op->annotations.count(kBufferOffsets))
+        << kBufferOffsets << " requires the Ascend scheduled pipeline; "
         << "enable TL_ENABLE_AUTO_SCHEDULE";
     Map<String, Any> previous_block_annotations = block_annotations_;
     Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
@@ -1283,10 +1283,10 @@ private:
       }
     }
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
-    if (op->attr_key == tl::kL1BufferOffsets) {
+    if (op->attr_key == tl::kBufferOffsets) {
       AttrStmt attribute = Downcast<AttrStmt>(std::move(stmt));
       attribute.CopyOnWrite()->node =
-          RemapL1BufferOffsets(ParseL1BufferOffsets(op->node), var_remap_);
+          RemapBufferOffsets(ParseBufferOffsets(op->node), var_remap_);
       return attribute;
     }
     if (op->attr_key == tl::kAivStorageMap) {
