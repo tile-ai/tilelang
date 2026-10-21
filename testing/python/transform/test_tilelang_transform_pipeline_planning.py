@@ -1,6 +1,8 @@
 from tilelang import tvm as tvm
 import tilelang as tl
 import pytest
+import tilelang.testing
+from tilelang.testing.ir import collect_nodes
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 from tvm.tirx.stmt_functor import post_order_visit
@@ -999,6 +1001,254 @@ def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
     assert replayable_binds == [1, 0, 0, 0]
 
 
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_propagates_buffer_producer_through_bind():
+    """A copy's scalar index can depend transitively on a shared-buffer store."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[0] = k * 32
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
+    """A store to another region of the same buffer is not a copy producer."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((2,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_shared[1] = k
+                index_shared[0] = k * 32
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [1, 0, 0, 0, 1]
+    assert orders == [3, 0, 1, 2, 4]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("threads_x,threads_y", [(32, 1), (8, 4)])
+def test_pipeline_planning_keeps_disjoint_thread_copy_regions(threads_x, threads_y):
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=(threads_x, threads_y)):
+            tx = T.get_thread_binding(0)
+            ty = T.get_thread_binding(1)
+            shared = T.alloc_shared((64,), T.float32)
+            for k in T.Pipelined(2, num_stages=2):
+                shared[tx + threads_x * ty] = A[k * 64 + tx + threads_x * ty]
+                shared[tx + threads_x * ty + 32] = A[k * 64 + tx + threads_x * ty + 32]
+                B[k * 64 + tx + threads_x * ty] = shared[tx + threads_x * ty]
+                B[k * 64 + tx + threads_x * ty + 32] = shared[tx + threads_x * ty + 32]
+
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = _run_pipeline_planning(mod["before"], sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    assert stages[:2] == [0, 0]
+    assert all(stage > 0 for stage in stages[2:])
+    tl.transform.InjectSoftwarePipeline()(mod)
+    with sm80_target:
+        tl.lower(before, target=sm80_target)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("materialize_launch", [False, True])
+def test_pipeline_planning_tracks_cross_thread_index_producers(materialize_launch):
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.float32), B: T.Tensor((64,), T.float32)):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            indices = T.alloc_shared((64,), T.int32)
+            data = T.alloc_shared((32,), T.float32)
+            for k in T.Pipelined(2, num_stages=2):
+                indices[tx] = k * 32
+                indices[tx + 32] = k * 32
+                offset: T.int32 = indices[tx + 1]
+                data[tx] = A[offset + tx]
+                B[k * 32 + tx] = data[tx]
+
+    if materialize_launch:
+        before = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))["before"]
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    assert [int(value) for value in anno["software_pipeline_stage"]] == [0, 0, 0, 0, 1]
+    assert [int(value) for value in anno["software_pipeline_order"]] == [0, 1, 2, 3, 4]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_reaches_mixed_dependency_fixed_point():
+    """Alternating scalar and buffer edges propagate to arbitrary depth."""
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_0 = T.alloc_shared((1,), T.int32)
+            index_1 = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                index_0[0] = k * 32
+                base: T.int32 = index_0[0]
+                index_1[0] = base
+                offset: T.int32 = index_1[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3, 4, 5]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_redirects_copy_anchor_through_copy_producer():
+    """A copy feeding another copy's index joins the downstream copy group."""
+
+    @T.prim_func
+    def before(
+        indices: T.Tensor((2,), T.int32),
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            index_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                T.copy(indices[k], index_shared)
+                offset: T.int32 = index_shared[0]
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 1]
+    assert orders == [0, 1, 2, 3]
+    async_groups = [int(value) for value in anno["software_pipeline_async_producer_groups"]]
+    assert async_groups[0] >= 0
+    assert async_groups[2] >= 0
+    assert async_groups[0] != async_groups[2]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_resolves_each_multi_root_anchor_before_minimum():
+    """A shared producer uses the earliest resolved sink across copy groups."""
+
+    @T.prim_func
+    def before(
+        indices: T.Tensor((64,), T.int32),
+        A: T.Tensor((64,), T.float16),
+        C: T.Tensor((64,), T.float16),
+        B: T.Tensor((128,), T.float16),
+    ):
+        with T.Kernel(1, threads=256):
+            base_shared = T.alloc_shared((1,), T.int32)
+            A_shared = T.alloc_shared((32,), T.float16)
+            next_shared = T.alloc_shared((1,), T.int32)
+            C_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                base_shared[0] = k * 32
+                base: T.int32 = base_shared[0]
+                T.copy(A[base], A_shared)
+                T.copy(indices[base], next_shared)
+                next_base: T.int32 = next_shared[0]
+                for i in T.Parallel(32):
+                    B[k * 64 + i] = A_shared[i]
+                T.copy(C[next_base], C_shared)
+                for i in T.Parallel(32):
+                    B[k * 64 + 32 + i] = C_shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    orders = [int(value) for value in anno["software_pipeline_order"]]
+    assert stages == [0, 0, 0, 0, 0, 2, 0, 2]
+    assert orders[1] < orders[2]
+    assert orders[1] < orders[3]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_skips_transitive_tma_pipeline():
+    """Sequential lowering provides the wait before the dependent copy."""
+    N, C, H, W, KH = 1, 32, 8, 8, 3
+    stride, dilation, padding = 1, 1, 1
+
+    @T.prim_func
+    def before(
+        data: T.Tensor((N, H, W, C), T.float16),
+        A: T.Tensor((64,), T.float16),
+        B: T.Tensor((64,), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            data_shared = T.alloc_shared((16, 32), T.float16)
+            A_shared = T.alloc_shared((32,), T.float16)
+            for k in T.Pipelined(2, num_stages=2):
+                T.im2col(
+                    data,
+                    data_shared,
+                    0,
+                    k,
+                    KH,
+                    stride,
+                    dilation,
+                    padding,
+                )
+                offset: T.int32 = T.cast(data_shared[0, 0], "int32")
+                T.copy(A[offset], A_shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = A_shared[i]
+
+    mod = _run_pipeline_planning(before, sm90_target)
+    assert not _collect_pipeline_loop_annotations(mod["main"])
+    loops = collect_nodes(mod["main"], tvm.tirx.For)
+    assert all("num_stages" not in loop.annotations for loop in loops)
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
     @T.prim_func
     def before(
@@ -1025,3 +1275,22 @@ def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
     assert stages == [0, 0, 1, 1]
     assert orders == [0, 1, 2, 3]
     assert "software_pipeline_replayable_scalar_binds" not in anno
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_planning_waits_before_dependent_copy():
+    @T.prim_func
+    def before(Ids: T.Tensor((2,), T.int32), A: T.Tensor((64,), T.float32), B: T.Tensor((64,), T.float32)):
+        with T.Kernel(1, threads=32):
+            index = T.alloc_shared((1,), T.int32)
+            shared = T.alloc_shared((32,), T.float32)
+            for k in T.Pipelined(2, num_stages=2):
+                T.copy(Ids[k], index)
+                T.copy(A[index[0]], shared)
+                for i in T.Parallel(32):
+                    B[k * 32 + i] = shared[i]
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    assert [int(v) for v in anno["software_pipeline_async_producers"]] == [1, 0, 0]
+    tl.transform.InjectSoftwarePipeline()(mod)
