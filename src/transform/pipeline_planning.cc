@@ -443,9 +443,11 @@ public:
 class PipelineStageAnalyzer {
 public:
   PipelineStageAnalyzer(Map<Var, Buffer> buffer_data_to_buffer, Target target,
-                        bool use_async_copy)
+                        bool use_async_copy,
+                        Map<Var, arith::IntSet> thread_domains)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
-        target_(std::move(target)), use_async_copy_(use_async_copy) {}
+        target_(std::move(target)), use_async_copy_(use_async_copy),
+        thread_domains_(std::move(thread_domains)) {}
 
   class ScalarUseDefCollector : public StmtExprVisitor {
   public:
@@ -639,7 +641,8 @@ public:
         for (const BufferRegion &read : (*pipeline_stage_infos)[i].reads) {
           if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
                            [&](const BufferRegion &r) {
-                             return PipelineRegionsMayConflict(r, read);
+                             return PipelineRegionsMayConflict(r, read,
+                                                               thread_domains_);
                            }) != pinfo.writes.end()) {
             pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
           }
@@ -648,7 +651,8 @@ public:
         for (const BufferRegion &write : (*pipeline_stage_infos)[i].writes) {
           if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
                            [&](const BufferRegion &r) {
-                             return PipelineRegionsMayConflict(r, write);
+                             return PipelineRegionsMayConflict(r, write,
+                                                               thread_domains_);
                            }) != pinfo.writes.end()) {
             LOG(FATAL) << "Pipeline planning error: Multiple writes to "
                           "overlapping buffer regions detected. "
@@ -688,7 +692,7 @@ public:
       bool conflicts = false;
       for (const BufferRegion &write : producer.writes) {
         for (const BufferRegion &read : consumer.reads) {
-          if (PipelineRegionsMayConflict(write, read)) {
+          if (PipelineRegionsMayConflict(write, read, thread_domains_)) {
             conflicts = true;
             break;
           }
@@ -991,12 +995,14 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
   bool use_async_copy_{};
+  Map<Var, arith::IntSet> thread_domains_;
 };
 
 class PipelinePlanner : public StmtExprMutator {
 public:
   static Stmt Substitute(const PrimFunc &f, bool use_async_copy = true) {
     PipelinePlanner substituter(use_async_copy);
+    substituter.thread_domains_ = CollectPipelineThreadDomains(f->body);
     for (const auto &[_, buffer] : f->buffer_map) {
       substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
@@ -1013,7 +1019,7 @@ private:
 
   PipelineStageAnalyzer MakeStageAnalyzer() const {
     return PipelineStageAnalyzer(buffer_data_to_buffer_, target_,
-                                 use_async_copy_);
+                                 use_async_copy_, thread_domains_);
   }
 
   void AnalyzeCopyLastUse(
@@ -1330,6 +1336,7 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
   bool use_async_copy_{};
+  Map<Var, arith::IntSet> thread_domains_;
 };
 
 tvm::transform::Pass PipelinePlanning() {

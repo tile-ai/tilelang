@@ -539,10 +539,12 @@ Stmt LowerAsyncCommitWaitAttrs(const Stmt &stmt) {
  * \param[out] dep_src2dst Optional, a map to store dependency edges from the
  * source to the destination. \param[out] dep_dst2src Optional, a map to store
  * dependency edges from the destination to the source.
+ * \param[in] thread_domains Domains used to compare accesses across threads.
  */
 void BuildDependencyGraph(const Array<SBlock> &blocks,
                           BlockDependencyGraph *dep_src2dst,
-                          BlockDependencyGraph *dep_dst2src) {
+                          BlockDependencyGraph *dep_dst2src,
+                          const Map<Var, arith::IntSet> &thread_domains) {
   using Writer = std::pair<SBlock, BufferRegion>;
   std::unordered_map<Var, std::vector<Writer>, ObjectPtrHash, ObjectPtrEqual>
       buffer_writers;
@@ -552,7 +554,7 @@ void BuildDependencyGraph(const Array<SBlock> &blocks,
       auto it = buffer_writers.find(read->buffer->data);
       if (it != buffer_writers.end()) {
         for (const auto &[writer, write] : it->second) {
-          if (!PipelineRegionsMayConflict(write, read)) {
+          if (!PipelineRegionsMayConflict(write, read, thread_domains)) {
             continue;
           }
           if (dep_src2dst != nullptr) {
@@ -1196,18 +1198,22 @@ public:
    * \param pipeline_info The pipeline annotation information.
    * \param scalar_binding_blocks Replayable scalar Bind statements from the
    * pipeline body.
+   * \param target The compilation target, when available.
+   * \param thread_domains Domains used to compare accesses across threads.
    */
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
                    const PipelineInfo &pipeline_info,
                    const Array<SBlock> &scalar_binding_blocks,
-                   Optional<Target> target)
+                   Optional<Target> target,
+                   Map<Var, arith::IntSet> thread_domains)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
         scalar_binding_blocks_(scalar_binding_blocks),
-        target_(std::move(target)) {}
+        target_(std::move(target)), thread_domains_(std::move(thread_domains)) {
+  }
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -1513,7 +1519,7 @@ private:
           }
           if (writer_info.order < reader_info.order &&
               writer_info.stage < reader_info.stage &&
-              PipelineRegionsMayConflict(*it1, *it2)) {
+              PipelineRegionsMayConflict(*it1, *it2, thread_domains_)) {
             need_multi_version = true;
             break;
           }
@@ -3047,6 +3053,7 @@ private:
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
   Optional<Target> target_;
+  Map<Var, arith::IntSet> thread_domains_;
   Array<SBlock> ordered_stmts_;
   std::vector<ScalarBinding> scalar_bindings_;
   ScalarBindingMap scalar_binding_map_;
@@ -3057,10 +3064,12 @@ PipelineRewriteResult RewritePipeline(
     Map<Var, Buffer> buffer_data_to_buffer,
     const Array<Buffer> &pipeline_allocs, const Array<Buffer> &local_allocs,
     const For &pipeline_loop, const PipelineInfo &pipeline_info,
-    const Array<SBlock> &scalar_binding_blocks, Optional<Target> target) {
+    const Array<SBlock> &scalar_binding_blocks, Optional<Target> target,
+    Map<Var, arith::IntSet> thread_domains) {
   PipelineRewriter rewriter(std::move(buffer_data_to_buffer), pipeline_allocs,
                             local_allocs, pipeline_loop, pipeline_info,
-                            scalar_binding_blocks, std::move(target));
+                            scalar_binding_blocks, std::move(target),
+                            std::move(thread_domains));
   PipelineRewriteResult result;
   result.pipeline = rewriter.BuildPipeline();
   result.buffer_remap = rewriter.GetBufferRemap();
@@ -3199,6 +3208,7 @@ public:
     auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
     auto target = func->GetAttr<Target>(tvm::attr::kTarget);
     PipelineInjector injector(global_symbol, target);
+    injector.thread_domains_ = CollectPipelineThreadDomains(func->body);
     for (const auto &kv : func->buffer_map) {
       const Buffer &buffer = kv.second;
       injector.buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -3234,7 +3244,8 @@ private:
 
     std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
         dep_src2dst;
-    BuildDependencyGraph(original_order, &dep_src2dst, nullptr);
+    BuildDependencyGraph(original_order, &dep_src2dst, nullptr,
+                         thread_domains_);
 
     for (const auto &pair : dep_src2dst) {
       const SBlock &src = pair.first;
@@ -3846,7 +3857,7 @@ private:
 
     PipelineRewriteResult rewrite_result = RewritePipeline(
         buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
-        pipeline_info, scalar_binding_blocks, target_);
+        pipeline_info, scalar_binding_blocks, target_, thread_domains_);
     Stmt pipeline = rewrite_result.pipeline;
 
     subtree_modified_ = true;
@@ -4184,6 +4195,7 @@ private:
   std::vector<std::pair<Buffer, Buffer>> pending_layout_remapped_allocs_;
   Optional<Target> target_;
   Optional<String> global_symbol_;
+  Map<Var, arith::IntSet> thread_domains_;
   // Track whether any pipeline was actually injected in the current
   // subtree.  Used to avoid unnecessary reads/writes recalculation
   // on blocks whose descendants were not modified.

@@ -1,5 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang as tl
+import pytest
 import tilelang.testing
 from tilelang.testing.ir import collect_nodes
 from tilelang.backend.target import determine_target
@@ -872,7 +873,34 @@ def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
 
 
 @tilelang.testing.requires_cuda
-def test_pipeline_planning_tracks_cross_thread_index_producers():
+@pytest.mark.parametrize("threads_x,threads_y", [(32, 1), (8, 4)])
+def test_pipeline_planning_keeps_disjoint_thread_copy_regions(threads_x, threads_y):
+    @T.prim_func
+    def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=(threads_x, threads_y)):
+            tx = T.get_thread_binding(0)
+            ty = T.get_thread_binding(1)
+            shared = T.alloc_shared((64,), T.float32)
+            for k in T.Pipelined(2, num_stages=2):
+                shared[tx + threads_x * ty] = A[k * 64 + tx + threads_x * ty]
+                shared[tx + threads_x * ty + 32] = A[k * 64 + tx + threads_x * ty + 32]
+                B[k * 64 + tx + threads_x * ty] = shared[tx + threads_x * ty]
+                B[k * 64 + tx + threads_x * ty + 32] = shared[tx + threads_x * ty + 32]
+
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = _run_pipeline_planning(mod["before"], sm80_target)
+    anno = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(value) for value in anno["software_pipeline_stage"]]
+    assert stages[:2] == [0, 0]
+    assert all(stage > 0 for stage in stages[2:])
+    tl.transform.InjectSoftwarePipeline()(mod)
+    with sm80_target:
+        tl.lower(before, target=sm80_target)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("materialize_launch", [False, True])
+def test_pipeline_planning_tracks_cross_thread_index_producers(materialize_launch):
     @T.prim_func
     def before(A: T.Tensor((64,), T.float32), B: T.Tensor((64,), T.float32)):
         with T.Kernel(1, threads=32):
@@ -886,6 +914,8 @@ def test_pipeline_planning_tracks_cross_thread_index_producers():
                 data[tx] = A[offset + tx]
                 B[k * 32 + tx] = data[tx]
 
+    if materialize_launch:
+        before = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))["before"]
     mod = _run_pipeline_planning(before, sm80_target)
     anno = _collect_pipeline_loop_annotations(mod["main"])[0]
     assert [int(value) for value in anno["software_pipeline_stage"]] == [0, 0, 0, 0, 1]
