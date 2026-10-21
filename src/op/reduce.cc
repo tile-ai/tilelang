@@ -25,6 +25,7 @@
 #include <tvm/tirx/stmt.h>
 
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -84,10 +85,11 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
   if (node->type->IsLogical()) {
-    for (const Buffer &buffer : {node->src, node->dst}) {
+    for (const auto &[name, buffer] :
+         {std::pair{"input", node->src}, {"output", node->dst}}) {
       CHECK(IsSharedBuffer(buffer) || IsFragmentBuffer(buffer), ValueError)
-          << "reduce_" << reduce_type
-          << " requires shared or fragment buffers, got " << buffer.scope();
+          << "reduce_" << reduce_type << " requires a shared or fragment "
+          << name << " buffer, got " << buffer.scope();
     }
     DataType src_dtype = node->src->dtype;
     CHECK(src_dtype.is_scalar() &&
@@ -95,11 +97,11 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
                src_dtype.is_uint() || src_dtype.is_float16() ||
                src_dtype == DataType::Float(32) ||
                src_dtype == DataType::Float(64) || src_dtype.is_bfloat16()),
-          ValueError)
+          TypeError)
         << "reduce_" << reduce_type
         << " requires a boolean, integer, or floating-point input, got "
         << src_dtype;
-    CHECK(node->dst->dtype == DataType::Bool(), ValueError)
+    CHECK(node->dst->dtype == DataType::Bool(), TypeError)
         << "reduce_" << reduce_type << " requires a bool output, got "
         << node->dst->dtype;
     CHECK(node->dim >= -1 &&
@@ -109,25 +111,74 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
         << " is out of range for input rank " << node->src->shape.size();
 
     arith::Analyzer analyzer;
-    for (const BufferRegion &region : {node->srcRegion_, node->dstRegion_}) {
+    // Validate original regions before shared operands are materialized. The
+    // same checks also protect native fragment-to-fragment calls.
+    if (node->src->data.same_as(node->dst->data)) {
+      bool overlaps = node->src.same_as(node->dst);
+      for (size_t i = 0; overlaps && i < node->srcRegion_->region.size(); ++i) {
+        const Range &a = node->srcRegion_->region[i];
+        const Range &b = node->dstRegion_->region[i];
+        overlaps = analyzer.CanProve(a->min < b->min + b->extent) &&
+                   analyzer.CanProve(b->min < a->min + a->extent);
+      }
+      CHECK(node->src.same_as(node->dst) && !overlaps, ValueError)
+          << "reduce_" << reduce_type
+          << " requires non-overlapping input and output regions; "
+             "aliased buffer views are unsupported";
+    }
+    for (const auto &[name, region] :
+         {std::pair{"input", node->srcRegion_}, {"output", node->dstRegion_}}) {
       for (size_t i = 0; i < region->region.size(); ++i) {
         const Range &range = region->region[i];
-        CHECK(
-            analyzer.CanProveEqual(range->min, 0) &&
-                analyzer.CanProveEqual(range->extent, region->buffer->shape[i]),
-            ValueError)
+        if (IsFragmentBuffer(region->buffer)) {
+          CHECK(analyzer.CanProveEqual(range->min, 0) &&
+                    analyzer.CanProveEqual(range->extent,
+                                           region->buffer->shape[i]),
+                ValueError)
+              << "reduce_" << reduce_type
+              << " currently requires a full fragment " << name
+              << "; copy the full fragment to shared memory before "
+                 "selecting a subregion";
+        }
+        PrimExpr simplified_extent = analyzer.Simplify(range->extent);
+        const auto *extent = simplified_extent.as<IntImmNode>();
+        CHECK(extent && extent->value >= 0, ValueError)
             << "reduce_" << reduce_type
-            << " requires subregions to be materialized before native lowering";
-        const auto *extent = range->extent.as<IntImmNode>();
-        CHECK(extent && extent->value > 0, ValueError)
-            << "reduce_" << reduce_type
-            << " requires non-empty static regions in native lowering; "
-               "the frontend handles empty reductions";
+            << " requires non-negative static region extents in native "
+               "lowering; "
+               "use a fixed-size tile with neutral padding";
       }
     }
-    CHECK(!node->src->data.same_as(node->dst->data), ValueError)
-        << "reduce_" << reduce_type
-        << " requires non-overlapping input and output";
+
+    Array<PrimExpr> reduced_shape, kept_shape;
+    if (node->dim == -1 || node->srcRegion_->region.size() == 1) {
+      reduced_shape = kept_shape = {Integer(1)};
+    } else {
+      for (size_t i = 0; i < node->srcRegion_->region.size(); ++i) {
+        PrimExpr extent = node->srcRegion_->region[i]->extent;
+        kept_shape.push_back(i == node->dim ? make_const(extent.dtype(), 1)
+                                            : extent);
+        if (i != node->dim) {
+          reduced_shape.push_back(extent);
+        }
+      }
+    }
+    auto matches_shape = [&](const Array<PrimExpr> &shape) {
+      if (shape.size() != node->dstRegion_->region.size()) {
+        return false;
+      }
+      for (size_t i = 0; i < shape.size(); ++i) {
+        if (!analyzer.CanProveEqual(shape[i],
+                                    node->dstRegion_->region[i]->extent)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    CHECK(matches_shape(reduced_shape) || matches_shape(kept_shape), ValueError)
+        << "Invalid reduce output shape for reduce_" << reduce_type << ": "
+        << node->dstRegion_ << ", expected " << reduced_shape << " or "
+        << kept_shape;
   }
   // Optional "batch" annotation: number of output elements per batched
   // AllReduce call (default 1 = scalar).
@@ -309,6 +360,11 @@ TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReduceOpNode::RegisterReflection();
   ReduceTypeNode::RegisterReflection();
+  reflection::GlobalDef().def(
+      "tl.ReduceOp",
+      [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+        return ReduceOp(std::move(args), std::move(annotations));
+      });
 }
 
 } // namespace tl

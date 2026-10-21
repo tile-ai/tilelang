@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 from typing import Literal
-from tvm import DataType, arith, tirx
+from tvm import arith, tirx
+from tilelang import _ffi_api
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate, fill
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
-from tilelang.utils.language import is_shared, is_fragment, is_local, is_full_region
+from tilelang.utils.language import is_shared, is_fragment, is_local
 from tilelang._typing import BufferLikeType
 from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
@@ -56,61 +57,39 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
+    annotations = _normalize_annotations(annotations)
+    if batch > 1:
+        annotations["batch"] = batch
     out_region = to_buffer_region(out)
     out_buffer = out_region.buffer
-    is_logical = reduce_type in ("any", "all")
-    if is_logical:
-        source_region = to_buffer_region(buffer)
-        source_buffer = source_region.buffer
-        analyzer = arith.Analyzer()
-        for name, region in (("input", source_region), ("output", out_region)):
-            if not (is_shared(region) or is_fragment(region)):
-                raise ValueError(f"reduce_{reduce_type} requires a shared or fragment {name} buffer, got {region.buffer.scope()}")
-            for axis, extent in zip(region.region, region.buffer.shape):
-                if (
-                    analyzer.can_prove(axis.min < 0)
-                    or analyzer.can_prove(axis.extent < 0)
-                    or analyzer.can_prove(axis.min + axis.extent > extent)
-                ):
-                    raise ValueError(f"reduce_{reduce_type} {name} region is out of bounds for buffer {region.buffer.name}")
-                if not isinstance(analyzer.simplify(axis.extent), tirx.IntImm):
-                    raise ValueError(
-                        f"reduce_{reduce_type} currently requires statically known region extents for fragment lowering; "
-                        "use a fixed-size tile with neutral padding"
-                    )
-        source_dtype = source_buffer.dtype
-        if DataType(source_dtype).lanes != 1 or not (
-            source_dtype == "bool"
-            or source_dtype.startswith(("int", "uint"))
-            or source_dtype in ("float16", "bfloat16", "float32", "float64")
-        ):
-            raise TypeError(f"reduce_{reduce_type} requires a boolean, integer, or floating-point input, got {source_dtype}")
-        if out_buffer.dtype != "bool":
-            raise TypeError(f"reduce_{reduce_type} requires a bool output, got {out_buffer.dtype}")
-        if source_buffer.data.same_as(out_buffer.data) and (
-            not source_buffer.same_as(out_buffer)
-            or all(
-                analyzer.can_prove(a.min < b.min + b.extent) and analyzer.can_prove(b.min < a.min + a.extent)
-                for a, b in zip(source_region.region, out_region.region)
-            )
-        ):
-            raise ValueError(
-                f"reduce_{reduce_type} requires non-overlapping input and output regions; aliased buffer views are unsupported"
-            )
-        for name, region in (("input", source_region), ("output", out_region)):
-            if is_fragment(region) and not is_full_region(region):
-                raise ValueError(
-                    f"reduce_{reduce_type} currently requires a full fragment {name}; "
-                    "copy the full fragment to shared memory before selecting a subregion"
-                )
-        if dim is None:
-            dim = -1  # Native whole-region logical reduction.
-        else:
+    if reduce_type in ("any", "all"):
+        if dim is not None:
             if not isinstance(dim, int) or isinstance(dim, bool):
                 raise TypeError(f"reduce_{reduce_type} dim must be an integer or None, got {dim}")
             dim = _legalize_dim(buffer, dim)
-            if not 0 <= dim < len(source_region.region):
-                raise ValueError(f"reduce_{reduce_type} axis {dim} is out of range for input rank {len(source_region.region)}")
+            # -1 is reserved for whole-region reductions in the native op.
+            if dim < 0:
+                raise ValueError(f"reduce_{reduce_type} axis is out of range for input rank {len(retrieve_shape(buffer))}")
+        else:
+            dim = -1
+        # Construct the native TileOp before expansion so it sees original
+        # shared regions and validates even reductions folded to fill/no-op.
+        call = tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get(_REDUCE_OP_KEY),
+            to_tile_region(buffer, access_type="r"),
+            to_tile_region(out_region, access_type="w" if clear else "rw"),
+            reduce_type,
+            dim,
+            clear,
+            annotations=annotations,
+        )
+        _ffi_api.ReduceOp(call.args, call.annotations)
+        analyzer = arith.Analyzer()
+        if any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(buffer)):
+            if clear and not any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(out_region)):
+                evaluate(fill(out, tirx.const(reduce_type == "all", "bool")))
+            return
     if reduce_type in ("bitand", "bitor", "bitxor"):
         # Both faces must be integral: a float source would otherwise be silently
         # value-cast to an integer before the bitwise reduction runs.
@@ -119,36 +98,17 @@ def reduce(
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
         if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
-    # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-    buf_shape = retrieve_shape(buffer)
-    out_shape = retrieve_shape(out_region)
-    if is_logical and (dim == -1 or len(buf_shape) == 1):
-        expected_shapes = [[1]]
-    else:
+    if reduce_type not in ("any", "all"):
+        # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
+        buf_shape = retrieve_shape(buffer)
+        out_shape = retrieve_shape(out_region)
         expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
-    valid_shape = (
-        any(
-            len(out_shape) == len(shape) and all(analyzer.can_prove_equal(a, b) for a, b in zip(out_shape, shape))
-            for shape in expected_shapes
-        )
-        if is_logical
-        else list(out_shape) in expected_shapes
-    )
-    if not valid_shape:
-        expected_shapes_str = " or ".join(map(str, expected_shapes))
-        raise ValueError(
-            f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
-            f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
-        )
-
-    if is_logical and any(analyzer.can_prove(extent == 0) for extent in buf_shape):
-        if clear and not any(analyzer.can_prove(extent == 0) for extent in out_shape):
-            evaluate(fill(out, tirx.const(reduce_type == "all", "bool")))
-        return
-
-    annotations = _normalize_annotations(annotations)
-    if batch > 1:
-        annotations["batch"] = batch
+        if list(out_shape) not in expected_shapes:
+            expected_shapes_str = " or ".join(map(str, expected_shapes))
+            raise ValueError(
+                f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
+                f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
+            )
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.

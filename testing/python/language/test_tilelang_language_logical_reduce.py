@@ -209,14 +209,15 @@ def test_logical_reduce_shared_subregion_nonoverlap(op):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op", ["any", "all"])
 @pytest.mark.parametrize("clear", [True, False])
-def test_logical_reduce_empty_region(op, clear):
+@pytest.mark.parametrize("dst_scope", ["local.fragment", "shared"])
+def test_logical_reduce_empty_region(op, clear, dst_scope):
     reduce_op = T.reduce_any if op == "any" else T.reduce_all
 
     @T.prim_func
     def main(Seed: T.Tensor((4,), "bool"), Out: T.Tensor((4,), "bool")):
         with T.Kernel(1, threads=128):
             src = T.alloc_shared((4, 8), "int32")
-            dst = T.alloc_fragment((4,), "bool")
+            dst = T.alloc_buffer((4,), "bool", scope=dst_scope)
             T.copy(Seed, dst)
             reduce_op(src[:, 0:0], dst, dim=1, clear=clear)
             T.copy(dst, Out)
@@ -309,14 +310,13 @@ def test_logical_reduce_rejects_scopes(op, scope):
 
 
 @pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
-def test_logical_reduce_rejects_dtype_axis_shape_and_overlap(op):
+def test_logical_reduce_rejects_axis_shape_and_overlap(op):
     src = tvm.tirx.decl_buffer((4, 8), "bool", scope="local.fragment")
-    dst = tvm.tirx.decl_buffer((4,), "int32", scope="local.fragment")
-    with pytest.raises(TypeError, match="requires a bool output"):
-        op(src, dst)
     dst = tvm.tirx.decl_buffer((4,), "bool", scope="local.fragment")
     with pytest.raises(ValueError, match="out of range"):
         op(src, dst, dim=2)
+    with pytest.raises(ValueError, match="out of range"):
+        op(src, dst, dim=-3)
     with pytest.raises(ValueError, match="Invalid reduce output shape"):
         op(src, dst, dim=None)
     with pytest.raises(ValueError, match="non-overlapping"):
@@ -325,15 +325,42 @@ def test_logical_reduce_rejects_dtype_axis_shape_and_overlap(op):
         op(src[:, 0:4], dst)
     with pytest.raises(ValueError, match="full fragment output"):
         op(src, src[:, 0:0], dim=1)
-    shared = tvm.tirx.decl_buffer((4, 8), "float32", scope="shared")
-    with pytest.raises(ValueError, match="out of bounds"):
-        op(shared[:, 4:12], dst)
+    shared = tvm.tirx.decl_buffer((4, 8), "bool", scope="shared")
+    with pytest.raises(ValueError, match="non-overlapping"):
+        op(shared, shared[:, 0:1], dim=1)
+    scalar = tvm.tirx.decl_buffer((1,), "bool", scope="shared")
+    with pytest.raises(ValueError, match="Invalid reduce output shape"):
+        op(shared[:, 0:0], scalar, dim=1)
+
+
+@pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
+@pytest.mark.parametrize("empty,clear", [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize(
+    "source_dtype,output_dtype,message",
+    [
+        ("float32", "int32", "requires a bool output"),
+        ("float8_e4m3fn", "bool", "requires a boolean, integer, or floating-point input"),
+        ("int32x2", "bool", "requires a boolean, integer, or floating-point input"),
+    ],
+)
+def test_logical_reduce_rejects_dtype_before_empty_folding(op, empty, clear, source_dtype, output_dtype, message):
+    src = tvm.tirx.decl_buffer((4, 8), source_dtype, scope="shared")
+    dst = tvm.tirx.decl_buffer((4,), output_dtype, scope="shared")
+    with pytest.raises(TypeError, match=message):
+        op(src[:, 0:0] if empty else src, dst, clear=clear)
+
+
+@pytest.mark.parametrize("op", [T.reduce_any, T.reduce_all])
+def test_logical_reduce_rejects_dynamic_region_at_creation(op):
     n = T.Var("n", "int32")
-    with pytest.raises(ValueError, match="statically known region extents"):
-        op(shared[:, 0:n], dst)
+    src = tvm.tirx.decl_buffer((4, 8), "float32", scope="shared")
+    dst = tvm.tirx.decl_buffer((4,), "bool", scope="local.fragment")
+    with pytest.raises(ValueError, match="requires non-negative static region extents in native lowering"):
+        op(src[:, 0:n], dst)
 
 
 @pytest.mark.parametrize("op", ["any", "all"])
+@pytest.mark.parametrize("scope", ["local.fragment", "shared"])
 @pytest.mark.parametrize(
     "backend",
     [
@@ -341,14 +368,14 @@ def test_logical_reduce_rejects_dtype_axis_shape_and_overlap(op):
         pytest.param("cutedsl", marks=tilelang.testing.requires_cuda.marks(support_required="compile-only")),
     ],
 )
-def test_logical_reduce_backend_codegen(op, backend):
+def test_logical_reduce_backend_codegen(op, scope, backend):
     from tilelang.engine.lower import lower
 
     build_func = f"target.build.tilelang_{backend}_without_compile"
     build = tvm.ffi.get_global_func(build_func, allow_missing=True)
     if build is None:
         pytest.skip(f"{backend} codegen is not enabled in this build")
-    program, _ = _kernel(op, "int64", shape=(1, 512), dim=None)
+    program, _ = _kernel(op, "int64", shape=(1, 512), dim=None, src_scope=scope, dst_scope=scope)
     if backend == "cutedsl":
         from tilelang.backend.module import BackendContext
         from tilelang.cuda.cutedsl_backend import BACKEND
@@ -373,7 +400,7 @@ def test_logical_reduce_backend_codegen(op, backend):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "source_scope,output_dtype,message",
-    [("local", "bool", "requires shared or fragment"), ("local.fragment", "int32", "requires a bool output")],
+    [("local", "bool", "requires a shared or fragment"), ("local.fragment", "int32", "requires a bool output")],
 )
 def test_logical_reduce_native_validation(source_scope, output_dtype, message):
     @T.prim_func
