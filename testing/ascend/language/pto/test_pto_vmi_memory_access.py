@@ -15,7 +15,7 @@ Contracts verified here:
   address after the normal negative-index legalization, so the scheduler sees
   the actual accessed range.
 * Ordinary continuous loads round up to full physical vectors; ordinary
-  broadcast keeps the conservative extent; ``dintlv`` loads declare both
+  broadcast declares the single element it actually reads; ``dintlv`` loads declare both
   results and a two-input ``dintlv`` store declares the full 2*N span (its
   PTODSL attribute is emitted as ``intlv``); group envelopes cover all
   groups (slot/broadcast count one element per group, a static negative
@@ -35,6 +35,16 @@ Contracts verified here:
   elements; an explicit ``access_ptr`` keeps the caller-declared descriptor
   plus the extra offset and the UB scope check; gather/scatter preserve
   non-zero bases.
+* Ordinary ``vload``/``vstore`` validate the complete physical envelope against
+  the existing logical pointer-region analysis.  A local descriptor must prove the
+  row-major carry from its own start (there is no whole-buffer fallback);
+  dynamic indices may use active loop domains and stable integer lets, but a
+  mutable read or an unknown scalar is never bound as an equality; dynamic
+  inner dimensions and symbolic multi-dimensional extents require an in-row
+  proof.  An explicit ``access_ptr`` keeps its caller-declared descriptor only
+  when its extent contains the envelope and its declared region still covers
+  the access; unrecoverable handles, multi-level aliases, direction mismatches
+  and element-unit mismatches are rejected.
 * Masks never shrink the may-write extent, and a logical ``size=80`` load
   declares both physical reads.
 * Removed interface parameters (``repeat_stride``, vload ``unpack`` /
@@ -126,12 +136,17 @@ def _single(artifact, op_name):
     return pairs[0]
 
 
-def _assert_descriptor_error(build, op, reason):
+def _assert_descriptor_error(build, op, reason, *, explicit=False):
     """Assert an unprovable footprint is rejected with the right op and reason."""
     with pytest.raises(ValueError) as excinfo:
         build()
     message = str(excinfo.value)
-    assert f"{op} cannot construct a descriptor covering the complete physical access" in message, message
+    prefix = (
+        "cannot verify the explicit access_ptr descriptor"
+        if explicit
+        else "cannot construct a descriptor covering the complete physical access"
+    )
+    assert f"{op} {prefix}" in message, message
     assert reason in message, message
     return message
 
@@ -297,6 +312,30 @@ def test_buffer_region_source_declares_from_region_minimum():
     assert _vload_descriptor(_buffer_region_kernel()) == (0, 64, 1, 0)
 
 
+def test_ramp_source_uses_the_public_buffer_region_base():
+    """An automatic BufferLoad with a Ramp index consumes ``Ramp.base``.
+
+    This is the public ``get_buffer_region_from_load``/``T.access_ptr``
+    convention.  The Ramp lanes and stride describe the vector value, not the
+    VMI physical envelope, so they never participate in the descriptor.
+    """
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                v = T.vmi.vload(work[tvm.tirx.Ramp(32, 1, 64)], size=64)
+                T.vmi.vstore(v, work[128])
+            T.copy(work, C)
+
+    artifact = _lower_pto(main)
+    assert _descriptor(artifact, "tl.vmi.vload") == (32, 64, 1, 0)
+    vload_line = next(line.strip() for line in artifact.kernel_source.splitlines() if "vmi.vload" in line)
+    assert "addptr" in vload_line and ", 32)" in vload_line, vload_line
+
+
 def test_elem_offset_counted_exactly_once():
     """A view with elem_offset=16 loaded at index 32 starts at element 48."""
     artifact = _lower_pto(_elem_offset_kernel())
@@ -312,11 +351,13 @@ def test_elem_offset_counted_exactly_once():
     [("int8", 256), (F16, 128), (F32, 128)],
     ids=["b8", "b16", "b32"],
 )
-def test_ordinary_broadcast_keeps_conservative_extent(dtype, size):
-    """brc reads one source element; the conservative ``size`` extent is kept."""
+def test_ordinary_broadcast_declares_the_single_read_element(dtype, size):
+    """brc reads one source element; the automatic descriptor declares it."""
 
-    # b8 full-VL broadcast at 64 reads [64,320) and stores [128,384); size
-    # the storage (and its initialization) for the real footprint.
+    # A b8 broadcast at 64 physically reads the single element at 64 and
+    # stores [128,384).  The declared footprint is that one element, not the
+    # broadcast output width, so a mid-row position on a multi-dimensional
+    # buffer is never misread as a cross-row access.
     @T.prim_func
     def main(A: T.Tensor((512,), dtype), C: T.Tensor((512,), dtype)):
         with T.Kernel(1):
@@ -329,13 +370,56 @@ def test_ordinary_broadcast_keeps_conservative_extent(dtype, size):
             T.copy(work, C)
 
     artifact = _lower_pto(main)
-    # The declaration is not re-expressed as a broadcast output width: it stays
-    # `size` address elements (a conservative over-report).
-    assert _descriptor(artifact, "tl.vmi.vload") == (64, size, 1, 0)
+    assert _descriptor(artifact, "tl.vmi.vload") == (64, 1, 1, 0)
     assert 'dist_mode="brc"' in artifact.kernel_source
 
     kernel = _compile_pto(main)
     assert "pto.vmi.vload(" in kernel.get_kernel_source()
+
+
+@pytest.mark.parametrize(
+    ("row", "col"),
+    [(0, 64), (0, 127)],
+    ids=["mid-column", "row-end"],
+)
+def test_ordinary_broadcast_from_a_mid_row_position_is_accepted(row, col):
+    """A broadcast never crosses a row: on a tight row-major buffer any legal
+    start position is accepted.  Non-tight layouts still need the existing
+    layout checks; a transposed-view broadcast is not exempted here."""
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            out = T.alloc_shared((128,), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                v = T.vmi.vload(work[row, col], size=128, dist_mode="brc")
+                T.vmi.vstore(v, out[0])
+            T.copy(out, C)
+
+    assert _vload_descriptor(main) == (row * 128 + col, 1, 1, 0)
+
+
+def test_explicit_broadcast_descriptor_needs_only_the_single_element():
+    """An explicit broadcast descriptor is checked against the real envelope.
+
+    The instruction reads exactly the element at the pointer; the explicit
+    form declares that single element, the same as the automatic form.
+    """
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                p = T.access_ptr(work[32], "r", extent=1)
+                v = T.vmi.vload(p, 0, size=64, dist_mode="brc")
+                T.vmi.vstore(v, work[128])
+            T.copy(work, C)
+
+    assert _vload_descriptor(main) == (32, 1, 1, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -807,24 +891,41 @@ def test_padded_low_group_dma_synchronizes_before_vmi_load():
     ids=["padded", "unproven-low", "transposed", "compressed", "negative-start"],
 )
 def test_padded_origin_plan_static_layout_boundaries(shape, strides, indices, accepted):
-    """The origin plan requires non-negative starts and an envelope above the origin.
+    """The origin plan requires non-negative starts, a padded layout and an
+    envelope above the origin.
 
-    A rejected source makes this candidate return ``None`` so the caller keeps
-    trying other constructions; only after every candidate fails does the
-    caller emit the unified diagnostic.
+    A layout-incompatible source makes this candidate return ``None`` so the
+    caller keeps trying other constructions.  A candidate that can be built is
+    still subject to the shared acceptance exit (address preservation,
+    containment and logical coverage), so an envelope below the origin is
+    rejected there rather than silently dropped.
     """
     from tilelang.ascend.language import vmi as vmi_language
 
     buffer = tvm.tirx.decl_buffer(shape, F32, name="view", strides=strides, scope="shared.dyn")
     source = tvm.tirx.BufferLoad(buffer, list(indices))
-    plan = vmi_language._padded_origin_plan(source, low=-256, high=64)
+    proof = vmi_language._local_analyzer([*indices, *shape])
+    candidate = vmi_language._padded_origin_plan(source, proof, low=-256, high=64)
+    if candidate is None:
+        assert not accepted
+        return
+    zero = tvm.tirx.IntImm("int32", 0)
+    plan = vmi_language._DescriptorPlan(
+        base=candidate[1],
+        starts=[zero for _ in shape],
+        extent=candidate[0],
+        offset=candidate[2],
+        relative=zero,
+        kind="origin",
+        require_static_shape=True,
+    )
+    address = vmi_language._VmiAddress("buffer", source=source, buffer=buffer, starts=list(indices))
+    rejection = vmi_language._accept_plan(proof, address, plan, low=-256, high=64)
+    assert (rejection is None) == accepted, rejection
     if accepted:
-        assert plan is not None
-        assert plan[0] == 320
-        assert plan[1] is not None and plan[1].same_as(buffer)
-        assert _const(plan[2]) == 256
-    else:
-        assert plan is None
+        assert candidate[0] == 320
+        assert candidate[1] is not None and candidate[1].same_as(buffer)
+        assert _const(candidate[2]) == 256
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +1150,554 @@ def test_explicit_pointer_scope_validation_is_preserved():
 
     with pytest.raises(TypeError, match="requires a UB pointer"):
         build()
+
+
+# ---------------------------------------------------------------------------
+# Ordinary logical coverage: local descriptors and explicit pointers
+# ---------------------------------------------------------------------------
+def _ordinary_access_kernel(shape, starts, size, *, is_load, strides=None, explicit=False, extent=None, mask_lanes=None):
+    """Build one ordinary UB view access over a tight or transposed view.
+
+    The opposite side of the access always uses the tight root buffer, so only
+    the tested address can make a case fail.  ``mask_lanes`` adds a small store
+    mask; masks never shrink the may-write envelope.
+    """
+    if explicit and extent is None:
+        extent = size
+
+    @T.prim_func
+    def main(A: T.Tensor((1024,), F32), C: T.Tensor((1024,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((1024,), F32)
+            T.copy(A, work)
+            if strides is None:
+                view = tvm.tirx.decl_buffer(shape, F32, data=work.data, scope="shared.dyn")
+            else:
+                view = T.StridedTensor(shape, strides, F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                if mask_lanes is None:
+                    mask = None
+                else:
+                    mask = T.vmi.create_mask(mask_lanes, size=size)
+                if is_load:
+                    if explicit:
+                        value = T.vmi.vload(T.access_ptr(view[starts], "r", extent=extent), 0, size=size)
+                    else:
+                        value = T.vmi.vload(view[starts], size=size)
+                    T.vmi.vstore(value, work[0], mask)
+                else:
+                    value = T.vmi.vload(work[0], size=size)
+                    if explicit:
+                        T.vmi.vstore(value, T.access_ptr(view[starts], "w", extent=extent), mask)
+                    else:
+                        T.vmi.vstore(value, view[starts], mask)
+            T.copy(work, C)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    ("shape", "starts", "size", "is_load", "expected"),
+    [
+        ((4, 128), (0, 32), 64, True, (32, 64, 1, 0)),
+        ((4, 128), (3, 0), 128, True, (384, 128, 1, 0)),
+        ((4, 128), (1, 0), 128, True, (128, 128, 1, 0)),
+        ((2, 128), (0, 64), 128, True, None),
+        ((4, 128), (0, 64), 128, True, None),
+        ((4, 128), (0, 64), 128, False, None),
+        ((4, 128), (0, 64), 80, True, None),
+    ],
+    ids=["in-row", "last-row", "first-row", "cross-row-tight-2x128", "cross-row", "store-cross-row", "rounded-cross-row"],
+)
+def test_ordinary_local_descriptor_requires_complete_row_major_coverage(shape, starts, size, is_load, expected):
+    """A local descriptor keeps its own start, so the existing row-major carry
+    must include the whole physical envelope; there is no whole-buffer fallback.
+    The rounded case checks the physical envelope (128), not the logical size.
+    """
+    if expected is None:
+        _assert_descriptor_error(
+            lambda: _ordinary_access_kernel(shape, starts, size, is_load=is_load),
+            "T.vmi.vload" if is_load else "T.vmi.vstore",
+            "existing row-major carry",
+        )
+        return
+    assert _vload_descriptor(_ordinary_access_kernel(shape, starts, size, is_load=is_load)) == expected
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["store-direct", "store-explicit"])
+def test_cross_row_small_mask_store_is_rejected(explicit):
+    """A one-lane store mask never shrinks the may-write envelope, so a
+    cross-row store address is rejected on the direct and explicit paths."""
+    _assert_descriptor_error(
+        lambda: _ordinary_access_kernel((2, 128), (0, 64), 128, is_load=False, explicit=explicit, mask_lanes=1),
+        "T.vmi.vstore",
+        "existing row-major carry",
+        explicit=explicit,
+    )
+
+
+@pytest.mark.parametrize("is_load", [True, False], ids=["load-direct", "store-direct"])
+def test_transposed_view_access_is_rejected(is_load):
+    """A local coordinate of a non-tight view has no local coverage proof; the
+    store form is not a bypass."""
+    _assert_descriptor_error(
+        lambda: _ordinary_access_kernel((128, 2), (64, 0), 128, is_load=is_load, strides=(1, 128)),
+        "T.vmi.vload" if is_load else "T.vmi.vstore",
+        "not proven tight row-major",
+    )
+
+
+@pytest.mark.parametrize(
+    ("shape", "starts", "extent", "size", "expected"),
+    [
+        ((4, 128), (0, 64), 192, 128, (64, 192, 1, 0)),
+        ((2, 128), (0, 32), 64, 64, (32, 64, 1, 0)),
+        ((4, 128), (0, 0), 256, 128, (0, 256, 1, 0)),
+        ((2, 4, 128), (0, 0, 0), 512, 256, (0, 512, 1, 0)),
+        ((2, 128), (0, 64), 128, 128, None),
+        ((4, 128), (0, 96), 64, 64, None),
+        ((2, 4, 128), (0, 1, 0), 512, 256, None),
+    ],
+    ids=[
+        "two-row",
+        "in-row",
+        "origin-256",
+        "3d-512",
+        "cross-row-2x128",
+        "carry-start-96",
+        "3d-high-axis-carry-512",
+    ],
+)
+def test_explicit_descriptor_must_cover_the_ordinary_access(shape, starts, extent, size, expected):
+    """An explicit access_ptr is caller-declared, so it is never rewritten: its
+    extent must contain the complete physical envelope and its declared region
+    must still cover the access under the existing logical analysis.
+    """
+
+    def build():
+        return _ordinary_access_kernel(shape, starts, size, is_load=True, explicit=True, extent=extent)
+
+    if expected is None:
+        _assert_descriptor_error(build, "T.vmi.vload", "does not cover the complete access", explicit=True)
+        return
+    assert _vload_descriptor(build()) == expected
+    if shape == (4, 128) and extent == 192:
+        # One representative case goes through PTODSL -> PTOAS -> Bisheng.
+        kernel = _compile_pto(build())
+        assert "pto.vmi.vload(" in kernel.get_kernel_source()
+
+
+def test_explicit_pointer_whole_dense_permutation_is_accepted():
+    """An exact whole dense permutation has no over-approximation or aliasing."""
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            T.copy(A, work)
+            view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                p = T.access_ptr(view[0, 0], "r", extent=256)
+                v = T.vmi.vload(p, size=256)
+                T.vmi.vstore(v, work[0])
+            T.copy(work, C)
+
+    assert _vload_descriptor(main) == (0, 256, 1, 0)
+
+
+def test_explicit_pointer_partial_permutation_is_rejected():
+    """A non-tight view needs an exact whole dense permutation, not a prefix."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+                with T.SimdVF():
+                    p = T.access_ptr(view[0, 0], "r", extent=128)
+                    v = T.vmi.vload(p, size=128)
+                    T.vmi.vstore(v, work[0])
+                T.copy(work, C)
+
+        return main
+
+    with pytest.raises(ValueError, match="does not cover the complete access"):
+        build()
+
+
+def test_explicit_pointer_envelope_and_direction_diagnostics():
+    def kernel(body):
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    body(work)
+                T.copy(work, C)
+
+        return main
+
+    def too_small(work):
+        p = T.access_ptr(work[0], "r", extent=32)
+        return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
+
+    with pytest.raises(ValueError, match="instruction_offset \\+ envelope_high <= descriptor_extent"):
+        kernel(too_small)()
+
+    def negative_offset(work):
+        p = T.access_ptr(work[64], "r", extent=128)
+        return T.vmi.vstore(T.vmi.vload(p, -16, size=64), work[128])
+
+    with pytest.raises(ValueError, match="0 <= instruction_offset \\+ envelope_low"):
+        kernel(negative_offset)()
+
+    def wrong_direction(work):
+        p = T.access_ptr(work[0], "w", extent=64)
+        return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
+
+    with pytest.raises(TypeError, match="declare read access"):
+        kernel(wrong_direction)()
+
+    def zero_extent(work):
+        p = T.access_ptr(work[0], "r", extent=0)
+        return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
+
+    with pytest.raises(ValueError, match="descriptor extent must be positive"):
+        kernel(zero_extent)()
+
+
+def test_ordinary_address_rejects_unrecoverable_handles():
+    def raw_data():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    v = T.vmi.vload(work.data, 0, size=64)
+                    T.vmi.vstore(v, work[128])
+                T.copy(work, C)
+
+        return main
+
+    with pytest.raises(TypeError, match="no recoverable definition"):
+        raw_data()
+
+    def scalar_handle(k):
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    v = T.vmi.vload(k, 0, size=64)
+                    T.vmi.vstore(v, work[128])
+                T.copy(work, C)
+
+        return main
+
+    # A numeric handle is never followed to its definition and treated as a
+    # pointer.
+    with pytest.raises(TypeError, match="got a scalar int32 variable"):
+        scalar_handle(tvm.tirx.Var("unused", "int32"))()
+
+    def multi_level():
+        from tilelang.ascend.language import vmi as vmi_language
+        from tilelang.language.frame import clear_let_values, register_let_value
+
+        first = tvm.tirx.Var("probe_first", "handle")
+        second = tvm.tirx.Var("probe_second", "handle")
+        register_let_value(first, second)
+        try:
+            vmi_language._parse_vmi_address(first, is_load=True, context="T.vmi.vload(...)")
+        finally:
+            clear_let_values()
+
+    with pytest.raises(TypeError, match="multi-level pointer aliases"):
+        multi_level()
+
+
+@pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+def test_ordinary_accesses_require_a_ub_buffer(is_load):
+    """Direct and explicit ordinary addresses share the UB scope check."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    if is_load:
+                        v = T.vmi.vload(A[0], size=64)
+                        T.vmi.vstore(v, work[128])
+                    else:
+                        v = T.vmi.vload(work[0], size=64)
+                        T.vmi.vstore(v, C[0], T.vmi.create_mask(64, size=64))
+                T.copy(work, C)
+
+        return main
+
+    with pytest.raises(TypeError, match="requires a UB pointer"):
+        build()
+
+
+def test_ordinary_dynamic_outer_row_is_accepted():
+    """The outermost axis has no outward carry to prove, so a legal dynamic
+    row coordinate stays expressible without a general bounds proof."""
+
+    @T.prim_func
+    def main(A: T.Tensor((1024,), F32), C: T.Tensor((1024,), F32), k: T.int32):
+        with T.Kernel(1):
+            work = T.alloc_shared((1024,), F32)
+            T.copy(A, work)
+            view = tvm.tirx.decl_buffer((4, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                v = T.vmi.vload(view[k, 0], size=256)
+                T.vmi.vstore(v, work[512])
+            T.copy(work, C)
+
+    artifact = _lower_pto(main)
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
+    assert _const(ptr.args[3]) == 256
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 0
+
+
+def test_vstore_requires_matching_value_and_destination_element_dtype():
+    """The descriptor extent and the value lanes must use the same element unit."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                out = T.alloc_shared((256,), F16)
+                T.copy(A, work)
+                with T.SimdVF():
+                    v = T.vmi.vload(work[0], size=64)
+                    T.vmi.vstore(v, out[128])
+                T.copy(work, C)
+
+        return main
+
+    with pytest.raises(TypeError, match="destination element dtype float16"):
+        build()
+
+
+# ---------------------------------------------------------------------------
+# Ordinary dynamic indices: proof from active loop domains and stable lets
+# ---------------------------------------------------------------------------
+def _serial_in_row():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                for i in T.serial(2):
+                    col = 64 * i
+                    T.vmi.vstore(T.vmi.vload(work[0, col], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+def _chained_let_in_row():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                for i in T.serial(1, 3):
+                    base = i - 1
+                    col = 64 * base
+                    T.vmi.vstore(T.vmi.vload(work[0, col], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+def _nested_in_row():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                for i in T.serial(2):
+                    for j in T.serial(2):
+                        col = 32 * i + 16 * j
+                        T.vmi.vstore(T.vmi.vload(work[0, col], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [_serial_in_row, _chained_let_in_row, _nested_in_row],
+    ids=["serial", "chained-let", "nested"],
+)
+def test_ordinary_dynamic_in_row_indices_are_accepted(factory):
+    """Loop domains and stable lets prove that the inner start stays in its row.
+
+    The descriptor keeps the symbolic start, so only the extent and the zero
+    instruction offset are asserted structurally.
+    """
+    artifact = _lower_pto(factory())
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
+    assert _const(ptr.args[3]) == 64
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 0
+
+
+def _serial_wrap():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                for i in T.serial(3):
+                    col = 64 * i
+                    T.vmi.vstore(T.vmi.vload(work[0, col], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+def _mutable_snapshot():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                index = T.alloc_var("int32", init=0)
+                snapshot = index
+                col = 64 * snapshot
+                T.vmi.vstore(T.vmi.vload(work[0, col], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+def _unknown_inner_start():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32), k: T.int32):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                T.vmi.vstore(T.vmi.vload(work[0, k], size=64), work[1, 0])
+            T.copy(work, C)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [_serial_wrap, _mutable_snapshot, _unknown_inner_start],
+    ids=["serial-3", "mutable-snapshot", "unknown-scalar"],
+)
+def test_ordinary_dynamic_row_crossing_is_rejected(factory):
+    """An unprovable start keeps the diagnostic; a mutable read or an unknown
+    scalar is never bound as an equality in the local proof environment."""
+    _assert_descriptor_error(factory, "T.vmi.vload", "existing row-major carry")
+
+
+def test_ordinary_dynamic_shape_in_row_is_accepted():
+    """A symbolic inner length is accepted when the static access extent stays
+    inside that innermost row."""
+
+    @T.prim_func
+    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                for i in T.serial(2):
+                    n = 64 * (i + 1)
+                    view = tvm.tirx.decl_buffer((2, n), F32, data=work.data, scope="shared.dyn")
+                    v = T.vmi.vload(view[0, 0], size=64)
+                    T.vmi.vstore(v, work[2 * n])
+            T.copy(work, C)
+
+    artifact = _lower_pto(main)
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert _const(ptr.args[3]) == 64
+    assert _const(call.args[1]) == 0
+
+
+def test_ordinary_dynamic_shape_wrap_is_rejected():
+    """A symbolic row length fails when the start is not provably inside it."""
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((512,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    for i in T.serial(2):
+                        n = 32 * i
+                        view = tvm.tirx.decl_buffer((2, n), F32, data=work.data, scope="shared.dyn")
+                        v = T.vmi.vload(view[0, 16], size=64)
+                        T.vmi.vstore(v, work[2 * n])
+                T.copy(work, C)
+
+        return main
+
+    _assert_descriptor_error(build, "T.vmi.vload", "non-constant dimension 1")
+
+
+def _symbolic_extent_kernel(col):
+    @T.prim_func
+    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((512,), F32)
+            T.copy(A, work)
+            view = tvm.tirx.decl_buffer((4, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                for i in T.serial(2):
+                    count = 64 * (i + 1)
+                    p = T.access_ptr(view[0, col], "r", extent=count)
+                    v = T.vmi.vload(p, size=64)
+                    T.vmi.vstore(v, work[384])
+            T.copy(work, C)
+
+    return main
+
+
+@pytest.mark.parametrize(("col", "accepted"), [(0, True), (64, False)], ids=["in-row", "cross-row"])
+def test_explicit_symbolic_extent_must_stay_in_the_innermost_row(col, accepted):
+    """A non-constant descriptor extent is provable only inside the innermost
+    row: the same extent from a cross-row start is rejected."""
+    if not accepted:
+        _assert_descriptor_error(
+            lambda: _symbolic_extent_kernel(col),
+            "T.vmi.vload",
+            "non-constant extent must stay inside the innermost dimension",
+            explicit=True,
+        )
+        return
+    artifact = _lower_pto(_symbolic_extent_kernel(col))
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
+    assert _const(call.args[1]) == 0
+    kernel = _compile_pto(_symbolic_extent_kernel(col))
+    assert "pto.vmi.vload(" in kernel.get_kernel_source()
 
 
 # ---------------------------------------------------------------------------

@@ -372,30 +372,58 @@ def _is_unit_stride_1d(buffer) -> bool:
     return True
 
 
-def _tight_buffer_span(buffer):
-    """Return ``prod(shape)`` when *buffer* is tightly packed, else ``None``.
+_UB_SCOPES = frozenset({"shared", "shared.dyn", "ub"})
 
-    A whole-buffer descriptor is only sound when the logical buffer covers one
-    contiguous physical span.  Explicit strides must equal the row-major
-    strides; default (empty) strides are row-major by construction.
+
+def _is_tight_buffer(buffer) -> bool:
+    """Whether *buffer* is tightly packed row-major.
+
+    Explicit strides must equal the row-major strides; default (empty) strides
+    are row-major by construction.  The comparison uses Python integers only:
+    a symbolic row-major product could narrow or overflow in its index dtype,
+    so it is not treated as an equality proof.
     """
     ndim = len(buffer.shape)
     if ndim == 0:
-        return None
-    if buffer.strides:
-        if len(buffer.strides) != ndim:
-            return None
-        from tvm import arith
+        return False
+    if not buffer.strides:
+        return True
+    if len(buffer.strides) != ndim:
+        return False
+    expected = 1
+    for dim in range(ndim - 1, -1, -1):
+        stride = _constant_int(buffer.strides[dim])
+        if stride is None or stride != expected:
+            return False
+        if dim > 0:
+            length = _constant_int(buffer.shape[dim])
+            if length is None or length <= 0:
+                return False
+            expected *= length
+    return True
 
-        analyzer = arith.Analyzer()
-        expected = 1
-        for dim in range(ndim - 1, -1, -1):
-            if not analyzer.can_prove_equal(buffer.strides[dim], expected):
-                return None
-            expected = expected * buffer.shape[dim]
+
+def _whole_buffer_span(buffer, proof):
+    """Whole-buffer element span when it can be declared without narrowing.
+
+    A multi-dimensional span must be the product of static positive lengths, so
+    the descriptor extent stays an exact Python integer.  A one-dimensional
+    span is the length itself, so a symbolic length is accepted when it is
+    provably positive; no product is formed and nothing can overflow.
+    """
+    if not _is_tight_buffer(buffer):
+        return None
+    if len(buffer.shape) == 1:
+        length = _constant_int(buffer.shape[0])
+        if length is not None:
+            return length if length > 0 else None
+        return buffer.shape[0] if proof.can_prove(buffer.shape[0] > 0) else None
     span = 1
     for dim in buffer.shape:
-        span = span * dim
+        length = _constant_int(dim)
+        if length is None or length <= 0:
+            return None
+        span *= length
     return span
 
 
@@ -431,12 +459,13 @@ def _source_relative_offset(source):
     return source_offsets[0] - origin_offsets[0]
 
 
-def _provably_non_negative_starts(source) -> bool:
+def _provably_non_negative_starts(source, proof) -> bool:
     """Whether every source axis start is a scalar proven non-negative.
 
     Relocating a descriptor moves the source position into the instruction
     offset, which bypasses the normal negative-index legalization.  Only
-    sources whose starts are provably non-negative may take that path.
+    sources whose starts are provably non-negative may take that path.  The
+    caller's per-access proof supplies active loop domains and stable lets.
     """
     if isinstance(source, Buffer):
         return True
@@ -446,10 +475,7 @@ def _provably_non_negative_starts(source) -> bool:
         starts = [region.min for region in source.region]
     else:
         return False
-    from tvm import arith
-
-    analyzer = arith.Analyzer()
-    return all(getattr(start.dtype, "lanes", 1) == 1 and analyzer.can_prove(start >= 0) for start in starts)
+    return all(getattr(start.dtype, "lanes", 1) == 1 and proof.can_prove(start >= 0) for start in starts)
 
 
 def _proven_sign(analyzer, expr) -> int:
@@ -467,9 +493,24 @@ def _vmi_op_name(is_load: bool) -> str:
     return "T.vmi.vload" if is_load else "T.vmi.vstore"
 
 
-def _descriptor_error(source, *, is_load, reason, size=None, group=None, stride=None, block_stride=None):
+def _descriptor_error(
+    source,
+    *,
+    is_load,
+    reason,
+    buffer=None,
+    size=None,
+    group=None,
+    stride=None,
+    block_stride=None,
+    start=None,
+    extent=None,
+    low=None,
+    high=None,
+):
     """Build the frontend diagnostic for an unprovable physical footprint."""
-    buffer = source if isinstance(source, Buffer) else source.buffer
+    if buffer is None:
+        buffer = source if isinstance(source, Buffer) else source.buffer
     strides = tuple(buffer.strides) if buffer.strides else ()
     context = f"buffer {buffer.name!r}: shape={tuple(buffer.shape)}, strides={strides}, elem_offset={buffer.elem_offset}"
     params = []
@@ -481,6 +522,12 @@ def _descriptor_error(source, *, is_load, reason, size=None, group=None, stride=
         params.append(f"stride={stride}")
     if block_stride is not None:
         params.append(f"block_stride={block_stride}")
+    if start is not None:
+        params.append(f"descriptor_start={tuple(start)}")
+    if extent is not None:
+        params.append(f"descriptor_extent={extent}")
+    if low is not None or high is not None:
+        params.append(f"access_envelope=[{low}, {high})")
     if params:
         context += ", " + ", ".join(params)
     return ValueError(
@@ -490,36 +537,564 @@ def _descriptor_error(source, *, is_load, reason, size=None, group=None, stride=
     )
 
 
-def _try_whole_buffer_plan(source, *, low, high):
-    """Try a whole tight-buffer descriptor that provably covers ``[low, high)``.
+# ---------------------------------------------------------------------------
+# Local proof environment and ordinary-access coverage proofs
+# ---------------------------------------------------------------------------
+# Node types that may participate in a stable scalar integer definition.  A
+# BufferLoad (for example a mutable local.var read) or any call is deliberately
+# not bound: the frontend only consumes definitions whose value is fixed by the
+# surrounding integer arithmetic.  Cast nodes are kept as-is so narrowed or
+# overflowing arithmetic is never silently strengthened.
+_STABLE_SCALAR_NODE_TYPES = (
+    tirx.Var,
+    tirx.IntImm,
+    tirx.Cast,
+    tirx.Add,
+    tirx.Sub,
+    tirx.Mul,
+    tirx.FloorDiv,
+    tirx.FloorMod,
+    tirx.Min,
+    tirx.Max,
+)
 
-    ``low`` and ``high`` are the complete instruction envelope relative to the
-    source address.  The plan uses the buffer origin as the descriptor and
-    carries the source position as the instruction offset, so it is only
-    returned when a single linear relative offset is available, every source
-    axis start is provably non-negative (otherwise moving the start would
-    bypass the normal negative-index legalization), and the envelope lies
-    inside ``[0, tight_span)``.  Otherwise the caller keeps trying other
-    constructions and diagnoses after all of them fail.
+_COVERAGE_PREFIX = "the existing logical pointer-region analysis does not cover the complete access"
+
+
+def _is_integer_scalar(expr) -> bool:
+    dtype = getattr(expr, "dtype", None)
+    if dtype is None or int(getattr(dtype, "lanes", 1)) != 1:
+        return False
+    return str(dtype).startswith(("int", "uint"))
+
+
+def _is_stable_integer_arithmetic(expr) -> bool:
+    """Whether *expr* is a scalar integer definition safe to bind in a proof."""
+    if not isinstance(expr, tirx.PrimExpr) or not _is_integer_scalar(expr):
+        return False
+    nodes = []
+    tirx.stmt_functor.post_order_visit(expr, nodes.append)
+    for node in nodes:
+        if isinstance(node, (tirx.BufferLoad, tirx.Call)):
+            return False
+        if not isinstance(node, _STABLE_SCALAR_NODE_TYPES):
+            return False
+    return True
+
+
+def _vars_in(expr):
+    found = []
+    tirx.stmt_functor.post_order_visit(expr, lambda node: found.append(node) if isinstance(node, tirx.Var) else None)
+    return found
+
+
+def _local_analyzer(expressions):
+    """Build the per-access analyzer from active loop domains and stable lets.
+
+    Active ``ForFrame`` ``vars/doms`` are bound outer-to-inner; a stable scalar
+    integer definition is bound only after its own dependencies, and only when
+    the accessed expressions actually reference it.  No global table is kept and
+    no definition containing a mutable read or a call is treated as an equality.
     """
-    buffer = source if isinstance(source, Buffer) else source.buffer
-    if not _provably_non_negative_starts(source):
-        return None
-    span = _tight_buffer_span(buffer)
-    relative = _source_relative_offset(source)
-    if span is None or relative is None:
-        return None
+    from tvm import arith
+    from tvm.script.ir_builder import tirx as _builder_tirx
+    from tilelang.language.frame import get_let_value, has_let_value
+
+    proof = arith.Analyzer()
+    bound = set()
+    frames = IRBuilder.current().frames if IRBuilder.is_in_scope() else ()
+    for frame in frames:
+        if not isinstance(frame, _builder_tirx.frame.ForFrame):
+            continue
+        for var, dom in zip(getattr(frame, "vars", ()) or (), getattr(frame, "doms", ()) or ()):
+            if var in bound:
+                continue
+            proof.bind(var, dom)
+            bound.add(var)
+
+    done = set()
+
+    def bind_definition(var):
+        if var in done:
+            return
+        done.add(var)
+        if var in bound or not has_let_value(var):
+            return
+        rhs = get_let_value(var)
+        if not _is_stable_integer_arithmetic(rhs):
+            return
+        for dependency in _vars_in(rhs):
+            bind_definition(dependency)
+        if var in bound:
+            return
+        proof.bind(var, rhs)
+        bound.add(var)
+
+    for expr in expressions:
+        if not isinstance(expr, tirx.PrimExpr):
+            continue
+        for var in _vars_in(expr):
+            bind_definition(var)
+    return proof
+
+
+def _coverage_starts(buffer, starts):
+    """Normalize only indices the negative-index pass provably rewrites.
+
+    The proof may use ``shape + index`` only when a bare analyzer (no loop or
+    let facts) proves the index negative, because the pass applies its own
+    rewrite with at least those facts.  A more restricted normalization is not
+    allowed: the frontend must not claim a coordinate the pass will not produce.
+    """
     from tvm import arith
 
-    analyzer = arith.Analyzer()
-    if not analyzer.can_prove(relative + low >= 0):
+    bare = arith.Analyzer()
+    normalized = []
+    for dim, start in enumerate(starts):
+        length = _constant_int(buffer.shape[dim])
+        if length is not None and _is_integer_scalar(start) and bare.can_prove(start < 0):
+            normalized.append(start + length)
+        else:
+            normalized.append(start)
+    return normalized
+
+
+def _local_coverage_reason(proof, buffer, starts, extent):
+    """Return None when the existing row-major carry provably covers ``extent``.
+
+    This mirrors ``LogicalPointerRegion`` for a descriptor that starts at
+    ``starts``: a static positive extent is distributed innermost-first, each
+    non-outermost dimension consumes ``ceil(rem / length)`` rows, and the start
+    offset of every dimension that carries must fit the rows the existing
+    analysis declares.  The outermost dimension has no further outward carry, so it is
+    never given a mechanical bounds check: a legal outer coordinate (for
+    example a dynamic row start) keeps the original expression.  A
+    non-constant extent is only accepted for one dimension or when the whole
+    declaration is provably inside the innermost dimension, so the proof stays
+    valid if a later pass constantizes the extent.  Non-tight layouts have no
+    local proof.
+    """
+    ndim = len(buffer.shape)
+    if ndim == 0:
+        return f"{_COVERAGE_PREFIX}: the buffer has no dimensions"
+    if len(starts) != ndim:
+        return f"{_COVERAGE_PREFIX}: the descriptor start arity does not match the buffer rank"
+    if not _is_tight_buffer(buffer):
+        return (
+            f"{_COVERAGE_PREFIX}: the address is a local coordinate of a buffer whose layout is not "
+            "proven tight row-major, so no accepted local coverage proof applies"
+        )
+    normalized = _coverage_starts(buffer, starts)
+    constant = _constant_int(extent)
+    if constant is None:
+        if not proof.can_prove(extent > 0):
+            return f"{_COVERAGE_PREFIX}: cannot prove the descriptor extent is positive"
+        if ndim > 1:
+            dim = ndim - 1
+            start = normalized[dim]
+            if not proof.can_prove(start >= 0) or not proof.can_prove(start + extent <= buffer.shape[dim]):
+                return (
+                    f"{_COVERAGE_PREFIX}: a non-constant extent must stay inside the innermost "
+                    f"dimension {dim} (length {buffer.shape[dim]}, start {start}), but that inclusion "
+                    "cannot be proven"
+                )
         return None
-    if not analyzer.can_prove(relative + high <= span):
+    if constant <= 0:
+        return f"{_COVERAGE_PREFIX}: the descriptor extent must be positive, got {constant}"
+    rem = constant
+    # Dim 0 is the outermost axis: there is no further outward carry to declare,
+    # so only dimensions that carry into an outer axis are checked.
+    for dim in range(ndim - 1, 0, -1):
+        if rem <= 1:
+            return None
+        start = normalized[dim]
+        length = _constant_int(buffer.shape[dim])
+        if length is None:
+            if not proof.can_prove(start >= 0) or not proof.can_prove(start + rem <= buffer.shape[dim]):
+                return (
+                    f"{_COVERAGE_PREFIX}: {rem} remaining elements must stay inside the non-constant "
+                    f"dimension {dim} (start {start}), but that inclusion cannot be proven"
+                )
+            return None
+        if length <= 0:
+            return f"{_COVERAGE_PREFIX}: dimension {dim} has non-positive length {length}"
+        rnext = (rem + length - 1) // length
+        if not proof.can_prove(start >= 0) or not proof.can_prove(start < length) or not proof.can_prove(start + rem <= rnext * length):
+            return (
+                f"{_COVERAGE_PREFIX}: dimension {dim} (length {length}) starts at {start} and carries "
+                f"{rem} elements, but the existing row-major carry only declares {rnext} dimension(s) from "
+                "the start"
+            )
+        rem = rnext
+    return None
+
+
+def _origin_prefix_reason(proof, buffer, extent, *, require_static_shape):
+    """Return None when an origin-based descriptor is a stable dense prefix."""
+    if len(buffer.shape) == 0:
+        return f"{_COVERAGE_PREFIX}: the buffer has no dimensions"
+    for dim, length in enumerate(buffer.shape):
+        value = _constant_int(length)
+        if value is not None and value <= 0:
+            return f"{_COVERAGE_PREFIX}: dimension {dim} has non-positive length {value}"
+        if require_static_shape and value is None:
+            return f"{_COVERAGE_PREFIX}: the origin descriptor has a non-constant dimension {dim}, so no stable dense-prefix proof applies"
+    constant = _constant_int(extent)
+    if constant is not None:
+        if constant <= 0:
+            return f"{_COVERAGE_PREFIX}: the descriptor extent must be positive, got {constant}"
+        return None
+    if not proof.can_prove(extent > 0):
+        return f"{_COVERAGE_PREFIX}: cannot prove the descriptor extent is positive"
+    return None
+
+
+def _whole_dense_permutation_reason(buffer, starts, extent):
+    """Return None for an exact whole dense-permutation descriptor.
+
+    The layout is accepted when every shape and stride is a static positive
+    integer, all descriptor starts are zero, the extent is exactly the whole
+    dense span, and the strides are the successive products of the non-singleton
+    dimensions sorted by stride.  Singleton axes do not change coverage.
+    """
+    if not buffer.strides or len(buffer.strides) != len(buffer.shape):
+        return "the buffer has no explicit permutation strides"
+    if not all(_constant_int(start) == 0 for start in starts):
+        return "the descriptor start is not the origin"
+    dims = []
+    for length in buffer.shape:
+        value = _constant_int(length)
+        if value is None or value <= 0:
+            return "the shape is not static and positive"
+        dims.append(value)
+    total = 1
+    for value in dims:
+        total *= value
+    if _constant_int(extent) != total:
+        return f"the descriptor extent is not exactly the whole dense span {total}"
+    axes = []
+    for dim, value in enumerate(dims):
+        stride = _constant_int(buffer.strides[dim])
+        if stride is None or stride < 0:
+            return "a stride is not a static non-negative integer"
+        if value == 1:
+            continue
+        axes.append((stride, value))
+    axes.sort()
+    expected = 1
+    for stride, value in axes:
+        if stride != expected:
+            return f"stride {stride} does not continue the dense permutation at {expected}"
+        expected *= value
+    return None
+
+
+def _scalar_start_indices(source, *, buffer, context, ramp_base=False):
+    """Extract one scalar integer start per buffer dimension.
+
+    An automatic BufferLoad address follows the public
+    ``get_buffer_region_from_load``/``T.access_ptr`` convention: a Ramp index
+    contributes only its scalar ``base``.  The Ramp lanes and stride describe
+    the vector value, not the VMI physical envelope, so they are never used as
+    address bounds.  Explicit ``tl.access_ptr`` descriptors stay scalar-only
+    (that frontend already reduced a Ramp base to a scalar).
+    """
+    if isinstance(source, Buffer):
+        dtype = "int32" if not buffer.shape else str(buffer.shape[0].dtype)
+        starts = [tirx.IntImm(dtype, 0) for _ in buffer.shape]
+    elif isinstance(source, BufferLoad):
+        starts = list(source.indices)
+    elif isinstance(source, BufferRegion):
+        starts = [region.min for region in source.region]
+    else:
+        starts = []
+    if len(starts) != len(buffer.shape):
+        raise TypeError(f"{context} requires a full-rank buffer address, got {len(starts)} indices for rank {len(buffer.shape)}")
+    if ramp_base:
+        starts = [start.base if isinstance(start, tirx.Ramp) else start for start in starts]
+    for start in starts:
+        if not _is_integer_scalar(start):
+            raise TypeError(f"{context} requires scalar integer buffer indices; vector indices cannot be reduced to one address start")
+    return starts
+
+
+class _VmiAddress:
+    """The single parsed address record used by an ordinary VMI access."""
+
+    __slots__ = ("kind", "source", "buffer", "starts", "extent", "rw_mask", "call")
+
+    def __init__(self, kind, *, source, buffer, starts, extent=None, rw_mask=None, call=None):
+        self.kind = kind
+        self.source = source
+        self.buffer = buffer
+        self.starts = starts
+        self.extent = extent
+        self.rw_mask = rw_mask
+        self.call = call
+
+    @property
+    def is_pointer(self) -> bool:
+        return self.kind == "pointer"
+
+
+def _validate_ub_buffer(buffer, *, context):
+    """Require the accessed buffer to live in UB with one scalar linear address."""
+    scope = buffer.scope()
+    if scope not in _UB_SCOPES:
+        raise TypeError(f"{context} requires a UB pointer, got buffer scope {scope!r}")
+    if buffer.axis_separators:
+        raise TypeError(
+            f"{context} requires a single scalar linear buffer address, but buffer {buffer.name!r} "
+            f"declares axis separators {tuple(buffer.axis_separators)}"
+        )
+
+
+def _validate_linear_address(buffer, starts, *, context):
+    """Require ``buffer.offset_of`` to yield exactly one scalar linear offset."""
+    try:
+        offsets = buffer.offset_of(list(starts))
+        origin = buffer.offset_of([0] * len(buffer.shape))
+    except Exception as error:  # pylint: disable=broad-except
+        raise TypeError(f"{context} requires a single scalar linear buffer address, but offset_of failed: {error}") from error
+    if len(offsets) != 1 or len(origin) != 1:
+        raise TypeError(
+            f"{context} requires a single scalar linear buffer address, got {len(offsets)} offsets "
+            "(axis separators and multiple address spaces are not supported)"
+        )
+
+
+def _validate_pointer_annotation(source, buffer, *, context):
+    """Check the original handle's PointerType against the parsed buffer, if any.
+
+    Plain handle annotations carry no scope or element information; the buffer
+    itself was already validated by :func:`_validate_ub_buffer`.
+    """
+    annotation = getattr(source, "type_annotation", None)
+    storage_scope = getattr(annotation, "storage_scope", None)
+    if storage_scope and storage_scope not in _UB_SCOPES:
+        raise TypeError(f"{context} requires a UB pointer, got pointer scope {storage_scope!r}")
+    if storage_scope and storage_scope != buffer.scope():
+        raise TypeError(f"{context} requires the pointer scope {buffer.scope()!r} to match the accessed buffer, got {storage_scope!r}")
+    element_dtype = getattr(getattr(annotation, "element_type", None), "dtype", None)
+    if element_dtype is not None and str(element_dtype) not in {"", "void"} and str(element_dtype) != str(buffer.dtype):
+        raise TypeError(f"{context} requires the pointer element dtype {buffer.dtype} to match the accessed buffer, got {element_dtype}")
+
+
+def _parse_access_ptr_call(call, *, source, is_load, context):
+    args = list(call.args)
+    if len(args) != 3:
+        raise TypeError(f"{context} requires a three-argument tl.access_ptr descriptor, got {len(args)}")
+    base, extent, mask = args
+    if not isinstance(base, BufferLoad):
+        raise TypeError(f"{context} requires tl.access_ptr to be constructed from a BufferLoad base")
+    if not isinstance(mask, tirx.IntImm) or isinstance(mask.value, bool) or int(mask.value) not in (1, 2, 3):
+        raise TypeError(f"{context} requires a valid tl.access_ptr rw_mask (1, 2, or 3), got {mask!r}")
+    rw_mask = int(mask.value)
+    if is_load and not (rw_mask & 1):
+        raise TypeError(f"{context} requires the explicit descriptor to declare read access, got rw_mask={rw_mask}")
+    if not is_load and not (rw_mask & 2):
+        raise TypeError(f"{context} requires the explicit descriptor to declare write access, got rw_mask={rw_mask}")
+    if not _is_stable_integer_arithmetic(extent):
+        raise TypeError(f"{context} requires a stable scalar integer tl.access_ptr extent, got {extent!r}")
+    buffer = base.buffer
+    _validate_ub_buffer(buffer, context=context)
+    starts = _scalar_start_indices(base, buffer=buffer, context=context)
+    _validate_linear_address(buffer, starts, context=context)
+    if isinstance(source, tirx.Var):
+        _validate_pointer_annotation(source, buffer, context=context)
+    return _VmiAddress("pointer", source=source, buffer=buffer, starts=starts, extent=extent, rw_mask=rw_mask, call=call)
+
+
+def _parse_vmi_address(source, *, is_load, context):
+    """Resolve one ordinary address form exactly once.
+
+    Accepted forms are ``Buffer``, ``BufferLoad``, ``BufferRegion``, a direct
+    ``tl.access_ptr`` call, and a handle ``Var`` whose direct let binding is that
+    call.  Every form must address a UB buffer with one scalar linear offset and
+    no axis separators; a numeric ``Var`` is never followed to its definition
+    and treated as a pointer.  Python aliases of the same object resolve
+    identically; genuine multi-level handle chains, raw ``data`` handles, and
+    unknown handles are rejected with a controlled diagnostic.
+    """
+    if isinstance(source, tirx.Var):
+        from tilelang.language.frame import get_let_value, has_let_value
+
+        if str(source.dtype) != "handle":
+            raise TypeError(f"{context} requires a Buffer address or an explicit tl.access_ptr; got a scalar {source.dtype} variable")
+        if not has_let_value(source):
+            raise TypeError(
+                f"{context} requires a Buffer address or an explicit tl.access_ptr; got a handle with no recoverable definition"
+            )
+        bound = get_let_value(source)
+        if isinstance(bound, tirx.Var):
+            raise TypeError(f"{context} does not support multi-level pointer aliases; bind the tl.access_ptr result directly")
+        if isinstance(bound, tirx.Call) and getattr(bound.op, "name", None) == "tl.access_ptr":
+            if str(bound.dtype) != "handle":
+                raise TypeError(f"{context} requires a bound tl.access_ptr to produce a handle, got {bound.dtype}")
+            return _parse_access_ptr_call(bound, source=source, is_load=is_load, context=context)
+        if isinstance(bound, (Buffer, BufferLoad, BufferRegion)):
+            raise TypeError(f"{context} requires a pointer-producing tl.access_ptr; got a value alias of {type(bound).__name__}")
+        raise TypeError(f"{context} requires a Buffer address or an explicit tl.access_ptr; got an unsupported handle definition")
+    if isinstance(source, tirx.Call):
+        if getattr(source.op, "name", None) != "tl.access_ptr" or str(source.dtype) != "handle":
+            raise TypeError(f"{context} requires a Buffer address or an explicit tl.access_ptr")
+        return _parse_access_ptr_call(source, source=source, is_load=is_load, context=context)
+    if isinstance(source, (Buffer, BufferLoad, BufferRegion)):
+        buffer = source if isinstance(source, Buffer) else source.buffer
+        _validate_ub_buffer(buffer, context=context)
+        starts = _scalar_start_indices(source, buffer=buffer, context=context, ramp_base=True)
+        _validate_linear_address(buffer, starts, context=context)
+        if isinstance(source, BufferLoad) and any(isinstance(index, tirx.Ramp) for index in source.indices):
+            # Consume the same scalar start everywhere: descriptor construction,
+            # address-preservation and coverage all use the normalized load, the
+            # same position the public access_ptr convention selects.
+            source = tirx.BufferLoad(buffer, starts)
+        return _VmiAddress("buffer", source=source, buffer=buffer, starts=starts)
+    raise TypeError(f"{context} requires a Buffer, BufferLoad, BufferRegion, or an explicit tl.access_ptr")
+
+
+def _explicit_descriptor_error(address, *, is_load, reason, delta=None, low=None, high=None):
+    buffer = address.buffer
+    strides = tuple(buffer.strides) if buffer.strides else ()
+    context = f"buffer {buffer.name!r}: shape={tuple(buffer.shape)}, strides={strides}, elem_offset={buffer.elem_offset}"
+    params = [f"descriptor_start={tuple(address.starts)}", f"descriptor_extent={address.extent}"]
+    if delta is not None:
+        params.append(f"instruction_offset={delta}")
+    if low is not None or high is not None:
+        params.append(f"access_envelope=[{low}, {high})")
+    context += ", " + ", ".join(params)
+    return ValueError(f"{_vmi_op_name(is_load)} cannot verify the explicit access_ptr descriptor: {reason} ({context})")
+
+
+class _DescriptorPlan:
+    """One candidate descriptor construction awaiting the shared acceptance check.
+
+    ``base`` is the object the descriptor is built from (``None`` keeps the
+    original source), ``starts`` are its logical start indices, ``extent`` is
+    its declared element length, ``offset`` is the VMI instruction offset and
+    ``relative`` is the descriptor start position measured from the buffer's
+    logical origin.  ``relative`` is only set for candidates that move the
+    descriptor base; the shared check uses it to prove address preservation.
+    """
+
+    __slots__ = ("base", "starts", "extent", "offset", "relative", "kind", "require_static_shape")
+
+    def __init__(self, *, base, starts, extent, kind, offset=None, relative=None, require_static_shape=False):
+        self.base = base
+        self.starts = starts
+        self.extent = extent
+        self.kind = kind
+        self.offset = offset if offset is not None else _zero_offset()
+        self.relative = relative
+        self.require_static_shape = require_static_shape
+
+
+def _plan_coverage_reason(proof, address, plan, extent):
+    """Logical-coverage proof of one candidate under the existing consumer."""
+    buffer = address.buffer
+    if plan.kind == "explicit":
+        return _explicit_coverage_reason(proof, address, extent)
+    if plan.kind == "local":
+        return _local_coverage_reason(proof, buffer, plan.starts, extent)
+    if plan.kind == "origin":
+        return _origin_prefix_reason(proof, buffer, extent, require_static_shape=plan.require_static_shape)
+    raise AssertionError(f"unknown descriptor plan kind {plan.kind!r}")
+
+
+def _accept_plan(proof, address, plan, *, low, high):
+    """The single acceptance exit shared by every descriptor candidate.
+
+    Returns ``None`` when the candidate preserves the original access address,
+    contains the complete physical envelope ``[low, high)`` relative to the
+    instruction offset and covers its declared extent under the existing logical
+    pointer-region analysis.  Otherwise returns ``(kind, reason)`` so the
+    caller can choose the diagnostic: ``kind`` is one of ``extent``,
+    ``address``, ``low``, ``high`` or ``coverage``.
+    """
+    delta = plan.offset if isinstance(plan.offset, tirx.PrimExpr) else tirx.convert(plan.offset)
+    extent = plan.extent if isinstance(plan.extent, tirx.PrimExpr) else tirx.convert(plan.extent)
+    constant = _constant_int(plan.extent)
+    if constant is not None:
+        if constant <= 0:
+            return "extent", f"the descriptor extent must be positive, got {constant}"
+    elif not proof.can_prove(extent > 0):
+        return "extent", "cannot prove the descriptor extent is positive"
+    if plan.relative is not None:
+        source_relative = _source_relative_offset(address.source)
+        if source_relative is None or not proof.can_prove_equal(plan.relative + delta, source_relative):
+            return "address", "the descriptor construction does not preserve the original access address"
+    if not proof.can_prove(delta + low >= 0):
+        return (
+            "low",
+            "the complete physical access envelope starts below the descriptor: 0 <= instruction_offset + envelope_low cannot be proven",
+        )
+    if not proof.can_prove(delta + high <= extent):
+        return (
+            "high",
+            "the complete physical access envelope exceeds the descriptor: "
+            "instruction_offset + envelope_high <= descriptor_extent cannot be proven",
+        )
+    reason = _plan_coverage_reason(proof, address, plan, plan.extent)
+    if reason is not None:
+        return "coverage", reason
+    return None
+
+
+def _explicit_coverage_reason(proof, address, extent):
+    buffer = address.buffer
+    starts = address.starts
+    if _is_tight_buffer(buffer):
+        return _local_coverage_reason(proof, buffer, starts, extent)
+    origin = all(_constant_int(start) == 0 for start in starts)
+    if origin and (buffer.strides and len(buffer.strides) == len(buffer.shape) and _padded_row_major(buffer, proof)):
+        return _origin_prefix_reason(proof, buffer, extent, require_static_shape=True)
+    permutation_reason = _whole_dense_permutation_reason(buffer, starts, extent)
+    if permutation_reason is None:
+        return None
+    return (
+        f"{_COVERAGE_PREFIX}: the descriptor starts at a local coordinate of a buffer whose layout is not "
+        "proven tight row-major, and neither an origin-prefix nor an exact whole dense permutation proof "
+        f"applies ({permutation_reason})"
+    )
+
+
+def _validate_explicit_descriptor(address, proof, *, low, high, delta, is_load, context):
+    """Validate a caller-declared descriptor without rewriting it."""
+    if delta is None:
+        delta = _zero_offset()
+    elif not isinstance(delta, tirx.PrimExpr):
+        delta = tirx.convert(delta)
+    if not _is_integer_scalar(delta):
+        raise TypeError(f"{context} requires a scalar integer instruction offset, got {delta!r}")
+    plan = _DescriptorPlan(base=address.source, starts=address.starts, extent=address.extent, offset=delta, kind="explicit")
+    rejection = _accept_plan(proof, address, plan, low=low, high=high)
+    if rejection is not None:
+        raise _explicit_descriptor_error(address, is_load=is_load, reason=rejection[1], delta=delta, low=low, high=high)
+    return delta
+
+
+def _try_whole_buffer_plan(source, proof, *, low, high):
+    """Build a whole tight-buffer descriptor candidate.
+
+    The plan uses the buffer origin as the descriptor and carries the source
+    position as the instruction offset.  It is only offered when a single
+    linear relative offset is available, the whole span is exactly
+    representable and every source axis start is provably non-negative
+    (otherwise moving the start would bypass the normal negative-index
+    legalization).  Containment and logical coverage are decided by the shared
+    acceptance exit, not here.
+    """
+    buffer = source if isinstance(source, Buffer) else source.buffer
+    if not _provably_non_negative_starts(source, proof):
+        return None
+    span = _whole_buffer_span(buffer, proof)
+    relative = _source_relative_offset(source)
+    if span is None or relative is None:
         return None
     return span, buffer, relative
 
 
-def _padded_row_major(buffer) -> bool:
+def _padded_row_major(buffer, proof) -> bool:
     """Whether every explicit stride is at least its dense row-major stride.
 
     This proves that every legal non-negative coordinate maps at or above its
@@ -527,24 +1102,27 @@ def _padded_row_major(buffer) -> bool:
     :func:`_padded_origin_plan` conservative.  It does not characterize the
     layout as ordinary row-major padding; any view whose strides merely satisfy
     the inequality is accepted.  Views with a smaller stride on some dimension
-    are rejected.
+    are rejected.  The dense stride itself is accumulated in Python integers
+    (inner dimensions must be static), so a narrowed symbolic product is never
+    used as the comparison basis.
     """
     ndim = len(buffer.shape)
     if ndim == 0 or not buffer.strides or len(buffer.strides) != ndim:
         return False
-    from tvm import arith
-
-    analyzer = arith.Analyzer()
     dense_stride = 1
     for dim in range(ndim - 1, -1, -1):
-        if not analyzer.can_prove(buffer.strides[dim] >= dense_stride):
+        if not proof.can_prove(buffer.strides[dim] >= dense_stride):
             return False
-        dense_stride = dense_stride * buffer.shape[dim]
+        if dim > 0:
+            length = _constant_int(buffer.shape[dim])
+            if length is None or length <= 0:
+                return False
+            dense_stride *= length
     return True
 
 
-def _padded_origin_plan(source, *, low, high):
-    """Declare a static negative group stride from the padded buffer origin.
+def _padded_origin_plan(source, proof, *, low, high):
+    """Build a padded-origin descriptor candidate.
 
     The accessed envelope is ``[relative + low, relative + high)`` in element
     addresses, where ``relative`` is the source position from the buffer
@@ -554,38 +1132,29 @@ def _padded_origin_plan(source, *, low, high):
     ``relative + high`` in row-major order.  The declared logical prefix
     ``[0, relative + high)`` therefore covers the whole envelope, and the VMI
     instruction offset carries ``relative`` once from the descriptor origin.
+    Containment and logical coverage are decided by the shared acceptance exit.
     """
     if not isinstance(source, (BufferLoad, BufferRegion)):
         return None
     buffer = source.buffer
     relative = _source_relative_offset(source)
-    if relative is None or not _padded_row_major(buffer):
+    if relative is None or not _padded_row_major(buffer, proof):
         return None
     # A negative or unknown start must keep the normal negative-index
     # legalization instead of being moved into the instruction offset.
-    if not _provably_non_negative_starts(source):
+    if not _provably_non_negative_starts(source, proof):
         return None
-    from tvm import arith
-
-    analyzer = arith.Analyzer()
-    if not analyzer.can_prove(relative + low >= 0):
-        return None
-    return analyzer.simplify(relative + high), buffer, relative
+    return proof.simplify(relative + high), buffer, relative
 
 
-def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem_dtype):
-    """May-access span of an equal-distance group access (C.2/C.3.1).
+def _group_envelope(address, *, lanes, group, stride, dist_mode, is_load, elem_dtype):
+    """Complete physical envelope ``[low, high)`` of an equal-distance group access.
 
     The first group starts at the original access address ``A``.  For stride
     ``S`` and physical group width ``W`` the contiguous envelope is
-    ``[A + min(0,(G-1)*S), A + max(0,(G-1)*S) + W)``.  A negative static
-    stride on a 1-D unit-stride buffer relocates the descriptor to the lowest
-    address and compensates with the VMI instruction offset when the original
-    and shifted positions have the same proven sign, so negative-index
-    legalization rewrites both or neither.  On a view whose strides are each
-    at least their dense row-major stride and whose envelope stays at or above
-    the buffer origin, the descriptor covers the logical prefix from the
-    origin and the instruction offset carries the source position once.
+    ``[A + min(0,(G-1)*S), A + max(0,(G-1)*S) + W)``.  Candidate descriptors
+    for an envelope below the source position are chosen by
+    :func:`_negative_group_plan`.
 
     A group load is unmasked and therefore reads whole physical vectors: when
     the logical per-group width ``N/G`` is not a multiple of the physical VL,
@@ -594,21 +1163,18 @@ def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem
     width because the backend's generated tail mask bounds the writes; do not
     copy the load rounding onto stores.
 
-    A group or stride with no proven bounds, and a finite envelope that no
-    candidate descriptor can express, are reported to the caller instead of
-    being replaced by a fabricated range.  The 1-D relocation above requires
-    the original and shifted positions to have the same proven sign; the
-    origin and whole-tight candidates require every axis start to be provably
-    non-negative.  A start that fails those conditions keeps the diagnostic
-    because moving it would change the address selected by negative-index
-    legalization.
+    A group or stride with no proven bounds is reported to the caller instead
+    of being replaced by a fabricated range.
     """
+    source = address.source
+    buffer = address.buffer
     group_const = _constant_int(group)
     if group_const is not None and group_const <= 0:
         raise ValueError(f"{_vmi_op_name(is_load)}(...) requires group to be a positive integer, got {group_const}")
     if group_const is None:
         raise _descriptor_error(
             source,
+            buffer=buffer,
             is_load=is_load,
             reason="group has no proven bounds for this buffer view",
             size=lanes,
@@ -627,6 +1193,7 @@ def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem
             if bits <= 0:
                 raise _descriptor_error(
                     source,
+                    buffer=buffer,
                     is_load=is_load,
                     reason="the physical element width is unknown, so the complete physical vector width cannot be computed",
                     size=lanes,
@@ -640,9 +1207,10 @@ def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem
         if group_const == 1:
             # One group has no inter-group displacement: the stride cannot move
             # any access, so the envelope is already complete.
-            return per_group, None, None
+            return 0, per_group
         raise _descriptor_error(
             source,
+            buffer=buffer,
             is_load=is_load,
             reason="group stride has no proven bounds for this buffer view",
             size=lanes,
@@ -650,60 +1218,11 @@ def _group_access_plan(source, *, lanes, group, stride, dist_mode, is_load, elem
             stride=stride,
         )
     span = (group_const - 1) * stride_const
-    low = min(0, span)
-    high = max(0, span) + per_group
-    extent = high - low
-    if low == 0:
-        return extent, None, None
-    if isinstance(source, BufferLoad) and len(source.indices) == 1 and _is_unit_stride_1d(source.buffer):
-        from tvm import arith
-
-        analyzer = arith.Analyzer()
-        original_index = source.indices[0]
-        shifted_index = original_index + low
-        # LegalizeNegativeIndex rewrites a provably negative index by adding
-        # the buffer extent.  Relocation is address-preserving when the
-        # original and shifted positions have the same proven sign: with both
-        # non-negative neither is rewritten, and with both negative the same
-        # pass rewrites both, so their difference ``low`` is unchanged.
-        original_sign = _proven_sign(analyzer, original_index)
-        if original_sign != 0 and original_sign == _proven_sign(analyzer, shifted_index):
-            shifted = tirx.BufferLoad(source.buffer, [shifted_index])
-            return extent, shifted, -low
-    origin_plan = _padded_origin_plan(source, low=low, high=high)
-    if origin_plan is not None:
-        return origin_plan
-    plan = _try_whole_buffer_plan(source, low=low, high=high)
-    if plan is not None:
-        return plan
-    relative = _source_relative_offset(source)
-    if relative is None:
-        reason = "the access address cannot be reduced to a single linear element offset"
-    elif not _provably_non_negative_starts(source):
-        reason = (
-            "the source index is negative or has no proven sign, so relocating the descriptor "
-            "cannot preserve the address selected by negative-index legalization"
-        )
-    else:
-        from tvm import arith
-
-        analyzer = arith.Analyzer()
-        if analyzer.can_prove(relative + low < 0):
-            reason = "the finite access envelope starts below the buffer view origin and no constructible descriptor covers it"
-        else:
-            reason = "cannot prove that any constructible descriptor covers the finite access envelope"
-    raise _descriptor_error(
-        source,
-        is_load=is_load,
-        reason=reason,
-        size=lanes,
-        group=group,
-        stride=stride,
-    )
+    return min(0, span), max(0, span) + per_group
 
 
-def _block_access_plan(source, *, lanes, elem_dtype, block_stride, is_load):
-    """May-access span of a block-stride access (C.3.2).
+def _block_envelope(address, *, lanes, elem_dtype, block_stride, is_load):
+    """Complete physical envelope ``[low, high)`` of a block-stride access (C.3.2).
 
     ``block_stride`` is measured in 32-byte blocks.  A full physical vector
     covers eight blocks; physical chunks beyond one vector start at the next
@@ -712,10 +1231,13 @@ def _block_access_plan(source, *, lanes, elem_dtype, block_stride, is_load):
     proven physical bounds, and an unknown element width cannot size a block;
     those cases are reported instead of being replaced by a fabricated range.
     """
+    source = address.source
+    buffer = address.buffer
     bits = int(getattr(elem_dtype, "bits", 0) or 0)
     if bits <= 0:
         raise _descriptor_error(
             source,
+            buffer=buffer,
             is_load=is_load,
             reason="the physical element width is unknown, so the complete block-stride footprint cannot be computed",
             size=lanes,
@@ -729,6 +1251,7 @@ def _block_access_plan(source, *, lanes, elem_dtype, block_stride, is_load):
     if block_const is None:
         raise _descriptor_error(
             source,
+            buffer=buffer,
             is_load=is_load,
             reason="block stride has no proven bounds for this buffer view",
             size=lanes,
@@ -737,32 +1260,33 @@ def _block_access_plan(source, *, lanes, elem_dtype, block_stride, is_load):
     if block_const < 0:
         raise _descriptor_error(
             source,
+            buffer=buffer,
             is_load=is_load,
             reason="negative block-stride control words have no proven physical bounds",
             size=lanes,
             block_stride=block_stride,
         )
-    extent = (blocks - 1) * block_const * elements_per_block + elements_per_block
-    return extent, None, None
+    return 0, (blocks - 1) * block_const * elements_per_block + elements_per_block
 
 
-def _vmi_access_plan(source, *, lanes, elem_dtype, dist_mode, group, stride, block_stride, is_load):
-    """Compute (descriptor extent, descriptor base, instruction offset).
+def _vmi_access_envelope(address, *, lanes, elem_dtype, dist_mode, group, stride, block_stride, is_load):
+    """Complete physical envelope ``[low, high)`` of one ordinary VMI access.
 
-    ``descriptor base`` is ``None`` when the original source is already the
-    right ``access_ptr`` base.  The instruction offset is ``None`` for zero.
-    Only buffer sources are analysed; explicit pointers keep their caller
-    declared ``ptr + offset`` ABI untouched.
+    The envelope is relative to the instruction address.  Loads are unmasked
+    and read whole physical vectors, so their contiguous envelope is rounded up
+    to the physical VL; stores keep the logical lane count because the
+    generated tail mask bounds the writes.  ``dintlv`` touches both interleaved
+    inputs, group modes use :func:`_group_envelope`, block strides use
+    :func:`_block_envelope`, and genuine FP4 descriptors stay in logical
+    element units until ``RewriteFp4ToFp4x2`` performs the single packing.
     """
-    if not isinstance(source, (BufferLoad, Buffer, BufferRegion)):
-        return None, None, None
     if dist_mode == "dintlv":
         # Two interleaved inputs/outputs: the complete 2*N span, regardless of
         # the (ineffective) store mask.
-        return 2 * lanes, None, None
+        return 0, 2 * lanes
     if group is not None:
-        return _group_access_plan(
-            source,
+        return _group_envelope(
+            address,
             lanes=lanes,
             group=group,
             stride=stride,
@@ -771,29 +1295,190 @@ def _vmi_access_plan(source, *, lanes, elem_dtype, dist_mode, group, stride, blo
             elem_dtype=elem_dtype,
         )
     if block_stride is not None:
-        return _block_access_plan(source, lanes=lanes, elem_dtype=elem_dtype, block_stride=block_stride, is_load=is_load)
+        return _block_envelope(address, lanes=lanes, elem_dtype=elem_dtype, block_stride=block_stride, is_load=is_load)
     if str(elem_dtype) == "float4_e2m1fn":
         # Genuine FP4 descriptors stay in logical FP4 element units;
         # RewriteFp4ToFp4x2 performs the single physical packing.
-        return lanes, None, None
+        return 0, lanes
     if dist_mode == "brc":
-        # An ordinary broadcast reads one source element; keeping the old
-        # conservative `size` declaration is allowed and does not change the
-        # instruction semantics.
-        return lanes, None, None
+        # An ordinary broadcast reads exactly one source element.  The
+        # automatic descriptor declares that single element; an explicit
+        # descriptor keeps the caller's extent and only has to contain it.
+        return 0, 1
     if is_load:
         bits = int(getattr(elem_dtype, "bits", 0) or 0)
         if bits <= 0:
             raise _descriptor_error(
-                source,
+                address.source,
+                buffer=address.buffer,
                 is_load=True,
                 reason="the physical element width is unknown, so the complete physical vector width cannot be computed",
                 size=lanes,
             )
         vector_elements = max(1, 2048 // bits)
         # An unmasked load reads whole physical vectors: cover the tail chunk.
-        return (lanes + vector_elements - 1) // vector_elements * vector_elements, None, None
-    return lanes, None, None
+        return 0, (lanes + vector_elements - 1) // vector_elements * vector_elements
+    return 0, lanes
+
+
+def _local_descriptor_plan(address, proof, *, low, high, extent, is_load, size, group, stride, block_stride):
+    """Declare the descriptor at the source position with extent ``extent``.
+
+    The descriptor keeps the caller's own start indices, so the logical
+    coverage proof must show that the existing row-major carry from those
+    starts includes every element of the declared extent.  ``extent`` is the
+    envelope extent (a single element for an ordinary broadcast); the shared
+    acceptance exit re-proves containment of the physical envelope against it.
+    A one-dimensional buffer has no outer dimension the carry can miss and
+    only needs a positive extent, which keeps runtime store offsets working.
+    """
+    plan = _DescriptorPlan(base=None, starts=address.starts, extent=extent, kind="local")
+    rejection = _accept_plan(proof, address, plan, low=low, high=high)
+    if rejection is not None:
+        raise _descriptor_error(
+            address.source,
+            buffer=address.buffer,
+            is_load=is_load,
+            reason=rejection[1],
+            size=size,
+            group=group,
+            stride=stride,
+            block_stride=block_stride,
+            start=address.starts,
+            extent=extent,
+            low=low,
+            high=high,
+        )
+    return plan
+
+
+def _negative_group_plan(address, proof, *, low, high, is_load, size, group, stride):
+    """Cover an envelope that starts below the source position.
+
+    A negative static group stride is the only ordinary access that reaches
+    below its own start.  Three address-preserving constructions are tried, in
+    this order: relocating a one-dimensional unit-stride descriptor to the
+    lowest address while the VMI instruction offset carries ``-low``; a padded
+    origin prefix for a view whose strides are each at least dense; and the
+    whole tight buffer origin.  Every candidate goes through the shared
+    acceptance exit, which re-proves address preservation, physical containment
+    and logical coverage.  Relocations keep the normal negative-index
+    legalization behavior: the original and shifted positions must have the
+    same proven sign, so the pass rewrites both or neither and their difference
+    stays ``low``.  That sign test deliberately uses a bare analyzer: it must
+    model the facts LegalizeNegativeIndex itself has, not the stronger
+    per-access proof.
+    """
+    source = address.source
+    buffer = address.buffer
+    extent = high - low
+    coverage_reason = None
+    if isinstance(source, BufferLoad) and len(source.indices) == 1 and _is_unit_stride_1d(buffer):
+        from tvm import arith
+
+        bare = arith.Analyzer()
+        original_index = source.indices[0]
+        shifted_index = original_index + low
+        original_sign = _proven_sign(bare, original_index)
+        if original_sign != 0 and original_sign == _proven_sign(bare, shifted_index):
+            shifted = tirx.BufferLoad(buffer, [shifted_index])
+            plan = _DescriptorPlan(
+                base=shifted,
+                starts=[shifted_index],
+                extent=extent,
+                offset=-low,
+                relative=_source_relative_offset(shifted),
+                kind="local",
+            )
+            rejection = _accept_plan(proof, address, plan, low=low, high=high)
+            if rejection is None:
+                return plan
+            if rejection[0] == "coverage":
+                coverage_reason = rejection[1]
+    origin_candidate = _padded_origin_plan(source, proof, low=low, high=high)
+    if origin_candidate is not None:
+        plan = _DescriptorPlan(
+            base=origin_candidate[1],
+            starts=[_zero_offset() for _ in buffer.shape],
+            extent=origin_candidate[0],
+            offset=origin_candidate[2],
+            relative=_zero_offset(),
+            kind="origin",
+            require_static_shape=True,
+        )
+        rejection = _accept_plan(proof, address, plan, low=low, high=high)
+        if rejection is None:
+            return plan
+        if rejection[0] == "coverage":
+            coverage_reason = coverage_reason or rejection[1]
+    whole_candidate = _try_whole_buffer_plan(source, proof, low=low, high=high)
+    if whole_candidate is not None:
+        plan = _DescriptorPlan(
+            base=whole_candidate[1],
+            starts=[_zero_offset() for _ in buffer.shape],
+            extent=whole_candidate[0],
+            offset=whole_candidate[2],
+            relative=_zero_offset(),
+            kind="origin",
+            require_static_shape=len(buffer.shape) > 1,
+        )
+        rejection = _accept_plan(proof, address, plan, low=low, high=high)
+        if rejection is None:
+            return plan
+        if rejection[0] == "coverage":
+            coverage_reason = coverage_reason or rejection[1]
+    relative = _source_relative_offset(source)
+    if relative is None:
+        reason = "the access address cannot be reduced to a single linear element offset"
+    elif not _provably_non_negative_starts(source, proof):
+        reason = (
+            "the source index is negative or has no proven sign, so relocating the descriptor "
+            "cannot preserve the address selected by negative-index legalization"
+        )
+    elif proof.can_prove(relative + low < 0):
+        reason = "the finite access envelope starts below the buffer view origin and no constructible descriptor covers it"
+    else:
+        reason = "cannot prove that any constructible descriptor covers the finite access envelope"
+    raise _descriptor_error(
+        source,
+        buffer=buffer,
+        is_load=is_load,
+        reason=coverage_reason or reason,
+        size=size,
+        group=group,
+        stride=stride,
+        start=address.starts,
+        extent=extent,
+        low=low,
+        high=high,
+    )
+
+
+def _vmi_access_plan(address, proof, *, low, high, is_load, size, group, stride, block_stride):
+    """Choose one descriptor construction for an ordinary buffer access.
+
+    A non-negative envelope keeps the caller's start as the descriptor origin
+    and declares the envelope extent (a single element for an ordinary
+    broadcast, whose true physical read is exactly that element).  An envelope
+    below the source position can only come from a negative group stride and
+    uses :func:`_negative_group_plan`.  There is deliberately no whole-buffer
+    fallback for a failed local descriptor: that would hide a genuinely
+    incomplete logical region instead of reporting it.
+    """
+    if low >= 0:
+        return _local_descriptor_plan(
+            address,
+            proof,
+            low=low,
+            high=high,
+            extent=high,
+            is_load=is_load,
+            size=size,
+            group=group,
+            stride=stride,
+            block_stride=block_stride,
+        )
+    return _negative_group_plan(address, proof, low=low, high=high, is_load=is_load, size=size, group=group, stride=stride)
 
 
 def _resolve_ptr_and_offset(source, offset=None, *, access_type: str, extent=None, descriptor=None, instruction_offset=None):
@@ -935,7 +1620,9 @@ def vload(
     )
     if size is None:
         raise TypeError("T.vmi.vload(...) requires size")
-    source_elem = _require_address_element_dtype(source, context="T.vmi.vload(...)")
+    context = "T.vmi.vload(...)"
+    address = _parse_vmi_address(source, is_load=True, context=context)
+    source_elem = _dtype(address.buffer.dtype)
     is_packed_fp4 = str(source_elem) == "float4_e2m1fn"
     if is_packed_fp4:
         if size % 2:
@@ -946,8 +1633,8 @@ def vload(
             raise TypeError("T.vmi.vload(...) only supports contiguous packed FP4 loads")
 
     result_dtype = _vector_result_dtype(source, size, elem_dtype=source_elem)
-    extent, descriptor, instruction_offset = _vmi_access_plan(
-        source,
+    low, high = _vmi_access_envelope(
+        address,
         lanes=size,
         elem_dtype=source_elem,
         dist_mode=dist_mode,
@@ -956,14 +1643,30 @@ def vload(
         block_stride=block_stride,
         is_load=True,
     )
-    ptr, extra_offset = _resolve_ptr_and_offset(
-        source,
-        offset,
-        access_type="r",
-        extent=extent,
-        descriptor=descriptor,
-        instruction_offset=instruction_offset,
-    )
+    proof = _local_analyzer([*address.starts, *address.buffer.shape, low, high, offset, address.extent])
+    if address.is_pointer:
+        ptr = address.source
+        extra_offset = _validate_explicit_descriptor(address, proof, low=low, high=high, delta=offset, is_load=True, context=context)
+    else:
+        plan = _vmi_access_plan(
+            address,
+            proof,
+            low=low,
+            high=high,
+            is_load=True,
+            size=size,
+            group=group,
+            stride=stride,
+            block_stride=block_stride,
+        )
+        ptr, extra_offset = _resolve_ptr_and_offset(
+            address.source,
+            offset,
+            access_type="r",
+            extent=plan.extent,
+            descriptor=plan.base,
+            instruction_offset=plan.offset,
+        )
     if is_packed_fp4:
         extra_offset = _pack_fp4_element_offset(extra_offset, context="T.vmi.vload(...)")
     attrs = {
@@ -1036,8 +1739,19 @@ def vstore(
     elif mask is not None:
         mask = _require_mask(mask, context="T.vmi.vstore(...)")
 
-    extent, descriptor, instruction_offset = _vmi_access_plan(
-        destination,
+    context = "T.vmi.vstore(...)"
+    address = _parse_vmi_address(destination, is_load=False, context=context)
+    # The destination element dtype comes from the parsed buffer, not from a
+    # second lookup through the source handle.  Codegen stores one value
+    # element per destination element, so the type must match exactly.
+    destination_elem = _dtype(address.buffer.dtype)
+    if str(destination_elem) != str(value_dtype):
+        raise TypeError(
+            f"{context} requires the destination element dtype {destination_elem} to match the value element "
+            f"dtype {value_dtype}; convert the value before storing"
+        )
+    low, high = _vmi_access_envelope(
+        address,
         lanes=store_lanes,
         elem_dtype=value_dtype,
         dist_mode=dist_mode,
@@ -1046,14 +1760,30 @@ def vstore(
         block_stride=block_stride,
         is_load=False,
     )
-    ptr, extra_offset = _resolve_ptr_and_offset(
-        destination,
-        offset,
-        access_type="w",
-        extent=extent,
-        descriptor=descriptor,
-        instruction_offset=instruction_offset,
-    )
+    proof = _local_analyzer([*address.starts, *address.buffer.shape, low, high, offset, address.extent])
+    if address.is_pointer:
+        ptr = address.source
+        extra_offset = _validate_explicit_descriptor(address, proof, low=low, high=high, delta=offset, is_load=False, context=context)
+    else:
+        plan = _vmi_access_plan(
+            address,
+            proof,
+            low=low,
+            high=high,
+            is_load=False,
+            size=store_lanes,
+            group=group,
+            stride=stride,
+            block_stride=block_stride,
+        )
+        ptr, extra_offset = _resolve_ptr_and_offset(
+            address.source,
+            offset,
+            access_type="w",
+            extent=plan.extent,
+            descriptor=plan.base,
+            instruction_offset=plan.offset,
+        )
     if str(value_dtype) == "float4_e2m1fn":
         extra_offset = _pack_fp4_element_offset(extra_offset, context="T.vmi.vstore(...)")
         if mask is not None:
