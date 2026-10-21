@@ -682,6 +682,21 @@ class Builder(BaseBuilder):
             tirx.buffer_store(orig_value, value, 0)
             return orig_value
 
+        # Reassigning an immutable let-var to a constant has no TIR node to
+        # carry the new binding, so inside a nested control-flow region the
+        # constant would silently leak past the region's end instead of being
+        # scoped (or rejected) like a PrimExpr assignment. Reject it explicitly.
+        if isinstance(orig_value, Var) and isinstance(value, (int, float, str, tirx.IntImm)):
+            defining_frame = self.name_inside_frame.get(name)
+            current_idx = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+            current_frame = self.frames[current_idx] if current_idx is not None else None
+            if defining_frame is not None and defining_frame is not current_frame:
+                raise RuntimeError(
+                    f"Immutable variable `{name}` is defined outside the current control-flow region and cannot be "
+                    "reassigned to a constant inside it. Assign it outside the branch, or use `T.alloc_var` "
+                    "for a value that must be updated conditionally."
+                )
+
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
             self.name_inside_frame.pop(name, None)
@@ -938,6 +953,12 @@ class Builder(BaseBuilder):
     def prim_func_arg(self, name, value):
         if isinstance(value, (Buffer, Var)):
             arg = tirx.arg(name, value)
+            if isinstance(arg, Var):
+                # Track the argument's defining region so that rebinding it
+                # inside a nested branch is caught like any other let-var.
+                frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+                assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+                self.name_inside_frame[name] = self.frames[frame]
             # Stamp parameter buffers with the signature line (SpanAttacher
             # emits set_fileline with the parameter's own line before each
             # `__tb.arg(...)` call), so diagnostics involving only argument

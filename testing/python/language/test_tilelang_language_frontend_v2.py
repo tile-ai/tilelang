@@ -473,5 +473,42 @@ def test_constexpr_if():
     assert torch.equal(A, expect_2)
 
 
+def test_immutable_rebind_to_constant_inside_branch_is_rejected():
+    def kernel(A: T.Tensor((4,), "int32"), Out: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(4):
+                val = A[i]
+                if val < 10:
+                    val = 10
+                Out[i] = val
+
+    with pytest.raises(RuntimeError, match="Immutable variable"):
+        T.prim_func(kernel)
+
+
+def test_immutable_rebind_to_constant_in_same_region_is_allowed():
+    def kernel(A: T.Tensor((4,), "int32"), Out: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(4):
+                val = A[i]
+                val = 5
+                Out[i] = val
+
+    # Rebinding in the defining region does not cross a scope boundary.
+    T.prim_func(kernel)
+
+
+def test_immutable_scalar_param_rebind_to_constant_inside_branch_is_rejected():
+    def kernel(A: T.Tensor((4,), "int32"), n: T.int32, Out: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(4):
+                if A[i] > 1:
+                    n = 5
+                Out[i] = n
+
+    with pytest.raises(RuntimeError, match="Immutable variable"):
+        T.prim_func(kernel)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
