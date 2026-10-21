@@ -967,6 +967,87 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 
 
 @tilelang.testing.requires_cuda
+def test_cross_thread_waw_with_shifted_partition_requires_sync():
+    """A later writer can target a slot owned by another thread."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        if tx < 6:
+            s[tx + 10] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    syncs = _storage_syncs(lowered)
+    assert len(syncs) == 1
+    first_write = collect_nodes(lowered, tirx.BufferStore)[0]
+    guard = _guard(lowered, _thread_var(lowered) < 6)
+    _assert_stmt_order(lowered, first_write, _sync_stmt(lowered, syncs[0]), guard)
+
+
+@tilelang.testing.requires_cuda
+def test_provably_disjoint_waw_partitions_need_no_sync():
+    """Disjoint write partitions should not acquire a conservative barrier."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        s[tx + 64] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert not _storage_syncs(lowered), "Disjoint partitions need no barrier"
+
+
+@pytest.mark.parametrize("active_threads", [6, 64])
+@tilelang.testing.requires_cuda
+def test_thread_private_waw_needs_no_sync(active_threads):
+    """Thread-private writes remain ordered even when participation differs."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        if tx < active_threads:
+            s[tx] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert not _storage_syncs(lowered), "Thread-private writes need no barrier"
+
+
+@tilelang.testing.requires_cuda
+def test_waw_bind_definition_uses_per_thread_instances():
+    """Bind definitions must not collapse the two WAW thread instances."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        idx: T.int32 = tx + 10
+        s[idx - 10] = T.cast(tx, "float32")
+        if tx < 6:
+            s[idx] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert _storage_syncs(lowered), "Bind sharing hid a cross-thread WAW hazard"
+
+
+@tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
     region that splits a warp must be a compile-time error, not silently
@@ -1865,6 +1946,27 @@ def test_partial_sync_multidimensional_rectangle():
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 1
     assert barriers[0][1] == 64
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("axis", ["y", "z"])
+@pytest.mark.parametrize("shift", [0, 1])
+def test_waw_uses_all_thread_axes(axis, shift):
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 4)
+        ty = T.launch_thread("threadIdx.y", 4)
+        tz = T.launch_thread("threadIdx.z", 4)
+        s[tx + 4 * ty + 16 * tz] = T.float32(1)
+        if axis == "y":
+            s[tx + 4 * ((ty + shift) % 4) + 16 * tz] = T.float32(2)
+        else:
+            s[tx + 4 * ty + 16 * ((tz + shift) % 4)] = T.float32(2)
+
+    lowered = _device_func(run_passes(func))
+    assert len(_storage_syncs(lowered)) == shift
 
 
 if __name__ == "__main__":

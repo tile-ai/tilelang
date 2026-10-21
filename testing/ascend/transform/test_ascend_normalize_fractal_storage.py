@@ -4,9 +4,9 @@ import pytest
 import tilelang
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import make_ascend_l0c_layout, make_ascend_nz_layout
+from tilelang.layout import make_ascend_l0c_layout, make_ascend_nz_layout, make_ascend_major_mn_layout, make_ascend_sf_layout
 from tvm import tirx
-from testing.ascend._ir import calls, nodes
+from testing.ascend._ir import calls, nodes, kernel, copy
 
 
 def _module(owner, view, body):
@@ -483,3 +483,83 @@ def test_l0c_to_ub_lowered_descriptor_is_aligned(dual, src_n, dst_n, expected_n)
     with tvm.transform.PassContext(instruments=[Capture()]):
         tilelang.lower(main, target="ascend")
     assert descriptors == [(expected_n, 16, int(dual))]
+
+
+@pytest.mark.parametrize(
+    "dtype,major_mn,transpose,source,destination,expected_source,expected_destination,pitch",
+    [
+        ("bfloat16", False, False, [24, 16], [24, 16], [32, 16], [32, 16], 2),
+        ("bfloat16", False, False, [24, 16], [64, 32], [32, 16], [32, 16], 4),
+        ("bfloat16", False, True, [24, 16], [16, 24], [32, 16], [16, 32], 1),
+        ("float32", False, False, [17, 1], [17, 1], [32, 8], [32, 8], 2),
+        ("float8_e4m3fn", False, False, [16, 17], [16, 17], [16, 32], [16, 32], 1),
+        ("float8_e4m3fn", True, False, [17, 17], [17, 17], [32, 32], [32, 32], 2),
+    ],
+)
+def test_l0_copy_regions_match_instruction_transfer(
+    dtype, major_mn, transpose, source, destination, expected_source, expected_destination, pitch
+):
+    src = tirx.decl_buffer((64, 64), dtype, name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((64, 64), dtype, name="dst", scope="shared.l0a")
+    layout = make_ascend_major_mn_layout if major_mn else make_ascend_nz_layout
+    before = kernel(
+        copy(src, dst, src_shape=source, dst_shape=destination, annotations={"transpose": tirx.IntImm("int32", int(transpose))}),
+        buffers=[src, dst],
+        annotations={"layout_map": {src: layout(src), dst: layout(dst)}},
+    )
+    after = _normalize(before)
+    operation = _find_copy(after)
+    assert [int(x) for x in operation.args[0].args[2:]] == expected_source
+    assert [int(x) for x in operation.args[1].args[2:]] == expected_destination
+    tvm.ir.assert_structural_equal(after, _normalize(after))
+    with tvm.target.Target("ascend"):
+        (load,) = calls(transform.AscendLowerTileOp()(after), "tl.ascend_load_cbuf_to_ca")
+    assert int(load.args[7]) == pitch
+
+
+@pytest.mark.parametrize("empty_operand", ["source", "destination"])
+def test_l0_copy_normalization_preserves_dynamic_empty_transfer(empty_operand):
+    n = tirx.Var("n", "int32")
+    rows = tirx.min(tirx.max(n, -1), 24)
+    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope="shared.l0a")
+    # A fixed source fits the destination whenever its symbolic size is positive.
+    src_rows, dst_rows = (rows, 32) if empty_operand == "source" else (1, tirx.min(tirx.max(n, -1), 16))
+    before = kernel(
+        copy(src, dst, src_shape=[src_rows, 16], dst_shape=[dst_rows, 16]),
+        buffers=[src, dst],
+        params=[n],
+        annotations={"layout_map": {src: make_ascend_nz_layout(src), dst: make_ascend_nz_layout(dst)}},
+    )
+    after = _normalize(before)
+    operation = _find_copy(after)
+    analyzer = tvm.arith.Analyzer()
+    for value in (-1, 0, 1, 24):
+        extents = [
+            analyzer.simplify(tirx.stmt_functor.substitute(operand.args[2], {n: tirx.IntImm("int32", value)}))
+            for operand in operation.args[:2]
+        ]
+        expected = 0 if value <= 0 else (32 if value == 24 and empty_operand == "source" else 16)
+        assert [int(x) for x in extents] == [expected, expected]
+    with tvm.target.Target("ascend"):
+        lowered = transform.AscendLowerTileOp()(after)
+    assert calls(lowered, "tl.ascend_load_cbuf_to_ca")
+    (guard,) = nodes(lowered, tirx.IfThenElse)
+    for value in (-1, 0, 1, 24):
+        condition = analyzer.simplify(tirx.stmt_functor.substitute(guard.condition, {n: tirx.IntImm("int32", value)}))
+        assert bool(condition) == (value > 0)
+
+
+@pytest.mark.parametrize("dtype,source,expected", [("uint8", [24, 3], [32, 4]), ("uint16", [24, 3], [32, 3])])
+def test_sf_source_uses_scale_pair_transfer_geometry(dtype, source, expected):
+    src = tirx.decl_buffer((32, 4), dtype, name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((32, 4), dtype, name="sf", scope="shared.l0a.sf")
+    before = kernel(
+        copy(src, dst, src_shape=source, dst_shape=source),
+        buffers=[src, dst],
+        annotations={"layout_map": {src: make_ascend_sf_layout(src)}},
+    )
+    operation = _find_copy(_normalize(before))
+    assert [int(x) for x in operation.args[0].args[2:]] == expected
+    # The destination is a virtual handle describing the bound effective tile.
+    assert [int(x) for x in operation.args[1].args[2:]] == source

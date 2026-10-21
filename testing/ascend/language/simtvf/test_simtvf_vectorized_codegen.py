@@ -145,6 +145,71 @@ def _broadcast_kernel(dtype):
     return main
 
 
+def _ramp_value_kernel(explicit):
+    num_elements = 128 if explicit else 256
+
+    @T.prim_func
+    def main(out: T.Tensor((num_elements,), T.int32)):
+        with T.Kernel(1):
+            out_ub = T.alloc_shared((num_elements,), T.int32)
+            with T.SimtVF(threads=32):
+                if explicit:
+                    lane = T.get_thread_binding()
+                    out_ub[T.Ramp(lane * 4, 1, 4)] = T.Ramp(lane * 12 + 7, 3, 4)
+                else:
+                    indices = T.alloc_fragment((num_elements,), T.int32)
+                    for i in T.Parallel(num_elements):
+                        indices[i] = i
+                    for i in T.Parallel(num_elements):
+                        out_ub[i] = indices[i]
+            T.copy(out_ub, out)
+
+    return main
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["parallel-index", "strided-ramp"])
+def test_pto_ramp_value_is_one_vector_argument(explicit):
+    source = _source(_ramp_value_kernel(explicit), target={"kind": "ascend", "keys": ["pto", "ascend"]})
+    lanes = 4 if explicit else 2
+    assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
+
+
+def test_pto_ramp_operands_are_evaluated_once():
+    @T.prim_func
+    def main():
+        with T.Kernel(1), T.SimtVF(threads=1):
+            T.evaluate(
+                T.call_extern(
+                    "int32",
+                    "consume",
+                    T.Ramp(
+                        T.call_extern("int32", "next_base"),
+                        T.call_extern("int32", "next_stride"),
+                        4,
+                    ),
+                )
+            )
+
+    source = _source(main, target={"kind": "ascend", "keys": ["pto", "ascend"]})
+    for operand in ("next_base", "next_stride"):
+        assert source.count(f"{operand}()") == 1
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("explicit", [False, True], ids=["parallel-index", "strided-ramp"])
+def test_ramp_value_preserves_all_lanes(explicit, target):
+    import torch
+
+    kernel = tilelang.compile(_ramp_value_kernel(explicit), target=target, out_idx=-1)
+    result = kernel()
+    torch.npu.synchronize()
+    expected = torch.arange(128 if explicit else 256, dtype=torch.int32)
+    if explicit:
+        expected = expected * 3 + 7
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
 _VECTOR_LOCAL_CASES = [
     pytest.param(2, False, id="float2-literal"),
     pytest.param(2, True, id="float2-unrolled"),

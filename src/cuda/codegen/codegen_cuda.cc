@@ -1884,6 +1884,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // 2. Add a new if statement like the one below.
   // 3. In src/cuda/target_utils.cc, allow this vectorizable cast.
 
+  // Validate supported dtype/rounding combinations before conversion branches
+  // can silently ignore the requested mode.
+  auto round_is_supported = [&]() {
+    if (cast_round.empty()) {
+      return true;
+    }
+    if (cast_round != "rs" || !cast_rbits.defined()) {
+      return false;
+    }
+    if (!(from_ty.is_float() && from_ty.bits() == 32)) {
+      return false;
+    }
+    // E8M0 is deliberately absent: its helpers round towards +infinity
+    // unconditionally, so they cannot honour a requested mode.
+    return target_ty.is_float16() || target_ty.is_bfloat16() ||
+           tl::IsCudaVectorizableFP8(target_ty) || target_ty.is_float4_e2m1fn();
+  };
+  if (!round_is_supported()) {
+    LOG(FATAL) << "round '" << cast_round
+               << "' is not supported for a cast from " << from_ty << " to "
+               << target_ty
+               << ". Supported combinations: round='rs' with an rbits operand, "
+                  "from float32 to float16, bfloat16, float8_e4m3*, "
+                  "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
+                  "round annotation.";
+  }
+
   // Handle conversion from float16 to float32
   if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __half22float2 for vectorized conversion (half2 -> float2)

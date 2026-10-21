@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from tvm.target import Target
+from tvm.tirx import PrimFunc
 
 TargetPredicate = Callable[[Target], bool]
 AvailabilityCheck = Callable[[], bool]
+KernelCallable = Callable[..., Any]
+CallableWrapper = Callable[[KernelCallable, PrimFunc], KernelCallable]
 
 
 def _always_available() -> bool:
@@ -27,6 +31,9 @@ class ExecutionBackendSpec:
     # environment tensor allocator, so kernels with out_idx may allocate
     # their outputs inside the generated host function.
     supports_callee_allocated_outputs: bool = False
+    # Optional target-owned decoration, applied once when JIT installs
+    # the adapter. None preserves the original execution callable.
+    wrap_callable: CallableWrapper | None = None
 
     def matches(self, target: Target) -> bool:
         return True if self.supports_target is None else self.supports_target(target)

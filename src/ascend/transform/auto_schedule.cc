@@ -855,8 +855,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       visit(r->buffer);
   };
   enumerate_buffers([&](const Buffer &buffer) {
-    if (!IsSharedBuffer(buffer) && !IsL1Buffer(buffer) &&
-        !IsL0CBuffer(buffer) && !IsL0ABuffer(buffer) && !IsL0BBuffer(buffer)) {
+    if (!IsAscendOnChipBuffer(buffer)) {
       return; // Only consider on-chip buffers for multi-buffer
     }
     if (seen_storages.insert(buffer->data).second)
@@ -875,6 +874,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       scope = "shared.l0a";
     } else if (IsL0BBuffer(buffer)) {
       scope = "shared.l0b";
+    } else if (IsSSBuffer(buffer)) {
+      scope = "shared.ss";
     } else {
       scope = "shared";
     }
@@ -914,6 +915,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // Validate buffer capacities upfront: if the minimum requirement (one
   // version of each eligible buffer) already exceeds the remaining capacity,
   // Z3 will never find a feasible solution.
+  // Only apply this bound when choosing versions; fixed allocations may reuse
+  // storage downstream, so their raw size sum is not a physical capacity check.
   for (size_t g = 0; g < group_capacities.size(); ++g) {
     int64_t capacity = group_capacities[g];
     const auto &idxs = group_indices[g];
@@ -1400,6 +1403,8 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetMemoryLimit("shared.l0c", GetL0CMemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0a", GetL0AMemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0b", GetL0BMemoryLimit(target));
+  // One SS pool is shared by AIC and both AIVs, unlike per-AIV UB storage.
+  unit_builder.SetMemoryLimit("shared.ss", 3 * 1024);
   constexpr int64_t kUnlimitedMemory = 1LL << 40;
   for (const String &scope : metadata.unlimit_memory_scopes) {
     unit_builder.SetMemoryLimit(scope, kUnlimitedMemory);

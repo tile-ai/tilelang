@@ -10,6 +10,7 @@ from tilelang.language.common import __all__ as _COMMON_ALL
 from .allocate import (  # noqa: F401
     alloc_shared,
     alloc_l1,
+    alloc_ss,
     alloc_l0a,
     alloc_l0a_sf,
     alloc_l0b,
@@ -66,6 +67,9 @@ from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Ve
 
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
 
+# Scalar reciprocal sqrt is a frontend composition of common math ops.
+from .math import rsqrt  # noqa: F401
+
 # Ascend owns its debug surface: device_assert lowers through the toolkit's
 # assert() macro, print gates by the NPU execution model (no CUDA-style
 # single-thread condition), and rng_init derives its default sequence id from
@@ -105,6 +109,7 @@ _ASCEND_API_ALL = (
     "alloc_l0b_sf",
     "alloc_l0c",
     "alloc_l1",
+    "alloc_ss",
     "annotate_buffer_versions",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
@@ -119,6 +124,7 @@ _ASCEND_API_ALL = (
     "rng_init",
     "rng_rand",
     "rng_rand_float",
+    "rsqrt",
     "simd",
     "unroll",
 )

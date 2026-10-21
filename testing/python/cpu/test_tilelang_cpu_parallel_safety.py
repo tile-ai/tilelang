@@ -9,6 +9,12 @@ from tilelang import tvm
 from tvm import tirx
 
 
+@pytest.fixture
+def fresh_compilation(monkeypatch):
+    # Serial fallback diagnostics are emitted during lowering, not on cache hits.
+    monkeypatch.setattr(tilelang.env, "TILELANG_DISABLE_CACHE", "1")
+
+
 def _compile_serial(func, out_idx=-1):
     kernel = tilelang.compile(func, target="c", out_idx=out_idx, pass_configs={"tl.cpu_parallel": True})
     assert "#pragma omp" not in kernel.get_kernel_source()
@@ -38,6 +44,7 @@ def _lower_grid(func, target="c"):
     return grids[0]
 
 
+@pytest.mark.usefixtures("fresh_compilation")
 def test_while_reset_stays_serial(capfd):
     @T.prim_func
     def main(A: T.Tensor((32,), T.int32), B: T.Tensor((32,), T.int32)):
@@ -112,6 +119,7 @@ def test_direct_reset_control_flow(reset_kind):
     assert _lower_grid(func).kind == expected
 
 
+@pytest.mark.usefixtures("fresh_compilation")
 def test_stateful_extern_without_pointer_stays_serial(capfd):
     @T.prim_func
     def main(A: T.Tensor((1024,), T.int32), B: T.Tensor((1024,), T.int32)):
@@ -177,6 +185,7 @@ def test_casts_preserve_iterator_identity(mixed_casts):
     assert _lower_grid(func).kind == tirx.ForKind.SERIAL
 
 
+@pytest.mark.usefixtures("fresh_compilation")
 @pytest.mark.parametrize("alias_contract", ["non_restrict", "no_noalias"])
 def test_overlapping_parameter_slices_stay_serial(alias_contract, capfd):
     n = 256
@@ -218,6 +227,7 @@ def test_parameter_alias_contract(target, alias_contract):
     assert _lower_grid(func, target).kind == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.SERIAL)
 
 
+@pytest.mark.usefixtures("fresh_compilation")
 @pytest.mark.parametrize(
     "target",
     ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built"))],

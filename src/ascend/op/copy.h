@@ -39,7 +39,8 @@ public:
   PrimExpr unit_flag_ctl;          // "unit_flag_ctrl", defaults to 0
   PrimExpr sub_blockid;            // "sub_blockid", defaults to 0
   Optional<Integer> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
-  Optional<PrimExpr> pad_value;    // "pad_value": GM->UB pad fill value
+  Optional<PrimExpr> l0_pitch;  // "l0_pitch": L0 matrix pitch in fractal blocks
+  Optional<PrimExpr> pad_value; // "pad_value": GM->UB pad fill value
 
   /*!
    * \brief l2_cache_ctrl with a path-specific default (GM loads default to 0,
@@ -106,6 +107,25 @@ public:
  *        synthesized by shared passes.
  */
 bool IsAscendCopyCall(const tirx::CallNode *call);
+
+namespace ascend {
+
+// The concrete regions transferred by a local data copy. Pitch is retained
+// separately because a destination region can be larger than the transfer.
+struct L0CopyRegions {
+  BufferRegion source;
+  BufferRegion destination;
+  PrimExpr pitch;
+};
+
+L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
+                                   const LayoutMap &layouts,
+                                   arith::Analyzer *analyzer);
+BufferRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
+                                     const LayoutMap &layouts,
+                                     arith::Analyzer *analyzer);
+
+} // namespace ascend
 
 } // namespace tl
 } // namespace tvm

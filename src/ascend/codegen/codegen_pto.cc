@@ -4817,10 +4817,17 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
       op->op.same_as(tl::warp_reduce_min())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "PTO warp reduction expects exactly one argument";
+    DataType dtype = op->args[0].dtype();
+    ICHECK(IsSupportedSIMTAllReduceType(dtype))
+        << "PTO warp reduction currently supports float16, float32, int32, "
+           "and uint32 only, got "
+        << dtype
+        << ". Use a supported reducer dtype, such as float32, and cast the "
+           "result afterward.";
     const char *name = op->op.same_as(tl::warp_reduce_sum())   ? "redux_add"
                        : op->op.same_as(tl::warp_reduce_max()) ? "redux_max"
                                                                : "redux_min";
-    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ")";
+    os << "tl." << name << "(" << PrintExpr_(op->args[0]) << ")";
     return;
   }
 
@@ -6537,6 +6544,21 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
     return;
   }
   os << "(" << PrintExpr_(lhs) << " " << opstr << " " << PrintExpr_(rhs) << ")";
+}
+
+void CodeGenTileLangPTO::VisitExpr_(const RampNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // Keep operands expression-local and evaluate each once, even for effectful
+  // calls. A Ramp used as a value must remain a typed vector.
+  os << "(lambda _ramp_base, _ramp_stride: tl.vector_from_list("
+     << DataTypeName(op->dtype.element_of()) << ", (";
+  for (int lane = 0; lane < op->dtype.lanes(); ++lane) {
+    if (lane != 0) {
+      os << ", ";
+    }
+    os << "(_ramp_base)+(_ramp_stride*" << lane << ")";
+  }
+  os << ")))(" << PrintExpr_(op->base) << ", " << PrintExpr_(op->stride) << ")";
 }
 
 void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,

@@ -187,7 +187,8 @@ private:
       const std::vector<std::shared_ptr<IRStructure>> &nodes) const {
     // Uniform vector work can keep one shared body, including sid-dependent
     // addresses in software dual copies. Split when participation differs or
-    // Cube needs a subcore-local value or UB destination.
+    // Cube needs a subcore-local value or UB destination. SS accesses also
+    // need concrete subcore indices to distinguish independent shared words.
     for (const auto &node : nodes) {
       const TaskNode *task =
           node->IsTask()
@@ -215,8 +216,9 @@ private:
         for (const auto &regions :
              {task->GetReadRegions(), task->GetWriteRegions()})
           for (const BufferRegion &region : regions)
-            if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
-                IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer))
+            if (IsSSBuffer(region->buffer) || IsL1Buffer(region->buffer) ||
+                IsL0ABuffer(region->buffer) || IsL0BBuffer(region->buffer) ||
+                IsL0CBuffer(region->buffer))
               return true;
       }
       if (node->IsControl() &&

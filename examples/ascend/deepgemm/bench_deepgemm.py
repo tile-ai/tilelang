@@ -3,15 +3,14 @@
 import torch
 
 from tilelang.profiler import do_bench
-from examples.ascend.deepgemm.config import GemmDesc, Major, select_gemm_config
-from examples.ascend.deepgemm.kernels import load_kernels
+from examples.ascend.deepgemm.config import GemmDesc, Major, select_gemm_config, execution_config
+from examples.ascend.deepgemm import kernels as builders
 
 
-def run_regression_perf(m, n, k, dtype="bfloat16", loop_order="mnk"):
+def run_regression_perf(m, n, k, dtype="bfloat16"):
     """Check one shape, then return GEMM-only latency in ms with L2 flushed."""
     if dtype not in ("bfloat16", "float8_e4m3fn"):
         raise ValueError(f"unsupported benchmark dtype: {dtype}")
-    builders = load_kernels(loop_order)
     device = torch.device("npu", torch.npu.current_device())
     desc = GemmDesc(
         m,
@@ -26,7 +25,7 @@ def run_regression_perf(m, n, k, dtype="bfloat16", loop_order="mnk"):
         outer_stride_a=k,
         outer_stride_b=k,
     )
-    config = select_gemm_config(desc)
+    config = execution_config(desc, select_gemm_config(desc))
     fp8 = dtype == "float8_e4m3fn"
     build = builders.build_fp8_gemm if fp8 else builders.build_bf16_gemm
     # Match the dense API's default: static N/K, runtime M and outer strides.
@@ -48,7 +47,7 @@ def run_regression_perf(m, n, k, dtype="bfloat16", loop_order="mnk"):
     torch.npu.synchronize()
 
     prof = do_bench(lambda: kernel(*args), backend="msprof_detail", _n_warmup=30, _n_repeat=50)
-    print(f"    [{dtype}, {loop_order}, {m}x{n}x{k}] {prof.dur_us:.2f} us/iter | {prof.tflops(2.0 * m * n * k):.1f} TFLOPS")
+    print(f"    [{dtype}, {m}x{n}x{k}] {prof.dur_us:.2f} us/iter | {prof.tflops(2.0 * m * n * k):.1f} TFLOPS")
     return prof.dur_ns / 1e6
 
 

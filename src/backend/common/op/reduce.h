@@ -54,29 +54,6 @@ inline Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
-  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
-  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
-  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
-
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto thd = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
-  }
-
-  return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
-      ->CondenseReplicateVar()
-      ->BindThreadRange(src_layout->ThreadRange());
-}
-
 /*!
  * \brief Resolve the participating thread range of a scalar AllReduce.
  *
@@ -778,7 +755,11 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
+      auto red_layout = ComputeReducerLayout(src_layout, op.dim);
+      // Lower in the canonical reduced shape while preserving the destination's
+      // physical register indices, replication, and participating thread range.
+      dst_layout = Downcast<Fragment>(
+          dst_layout->Reshape(red_layout->InputShape(), analyzer));
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
 

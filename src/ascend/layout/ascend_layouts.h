@@ -127,6 +127,15 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
                                    const ffi::Array<Range> &logical_region,
                                    AscendFractalRegionInfo *out);
 
+namespace attr {
+
+// Copy lowering transfers the destination pitch to its tvm_access_ptr.
+// LowerTileOp uses it to remap matrix offsets while retaining the allocation's
+// leading-plane / buffer-version stride.
+constexpr const char *kL0AccessPitch = "tl.ascend_l0_access_pitch";
+
+} // namespace attr
+
 } // namespace tl
 } // namespace tvm
 
