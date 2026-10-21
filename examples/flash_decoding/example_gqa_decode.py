@@ -267,6 +267,7 @@ def ref_program(query, key, value, mask):
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """
+    output_dtype = query.dtype
     query = query.float()
     key = key.float()
     value = value.float()
@@ -288,7 +289,7 @@ def ref_program(query, key, value, mask):
 
     out = einsum(attention, value, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
-    return out
+    return out.to(output_dtype)
 
 
 def flash_split_ref(Q, K, V, mask):
