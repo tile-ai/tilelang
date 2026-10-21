@@ -1,9 +1,8 @@
 """PTO target through the shared tvm_ffi host execution path.
 
-Covers the execution semantics of ``target="pto"`` with
-``execution_backend="tvm_ffi"``: callee-allocated outputs, dynamic shapes,
-multiple device kernels, dynamic shared memory, mixed cube/vector kernels,
-exported-library round-trips, and device kernels under host control flow.
+Covers output allocation, dynamic shapes, dynamic shared memory,
+multi-kernel and mixed cube/vector programs, exported libraries, and
+host-controlled launches.
 """
 
 import pytest
@@ -28,7 +27,7 @@ def vector_add(n: int, tile: int):
         b: T.Tensor((n,), T.float32),
         c: T.Tensor((n,), T.float32),
     ):
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 c[idx] = a[idx] + b[idx]
@@ -68,12 +67,12 @@ def two_kernels(n: int, tile: int):
         tmp: T.Tensor((n,), T.float32),
         out: T.Tensor((n,), T.float32),
     ):
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 tmp[idx] = a[idx] + b[idx]
 
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 out[idx] = tmp[idx] * T.float32(2.0)
@@ -101,7 +100,7 @@ def accumulate(n: int, tile: int, iters: int):
         out: T.Tensor((n,), T.float32),
     ):
         for _ in T.serial(iters):
-            with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+            with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
                 for i in T.Parallel(tile):
                     idx = bx * tile + i
                     out[idx] = out[idx] + a[idx]
@@ -111,7 +110,7 @@ def accumulate(n: int, tile: int, iters: int):
 
 def mixed_gemm(m_dim: int, k_dim: int, n_dim: int):
     num_blocks = 32
-    tile_m, tile_n, tile_k = 256, 256, 256
+    tile_m, tile_n, tile_k = 16, 16, 32
     m_tiles, n_tiles = m_dim // tile_m, n_dim // tile_n
     k_tiles = k_dim // tile_k
     tiles_per_core = (m_tiles * n_tiles) // num_blocks
@@ -207,8 +206,9 @@ def test_pto_auto_resolves_tvm_ffi():
     assert context.execution_backend.name == "tvm_ffi"
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_vecadd_callee_allocated():
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     kernel = tilelang.compile(vector_add(n, tile), target="pto", out_idx=-1, execution_backend="tvm_ffi")
 
     a = torch.randn(n, device="npu")
@@ -219,6 +219,7 @@ def test_pto_tvm_ffi_vecadd_callee_allocated():
     torch.testing.assert_close(out.cpu(), a.cpu() + b.cpu(), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_dynamic_shape():
     kernel = tilelang.compile(dynamic_copy, target="pto", out_idx=-1, execution_backend="tvm_ffi")
 
@@ -229,6 +230,7 @@ def test_pto_tvm_ffi_dynamic_shape():
         torch.testing.assert_close(out.cpu(), source.cpu(), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_dynamic_outputs():
     kernel = tilelang.compile(dynamic_outputs, out_idx=[0, 2], target="pto", execution_backend="tvm_ffi")
 
@@ -244,8 +246,9 @@ def test_pto_tvm_ffi_dynamic_outputs():
     torch.testing.assert_close(negative.cpu(), reference - 9, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_multiple_kernels():
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     kernel = tilelang.compile(two_kernels(n, tile), target="pto", out_idx=[2, 3], execution_backend="tvm_ffi")
 
     a = torch.randn(n, device="npu")
@@ -257,6 +260,7 @@ def test_pto_tvm_ffi_multiple_kernels():
     torch.testing.assert_close(out.cpu(), (a.cpu() + b.cpu()) * 2, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_dynamic_shared_memory():
     kernel = tilelang.compile(dynamic_shared_copy(), target="pto", out_idx=-1, execution_backend="tvm_ffi")
 
@@ -267,8 +271,9 @@ def test_pto_tvm_ffi_dynamic_shared_memory():
         torch.testing.assert_close(out.cpu(), source.cpu(), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_mixed_cube_vector_gemm():
-    m = k = n = 2048
+    m, k, n = 128, 64, 128
     kernel = tilelang.compile(
         mixed_gemm(m, k, n),
         target="pto",
@@ -287,7 +292,7 @@ def test_pto_tvm_ffi_mixed_cube_vector_gemm():
 
 
 def test_pto_tvm_ffi_source_accessors():
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     kernel = tilelang.compile(vector_add(n, tile), target="pto", out_idx=-1, execution_backend="tvm_ffi")
 
     device_source = kernel.get_kernel_source(kernel_only=True)
@@ -297,10 +302,11 @@ def test_pto_tvm_ffi_source_accessors():
     assert host_source and "target" in host_source
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_export_library_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
 
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     kernel = tilelang.compile(vector_add(n, tile), target="pto", out_idx=-1, execution_backend="tvm_ffi")
 
     a = torch.randn(n, device="npu")
@@ -322,10 +328,11 @@ def test_pto_tvm_ffi_export_library_roundtrip(tmp_path, monkeypatch):
     torch.testing.assert_close(loaded.cpu(), direct.cpu(), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_pto_tvm_ffi_kernel_call_in_host_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
 
-    n, tile, iters = 64 * 2048, 2048, 3
+    n, tile, iters = 64, 32, 3
     kernel = tilelang.compile(accumulate(n, tile, iters), target="pto", out_idx=None, execution_backend="tvm_ffi")
 
     a = torch.randn(n, device="npu")

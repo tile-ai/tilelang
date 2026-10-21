@@ -1,8 +1,7 @@
 """PTO binary cache: callback wiring and PTO-specific key semantics.
 
-The byte-level edge cases of the shared BinaryCache base (metadata field
-validation, truncated/empty reads, fsync-before-publish atomicity, staging
-cleanup) are covered in testing/python/cache/test_tilelang_cuda_binary_cache.py.
+Byte-level edge cases of the shared BinaryCache base are covered in
+testing/python/cache/test_tilelang_cuda_binary_cache.py.
 """
 
 from __future__ import annotations

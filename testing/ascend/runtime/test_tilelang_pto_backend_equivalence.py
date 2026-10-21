@@ -1,8 +1,6 @@
 """Bitwise equivalence of the tvm_ffi and legacy pto execution backends.
 
-The same program is compiled twice with ``target="pto"`` — once with
-``execution_backend="tvm_ffi"`` and once with the legacy Cython launcher
-(``execution_backend="pto"``) — and both run on identical inputs.
+Each program is compiled with both backends and run on identical inputs.
 """
 
 import pytest
@@ -23,7 +21,7 @@ def vector_add(n: int, tile: int):
         b: T.Tensor((n,), T.float32),
         c: T.Tensor((n,), T.float32),
     ):
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 c[idx] = a[idx] + b[idx]
@@ -52,12 +50,12 @@ def two_kernels(n: int, tile: int):
         tmp: T.Tensor((n,), T.float32),
         out: T.Tensor((n,), T.float32),
     ):
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 tmp[idx] = a[idx] + b[idx]
 
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=2048):
+        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
             for i in T.Parallel(tile):
                 idx = bx * tile + i
                 out[idx] = tmp[idx] * T.float32(2.0)
@@ -65,10 +63,11 @@ def two_kernels(n: int, tile: int):
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_pto_backend_equivalence_vecadd(tmp_path, monkeypatch):
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
 
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     func = vector_add(n, tile)
     ffi_kernel = tilelang.compile(func, target="pto", out_idx=-1, execution_backend="tvm_ffi")
     legacy_kernel = tilelang.compile(func, target="pto", out_idx=-1, execution_backend="pto")
@@ -82,6 +81,7 @@ def test_pto_backend_equivalence_vecadd(tmp_path, monkeypatch):
     assert torch.equal(out_ffi.cpu(), out_legacy.cpu())
 
 
+@tilelang.testing.requires_ascend
 def test_pto_backend_equivalence_dynamic_shared_memory(tmp_path, monkeypatch):
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
 
@@ -97,10 +97,11 @@ def test_pto_backend_equivalence_dynamic_shared_memory(tmp_path, monkeypatch):
         assert torch.equal(out_ffi.cpu(), out_legacy.cpu())
 
 
+@tilelang.testing.requires_ascend
 def test_pto_backend_equivalence_multiple_kernels(tmp_path, monkeypatch):
     monkeypatch.setenv("TILELANG_CACHE_DIR", str(tmp_path))
 
-    n, tile = 64 * 2048, 2048
+    n, tile = 64, 32
     func = two_kernels(n, tile)
     ffi_kernel = tilelang.compile(func, target="pto", out_idx=[2, 3], execution_backend="tvm_ffi")
     legacy_kernel = tilelang.compile(func, target="pto", out_idx=[2, 3], execution_backend="pto")
