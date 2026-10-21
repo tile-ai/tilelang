@@ -437,6 +437,21 @@ void CheckContiguousRampStride(const PrimExpr &index, const char *access_kind) {
   }
 }
 
+PrimExpr SIMTVectorLocalScalarOffset(const PrimExpr &index, int element_lanes,
+                                     const char *access_kind) {
+  // BufferLoad/Store indices count vector slots, including Ramp indices.
+  PrimExpr slot = index;
+  if (const auto *ramp = index.as<RampNode>()) {
+    CheckContiguousRampStride(index, access_kind);
+    slot = ramp->base;
+  }
+  ICHECK(slot.dtype().is_scalar())
+      << "PTO SIMT vector local " << access_kind
+      << " requires a scalar index or a unit-stride Ramp, got " << index;
+  return arith::Analyzer().Simplify(slot *
+                                    make_const(slot.dtype(), element_lanes));
+}
+
 void CheckConstZero(const PrimExpr &expr, const char *name) {
   int64_t value = 0;
   ICHECK(TryGetConstInt(expr, &value) && value == 0)
@@ -7442,9 +7457,7 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
   if (inside_simtvf_body_ && element_dtype.is_vector() &&
       (scope == "local.fragment" || scope == "local")) {
     // Convert vector slots to scalar offsets for the existing contiguous load.
-    index = VectorBufferElemIndex(index);
-    index = arith::Analyzer().Simplify(
-        index * make_const(index.dtype(), element_dtype.lanes()));
+    index = SIMTVectorLocalScalarOffset(index, element_dtype.lanes(), "load");
     element_dtype = element_dtype.element_of();
   }
 
@@ -7642,9 +7655,7 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   if (inside_simtvf_body_ && buffer_dtype.is_vector() &&
       (scope == "local.fragment" || scope == "local")) {
     // Match the scalar-addressed allocation and contiguous load path.
-    index = VectorBufferElemIndex(index);
-    index = arith::Analyzer().Simplify(
-        index * make_const(index.dtype(), buffer_dtype.lanes()));
+    index = SIMTVectorLocalScalarOffset(index, buffer_dtype.lanes(), "store");
     buffer_dtype = buffer_dtype.element_of();
   }
 

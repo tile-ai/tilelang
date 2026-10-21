@@ -269,6 +269,53 @@ def test_vector_local_slots_observe_mutation(lanes, unrolled, target):
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+def _vector_local_cross_slot_kernel(load_stride=1, store_stride=1):
+    @T.prim_func
+    def main(a: T.Tensor((12,), T.float32), out: T.Tensor((16,), T.float32)):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((12,), T.float32)
+            out_ub = T.alloc_shared((16,), T.float32)
+            T.copy(a, a_ub)
+            with T.SimtVF(threads=1):
+                vals = T.alloc_local((4,), "float32x2")
+                for i in T.unroll(4):
+                    vals[i] = a_ub[T.Ramp(i * 2, 1, 2)]
+                out_ub[T.Ramp(0, 1, 4)] = vals[T.Ramp(1, load_stride, 2)]
+                out_ub[T.Ramp(4, 1, 4)] = vals[T.Ramp(2, 1, 2)]
+                vals[T.Ramp(1, store_stride, 2)] = a_ub[T.Ramp(8, 1, 4)]
+                for i in T.unroll(4):
+                    out_ub[T.Ramp(8 + i * 2, 1, 2)] = vals[i]
+            T.copy(out_ub, out)
+
+    return main
+
+
+def test_pto_vector_local_cross_slot_offsets():
+    source = tilelang.lower(_vector_local_cross_slot_kernel(), target="pto", enable_device_compile=False).kernel_source
+    for offset in (2, 4):
+        assert f"pto.load(vals, {offset}, contiguous=4)" in source
+    assert re.search(r"pto\.store\([^\n]+, vals, 2, contiguous=4\)", source)
+
+
+@tilelang.testing.requires_ascend
+def test_pto_vector_local_cross_slot_mutation_preserves_neighbors():
+    import torch
+
+    a = torch.arange(1, 13, dtype=torch.float32, device="npu")
+    kernel = tilelang.compile(_vector_local_cross_slot_kernel(), target="pto", out_idx=-1)
+    result = kernel(a)
+    torch.npu.synchronize()
+    expected = torch.cat((a[2:6], a[4:8], a[:2], a[8:12], a[6:8]))
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("access_kind", ["load", "store"])
+def test_pto_vector_local_cross_slot_rejects_noncontiguous_ramp(access_kind):
+    func = _vector_local_cross_slot_kernel(**{f"{access_kind}_stride": 2})
+    with pytest.raises(tilelang.tvm.error.InternalError, match=rf"vector {access_kind}.*Ramp stride must be 1"):
+        tilelang.lower(func, target="pto", enable_device_compile=False)
+
+
 def _unsigned_local_min_max_kernel(vector_elements):
     shape = (2,) if vector_elements else (4,)
     dtype = "uint32x2" if vector_elements else "uint32"
