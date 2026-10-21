@@ -180,6 +180,12 @@ def apply_reduce_op(reduce_op, buffer, out, reduce_axis, clear=True):
         T.reduce_max(buffer, out, dim=reduce_axis, clear=clear)
     elif reduce_op == "min":
         T.reduce_min(buffer, out, dim=reduce_axis, clear=clear)
+    elif reduce_op == "bitand":
+        T.reduce_bitand(buffer, out, dim=reduce_axis, clear=clear)
+    elif reduce_op == "bitor":
+        T.reduce_bitor(buffer, out, dim=reduce_axis, clear=clear)
+    elif reduce_op == "bitxor":
+        T.reduce_bitxor(buffer, out, dim=reduce_axis, clear=clear)
     else:
         raise ValueError(f"Unsupported reduce_op={reduce_op}")
 
@@ -717,6 +723,26 @@ def test_tilelang_reduce_sunmmio_non_tiled_axis_tail_has_no_reduce_predicate():
     out_store_predicates = [store.predicate for store in _collect_buffer_stores(mod["main"], "Out_shared") if store.predicate is not None]
     assert not a_load_predicates
     assert not out_store_predicates
+
+
+def test_tilelang_reduce_sunmmio_uint32_bitand_uses_all_ones_identity_and_external_axis():
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    mod = reduce_kernel_with_tileview_builder(
+        (4, 32, 32),
+        reduce_axis=0,
+        tile_size=(32, 32),
+        dtype="uint32",
+        reduce_op="bitand",
+    )
+
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    checker = ReduceIRChecker()
+    checker.visit_stmt(mod["main"].body)
+    assert checker.scope_root is not None
+    assert not checker.has_in_tile_reduce
+    assert "T.uint32(4294967295)" in mod.script()
 
 
 def test_tilelang_reduce_sunmmio_blocked_axis_yields_aligned_rowmajor():

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <tvm/tir/op.h>
+#include <utility>
 
 #include "../layout/cute_layout.h"
 #include "../target/sunmmio_utils.h"
@@ -112,14 +113,16 @@ void AppendBroadcastArgs(Array<PrimExpr> *args, PrimExpr src_region,
 }
 
 Stmt MakeBroadcastLeaf(PrimExpr src_region, PrimExpr dst_region, int direction,
-                       PrimExpr mask, PrimExpr src_offset_byte) {
+                       PrimExpr mask, PrimExpr src_offset_byte,
+                       Map<String, ObjectRef> annotations = {}) {
   Array<PrimExpr> args;
   args.push_back(src_region);
   args.push_back(dst_region);
   args.push_back(I32Imm(direction));
   args.push_back(mask);
   args.push_back(src_offset_byte);
-  return Evaluate(Call(DataType::Handle(), broadcast_(), args));
+  return Evaluate(
+      Call(DataType::Handle(), broadcast_(), args, std::move(annotations)));
 }
 
 } // namespace
@@ -716,6 +719,10 @@ Stmt AllgatherOpNode::Lower(const LowerArgs &T,
   // the optional src_core and target metadata. No AttrStmt wrapping needed.
   int src_offset_byte = GetSrcOffsetByte();
   PrimExpr src_offset_imm = IntImm(DataType::Int(32), src_offset_byte);
+  Map<String, ObjectRef> broadcast_annotations;
+  if (auto allow_rank3 = annotations.Get(kAttrAllowRank3Multicast)) {
+    broadcast_annotations.Set(kAttrAllowRank3Multicast, allow_rank3.value());
+  }
 
   PrimExpr current_core = cid;
   PrimExpr mesh_ncol_expr = IntImm(current_core.dtype(), mesh_ncol);
@@ -729,7 +736,7 @@ Stmt AllgatherOpNode::Lower(const LowerArgs &T,
     bcast_stmts.push_back(MakeBroadcastLeaf(
         MakeRegionExpr(send_buffer, send_range, /*access_mask=*/1),
         MakeRegionExpr(recv_buffer, dst_ranges, /*access_mask=*/2), bcast_dir,
-        analyzer->Simplify(mask), src_offset_imm));
+        analyzer->Simplify(mask), src_offset_imm, broadcast_annotations));
   };
 
   auto emit_from_recv = [&](Array<Range> slab_ranges, int bcast_dir,
@@ -737,7 +744,7 @@ Stmt AllgatherOpNode::Lower(const LowerArgs &T,
     bcast_stmts.push_back(MakeBroadcastLeaf(
         MakeRegionExpr(recv_buffer, slab_ranges, /*access_mask=*/1),
         MakeRegionExpr(recv_buffer, slab_ranges, /*access_mask=*/2), bcast_dir,
-        analyzer->Simplify(mask), src_offset_imm));
+        analyzer->Simplify(mask), src_offset_imm, broadcast_annotations));
   };
 
   if (direction == 0) { // horizontal
@@ -770,25 +777,197 @@ TIR_REGISTER_TL_TILE_OP(AllgatherOp, comm_allgather)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+namespace {
+
+bool IsSupportedAllreduceType(const StringImm &type) {
+  return type->value == "sum" || type->value == "abssum" ||
+         type->value == "max" || type->value == "min" ||
+         type->value == "absmax" || type->value == "bitand" ||
+         type->value == "bitor" || type->value == "bitxor";
+}
+
+void ValidateAllreduceType(const StringImm &type) {
+  ICHECK(IsSupportedAllreduceType(type))
+      << "T.comm.all_reduce supports only sum, abssum, max, min, and "
+         "absmax, bitand, bitor, and bitxor; got "
+      << type->value;
+}
+
+bool IsBitwiseReduction(const StringImm &type) {
+  return type->value == "bitand" || type->value == "bitor" ||
+         type->value == "bitxor";
+}
+
+void ValidateAllreduceReductionDType(const StringImm &type, DataType src_dtype,
+                                     DataType dst_dtype) {
+  if (!IsBitwiseReduction(type)) {
+    return;
+  }
+  auto is_supported = [](DataType dtype) {
+    return (dtype.is_int() || dtype.is_uint()) && dtype.bits() == 32 &&
+           dtype.lanes() == 1;
+  };
+  ICHECK(is_supported(src_dtype) && is_supported(dst_dtype) &&
+         src_dtype == dst_dtype)
+      << "Sunmmio bitwise all_reduce requires input and output dtypes to be "
+         "both int32 or both uint32, got "
+      << src_dtype << " and " << dst_dtype;
+}
+
+void ValidateAllreduceTemporaryDTypes(const Buffer &src, const Buffer &dst,
+                                      const Buffer &row_allgather,
+                                      const Buffer &col_allgather,
+                                      const Buffer &dst_copy,
+                                      const StringImm &type, int direction) {
+  auto check = [](const Buffer &buffer, DataType expected, const char *name,
+                  const char *expected_name) {
+    ICHECK_EQ(buffer->dtype, expected)
+        << "T.comm.all_reduce requires " << name << " dtype to match "
+        << expected_name << " dtype " << expected << ", got " << buffer->dtype;
+  };
+
+  ValidateAllreduceReductionDType(type, src->dtype, dst->dtype);
+  if (direction == 0) {
+    check(row_allgather, src->dtype, "row_allgather", "src");
+  } else if (direction == 1) {
+    check(col_allgather, src->dtype, "col_allgather", "src");
+  } else if (direction == 2) {
+    check(col_allgather, src->dtype, "col_allgather", "src");
+    check(row_allgather, dst->dtype, "row_allgather", "dst");
+  }
+  if (dst_copy.defined()) {
+    check(dst_copy, dst->dtype, "dst_copy", "dst");
+  }
+}
+
+void ValidateMatchingAllreduceShape(const BufferRegion &actual,
+                                    const BufferRegion &expected,
+                                    const char *actual_name,
+                                    arith::Analyzer *analyzer) {
+  ICHECK_EQ(actual->region.size(), expected->region.size())
+      << "T.comm.all_reduce requires " << actual_name
+      << " rank to match src rank " << expected->region.size() << ", got "
+      << actual->region.size();
+  for (size_t dim = 0; dim < expected->region.size(); ++dim) {
+    ICHECK(analyzer->CanProveEqual(actual->region[dim]->extent,
+                                   expected->region[dim]->extent))
+        << "T.comm.all_reduce requires " << actual_name << " extent at dim "
+        << dim << " to match src extent " << expected->region[dim]->extent
+        << ", got " << actual->region[dim]->extent;
+  }
+}
+
+void ValidateAllreduceCarrierShape(const BufferRegion &carrier,
+                                   const BufferRegion &payload,
+                                   int64_t participant_count,
+                                   const char *carrier_name,
+                                   arith::Analyzer *analyzer) {
+  ICHECK_EQ(carrier->region.size(), payload->region.size() + 1)
+      << "T.comm.all_reduce requires " << carrier_name
+      << " rank to equal src rank + 1, got " << carrier->region.size() << " vs "
+      << payload->region.size();
+  ICHECK(analyzer->CanProveEqual(
+      carrier->region[0]->extent,
+      IntImm(carrier->region[0]->extent.dtype(), participant_count)))
+      << "T.comm.all_reduce requires " << carrier_name
+      << " leading extent to equal participant count " << participant_count
+      << ", got " << carrier->region[0]->extent;
+  for (size_t dim = 0; dim < payload->region.size(); ++dim) {
+    ICHECK(analyzer->CanProveEqual(carrier->region[dim + 1]->extent,
+                                   payload->region[dim]->extent))
+        << "T.comm.all_reduce requires " << carrier_name
+        << " payload extent at dim " << dim << " to match src extent "
+        << payload->region[dim]->extent << ", got "
+        << carrier->region[dim + 1]->extent;
+  }
+}
+
+} // namespace
+
+void ValidateAllreduceContract(
+    const PrimExpr &src_expr, const PrimExpr &dst_expr,
+    const PrimExpr &row_allgather_expr, const PrimExpr &col_allgather_expr,
+    const PrimExpr &dst_copy_expr, const StringImm &type, int direction,
+    bool should_clear, Target target, arith::Analyzer *analyzer) {
+  ValidateAllreduceType(type);
+  ICHECK(direction == 0 || direction == 1 || direction == 2)
+      << "Invalid allreduce direction " << direction
+      << ", must be 0 (row-wise), 1 (column-wise), or 2 (all).";
+  bool needs_dst_copy = direction == 2 && !should_clear;
+  ICHECK_EQ(dst_copy_expr.defined(), needs_dst_copy)
+      << "T.comm.all_reduce dst_copy must be provided only for direction=all "
+         "with clear=false";
+
+  BufferRegion src = NormalizeToBufferRegion(src_expr);
+  ICHECK_GT(src->region.size(), 0U)
+      << "T.comm.all_reduce input must have at least one dimension";
+  BufferRegion dst = NormalizeToBufferRegion(dst_expr);
+  BufferRegion row_allgather = NormalizeToBufferRegion(row_allgather_expr);
+  BufferRegion col_allgather = NormalizeToBufferRegion(col_allgather_expr);
+  BufferRegion dst_copy;
+  if (needs_dst_copy) {
+    dst_copy = NormalizeToBufferRegion(dst_copy_expr);
+  }
+
+  ValidateAllreduceTemporaryDTypes(
+      src->buffer, dst->buffer, row_allgather->buffer, col_allgather->buffer,
+      dst_copy.defined() ? dst_copy->buffer : Buffer(), type, direction);
+  ValidateMatchingAllreduceShape(dst, src, "dst", analyzer);
+
+  auto mesh = GetSunmmioMeshConfig(target);
+  if (direction == 0 || direction == 2) {
+    ValidateAllreduceCarrierShape(row_allgather, src, mesh.ncol,
+                                  "row_allgather", analyzer);
+  }
+  if (direction == 1 || direction == 2) {
+    ValidateAllreduceCarrierShape(col_allgather, src, mesh.nrow,
+                                  "col_allgather", analyzer);
+  }
+  if (needs_dst_copy) {
+    ValidateMatchingAllreduceShape(dst_copy, src, "dst_copy", analyzer);
+  }
+}
+
 AllreduceOp::AllreduceOp(Array<PrimExpr> args,
                          Map<String, ObjectRef> annotations) {
-  ICHECK(args.size() == 9 || args.size() == 10)
-      << "Allreduce expects 9 or 10 inputs, got " << args.size();
+  ICHECK(args.size() == 8 || args.size() == 9)
+      << "Allreduce expects 8 or 9 inputs, got " << args.size();
+
+  StringImm type = Downcast<StringImm>(args[4]);
+  int direction = Downcast<IntImm>(args[5])->value;
+  bool should_clear = Downcast<IntImm>(args[6])->value != 0;
+  bool needs_dst_copy = direction == 2 && !should_clear;
+  ValidateAllreduceType(type);
+  ICHECK_EQ(args.size(), needs_dst_copy ? 9U : 8U)
+      << "T.comm.all_reduce dst_copy must be provided only for direction=all "
+         "with clear=false";
+
+  Buffer src_buffer = NormalizeToBufferRegion(args[0])->buffer;
+  Buffer dst_buffer = NormalizeToBufferRegion(args[1])->buffer;
+  Buffer row_allgather_buffer = NormalizeToBufferRegion(args[2])->buffer;
+  Buffer col_allgather_buffer = NormalizeToBufferRegion(args[3])->buffer;
+  Buffer dst_copy_buffer;
+  if (args.size() == 9) {
+    dst_copy_buffer = NormalizeToBufferRegion(args[7])->buffer;
+  }
+  ValidateAllreduceTemporaryDTypes(src_buffer, dst_buffer, row_allgather_buffer,
+                                   col_allgather_buffer, dst_copy_buffer, type,
+                                   direction);
+
   ObjectPtr<AllreduceOpNode> node = tvm::ffi::make_object<AllreduceOpNode>();
   node->src = args[0];
   node->dst = args[1];
   node->row_allgather = args[2];
   node->col_allgather = args[3];
 
-  node->type = Downcast<StringImm>(args[4]);
-  node->direction = Downcast<IntImm>(args[5])->value;
-  node->dim = Downcast<IntImm>(args[6]);
-  node->clear = Downcast<IntImm>(args[7]);
-  if (args.size() == 10) {
-    node->dst_copy = args[8];
-    node->cid = args[9];
-  } else {
+  node->type = type;
+  node->direction = direction;
+  node->clear = Downcast<IntImm>(args[6]);
+  if (args.size() == 9) {
+    node->dst_copy = args[7];
     node->cid = args[8];
+  } else {
+    node->cid = args[7];
   }
   data_ = std::move(node);
 }
@@ -801,11 +980,10 @@ TileOperator AllreduceOpNode::Clone() const {
 // Not yet complete; it will be further refined later
 LayoutMap AllreduceOpNode::ComputeLayout(const LayoutInferArgs &T,
                                          InferLevel level, Buffer src,
-                                         Buffer dst, int dim) const {
+                                         Buffer dst) const {
   if (level >= InferLevel::kStrict)
     return {};
 
-  (void)dim;
   CheckSunmmioCommBuffers("T.comm.all_reduce", src, dst);
   return SunmmioCommInferLayout(T, src, dst, level);
 }
@@ -815,8 +993,9 @@ LayoutMap AllreduceOpNode::InferLayout(const LayoutInferArgs &T,
   LayoutMap lm;
 
   bool should_clear = clear.as<Bool>().value();
-  ICHECK(should_clear || dst_copy.defined())
-      << "Allreduce clear=false requires a dst_copy temporary buffer.";
+  ValidateAllreduceContract(src, dst, row_allgather, col_allgather, dst_copy,
+                            type, direction, should_clear, T.target,
+                            T.analyzer);
   ICHECK(cid.defined())
       << "Allreduce dynamic allgather lowering requires current core id.";
 
@@ -869,30 +1048,35 @@ LayoutMap AllreduceOpNode::InferLayout(const LayoutInferArgs &T,
   };
 
   if (should_clear) {
-    infer_reduce(src, dst, dim, /*reduce_clear=*/true);
-
-    if (direction == 1 || direction == 2) {
-      infer_allgather(dst, col_allgather, /*gather_dir=*/1);
+    if (direction == 1) {
+      infer_allgather(src, col_allgather, /*gather_dir=*/1);
       infer_reduce(col_allgather, dst, IntImm(DataType::Int(32), 0),
                    /*reduce_clear=*/true);
-    }
-
-    if (direction == 0 || direction == 2) {
+    } else if (direction == 0) {
+      infer_allgather(src, row_allgather, /*gather_dir=*/0);
+      infer_reduce(row_allgather, dst, IntImm(DataType::Int(32), 0),
+                   /*reduce_clear=*/true);
+    } else {
+      infer_allgather(src, col_allgather, /*gather_dir=*/1);
+      infer_reduce(col_allgather, dst, IntImm(DataType::Int(32), 0),
+                   /*reduce_clear=*/true);
       infer_allgather(dst, row_allgather, /*gather_dir=*/0);
       infer_reduce(row_allgather, dst, IntImm(DataType::Int(32), 0),
                    /*reduce_clear=*/true);
     }
   } else {
-    infer_reduce(src, dst_copy, dim, /*reduce_clear=*/true);
-
-    if (direction == 1 || direction == 2) {
-      infer_allgather(dst_copy, col_allgather, /*gather_dir=*/1);
-      infer_reduce(col_allgather, direction == 1 ? dst : dst_copy,
-                   IntImm(DataType::Int(32), 0),
-                   /*reduce_clear=*/direction == 2);
-    }
-
-    if (direction == 0 || direction == 2) {
+    if (direction == 1) {
+      infer_allgather(src, col_allgather, /*gather_dir=*/1);
+      infer_reduce(col_allgather, dst, IntImm(DataType::Int(32), 0),
+                   /*reduce_clear=*/false);
+    } else if (direction == 0) {
+      infer_allgather(src, row_allgather, /*gather_dir=*/0);
+      infer_reduce(row_allgather, dst, IntImm(DataType::Int(32), 0),
+                   /*reduce_clear=*/false);
+    } else {
+      infer_allgather(src, col_allgather, /*gather_dir=*/1);
+      infer_reduce(col_allgather, dst_copy, IntImm(DataType::Int(32), 0),
+                   /*reduce_clear=*/true);
       infer_allgather(dst_copy, row_allgather, /*gather_dir=*/0);
       infer_reduce(row_allgather, dst, IntImm(DataType::Int(32), 0),
                    /*reduce_clear=*/false);
@@ -907,13 +1091,9 @@ Stmt AllreduceOpNode::Lower(const LowerArgs &T,
   Target target = T.target;
   ICHECK(TargetIsSunmmio(target)) << "Allreduce only supports SUNMMIO targets.";
 
-  ICHECK(direction == 0 || direction == 1 || direction == 2)
-      << "Invalid allreduce direction " << direction
-      << ", must be 0 (row-wise) or 1 (column-wise) or 2 (all).";
-
   bool should_clear = clear.as<Bool>().value();
-  ICHECK(should_clear || dst_copy.defined())
-      << "Allreduce clear=false requires a dst_copy temporary buffer.";
+  ValidateAllreduceContract(src, dst, row_allgather, col_allgather, dst_copy,
+                            type, direction, should_clear, target, analyzer);
   ICHECK(cid.defined())
       << "Allreduce dynamic allgather lowering requires current core id.";
 
@@ -939,7 +1119,9 @@ Stmt AllreduceOpNode::Lower(const LowerArgs &T,
     args.push_back(IntImm(DataType::Int(32), -1)); // size
     args.push_back(IntImm(DataType::Int(32), -1)); // axis
     args.push_back(cid);
-    AllgatherOp allgather_op = AllgatherOp(args);
+    Map<String, ObjectRef> annotations;
+    annotations.Set(kAttrAllowRank3Multicast, Bool(true));
+    AllgatherOp allgather_op = AllgatherOp(args, annotations);
     stmts.push_back(allgather_op->Lower(T, analyzer));
   };
 
@@ -958,24 +1140,21 @@ Stmt AllreduceOpNode::Lower(const LowerArgs &T,
   };
 
   if (should_clear) {
-    append_reduce(src, dst, dim, /*reduce_clear=*/true);
-
-    if (direction == 1 || direction == 2) {
-      append_col_stage(dst, dst, /*reduce_clear=*/true);
-    }
-
-    if (direction == 0 || direction == 2) {
+    if (direction == 1) {
+      append_col_stage(src, dst, /*reduce_clear=*/true);
+    } else if (direction == 0) {
+      append_row_stage(src, dst, /*reduce_clear=*/true);
+    } else {
+      append_col_stage(src, dst, /*reduce_clear=*/true);
       append_row_stage(dst, dst, /*reduce_clear=*/true);
     }
   } else {
-    append_reduce(src, dst_copy, dim, /*reduce_clear=*/true);
-
-    if (direction == 1 || direction == 2) {
-      append_col_stage(dst_copy, direction == 1 ? dst : dst_copy,
-                       /*reduce_clear=*/direction == 2);
-    }
-
-    if (direction == 0 || direction == 2) {
+    if (direction == 1) {
+      append_col_stage(src, dst, /*reduce_clear=*/false);
+    } else if (direction == 0) {
+      append_row_stage(src, dst, /*reduce_clear=*/false);
+    } else {
+      append_col_stage(src, dst_copy, /*reduce_clear=*/true);
       append_row_stage(dst_copy, dst, /*reduce_clear=*/false);
     }
   }

@@ -11,21 +11,21 @@ tilelang.env.disable_cache()
 
 def apply_sunmmio_passes(mod, target):
     mod = tvm.tir.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+    mod = tilelang.transform.ResolveSunmmioMeshSymbols()(mod)
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.InferSramScope()(mod)
     mod = tilelang.transform.LegalizeSunmmioDataPath()(mod)
-    mod = tilelang.transform.LayoutReducer()(mod)
     mod = tilelang.transform.SunmmioLayoutInference()(mod)
+    mod = tilelang.transform.LegalizeSunmmioGemm()(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
     return mod
 
 
 def allreduce_kernel(direction="all", clear=True, dtype="float32"):
     shape = (32, 32)
-    out_shape = (32,)
+    out_shape = shape
 
     @T.prim_func
     def main(A: T.Tensor(shape, dtype), Out: T.Tensor(out_shape, dtype)):
@@ -36,7 +36,7 @@ def allreduce_kernel(direction="all", clear=True, dtype="float32"):
             T.copy(A, A_shared)
             if not clear:
                 T.copy(Out, Out_shared)
-            T.comm.all_reduce(A_shared, Out_shared, "sum", direction, dim=1, clear=clear)
+            T.comm.all_reduce(A_shared, Out_shared, "sum", direction, clear=clear)
             T.copy(Out_shared, Out)
 
     return tvm.IRModule({"main": main})
@@ -110,7 +110,10 @@ def test_tilelang_allreduce_sunmmio_lowers_to_broadcast_and_tile_reduce(directio
     assert all(_region_access_mask(call.args[1]) == 2 for call in checker.broadcast_calls)
     assert all(int(call.args[3]) == 15 for call in checker.broadcast_calls)
     assert all(int(call.args[4]) == 0 for call in checker.broadcast_calls)
-    assert len(checker.in_tile_reduce_calls) >= 2
+    assert all(int(call.annotations["tl.allow_rank3_allreduce_multicast"]) == 1 for call in checker.broadcast_calls)
+    # Cross-core-only all_reduce lowers each carrier reduction along its
+    # leading participant axis; it must not insert a local payload reduction.
+    assert len(checker.in_tile_reduce_calls) == 0
     dma_buffer_pairs = [(_region_buffer_name(call.args[0]), _region_buffer_name(call.args[1])) for call in checker.dma_copy_calls]
     if clear:
         assert ("Out", "Out_shared") not in dma_buffer_pairs

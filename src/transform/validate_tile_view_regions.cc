@@ -232,14 +232,18 @@ private:
   }
 
   void ValidateAllreduceOp(const CallNode *call) {
-    ICHECK(call->args.size() == 9 || call->args.size() == 10)
-        << "tl.tileop.comm_allreduce expects 9 or 10 inputs, got "
+    ICHECK(call->args.size() == 8 || call->args.size() == 9)
+        << "tl.tileop.comm_allreduce expects 8 or 9 inputs, got "
         << call->args.size();
 
     BufferRegion src = NormalizeToBufferRegion(call->args[0]);
     BufferRegion dst = NormalizeToBufferRegion(call->args[1]);
     BufferRegion row_allgather = NormalizeToBufferRegion(call->args[2]);
     BufferRegion col_allgather = NormalizeToBufferRegion(call->args[3]);
+
+    const auto *type_imm = call->args[4].as<StringImmNode>();
+    ICHECK(type_imm)
+        << "tl.tileop.comm_allreduce reduce type must be StringImm";
 
     const auto *direction_imm = call->args[5].as<IntImmNode>();
     ICHECK(direction_imm)
@@ -249,29 +253,40 @@ private:
         << "Invalid direction value for tl.tileop.comm_allreduce: "
         << direction;
 
-    const auto *clear_imm = call->args[7].as<IntImmNode>();
+    const auto *clear_imm = call->args[6].as<IntImmNode>();
     ICHECK(clear_imm) << "tl.tileop.comm_allreduce clear must be IntImm";
     bool should_clear = clear_imm->value != 0;
+    bool needs_dst_copy = direction == 2 && !should_clear;
+    ICHECK_EQ(call->args.size(), needs_dst_copy ? 9U : 8U)
+        << "T.comm.all_reduce dst_copy must be provided only for direction=all "
+           "with clear=false";
+    PrimExpr dst_copy_expr =
+        call->args.size() == 9 ? call->args[7] : PrimExpr();
+    ValidateAllreduceContract(
+        call->args[0], call->args[1], call->args[2], call->args[3],
+        dst_copy_expr, Downcast<StringImm>(call->args[4]),
+        static_cast<int>(direction), should_clear, target_.value(), &analyzer_);
 
     ValidateRegionCanFormTileView(src, "tl.tileop.comm_allreduce", "src");
     ValidateRegionCanFormTileView(dst, "tl.tileop.comm_allreduce", "dst");
 
-    BufferRegion gather_send = dst;
-    if (!should_clear) {
-      ICHECK_EQ(call->args.size(), 10U)
-          << "tl.tileop.comm_allreduce clear=false requires dst_copy";
-      BufferRegion dst_copy = NormalizeToBufferRegion(call->args[8]);
+    BufferRegion row_gather_send = src;
+    const BufferRegion &col_gather_send = src;
+    if (direction == 2 && should_clear) {
+      row_gather_send = dst;
+    } else if (needs_dst_copy) {
+      BufferRegion dst_copy = NormalizeToBufferRegion(dst_copy_expr);
       ValidateRegionCanFormTileView(dst_copy, "tl.tileop.comm_allreduce",
                                     "dst_copy");
-      gather_send = dst_copy;
+      row_gather_send = dst_copy;
     }
 
     if (direction == 0 || direction == 2) {
-      ValidateAllgatherRegions(gather_send, row_allgather, /*direction=*/0,
+      ValidateAllgatherRegions(row_gather_send, row_allgather, /*direction=*/0,
                                /*axis=*/-1, "tl.tileop.comm_allreduce.row");
     }
     if (direction == 1 || direction == 2) {
-      ValidateAllgatherRegions(gather_send, col_allgather, /*direction=*/1,
+      ValidateAllgatherRegions(col_gather_send, col_allgather, /*direction=*/1,
                                /*axis=*/-1, "tl.tileop.comm_allreduce.col");
     }
   }

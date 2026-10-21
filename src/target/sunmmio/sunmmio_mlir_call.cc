@@ -118,7 +118,7 @@ SunMMIOValue SunmmioMlirCall::RegionCall(
     const std::string &result_name, const std::string &buffer_handle,
     const std::vector<SunMMIOValue> &mins, const std::vector<int64_t> &extents,
     DataType ret_dtype, const SunMMIOType &ret_type, int64_t byte_offset,
-    bool preserve_unit_dims) {
+    bool preserve_unit_dims, bool allow_rank3) {
   SunmmioMlirType type(ctx_);
 
   mlir::Value source = ctx_.LookupMLIRValue(buffer_handle);
@@ -172,9 +172,10 @@ SunMMIOValue SunmmioMlirCall::RegionCall(
     shape.push_back(1);
     tiled_dims.push_back(0);
   }
-  ICHECK(shape.size() == 1 || shape.size() == 2)
-      << "tl.tileop.region expects one or two tiled dims with extent != 1, "
-         "but got "
+  ICHECK(shape.size() == 1 || shape.size() == 2 ||
+         (allow_rank3 && shape.size() == 3))
+      << "tl.tileop.region expects one or two tiled dims with extent != 1, or "
+         "three for tl.broadcast_, but got "
       << shape.size();
 
   mlir::Type elem_ty = memtensor_ty.getElementType();

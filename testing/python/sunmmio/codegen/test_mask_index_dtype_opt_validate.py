@@ -105,6 +105,7 @@ def bf16_dynamic_rect_tail_mask_kernel(block_m=32, block_n=32, valid_rows=17, va
         (T.int16, "i16"),
         (T.float32, "i32"),
         (T.int32, "i32"),
+        (T.uint32, "i32"),
     ],
 )
 def test_predicated_store_mask_range_uses_value_dtype_width(dtype, expected_index_dtype, tmp_path):

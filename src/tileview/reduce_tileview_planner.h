@@ -24,6 +24,7 @@ using namespace tir;
 struct ReduceTileViewHints {
   Optional<TileView> src_tileview;
   Optional<TileView> dst_tileview;
+  bool allow_tiled_reduction{true};
 };
 
 struct ReduceTileViewPlan {

@@ -1516,7 +1516,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       return DataType::Int(16);
     }
     if ((dtype.is_float() && dtype.bits() == 32) ||
-        (dtype.is_int() && dtype.bits() == 32)) {
+        ((dtype.is_int() || dtype.is_uint()) && dtype.bits() == 32)) {
       return DataType::Int(32);
     }
     LOG(FATAL) << "Unsupported masked tile dtype for SunMMIO mask index "
@@ -3635,6 +3635,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     }
     auto emit_binary = [&](BinaryOp op, const PrimExpr &lhs_expr,
                            const PrimExpr &rhs_expr, DataType dtype) {
+      bool is_bitwise =
+          op == BinaryOp::kAnd || op == BinaryOp::kOr || op == BinaryOp::kXor;
       bool supports_mixed_precision = supports_mixed_precision_binary(op);
       std::optional<DataType> integer_preferred =
           canonical_integer_preferred_dtype(preferred_dtype);
@@ -3661,6 +3663,40 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
                                 arithmetic_flavor_for_dtype(result_dtype), lhs,
                                 rhs, result_type, result_dtype);
       }
+      if (is_bitwise) {
+        auto is_supported_integer_dtype = [](DataType value_dtype) {
+          value_dtype = CanonicalizeSuvmDType(value_dtype);
+          return (value_dtype.is_int() || value_dtype.is_uint()) &&
+                 value_dtype.bits() == 32 && value_dtype.lanes() == 1;
+        };
+        if (result_dtype.is_bool()) {
+          bool has_mask_operands = IsTileLike(lhs) && IsTileLike(rhs) &&
+                                   lhs.dtype.is_bool() && rhs.dtype.is_bool();
+          if (!has_mask_operands) {
+            UnsupportedExpr(
+                expr.get(),
+                "SunMMIO i1 tile bitwise operations require two mask tile "
+                "operands");
+          }
+        } else {
+          std::optional<DataType> unsupported_dtype;
+          if (IsTileLike(lhs) && !is_supported_integer_dtype(lhs.dtype)) {
+            unsupported_dtype = lhs.dtype;
+          } else if (IsTileLike(rhs) &&
+                     !is_supported_integer_dtype(rhs.dtype)) {
+            unsupported_dtype = rhs.dtype;
+          } else if (!is_supported_integer_dtype(result_dtype)) {
+            unsupported_dtype = result_dtype;
+          }
+          if (unsupported_dtype.has_value()) {
+            std::ostringstream detail;
+            detail << "SunMMIO tile bitwise operations require int32 or "
+                      "uint32 elements, got "
+                   << unsupported_dtype.value();
+            UnsupportedExpr(expr.get(), detail.str());
+          }
+        }
+      }
       std::vector<int64_t> result_shape = tile_result_shape(lhs, rhs);
       lhs = orient_expr_tile_operand(lhs, lhs_expr, result_shape);
       rhs = orient_expr_tile_operand(rhs, rhs_expr, result_shape);
@@ -3686,9 +3722,11 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         lhs = cast_value_to_dtype(lhs, result_dtype);
         rhs = cast_value_to_dtype(rhs, result_dtype);
       }
-      return builder_->Binary(NewValueName(), op,
-                              arithmetic_flavor_for_dtype(result_dtype), lhs,
-                              rhs, tile_type, result_dtype);
+      ArithmeticFlavor flavor = is_bitwise && result_dtype.is_bool()
+                                    ? ArithmeticFlavor::kBool
+                                    : arithmetic_flavor_for_dtype(result_dtype);
+      return builder_->Binary(NewValueName(), op, flavor, lhs, rhs, tile_type,
+                              result_dtype);
     };
     auto emit_compare_to_shape =
         [&](CompareOp op, const PrimExpr &lhs_expr, const PrimExpr &rhs_expr,
@@ -4285,6 +4323,21 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         return emit_binary(BinaryOp::kMod, call->args[0], call->args[1],
                            call->dtype);
       }
+      if (op_node && call->args.size() == 2 &&
+          op_node->name == "tir.bitwise_and") {
+        return emit_binary(BinaryOp::kAnd, call->args[0], call->args[1],
+                           call->dtype);
+      }
+      if (op_node && call->args.size() == 2 &&
+          op_node->name == "tir.bitwise_or") {
+        return emit_binary(BinaryOp::kOr, call->args[0], call->args[1],
+                           call->dtype);
+      }
+      if (op_node && call->args.size() == 2 &&
+          op_node->name == "tir.bitwise_xor") {
+        return emit_binary(BinaryOp::kXor, call->args[0], call->args[1],
+                           call->dtype);
+      }
       if (op_node && op_node->name == "tl.ieee_frcp") {
         ICHECK_EQ(call->args.size(), 2U)
             << "tl.ieee_frcp expects value and rounding mode";
@@ -4300,8 +4353,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     }
     UnsupportedExpr(expr.get(),
                     "Clean v4 tiles lowering currently supports only "
-                    "BufferLoad/add/sub/mul/div/mod/min/max/compare/select/"
-                    "cast/constants and selected unary math calls");
+                    "BufferLoad/add/sub/mul/div/mod/min/max/bitwise/compare/"
+                    "select/cast/constants and selected unary math calls");
   };
 
   lower_stmt = [&](const Stmt &stmt, TileBlockState *state) {

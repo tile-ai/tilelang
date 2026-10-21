@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 import tvm_ffi
 from tvm import arith, ir, tir
+from tvm.runtime import DataTypeCode
 import tilelang.utils.target as _target_utils
 import tilelang.language as T
 from tilelang._typing import BufferLikeType
@@ -660,58 +661,47 @@ def _normalize_allgather_regions(
 def _allreduce_result_region(
     src: _NormalizedCommRegion,
     out_rank: int,
-    dim: int,
     op_name: str,
 ) -> _NormalizedCommRegion:
     src_rank = len(src.extents)
-    if out_rank == src_rank - 1:
-        mins = src.mins[:dim] + src.mins[dim + 1 :]
-        extents = src.extents[:dim] + src.extents[dim + 1 :]
-    elif out_rank == src_rank:
-        mins = list(src.mins)
-        extents = list(src.extents)
-        extents[dim] = _int_one()
-    else:
+    if out_rank != src_rank:
         raise ValueError(
-            f"{op_name} output rank must be input rank - 1 or input rank; input rank is {src_rank}, output rank is {out_rank}."
+            f"{op_name} output rank must equal input rank for cross-core-only all_reduce; "
+            f"input rank is {src_rank}, output rank is {out_rank}."
         )
-    return _NormalizedCommRegion(src.spec, mins, extents)
+    return _NormalizedCommRegion(src.spec, list(src.mins), list(src.extents))
 
 
 def _infer_allreduce_input_extents(
     src_spec: _CommRegionSpec,
     out_region: _NormalizedCommRegion,
-    dim: int,
     op_name: str,
 ) -> list[tir.PrimExpr]:
     src_rank = len(src_spec.mins)
     out_rank = len(out_region.extents)
-    if out_rank == src_rank - 1:
-        extents = list(out_region.extents)
-        extents.insert(dim, src_spec.buffer.shape[dim])
-        return extents
-    if out_rank == src_rank:
-        extents = list(out_region.extents)
-        extents[dim] = src_spec.buffer.shape[dim]
-        return extents
-    raise ValueError(f"{op_name} output rank must be input rank - 1 or input rank; input rank is {src_rank}, output rank is {out_rank}.")
+    if out_rank != src_rank:
+        raise ValueError(
+            f"{op_name} output rank must equal input rank for cross-core-only all_reduce; "
+            f"input rank is {src_rank}, output rank is {out_rank}."
+        )
+    return list(out_region.extents)
 
 
 def _normalize_allreduce_regions(
     src: BufferLikeType,
     out: BufferLikeType,
-    dim: int,
     op_name: str,
 ) -> tuple[_NormalizedCommRegion, _NormalizedCommRegion]:
-    # Apply one-to-one copy rules after removing or retaining the reduced dim.
+    # Cross-core-only all_reduce preserves the complete local region.
     src_spec = _extract_comm_region_spec(src, op_name)
     out_spec = _extract_comm_region_spec(out, op_name)
     src_rank = len(src_spec.mins)
     out_rank = len(out_spec.mins)
 
-    if out_rank not in (src_rank - 1, src_rank):
+    if out_rank != src_rank:
         raise ValueError(
-            f"{op_name} output rank must be input rank - 1 or input rank; input rank is {src_rank}, output rank is {out_rank}."
+            f"{op_name} output rank must equal input rank for cross-core-only all_reduce; "
+            f"input rank is {src_rank}, output rank is {out_rank}."
         )
     if src_spec.kind == "load" and out_spec.kind == "load":
         raise ValueError(f"{op_name} cannot infer extents when both operands are BufferLoad values.")
@@ -721,14 +711,14 @@ def _normalize_allreduce_regions(
 
     if src_region is None:
         assert out_region is not None
-        src_extents = _infer_allreduce_input_extents(src_spec, out_region, dim, op_name)
+        src_extents = _infer_allreduce_input_extents(src_spec, out_region, op_name)
         src_region = _clip_region_to_shape(src_spec, src_spec.mins, src_extents, op_name)
 
     if out_region is None:
-        result_region = _allreduce_result_region(src_region, out_rank, dim, op_name)
+        result_region = _allreduce_result_region(src_region, out_rank, op_name)
         out_region = _clip_region_to_shape(out_spec, out_spec.mins, result_region.extents, op_name)
 
-    result_region = _allreduce_result_region(src_region, out_rank, dim, op_name)
+    result_region = _allreduce_result_region(src_region, out_rank, op_name)
     _, out_region = _validate_and_adjust_comm_regions(
         result_region,
         out_region,
@@ -846,42 +836,31 @@ def _prepare_allgather_operands(
 def _prepare_allreduce_operands(
     buffer: BufferLikeType,
     out: BufferLikeType,
-    dim: int,
     op_name: str,
-) -> tuple[_PreparedCommRegion, _PreparedCommRegion, int]:
+) -> tuple[_PreparedCommRegion, _PreparedCommRegion]:
+    if not _extract_comm_region_spec(buffer, op_name).mins:
+        raise ValueError(f"{op_name} input must have at least one dimension.")
+
     if _target_utils.ENABLE_SUNMMIO_REGION_VALIDATION:
-        buffer_spec = _extract_comm_region_spec(buffer, op_name)
-        buffer_rank = len(buffer_spec.mins)
-        assert isinstance(dim, int) and -1 <= dim < buffer_rank, f"dim {dim} out of bounds for buffer with {buffer_rank} dimensions."
-        normalized_dim = buffer_rank - 1 if dim == -1 else dim
         buffer_region, out_region = _normalize_allreduce_regions(
             buffer,
             out,
-            normalized_dim,
             op_name,
         )
         return (
             _prepare_normalized_comm_region(buffer_region, "r"),
             _prepare_normalized_comm_region(out_region, "w"),
-            normalized_dim,
         )
 
     buffer_region = _prepare_comm_region_compact(buffer, "r")
     out_region = _prepare_comm_region_compact(out, "w")
-    buffer_rank = len(buffer_region.extents)
-    assert isinstance(dim, int) and -1 <= dim < buffer_rank, f"dim {dim} out of bounds for buffer with {buffer_rank} dimensions."
-    normalized_dim = buffer_rank - 1 if dim == -1 else dim
-    expected_shapes = [
-        buffer_region.extents[:normalized_dim] + buffer_region.extents[normalized_dim + 1 :],
-        buffer_region.extents[:normalized_dim] + [1] + buffer_region.extents[normalized_dim + 1 :],
-    ]
-    if not any(_compact_shape_equal(out_region.extents, shape) for shape in expected_shapes):
-        expected_shapes_str = " or ".join(map(str, expected_shapes))
+    expected_shape = list(buffer_region.extents)
+    if not _compact_shape_equal(out_region.extents, expected_shape):
         raise ValueError(
-            f"Invalid reduce output shape, buffer shape is {buffer_region.extents}, dim is {normalized_dim}, "
-            f"output shape is {out_region.extents}, expected shapes are {expected_shapes_str}"
+            f"Invalid all_reduce output shape for cross-core-only all_reduce, buffer shape is {buffer_region.extents}, "
+            f"output shape is {out_region.extents}, expected shape is {expected_shape}"
         )
-    return buffer_region, out_region, normalized_dim
+    return buffer_region, out_region
 
 
 def _prepare_allreduce_temporary(buffer: tir.Buffer, access_type: str) -> tir.PrimExpr | tir.BufferRegion:
@@ -1076,7 +1055,7 @@ def all_reduce(
     out: BufferLikeType,
     reduce_type: str,
     direction: Literal["horizontal", "h", "vertical", "v", "all", "a"],
-    dim: int = -1,
+    *,
     clear: bool = True,
 ):
     """Perform an all-reduce operation on a buffer and store the result in an output buffer
@@ -1092,8 +1071,6 @@ def all_reduce(
     direction : Literal["horizontal", "h", "vertical", "v", "all", "a"]
         Direction of all-reduce: "horizontal" (or "h") for row-wise, "vertical" (or "v") for column-wise,
         and "all" (or "a") for all cores.
-    dim : int
-        Dimension along which to perform the reduction. Default is -1 (last dimension).
     clear : bool
         Whether to clear the output buffer before reduction. Default is True.
     Returns
@@ -1102,49 +1079,68 @@ def all_reduce(
         The TIR intrinsic call handle for `tl.tileop.comm_allreduce`.
     Examples
     --------
-    >>> all_reduce(A_local, E_local, "sum", "all", dim=-1, clear=False)
+    >>> all_reduce(A_local, E_local, "sum", "all", clear=False)
     """
-    buffer_region, out_region, dim = _prepare_allreduce_operands(
+    buffer_region, out_region = _prepare_allreduce_operands(
         buffer,
         out,
-        dim,
         "T.comm.all_reduce",
     )
     out_buffer = out_region.buffer
+    src_dtype = buffer_region.buffer.dtype
     out_dtype = out_buffer.dtype
+    src_shape = buffer_region.extents
     out_shape = out_region.extents
 
     reduce_type = reduce_type.lower()
     assert reduce_type in REDUCE_TYPE_LIST, f"Reduction op must be one of {REDUCE_TYPE_LIST}, but got {reduce_type}."
 
-    assert direction.lower() in DIRECTION_MAP, f"Invalid direction string: {direction}"
+    if reduce_type in ("bitand", "bitor", "bitxor"):
+        integer_type_codes = (DataTypeCode.INT, DataTypeCode.UINT)
+        assert (
+            src_dtype.type_code in integer_type_codes
+            and out_dtype.type_code in integer_type_codes
+            and src_dtype.bits == 32
+            and out_dtype.bits == 32
+            and src_dtype.lanes == 1
+            and out_dtype.lanes == 1
+            and src_dtype == out_dtype
+        ), (
+            "Sunmmio bitwise all_reduce requires input and output dtypes to be both int32 or both uint32, "
+            f"but got {src_dtype} and {out_dtype}."
+        )
+
+    direction = direction.lower()
+    assert direction in DIRECTION_MAP, f"Invalid direction string: {direction}"
     assert clear in [True, False], "clear must be a boolean value."
 
-    mesh_shape = get_target_mesh_shape()
+    mesh_nrows = T.mesh_nrows()
+    mesh_ncols = T.mesh_ncols()
 
     # Create temporary buffers for row and column allgather results.  Keep the
     # temporaries in the output scope because the lowered Sunmmio path feeds
     # them back into ReduceOp and broadcast_.
     out_scope = out_buffer.scope()
 
-    def alloc_tmp(shape):
+    def alloc_tmp(shape, dtype):
         if out_scope.startswith("shared"):
-            return T.alloc_shared(shape, out_dtype, scope=out_scope)
-        return T.alloc_fragment(shape, out_dtype, scope=out_scope)
+            return T.alloc_shared(shape, dtype, scope=out_scope)
+        return T.alloc_fragment(shape, dtype, scope=out_scope)
 
-    direction_value = DIRECTION_MAP[direction.lower()]
-    if direction_value == 0:
-        row_allgather = alloc_tmp([mesh_shape["ncol"]] + list(out_shape))
-        col_allgather = row_allgather
-    elif direction_value == 1:
-        col_allgather = alloc_tmp([mesh_shape["nrow"]] + list(out_shape))
-        row_allgather = col_allgather
+    direction_id = DIRECTION_MAP[direction]
+    if direction_id == 0:
+        row_allgather = alloc_tmp([mesh_ncols] + list(src_shape), src_dtype)
+        row_allgather_region = _prepare_allreduce_temporary(row_allgather, "rw")
+        col_allgather_region = row_allgather_region
+    elif direction_id == 1:
+        col_allgather = alloc_tmp([mesh_nrows] + list(src_shape), src_dtype)
+        col_allgather_region = _prepare_allreduce_temporary(col_allgather, "rw")
+        row_allgather_region = col_allgather_region
     else:
-        row_allgather = alloc_tmp([mesh_shape["ncol"]] + list(out_shape))
-        col_allgather = alloc_tmp([mesh_shape["nrow"]] + list(out_shape))
-
-    row_allgather_region = _prepare_allreduce_temporary(row_allgather, "rw")
-    col_allgather_region = _prepare_allreduce_temporary(col_allgather, "rw")
+        row_allgather = alloc_tmp([mesh_ncols] + list(src_shape), out_dtype)
+        col_allgather = alloc_tmp([mesh_nrows] + list(src_shape), src_dtype)
+        row_allgather_region = _prepare_allreduce_temporary(row_allgather, "rw")
+        col_allgather_region = _prepare_allreduce_temporary(col_allgather, "rw")
     cid = T.get_block_binding(0)
 
     args = (
@@ -1153,15 +1149,14 @@ def all_reduce(
         row_allgather_region,
         col_allgather_region,
         reduce_type,
-        direction_value,
-        dim,
+        direction_id,
         clear,
         cid,
     )
 
-    # If not clearing, allocate an output copy buffer to hold intermediate results
-    if not clear:
-        out_copy = alloc_tmp(list(out_shape))
+    # The two-stage all direction needs a temporary that preserves dst_before.
+    if not clear and direction_id == 2:
+        out_copy = alloc_tmp(list(out_shape), out_dtype)
         out_copy_region = _prepare_allreduce_temporary(out_copy, "rw")
         args = (
             buffer_region.region,
@@ -1169,8 +1164,7 @@ def all_reduce(
             row_allgather_region,
             col_allgather_region,
             reduce_type,
-            DIRECTION_MAP[direction.lower()],
-            dim,
+            direction_id,
             clear,
             out_copy_region,
             cid,

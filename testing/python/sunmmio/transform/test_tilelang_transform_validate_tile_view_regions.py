@@ -590,8 +590,8 @@ def _make_comm_kernel(comm_case):
 
     elif comm_case == "allreduce_low_level_valid":
         send_shape = (32, 32)
-        out_shape = (32,)
-        gather_shape = (16, 32)
+        out_shape = send_shape
+        gather_shape = (4, *send_shape)
 
         @T.prim_func
         def kernel(A: T.Tensor(shape, DTYPE)):
@@ -613,13 +613,59 @@ def _make_comm_kernel(comm_case):
                         "handle",
                         tvm.tir.op.Op.get("tl.tileop.comm_allreduce"),
                         A_shared[0:32, 0:32],
-                        Out_shared[0:32],
-                        Row_gather[0:16, 0:32],
-                        Col_gather[0:16, 0:32],
+                        Out_shared[0:32, 0:32],
+                        Row_gather[0:4, 0:32, 0:32],
+                        Col_gather[0:4, 0:32, 0:32],
                         "sum",
                         2,
-                        1,
                         T.bool(True),
+                        bx,
+                    )
+                )
+
+    elif comm_case in {
+        "allreduce_low_level_bitwise",
+        "allreduce_low_level_bitwise_int32",
+        "allreduce_low_level_bitwise_uint32",
+        "allreduce_low_level_missing_dst_copy",
+    }:
+        send_shape = (32, 32)
+        gather_shape = (4, *send_shape)
+        reduce_type = "bitand" if "bitwise" in comm_case else "sum"
+        if comm_case == "allreduce_low_level_bitwise_int32":
+            reduce_dtype = "int32"
+        elif comm_case == "allreduce_low_level_bitwise_uint32":
+            reduce_dtype = "uint32"
+        else:
+            reduce_dtype = DTYPE
+        clear = comm_case != "allreduce_low_level_missing_dst_copy"
+
+        @T.prim_func
+        def kernel(A: T.Tensor(shape, DTYPE)):
+            with T.Kernel() as bx:
+                A_shared = T.alloc_shared(send_shape, reduce_dtype)
+                Out_shared = T.alloc_shared(send_shape, reduce_dtype)
+                Row_gather = T.alloc_shared(gather_shape, reduce_dtype)
+                Col_gather = T.alloc_shared(gather_shape, reduce_dtype)
+                T.annotate_layout(
+                    {
+                        A_shared: make_row_major(send_shape),
+                        Out_shared: make_row_major(send_shape),
+                        Row_gather: make_row_major(gather_shape),
+                        Col_gather: make_row_major(gather_shape),
+                    }
+                )
+                T.evaluate(
+                    tvm.tir.call_intrin(
+                        "handle",
+                        tvm.tir.op.Op.get("tl.tileop.comm_allreduce"),
+                        A_shared[0:32, 0:32],
+                        Out_shared[0:32, 0:32],
+                        Row_gather[0:4, 0:32, 0:32],
+                        Col_gather[0:4, 0:32, 0:32],
+                        reduce_type,
+                        2,
+                        T.bool(clear),
                         bx,
                     )
                 )
@@ -751,6 +797,8 @@ def test_sunmmio_validate_tile_view_regions_rejects_kernel_after_layout_inferenc
         "allgather_axis0_valid",
         "allgather_axis_last_valid",
         "allreduce_low_level_valid",
+        "allreduce_low_level_bitwise_int32",
+        "allreduce_low_level_bitwise_uint32",
     ],
 )
 def test_sunmmio_validate_tile_view_regions_accepts_comm_regions(comm_case):
@@ -771,6 +819,21 @@ def test_sunmmio_validate_tile_view_regions_accepts_comm_regions(comm_case):
     ],
 )
 def test_sunmmio_validate_tile_view_regions_rejects_comm_regions(comm_case, error_msg):
+    with pytest.raises(tvm.error.InternalError, match=error_msg):
+        _run_comm_validate_tile_view_regions(comm_case)
+
+
+@pytest.mark.parametrize(
+    "comm_case,error_msg",
+    [
+        (
+            "allreduce_low_level_bitwise",
+            "Sunmmio bitwise all_reduce requires input and output dtypes to be both int32 or both uint32",
+        ),
+        ("allreduce_low_level_missing_dst_copy", "dst_copy must be provided only"),
+    ],
+)
+def test_sunmmio_validate_tile_view_regions_rejects_invalid_allreduce_contract(comm_case, error_msg):
     with pytest.raises(tvm.error.InternalError, match=error_msg):
         _run_comm_validate_tile_view_regions(comm_case)
 

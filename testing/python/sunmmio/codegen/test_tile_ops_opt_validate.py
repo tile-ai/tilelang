@@ -1,6 +1,7 @@
 import os
 import re
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -220,6 +221,62 @@ def fp32_select_then_bf16_cast_test(m=32, n=32):
             T.copy(C_shared, C)
 
     return main
+
+
+@target("Sunmmio")
+def tile_bitwise_ops_test(m=32, n=32, dtype="int32"):
+    shard_policy = T.placement.replicated()
+    tensor_shape = (m, n)
+    tensor_layout = make_zz_layout(tensor_shape, [0, 1], (32, 32))
+
+    @T.prim_func
+    def main(
+        A: T.MeshTensor(tensor_shape, shard_policy, dtype, layout=tensor_layout),  # type: ignore
+        B: T.MeshTensor(tensor_shape, shard_policy, dtype, layout=tensor_layout),  # type: ignore
+        C: T.MeshTensor(tensor_shape, shard_policy, dtype, layout=tensor_layout),  # type: ignore
+    ):
+        with T.Kernel():
+            A_shared = T.alloc_shared(tensor_shape, dtype)
+            B_shared = T.alloc_shared(tensor_shape, dtype)
+            C_shared = T.alloc_shared(tensor_shape, dtype)
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            for i, j in T.Tiles(A_shared, parallel=True):
+                and_value = T.bitwise_and(A_shared[i, j], B_shared[i, j])
+                or_value = T.bitwise_or(and_value, A_shared[i, j])
+                C_shared[i, j] = T.bitwise_xor(or_value, B_shared[i, j])
+            T.copy(C_shared, C)
+
+    return main
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+@pytest.mark.parametrize("m", [32, 40], ids=["full-tile", "1024-byte-tail"])
+def test_tile_bitwise_ops_codegen_validates_with_npuir_opt(tmp_path, dtype, m):
+    src = validate_sunmmio_codegen_with_npuir_opt(
+        tile_bitwise_ops_test(m=m, dtype=dtype),
+        tmp_path,
+        mlir_filename=f"tile_bitwise_ops_{dtype}_{m}_suvm.mlir",
+        expected_tokens=("suvm.tile.andi", "suvm.tile.ori", "suvm.tile.xori"),
+        opt_args=STRICT_OPT_ARGS,
+    )
+    assert_source_contains(
+        src,
+        ("suvm.tile.andi", "suvm.tile.ori", "suvm.tile.xori"),
+    )
+
+
+@pytest.mark.parametrize("dtype", ["int16", "uint16", "int64", "uint64"])
+def test_tile_bitwise_ops_rejects_unsupported_dtype(tmp_path, dtype):
+    with pytest.raises(
+        Exception,
+        match=rf"SunMMIO tile bitwise operations require int32 or uint32 elements, got {dtype}",
+    ):
+        validate_sunmmio_codegen_with_npuir_opt(
+            tile_bitwise_ops_test(dtype=dtype),
+            tmp_path,
+            mlir_filename=f"tile_bitwise_ops_{dtype}_rejected_suvm.mlir",
+        )
 
 
 def test_tile_elementwise_ops_2d_codegen_validates_with_npuir_opt(tmp_path):

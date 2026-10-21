@@ -17,6 +17,7 @@ os.environ.setdefault("SUNMMIO_TEST_PRINT", "0")
 # os.environ["SUNMMIO_TEST_LOG_IR"] = "1"
 
 LOOSE_OPT_ARGS = ("--verify-each",)
+STRICT_OPT_ARGS = ("--verify-each", "--suvm-to-llvm-pipeline")
 
 
 @target("Sunmmio")
@@ -87,25 +88,35 @@ def comm_all_gather_kernel(
 
 
 @target("Sunmmio")
-def comm_all_reduce_horizontal_kernel(M=32, N=128, dtype="float32"):
+def comm_all_reduce_horizontal_kernel(
+    K=2,
+    M=32,
+    N=32,
+    dtype="float32",
+    reduce_type="sum",
+    clear=True,
+):
     @T.prim_func
     def main(
-        A: T.Tensor((M, N), dtype),
-        B: T.Tensor((M, N), dtype),
+        A: T.Tensor((K, M, N), dtype),
+        B: T.Tensor((K, M, N), dtype),
     ):
         with T.Kernel():
-            reduce_src = T.alloc_shared((1, M, N), dtype, scope="shared.rsram")
-            reduced = T.alloc_shared((M, N), dtype, scope="shared.rsram")
-            T.copy(A, reduce_src[0, 0:M, 0:N])
+            reduce_src = T.alloc_shared((K, M, N), dtype, scope="shared.rsram")
+            reduced = T.alloc_shared((K, M, N), dtype, scope="shared.rsram")
+            for k in T.serial(K):
+                T.copy(A[k, :, :], reduce_src[k, :, :])
+            if not clear:
+                T.fill(reduced, 1)
             T.comm.all_reduce(
                 reduce_src,
                 reduced,
-                "sum",
+                reduce_type,
                 "horizontal",
-                dim=0,
-                clear=True,
+                clear=clear,
             )
-            T.copy(reduced, B)
+            for k in T.serial(K):
+                T.copy(reduced[k, :, :], B[k, :, :])
 
     return main
 
@@ -292,9 +303,48 @@ def test_comm_all_reduce_horizontal_codegen_validates_with_npuir_opt(tmp_path):
         tmp_path,
         mlir_filename="comm_all_reduce_horizontal_kernel_suvm.mlir",
         expected_tokens=("suvm.copy_async", "suvm.mcast_async"),
+        opt_args=STRICT_OPT_ARGS,
     )
 
-    assert src.count("suvm.mcast_async") >= 1
+    # The local payload must stay one direct rank-3 multicast leaf.
+    mcast_lines = find_async_op_lines(src, "suvm.mcast_async")
+    assert len(mcast_lines) == 1
+    assert mcast_lines[0].count("!suvm.tile_view<2x32x32xf32>") == 2
+
+
+@pytest.mark.parametrize(
+    ("reduce_type", "tile_op"),
+    [
+        ("bitand", "suvm.tile.andi"),
+        ("bitor", "suvm.tile.ori"),
+        ("bitxor", "suvm.tile.xori"),
+    ],
+)
+@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+@pytest.mark.parametrize("clear", [True, False], ids=["clear", "accumulate"])
+def test_comm_all_reduce_rank3_bitwise_uses_hardware_tile(
+    clear,
+    dtype,
+    reduce_type,
+    tile_op,
+    tmp_path,
+):
+    src = _validate_kernel(
+        comm_all_reduce_horizontal_kernel(
+            dtype=dtype,
+            reduce_type=reduce_type,
+            clear=clear,
+        ),
+        tmp_path,
+        mlir_filename=f"comm_all_reduce_rank3_{dtype}_{reduce_type}_clear_{clear}_suvm.mlir",
+        expected_tokens=("suvm.mcast_async", tile_op),
+        opt_args=STRICT_OPT_ARGS,
+    )
+
+    mcast_lines = find_async_op_lines(src, "suvm.mcast_async")
+    assert len(mcast_lines) == 1
+    assert mcast_lines[0].count("!suvm.tile_view<2x32x32x") == 2
+    assert tile_op in src
 
 
 def test_sync_simple_copy_kernel_codegen_validates_with_npuir_opt(tmp_path):

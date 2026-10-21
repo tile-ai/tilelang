@@ -349,6 +349,9 @@ PlanReduceTileViews(const BufferRegion &src_region,
   std::vector<ReduceTileCandidate> compatible_candidates;
   compatible_candidates.reserve(candidates.size());
   for (const ReduceTileCandidate &candidate : candidates) {
+    if (!hints.allow_tiled_reduction && candidate.reduce_tile_axis >= 0) {
+      continue;
+    }
     if (IsLegalProjectedDstTileView(dst_region, candidate, layout_map,
                                     tile_processor_config, analyzer) &&
         IsCompatibleProjectedTileView(hints.dst_tileview,
