@@ -30,18 +30,9 @@ class GemmSP(Node, Scriptable):
     trans_B: bool
     trans_E: bool
 
-    stride_A: int
-    stride_B: int
-    offset_A: int
-    offset_B: int
     clear_accum: bool
-    kPack: int
     wg_wait: int
     policy: GemmSPWarpPolicy
-
-    @property
-    def k_pack(self):
-        return self.kPack
 
     @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
     def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):

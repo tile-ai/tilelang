@@ -5,7 +5,7 @@ from tilelang import language as T, tvm
 
 @tilelang.jit
 def _compile_kernel_without_inplace():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
@@ -26,7 +26,7 @@ def _compile_kernel_without_inplace():
     },
 )
 def _compile_kernel_with_inplace():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):

@@ -38,6 +38,22 @@ void RequireTMASmemAlignment(const LowerArgs &lower_args,
                              const tirx::Buffer &shared_tensor,
                              const SwizzleMode &swizzle_mode);
 
+// A TensorMap box dimension holds at most 256 elements.
+inline constexpr int64_t kTmaMaxBoxDim = 256;
+
+// Every tile-mode TMA instruction requires a 128-byte-aligned SMEM address.
+inline constexpr int64_t kTmaSmemAddrAlign = 128;
+
+// An im2col TensorMap accesses up to 1024 pixels per column; its
+// channels-per-pixel stays under the ordinary box limit.
+inline constexpr int64_t kTmaMaxIm2ColPixelsPerColumn = 1024;
+
+// Unswizzled shared-memory layout whose copied modes are tiled at the TMA box
+// cap. Dimensions fixed by `region` stay outermost so a versioned slice
+// remains contiguous.
+Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
+                           const ffi::Array<Range> &region = {});
+
 } // namespace cuda
 } // namespace tl
 } // namespace tvm

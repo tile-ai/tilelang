@@ -1,0 +1,325 @@
+# Persistent, warp-specialized TCGEN05 GEMM using PersistentTileScheduler.
+#
+# Each warp role (TMA / tcgen5 MMA / epilogue) creates its own scheduler instance
+# and drives a single ``while sched.valid()`` loop. The scheduler owns the only
+# iteration clock: ``sched.current_iter`` drives pipeline phase /
+# ``sched.current_iter & 1`` double-buffering; ``sched.m_idx`` /
+# ``sched.n_idx`` are the tile coords. One clock, held by the scheduler -- no
+# separate ``for w in range(waves)`` counter.
+
+import argparse
+
+import torch
+import tilelang
+import tilelang.language as T
+from tilelang.carver.arch import driver
+from tilelang.profiler import do_bench
+
+
+@tilelang.jit
+def gemm_persistent(
+    A,
+    B,
+    block_M,
+    block_N,
+    store_block_N,  # block_N for C_shared
+    block_K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    num_stages,
+    group_size,
+    use_tma_store,
+):
+    M, N, K = T.const("M, N, K")
+
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[K, N], in_dtype]
+    C = T.empty((M, N), out_dtype)
+
+    sm_num = driver.get_num_sms()
+    m_blocks = T.ceildiv(M, block_M)
+    n_blocks = T.ceildiv(N, block_N)
+    assert K % (2 * block_K) == 0  # for simplicity
+    k_blocks = T.ceildiv(K, block_K)
+    assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
+
+    with T.Kernel(sm_num, threads=256) as (block_id):
+        A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
+        B_shared = T.alloc_shared((num_stages, block_K, block_N), in_dtype)
+        C_tmem = T.alloc_tmem([2, block_M, block_N], accum_dtype)
+        C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, store_block_N), out_dtype)
+        loaded = T.alloc_barrier([32] * num_stages)
+        consumed = T.alloc_barrier([1] * num_stages)
+        tmem_full = T.alloc_barrier([1] * 2)
+        tmem_empty = T.alloc_barrier([128] * 2)
+
+        tx = T.get_thread_binding()
+
+        if tx < 32:  # warp 0: issue tma
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size)
+            sched.init(block_id)
+            while sched.valid():
+                bx, by = sched.m_idx, sched.n_idx
+
+                for k in T.serial(k_blocks):
+                    phase = sched.current_iter * k_blocks + k
+                    T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
+                    T.tma_copy(
+                        A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                        A_shared[phase % num_stages, :, :],
+                        barrier=loaded[phase % num_stages],
+                    )
+                    T.tma_copy(
+                        B[k * block_K : (k + 1) * block_K, by * block_N : (by + 1) * block_N],
+                        B_shared[phase % num_stages, :, :],
+                        barrier=loaded[phase % num_stages],
+                    )
+                    T.mbarrier_arrive(loaded[phase % num_stages])
+                sched.next_tile()
+
+        elif tx < 64:  # warp 1: issue tcgen5
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size)
+            sched.init(block_id)
+            while sched.valid():
+                T.mbarrier_wait_parity(tmem_empty[sched.current_iter & 1], ((sched.current_iter // 2) & 1) ^ 1)
+                for k in T.serial(k_blocks):
+                    phase = sched.current_iter * k_blocks + k
+                    T.mbarrier_wait_parity(loaded[phase % num_stages], (phase // num_stages) & 1)
+                    T.tcgen05_gemm(
+                        A_shared[phase % num_stages, :, :],
+                        B_shared[phase % num_stages, :, :],
+                        C_tmem[sched.current_iter & 1, :, :],
+                        mbar=consumed[phase % num_stages],
+                        clear_accum=k == 0,
+                    )
+                T.tcgen05_mma_arrive(tmem_full[sched.current_iter & 1])
+                sched.next_tile()
+
+        elif 128 <= tx < 256:  # warp 4~7: epilogue
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size)
+            sched.init(block_id)
+            while sched.valid():
+                bx, by = sched.m_idx, sched.n_idx
+
+                T.mbarrier_wait_parity(tmem_full[sched.current_iter & 1], (sched.current_iter // 2) & 1)
+
+                for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                    T.copy(
+                        C_tmem[
+                            sched.current_iter & 1,
+                            :,
+                            i * store_block_N : (i + 1) * store_block_N,
+                        ],
+                        C_local,
+                    )
+                    if use_tma_store:
+                        T.copy(C_local, C_shared)
+                        T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+                    else:
+                        T.copy(C_local, C_local_cast)
+                        T.copy(
+                            C_local_cast,
+                            C[bx * block_M, by * block_N + i * store_block_N],
+                        )
+
+                T.mbarrier_arrive(tmem_empty[sched.current_iter & 1])
+
+                sched.next_tile()
+    return C
+
+
+@tilelang.jit
+def gemm_persistent_2cta(
+    A,
+    B,
+    block_M,
+    block_N,
+    store_block_N,  # block_N for C_shared
+    block_K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    num_stages,
+    group_size,
+    use_tma_store,
+):
+    M, N, K = T.const("M, N, K")
+
+    A: T.Tensor[[M, K], in_dtype]
+    B: T.Tensor[[K, N], in_dtype]
+    C = T.empty((M, N), out_dtype)
+
+    sm_num = driver.get_num_sms()
+    m_blocks = T.ceildiv(M, block_M)
+    n_blocks = T.ceildiv(N, block_N)
+    assert K % (2 * block_K) == 0  # for simplicity
+    k_blocks = T.ceildiv(K, block_K)
+    assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
+    cluster_size = 2
+
+    with T.ClusterKernel(sm_num, threads=256, cluster_dims=2) as (block_id):
+        A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
+        B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)
+        C_tmem = T.alloc_tmem([2, block_M, block_N], accum_dtype)
+        C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
+        if use_tma_store:
+            C_shared = T.alloc_shared((block_M, store_block_N), out_dtype)
+        else:
+            C_local_cast = T.alloc_fragment((block_M, store_block_N), out_dtype)
+        loaded = T.alloc_cluster_barrier([32 * 2] * num_stages)
+        consumed = T.alloc_cluster_barrier([1] * num_stages)
+        tmem_full = T.alloc_cluster_barrier([1] * 2)
+        tmem_empty = T.alloc_cluster_barrier([128 * 2] * 2)
+
+        tx = T.get_thread_binding()
+        cta_id = T.block_rank_in_cluster()
+        T.assume(cta_id < 2)  # todo: automatically assume this
+
+        if tx < 32:  # warp 0: issue tma
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched.init(block_id // cluster_size)
+            while sched.valid():
+                bx, by = sched.m_idx * cluster_size + cta_id, sched.n_idx
+
+                for k in T.serial(k_blocks):
+                    phase = sched.current_iter * k_blocks + k
+                    T.mbarrier_wait_parity(consumed[phase % num_stages], ((phase // num_stages) & 1) ^ 1)
+                    T.tma_copy(
+                        A[bx * block_M : (bx + 1) * block_M, k * block_K : (k + 1) * block_K],
+                        A_shared[phase % num_stages, :, :],
+                        barrier=loaded[phase % num_stages],
+                    )
+
+                    T.tma_copy(
+                        B[k * block_K : (k + 1) * block_K, (by * 2 + cta_id) * block_N // 2 : (by * 2 + cta_id + 1) * block_N // 2],
+                        B_shared[phase % num_stages, :, :],
+                        barrier=loaded[phase % num_stages],
+                    )
+                    T.mbarrier_arrive(loaded[phase % num_stages], 0)
+                sched.next_tile()
+
+        elif tx < 64 and cta_id == 0:  # warp 1: issue tcgen5
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched.init(block_id // cluster_size)
+            while sched.valid():
+                T.mbarrier_wait_parity(tmem_empty[sched.current_iter & 1], ((sched.current_iter // 2) & 1) ^ 1)
+                for k in T.serial(k_blocks):
+                    phase = sched.current_iter * k_blocks + k
+                    T.mbarrier_wait_parity(loaded[phase % num_stages], (phase // num_stages) & 1)
+                    T.tcgen05_gemm(
+                        A_shared[phase % num_stages, :, :],
+                        B_shared[phase % num_stages, :, :],
+                        C_tmem[sched.current_iter & 1, :, :],
+                        mbar=consumed[phase % num_stages],
+                        clear_accum=k == 0,
+                        use_2cta=True,
+                    )
+                T.tcgen05_mma_arrive(tmem_full[sched.current_iter & 1], arrive_2cta=True)
+                sched.next_tile()
+
+        elif 128 <= tx < 256:  # warp 4~7: epilogue
+            sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, cluster_size=cluster_size)
+            sched.init(block_id // cluster_size)
+            while sched.valid():
+                bx, by = sched.m_idx * cluster_size + cta_id, sched.n_idx
+
+                T.mbarrier_wait_parity(tmem_full[sched.current_iter & 1], (sched.current_iter // 2) & 1)
+
+                for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                    T.copy(
+                        C_tmem[
+                            sched.current_iter & 1,
+                            :,
+                            i * store_block_N : (i + 1) * store_block_N,
+                        ],
+                        C_local,
+                    )
+                    if use_tma_store:
+                        T.copy(C_local, C_shared)
+                        T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+                    else:
+                        T.copy(C_local, C_local_cast)
+                        T.copy(
+                            C_local_cast,
+                            C[bx * block_M, by * block_N + i * store_block_N],
+                        )
+
+                T.mbarrier_arrive(tmem_empty[sched.current_iter & 1], 0)
+
+                sched.next_tile()
+
+    return C
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Persistent warp-specialized TCGEN05 GEMM")
+    parser.add_argument("--m", type=int, default=8192)
+    parser.add_argument("--n", type=int, default=8192)
+    parser.add_argument("--k", type=int, default=8192)
+    parser.add_argument("--block_M", type=int, default=128)
+    parser.add_argument("--block_N", type=int, default=256)
+    parser.add_argument("--block_K", type=int, default=64)
+    parser.add_argument("--store_block_N", type=int, default=64, help="block_N for C_shared")
+    parser.add_argument("--num_stages", type=int, default=None, help="pipeline stages (default: 6 with 2cta, else 4)")
+    parser.add_argument("--group_size", type=int, default=8)
+    parser.add_argument("--enable_2cta_tcgen5mma", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use_tma_store", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args()
+
+    M, N, K = args.m, args.n, args.k
+    in_dtype, out_dtype, accum_dtype = T.bfloat16, T.bfloat16, T.float
+    enable_2cta_tcgen5mma = args.enable_2cta_tcgen5mma
+    if args.num_stages is not None:
+        num_stages = args.num_stages
+    else:
+        num_stages = 6 if enable_2cta_tcgen5mma else 4  # Each cta only needs to load half of B, enabling larger stages
+    kernel = gemm_persistent_2cta if enable_2cta_tcgen5mma else gemm_persistent
+    kwargs = {
+        "block_M": args.block_M,
+        "block_N": args.block_N,
+        "store_block_N": args.store_block_N,
+        "block_K": args.block_K,
+        "in_dtype": in_dtype,
+        "out_dtype": out_dtype,
+        "accum_dtype": accum_dtype,
+        "num_stages": num_stages,
+        "group_size": args.group_size,
+        "use_tma_store": args.use_tma_store,
+    }
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    kernel_args = (a, b)
+
+    print(kernel.get_kernel_source(*kernel_args, **kwargs))
+    c = kernel(*kernel_args, **kwargs)
+
+    ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print("All checks passed. ✅")
+
+    tl_latency = do_bench(
+        lambda: kernel(*kernel_args, **kwargs),
+        _n_warmup=50,
+        _n_repeat=50,
+        backend="cupti",
+    )
+    torch_latency = do_bench(
+        lambda: a @ b,
+        _n_warmup=50,
+        _n_repeat=50,
+        backend="cupti",
+    )
+    print(f"Tilelang latency: {tl_latency} ms")
+    print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
+    print(f"Torch latency: {torch_latency} ms")
+    print(f"Flops: {2 * M * N * K / (torch_latency / 1e3) / 1e12} TFLOPS")
+
+
+if __name__ == "__main__":
+    main()

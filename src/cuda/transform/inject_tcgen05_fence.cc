@@ -97,6 +97,7 @@ bool IsTcgen05OrTmemCall(const CallNode *call) {
 
   return call->op.same_as(ptx_tcgen05_mma_ss()) ||
          call->op.same_as(ptx_tcgen05_mma_ts()) ||
+         call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
          call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
          call->op.same_as(ptx_init_tensor_memory()) ||

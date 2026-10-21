@@ -195,7 +195,9 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a barrier buffer.
 
     Args:
-        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
+            Every count must be at least 1: an mbarrier arrive count of 0 has no defined meaning,
+            and a negative count would be reinterpreted as a garbage unsigned value at init.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
@@ -205,6 +207,9 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
     >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
+    counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
+    if any(count <= 0 for count in counts):
+        raise ValueError(f"alloc_barrier: arrive_count must be at least 1, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
@@ -223,11 +228,15 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a cluster barrier buffer.
 
     Args:
-        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
+            Every count must be at least 1, as for `alloc_barrier`.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a cluster barrier
     """
+    counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
+    if any(count <= 0 for count in counts):
+        raise ValueError(f"alloc_cluster_barrier: arrive_count must be at least 1, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
@@ -280,41 +289,67 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
-ReducerOp = Literal["sum", "max", "min"]
+ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
+_BITWISE_REDUCER_OPS = ("bitand", "bitor", "bitxor")
 
 
 def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
     """
-    Allocate a reducer buffer.
+    Allocate a reducer: a first-class deferred reduction epoch handle.
 
-    Modifications needs to conform with `op`,
-    such as `op="sum"` requires `reducer[...] += ...` and
-    `op="max"` requires `reducer[...] = T.max(reducer[...], ...)`.
+    The reducer lives in the virtual ``local.reducer`` scope and may only be
+    accessed through the epoch operations::
 
-    Only after T.fill with proper initializer the reduction may begin;
-    only after T.finalize_reducer the partial results will be available.
+        acc = T.alloc_reducer(shape, dtype, op="sum")
+        T.reducer_init(acc)          # or T.reducer_init(acc, init_value)
+        for ...:
+            T.reducer_update(acc[indices], contribution)
+        dst = T.alloc_fragment(shape, dtype)
+        T.finalize_reducer(acc, dst)
 
-    For `op="sum"`, filled value must be 0; for min and max, the filled initializer will become max or min clamper correspondingly.
-    You may want to use `T.max_value` for min and `T.min_value` for max.
+    Ordinary reads/writes, ``T.clear``/``T.fill``, aliasing, and in-place
+    finalize are rejected at compile time. Physical storage and the
+    cross-thread communication plan are chosen by the compiler; the physical
+    layout can never change how many times a logical contribution is combined.
 
     Args:
-        shape (tuple): The shape of the buffer to allocate
-        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        op (str): The reduce operation corresponded with the reducer
-        replication (str | None): Replication strategy, can be "all" or "none". Defaults to not specified, and the compiler will do whatever it want.
+        shape (tuple): Logical shape of the reduction result.
+        dtype (str): Element data type (e.g., 'float32', 'int32').
+        op (str): Combine op: "sum", "max", "min", "bitand", "bitor" or
+            "bitxor" (the bitwise ops require an integer dtype).
+        replication (str | None): Deprecated legacy (v1) knob. Passing "all"
+            or "none" selects the legacy fragment-based reducer for backward
+            compatibility; it will be removed together with the v1 lowering.
 
     Returns:
-        T.Buffer: A TVM buffer object allocated in thread-private storage, available to reduce values in T.Parallel loops.
+        T.Buffer: The reducer handle.
     """
 
-    assert op in ["sum", "max", "min"]
-    # TODO: support automatic layout
-    if replication is None:
-        replication = "none"
-    assert replication in ["all", "none"]
+    assert op in ["sum", "max", "min", "bitand", "bitor", "bitxor"]
+    if op in _BITWISE_REDUCER_OPS:
+        dtype_str = str(dtype)
+        assert dtype_str.startswith(("int", "uint")) or dtype_str == "bool", (
+            f"bitwise reducer op '{op}' requires an integer dtype, got {dtype_str}"
+        )
+        assert replication is None, "the legacy v1 reducer only supports sum/max/min"
 
-    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-    sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+    if replication is not None:
+        # Legacy v1 reducer path (fragment buffer + reducer_info annotation).
+        import warnings
+
+        warnings.warn(
+            "alloc_reducer(replication=...) selects the deprecated v1 reducer; "
+            "migrate to reducer_init/reducer_update/finalize_reducer(acc, dst).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        assert replication in ["all", "none"]
+        reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
+        sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+        return reducer
+
+    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
+    sblock_attr({"reducer_info_v2": {reducer.data: {"op": op}}})
 
     return reducer
 

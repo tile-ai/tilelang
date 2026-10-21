@@ -376,6 +376,67 @@ def test_tma_atomic_add_uint64_runtime():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_wide_linear_layout_runtime():
+    rows, global_width, tile_width, col_offset = 8, 520, 512, 8
+
+    @tilelang.jit
+    def kernel(out):
+        out: T.Tensor[(rows, global_width), T.uint64]
+
+        with T.Kernel(1):
+            out_shared = T.alloc_shared((rows, tile_width), dtype=T.uint64)
+            T.fill(out_shared, 1)
+            T.atomic_add(
+                out[:, col_offset : col_offset + tile_width],
+                out_shared,
+                use_tma=True,
+            )
+
+    compiled = kernel.compile(out=T.Tensor[(rows, global_width), T.uint64])
+    source = compiled.get_kernel_source()
+    assert re.search(
+        r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_store_add\(",
+        source,
+    )
+
+    out = torch.zeros((rows, global_width), dtype=torch.uint64, device="cuda")
+    compiled(out)
+    torch.cuda.synchronize()
+    assert torch.all(out[:, :col_offset] == 0)
+    assert torch.all(out[:, col_offset:] == 1)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_versioned_smem_slice_runtime():
+    """A version slice of a wide linear buffer must stay contiguous under the
+    inferred layout, or the second TMA box silently reads the other version."""
+    rows, width = 8, 512
+
+    @tilelang.jit
+    def kernel(out):
+        out: T.Tensor[(rows, width), T.uint64]
+
+        with T.Kernel(1):
+            smem = T.alloc_shared((2, rows, width), dtype=T.uint64)
+            T.fill(smem, 7)  # decoy in version 0
+            for i, j in T.Parallel(rows, width):
+                smem[1, i, j] = 1
+            T.atomic_add(out, smem[1, :, :], use_tma=True)
+
+    compiled = kernel.compile(out=T.Tensor[(rows, width), T.uint64])
+    source = compiled.get_kernel_source()
+    assert re.search(
+        r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_store_add\(",
+        source,
+    )
+
+    out = torch.zeros((rows, width), dtype=torch.uint64, device="cuda")
+    compiled(out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_atomic_add_32b_swizzle_runtime():
     out = torch.zeros((16, 24), dtype=torch.float32, device="cuda")
     tma_atomic_add_32b_swizzle_program(out)
@@ -462,6 +523,41 @@ def run_atomic_add_auto_vectorized_unit_test(vec_size: int, dtype=T.float32):
 
 
 @tilelang.jit
+def atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=T.float16):
+    @T.prim_func
+    def atomic_add(X: T.Tensor((N,), dtype), Out: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=threads):
+            T.atomic_add(Out[0:N], X[0:N], memory_order=memory_order)
+
+    return atomic_add
+
+
+def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_order_id, dtype=T.float16):
+    # A vectorized atomic add must carry the requested memory order, just like
+    # the scalar lowering of the same call does. Cache disabled because the key
+    # does not cover the native library by default, so a stale pre-fix kernel
+    # source would otherwise be served here.
+    tilelang.disable_cache()
+    try:
+        kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
+
+        wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
+        assert wide_calls, f"expected a vectorized atomic add, got:\n{kernel.get_kernel_source()}"
+        for call in wide_calls:
+            assert call.endswith(f", {memory_order_id});"), f"{memory_order} dropped from vectorized atomic add: {call}"
+
+        # Each order takes a separately spelled asm string in the device helpers,
+        # so run the kernel to check this one actually computes the sum.
+        torch_dtype = getattr(torch, dtype)
+        X = torch.randn(N, dtype=torch_dtype).cuda()
+        Out = torch.zeros(N, dtype=torch_dtype).cuda()
+        kernel(X, Out)
+        torch.testing.assert_close(Out, X, atol=1e-2, rtol=1e-2)
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.jit
 def atomic_add_complicated_parallel_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -503,7 +599,7 @@ def test_atomic_add_mixed_dtype_fp16():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(7, 0)
 def test_atomic_add_mixed_dtype_bf16():
     run_atomic_add_mixed_dtype(8, T.float32, T.bfloat16)
     run_atomic_addx2_mixed_dtype(32, 64, 8, 16, T.float32, T.bfloat16)
@@ -516,6 +612,28 @@ def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.bfloat16)
 
 
+# ids match cuda::memory_order. Each one is a separately spelled asm string in
+# the device helpers, so all three ordered spellings need exercising.
+_ORDERED_MEMORY_ORDERS = [("acquire", 2), ("release", 3), ("acq_rel", 4)]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+def test_atomic_add_vectorized_preserves_memory_order(memory_order, memory_order_id):
+    run_atomic_add_vectorized_memory_order(64, 32, memory_order, memory_order_id, dtype=T.float16)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+def test_atomic_add_vectorized_preserves_memory_order_bf16(memory_order, memory_order_id):
+    # bf16 takes a different device path depending on the target: below sm_90
+    # there is no ordered bf16 atomic in any width, so AtomicAddx2 falls back to
+    # fences around a relaxed add, while sm_90 uses the ordered instruction. A
+    # given run covers whichever side the test GPU selects.
+    run_atomic_add_vectorized_memory_order(64, 32, memory_order, memory_order_id, dtype=T.bfloat16)
+
+
 def test_atomic_addx4():
     run_atomic_addx4(16, 64, 4, 4)
 
@@ -525,7 +643,7 @@ def test_atomic_addx4_sliced_dst_compile():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(7, 0)
 def test_atomic_addx4_16bit():
     for dtype in (T.float16, T.bfloat16):
         for offset in (0, 4):
@@ -534,6 +652,13 @@ def test_atomic_addx4_16bit():
 
 def test_atomic_return_prev():
     run_atomic_return_prev(32, 32, 8, 8)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(7, 0)
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_atomic_return_prev_16bit(dtype):
+    run_atomic_return_prev(32, 32, 8, 8, dtype=dtype)
 
 
 def test_atomic_add():
@@ -1180,6 +1305,266 @@ def test_atomic_add_return_prev_materialized_once():
     assert counter.item() == n, f"atomic executed {counter.item()} times, expected {n}"
     assert (out < 0).sum().item() == 0, "unwritten slots: atomic return value was re-evaluated"
     assert torch.equal(out.sort().values.long(), torch.arange(n).cuda())
+
+
+# ======================= Contended scalar atomic add =======================
+
+
+@tilelang.jit
+def atomic_add_contended_program(N, threads, dtype):
+    @T.prim_func
+    def atomic_add_contended(A: T.Tensor((N,), dtype), Out: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=threads) as _:
+            for i in T.Parallel(N):
+                T.atomic_add(Out[0], A[i])
+
+    return atomic_add_contended
+
+
+def run_atomic_add_contended(N, threads, dtype):
+    kernel = atomic_add_contended_program(N, threads, dtype)
+
+    # Every thread targets the same cell, so a non-atomic read-modify-write
+    # loses updates. Ones keep every partial sum exactly representable.
+    a = torch.ones(N, dtype=getattr(torch, dtype)).cuda()
+    out = torch.zeros(1, dtype=getattr(torch, dtype)).cuda()
+
+    kernel(a, out)
+
+    assert float(out[0]) == float(N), f"lost updates: got {float(out[0])}, expected {N}"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(7, 0)
+def test_atomic_add_contended_bf16():
+    # bf16 is the dtype whose pre-SM80 add is a CAS loop; float32 contention is
+    # already covered by the multi-block test_atomic_add above.
+    run_atomic_add_contended(128, 128, T.bfloat16)
+    # With more elements than threads the loop vectorizes; the shared constant
+    # destination must stay scalar instead of widening to AtomicAddx2.
+    run_atomic_add_contended(256, 128, T.bfloat16)
+
+
+@tilelang.jit
+def atomic_add_fp32_shared_sm90_program(N, threads):
+    @T.prim_func
+    def atomic_add_fp32_shared_sm90(A: T.Tensor((N,), T.float32), Out: T.Tensor((N,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared((N,), T.float32)
+            for i in T.Parallel(N):
+                shared[i] = T.float32(0)
+            for i in T.Parallel(N):
+                T.atomic_add(shared[i], A[i])
+            for i in T.Parallel(N):
+                Out[i] = shared[i]
+
+    return atomic_add_fp32_shared_sm90
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_atomic_add_fp32_shared_stays_scalar_on_sm90():
+    n = 256
+    kernel = atomic_add_fp32_shared_sm90_program(n, 128)
+    source = kernel.get_kernel_source()
+
+    assert "AtomicAdd(" in source
+    assert "AtomicAddx2(" not in source
+    assert "AtomicAddx4(" not in source
+
+    a = torch.arange(n, dtype=torch.float32, device="cuda")
+    out = torch.empty_like(a)
+    kernel(a, out)
+
+    torch.testing.assert_close(out, a, atol=0, rtol=0)
+
+
+@tilelang.jit(target={"kind": "cuda", "arch": "sm_75"})
+def atomic_add_bf16_sm75_program(N):
+    @T.prim_func
+    def atomic_add_bf16_sm75(A: T.Tensor((N,), T.bfloat16), B: T.Tensor((N,), T.bfloat16), Prev: T.Tensor((N,), T.bfloat16)):
+        with T.Kernel(1, threads=32) as _:
+            # Outside a parallel loop, so it stays scalar instead of packed.
+            T.atomic_add(B[1], A[1])
+            for i in T.Parallel(N // 2):
+                T.atomic_addx2(B[i * 2], A[i * 2])
+            for i in T.Parallel(N // 4):
+                T.atomic_addx4(B[i * 4], A[i * 4])
+            Prev[0] = T.atomic_add(B[0], A[0], return_prev=True)
+            Prev[0:2] = T.atomic_addx2(B[0:2], A[0:2], return_prev=True)
+            Prev[0:4] = T.atomic_addx4(B[0:4], A[0:4], return_prev=True)
+
+    return atomic_add_bf16_sm75
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_add_bf16_compiles_for_sm75():
+    """The native __nv_bfloat16 atomicAdd and `atom.*.v2.bf16` are SM80+, and
+    atomic.h reaches every generated kernel, so the pre-SM80 fallbacks must keep
+    compiling. Pinned with an explicit sm_75 target because the tests above use
+    the runner's native target and would miss this fallback on a modern GPU."""
+    source = atomic_add_bf16_sm75_program(64).get_kernel_source()
+
+    # Auto-vectorization rewrites scalar adds into packed ones, so check the
+    # kernel above still reaches each fallback.
+    for helper in (
+        "AtomicAdd(",
+        "AtomicAddx2(",
+        "AtomicAddx4(",
+        "AtomicAddRet(",
+        "AtomicAddx2Ret(",
+        "AtomicAddx4Ret(",
+    ):
+        assert helper in source, f"{helper} not exercised by the sm_75 kernel"
+
+
+# ======================= Invariant atomic destination =======================
+
+_INV_N = 64
+_INV_EXTENT = 8
+
+
+def _invariant_index(which, i):
+    if which == 0:  # contiguous, aligned
+        return i
+    if which == 1:  # contiguous with an even base
+        return i + 2
+    if which == 2:  # invariant within the 2-lane boundary
+        return i // 2
+    if which == 3:  # invariant, aligned base
+        return (i // 2) * 2
+    if which == 4:  # constant destination
+        return 0
+    if which == 5:  # invariant, odd base
+        return (i // 2) * 2 + 1
+    if which == 6:  # two-periodic: agrees on lanes 0/1, repeats at width 4
+        return i % 2
+    raise ValueError(f"unknown case {which}")
+
+
+# (which, dtype, max_width): bound on the vector width the destination may use.
+# A destination with a valid contiguous run of k elements bounds at k (4 is the
+# widest any target emits), so the assertion is target independent.
+_INVARIANT_CASES = [
+    (0, T.float16, 4),  # B[i]
+    (1, T.float16, 4),  # B[i+2]
+    (2, T.float16, 1),  # B[i//2]
+    (3, T.float16, 1),  # B[(i//2)*2]
+    (4, T.float16, 1),  # B[0]
+    (5, T.float16, 1),  # B[(i//2)*2+1]
+    (6, T.float32, 2),  # B[i%2]: only lanes 0/1 form a valid run
+]
+
+
+@tilelang.jit
+def atomic_add_invariant_program(which, dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[_invariant_index(which, i)], A_local[i])
+
+    return atomic_add_invariant
+
+
+@tilelang.jit
+def atomic_add_invariant_shared_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_shared(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            B_shared = T.alloc_shared((_INV_N,), dtype)
+            for i in T.Parallel(_INV_N):
+                B_shared[i] = B[i]
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B_shared[i // 2], A_local[i])
+            for i in T.Parallel(_INV_N):
+                B[i] = B_shared[i]
+
+    return atomic_add_invariant_shared
+
+
+@tilelang.jit
+def atomic_add_invariant_memory_order_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_memory_order(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[i // 2], A_local[i], memory_order="relaxed")
+
+    return atomic_add_invariant_memory_order
+
+
+def _invariant_reference(which, a):
+    ref = torch.zeros(_INV_N, dtype=a.dtype, device=a.device)
+    for i in range(_INV_EXTENT):
+        ref[_invariant_index(which, i)] += a[i]
+    return ref
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("which,dtype,max_width", _INVARIANT_CASES + [(2, T.float32, 1), (5, T.float32, 1)])
+def test_atomic_add_invariant_destination(which, dtype, max_width):
+    kernel = atomic_add_invariant_program(which, dtype)
+    widths = [int(w) for w in re.findall(r"AtomicAddx(\d)", kernel.get_kernel_source())]
+    assert all(w <= max_width for w in widths), (which, widths, max_width)
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=getattr(torch, dtype), device="cuda")
+    b = torch.zeros(_INV_N, dtype=getattr(torch, dtype), device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("program", [atomic_add_invariant_shared_program, atomic_add_invariant_memory_order_program])
+def test_atomic_add_invariant_shared_and_memory_order(program):
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
+    kernel = program()
+    assert "AtomicAddx" not in kernel.get_kernel_source()
+    b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(2, a), atol=0, rtol=0)
+
+
+@tilelang.jit
+def atomic_add_dynamic_rows_program(indirect):
+    rows = T.dynamic("rows")
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 256), T.bfloat16), B: T.Tensor((rows, 256), T.float32), indices: T.Tensor((4,), T.int64)):
+        with T.Kernel(1, threads=128):
+            values = T.alloc_fragment((4, 256), T.float32)
+            for i, j in T.Parallel(4, 256):
+                values[i, j] = A[i, j]
+                if indirect:
+                    T.atomic_add(B[indices[i], j], values[i, j])
+                else:
+                    T.atomic_add(B[i, j], values[i, j])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("indirect", [False, True])
+def test_atomic_add_dynamic_rows_keep_x4(indirect):
+    """Dynamic/indirect row offsets need int64 arithmetic but retain x4 lanes."""
+    kernel = atomic_add_dynamic_rows_program(indirect)
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+    a = torch.randint(1, 5, (4, 256), device="cuda").to(torch.bfloat16)
+    b = torch.zeros((8, 256), dtype=torch.float32, device="cuda")
+    indices = torch.tensor([0, 1, 0, 1], dtype=torch.int64, device="cuda")
+    kernel(a, b, indices)
+    ref = torch.zeros_like(b)
+    ref.index_add_(0, indices if indirect else torch.arange(4, device="cuda"), a.float())
+    torch.testing.assert_close(b, ref, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

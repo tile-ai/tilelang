@@ -69,12 +69,11 @@ bool CheckWGMMA(const GemmSPNode &op) {
 
 // TODO @botbw: support tcgen5mma.sp for sparse inputs when it's available
 bool AllowTcgen5Mma(const GemmSPNode &op, Target target) {
-  bool scope_ok = (IsSharedBuffer(op.A) || op.A.scope() == "shared.tmem") &&
-                  IsSharedBuffer(op.B) && op.C.scope() == "shared.tmem";
+  bool scope_ok = (IsSharedBuffer(op.A) || IsTmemBuffer(op.A)) &&
+                  IsSharedBuffer(op.B) && IsTmemBuffer(op.C);
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype =
-      (op.A.scope() == "shared.tmem") ? op.B->dtype : op.A->dtype;
+  DataType ab_dtype = IsTmemBuffer(op.A) ? op.B->dtype : op.A->dtype;
   return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C->dtype).first;
 }
 

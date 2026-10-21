@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Ascend Kernels"
+  short_description: "Write, tune, profile, and debug Ascend NPU kernels"
+  default_prompt: "Use $tilelang-ascend to implement this kernel with the Ascend dialect and validate its outputs."

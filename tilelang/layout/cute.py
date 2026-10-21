@@ -297,8 +297,8 @@ class ComposedLayout(Node, Scriptable):
         return _cute_ffi_api.composed_layout_recast(self, int(old_bits), int(new_bits))
 
     @staticmethod
-    def from_tilelang(layout, buffer: BufferLikeType = None) -> ComposedLayout | None:
-        mode = _cute_ffi_api.composed_layout_from_tilelang(layout)
+    def from_tilelang(layout, buffer: BufferLikeType = None, least_b_bits: int | None = None) -> ComposedLayout | None:
+        mode = _cute_ffi_api.composed_layout_from_tilelang(layout, least_b_bits)
         if buffer is None or mode is None:
             return mode
         from tilelang.layout.swizzle import _get_buffer_info

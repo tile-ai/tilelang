@@ -757,6 +757,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  */
 void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (op->op.same_as(tl::clamp())) {
+    os << PrintExpr_(tl::LowerClamp(GetRef<Call>(op)));
+    return;
+  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
@@ -1420,29 +1424,41 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << sfa_offset << ", " << sfb_ref << "[0] + " << sfb_offset
            << ", use_2cta=" << (enable_2cta ? "True" : "False") << ")\n";
   } else if (op->op.same_as(tl::tcgen05_ld())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_ld expects 6 or 7 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = PrintExpr_(op->args[3]);
     std::string col_offset = PrintExpr_(op->args[4]);
-    std::string dst_ptr = PrintExpr_(op->args[5]);
+    // The optional datapath count selects the half-subpartition (16dp)
+    // wrappers; a six-argument call from before it existed means the
+    // sub-partition-filling 32dp wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string dst_ptr = PrintExpr_(op->args[has_datapaths ? 6 : 5]);
     PrintIndent();
-    stream << "tl.tcgen05_ld_32dp" << inst_bits << "bNx(" << chunks << ", "
-           << (pack16 ? "True" : "False") << ", " << tmem_start_col << ", "
-           << col_offset << ", " << dst_ptr << ")\n";
+    stream << "tl.tcgen05_ld_" << datapaths << "dp" << inst_bits << "bNx("
+           << chunks << ", " << (pack16 ? "True" : "False") << ", "
+           << tmem_start_col << ", " << col_offset << ", " << dst_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_st())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_st expects 6 or 7 arguments";
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool unpack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = PrintExpr_(op->args[3]);
     std::string col_offset = PrintExpr_(op->args[4]);
-    std::string src_ptr = PrintExpr_(op->args[5]);
+    // The optional datapath count selects the half-subpartition (16dp)
+    // wrappers; a six-argument call from before it existed means the
+    // sub-partition-filling 32dp wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string src_ptr = PrintExpr_(op->args[has_datapaths ? 6 : 5]);
     PrintIndent();
-    stream << "tl.tcgen05_st_32dp" << inst_bits << "bNx(" << chunks << ", "
-           << (unpack16 ? "True" : "False") << ", " << tmem_start_col << ", "
-           << col_offset << ", " << src_ptr << ")\n";
+    stream << "tl.tcgen05_st_" << datapaths << "dp" << inst_bits << "bNx("
+           << chunks << ", " << (unpack16 ? "True" : "False") << ", "
+           << tmem_start_col << ", " << col_offset << ", " << src_ptr << ")\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     PrintIndent();
@@ -1718,6 +1734,48 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
     os << "tl.ieee_fdiv(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ", rounding=\"" << rounding_mode << "\")";
+  } else if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
+    // Round-to-nearest fma/mul map onto the IEEE helpers with the fixed
+    // "rn" mode. The CuTeDSL helpers are scalar-only, so vector calls are
+    // expanded per lane through a register tensor.
+    bool is_fma = op->op.same_as(tl::fma());
+    const char *py_func = is_fma ? "tl.ieee_fmaf" : "tl.ieee_fmul";
+    if (op->dtype.is_scalar()) {
+      os << py_func << "(" << PrintExpr_(op->args[0]) << ", "
+         << PrintExpr_(op->args[1]);
+      if (is_fma) {
+        os << ", " << PrintExpr_(op->args[2]);
+      }
+      os << ", rounding=\"rn\")";
+    } else {
+      int lanes = op->dtype.lanes();
+      std::vector<std::string> vec_ids;
+      vec_ids.reserve(op->args.size());
+      for (const PrimExpr &arg : op->args) {
+        ICHECK_EQ(arg.dtype().lanes(), lanes)
+            << "tl." << (is_fma ? "fma" : "fmul")
+            << " expects vectorized arguments to share the call lanes";
+        vec_ids.push_back(SSAGetID(PrintExpr_(arg), arg.dtype()));
+      }
+      std::string sret = name_supply_->FreshName(is_fma ? "_fma" : "_fmul");
+      PrintIndent();
+      stream << sret << " = tl.make_rmem_tensor((" << lanes << ",), ";
+      PrintType(op->dtype.element_of(), stream);
+      stream << ")\n";
+      for (int i = 0; i < lanes; ++i) {
+        std::ostringstream value;
+        value << py_func << "(";
+        for (size_t j = 0; j < vec_ids.size(); ++j) {
+          if (j != 0) {
+            value << ", ";
+          }
+          PrintVecElemLoad_(vec_ids[j], op->args[j].dtype(), i, value);
+        }
+        value << ", rounding=\"rn\")";
+        PrintVecElemStore_(sret, op->dtype, i, value.str());
+      }
+      os << sret << ".load()";
+    }
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl.warp_reduce_sum(" << PrintExpr_(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {

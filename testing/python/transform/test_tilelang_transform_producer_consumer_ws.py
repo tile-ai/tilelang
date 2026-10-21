@@ -1,5 +1,7 @@
 """Tests for the warp-specialized producer/consumer pass."""
 
+import re
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -839,6 +841,80 @@ def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
     _run_grouped_gemm_ws(kernel, batch_sizes)
 
 
+def _wide_linear_reduce_kernel(rows, mids, width, batches, rows_per_batch, dtype, num_stages=2):
+    """A grad_w-style batched reduction: each pipelined iteration TMA-loads a
+    (rows_per_batch, width) slice (fixed middle index, strided rows) into a
+    linear-layout shared buffer and accumulates it into a fragment."""
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((rows, mids, width), dtype),
+        out: T.Tensor((mids, width), "float32"),
+    ):
+        with T.Kernel(mids, threads=128) as bx:
+            smem = T.alloc_shared((rows_per_batch, width), dtype)
+            acc = T.alloc_fragment((width,), "float32")
+            T.clear(acc)
+            for k in T.Pipelined(batches, num_stages=num_stages):
+                T.copy(src[k * rows_per_batch : (k + 1) * rows_per_batch, bx, :], smem)
+                for i in T.Serial(rows_per_batch):
+                    for j in T.Parallel(width):
+                        acc[j] += smem[i, j]
+            T.copy(acc, out[bx, :])
+
+    return main
+
+
+def _run_wide_linear_reduce(kernel, rows, mids, width, dtype):
+    import torch
+
+    torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[dtype]
+    src = torch.randn(rows, mids, width, device="cuda", dtype=torch_dtype)
+    out = torch.zeros(mids, width, device="cuda", dtype=torch.float32)
+    kernel(src, out)
+    ref = src.float().sum(dim=0)
+    torch.testing.assert_close(out, ref, rtol=1e-3, atol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma():
+    """A multi-versioned linear shared buffer with a >256-element row must
+    stay a TMA producer: the version axis stays outside the per-copy TMA tile,
+    while the width quotient stays outside its 256-element box. Pins the fix
+    for the gapped-slice bijection ICHECK."""
+    func = _wide_linear_reduce_kernel(rows=128, mids=4, width=512, batches=4, rows_per_batch=32, dtype="float32")
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load(" in src
+    assert "cp_async" not in src
+    assert re.search(r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+    _run_wide_linear_reduce(kernel, 128, 4, 512, "float32")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_wide_linear_smem_multi_way_box_split():
+    """1024 bf16 columns force a (256, 4) split of the contiguous box mode."""
+    func = _wide_linear_reduce_kernel(rows=64, mids=2, width=1024, batches=4, rows_per_batch=16, dtype="bfloat16")
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "tl::tma_load(" in src
+    _run_wide_linear_reduce(kernel, 64, 2, 1024, "bfloat16")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_wide_linear_smem_three_stages():
+    """Three versions interleave the ring dimension above the 256-splits."""
+    func = _wide_linear_reduce_kernel(rows=48, mids=2, width=768, batches=3, rows_per_batch=16, dtype="float32", num_stages=3)
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "cp_async" not in src
+    assert re.search(r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+    _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
+
+
 if __name__ == "__main__":
     test_tiled_ws_skips_device_bound_tma_descriptor_base()
     test_tiled_ws_places_producer_in_first_warp_group()
@@ -854,3 +930,6 @@ if __name__ == "__main__":
     test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read()
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()
+    test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
+    test_tiled_ws_wide_linear_smem_multi_way_box_split()
+    test_tiled_ws_wide_linear_smem_three_stages()

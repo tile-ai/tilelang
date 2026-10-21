@@ -46,6 +46,21 @@ def test_tilelang_copy():
     run_tilelang_copy(M=1024, N=576, block_M=32, block_N=576, dtype=T.float32)
 
 
+def test_scalar_copy_annotations_preserved():
+    @T.prim_func
+    def main(A: T.Tensor((1,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=32):
+            A_shared = T.alloc_shared((1,), T.float32)
+            T.copy(A[0], B[0], annotations={"test.copy": "sync"})
+            T.async_copy(A[0], A_shared[0], annotations={"test.copy": "async"})
+
+    lines = main.script().splitlines()
+    copy_line = next(line for line in lines if "T.copy(" in line)
+    async_line = next(line for line in lines if "T.async_copy(" in line)
+    assert 'test.copy="sync"' in copy_line
+    assert 'test.copy="async"' in async_line
+
+
 def run_tilelang_copy_cross_dtype(M=256, N=256, block_M=128, block_N=128, src_dtype=T.float16, dst_dtype=T.bfloat16):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(program, out_idx=[1])
@@ -419,14 +434,14 @@ def test_tilelang_copy_fp4():
 @tilelang.testing.requires_cuda
 def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
     @T.prim_func
-    def main(A: T.Tensor((16, 8), T.int8)):
+    def main(A: T.Tensor((8, 16), T.int8)):
         with T.Kernel(1, threads=32):
-            frag = T.alloc_fragment((16, 8), T.int8)
-            smem = T.alloc_shared((16, 8), T.int8)
+            frag = T.alloc_fragment((8, 16), T.int8)
+            smem = T.alloc_shared((8, 16), T.int8)
 
-            T.annotate_layout({frag: make_gemm_fragment_8x8_transposed().repeat([2, 1], repeat_on_thread=False)})
+            T.annotate_layout({frag: make_gemm_fragment_8x8_transposed().repeat([1, 2], repeat_on_thread=False)})
 
-            for i, j in T.Parallel(16, 8):
+            for i, j in T.Parallel(8, 16):
                 frag[i, j] = A[i, j]
 
             T.copy(frag, smem)

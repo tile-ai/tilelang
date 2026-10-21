@@ -2,7 +2,7 @@
 
 An interactive, pass-by-pass **structure-tree** visualizer for TileLang kernels.
 
-This is a debugging complement to [`tilelang.utils.pass_diff`](../pass_diff.py).
+This is a debugging complement to [`tilelang.utils.pass_diff`](../../utils/pass_diff.py).
 Where `pass_diff` shows a line-level diff of the **TVMScript text**, this tool
 renders the IR as an **`SBlock` structure tree** — the block nesting plus
 `reads` / `writes` / `alloc_buffers` / `annotations` fields — and expands every
@@ -60,6 +60,9 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
   primitives, and lowered hardware intrinsics (`ptx_mma`, `tma_load`, …) are
   each colored distinctly, so you can follow a `T.copy` as it lowers into
   TMA/PTX intrinsics.
+- **Shared instrumentation session**: the viewer uses TileLang's per-compile
+  tool lifecycle while explicitly excluding globally enabled tools, so its
+  report remains independent from LowerTrace.
 - **Real pass metadata**: stage names and ordering come from `PassInstrument`;
   nested implementation passes are folded into their top-level pipeline stage
   to keep the browser timeline linear.
@@ -70,9 +73,10 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 from tilelang.tools.pass_visualizer.viewer import build_pass_data, emit_html
 
 name, stages = build_pass_data(
-    "path/to/kernel.py", factory=None, target="auto",
-    kwargs={"M": 1024, "N": 1024, "K": 1024,
-            "block_M": 128, "block_N": 128, "block_K": 32},
+    "path/to/kernel.py",
+    factory=None,
+    target="auto",
+    kwargs={"M": 1024, "N": 1024, "K": 1024, "block_M": 128, "block_N": 128, "block_K": 32},
     source=open("path/to/kernel.py").read(),
 )
 html = emit_html(name, stages)

@@ -9,6 +9,7 @@
  */
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
+#include "op/utils.h"
 #include "support/check.h"
 #include "tvm/ir/type.h"
 #include <algorithm>
@@ -609,11 +610,9 @@ private:
       auto new_buffer = buffer_remap_[load->buffer];
       return BufferLoad(new_buffer, {0}) + GetArenaTmemOffset(buffer, indices);
     } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], tmem_dtype_, buffer->shape, buffer->strides,
-          buffer->elem_offset, buffer->name, buffer->data_alignment,
-          buffer->offset_factor, buffer->buffer_type);
-      return BufferLoad(new_buffer, {0}) + GetArenaTmemOffset(buffer, indices);
+      Buffer arena_buffer = buffer_data_to_buffer_.at(var_remap_[buffer->data]);
+      return BufferLoad(arena_buffer, {0}) +
+             GetArenaTmemOffset(buffer, indices);
     }
     return load;
   }
@@ -621,7 +620,7 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     auto buffer = store->buffer;
-    ICHECK(buffer.scope() != "shared.tmem")
+    ICHECK(!IsTmemBuffer(buffer))
         << "We should never directly store data into tmem!";
     return store;
   }

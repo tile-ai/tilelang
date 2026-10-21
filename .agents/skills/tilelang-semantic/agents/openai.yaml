@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Semantic Checks"
+  short_description: "Design TileLang semantic and safety contracts"
+  default_prompt: "Use $tilelang-semantic to design or review a TileLang semantic or safety rule and place its validation at the correct compiler stage."

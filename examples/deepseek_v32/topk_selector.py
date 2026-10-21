@@ -5,6 +5,7 @@ import tilelang.language as T
 pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
 }
+_RADIX = 1 << 8
 
 
 def convert_to_uint16(x):
@@ -25,12 +26,12 @@ def convert_to_uint32(x):
 
 
 @tilelang.jit(pass_configs=pass_configs)
-def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int32):
+def tl_topk_impl(input, index, starts, ends, threads=1024, in_dtype=T.float32, out_dtype=T.int32):
     topk = T.const("topk")
     batch = T.dynamic("batch")
     seq_len = T.dynamic("seq_len")
-    RADIX = 1 << 8
-    BLOCK_SIZE = 1024
+    RADIX = _RADIX
+    histogram_size = RADIX * 2 if threads == RADIX else RADIX + 1
     SMEM_INPUT_SIZE = 4096  # assume the threshold bucket size after first pass is less than 4K
 
     input: T.Tensor[(batch, seq_len), in_dtype]
@@ -38,11 +39,13 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
     starts: T.Tensor[(batch), out_dtype]
     ends: T.Tensor[(batch), out_dtype]
 
-    with T.Kernel(batch, threads=BLOCK_SIZE) as (bx):
+    with T.Kernel(batch, threads=threads) as (bx):
         tx = T.get_thread_binding()
 
         s_threshold_bin_id = T.alloc_shared([1], T.int32)
-        s_histogram = T.alloc_shared([RADIX + 1], T.int32)
+        # Pad the 257 logical entries when using 256 threads so T.fill has a
+        # bijective two-element-per-thread layout on the ROCm launch.
+        s_histogram = T.alloc_shared([histogram_size], T.int32)
         s_num_input = T.alloc_shared([2], T.int32)
         s_input_idx = T.alloc_shared([2, SMEM_INPUT_SIZE], T.int32)
 
@@ -71,8 +74,8 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
         T.fill(s_threshold_bin_id, 0)
 
         T.sync_threads()
-        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE * 4)):
-            input_base = s * BLOCK_SIZE * 4 + tx * 4
+        for s in T.serial(T.ceildiv(seq_len, threads * 4)):
+            input_base = s * threads * 4 + tx * 4
             for j in T.serial(4):
                 input_idx = input_base + j
                 if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
@@ -103,9 +106,9 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
         T.sync_threads()
 
         # collect all elements with exponent ≥ threshold
-        for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE * 4)):
+        for s in T.serial(T.ceildiv(seq_len, threads * 4)):
             T.sync_threads()
-            input_base = s * BLOCK_SIZE * 4 + tx * 4
+            input_base = s * threads * 4 + tx * 4
             for j in T.serial(4):
                 input_idx = input_base + j
                 if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
@@ -136,10 +139,10 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
             T.sync_threads()
 
             l_num_input = s_num_input[r_idx]
-            for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
-                if s * BLOCK_SIZE + tx < l_num_input:
+            for s in T.serial(T.ceildiv(l_num_input, threads)):
+                if s * threads + tx < l_num_input:
                     l_bin_id32 = T.cast(
-                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                     )
                     T.atomic_add(s_histogram[l_bin_id32], 1)
             T.sync_threads()
@@ -166,29 +169,34 @@ def tl_topk_impl(input, index, starts, ends, in_dtype=T.float32, out_dtype=T.int
             l_new_topk = l_new_topk - s_histogram[l_threshold_bin_id + 1]
             T.sync_threads()
 
-            for s in T.serial(T.ceildiv(l_num_input, BLOCK_SIZE)):
+            for s in T.serial(T.ceildiv(l_num_input, threads)):
                 T.sync_threads()
-                if s * BLOCK_SIZE + tx < l_num_input:
+                if s * threads + tx < l_num_input:
                     l_bin_id32 = T.cast(
-                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
+                        ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * threads + tx]]) >> (24 - round * 8)) & 0xFF), T.int32
                     )
                     if l_bin_id32 > l_threshold_bin_id:
                         pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
-                        index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
+                        index[bx, pos] = s_input_idx[r_idx, s * threads + tx]
                     elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                         if round == 3:
                             l_out_pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) + l_start_pos
                             if l_out_pos < topk:
-                                index[bx, l_out_pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
+                                index[bx, l_out_pos] = s_input_idx[r_idx, s * threads + tx]
                         else:
                             pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                            s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
+                            s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx, s * threads + tx]
 
 
 def tl_topk(input, starts, ends, topk):
     batch, seq_len = input.shape
     indexes = torch.zeros(batch, topk, dtype=torch.int32, device=input.device)
-    tl_topk_impl(input, indexes, starts, ends)
+    # CUDA supports named barriers for the 256-thread radix subgroup. HIP
+    # currently lowers that synchronization to a full workgroup barrier, so
+    # launch exactly the radix participants there to keep every barrier
+    # convergent without changing the tuned CUDA configuration.
+    threads = _RADIX if torch.version.hip is not None else 1024
+    tl_topk_impl(input, indexes, starts, ends, threads=threads)
     return indexes
 
 

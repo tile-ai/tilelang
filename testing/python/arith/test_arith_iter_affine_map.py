@@ -218,6 +218,18 @@ def test_compound_floormod_two_regression():
     )
 
 
+def test_nested_floormod_requires_divisible_extents():
+    x = tvm.tirx.Var("x", "int32")
+    flm = tvm.tirx.floormod
+    dom_map = var_dom([(x, 128)])
+
+    non_divisible = flm(flm(x, 64), 7)
+    assert_iter_map_simplify({non_divisible: non_divisible}, dom_map)
+
+    divisible = flm(flm(x, 64), 8)
+    assert_iter_map_simplify({divisible: flm(x, 8)}, dom_map)
+
+
 def test_predicate():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")

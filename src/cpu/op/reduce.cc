@@ -36,8 +36,7 @@ struct Reduce {
     (void)analyzer;
 
     // 1. nan_propagate guard: CPU codegen has no __hmax_nan/__hmin_nan
-    //    equivalent. Only meaningful for fp16/bf16 max/min/absmax; other
-    //    dtypes ignore the flag.
+    //    equivalent for fp16/bf16 max/min/absmax.
     if (op.nan_propagate &&
         (op.dst->dtype.is_float16() || op.dst->dtype.is_bfloat16())) {
       LOG(FATAL) << "CPU reduce does not support nan_propagate=True for "
@@ -134,8 +133,8 @@ struct Reduce {
                         reduce_body, std::nullopt));
 
     // 8. Outer dst-dim loops. Built as kSerial then wrapped with
-    //    PragmaUnrollLoop to match the fill.cc/transpose.cc CPU op convention.
-    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc:163-181)
+    //    PragmaUnrollLoop to match the fill.cc CPU op convention.
+    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc)
     //    only retags the outermost kSerial For it meets and returns without
     //    recursing into the body, so the inner kSerial reduce loop above is
     //    left untouched. Under the default UnrollLoopConfig

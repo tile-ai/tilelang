@@ -31,6 +31,7 @@ tutorials/logging
 :caption: TOOLS
 
 tools/index
+tools/compile_only
 tools/analyzer
 tools/layout_visualization
 tools/autodd
@@ -79,6 +80,7 @@ compiler_internals/metal_tilelang_development
 :caption: DEVELOPER GUIDE
 
 developer_guide/cpp_style
+developer_guide/testing_style
 :::
 
 :::{toctree}

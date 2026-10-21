@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Simplification"
+  short_description: "Find and prove safe TileLang simplifications"
+  default_prompt: "Use $tilelang-simplification to audit TileLang for evidence-backed simplification candidates and define the validation needed to make them safe."

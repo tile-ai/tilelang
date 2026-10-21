@@ -22,7 +22,13 @@ class PassPipeline:
     def lower(self, mod: IRModule, target: Target) -> IRModule:
         """Run the pipeline and render source snippets for located errors."""
         try:
-            return self._lower(mod, target)
+            # Full compiler entry points own instrumentation sessions.  This
+            # boundary only identifies the active backend pipeline within the
+            # caller's session.
+            from tilelang.instrumentation import pass_pipeline
+
+            with pass_pipeline(self.name):
+                return self._lower(mod, target)
         except Exception as exc:
             # Compiler passes append a machine-readable `--> file:line:col`
             # marker when the relevant IR node carries a span. Keep enrichment

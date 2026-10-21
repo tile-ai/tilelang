@@ -36,7 +36,6 @@
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -335,11 +334,24 @@ private:
     return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
 
+  // Ops that auto-emit a paired arrive+wait on an explicit (user-allocated)
+  // mbarrier: sync gemm with an mbar (isTcgen05_ marks the explicit-async
+  // T.tcgen05_gemm op, which never waits) and copies with an explicit
+  // "barrier". The paired wait assumes the slot flips once per op invocation,
+  // so the parity is the op's logical iteration parity. Pipeline-managed TMA
+  // copies (is_tma_copy) carry their ring parity in explicit waits, and
+  // compiler-generated copy/im2col barriers are allocated per emitted site,
+  // so LowerTileOp derives their phase from that site's enclosing loop.
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
-    return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Im2ColOpNode>() != nullptr ||
-                                 tile_op.as<GemmNode>() != nullptr);
+    if (const auto *gemm = tile_op.as<GemmNode>()) {
+      return gemm->mbar_.defined() && !gemm->isTcgen05_;
+    }
+    if (const auto *copy = tile_op.as<CopyNode>()) {
+      return !GetIsTmaCopy(*copy) &&
+             copy->annotations.Get("barrier").has_value();
+    }
+    return false;
   }
 
   PrimExpr phase_expr_;
@@ -473,7 +485,9 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                   /*name_hint=*/"", /*body*/ body);
+                   /*name_hint=*/"", /*body*/ body, /*init=*/std::nullopt,
+                   /*alloc_buffers=*/{}, /*match_buffers=*/{},
+                   /*annotations=*/{}, /*span=*/body->span);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -1133,7 +1147,7 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents = call->args.size() - 2;
         if (load->indices.size() == num_extents + 1) {
@@ -1740,25 +1754,6 @@ private:
 
     const PipelineRewriter *rewriter_;
   };
-
-  Optional<PrimExpr>
-  ComputePipelineMbarPhaseExpr(const PrimExpr &normalized_access_index,
-                               const Optional<Integer> &pipeline_num_stages) {
-    if (!pipeline_num_stages) {
-      return Optional<PrimExpr>();
-    }
-    PrimExpr parity_expr;
-    if (pipeline_num_stages.value().IntValue() <= 1) {
-      parity_expr =
-          FloorMod(normalized_access_index, IntImm(DataType::Int(32), 2));
-    } else {
-      PrimExpr ns =
-          IntImm(DataType::Int(32), pipeline_num_stages.value().IntValue());
-      parity_expr = FloorMod(FloorDiv(normalized_access_index, ns),
-                             IntImm(DataType::Int(32), 2));
-    }
-    return analyzer_.Simplify(parity_expr);
-  }
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
     return attr && attr->attr_key == s_tir::attr::async_commit_queue_scope;
@@ -2833,6 +2828,11 @@ private:
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
+    // Written against the original loop var; the per-block Substitute below
+    // specializes it into each op's logical iteration parity.
+    PrimExpr mbar_phase = analyzer_.Simplify(
+        FloorMod(pipeline_loop_->loop_var - pipeline_loop_->min,
+                 make_const(pipeline_loop_->loop_var.dtype(), 2)));
     auto make_nop = []() {
       return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -2898,9 +2898,11 @@ private:
             pipeline_loop_->min <= skewed_loop_var,
             (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent));
 
-      SBlock new_block = Downcast<SBlock>(
-          PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
-                               pipeline_loop_, max_stage_ != 1)(block));
+      SBlock annotated_block =
+          Downcast<SBlock>(AnnotateTileOpMbarPhase(block, mbar_phase));
+      SBlock new_block = Downcast<SBlock>(PipelineBodyRewriter(
+          buffer_data_to_buffer_, buffer_remap_, pipeline_loop_,
+          max_stage_ != 1)(annotated_block));
 
       PrimExpr delta = start - pipeline_loop_->min;
       PrimExpr normalized_access_index =
@@ -2924,8 +2926,6 @@ private:
       new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
-      Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
-          normalized_access_index, pipeline_num_stages);
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
@@ -2973,11 +2973,6 @@ private:
         }
         rewritten_stmt = AnnotateSimtProducer(rewritten_stmt, target_);
       }
-      if (pipeline_mbar_phase) {
-        rewritten_stmt = AnnotateTileOpMbarPhase(rewritten_stmt,
-                                                 pipeline_mbar_phase.value());
-      }
-
       new_stmts.push_back({stage, inbound, new_block->reads, new_block->writes,
                            normalized_access_index, is_async, rewritten_stmt});
 
@@ -3035,7 +3030,8 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations);
+                     std::move(new_loop), std::nullopt, preserved_annotations,
+                     std::nullopt, pipeline_loop_->span);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));
@@ -3071,6 +3067,132 @@ PipelineRewriteResult RewritePipeline(
   result.buffer_remap = rewriter.GetBufferRemap();
   return result;
 }
+
+/*!
+ * \brief Reconcile pipeline buffer views with their final allocation.
+ * Preserve loop-local version indices and use slot zero for unexpanded
+ * accesses. Update buffer regions and annotated layouts to match the
+ * allocation.
+ */
+class PipelineBufferReconciler : public StmtExprMutator {
+public:
+  explicit PipelineBufferReconciler(const Map<Buffer, Buffer> &replacements)
+      : replacements_(replacements) {
+    for (const auto &[old_buffer, new_buffer] : replacements_) {
+      if (old_buffer->shape.size() < new_buffer->shape.size()) {
+        remapped_allocs_.emplace_back(old_buffer, new_buffer);
+      }
+    }
+  }
+
+private:
+  BufferRegion RewriteBufferRegion(const BufferRegion &region) const {
+    if (auto new_buffer = replacements_.Get(region->buffer)) {
+      Region bounds = region->region;
+      if (bounds.size() < new_buffer.value()->shape.size()) {
+        ICHECK_EQ(bounds.size() + 1, new_buffer.value()->shape.size());
+        bounds.insert(bounds.begin(), Range::FromMinExtent(0, 1));
+      }
+      return BufferRegion(new_buffer.value(), bounds);
+    }
+    return region;
+  }
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    if (auto new_buf = replacements_.Get(node->buffer)) {
+      auto *n = node.CopyOnWrite();
+      n->buffer = new_buf.value();
+      if (n->indices.size() < n->buffer->shape.size()) {
+        ICHECK_EQ(n->indices.size() + 1, n->buffer->shape.size());
+        n->indices.insert(n->indices.begin(), Integer(0));
+      }
+    }
+    return node;
+  }
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (auto new_buf = replacements_.Get(node->buffer)) {
+      auto *n = node.CopyOnWrite();
+      n->buffer = new_buf.value();
+      if (n->indices.size() < n->buffer->shape.size()) {
+        ICHECK_EQ(n->indices.size() + 1, n->buffer->shape.size());
+        n->indices.insert(n->indices.begin(), Integer(0));
+      }
+    }
+    return node;
+  }
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
+      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+        size_t num_extents = call->args.size() - 2;
+        if (load->indices.size() == num_extents + 1) {
+          Array<PrimExpr> args = call->args;
+          args.insert(args.begin() + 2, Integer(1));
+          return Call(call->dtype, call->op, args, call->annotations,
+                      call->span);
+        }
+      }
+    }
+    return call;
+  }
+  Stmt VisitStmt_(const DeclBufferNode *op) final {
+    if (auto new_buf = replacements_.Get(op->buffer)) {
+      ObjectPtr<DeclBufferNode> n = make_object<DeclBufferNode>(*op);
+      n->buffer = new_buf.value();
+      return DeclBuffer(n);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const AllocBufferNode *op) final {
+    if (auto new_buf = replacements_.Get(op->buffer)) {
+      ObjectPtr<AllocBufferNode> n = make_object<AllocBufferNode>(*op);
+      n->buffer = new_buf.value();
+      return AllocBuffer(n);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+    bool changed = false;
+    Array<Buffer> alloc_buffers;
+    for (const auto &buf : block->alloc_buffers) {
+      if (auto new_buf = replacements_.Get(buf)) {
+        alloc_buffers.push_back(new_buf.value());
+        changed = true;
+      } else {
+        alloc_buffers.push_back(buf);
+      }
+    }
+    Array<BufferRegion> reads;
+    for (const auto &region : block->reads) {
+      BufferRegion rewritten = RewriteBufferRegion(region);
+      changed = changed || !rewritten.same_as(region);
+      reads.push_back(rewritten);
+    }
+    Array<BufferRegion> writes;
+    for (const auto &region : block->writes) {
+      BufferRegion rewritten = RewriteBufferRegion(region);
+      changed = changed || !rewritten.same_as(region);
+      writes.push_back(rewritten);
+    }
+    auto annotations = block->annotations;
+    changed = UpdateExpandedLayoutMapForRemappedAllocs(remapped_allocs_,
+                                                       &annotations) ||
+              changed;
+    if (changed) {
+      SBlockNode *bn = block.CopyOnWrite();
+      bn->alloc_buffers = std::move(alloc_buffers);
+      bn->reads = std::move(reads);
+      bn->writes = std::move(writes);
+      bn->annotations = std::move(annotations);
+    }
+    return block;
+  }
+  Map<Buffer, Buffer> replacements_;
+  std::vector<std::pair<Buffer, Buffer>> remapped_allocs_;
+};
 
 class PipelineInjector : private StmtExprMutator {
 public:
@@ -3283,6 +3405,20 @@ private:
     return preserved_annotations;
   }
 
+  void CollectBufferReplacements(const Buffer &buffer, const Buffer &allocation,
+                                 Map<Buffer, Buffer> *replacements) {
+    if (auto expansions = buffer_expansions_.Get(buffer)) {
+      // Include the original buffer for single-version and non-pipelined uses.
+      replacements->Set(buffer, allocation);
+      for (const Buffer &expanded : expansions.value()) {
+        if (!expanded.same_as(allocation)) {
+          replacements->Set(expanded, allocation);
+        }
+      }
+      buffer_expansions_.erase(buffer);
+    }
+  }
+
   Stmt VisitStmt_(const SeqStmtNode *op) final {
     struct ScopedAllocation {
       Buffer buffer;
@@ -3294,6 +3430,7 @@ private:
     std::vector<std::pair<Var, Optional<Buffer>>> old_bindings;
     std::vector<ScopedAllocation> old_allocated;
     std::vector<std::pair<size_t, size_t>> flat_alloc_indices;
+    Map<Buffer, Buffer> replacements;
 
     auto register_buffer = [&](const Buffer &buffer,
                                bool is_allocation) -> std::optional<size_t> {
@@ -3310,11 +3447,12 @@ private:
 
     auto apply_pending_flat_alloc_remaps = [&]() {
       for (auto &[stmt_index, alloc_state_index] : flat_alloc_indices) {
-        const Buffer &old_buffer = old_allocated[alloc_state_index].buffer;
+        Buffer old_buffer = old_allocated[alloc_state_index].buffer;
         if (auto remapped = pending_buffer_remap_.Get(old_buffer)) {
           const auto *alloc = seq[stmt_index].as<AllocBufferNode>();
           ICHECK(alloc != nullptr);
           Buffer new_buffer = remapped.value();
+          CollectBufferReplacements(old_buffer, new_buffer, &replacements);
           seq.Set(stmt_index,
                   AllocBuffer(new_buffer, alloc->annotations, alloc->span));
           buffer_data_to_buffer_.Set(old_buffer->data, new_buffer);
@@ -3334,7 +3472,6 @@ private:
       Stmt new_child = VisitStmt(child);
       changed = changed || !new_child.same_as(child);
       seq.push_back(new_child);
-      apply_pending_flat_alloc_remaps();
 
       if (const auto *alloc = new_child.as<AllocBufferNode>()) {
         std::optional<size_t> alloc_state_index =
@@ -3346,6 +3483,9 @@ private:
         register_buffer(decl->buffer, false);
       }
     }
+    // Keep the original buffer registered while visiting sibling loops. Each
+    // loop computes its own version requirement; resize the allocation only
+    // after all uses in this scope have been visited.
     apply_pending_flat_alloc_remaps();
 
     for (auto it = old_allocated.rbegin(); it != old_allocated.rend(); ++it) {
@@ -3364,7 +3504,11 @@ private:
     if (!changed) {
       return GetRef<Stmt>(op);
     }
-    return SeqStmt(seq, op->span);
+    Stmt result = SeqStmt(seq, op->span);
+    if (!replacements.empty()) {
+      result = PipelineBufferReconciler(replacements)(std::move(result));
+    }
+    return result;
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -3705,6 +3849,7 @@ private:
         buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
         pipeline_info, scalar_binding_blocks, target_);
     Stmt pipeline = rewrite_result.pipeline;
+
     subtree_modified_ = true;
 
     auto unwrap_outer_attrs = [](Stmt stmt) {
@@ -3793,9 +3938,21 @@ private:
       }
     }
 
-    // Store the buffer remapping for updating outer block alloc_buffers
-    for (const auto &kv : rewrite_result.buffer_remap) {
-      pending_buffer_remap_.Set(kv.first, kv.second);
+    // Reserve enough space for every pipeline using the allocation. Keep all
+    // loop-local views until the allocation scope can reconcile them without
+    // changing the version indices generated by each pipeline.
+    for (const auto &[buffer, expanded] : rewrite_result.buffer_remap) {
+      Array<Buffer> expansions =
+          buffer_expansions_.Get(buffer).value_or(Array<Buffer>{});
+      expansions.push_back(expanded);
+      buffer_expansions_.Set(buffer, expansions);
+
+      Buffer allocation = pending_buffer_remap_.Get(buffer).value_or(expanded);
+      if (Downcast<IntImm>(expanded->shape[0])->value >
+          Downcast<IntImm>(allocation->shape[0])->value) {
+        allocation = expanded;
+      }
+      pending_buffer_remap_.Set(buffer, allocation);
     }
     pipeline = LowerAsyncCommitWaitAttrs(pipeline);
 
@@ -3823,10 +3980,13 @@ private:
     bool layout_changed = false;
     Array<Buffer> new_alloc_buffers;
     std::vector<std::pair<Buffer, Buffer>> remapped_allocs;
+    Map<Buffer, Buffer> replacements;
     for (const auto &buffer : block->alloc_buffers) {
       if (auto remapped = pending_buffer_remap_.Get(buffer)) {
         new_alloc_buffers.push_back(remapped.value());
         remapped_allocs.emplace_back(buffer, remapped.value());
+        CollectBufferReplacements(buffer, remapped.value(), &replacements);
+        buffer_data_to_buffer_.Set(buffer->data, remapped.value());
         pending_buffer_remap_.erase(buffer);
         allocs_changed = true;
       } else {
@@ -3894,6 +4054,11 @@ private:
         bn->alloc_buffers = new_alloc_buffers;
         allocs_changed = false; // already applied
       }
+    }
+
+    if (!replacements.empty()) {
+      block = Downcast<SBlock>(
+          PipelineBufferReconciler(replacements)(std::move(block)));
     }
 
     bool modified = children_modified || allocs_changed || layout_changed;
@@ -4015,6 +4180,8 @@ private:
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> allocated_buffers_;
   Map<Buffer, Buffer> pending_buffer_remap_;
+  // All loop-local expanded views, keyed by their original allocation.
+  Map<Buffer, Array<Buffer>> buffer_expansions_;
   std::vector<std::pair<Buffer, Buffer>> pending_layout_remapped_allocs_;
   Optional<Target> target_;
   Optional<String> global_symbol_;

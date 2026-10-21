@@ -33,6 +33,7 @@ def grouped_gemm_fwd(
 
         m_start_padded = bx * block_M
 
+        cur_batch_idx = 0
         for i in range(batch_count):
             in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
             cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)
@@ -216,10 +217,9 @@ def run_tilelang_grouped_gemm(
     O.backward(dO, retain_graph=True)
     dB, B.grad = B.grad.clone(), None
 
-    if torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2) and torch.allclose(dB, dB_ref, rtol=1e-2, atol=1e-2):
-        print("✅ Tilelang and Torch match")
-    else:
-        print("❌ Tilelang and Torch mismatch")
+    torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dB, dB_ref, rtol=1e-2, atol=1e-2)
+    print("✅ Tilelang and Torch match")
 
     if profile:
         from tilelang.profiler import do_bench
