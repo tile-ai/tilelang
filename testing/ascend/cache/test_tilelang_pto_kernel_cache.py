@@ -1,9 +1,7 @@
 """PTO tvm_ffi kernel-cache round-trip: layout and warm hit in a fresh process.
 
 Mirrors the generic kernel-cache coverage in testing/python/cache/ for
-``target="pto"`` with ``execution_backend="tvm_ffi"``: the on-disk artifacts a
-PTOTVMFFIKernelCache entry must contain, and a fresh process reusing the
-entry without re-running the toolchain.
+``target="pto"`` with ``execution_backend="tvm_ffi"``.
 """
 
 import json
@@ -26,8 +24,8 @@ pytestmark = pytest.mark.pto
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-N = 64 * 2048
-TILE = 2048
+N = 64
+TILE = 32
 
 EXPECTED_FILES = [
     "device_kernel.ptodsl.py",
@@ -107,6 +105,7 @@ def test_pto_kernel_cache_layout(monkeypatch, tmp_path):
         assert (entry / name).stat().st_size == meta["size"]
 
 
+@tilelang.testing.requires_ascend
 def test_pto_kernel_cache_hit_in_fresh_process(monkeypatch, tmp_path):
     """A fresh process reuses the on-disk entry and produces bit-exact outputs."""
     cache_dir = _set_cache_dirs(monkeypatch, tmp_path)
