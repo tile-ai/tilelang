@@ -195,7 +195,7 @@ def test_manual_pipe_order_does_not_order_distinct_physical_cores(cores, in_loop
     if in_loop:
         loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
         body = unit(loop, core=None, stage=-1)
-    name = "z3_schedule_loop_python" if in_loop else "z3_schedule_seq_python"
+    name = "z3_schedule_loop_python" if in_loop else "z3_schedule_python"
     original = getattr(z3_scheduler, name)
     inputs = []
 
