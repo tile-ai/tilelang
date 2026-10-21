@@ -107,26 +107,12 @@ template <typename Impl> struct FinalizeReducerLowerer {
         int ws_size = workspace_stride * static_cast<int>(effective_batch);
         PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
 
-        std::vector<int64_t> shape_values;
-        shape_values.reserve(layout->OutputDim());
-        for (int i = 0; i < layout->OutputDim(); ++i) {
-          shape_values.push_back(*as_const_int(layout->OutputShape()[i]));
-        }
-        std::vector<int64_t> strides(layout->OutputDim(), 1);
-        for (int i = layout->OutputDim() - 2; i >= 0; --i) {
-          strides[i] = strides[i + 1] * shape_values[i + 1];
-        }
-
-        int num_chunks = static_cast<int>(layout_batch_size / effective_batch);
-        for (int chunk = 0; chunk < num_chunks; ++chunk) {
-          int64_t flat_offset = static_cast<int64_t>(chunk) * effective_batch;
-          Array<PrimExpr> chunk_indices;
-          for (int i = 0; i < layout->OutputDim(); ++i) {
-            int64_t index = (flat_offset / strides[i]) % shape_values[i];
-            chunk_indices.push_back(Integer(index));
-          }
+        // The remapped buffer has compact physical storage.
+        Buffer flat_buffer = buffer.GetFlattenedBuffer();
+        for (int64_t offset = 0; offset < layout_batch_size;
+             offset += effective_batch) {
           PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                              {BufferLoad(buffer, chunk_indices)});
+                              {BufferLoad(flat_buffer, {Integer(offset)})});
           Array<PrimExpr> args = {StringImm(allreduce), ptr, workspace};
           step_stmts.push_back(
               Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
