@@ -51,8 +51,7 @@ __simt_callee__ __aicore__ inline uint32_t philox_rand(AscendPhiloxState *st) {
 
 __simt_callee__ __aicore__ inline float
 philox_rand_uniform(AscendPhiloxState *st) {
-  return philox_rand(st) * RandomKernelBase::RAND_2POW32_INV +
-         RandomKernelBase::RAND_2POW32_INV_HALF;
+  return RandomKernelBase::Uint32ToUniformFloat(philox_rand(st));
 }
 
 // Keep two consecutive uniform draws in one target-runtime call when the loop

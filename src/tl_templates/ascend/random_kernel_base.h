@@ -9,7 +9,8 @@
 //   (CANN 9.1.T560, __NPU_ARCH__ == 3510)
 //
 // Only the self-contained scalar `__simt_callee__` functions are vendored here,
-// verbatim. The SDK header cannot be #include'd directly from a TileLang
+// with a local bound fix for uniform float conversion. The SDK header cannot
+// be #include'd directly from a TileLang
 // kernel: its file-scope SIMD code (MicroAPI::CastTrait /
 // Ops::Base::GetVRegSize / the
 // __VEC_SCOPE__ helpers and RandomKernelBaseOp) requires CANN's op-build
@@ -166,6 +167,12 @@ __simt_callee__ __aicore__ inline void PhiloxRandomSimt(const uint32_t *key,
   CopyArray<ALG_COUNTER_SIZE>(results, counterTmp);
 }
 
+// Preserve ordinary draws while excluding the rounded 1.0f endpoint.
+__simt_callee__ __aicore__ inline float Uint32ToUniformFloat(uint32_t value) {
+  float result = value * RAND_2POW32_INV + RAND_2POW32_INV_HALF;
+  return result < 1.0f ? result : 0x1.fffffep-1f;
+}
+
 // float overload: Philox bits -> uniform [0, 1).
 __simt_callee__ __aicore__ inline void
 PhiloxRandomSimt(const uint32_t *key, const uint32_t *counter, float *results) {
@@ -173,7 +180,7 @@ PhiloxRandomSimt(const uint32_t *key, const uint32_t *counter, float *results) {
   PhiloxRandomSimt(key, counter, resultU32);
 #pragma unroll
   for (uint16_t i = 0; i < ALG_COUNTER_SIZE; i++) {
-    results[i] = resultU32[i] * RAND_2POW32_INV + RAND_2POW32_INV_HALF;
+    results[i] = Uint32ToUniformFloat(resultU32[i]);
   }
 }
 

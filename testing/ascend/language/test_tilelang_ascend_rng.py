@@ -98,5 +98,39 @@ def test_two_kernels_each_with_rng_init_get_isolated_state():
     assert torch.equal(a, out_a.cpu())
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("distribution", ["uniform", "normal"])
+def test_rng_excludes_rounded_uniform_endpoint(target, distribution):
+    # This counter produces 0xffffffff followed by 0x20000000. The first word
+    # used to become uniform 1.0, or a zero Box-Muller radius for normal draws.
+    # The offset is four-aligned, so AscendC and PTO start at the same lane.
+    seq = 8062896657368119635
+    off = 2317056244545112300
+
+    @T.prim_func
+    def main(out: T.Tensor((THREADS,), T.float32), sequence: T.int64, offset: T.int64):
+        with T.Kernel(1):
+            ub = T.alloc_shared((THREADS,), T.float32)
+            with T.SimtVF(threads=THREADS):
+                T.rng_init(0, seq=sequence, off=offset)
+                for i in T.Parallel(THREADS):
+                    ub[i] = T.rng_rand_float(dist=distribution)
+            T.copy(ub, out)
+
+    kernel = tilelang.compile(main, target=target)
+    out = torch.empty(THREADS, dtype=torch.float32, device="npu")
+    kernel(out, seq, off)
+    torch.npu.synchronize()
+    actual = out.cpu()
+    if distribution == "uniform":
+        expected = torch.full((THREADS,), float.fromhex("0x1.fffffep-1"), dtype=torch.float32)
+        assert torch.equal(actual, expected)
+    else:
+        # The repaired radius is positive; the second uniform fixes the angle
+        # near pi/4. Allow the two backends' transcendental implementations.
+        assert bool(((actual > 0) & (actual < 1.0e-3)).all())
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

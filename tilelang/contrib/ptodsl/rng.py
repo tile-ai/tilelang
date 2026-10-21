@@ -21,6 +21,7 @@ class PhiloxRNG:
     _PHILOX_W32_B = 0xBB67AE85
     _RAND_2POW32_INV = 2.3283064e-10
     _RAND_2POW32_INV_HALF = _RAND_2POW32_INV / 2.0
+    _RAND_FLOAT_MAX = float.fromhex("0x1.fffffep-1")
     _BOX_MULLER_EPS = 1.0e-7
     _BOX_MULLER_TWO = 2.0
     _BOX_MULLER_TWO_PI = 6.283185307179586
@@ -104,6 +105,9 @@ class PhiloxRNG:
             saturation="nosat",
         )
         result = _f * pto.const(self._RAND_2POW32_INV, dtype=pto.f32) + pto.const(self._RAND_2POW32_INV_HALF, dtype=pto.f32)
+        # High uint32 words round to 2**32 before scaling. Preserve ordinary
+        # draws, but keep the rounded endpoint inside the promised [0, 1).
+        result = pto.select(result < pto.const(1.0, dtype=pto.f32), result, pto.const(self._RAND_FLOAT_MAX, dtype=pto.f32))
         return result, draw_index
 
     def rand_normal(self, draw_index, normal_cache, has_normal):
