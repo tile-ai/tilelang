@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 import tilelang
@@ -7,7 +8,8 @@ import tilelang.testing
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-def test_predicated_pipeline_copy_uses_cp_async_and_zero_fills():
+@pytest.mark.parametrize("expression_form", [False, True])
+def test_predicated_pipeline_copy_uses_cp_async_and_zero_fills(expression_form):
     length = 514
     tile_size = 512
 
@@ -20,7 +22,9 @@ def test_predicated_pipeline_copy_uses_cp_async_and_zero_fills():
             A_shared = T.alloc_shared((tile_size,), T.float16)
             for tile in T.Pipelined(2, num_stages=1):
                 for i in T.Parallel(tile_size):
-                    if tile * tile_size + i < length:
+                    if expression_form:
+                        A_shared[i] = T.if_then_else(tile * tile_size + i < length, A[tile * tile_size + i], T.float16(0))
+                    elif tile * tile_size + i < length:
                         A_shared[i] = A[tile * tile_size + i]
                     else:
                         A_shared[i] = T.float16(0)

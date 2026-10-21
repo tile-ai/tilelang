@@ -249,12 +249,12 @@ public:
       return StmtMutator::VisitStmt_(store);
     }
 
-    Optional<PrimExpr> predicate = std::nullopt;
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(store->value, &predicate);
-    if (load) {
+    auto copy = AnalyzeBufferCopy(GetRef<BufferStore>(store));
+    if (copy && (!copy->fallback.defined() ||
+                 IsZeroBitPattern(copy->fallback.value()))) {
+      const auto &predicate = copy->predicate;
       Optional<Stmt> injected =
-          TryInjectPTX(load, store, predicate.defined(),
+          TryInjectPTX(copy->load.get(), store, predicate.defined(),
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
         injected_ptx_async_copy_ = true;
@@ -294,32 +294,6 @@ private:
   };
 
   // ---- Copy candidate analysis helpers ----
-  static const BufferLoadNode *
-  MatchZeroFillBufferLoad(const PrimExpr &value,
-                          Optional<PrimExpr> *predicate) {
-    if (const auto *load = value.as<BufferLoadNode>()) {
-      return load;
-    }
-
-    const auto *call = value.as<CallNode>();
-    if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroBitPattern(call->args[2])) {
-      return nullptr;
-    }
-
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(call->args[1], predicate);
-    if (load == nullptr) {
-      return nullptr;
-    }
-
-    *predicate =
-        predicate->defined()
-            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
-            : Optional<PrimExpr>(call->args[0]);
-    return load;
-  }
-
   static Optional<PrimExpr>
   FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single

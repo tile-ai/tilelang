@@ -5,7 +5,7 @@ A predicated staging store with an else-fill is a common masking idiom:
     for i, d in T.Parallel(M, N, prefer_async=True):
         S[i, d] = T.if_then_else(i < k_len, A[i, d], T.float32(-0.0))
 
-`MatchZeroFillBufferLoad` recognises the else branch as a zero fill and lets the
+The copy analysis recognises the else branch as a zero fill and lets the
 copy take the async path. `-0.0` compares equal to `0.0`, so it used to match,
 and the fill then wrote `+0.0` -- a different value, silently.
 """
@@ -48,6 +48,7 @@ def _masked_row_bits(prefer_async):
     return int(out.view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
 
 
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_async_masked_staging_preserves_negative_zero_fill():
     """Both lowerings of the same kernel have to produce the same bytes."""
@@ -57,8 +58,10 @@ def test_async_masked_staging_preserves_negative_zero_fill():
     assert bits == NEGATIVE_ZERO_BITS, f"async path stored {hex(bits)}, expected 0x80000000 (-0.0)"
 
 
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-def test_masked_staging_preserves_positive_zero_fill():
+@pytest.mark.parametrize("nested_guard", [False, True])
+def test_masked_staging_preserves_positive_zero_fill(nested_guard):
     """Control: a `+0.0` fill still matches the zero-fill path."""
 
     @T.prim_func
@@ -70,18 +73,27 @@ def test_masked_staging_preserves_positive_zero_fill():
         with T.Kernel(1, threads=128):
             S = T.alloc_shared([M, N], T.float32)
             for i, d in T.Parallel(M, N, prefer_async=True):
-                S[i, d] = T.if_then_else(i < k_len, A[i, d], T.float32(0.0))
+                if nested_guard:
+                    S[i, d] = T.if_then_else(i < k_len, T.if_then_else(d < N // 2, A[i, d], T.float32(0.0)), T.float32(0.0))
+                else:
+                    S[i, d] = T.if_then_else(i < k_len, A[i, d], T.float32(0.0))
             for i, d in T.Parallel(M, N):
                 Out[i, d] = S[i, d]
 
     A = torch.randn(M, N, dtype=torch.float32, device="cuda") + 1.0
     kernel = tilelang.compile(main, out_idx=[1], target="cuda")
     assert "cp_async_gs_conditional<" in kernel.get_kernel_source()
-    bits = int(kernel(A, K_LEN).view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
+    out = kernel(A, K_LEN)
+    expected = torch.zeros_like(A)
+    columns = N // 2 if nested_guard else N
+    expected[:K_LEN, :columns] = A[:K_LEN, :columns]
+    assert torch.equal(out.view(torch.int32), expected.view(torch.int32))
+    bits = int(out.view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
     torch.cuda.synchronize()
     assert bits == 0
 
 
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64"])
 def test_async_copy_preserves_negative_zero_safe_value(dtype):

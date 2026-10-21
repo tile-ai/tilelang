@@ -667,7 +667,9 @@ def test_pipeline_planning_recognizes_parallel_bufferstore_copy_stages():
     assert async_groups == [0, 0, -1]
 
 
-def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy():
+@pytest.mark.parametrize("form", ["statement", "expression", "nested"])
+@pytest.mark.parametrize("explicit_schedule", [False, True])
+def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy(form, explicit_schedule):
     @T.prim_func
     def before(
         A: T.Tensor((130,), T.float16),
@@ -675,9 +677,20 @@ def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy():
     ):
         with T.Kernel(1, threads=128):
             A_shared = T.alloc_shared((128,), T.float16)
-            for ko in T.Pipelined(2, num_stages=1):
+            for ko in T.Pipelined(
+                2,
+                num_stages=0 if explicit_schedule else 1,
+                order=[1, 0] if explicit_schedule else None,
+                stage=[0, 1] if explicit_schedule else None,
+            ):
                 for i in T.Parallel(128):
-                    if ko * 128 + i < 130:
+                    if form == "expression":
+                        A_shared[i] = T.if_then_else(ko * 128 + i < 130, A[ko * 128 + i], T.float16(0))
+                    elif form == "nested":
+                        A_shared[i] = T.if_then_else(
+                            ko < 2, T.if_then_else(ko * 128 + i < 130, A[ko * 128 + i], T.float16(0)), T.float16(0)
+                        )
+                    elif ko * 128 + i < 130:
                         A_shared[i] = A[ko * 128 + i]
                     else:
                         A_shared[i] = T.float16(0)
@@ -698,7 +711,9 @@ def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy():
 
 
 @pytest.mark.parametrize("fallback", [pytest.param(1.0, id="nonzero"), pytest.param(-0.0, id="negative_zero")])
-def test_pipeline_planning_keeps_unsupported_fallback_copy_synchronous(fallback):
+@pytest.mark.parametrize("expression_form", [False, True])
+@pytest.mark.parametrize("explicit_schedule", [False, True])
+def test_pipeline_planning_keeps_unsupported_fallback_copy_synchronous(fallback, expression_form, explicit_schedule):
     @T.prim_func
     def before(
         A: T.Tensor((130,), T.float16),
@@ -706,9 +721,16 @@ def test_pipeline_planning_keeps_unsupported_fallback_copy_synchronous(fallback)
     ):
         with T.Kernel(1, threads=128):
             A_shared = T.alloc_shared((128,), T.float16)
-            for ko in T.Pipelined(2, num_stages=1):
+            for ko in T.Pipelined(
+                2,
+                num_stages=0 if explicit_schedule else 1,
+                order=[0, 1] if explicit_schedule else None,
+                stage=[0, 1] if explicit_schedule else None,
+            ):
                 for i in T.Parallel(128):
-                    if ko * 128 + i < 130:
+                    if expression_form:
+                        A_shared[i] = T.if_then_else(ko * 128 + i < 130, A[ko * 128 + i], T.float16(fallback))
+                    elif ko * 128 + i < 130:
                         A_shared[i] = A[ko * 128 + i]
                     else:
                         A_shared[i] = T.float16(fallback)
@@ -740,7 +762,8 @@ def test_pipeline_planning_keeps_partial_guarded_copy_synchronous():
     assert "software_pipeline_async_producers" not in annos[0]
 
 
-def test_pipeline_planning_keeps_state_dependent_guarded_copy_synchronous():
+@pytest.mark.parametrize("expression_form", [False, True])
+def test_pipeline_planning_keeps_state_dependent_guarded_copy_synchronous(expression_form):
     @T.prim_func
     def before(
         A: T.Tensor((256,), T.float16),
@@ -751,7 +774,9 @@ def test_pipeline_planning_keeps_state_dependent_guarded_copy_synchronous():
             A_shared = T.alloc_shared((128,), T.float16)
             for ko in T.Pipelined(2, num_stages=1):
                 for i in T.Parallel(128):
-                    if Mask[ko * 128 + i] != 0:
+                    if expression_form:
+                        A_shared[i] = T.if_then_else(Mask[ko * 128 + i] != 0, A[ko * 128 + i], T.float16(0))
+                    elif Mask[ko * 128 + i] != 0:
                         A_shared[i] = A[ko * 128 + i]
                     else:
                         A_shared[i] = T.float16(0)
@@ -763,7 +788,8 @@ def test_pipeline_planning_keeps_state_dependent_guarded_copy_synchronous():
     assert "software_pipeline_async_producers" not in annos[0]
 
 
-def test_pipeline_planning_keeps_state_dependent_index_copy_synchronous():
+@pytest.mark.parametrize("expression_form", [False, True])
+def test_pipeline_planning_keeps_state_dependent_index_copy_synchronous(expression_form):
     @T.prim_func
     def before(
         A: T.Tensor((256,), T.float16),
@@ -774,7 +800,9 @@ def test_pipeline_planning_keeps_state_dependent_index_copy_synchronous():
             A_shared = T.alloc_shared((128,), T.float16)
             for ko in T.Pipelined(2, num_stages=1):
                 for i in T.Parallel(128):
-                    if ko * 128 + i < 256:
+                    if expression_form:
+                        A_shared[i] = T.if_then_else(ko * 128 + i < 256, A[Indices[ko * 128 + i]], T.float16(0))
+                    elif ko * 128 + i < 256:
                         A_shared[i] = A[Indices[ko * 128 + i]]
                     else:
                         A_shared[i] = T.float16(0)
@@ -783,6 +811,45 @@ def test_pipeline_planning_keeps_state_dependent_index_copy_synchronous():
     mod = _run_pipeline_planning(before, sm80_target)
     annos = _collect_pipeline_loop_annotations(mod["main"])
     assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    assert "software_pipeline_async_producers" not in annos[0]
+
+
+@pytest.mark.parametrize("different_buffer", [False, True])
+def test_pipeline_planning_keeps_different_fill_destination_synchronous(different_buffer):
+    @T.prim_func
+    def before(A: T.Tensor((130,), T.float16), B: T.Tensor((2,), T.float16)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((128,), T.float16)
+            Other = T.alloc_shared((128,), T.float16)
+            for ko in T.Pipelined(2, num_stages=1):
+                for i in T.Parallel(128):
+                    if ko * 128 + i < 130:
+                        S[i] = A[ko * 128 + i]
+                    elif different_buffer:
+                        Other[i] = T.float16(0)
+                    else:
+                        S[(i + 1) % 128] = T.float16(0)
+                B[ko] = S[0]
+
+    annos = _collect_pipeline_loop_annotations(_run_pipeline_planning(before, sm80_target)["main"])
+    assert annos
+    assert "software_pipeline_async_producers" not in annos[0]
+
+
+def test_pipeline_planning_keeps_mixed_copy_compute_stage_synchronous():
+    @T.prim_func
+    def before(A: T.Tensor((256,), T.float16), B: T.Tensor((2,), T.float16)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((128,), T.float16)
+            for ko in T.Pipelined(2, order=[0, 1], stage=[0, 1]):
+                with T.sblock("copy_and_compute"):
+                    T.copy(A[ko * 128 : (ko + 1) * 128], S)
+                    for i in T.Parallel(128):
+                        S[i] = S[i] + T.float16(1)
+                B[ko] = S[0]
+
+    annos = _collect_pipeline_loop_annotations(_run_pipeline_planning(before, sm80_target)["main"])
+    assert annos
     assert "software_pipeline_async_producers" not in annos[0]
 
 

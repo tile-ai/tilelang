@@ -3,7 +3,6 @@
 #include <map>
 #include <numeric>
 #include <tvm/arith/analyzer.h>
-#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
@@ -36,32 +35,20 @@ using namespace ffi;
 
 class BufferRegionCollector : public StmtExprVisitor {
 public:
-  BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer, Target target);
+  explicit BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer);
 
   Array<BufferRegion> GetReads() const;
   Array<BufferRegion> GetWrites() const;
-  bool GetGlobalCopyPattern() const;
-  bool GetTmaCopyPattern() const;
-  bool HasNonCopyTileOp() const;
 
 private:
-  static bool IsGlobalLikeBuffer(const Buffer &buffer);
-
   void HandleTileOp(const TileOperator &tile_op);
   void VisitStmt_(const BufferStoreNode *op) final;
   void VisitExpr_(const BufferLoadNode *op) final;
   void VisitExpr_(const CallNode *op) final;
-  void VisitStmt_(const IfThenElseNode *op) final;
 
   Map<Var, Buffer> buffer_data_to_buffer_;
-  Target target_;
   Array<BufferRegion> reads_;
   Array<BufferRegion> writes_;
-  bool is_global_read_ = false;
-  bool is_global_copy_pattern_ = false;
-  bool is_tma_copy_ = false;
-  bool has_non_copy_tile_op_ = false;
-  bool within_condition_expr_ = false;
 };
 
 /*!
@@ -85,62 +72,26 @@ bool MayConflict(const Region &region1, const Region &region2) {
 }
 
 BufferRegionCollector::BufferRegionCollector(
-    Map<Var, Buffer> buffer_data_to_buffer, Target target)
-    : buffer_data_to_buffer_(buffer_data_to_buffer), target_(target) {}
+    Map<Var, Buffer> buffer_data_to_buffer)
+    : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
 Array<BufferRegion> BufferRegionCollector::GetReads() const { return reads_; }
 
 Array<BufferRegion> BufferRegionCollector::GetWrites() const { return writes_; }
 
-bool BufferRegionCollector::GetGlobalCopyPattern() const {
-  return is_global_copy_pattern_;
-}
-
-bool BufferRegionCollector::GetTmaCopyPattern() const { return is_tma_copy_; }
-
-bool BufferRegionCollector::HasNonCopyTileOp() const {
-  return has_non_copy_tile_op_;
-}
-
-bool BufferRegionCollector::IsGlobalLikeBuffer(const Buffer &buffer) {
-  return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
-}
-
 void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
   if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-    BufferRegionCollector nested(buffer_data_to_buffer_, target_);
+    BufferRegionCollector nested(buffer_data_to_buffer_);
     nested(parallel->GetRoot());
     reads_.insert(reads_.end(), nested.GetReads().begin(),
                   nested.GetReads().end());
     writes_.insert(writes_.end(), nested.GetWrites().begin(),
                    nested.GetWrites().end());
-    is_global_copy_pattern_ =
-        is_global_copy_pattern_ || nested.GetGlobalCopyPattern();
-    is_tma_copy_ = is_tma_copy_ || nested.GetTmaCopyPattern();
-    has_non_copy_tile_op_ = has_non_copy_tile_op_ || nested.HasNonCopyTileOp();
     return;
   }
   AccessRegions access = tile_op->GetAccessRegions();
   reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
   writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-  if (const auto *copy = tile_op.as<CopyNode>()) {
-    if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
-      is_global_copy_pattern_ = true;
-    }
-  }
-  // Im2Col always uses TMA on Hopper.
-  if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
-    if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
-      is_global_copy_pattern_ = true;
-      if (TargetIsHopper(target_)) {
-        is_tma_copy_ = true;
-      }
-    }
-    return;
-  }
-  if (!tile_op.as<CopyNode>()) {
-    has_non_copy_tile_op_ = true;
-  }
 }
 
 void BufferRegionCollector::VisitStmt_(const BufferStoreNode *op) {
@@ -154,12 +105,7 @@ void BufferRegionCollector::VisitStmt_(const BufferStoreNode *op) {
   auto store_region = BufferRegion(store_buffer, region);
   writes_.push_back(store_region);
 
-  is_global_read_ = false;
-  this->VisitExpr(op->value);
-  if (is_global_read_ && IsSharedBuffer(store_buffer)) {
-    is_global_copy_pattern_ = true;
-  }
-  is_global_read_ = false;
+  StmtExprVisitor::VisitStmt_(op);
 }
 
 void BufferRegionCollector::VisitExpr_(const BufferLoadNode *op) {
@@ -173,13 +119,7 @@ void BufferRegionCollector::VisitExpr_(const BufferLoadNode *op) {
   auto load_region = BufferRegion(load_buffer, region);
   reads_.push_back(load_region);
 
-  if (IsGlobalLikeBuffer(op->buffer) && !within_condition_expr_) {
-    // skip condition expr of if_then_else node
-    // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
-    // is not a global read shared[i] = T.if_then_else(global[i] < n,
-    // global_a[i], global_b[i]) is a global read
-    is_global_read_ = true;
-  }
+  StmtExprVisitor::VisitExpr_(op);
 }
 
 void BufferRegionCollector::VisitExpr_(const CallNode *op) {
@@ -245,42 +185,21 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     for (size_t i = 2; i < op->args.size(); ++i) {
       this->VisitExpr(op->args[i]);
     }
-  } else if (op->op.same_as(builtin::if_then_else())) {
-    within_condition_expr_ = true;
-    this->VisitExpr(op->args[0]);
-    within_condition_expr_ = false;
-    for (auto i = 1; i < op->args.size(); i++) {
-      this->VisitExpr(op->args[i]);
-    }
   } else {
     StmtExprVisitor::VisitExpr_(op);
   }
 }
 
-void BufferRegionCollector::VisitStmt_(const IfThenElseNode *op) {
-  within_condition_expr_ = true;
-  this->VisitExpr(op->condition);
-  within_condition_expr_ = false;
-  this->VisitStmt(op->then_case);
-  if (op->else_case.defined()) {
-    within_condition_expr_ = true;
-    this->VisitStmt(op->else_case.value());
-    within_condition_expr_ = false;
-  }
-}
-
 class PipelinePlanningBodyAnalyzer {
 public:
-  PipelinePlanningBodyAnalyzer(Map<Var, Buffer> buffer_data_to_buffer,
-                               Target target)
-      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
-        target_(std::move(target)) {}
+  explicit PipelinePlanningBodyAnalyzer(Map<Var, Buffer> buffer_data_to_buffer)
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
   std::pair<Array<BufferRegion>, Array<BufferRegion>>
   CollectStmtAccessRegions(const Stmt &stmt) const {
     SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                  /*name_hint=*/"", /*body*/ stmt);
-    auto collector = BufferRegionCollector(buffer_data_to_buffer_, target_);
+    auto collector = BufferRegionCollector(buffer_data_to_buffer_);
     collector(block);
     return {collector.GetReads(), collector.GetWrites()};
   }
@@ -401,7 +320,146 @@ public:
 
 private:
   Map<Var, Buffer> buffer_data_to_buffer_;
+};
+
+enum class PipelineCopyKind { kNone, kSync, kAsyncCandidate, kTma };
+
+// Classify an entire scheduling unit. Buffer-copy syntax is decoded by the
+// shared analysis; this visitor owns loop/control-flow scheduling constraints.
+class PipelineCopyAnalyzer : public StmtExprVisitor {
+public:
+  static PipelineCopyKind Analyze(const Stmt &stmt, const Target &target) {
+    PipelineCopyAnalyzer analyzer(target);
+    analyzer(stmt);
+    if (!analyzer.has_global_to_shared_ || analyzer.has_non_copy_) {
+      return PipelineCopyKind::kNone;
+    }
+    if (!analyzer.async_safe_) {
+      return PipelineCopyKind::kSync;
+    }
+    return analyzer.has_tma_ ? PipelineCopyKind::kTma
+                             : PipelineCopyKind::kAsyncCandidate;
+  }
+
+private:
+  explicit PipelineCopyAnalyzer(Target target) : target_(std::move(target)) {}
+
+  static bool ArePure_(const Array<PrimExpr> &exprs) {
+    return std::all_of(exprs.begin(), exprs.end(), [](const PrimExpr &expr) {
+      return SideEffect(expr) <= CallEffectKind::kPure;
+    });
+  }
+
+  static bool IsGlobalLike_(const Buffer &buffer) {
+    return IsGlobalBuffer(buffer) || buffer.scope().empty();
+  }
+
+  void RecordBufferCopy_(const BufferCopy &copy) {
+    bool global_to_shared =
+        IsGlobalLike_(copy.load->buffer) && IsSharedBuffer(copy.store->buffer);
+    if (!IsGlobalLike_(copy.load->buffer) ||
+        (!IsSharedBuffer(copy.store->buffer) &&
+         !IsLocalBuffer(copy.store->buffer, /*allow_var=*/true))) {
+      has_non_copy_ = true;
+      return;
+    }
+    bool pure_addresses =
+        ArePure_(copy.load->indices) && ArePure_(copy.store->indices);
+    if (copy.predicate.defined() &&
+        (!inside_parallel_ || !parallel_only_ || !pure_loop_bounds_ ||
+         !global_to_shared || !pure_addresses ||
+         SideEffect(copy.predicate.value()) > CallEffectKind::kPure ||
+         !copy.fallback.defined() ||
+         !IsZeroBitPattern(copy.fallback.value()))) {
+      has_non_copy_ = true;
+      return;
+    }
+    has_global_to_shared_ |= global_to_shared;
+    async_safe_ &= pure_addresses;
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (auto copy = AnalyzeBufferCopy(GetRef<BufferStore>(op))) {
+      RecordBufferCopy_(*copy);
+      return;
+    }
+    // Numeric casts are still copy-like for scheduling. The backend decides
+    // whether their actual load/store representation can use an async copy.
+    PrimExpr value = op->value;
+    while (const auto *cast = value.as<CastNode>()) {
+      value = cast->value;
+    }
+    if (const auto *load = value.as<BufferLoadNode>();
+        load && !op->predicate.defined() && !load->predicate.defined()) {
+      RecordBufferCopy_({GetRef<BufferLoad>(load), GetRef<BufferStore>(op),
+                         std::nullopt, std::nullopt});
+    } else {
+      has_non_copy_ = true;
+    }
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if (auto copy = AnalyzeBufferCopy(GetRef<IfThenElse>(op));
+        copy && copy->fallback.defined() &&
+        IsZeroBitPattern(copy->fallback.value())) {
+      RecordBufferCopy_(*copy);
+      return;
+    }
+    async_safe_ = false;
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    bool was_parallel = inside_parallel_;
+    bool was_parallel_only = parallel_only_;
+    bool had_pure_bounds = pure_loop_bounds_;
+    inside_parallel_ |= op->kind == ForKind::kParallel;
+    parallel_only_ &= op->kind == ForKind::kParallel;
+    pure_loop_bounds_ &= SideEffect(op->min) <= CallEffectKind::kPure &&
+                         SideEffect(op->extent) <= CallEffectKind::kPure &&
+                         (!op->step.defined() || SideEffect(op->step.value()) <=
+                                                     CallEffectKind::kPure);
+    async_safe_ &= pure_loop_bounds_;
+    StmtExprVisitor::VisitStmt_(op);
+    inside_parallel_ = was_parallel;
+    parallel_only_ = was_parallel_only;
+    pure_loop_bounds_ = had_pure_bounds;
+  }
+
+  void VisitStmt_(const SBlockRealizeNode *op) final {
+    async_safe_ &= is_one(op->predicate);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    auto tile_op = ParseOperator(GetRef<Call>(op));
+    if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
+      this->VisitStmt(parallel->GetRoot());
+      return;
+    }
+    if (const auto *copy = tile_op.as<CopyNode>()) {
+      has_global_to_shared_ |=
+          IsGlobalLike_(copy->src) && IsSharedBuffer(copy->dst);
+    } else if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
+      bool global_to_shared =
+          IsGlobalLike_(im2col->src_) && IsSharedBuffer(im2col->dst_);
+      has_global_to_shared_ |= global_to_shared;
+      has_tma_ |= global_to_shared && TargetIsHopper(target_);
+    } else if (tile_op.defined() ||
+               SideEffect(GetRef<Call>(op)) > CallEffectKind::kReadState) {
+      has_non_copy_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
   Target target_;
+  bool has_global_to_shared_ = false;
+  bool has_non_copy_ = false;
+  bool has_tma_ = false;
+  bool async_safe_ = true;
+  bool inside_parallel_ = false;
+  bool parallel_only_ = true;
+  bool pure_loop_bounds_ = true;
 };
 
 /*! \brief Information about a pipeline stage
@@ -412,7 +470,7 @@ private:
  * before reordering \param order Current position of this stage in the
  * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
  * stage number this operation belongs to (-1 if not yet assigned) \param
- * copy_stage Whether this stage is a memory copy operation \param
+ * copy_kind Copy classification for scheduling, before backend lowering \param
  * last_use_stmt_index Index of the last statement (in original order) that
  * uses the results of this stage (-1 if not yet determined). This field is
  * crucial for pipeline optimization:
@@ -430,18 +488,15 @@ struct PipelineStageInfo {
   std::unordered_set<const VarNode *> scalar_uses;
   int original_stmt_index{};
   int order = -1, stage = -1;
-  bool copy_stage = false;
-  bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
-  bool conditional_execution = false;
-  bool total_zero_fill_copy = false;
+  PipelineCopyKind copy_kind = PipelineCopyKind::kNone;
   bool producer_for_copy = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
 
 public:
-  bool IsFirstStage() const { return copy_stage || producer_for_copy; }
-  bool IsCopyStage() const { return copy_stage; }
-  bool IsTmaCopy() const { return tma_copy; }
+  bool IsFirstStage() const { return IsCopyStage() || producer_for_copy; }
+  bool IsCopyStage() const { return copy_kind != PipelineCopyKind::kNone; }
+  bool IsTmaCopy() const { return copy_kind == PipelineCopyKind::kTma; }
   bool IsProducerForCopy() const { return producer_for_copy; }
   bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
 };
@@ -475,205 +530,6 @@ public:
     std::unordered_set<const VarNode *> scalar_defs_;
     std::unordered_set<const VarNode *> scalar_uses_;
   };
-
-  bool MayBeConditionallyExecuted(const Stmt &stmt) const {
-    bool conditional = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (conditional) {
-        return;
-      }
-      if (const auto *if_then_else = node.as<IfThenElseNode>()) {
-        conditional = true;
-        return;
-      }
-      if (const auto *realize = node.as<SBlockRealizeNode>()) {
-        if (!is_one(realize->predicate)) {
-          conditional = true;
-        }
-      }
-    });
-    return conditional;
-  }
-
-  bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
-    // A guarded global-to-shared copy with an explicit zero-fill else branch
-    // defines the same shared location on every path.  It is therefore a
-    // total SIMT copy, unlike a generic conditionally executed producer.
-    if (pinfo.conditional_execution && !pinfo.total_zero_fill_copy) {
-      return false;
-    }
-    if (pinfo.IsTmaCopy()) {
-      return false;
-    }
-    return pinfo.IsCopyStage();
-  }
-
-  static bool ArePureExprs(const Array<PrimExpr> &exprs) {
-    return std::all_of(exprs.begin(), exprs.end(), [](const PrimExpr &expr) {
-      return SideEffect(expr) <= CallEffectKind::kPure;
-    });
-  }
-
-  bool IsTotalZeroFillCopyStmt(const Stmt &stmt,
-                               bool inside_parallel = false) const {
-    if (const auto *loop = stmt.as<ForNode>()) {
-      if (loop->kind != ForKind::kParallel ||
-          SideEffect(loop->min) > CallEffectKind::kPure ||
-          SideEffect(loop->extent) > CallEffectKind::kPure) {
-        return false;
-      }
-      return IsTotalZeroFillCopyStmt(loop->body, true);
-    }
-    const auto *conditional = stmt.as<IfThenElseNode>();
-    if (!inside_parallel || conditional == nullptr ||
-        !conditional->else_case.defined() ||
-        SideEffect(conditional->condition) > CallEffectKind::kPure) {
-      return false;
-    }
-    const auto *copy = conditional->then_case.as<BufferStoreNode>();
-    const auto *zero_fill =
-        conditional->else_case.value().as<BufferStoreNode>();
-    if (copy == nullptr || zero_fill == nullptr ||
-        !copy->buffer.same_as(zero_fill->buffer) ||
-        !IsSharedBuffer(copy->buffer) ||
-        !StructuralEqual()(copy->indices, zero_fill->indices) ||
-        !ArePureExprs(copy->indices) || copy->predicate.defined() ||
-        zero_fill->predicate.defined()) {
-      return false;
-    }
-    const auto *load = copy->value.as<BufferLoadNode>();
-    return load != nullptr && IsGlobalBuffer(load->buffer) &&
-           ArePureExprs(load->indices) && !load->predicate.defined() &&
-           IsZeroBitPattern(zero_fill->value);
-  }
-
-  bool IsPureCopyStmt(const Stmt &stmt) const {
-    auto is_global_like_buffer = [](const Buffer &buffer) {
-      return IsGlobalBuffer(buffer) ||
-             (buffer.defined() && buffer.scope().empty());
-    };
-    auto is_pure_raw_copy_value = [&](const PrimExpr &expr,
-                                      const auto &self) -> bool {
-      if (const auto *load = expr.as<BufferLoadNode>()) {
-        return is_global_like_buffer(load->buffer);
-      }
-      if (const auto *cast = expr.as<CastNode>()) {
-        return self(cast->value, self);
-      }
-      return false;
-    };
-
-    bool saw_copy = false;
-    bool saw_non_copy_tile_op = false;
-    bool saw_non_copy_buffer_store = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_non_copy_buffer_store) {
-        return;
-      }
-      if (const auto *store = node.as<BufferStoreNode>()) {
-        saw_copy = true;
-        if ((!IsSharedBuffer(store->buffer) &&
-             !IsLocalBuffer(store->buffer, /*allow_var=*/true)) ||
-            !is_pure_raw_copy_value(store->value, is_pure_raw_copy_value)) {
-          saw_non_copy_buffer_store = true;
-        }
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-        if (IsPureCopyStmt(parallel->GetRoot())) {
-          saw_copy = true;
-        } else {
-          saw_non_copy_tile_op = true;
-        }
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        saw_copy = true;
-      } else {
-        saw_non_copy_tile_op = true;
-      }
-    });
-    return saw_copy && !saw_non_copy_tile_op && !saw_non_copy_buffer_store;
-  }
-
-  Optional<TileOperator> GetSinglePureCopyTileOp(const Stmt &stmt) const {
-    Optional<TileOperator> copy_tile_op;
-    bool saw_non_copy_tile_op = false;
-    bool saw_multiple_copy_ops = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        if (copy_tile_op.defined()) {
-          saw_multiple_copy_ops = true;
-          copy_tile_op = Optional<TileOperator>();
-        } else {
-          copy_tile_op = tile_op;
-        }
-      } else {
-        saw_non_copy_tile_op = true;
-        copy_tile_op = Optional<TileOperator>();
-      }
-    });
-    if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
-      return Optional<TileOperator>();
-    }
-    return copy_tile_op;
-  }
-
-  static bool IsGlobalLikeBuffer(const Buffer &buffer) {
-    return IsGlobalBuffer(buffer) ||
-           (buffer.defined() && buffer.scope().empty());
-  }
-
-  void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
-    ICHECK(pinfo != nullptr);
-    if (pinfo->conditional_execution) {
-      return;
-    }
-
-    if (pinfo->copy_stage) {
-      return;
-    }
-
-    auto copy_tile_op = GetSinglePureCopyTileOp(stmt);
-    if (!copy_tile_op.defined()) {
-      return;
-    }
-
-    if (const auto *copy = copy_tile_op.value().as<CopyNode>()) {
-      if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
-        return;
-      }
-      pinfo->copy_stage = true;
-      return;
-    }
-
-    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
-      if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
-        return;
-      }
-      pinfo->copy_stage = true;
-      pinfo->tma_copy = TargetIsHopper(target_);
-    }
-  }
 
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
@@ -922,7 +778,7 @@ public:
     std::map<std::pair<int, int>, int> implicit_group_ids;
     for (int stmt_idx : stmt_indices_by_order) {
       const auto &pinfo = pipeline_stage_infos[stmt_idx];
-      if (!IsAsyncProducerCandidate(pinfo)) {
+      if (pinfo.copy_kind != PipelineCopyKind::kAsyncCandidate) {
         continue;
       }
       auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
@@ -983,29 +839,8 @@ public:
     pipeline_stage_infos.reserve(pipeline_stmts.size());
     for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
       auto pinfo = MakePipelineStageInfo(pipeline_stmts[i], i);
-      ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
       pinfo.order = static_cast<int>(order_array[i]->value);
       pinfo.stage = static_cast<int>(stage_array[i]->value);
-      if (!pinfo.IsCopyStage() && !pinfo.conditional_execution &&
-          pinfo.stage == 0) {
-        bool reads_global = false;
-        bool writes_shared = false;
-        for (const BufferRegion &read : pinfo.reads) {
-          if (IsGlobalLikeBuffer(read->buffer)) {
-            reads_global = true;
-            break;
-          }
-        }
-        for (const BufferRegion &write : pinfo.writes) {
-          if (IsSharedBuffer(write->buffer)) {
-            writes_shared = true;
-            break;
-          }
-        }
-        if (reads_global && writes_shared) {
-          pinfo.copy_stage = true;
-        }
-      }
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
@@ -1017,7 +852,7 @@ public:
     SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                  /*name_hint=*/"",
                  /*body*/ std::move(stmt));
-    auto collector = BufferRegionCollector(buffer_data_to_buffer_, target_);
+    auto collector = BufferRegionCollector(buffer_data_to_buffer_);
     collector(block);
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
@@ -1027,15 +862,7 @@ public:
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
-    pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
-    pinfo.total_zero_fill_copy = collector.GetGlobalCopyPattern() &&
-                                 IsTotalZeroFillCopyStmt(block->body);
-    bool pure_copy_stage =
-        collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
-    pinfo.copy_stage = pure_copy_stage || pinfo.total_zero_fill_copy;
-    pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
-                     collector.GetTmaCopyPattern();
-    ClassifyCopyLikeStage(block->body, &pinfo);
+    pinfo.copy_kind = PipelineCopyAnalyzer::Analyze(block->body, target_);
     return pinfo;
   }
 
@@ -1112,7 +939,7 @@ private:
   using SeqStmtFlattener = PipelinePlanningBodyAnalyzer::SeqStmtFlattener;
 
   PipelinePlanningBodyAnalyzer MakeBodyAnalyzer() const {
-    return PipelinePlanningBodyAnalyzer(buffer_data_to_buffer_, target_);
+    return PipelinePlanningBodyAnalyzer(buffer_data_to_buffer_);
   }
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(const Array<Stmt> &stmts) const {

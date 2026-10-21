@@ -9,6 +9,7 @@
 
 #include "builtin.h"
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
@@ -80,6 +81,60 @@ bool IsZeroBitPattern(const PrimExpr &expr) {
     return imm->value == 0.0 && !std::signbit(imm->value);
   }
   return false;
+}
+
+std::optional<BufferCopy> AnalyzeBufferCopy(const Stmt &stmt) {
+  BufferCopy copy;
+  if (const auto *store = stmt.as<BufferStoreNode>()) {
+    copy.store = ffi::GetRef<BufferStore>(store);
+  } else if (const auto *branch = stmt.as<IfThenElseNode>()) {
+    const auto *then_store = branch->then_case.as<BufferStoreNode>();
+    const auto *else_store =
+        branch->else_case.defined()
+            ? branch->else_case.value().as<BufferStoreNode>()
+            : nullptr;
+    if (!then_store || !else_store || then_store->predicate.defined() ||
+        else_store->predicate.defined() ||
+        !then_store->buffer.same_as(else_store->buffer) ||
+        !ffi::StructuralEqual()(then_store->indices, else_store->indices)) {
+      return std::nullopt;
+    }
+    copy.store = ffi::GetRef<BufferStore>(then_store);
+    copy.predicate = branch->condition;
+    copy.fallback = else_store->value;
+  } else {
+    return std::nullopt;
+  }
+  if (copy.store->predicate.defined()) {
+    return std::nullopt;
+  }
+
+  PrimExpr value = copy.store->value;
+  while (const auto *call = value.as<CallNode>()) {
+    if (!call->op.same_as(builtin::if_then_else())) {
+      return std::nullopt;
+    }
+    if (copy.fallback.defined() &&
+        (!ffi::StructuralEqual()(copy.fallback.value(), call->args[2]) ||
+         IsZeroBitPattern(copy.fallback.value()) !=
+             IsZeroBitPattern(call->args[2]))) {
+      return std::nullopt;
+    }
+    // Preserve short-circuit evaluation of nested guards. In particular, an
+    // inner guard may itself load memory protected by the outer guard.
+    copy.predicate = copy.predicate.defined()
+                         ? if_then_else(copy.predicate.value(), call->args[0],
+                                        make_zero(call->args[0].dtype()))
+                         : call->args[0];
+    copy.fallback = call->args[2];
+    value = call->args[1];
+  }
+  const auto *load = value.as<BufferLoadNode>();
+  if (!load || load->predicate.defined()) {
+    return std::nullopt;
+  }
+  copy.load = ffi::GetRef<BufferLoad>(load);
+  return copy;
 }
 
 bool IsBufferLikeExpr(const PrimExpr &expr) {
