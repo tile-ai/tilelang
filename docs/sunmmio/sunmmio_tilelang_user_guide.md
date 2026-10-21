@@ -374,7 +374,7 @@ Common APIs:
 T.comm.broadcast(A_shared, B_shared, src_core=(0, 0), direction="horizontal")
 T.comm.put(A_shared, B_shared, src_core=(1, 2), dst_core=(2, 3))
 T.comm.all_gather(A_local, A_gathered, direction="horizontal", axis=-1)
-T.comm.all_reduce(A_shared, Out_shared, "sum", direction="all", dim=-1)
+T.comm.all_reduce(A_shared, Out_shared, "sum", direction="all")
 ```
 
 Choose an API by its semantics:
@@ -382,7 +382,7 @@ Choose an API by its semantics:
 - `broadcast`: one source core sends the same data to multiple cores along a direction.
 - `put`: one source core sends data to one destination core.
 - `all_gather`: multiple cores each contribute a data segment, and the receive buffer concatenates the segments.
-- `all_reduce`: data from multiple cores is reduced, producing a reduction result.
+- `all_reduce`: corresponding elements from multiple cores are reduced. It preserves the complete local shape and does not reduce a local tensor dimension.
 
 The receive shape of `all_gather` must match `direction` and `axis`:
 
@@ -847,20 +847,19 @@ The receive shape must match `direction` and `axis`. If the number of participat
 **`T.comm.all_reduce`**
 
 ```python
-T.comm.all_reduce(buffer, out, reduce_type, direction, dim=-1, clear=True)
+T.comm.all_reduce(buffer, out, reduce_type, direction, clear=True)
 ```
 
-`all_reduce` expresses cross-core reduction.
+`all_reduce` expresses cross-core-only reduction. For every local element, it reduces the corresponding values from the cores selected by `direction`; it does not perform a reduction along a local buffer dimension.
 
 - `buffer`: input buffer or region participating in reduce.
 - `out`: output buffer or region storing the reduce result.
 - `reduce_type`: reduce type. Supported values include `"sum"`, `"abssum"`, `"max"`, `"min"`, `"absmax"`, `"bitand"`, `"bitor"`, and `"bitxor"`.
 - `direction`: direction participating in reduce. Supported values are `"horizontal"` / `"h"`, `"vertical"` / `"v"`, and `"all"` / `"a"`.
-- `dim`: reduction dimension inside the local buffer. The default `-1` means the last dimension.
-- `clear`: whether to clear `out` before reduce. The default is `True`.
+- `clear`: keyword-only argument controlling whether `out` is initialized with the reducer's neutral value. If `False`, the cross-core result is combined with the existing `out` value. The default is `True`.
 - Return value: a statement expressing all-reduce.
 
-The `out` shape must be equal to the shape after removing `dim`, or keep length 1 on `dim`.
+The input and output regions must have the same rank and extents. Use `T.reduce` when a dimension inside the local buffer must also be reduced.
 
 ### 3.7 GEMM
 

@@ -319,14 +319,14 @@ T.gemm(A_shared_dist, B_shared_dist, C_shared)
 - `T.comm.broadcast(src, dst, src_core, direction=...)`
 - `T.comm.put(src, dst, src_core, dst_core)`
 - `T.comm.all_gather(send_buffer, recv_buffer, direction=..., axis=...)`
-- `T.comm.all_reduce(buffer, out, reduce_type, direction=..., dim=..., clear=...)`
+- `T.comm.all_reduce(buffer, out, reduce_type, direction=..., clear=...)`
 
 它们的用途分别是：
 
 - `broadcast`：一个源 Core 向一行、一列或整个 mesh 广播数据
 - `put`：一个源 Core 向一个目标 Core 发送数据
 - `all_gather`：多个 Core 的局部数据收集到一个更大的接收 buffer
-- `all_reduce`：多个 Core 参与归约并把结果写到输出 buffer
+- `all_reduce`：对多个 Core 上相同位置的元素做归约，并把结果写到本地 shape 相同的输出 buffer；它不会归约本地 buffer 内的某个维度
 
 ## Layout
 

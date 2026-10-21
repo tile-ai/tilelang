@@ -374,7 +374,7 @@ core 可以用线性 id，也可以用 `(row, col)` 坐标表示。一般来说�
 T.comm.broadcast(A_shared, B_shared, src_core=(0, 0), direction="horizontal")
 T.comm.put(A_shared, B_shared, src_core=(1, 2), dst_core=(2, 3))
 T.comm.all_gather(A_local, A_gathered, direction="horizontal", axis=-1)
-T.comm.all_reduce(A_shared, Out_shared, "sum", direction="all", dim=-1)
+T.comm.all_reduce(A_shared, Out_shared, "sum", direction="all")
 ```
 
 选择接口时可以按语义判断：
@@ -382,7 +382,7 @@ T.comm.all_reduce(A_shared, Out_shared, "sum", direction="all", dim=-1)
 - `broadcast`：一个源 core 向某个方向上的多个 core 发送相同数据。
 - `put`：一个源 core 向一个目标 core 发送数据。
 - `all_gather`：多个 core 各自贡献一段数据，并在接收 buffer 中拼接。
-- `all_reduce`：多个 core 的数据做 reduce，并得到 reduce 结果。
+- `all_reduce`：对多个 core 上相同位置的元素做 reduce。它保留完整的本地 shape，不会归约本地 tensor 的某个维度。
 
 `all_gather` 的 recv shape 需要与 direction 和 axis 匹配：
 
@@ -847,20 +847,19 @@ T.comm.all_gather(
 **`T.comm.all_reduce`**
 
 ```python
-T.comm.all_reduce(buffer, out, reduce_type, direction, dim=-1, clear=True)
+T.comm.all_reduce(buffer, out, reduce_type, direction, clear=True)
 ```
 
-`all_reduce` 表达跨 core reduce。
+`all_reduce` 只表达跨 core reduce：对 `direction` 选中的各个 core 上相同位置的元素做归约，不会沿本地 buffer 的某个维度做归约。
 
 - `buffer`：参与 reduce 的输入 buffer 或 region。
 - `out`：保存 reduce 结果的输出 buffer 或 region。
 - `reduce_type`：reduce 类型，支持 `"sum"`、`"abssum"`、`"max"`、`"min"`、`"absmax"`、`"bitand"`、`"bitor"`、`"bitxor"`。
 - `direction`：参与 reduce 的方向，支持 `"horizontal"` / `"h"`、`"vertical"` / `"v"`、`"all"` / `"a"`。
-- `dim`：在本地 buffer 内 reduce 的维度，默认 `-1` 表示最后一维。
-- `clear`：是否在 reduce 前清空 `out`，默认 `True`。
+- `clear`：仅限关键字传入，用于控制是否以 reducer 的中性值初始化 `out`；为 `False` 时，跨 core 归约结果会与 `out` 的原值继续归约。默认值为 `True`。
 - 返回值：表达 all-reduce 的语句。
 
-`out` shape 需要等于删除 `dim` 后的 shape，或在 `dim` 上保留长度 1。
+输入和输出 region 必须具有相同的 rank 和各维 extent。若还需要归约本地 buffer 内的某个维度，应使用 `T.reduce`。
 
 ### 3.7 GEMM
 
