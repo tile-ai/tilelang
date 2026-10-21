@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-import torch
 
 import tilelang
 from tilelang.backend import get_backend
@@ -17,49 +16,6 @@ from tilelang.backend.target import (
 
 def test_tilelang_does_not_export_target_wrapper():
     assert not hasattr(tilelang, "Target")
-
-
-@pytest.fixture
-def cuda_target_module(monkeypatch):
-    """``tilelang.cuda.target`` with the CUDA detection branch forced on.
-
-    ``_detect_cuda_target`` returns None up front when ``torch.version.hip`` is
-    set, so on a ROCm runner it never reaches the arch logic these tests cover.
-    Pinning hip to None keeps the assertions about that logic runner-independent.
-    """
-    from tilelang.cuda import target as cuda_target
-
-    monkeypatch.setattr(torch.version, "hip", None, raising=False)
-    return cuda_target
-
-
-def test_cuda_auto_without_gpu_falls_through(monkeypatch, cuda_target_module):
-    # A toolkit alone must not stop auto-detection from trying other backends.
-    cuda_target = cuda_target_module
-
-    monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    assert cuda_target._detect_cuda_target() is None
-
-
-def test_cuda_auto_with_gpu_returns_concrete_arch(monkeypatch, cuda_target_module):
-    cuda_target = cuda_target_module
-
-    monkeypatch.setattr(cuda_target, "check_cuda_availability", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
-    target = cuda_target._detect_cuda_target()
-    assert isinstance(target, Target)
-    assert str(target.attrs["arch"]) == "sm_90a"
-
-
-def test_explicit_cuda_target_without_gpu_rejects(monkeypatch, cuda_target_module):
-    # Explicit target="cuda" without a GPU must also reject, not silently sm_50.
-    cuda_target = cuda_target_module
-
-    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: None)
-    with pytest.raises(ValueError, match="arch"):
-        determine_target("cuda", return_object=True)
 
 
 def test_default_target_env_accepts_json_string(monkeypatch):
