@@ -88,6 +88,13 @@ def test_generated_names_preserve_tuple_and_chained_assignments():
     assert mutate(kernel).gen(_TestBuilder())(1, 2, 3) == kernel(1, 2, 3)
 
 
+@pytest.mark.parametrize("subject, pattern", [("1", "__tb"), ("[1, 2]", "[*__tb]"), ("{'key': 1}", "{**__tb}")])
+def test_generated_names_preserve_pattern_captures(tmp_path, subject, pattern):
+    """Unused pattern captures still bind locals and must not replace the builder."""
+    function = _load_function(tmp_path, f"def kernel():\n    match {subject}:\n        case {pattern}:\n            pass\n    return 7\n")
+    assert mutate(function).gen(_TestBuilder())() == function()
+
+
 def test_generated_names_preserve_captured_values():
     """A generated loop local must not hide a free variable from its closure."""
     __0 = 123
