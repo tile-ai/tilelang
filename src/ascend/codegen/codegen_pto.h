@@ -131,7 +131,8 @@ private:
   void EmitLocalVarInitialization_(const Buffer &buffer, std::string vid);
   void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
   void EmitScalarizedStore(const BufferStoreNode *op);
-  bool TryEmitRngBroadcastStore(const BufferStoreNode *op);
+  bool TryEmitRngBroadcastStore(const BufferStoreNode *op,
+                                const PrimExpr &index);
   std::string ScopeOfBuffer(const BufferNode *buffer) const;
   void PrintBinaryExpr_(const std::string &opstr, DataType dtype, PrimExpr lhs,
                         PrimExpr rhs,
