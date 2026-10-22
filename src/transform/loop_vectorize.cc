@@ -1408,7 +1408,8 @@ For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
   }
   if (vectorize_hint == 1)
     return ParallelToSerial(loop);
-  auto rewriter = VectorizeRewriter(vectorize_hint, analyzer);
+  auto local_analyzer = analyzer->Clone();
+  auto rewriter = VectorizeRewriter(vectorize_hint, local_analyzer.get());
   return Downcast<For>(rewriter(loop));
 }
 
