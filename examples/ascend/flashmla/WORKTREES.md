@@ -13,7 +13,7 @@ Included compiler support:
 - AIV stream selection outside scheduled pipelines.
 - Manual source order across physical phase ties on each shared core and pipe.
 
-Remaining compiler support:
+Remaining support in this compiler snapshot:
 
 - Preserve Cube configuration-register dependencies across manual stages.
 - Preserve complete periodic buffer lifetimes, including externally preloaded
@@ -23,8 +23,9 @@ Remaining compiler support:
 - Preserve physical allocation/view remapping and pointer element units during
   layout lowering.
 - Preserve independent Cube view layouts on shared storage rings.
-- Support partial UB-to-L1 NZ copies with correct pitches, compact allocations,
-  and access footprints: [#3530](https://github.com/tile-ai/tilelang/pull/3530).
+- Update the compiler base to include partial UB-to-L1 NZ copies with correct
+  pitches, compact allocations, and access footprints, already merged upstream
+  in [#3530](https://github.com/tile-ai/tilelang/pull/3530).
 
 The buffer-placement prerequisite now provides `T.annotate_buffer_offsets` for
 UB, L1, L0A/L0B/L0C, and SS buffers, with an explicit fixed
