@@ -111,6 +111,10 @@ TVM_DLL const Op &simd_vcgadd();
 TVM_DLL const Op &simd_vcgmax();
 TVM_DLL const Op &simd_vcgmin();
 TVM_DLL const Op &simd_vsqz();
+TVM_DLL const Op &simd_compact_store_begin();
+TVM_DLL const Op &simd_compact_store();
+TVM_DLL const Op &simd_compact_store_end();
+
 TVM_DLL const Op &simd_dhistv2();
 TVM_DLL const Op &simd_chistv2();
 

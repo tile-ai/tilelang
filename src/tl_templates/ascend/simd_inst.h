@@ -77,6 +77,40 @@ template <typename FirstVec, typename SecondVec = FirstVec> struct vec_pair {
 
 template <typename T> using vec_t = typename vec<T>::type;
 
+template <typename T> struct compact_store_state {
+  __ubuf__ T *destination;
+  vector_store_unalign pending;
+};
+
+template <typename T>
+__simd_callee__ inline compact_store_state<T>
+compact_store_begin(__ubuf__ T *destination) {
+  asc_squeeze_and_storeunalign_init();
+  compact_store_state<T> state;
+  state.destination = destination;
+  return state;
+}
+
+template <typename T>
+__simd_callee__ inline void compact_store(compact_store_state<T> &state,
+                                          vec_t<T> value, vector_bool mask) {
+  vec_t<T> packed;
+  asc_squeeze_and_storeunalign(state.destination, packed, state.pending, value,
+                               mask);
+}
+
+template <typename T>
+__simd_callee__ inline void compact_store_end(compact_store_state<T> &state) {
+  asc_squeeze_and_storeunalign_finalize(state.destination, state.pending);
+}
+
+template <typename T>
+__simd_callee__ inline void compact_store_end(compact_store_state<T> &state,
+                                              __ubuf__ uint32_t *count) {
+  compact_store_end(state);
+  sprsts(SPR_AR, count, 0);
+}
+
 // C APIs produce a zeroing result for masked register operations. Legalized
 // MODE_MERGING calls use this helper to preserve inactive destination lanes,
 // matching the software merge in the CCE intrinsics on dav-3510.
@@ -758,7 +792,7 @@ __simd_callee__ inline SrcVec vcgmin(SrcVec src, vector_bool mask, Mode mode) {
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vsqz(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  asc_squeeze(dst, src, mask);
+  ::vsqz(dst, src, mask, mode);
   return dst;
 }
 

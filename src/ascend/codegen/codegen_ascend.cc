@@ -2516,6 +2516,11 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   else if (op->op.same_as(tl::simd_vselr())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintSimdCall_(GetRef<Call>(op), 2, os);
+  } else if (op->op.same_as(tl::simd_compact_store_begin()) ||
+             op->op.same_as(tl::simd_compact_store()) ||
+             op->op.same_as(tl::simd_compact_store_end())) {
+    ICHECK(IsInsideSimdVF()) << "SIMD compaction requires SimdVF";
+    PrintSimdCall_(GetRef<Call>(op), op->args.size(), os);
   } else if (op->op.same_as(tl::simd_mem_bar())) {
     std::string mem_type_str = Downcast<StringImm>(op->args[0])->value;
     this->PrintIndent();

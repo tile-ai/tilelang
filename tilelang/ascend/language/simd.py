@@ -1019,8 +1019,71 @@ def vcgmin(src, mask=None, mode="MODE_ZEROING"):
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcgmin"), src, mask, mode)
 
 
+class CompactStore:
+    """One non-nestable SIMD compaction stream; finish within the same VF."""
+
+    def __init__(self, state, dtype):
+        self.state = state
+        self.dtype = dtype
+
+
+def compact_store_begin(dst):
+    """Start contiguous masked stores to a UB region, resetting SPR_AR.
+
+    dst must be a 32-byte-aligned write access_ptr covering the maximum output.
+    Streams cannot overlap because the hardware compaction counter is shared.
+    """
+    if not isinstance(dst, tirx.Call) or not dst.op.same_as(_Op("tl.access_ptr")):
+        raise TypeError("compact_store_begin requires an explicit T.access_ptr")
+    if not int(dst.args[2]) & 2:
+        raise ValueError("compact_store_begin requires write access")
+    buf = dst.args[0].buffer
+    if buf.scope() not in ("shared", "shared.dyn") or buf.dtype not in (
+        "uint8",
+        "int8",
+        "uint16",
+        "int16",
+        "bfloat16",
+        "float16",
+        "uint32",
+        "int32",
+        "float32",
+    ):
+        raise ValueError("compact_store_begin requires a shared 8/16/32-bit buffer")
+    state = _bind(tirx.call_intrin("handle", _Op("tl.simd.compact_store_begin"), dst))
+    return CompactStore(state, buf.dtype)
+
+
+def compact_store(stream, src, mask):
+    """Append selected lanes to a compaction stream in lane order."""
+    if not isinstance(stream, CompactStore) or str(src.dtype) != _vec_dtype(stream.dtype):
+        raise TypeError("compact_store source must match the stream element type")
+    if str(mask.dtype) != "boolx256":
+        raise TypeError("compact_store requires a SIMD predicate mask")
+    return tirx.call_intrin("void", _Op("tl.simd.compact_store"), stream.state, src, mask)
+
+
+def compact_store_end(stream, count=None):
+    """Flush a stream; optionally store its byte count to shared UINT32.
+
+    Issue mem_bar(VST_VLD) or mem_bar(VST_LD) before consuming the data or
+    count, respectively. The count is in bytes, not elements.
+    """
+    if not isinstance(stream, CompactStore):
+        raise TypeError("compact_store_end requires a compaction stream")
+    if count is None:
+        return tirx.call_intrin("void", _Op("tl.simd.compact_store_end"), stream.state)
+    if not isinstance(count, BufferLoad):
+        raise TypeError("compact_store_end requires a stream and shared UINT32 BufferLoad")
+    if count.buffer.scope() not in ("shared", "shared.dyn") or count.dtype != "uint32":
+        raise ValueError("compact_store_end count must be shared UINT32")
+    return tirx.call_intrin("void", _Op("tl.simd.compact_store_end"), stream.state, access_ptr(count, "w", extent=1))
+
+
 def vsqz(src, mask=None, mode="MODE_STORED"):
-    """Squeeze selected lanes toward the low lanes: dst = vsqz(src, mask)."""
+    """Squeeze selected lanes; MODE_STORED also updates hardware SPR_AR."""
+    if mode not in ("MODE_STORED", "MODE_NO_STORED"):
+        raise ValueError("vsqz mode must be MODE_STORED or MODE_NO_STORED")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vsqz"), src, mask, mode)
