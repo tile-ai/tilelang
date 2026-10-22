@@ -385,7 +385,7 @@ TIR_DEFINE_TL_BUILTIN(ascend_nd2nz_scatter)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(ascend_nd2nz_post_copy)
-    .set_num_inputs(6)
+    .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

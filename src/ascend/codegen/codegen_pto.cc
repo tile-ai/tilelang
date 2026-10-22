@@ -4,6 +4,7 @@
  */
 #include "ascend/codegen/codegen_pto.h"
 #include "ascend/codegen/sfu_precision.h"
+#include "ascend/op/nd2nz.h"
 
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
@@ -4549,29 +4550,15 @@ void CodeGenTileLangPTO::EmitAscendCopyUbufToCbuf(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
-  // ascend_nd2nz_post_copy(dst_l1, src_nz_ub, rows, cols, full_rows,
-  //                        dst_dtype_str [, split_dim_neg2, half_extent])
-  // The dual extras (args 6-7) are consumed by warpgroup_partition before
-  // codegen; by the time we get here, the dst access_ptr already has the
-  // sid-based offset baked in.
-  ICHECK(op->args.size() == 6U || op->args.size() == 8U)
-      << "tl.ascend_nd2nz_post_copy expects 6 or 8 arguments, got "
-      << op->args.size();
-
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
   std::string dst = GetLocalPtrExpr(op->args[0], "mat", DataType::BFloat(16));
   std::string src = GetLocalPtrExpr(op->args[1], "ub", DataType::BFloat(16));
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  int64_t full_rows = ConstArgDim(op, 4, "full_rows");
-  std::string dst_dtype = Downcast<StringImm>(op->args[5])->value;
-
-  int elem_bytes = (dst_dtype == "float") ? 4 : 2;
-  int elems_perC0 = 32 / elem_bytes;
-  int64_t burst_num = cols / elems_perC0;
-  int64_t burst_len = rows;
-  int64_t src_gap = 1;
-  int64_t dst_gap = full_rows - rows;
+  int64_t burst_num = geometry.Bursts();
+  int64_t burst_len = geometry.rows;
+  int64_t src_gap = geometry.src_pitch - geometry.rows;
+  int64_t dst_gap = geometry.dst_pitch - geometry.rows;
 
   PrintIndent();
   stream << "pto.mte_ub_l1(" << src << ", " << dst << ", " << burst_len
@@ -4580,17 +4567,12 @@ void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
-  // ascend_nd2nz_scatter(src_ub, tmp_nz_ub, rows, cols,
-  //                      dst_dtype_str, src_dtype_str)
-  // Emits inline PTO SIMD calls that reorder [ROWS, COLS] data from ND
-  // (row-major) to NZ (fractal) layout within UB.
-  ICHECK_EQ(op->args.size(), 6U)
-      << "tl.ascend_nd2nz_scatter expects exactly 6 arguments";
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  std::string dst_dtype = Downcast<StringImm>(op->args[4])->value;
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
   std::string src_dtype = Downcast<StringImm>(op->args[5])->value;
+  std::string dst_dtype = Downcast<StringImm>(op->args[6])->value;
 
   ICHECK(rows % 16 == 0) << "PTO nd2nz_scatter requires ROWS % 16 == 0, got "
                          << rows;
@@ -4635,7 +4617,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
     }
 
     int src_offset = pass * vl_elems;
-    int dst_pass_offset = pass * (static_cast<int>(rows) + 1) * vl_elems;
+    int dst_pass_offset =
+        pass * static_cast<int>(geometry.dst_pitch) * vl_elems;
 
     for (int r = 0; r < rows; ++r) {
       int row_src_offset = src_offset + r * static_cast<int>(cols);
@@ -4653,8 +4636,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
              << " dist=\"NORM\")\n";
       PrintIndent();
       stream << "pto.vsstb(" << var << ", pto.addptr(" << dst_ptr << ", "
-             << row_dst_offset << "), " << (rows + 1) << ", 0, " << mask_fn
-             << ")\n";
+             << row_dst_offset << "), " << geometry.dst_pitch << ", 0, "
+             << mask_fn << ")\n";
     }
   }
 }

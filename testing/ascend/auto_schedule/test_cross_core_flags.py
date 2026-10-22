@@ -86,8 +86,8 @@ def test_unbounded_explicit_flag_is_rejected():
 @pytest.mark.parametrize("overlap", [False, True])
 def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
     rows = tirx.Var("rows", "int32")
-    l1 = tirx.decl_buffer((32, 64), "float8_e4m3fn", name="l1", scope="shared.l1")
-    nz = [tirx.decl_buffer((17, 64), "float8_e4m3fn", name=f"nz{sid}", scope="shared.dyn") for sid in range(2)]
+    l1 = tirx.decl_buffer((32, 64), "bfloat16", name="l1", scope="shared.l1")
+    nz = [tirx.decl_buffer((17, 64), "bfloat16", name=f"nz{sid}", scope="shared.dyn") for sid in range(2)]
     copies = []
     for sid in range(2):
         offset = 0 if overlap else sid * 16
@@ -96,9 +96,12 @@ def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
             T.access_ptr(nz[sid][0, 0], "r", 17, 64),
             rows,
             64,
-            32,
-            "float8_e4m3_t",
+            src_pitch=17,
+            dst_pitch=32,
+            dtype="bfloat16",
         )
+        # This is a prepared InsertSync input with a proven NZ destination.
+        call = tirx.Call(call.dtype, call.op, call.args, annotations={"nd2nz_logical_regions": tirx.IntImm("int32", 1)})
         copies.append(unit(tirx.Evaluate(call), core=1 if sid == 0 else 4))
     before = kernel(
         unit(tirx.For(rows, 1, 16, tirx.ForKind.SERIAL, seq(*copies)), core=None),
@@ -111,6 +114,30 @@ def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
     else:
         after = transform.InsertSync()(before)
         assert not calls(after, "tl.ascend_cross_core_set_flag")
+
+
+@pytest.mark.parametrize("annotated_layout,dst_pitch,overlap", [(False, 64, True), (True, 16, True), (True, 64, False)])
+def test_explicit_nz_pitch_cannot_hide_overlapping_subcore_writes(annotated_layout, dst_pitch, overlap):
+    from tilelang.layout import make_ascend_nz_layout
+
+    l1 = tirx.decl_buffer((64, 64), "bfloat16", name="l1", scope="shared.l1")
+    nz = [tirx.decl_buffer((1024,), "bfloat16", name=f"nz{sid}", scope="shared.dyn") for sid in range(2)]
+    copies = []
+    for sid in range(2):
+        # Without a layout the second pointer is at element 1024, exactly the
+        # first DMA's second burst. With NZ layout, a 16-block pitch similarly
+        # makes that burst overlap row 16 despite disjoint logical row ranges.
+        call = T.ascend_nd2nz_post_copy(l1[sid * 16, 0], nz[sid][0], 8, 32, src_pitch=8, dst_pitch=dst_pitch, dtype="bfloat16")
+        copies.append(unit(tirx.Evaluate(call), core=1 if sid == 0 else 4))
+    annotations = {"tl.split_subcores": True}
+    if annotated_layout:
+        annotations["layout_map"] = {l1: make_ascend_nz_layout(l1)}
+    before = transform.InsertNd2Nz()(kernel(seq(*copies), buffers=[l1, *nz], annotations=annotations))
+    if overlap:
+        with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+            transform.InsertSync()(before)
+    else:
+        transform.InsertSync()(before)
 
 
 @pytest.mark.parametrize("versions", [2, 15])
