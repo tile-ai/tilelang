@@ -1,31 +1,36 @@
 # FlashMLA compiler prerequisites
 
-The example branch contains the kernels, runners, and historical measurement
-records. Compiler changes are proposed separately against `Denverjin/tilelang:main`,
-synchronized to upstream `d85a70a97218fec25856f8b5c969f167ad96dc1e` on 2026-10-21.
-Apply the compiler prerequisites before building the staged kernel.
+The kernel branch contains the kernels, runners, historical measurement records,
+and the compiler changes from fork PRs #5, #7, and #12. It starts from
+`d85a70a97218fec25856f8b5c969f167ad96dc1e`, synchronized with upstream on 2026-10-21.
+Apply the remaining compiler prerequisites before building the staged kernel.
 The source does not use `T.IssuePhase`, and its API is excluded from these proposals.
 
-| Compiler change | Pull request | Fork branch |
+| Included compiler change | Source pull request |
+| --- | --- |
+| Support native NZ output for L0C-to-UB copies | [Denverjin/tilelang#5](https://github.com/Denverjin/tilelang/pull/5) |
+| Select AIV streams outside scheduled pipelines | [Denverjin/tilelang#7](https://github.com/Denverjin/tilelang/pull/7) |
+| Preserve manual source order across physical phase ties | [Denverjin/tilelang#12](https://github.com/Denverjin/tilelang/pull/12) |
+
+| Remaining compiler change | Pull request | Fork branch |
 | --- | --- | --- |
-| Support native NZ output for L0C-to-UB copies | [#5](https://github.com/Denverjin/tilelang/pull/5) | [codex/ascend-l0c-ub-nz](https://github.com/Denverjin/tilelang/tree/codex/ascend-l0c-ub-nz) |
 | Preserve Cube configuration phases across manual stages | [#6](https://github.com/Denverjin/tilelang/pull/6) | [codex/ascend-cube-register-phases](https://github.com/Denverjin/tilelang/tree/codex/ascend-cube-register-phases) |
-| Select AIV streams outside scheduled pipelines | [#7](https://github.com/Denverjin/tilelang/pull/7) | [codex/ascend-aiv-stream-selection](https://github.com/Denverjin/tilelang/tree/codex/ascend-aiv-stream-selection) |
-| Preserve complete periodic buffer lifetimes | [#8](https://github.com/Denverjin/tilelang/pull/8) | [codex/ascend-periodic-buffer-lifetimes](https://github.com/Denverjin/tilelang/tree/codex/ascend-periodic-buffer-lifetimes) |
-| Establish buffer placement hints from exact L1 offsets | [#9](https://github.com/Denverjin/tilelang/pull/9) | [codex/ascend-buffer-placement-hints](https://github.com/Denverjin/tilelang/tree/codex/ascend-buffer-placement-hints) |
+| Preserve complete periodic buffer lifetimes | [tile-ai/tilelang#3606](https://github.com/tile-ai/tilelang/pull/3606), from [fork #8](https://github.com/Denverjin/tilelang/pull/8) | [ascend-periodic-buffer-lifetimes](https://github.com/Denverjin/tilelang/tree/ascend-periodic-buffer-lifetimes) |
+| Support exact placement of versioned on-chip buffers | [tile-ai/tilelang#3607](https://github.com/tile-ai/tilelang/pull/3607), from [fork #9](https://github.com/Denverjin/tilelang/pull/9) | [ascend-buffer-placement-hints](https://github.com/Denverjin/tilelang/tree/ascend-buffer-placement-hints) |
 | Preserve physical views and pointer units during layout lowering | [#10](https://github.com/Denverjin/tilelang/pull/10) | [codex/ascend-layout-pointer-units](https://github.com/Denverjin/tilelang/tree/codex/ascend-layout-pointer-units) |
 | Preserve independent Cube view layouts on shared storage rings | [#11](https://github.com/Denverjin/tilelang/pull/11) | [codex/ascend-conflict-storage-rings](https://github.com/Denverjin/tilelang/tree/codex/ascend-conflict-storage-rings) |
-| Preserve manual source order across physical phase ties | [#12](https://github.com/Denverjin/tilelang/pull/12) | [codex/ascend-manual-pipe-order](https://github.com/Denverjin/tilelang/tree/codex/ascend-manual-pipe-order) |
 
 The additional NZ pitch, compact-allocation, and access-footprint prerequisite
 is already proposed upstream as [tile-ai/tilelang#3530](https://github.com/tile-ai/tilelang/pull/3530).
 It is not duplicated as a new fork PR. The pointer-unit branch also carries
 physical allocation/view remapping fixes that are outside that upstream PR.
 
-The buffer-placement branch currently implements exact L1 byte offsets.
-Its PR describes the intended extension to manual placement hints for every
-buffer kind. That extension is not implemented yet; the kernel still calls
-`T.annotate_l1_offsets` and uses the existing L1 placement contract.
+The buffer-placement prerequisite now provides `T.annotate_buffer_offsets` for
+UB, L1, L0A/L0B/L0C, and SS buffers, with an explicit fixed
+`T.annotate_buffer_versions` count required for every placed buffer. The staged
+kernel still calls the earlier `T.annotate_l1_offsets` API. Integrating the new
+placement prerequisite also requires migrating that call and adding the explicit
+fixed version count for `q_l1` on the prefetched-query path.
 
 The staged kernel requires PR #11's Cube-view layout support from commit
 `393a0bde46d60a3b7cfaabeeb65ebc67a7a14ec7` or later. QK allocates one
