@@ -66,9 +66,10 @@ fixed loop extent; they do not shorten this example's pipeline loop.
 
 ## Reproduce
 
-This example is proposed separately from its compiler prerequisites, listed in
-[WORKTREES.md](WORKTREES.md). The example branch starts at main `d85a70a`;
-apply the prerequisite compiler changes before compiling the kernels.
+The kernel branch includes the native NZ-copy, AIV-stream-selection, and manual
+pipe-order compiler changes. It starts at main `d85a70a`; apply the remaining
+compiler prerequisites and placement-API migration listed in
+[WORKTREES.md](WORKTREES.md) before compiling the staged kernel.
 The historical integrated compiler was based on main `876a59e`; its
 [rebase validation record](results/staged-main-rebase-2026-10-20.json) covers
 the initial native build, host tests, and kernel source generation. The
