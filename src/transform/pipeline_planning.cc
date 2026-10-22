@@ -109,7 +109,18 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     StmtExprVisitor::VisitExpr_(op);
     return;
   }
-  if (op->op.same_as(builtin::address_of())) {
+  if (op->op.same_as(region())) {
+    // The TileOp already reports the region's accesses. Its BufferLoad is an
+    // address descriptor, not an additional read of a copy's destination.
+    const auto *load = op->args[0].as<BufferLoadNode>();
+    ICHECK(load);
+    for (const PrimExpr &index : load->indices) {
+      this->VisitExpr(index);
+    }
+    for (size_t i = 1; i < op->args.size(); ++i) {
+      this->VisitExpr(op->args[i]);
+    }
+  } else if (op->op.same_as(builtin::address_of())) {
     BufferRegion buffer_region;
     if (const auto *load = op->args[0].as<BufferLoadNode>()) {
       buffer_region = BufferRegion::FullRegion(load->buffer);
@@ -325,10 +336,12 @@ public:
 private:
   explicit PipelineCopyAnalyzer(Target target) : target_(std::move(target)) {}
 
-  static bool ArePure_(const Array<PrimExpr> &exprs) {
-    return std::all_of(exprs.begin(), exprs.end(), [](const PrimExpr &expr) {
-      return SideEffect(expr) <= CallEffectKind::kPure;
-    });
+  static CallEffectKind GetIndexEffect_(const Array<PrimExpr> &indices) {
+    CallEffectKind effect = CallEffectKind::kPure;
+    for (const PrimExpr &index : indices) {
+      effect = std::max(effect, SideEffect(index));
+    }
+    return effect;
   }
 
   static bool IsGlobalLike_(const Buffer &buffer) {
@@ -344,11 +357,12 @@ private:
       has_non_copy_ = true;
       return;
     }
-    bool pure_addresses =
-        ArePure_(copy.load->indices) && ArePure_(copy.store->indices);
+    CallEffectKind address_effect =
+        std::max(GetIndexEffect_(copy.load->indices),
+                 GetIndexEffect_(copy.store->indices));
     if (copy.predicate.defined() &&
         (!inside_parallel_ || !parallel_only_ || !pure_loop_bounds_ ||
-         !global_to_shared || !pure_addresses ||
+         !global_to_shared || address_effect > CallEffectKind::kPure ||
          SideEffect(copy.predicate.value()) > CallEffectKind::kPure ||
          !copy.fallback.defined() ||
          !IsZeroBitPattern(copy.fallback.value()))) {
@@ -356,7 +370,11 @@ private:
       return;
     }
     has_global_to_shared_ |= global_to_shared;
-    async_safe_ &= pure_addresses;
+    // Unconditional gathers may read index buffers; their dependencies are
+    // tracked by BufferRegionCollector. Predicated copies require pure
+    // addresses above because lowering can evaluate them even when the
+    // predicate is false.
+    async_safe_ &= address_effect <= CallEffectKind::kReadState;
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
@@ -755,6 +773,20 @@ public:
     for (int stmt_idx : stmt_indices_by_order) {
       const auto &pinfo = pipeline_stage_infos[stmt_idx];
       if (pinfo.copy_kind != PipelineCopyKind::kAsyncCandidate) {
+        continue;
+      }
+      // A scheduling unit cannot wait between its own copies. In particular,
+      // keep a grouped index copy and dependent gather synchronous.
+      bool reads_own_writes = std::any_of(
+          pinfo.writes.begin(), pinfo.writes.end(),
+          [&](const BufferRegion &write) {
+            return std::any_of(pinfo.reads.begin(), pinfo.reads.end(),
+                               [&](const BufferRegion &read) {
+                                 return PipelineRegionsMayConflict(
+                                     write, read, thread_domains_);
+                               });
+          });
+      if (reads_own_writes) {
         continue;
       }
       // Wait insertion currently handles synchronous consumers only. A copy

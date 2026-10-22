@@ -738,6 +738,84 @@ def test_pipeline_planning_recognizes_parallel_bufferstore_copy_stages():
     assert async_groups == [0, 0, -1]
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_90a", "sm_103a"])
+@pytest.mark.parametrize("dtype", ["bfloat16", "float8_e4m3"])
+def test_pipeline_planning_preserves_async_gather_copy(arch, dtype):
+    @T.prim_func
+    def before(A: T.Tensor((64, 32), dtype), Indices: T.Tensor((64,), T.int32), B: T.Tensor((64, 32), dtype)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((16, 32), dtype)
+            for k in T.Pipelined(4, num_stages=2):
+                for i, j in T.Parallel(16, 32):
+                    S[i, j] = A[Indices[k * 16 + i], j]
+                T.copy(S, B[k * 16 : (k + 1) * 16, :])
+
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with target, tvm.transform.PassContext(config={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True}):
+        mod = _run_pipeline_planning(before, target)
+        (anno,) = _collect_pipeline_loop_annotations(mod["main"])
+        assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
+        assert [int(v) for v in anno["software_pipeline_async_producers"]] == [1, 0]
+        source = tl.lower(before, target=target).kernel_source
+    assert "cp_async_gs_conditional<" in source
+    assert "cp_async_commit" in source
+    assert "cp_async_wait" in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("address", ["source", "destination", "nested"])
+def test_pipeline_planning_keeps_effectful_copy_addresses_synchronous(address):
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.float16), Indices: T.Tensor((64,), T.int32), B: T.Tensor((4,), T.float16)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((16,), T.float16)
+            for k in T.Pipelined(4, num_stages=2):
+                for i in T.Parallel(16):
+                    if address == "source":
+                        S[i] = A[T.call_extern("int32", "next_index", k * 16 + i)]
+                    elif address == "destination":
+                        S[T.call_extern("int32", "next_index", i)] = A[k * 16 + i]
+                    else:
+                        S[i] = A[Indices[T.call_extern("int32", "next_index", k * 16 + i)]]
+                B[k] = S[0]
+
+    (anno,) = _collect_pipeline_loop_annotations(_run_pipeline_planning(before, sm80_target)["main"])
+    assert "software_pipeline_async_producers" not in anno
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("grouped", [False, True])
+def test_pipeline_planning_waits_for_gather_index_copy(grouped):
+    @T.prim_func
+    def before(A: T.Tensor((64, 32), T.float16), Indices: T.Tensor((64,), T.int32), B: T.Tensor((64, 32), T.float16)):
+        with T.Kernel(1, threads=128):
+            index_shared = T.alloc_shared((16,), T.int32)
+            S = T.alloc_shared((16, 32), T.float16)
+            for k in T.Pipelined(4, num_stages=2):
+                if grouped:
+                    with T.sblock("gather"):
+                        T.copy(Indices[k * 16 : (k + 1) * 16], index_shared)
+                        for i, j in T.Parallel(16, 32):
+                            S[i, j] = A[index_shared[i], j]
+                else:
+                    T.copy(Indices[k * 16 : (k + 1) * 16], index_shared)
+                    for i, j in T.Parallel(16, 32):
+                        S[i, j] = A[index_shared[i], j]
+                T.copy(S, B[k * 16 : (k + 1) * 16, :])
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    (anno,) = _collect_pipeline_loop_annotations(mod["main"])
+    if grouped:
+        assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
+        assert "software_pipeline_async_producers" not in anno
+    else:
+        assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 0, 1]
+        assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1, 2]
+        assert [int(v) for v in anno["software_pipeline_async_producers"]] == [1, 0, 0]
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
 @pytest.mark.parametrize("form", ["statement", "expression", "nested"])
 @pytest.mark.parametrize("explicit_schedule", [False, True])
 def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy(form, explicit_schedule):
