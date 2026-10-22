@@ -382,8 +382,10 @@ class DSLMutator(ast.NodeTransformer):
                     self.used_names.add(item.name)
                 elif isinstance(item, ast.alias):
                     self.used_names.add(item.asname or item.name.split(".")[0])
-                elif isinstance(item, ast.ExceptHandler) and item.name:
+                elif isinstance(item, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and item.name:
                     self.used_names.add(item.name)
+                elif isinstance(item, ast.MatchMapping) and item.rest:
+                    self.used_names.add(item.rest)
             self.generated_names = {name: self._fresh_name(name) for name in ("__tb", "__tb_fl", "__tb_fn", "__kwargs", "_")}
         return super().visit(node)
 
