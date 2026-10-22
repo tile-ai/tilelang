@@ -775,6 +775,13 @@ if(DEFINED TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE AND PATCHELF_EXECUTABLE)
   endforeach()
 endif()
 
+if(SKBUILD_STATE STREQUAL "wheel")
+  # Expose vendored TVM to static analyzers without importing TileLang.
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/tilelang_tvm.pth"
+    "tilelang/3rdparty/tvm/python\n")
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tilelang_tvm.pth" DESTINATION .)
+endif()
+
 install(
   TARGETS ${TILELANG_OUTPUT_TARGETS}
   LIBRARY DESTINATION tilelang/lib

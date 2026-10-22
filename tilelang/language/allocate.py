@@ -16,13 +16,19 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from typing import overload, Literal
+from typing import TYPE_CHECKING, overload, Literal
 from tilelang._typing import DType, ShapeType
 from tilelang import tvm as tvm
 from tvm.script import tirx as T
 from tvm.tirx import PrimExpr
 from tvm.tirx.script.builder.ir import sblock_attr
-from tvm.tirx.buffer import Buffer
+
+if TYPE_CHECKING:
+    from .proxy import BaseTensor as Buffer, ScalarBuffer
+else:
+    from tvm.tirx.buffer import Buffer
+
+    ScalarBuffer = Buffer
 from tvm.tirx.expr import FloatImm, IntImm
 
 from . import dtypes as _dtypes
@@ -93,11 +99,11 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
 
 
 @overload
-def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> ScalarBuffer: ...
 
 
 @overload
-def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
+def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> ScalarBuffer: ...
 
 
 def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer:

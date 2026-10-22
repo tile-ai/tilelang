@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tvm.tirx import Buffer, PrimExpr
+from tvm.tirx import PrimExpr
+from tilelang._typing import BufferLikeType, PyPrimExpr
 
 from tilelang.language.atomic import atomic_add as _common_atomic_add
 
@@ -10,12 +11,12 @@ __all__ = ["atomic_add"]
 
 
 def atomic_add(
-    dst: Buffer,
-    value: PrimExpr,
+    dst: BufferLikeType | PrimExpr,
+    value: BufferLikeType | PyPrimExpr,
     memory_order: str | None = None,
     return_prev: bool = False,
     use_tma: bool = False,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> PrimExpr:
     """Atomically add ``value`` into ``dst``, with CUDA lowering knobs.
 
@@ -38,7 +39,7 @@ def atomic_add(
     Returns:
         PrimExpr: A handle to the atomic operation.
     """
-    ann: dict = dict(annotations) if annotations is not None else {}
+    ann: dict[str, object] = dict(annotations) if annotations is not None else {}
     if use_tma:
         ann.setdefault("use_tma", 1)
     return _common_atomic_add(

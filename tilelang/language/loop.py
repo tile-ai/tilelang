@@ -1,13 +1,57 @@
 """Loop related language interfaces in TileLang."""
 
 from __future__ import annotations
-from typing import Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload, cast
+from collections.abc import Iterator
 from tvm import tirx
 from tvm.tirx import IntImm
+from tvm.tirx.expr import PrimExprWithOp
 import tvm.tirx.script.builder as tb_tir
 from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
 from tvm.tirx.script.builder import frame
+
+
+if TYPE_CHECKING:
+    _Binding = TypeVar("_Binding", covariant=True)
+
+    class ForFrame(frame.ForFrame, Generic[_Binding]):
+        # Iteration is lowered by Builder.ctx_for, not executed by Python.
+        def __iter__(self) -> Iterator[_Binding]: ...
+else:
+    ForFrame = frame.ForFrame
+
+
+@overload
+def Parallel(
+    extent: int | tirx.PrimExpr,
+    /,
+    *,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[tirx.Var]: ...
+
+
+@overload
+def Parallel(
+    extent: int | tirx.PrimExpr,
+    second_extent: int | tirx.PrimExpr,
+    /,
+    *extents: int | tirx.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[list[tirx.Var]]: ...
+
+
+@overload
+def Parallel(
+    *extents: int | tirx.PrimExpr,
+    coalesced_width: int | None = None,
+    loop_layout: Any | None = None,
+    annotations: dict[str, Any] | None = None,
+) -> ForFrame[tirx.Var | list[tirx.Var]]: ...
 
 
 def Parallel(
@@ -187,12 +231,12 @@ def Pipelined(
 
 
 def serial(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: tirx.PrimExpr | int,
+    stop: tirx.PrimExpr | int | None = None,
+    step: tirx.PrimExpr | int | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> ForFrame[PrimExprWithOp]:
     """The serial For statement.
 
     Parameters
@@ -219,12 +263,12 @@ def serial(
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
     if step is None or step_is_one:
-        return tb_tir.serial(start, stop, annotations=annotations)
+        return cast("ForFrame[PrimExprWithOp]", tb_tir.serial(start, stop, annotations=annotations))
     else:
         if stop is None:
             stop = start
             start = IntImm(start.dtype, 0) if hasattr(start, "dtype") else 0
-        return SerialForWithStep(start, stop, step, annotations=annotations)
+        return cast("ForFrame[PrimExprWithOp]", SerialForWithStep(start, stop, step, annotations=annotations))
 
 
 def unroll(

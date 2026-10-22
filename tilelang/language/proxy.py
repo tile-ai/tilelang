@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING, Generic, TypeVar
+from typing import Any, TYPE_CHECKING, Generic, TypeVar, overload
 from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
@@ -212,13 +212,18 @@ Buffer = BufferProxy()  # pylint: disable=invalid-name
 # be mapped with torch.Tensor.
 if TYPE_CHECKING:
 
-    class BaseTensor:
+    class BaseTensor(tirx.Buffer):
         def __class_getitem__(cls, key):
             return cls
 
-        def __getitem__(self, key) -> Any: ...
+        @overload
+        def __getitem__(self, key: PrimExpr | int | tuple[PrimExpr | int, ...]) -> tirx.BufferLoad: ...
+        @overload
+        def __getitem__(self, key: slice | tuple[PrimExpr | int | slice, ...]) -> tirx.BufferRegion | tirx.BufferLoad: ...
 
-        def __setitem__(self, key, value) -> None: ...
+        def __getitem__(self, key: PrimExpr | int | slice | tuple[PrimExpr | int | slice, ...]) -> tirx.BufferRegion | tirx.BufferLoad: ...
+
+        def __setitem__(self, key: PrimExpr | int | tuple[PrimExpr | int, ...], value: PrimExpr | int | float) -> None: ...
 
         def __init__(
             self,
@@ -238,6 +243,10 @@ if TYPE_CHECKING:
         def from_ptr(
             cls, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
         ) -> Self: ...
+
+    from tvm.tirx.expr import PrimExprWithOp
+
+    class ScalarBuffer(BaseTensor, PrimExprWithOp): ...
 
     class Tensor(BaseTensor): ...
 

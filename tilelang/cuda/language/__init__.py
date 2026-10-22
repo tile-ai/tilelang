@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from tilelang.language.common import *  # noqa: F401,F403
-from tilelang.language.common import __all__ as _COMMON_ALL
+from tilelang.language import common as _common
 from tilelang.language.allocate import alloc_cluster_barrier, alloc_descriptor, alloc_tmem  # noqa: F401
 from tilelang.language.annotations import annotate_l2_hit_ratio, annotate_min_blocks_per_sm  # noqa: F401
 from tilelang.language.builtin import (  # noqa: F401
@@ -89,23 +91,25 @@ from .gemm_op import gemm, gemm_blockscaled, gemm_sp  # noqa: F401
 from .atomic import atomic_add  # noqa: F401
 from .loop import Parallel, Unroll, unroll  # noqa: F401
 from .cluster import *  # noqa: F401,F403
-from .cluster import __all__ as _CLUSTER_ALL
+from . import cluster as _cluster
 from .intrinsics import *  # noqa: F401,F403
-from .intrinsics import __all__ as _INTRINSICS_ALL
+from . import intrinsics as _intrinsics
 from .math import *  # noqa: F401,F403
-from .math import __all__ as _MATH_ALL
+from . import math as _math
 from .pdl import *  # noqa: F401,F403
-from .pdl import __all__ as _PDL_ALL
+from . import pdl as _pdl
 from .print import *  # noqa: F401,F403
-from .print import __all__ as _PRINT_ALL
+from .print import __all__ as _print_all
 from .random import *  # noqa: F401,F403
-from .random import __all__ as _RANDOM_ALL
+from . import random as _random
 from .tir import *  # noqa: F401,F403
-from .tir import __all__ as _TIR_ALL
+from . import tir as _tir
 from .warpgroup import *  # noqa: F401,F403
-from .warpgroup import __all__ as _WARPGROUP_ALL
+from . import warpgroup as _warpgroup
 
-_CUDA_API_ALL = (
+__all__ = []
+__all__.extend(_common.__all__)
+__all__ += [
     "ClusterKernel",
     "CUDASourceCodeKernel",
     "Kernel",
@@ -193,24 +197,17 @@ _CUDA_API_ALL = (
     "tma_scatter4",
     "tma_store_arrive",
     "tma_store_wait",
-)
+]
 
 __tilelang_dialect__ = "cuda"
-__all__ = tuple(
-    dict.fromkeys(
-        (
-            *_COMMON_ALL,
-            *_CUDA_API_ALL,
-            *_CLUSTER_ALL,
-            *_INTRINSICS_ALL,
-            *_MATH_ALL,
-            *_PDL_ALL,
-            *_PRINT_ALL,
-            *_RANDOM_ALL,
-            *_TIR_ALL,
-            *_WARPGROUP_ALL,
-        )
-    )
-)
+__all__.extend(_cluster.__all__)
+__all__.extend(_intrinsics.__all__)
+__all__.extend(_math.__all__)
+__all__.extend(_pdl.__all__)
+__all__.extend(_print_all)
+__all__.extend(_random.__all__)
+__all__.extend(_tir.__all__)
+__all__.extend(_warpgroup.__all__)
 
-del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _MATH_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _TIR_ALL, _WARPGROUP_ALL
+if not TYPE_CHECKING:
+    __all__ = tuple(dict.fromkeys(__all__))

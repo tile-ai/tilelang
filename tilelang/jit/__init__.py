@@ -354,7 +354,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     signature: inspect.Signature
     mode: Literal["auto", "lazy", "eager"]
     # place func at the last element for better __repr__
-    func: JITFunc[_KP, _T]
+    func: JITFunc[_P, _T]
 
     def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
@@ -570,6 +570,10 @@ ExecutionBackend = Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cuted
 
 
 @overload
+def jit(func: Callable[_P, PrimFunc[_KP, _T]]) -> JITImpl[_P, _KP, PrimFunc[_KP, _T], JITKernel[..., _T]]: ...
+
+
+@overload
 def jit(func: Callable[_KP, _T]) -> JITImpl[_KP, _KP, _T, _T]: ...
 
 
@@ -598,7 +602,7 @@ def jit(
     pass_configs: dict[str, Any] | None = None,
     debug_root_path: str | None = None,
     compile_flags: list[str] | str | None = None,
-) -> Callable[[Callable[_P, _T]], JITImpl[_KP, _KP, _T, _T]]:
+) -> JITImpl[_P, _KP, _T, _Ret] | Callable[[Callable[_P, _T]], JITImpl[_P, _KP, _T, _Ret]]:
     """
     JIT compiler decorator for TileLang functions.
 
@@ -630,18 +634,7 @@ def jit(
         Additional compiler flags.
     """
 
-    compile_args = dict(
-        out_idx=out_idx,
-        execution_backend=execution_backend,
-        target=target,
-        target_host=target_host,
-        verbose=verbose,
-        pass_configs=pass_configs,
-        debug_root_path=debug_root_path,
-        compile_flags=compile_flags,
-    )
-
-    def decorator(func: Callable[_P, _T]):
+    def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _KP, _T, _Ret]:
         mode = "auto"
         pf: JITFunc[_P, _T] = prim_func(func, eager_jit=True)
         func_source = inspect.getsource(pf.orig_func)
@@ -649,7 +642,14 @@ def jit(
 
         return JITImpl(
             func=pf,
-            **compile_args,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            debug_root_path=debug_root_path,
+            compile_flags=compile_flags,
             func_source=func_source,
             signature=signature,
             mode=mode,
