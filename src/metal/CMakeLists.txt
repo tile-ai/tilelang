@@ -5,6 +5,7 @@
 # is gated by USE_METAL / APPLE below.
 file(GLOB TILE_LANG_METAL_ALWAYS_SRCS
   src/metal/codegen/codegen_metal.cc
+  src/metal/codegen/intrin_rule_metal.cc
   src/metal/op/*.cc
   src/metal/target_utils.cc
 )
