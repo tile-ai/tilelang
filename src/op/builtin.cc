@@ -44,6 +44,12 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDumpIRDir, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfile, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfileThresholdMs, FloatImm);
 
+TVM_REGISTER_OP("tirx.mulhi")
+    .set_num_inputs(2)
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "mulhi")
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(tvm_ffi_call_with_result)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",

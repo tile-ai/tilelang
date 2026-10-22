@@ -57,6 +57,22 @@ TVM_REGISTER_OP("tl.clamp")
     .set_attr<FLowerIntrinsic>("metal.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("webgpu.FLowerIntrinsic", LowerClamp);
 
+static PrimExpr LowerMulhi(PrimExpr expr) {
+  Call call = Downcast<Call>(expr);
+  DataType dtype = call->dtype;
+  if (!dtype.is_uint() || (dtype.bits() != 32 && dtype.bits() != 64)) {
+    return expr;
+  }
+  return Call(dtype, builtin::call_pure_extern(),
+              {StringImm(dtype.bits() == 64 ? "__umul64hi" : "__umulhi"),
+               call->args[0], call->args[1]},
+              call->annotations);
+}
+
+TVM_REGISTER_OP("tirx.mulhi")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerMulhi)
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerMulhi);
+
 PrimExpr pow_of_int_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();
   ICHECK(call != nullptr);

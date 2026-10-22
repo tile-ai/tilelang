@@ -204,6 +204,7 @@ bitwise_or = _op_wrapper(_tir_op.bitwise_or)
 bitwise_xor = _op_wrapper(_tir_op.bitwise_xor)
 ceil = _op_wrapper(_tir_op.ceil)
 clz = _op_wrapper(_tir_op.clz)
+mulhi = _op_wrapper(_tir_op.mulhi)
 copysign = _op_wrapper(_tir_op.copysign)
 cos = _op_wrapper(_tir_op.cos)
 cosh = _op_wrapper(_tir_op.cosh)
@@ -426,6 +427,7 @@ __all__ = (
     "ceil",
     "ceildiv",
     "clz",
+    "mulhi",
     "copysign",
     "cos",
     "cosh",
