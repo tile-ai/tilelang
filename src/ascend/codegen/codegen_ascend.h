@@ -164,6 +164,7 @@ private:
   AscendKernelMode kernel_mode_{AscendKernelMode::kVector};
   int mix_aiv_count_{2};
   bool enable_fast_math_{false};
+  bool require_batch_mode_{false};
 
   // Accumulates constraints along the traversal
   arith::Analyzer analyzer_;
