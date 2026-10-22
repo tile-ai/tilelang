@@ -1120,3 +1120,191 @@ def test_ss_placement_survives_cross_core_version_lowering():
     (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.ss.dyn"]
     assert int(allocation.buffer.shape[0]) == 128  # Start at byte 96; two 8-byte versions, rounded to 32.
     assert "volatile __ssbuf__ uint8_t" in artifact.kernel_source
+
+
+@tilelang.testing.requires_ascend
+def test_write_counter_retains_values_across_guarded_iterations():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((18, 64), "float32"), C: T.Tensor((18, 64), "float32"), start: T.int32):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (2, "write_counter")})
+            if start >= 0:
+                for i in T.Pipelined(18, num_stages=2):
+                    if i >= start and (i - start) % 3 != 2:
+                        if (i - start) % 6 == 0:
+                            T.copy(A[i, :], cached)
+                        T.copy(cached, C[i, :])
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(18 * 64, dtype=torch.float32).reshape(18, 64)
+    a = source.npu()
+    for start in (0, 1, 4, 18):
+        output = torch.full_like(a, -1)
+        compiled(a, output, start)
+        expected = torch.full_like(source, -1)
+        for i in range(start, 18):
+            if (i - start) % 3 != 2:
+                expected[i] = source[start + ((i - start) // 6) * 6]
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_write_counter_infers_sibling_owners_and_preserves_values_between_them():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 9, 64), "float32"), C: T.Tensor((2, 16, 64), "float32")):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (2, "write_counter")})
+            for tile in T.serial(2):
+                for i in T.Pipelined(5, num_stages=2):
+                    if i % 2 == 0:
+                        T.copy(A[tile, i, :], cached)
+                    T.copy(cached, C[tile, i, :])
+                for j in T.serial(3):
+                    T.copy(cached, C[tile, 5 + j, :])
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(cached, C[tile, 8 + 2 * k, :])
+                    if k % 2 == 1:
+                        T.copy(A[tile, 5 + k, :], cached)
+                    T.copy(cached, C[tile, 9 + 2 * k, :])
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(2 * 9 * 64, dtype=torch.float32).reshape(2, 9, 64)
+    expected = torch.empty((2, 16, 64), dtype=torch.float32)
+    for tile in range(2):
+        for i in range(5):
+            expected[tile, i] = source[tile, i - i % 2]
+        expected[tile, 5:8] = source[tile, 4]
+        current = source[tile, 4]
+        for k in range(4):
+            expected[tile, 8 + 2 * k] = current
+            if k % 2:
+                current = source[tile, 5 + k]
+            expected[tile, 9 + 2 * k] = current
+    a, c = source.npu(), torch.empty_like(expected).npu()
+    for _ in range(2):
+        c.fill_(-1)
+        compiled(a, c)
+        torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("versions", [1, 2, 3])
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+def test_write_counter_fill_patches_and_intermediate_read(versions, loop_kind):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((12, 64), "float32"), C: T.Tensor((12, 64), "float32"), D: T.Tensor((12, 64), "float32")):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            ordinary = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (versions, "write_counter"), ordinary: (2, "iteration")})
+            for i in T.Pipelined(12, num_stages=2, annotations={"multi_buffer_eligible": [cached, ordinary], "enable_offset": True}):
+                with T.Stage(0):
+                    T.copy(A[i, :], ordinary)
+                    T.copy(ordinary, C[i, :])
+                with T.Stage(1):
+                    if i % 3 == 0:
+                        T.fill(cached, -1.0)
+                        if loop_kind == "for":
+                            for j in T.serial(2):
+                                if (i + j) % 2 == 0:
+                                    T.copy(A[i, j * 32 : (j + 1) * 32], cached[j * 32 : (j + 1) * 32])
+                        else:
+                            j = T.alloc_var("int32", init=0)
+                            while j < 2:
+                                if (i + j) % 2 == 0:
+                                    T.copy(A[i, j * 32 : (j + 1) * 32], cached[j * 32 : (j + 1) * 32])
+                                j += 1
+                        T.copy(cached, C[i, :])
+                        T.copy(A[i, :32], cached[32:64])
+                    T.copy(cached, D[i, :])
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(12 * 64, dtype=torch.float32).reshape(12, 64)
+    a, c, d = source.npu(), torch.full_like(source, -2).npu(), torch.empty_like(source).npu()
+    compiled(a, c, d)
+    expected_c, expected_d = source.clone(), torch.empty_like(source)
+    for i in range(12):
+        if i % 3 == 0:
+            current = torch.full((64,), -1.0)
+            for j in range(2):
+                if (i + j) % 2 == 0:
+                    current[j * 32 : (j + 1) * 32] = source[i, j * 32 : (j + 1) * 32]
+            expected_c[i] = current
+            current[32:] = source[i, :32]
+        expected_d[i] = current
+    torch.testing.assert_close(c.cpu(), expected_c, rtol=0, atol=0)
+    torch.testing.assert_close(d.cpu(), expected_d, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_write_counter_sparse_simt_update():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((7, 64), "float32"), C: T.Tensor((7, 64), "float32"), divisor: T.int32):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (2, "write_counter")})
+            for i in T.Pipelined(7, num_stages=2):
+                if i % 3 == 0:
+                    with T.SimtVF(threads=64):
+                        for j in T.Parallel(64):
+                            if j % divisor == 0:
+                                cached[j] = A[i, j]
+                with T.SimtVF(threads=64):
+                    for j in T.Parallel(64):
+                        if j % divisor == 0:
+                            C[i, j] = cached[j]
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(7 * 64, dtype=torch.float32).reshape(7, 64)
+    a = source.npu()
+    for divisor in (2, 3, 7):
+        c = torch.full_like(a, -1)
+        compiled(a, c, divisor)
+        expected = torch.full_like(source, -1)
+        for i in range(7):
+            expected[i, ::divisor] = source[(i // 3) * 3, ::divisor]
+        torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_write_counter_first_write_in_a_possibly_empty_while():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((7, 64), "float32"), C: T.Tensor((7, 64), "float32"), D: T.Tensor((7, 64), "float32")):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (2, "write_counter")})
+            for i in T.Pipelined(7, num_stages=2, annotations={"multi_buffer_eligible": [cached]}):
+                if i == 0:
+                    T.copy(A[0, :], cached)
+                j = T.alloc_var("int32", init=0)
+                while j < i % 3:
+                    T.copy(A[i, :], cached)
+                    T.copy(cached, C[i, :])
+                    j += 1
+                T.copy(cached, D[i, :])
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(7 * 64, dtype=torch.float32).reshape(7, 64)
+    a, c, d = source.npu(), torch.full_like(source, -1).npu(), torch.empty_like(source).npu()
+    compiled(a, c, d)
+    expected_c, expected_d = torch.full_like(source, -1), torch.empty_like(source)
+    current = source[0]
+    for i in range(7):
+        if i % 3:
+            current = source[i]
+            expected_c[i] = current
+        expected_d[i] = current
+    torch.testing.assert_close(c.cpu(), expected_c, rtol=0, atol=0)
+    torch.testing.assert_close(d.cpu(), expected_d, rtol=0, atol=0)

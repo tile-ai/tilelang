@@ -332,6 +332,36 @@ std::shared_ptr<IRStructure> ControlNode::Clone() const {
   return new_ctrl;
 }
 
+std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+CollectIterationVariantVars(ControlNode *scope, bool include_ancestors) {
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> result;
+  if (scope == nullptr)
+    return result;
+
+  ControlNode *root = scope;
+  while (include_ancestors && root->GetParentControl() != nullptr)
+    root = root->GetParentControl();
+  std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
+    if (node == nullptr)
+      return;
+    if (node->IsTask()) {
+      for (const Var &var : node->GetWriteVars())
+        result.insert(var);
+      return;
+    }
+    auto *control = static_cast<ControlNode *>(node);
+    result.insert(control->control->loop_var);
+    if (control->task) {
+      for (const Var &var : control->task->GetWriteVars())
+        result.insert(var);
+    }
+    for (const std::shared_ptr<IRStructure> &child : control->children)
+      collect(child.get());
+  };
+  collect(root);
+  return result;
+}
+
 void CollectAllTaskNodes(IRStructure *node,
                          std::vector<TaskNode *> &all_tasks) {
   if (!node)
