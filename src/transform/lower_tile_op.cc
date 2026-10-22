@@ -4,7 +4,6 @@
  */
 
 #include "support/check.h"
-#include <memory>
 #include <optional>
 #include <tvm/ir/cast.h>
 #include <tvm/relax/analysis.h>
@@ -1225,11 +1224,7 @@ private:
     // Save the enclosing bindings before visiting the body. Partitioning
     // substitutes logical indices in nested loop ranges without changing their
     // Var identities, so lowering must not reuse the original body's bindings.
-    std::unique_ptr<arith::Analyzer> lowering_analyzer;
-    if (op->kind == ForKind::kParallel &&
-        op->annotations.count(attr::kParallelLoopLayout)) {
-      lowering_analyzer = analyzer_->Clone();
-    }
+    auto lowering_analyzer = analyzer_->Clone();
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     if (pushed_loop_mbar_phase) {
       loop_mbar_phase_stack_.pop_back();
