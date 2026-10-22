@@ -285,10 +285,9 @@ struct StorageEpochAnalysis {
   bool needs_write_flag{false};
 };
 
-StorageEpochAnalysis
-AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
-                    const L0StorageGroups &groups = L0StorageGroups(),
-                    bool writes_only = false) {
+StorageEpochAnalysis AnalyzeStorageEpoch(const Array<Var> &storages,
+                                         ControlNode *loop,
+                                         bool writes_only = false) {
   std::vector<PrimExpr> guard_terms;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> guard_definitions;
   arith::Analyzer analyzer;
@@ -305,7 +304,7 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
     for (const Var &var : child->GetWriteVars())
       guard_definitions[var] = child_index;
     bool touches = false, writes = false, reads = false;
-    for (const Var &member : groups.Members(storage)) {
+    for (const Var &member : storages) {
       touches |= child->TouchesStorage(member);
       writes |= child->WritesStorage(member);
       reads |= child->ReadsStorage(member);
@@ -327,14 +326,14 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
     }
     if (first_access < 0)
       first_access = child_index;
-    for (const Var &member : groups.Members(storage))
+    for (const Var &member : storages)
       has_write |= child->WritesStorage(member);
     guard_terms.push_back(child->GetConditionGuard());
   }
   if (writes_only && first_access < 0)
     return {}; // A disjoint read-only owner retains the preceding generation.
-  ICHECK_GE(first_access, 0) << "Storage epoch analysis for "
-                             << storage->name_hint << " contains no access";
+  ICHECK_GE(first_access, 0)
+      << "Storage epoch analysis for " << storages << " contains no access";
 
   StorageEpochAnalysis result;
   result.has_write = has_write;
@@ -363,6 +362,12 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
     result.guard_ready_position = -1;
   }
   return result;
+}
+
+StorageEpochAnalysis
+AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
+                    const L0StorageGroups &groups = L0StorageGroups()) {
+  return AnalyzeStorageEpoch(groups.Members(storage), loop);
 }
 
 std::vector<Var> CollectLoopStorages(ControlNode *loop) {
@@ -1478,7 +1483,6 @@ private:
 
 CounterProtocolPlans PlanCounterProtocols(const ScheduledTIR &scheduled,
                                           const MultiBufferPlan &plan,
-                                          const L0StorageGroups &storage_groups,
                                           LoopEpochPlans *epochs) {
   LayoutMap layouts;
   if (auto value =
@@ -1537,8 +1541,11 @@ CounterProtocolPlans PlanCounterProtocols(const ScheduledTIR &scheduled,
         ICHECK(anchor) << "Counter multi-buffer owner has no storage access";
         placement.advances.push_back({anchor, active_guard});
       } else {
+        // Advancing the shared clock redirects every member's reads. A read
+        // of any member between writers must therefore keep the old version
+        // until the first writing Task actually executes.
         StorageEpochAnalysis epoch = AnalyzeStorageEpoch(
-            info.storage, owner.loop, storage_groups, /*writes_only=*/true);
+            Array<Var>(protocol.storages), owner.loop, /*writes_only=*/true);
         PrimExpr active_guard = epoch.active_guard;
         for (const auto &child : owner.loop->children)
           if (touches(child.get(), /*writes_only=*/true)) {
@@ -1746,7 +1753,7 @@ tvm::transform::Pass PrepareMultiBuffer() {
               scheduled_tir.metadata.manual_buffer_versions, context.outer_sid,
               groups);
           CounterProtocolPlans protocols =
-              PlanCounterProtocols(scheduled_tir, plan, groups, &epochs);
+              PlanCounterProtocols(scheduled_tir, plan, &epochs);
           metadata.buffer_versions = std::move(selected_versions);
           metadata.buffer_version_modes = {};
           MaterializeMultiBufferPreparation(&scheduled_tir, epochs, protocols);

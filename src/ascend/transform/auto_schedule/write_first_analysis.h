@@ -422,12 +422,9 @@ public:
            const Var &storage, const ConstrSet &outer_ctx,
            bool writes_only = false) {
     State state;
-    for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
-      if (!writes_only || node->WritesStorage(storage))
-        ProcessNode(node, storage, outer_ctx, &state, writes_only);
-      if (state.unsafe)
-        return AccessOrder::kReadFirst;
-    }
+    ProcessNodes(nodes, storage, outer_ctx, &state, writes_only);
+    if (state.unsafe)
+      return AccessOrder::kReadFirst;
     if (!state.touched)
       return AccessOrder::kUntouched;
     return IsCovered(Bool(true), state.written_guard, outer_ctx)
@@ -441,6 +438,18 @@ private:
     bool unsafe{false};
     PrimExpr written_guard{Bool(false)};
   };
+
+  static void
+  ProcessNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
+               const Var &storage, const ConstrSet &outer_ctx, State *state,
+               bool writes_only) {
+    for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
+      if (!writes_only || node->WritesStorage(storage))
+        ProcessNode(node, storage, outer_ctx, state, writes_only);
+      if (state->unsafe)
+        return;
+    }
+  }
 
   static bool IsCovered(const PrimExpr &access_guard,
                         const PrimExpr &written_guard,
@@ -498,6 +507,47 @@ private:
     return SeqCompose(header, AssumeForExecutes(body));
   }
 
+  static void ProcessWriteLoop(const ControlNode *control, const Var &storage,
+                               const PrimExpr &active_guard,
+                               const ConstrSet &outer_ctx, State *state) {
+    WriteFirstClassifier classifier(/*physical_reads=*/true);
+    ProcessAccess(classifier.Classify(control->task->stmt, storage),
+                  active_guard, outer_ctx, state);
+    const For &loop = control->control;
+    PrimExpr enters = active_guard && loop->extent > 0;
+    if (state->unsafe || IsCovered(enters, Bool(false), outer_ctx))
+      return;
+
+    // A writing Task must precede RMW in this owner iteration. Unlike the
+    // ordinary eligibility heuristic, a skipped loop or writing branch cannot
+    // establish that fact. Retain writes from before the loop when checking
+    // its body, including conditional writes under the same guard.
+    State body = *state;
+    ProcessNodes(control->children, storage, control->GetLoopBodyContext(),
+                 &body, /*writes_only=*/true);
+    state->touched |= body.touched;
+    state->unsafe |= body.unsafe;
+    if (state->unsafe || control->BodyHasLoopBreak())
+      return;
+
+    // A first-trip write is sufficient, even when its guard depends on the
+    // enclosing iteration. Keep that predicate in the enclosing vocabulary;
+    // local snapshots cannot be exported as if they held on every trip.
+    PrimExpr first_write =
+        Substitute(body.written_guard, {{loop->loop_var, loop->min}});
+    std::vector<Var> locals = control->GetWriteVars();
+    locals.push_back(loop->loop_var);
+    if (UsesVar(first_write, [&](const VarNode *var) {
+          return std::any_of(locals.begin(), locals.end(),
+                             [&](const Var &local) {
+                               return local.same_as(ffi::GetRef<Var>(var));
+                             });
+        }))
+      return;
+    ProcessAccess(AccessOrder::kWriteFirst, enters && first_write, outer_ctx,
+                  state);
+  }
+
   static void ProcessNode(const IRStructure *node, const Var &storage,
                           const ConstrSet &outer_ctx, State *state,
                           bool writes_only) {
@@ -520,8 +570,13 @@ private:
                       active_guard, outer_ctx, state);
       }
     }
-    ProcessAccess(ClassifyPayload(node, storage, writes_only), active_guard,
-                  outer_ctx, state);
+    if (writes_only && node->IsControl()) {
+      ProcessWriteLoop(static_cast<const ControlNode *>(node), storage,
+                       active_guard, outer_ctx, state);
+    } else {
+      ProcessAccess(ClassifyPayload(node, storage, writes_only), active_guard,
+                    outer_ctx, state);
+    }
   }
 };
 
