@@ -337,6 +337,7 @@ def _fp8_kernel(src, dst, lanes, annotations=None, **kwargs):
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("src", INT_TYPES)
 @pytest.mark.parametrize("dst", INT_TYPES)
+@pytest.mark.pto
 def test_integer_pair_action_structure(src, dst):
     category = _pair_category(src, dst)
     source = _lower_source(_cast_kernel(src, dst, 128))
@@ -383,6 +384,7 @@ def _count_cast_nodes(module):
 
 
 @pytest.mark.parametrize("dtype", INT_TYPES)
+@pytest.mark.pto
 def test_identity_cast_reaches_planner_and_emits_zero_actions(dtype):
     # A plain same-dtype T.cast is folded by the frontend, so the annotated
     # raw Cast is used to prove the planner identity path is reachable: the
@@ -400,6 +402,7 @@ def test_identity_cast_reaches_planner_and_emits_zero_actions(dtype):
 # ---------------------------------------------------------------------------
 # B. Producer once, ordered binds, scope and DCE
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_cross_sign_widening_producer_and_order():
     source = _lower_source(_cast_kernel("int8", "uint32", 256))
     lines = _cast_lines(source)
@@ -410,6 +413,7 @@ def test_cross_sign_widening_producer_and_order():
     assert _count(source, "vmi.vload") == 1
 
 
+@pytest.mark.pto
 def test_conversion_binds_stay_between_load_and_store():
     source = _lower_source(_cast_kernel("int8", "uint32", 128))
     vload_index = source.index("vmi.vload")
@@ -418,6 +422,7 @@ def test_conversion_binds_stay_between_load_and_store():
     assert vload_index < first_cast < store_index
 
 
+@pytest.mark.pto
 def test_dead_pure_conversion_chain_is_dropped():
     source = _lower_source(_dead_chain_kernel(128))
     assert "vmi.vcvt" not in source, source
@@ -426,6 +431,7 @@ def test_dead_pure_conversion_chain_is_dropped():
     assert _count(source, "vmi.vload") == 1, source
 
 
+@pytest.mark.pto
 def test_nested_cast_chains_inner_then_outer():
     source = _lower_source(_nested_cast_kernel(128))
     lines = _cast_lines(source)
@@ -438,6 +444,7 @@ def test_nested_cast_chains_inner_then_outer():
 # ---------------------------------------------------------------------------
 # C. Verify/Vectorize classification consistency
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_external_scalar_cast_stays_scalar():
     source = _lower_source(_external_scalar_kernel(128))
     assert _cast_lines(source) == []
@@ -445,18 +452,21 @@ def test_external_scalar_cast_stays_scalar():
     assert "vbrc" in source
 
 
+@pytest.mark.pto
 def test_uniform_load_cast_stays_scalar():
     source = _lower_source(_ann_kernel("int8", "int32", 128, {}, uniform=True))
     assert _cast_lines(source) == []
     assert "pto.cast(" in source
 
 
+@pytest.mark.pto
 def test_bind_alias_keeps_vmi_classification():
     source = _lower_source(_alias_kernel("int8", "int32", 128, uniform=False))
     assert len(_cast_lines(source)) == 1
     assert _count(source, "vmi.vload") == 1
 
 
+@pytest.mark.pto
 def test_scalar_cast_then_parent_broadcast():
     source = _lower_source(_binary_scalar_cast_kernel(128))
     assert "vbrc" in source
@@ -471,6 +481,7 @@ def test_scalar_cast_then_parent_broadcast():
         ("selected_of_load", True),
     ],
 )
+@pytest.mark.pto
 def test_2d_coordinate_classification(which, expect_vector):
     source = _lower_source(_coordinate_kernel(128, which))
     lines = _cast_lines(source)
@@ -481,6 +492,7 @@ def test_2d_coordinate_classification(which, expect_vector):
         assert "pto.cast(" in source
 
 
+@pytest.mark.pto
 def test_lane_one_vector_context_is_not_constructible():
     # {kVectorVmi, 1} would be a VMI value with one logical lane; the current
     # Parallel VL contract cannot produce it (lanes are 64/128/256), and the
@@ -496,24 +508,32 @@ def _lower_ann(src, dst, annotations):
     return _lower_source(_ann_kernel(src, dst, 128, annotations))
 
 
+@pytest.mark.pto
 def test_integer_narrowing_accepts_sat_false():
     source = _lower_ann("int16", "int8", {"sat": False})
     line = _cast_lines(source)[0]
     assert 'saturate="NOSAT"' in line, line
 
 
+@pytest.mark.pto
 def test_float_narrowing_accepts_sat_false_and_nosat():
     source = _lower_ann("float32", "float16", {"sat": False})
     line = _cast_lines(source)[0]
     assert 'rounding="R"' in line and 'saturate="NOSAT"' in line, line
 
 
+@pytest.mark.pto
 def test_fp8_narrowing_accepts_round_and_sat_false():
     source = _lower_source(_fp8_kernel("float32", "float8_e5m2", 128, {"round": "Z", "sat": False}))
     line = _cast_lines(source)[0]
     assert 'rounding="Z"' in line and 'saturate="NOSAT"' in line, line
 
+    rn_source = _lower_source(_fp8_kernel("float32", "float8_e4m3fn", 128, round="rn"))
+    rn_line = _cast_lines(rn_source)[0]
+    assert 'rounding="R"' in rn_line, rn_line
 
+
+@pytest.mark.pto
 def test_integer_narrowing_rejects_sat_true():
     _expect_lower_error(
         _ann_kernel("int16", "int8", 128, {"sat": True}),
@@ -521,6 +541,7 @@ def test_integer_narrowing_rejects_sat_true():
     )
 
 
+@pytest.mark.pto
 def test_unknown_annotation_is_rejected():
     _expect_lower_error(
         _ann_kernel("int8", "int32", 128, {"mystery": 1}),
@@ -528,6 +549,7 @@ def test_unknown_annotation_is_rejected():
     )
 
 
+@pytest.mark.pto
 def test_float_int_conversion_is_rejected():
     _expect_lower_error(
         _ann_kernel("float32", "int32", 128, {}),
@@ -535,6 +557,7 @@ def test_float_int_conversion_is_rejected():
     )
 
 
+@pytest.mark.pto
 def test_f16_bf16_cross_family_is_rejected():
     _expect_lower_error(
         _ann_kernel("float16", "bfloat16", 128, {}),
@@ -542,6 +565,7 @@ def test_f16_bf16_cross_family_is_rejected():
     )
 
 
+@pytest.mark.pto
 def test_fp8_to_half_is_rejected():
     _expect_lower_error(
         _fp8_kernel("float8_e4m3fn", "float16", 128),
@@ -549,6 +573,7 @@ def test_fp8_to_half_is_rejected():
     )
 
 
+@pytest.mark.pto
 def test_lane_uniform_fp8_conversion_is_rejected():
     _expect_lower_error(
         _ann_kernel("float8_e4m3fn", "float32", 128, {}, uniform=True),
@@ -559,29 +584,34 @@ def test_lane_uniform_fp8_conversion_is_rejected():
 # ---------------------------------------------------------------------------
 # E. Scalar paths and literal boundaries (existing semantics)
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_scalar_float_widening_stays_scalar():
     source = _lower_source(_ann_kernel("float16", "float32", 128, {}, uniform=True))
     assert _cast_lines(source) == []
     assert "vbrc" in source
 
 
+@pytest.mark.pto
 def test_scalar_float_narrowing_stays_scalar():
     source = _lower_source(_ann_kernel("float32", "float16", 128, {}, uniform=True))
     assert _cast_lines(source) == []
     assert "vbrc" in source
 
 
+@pytest.mark.pto
 def test_scalar_integer_narrowing_keeps_plain_cast():
     source = _lower_source(_ann_kernel("int32", "int8", 128, {}, uniform=True))
     assert _cast_lines(source) == []
     assert "pto.cast(" in source
 
 
+@pytest.mark.pto
 def test_actual_t_cast_literal_out_of_range_is_rejected_by_frontend():
     with pytest.raises(Exception, match="exceeds maximum of int8"):
         T.cast(300, "int8")
 
 
+@pytest.mark.pto
 def test_actual_t_cast_negative_to_unsigned_is_rejected_by_frontend():
     with pytest.raises(Exception, match="cannot make uint from negative value"):
         T.cast(-1, "uint8")
@@ -590,6 +620,7 @@ def test_actual_t_cast_negative_to_unsigned_is_rejected_by_frontend():
 # ---------------------------------------------------------------------------
 # F. Direct planner contexts and scalar rebuilt span/annotations
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_plan_value_cast_context_matrix_directly(tmp_path):
     """The two passes can only produce scalar lanes=1 and VMI lanes=64/128/256,
     so {kVectorVmi, 1} and {kScalar, 128} are unreachable end-to-end.  A local
@@ -671,6 +702,7 @@ def _span_scalar_kernel(vl, span):
     return main
 
 
+@pytest.mark.pto
 def test_scalar_rebuild_preserves_span_and_drop_provenance():
     # Span(source_name, line, end_line, column, end_column).
     span = tvm.ir.Span(tvm.ir.SourceName("cast_span_probe"), 3, 3, 7, 11)

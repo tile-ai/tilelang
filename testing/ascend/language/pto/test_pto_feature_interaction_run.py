@@ -213,6 +213,7 @@ def _uint32_reduce_input(round_index):
     ],
     ids=["int32-signed-negative", "uint32-high-bit"],
 )
+@pytest.mark.pto
 def test_nonzero_start_integer_reduce_broadcast_store(dtype, torch_dtype, sentinel, make_input):
     _require_npu_runtime()
     kernel = _compile(_vmi_reduce_kernel(dtype))
@@ -294,6 +295,7 @@ def _source_values(src, torch_src, source_len):
     ids=["int8_to_uint16", "uint8_to_int32"],
 )
 @pytest.mark.parametrize("extent", _EXTENTS, ids=["tail", "multi_chunk"])
+@pytest.mark.pto
 def test_parallel_nonzero_source_cross_sign_cast_store(src, dst, torch_src, torch_dst, intermediate, target, sentinel, extent):
     _require_npu_runtime()
     kernel = _compile(_parallel_cast_kernel(src, dst, extent))
@@ -421,6 +423,7 @@ def _compile_parallel(round_index):
     torch.testing.assert_close(output[extent:], sentinels[extent:], rtol=0.0, atol=0.0)
 
 
+@pytest.mark.pto
 def test_simt_vmi_parallel_compile_sequences_do_not_leak_state():
     _require_npu_runtime()
     sequences = [

@@ -22,9 +22,6 @@ os.environ["TILELANG_DISABLE_DATA_RACE_CHECK"] = "1"
 import tilelang
 import tilelang.ascend.language as T
 
-from tilelang import tvm
-from tilelang.engine.lower import lower
-
 
 def _require_npu_runtime():
     if not hasattr(torch, "npu"):
@@ -640,26 +637,6 @@ def test_f32_to_fp16_bf16_narrow(npu, to_dtype):
     torch.testing.assert_close(out.float(), ref.float(), rtol=1e-3, atol=1e-3)
 
 
-def test_pipeline_routes_to_new_passes(npu):
-    """Pass-instrument check: the pto pipeline must run Verify/Vectorize and
-    must NOT run AscendSimdVFLowerParallel; auto-schedule must inject sync."""
-
-    names = []
-
-    @tvm.instrument.pass_instrument
-    class Capture:
-        def run_after_pass(self, mod, info):
-            names.append(info.name.split(".")[-1])
-
-    with tvm.transform.PassContext(opt_level=3, instruments=[Capture()]):
-        lower(_vecadd(512, 128), target="pto")
-
-    assert "VerifyParallelToPTO" in names, f"VerifyParallelToPTO not in pipeline: {names}"
-    assert "VectorizeParallelToPTO" in names, f"VectorizeParallelToPTO not in pipeline: {names}"
-    assert "AscendSimdVFLowerParallel" not in names, f"legacy AscendC pass ran on target=pto: {names}"
-    assert "InsertSync" in names, f"InsertSync not in pipeline (auto-schedule off?): {names}"
-
-
 if __name__ == "__main__":
     import tilelang.testing
 
@@ -803,15 +780,6 @@ def _narrow_kernel(n, lanes, to_dtype):
 
 
 @pytest.mark.pto
-def test_narrow_cast_attributes(npu):
-    kernel = tilelang.compile(_narrow_kernel(256, 128, "float16"), target="pto", out_idx=-1)
-    line = [ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt(" in ln and "=" in ln][0]
-    assert "to_dtype=pto.f16" in line, line
-    assert 'rounding="R"' in line, line
-    assert 'saturate="NOSAT"' in line, line
-
-
-@pytest.mark.pto
 def test_narrow_cast_f16_boundary_values(npu):
     _require_npu_runtime()
     # f16: 2^-14 is the smallest normal; 2049/2051 are ties-to-even
@@ -834,6 +802,10 @@ def test_narrow_cast_f16_boundary_values(npu):
     x = torch.zeros(n, dtype=torch.float32)
     x[: len(values)] = torch.tensor(values, dtype=torch.float32)
     kernel = tilelang.compile(_narrow_kernel(n, 128, "float16"), target="pto", out_idx=-1)
+    line = [ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt(" in ln and "=" in ln][0]
+    assert "to_dtype=pto.f16" in line, line
+    assert 'rounding="R"' in line, line
+    assert 'saturate="NOSAT"' in line, line
     out = kernel(x.to(npu))
     torch.npu.synchronize()
     got = out.float()[: len(values)].cpu()
@@ -865,6 +837,10 @@ def test_narrow_cast_bf16_boundary_values(npu):
     x = torch.zeros(n, dtype=torch.float32)
     x[: len(values)] = torch.tensor(values, dtype=torch.float32)
     kernel = tilelang.compile(_narrow_kernel(n, 128, "bfloat16"), target="pto", out_idx=-1)
+    line = [ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt(" in ln and "=" in ln][0]
+    assert "to_dtype=pto.bf16" in line, line
+    assert 'rounding="R"' in line, line
+    assert 'saturate="NOSAT"' in line, line
     out = kernel(x.to(npu))
     torch.npu.synchronize()
     got = out.float()[: len(values)].cpu()
@@ -873,15 +849,6 @@ def test_narrow_cast_bf16_boundary_values(npu):
     torch.testing.assert_close(got, ref, rtol=0, atol=0, equal_nan=True)
     assert got[2] != 0.0, "bf16 subnormal must not flush to zero"
     assert got[1] == 0.0 and torch.signbit(got[1]), "negative zero must keep the sign bit"
-
-
-@pytest.mark.pto
-def test_narrow_cast_bf16_attributes(npu):
-    kernel = tilelang.compile(_narrow_kernel(256, 128, "bfloat16"), target="pto", out_idx=-1)
-    line = [ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt(" in ln and "=" in ln][0]
-    assert "to_dtype=pto.bf16" in line, line
-    assert 'rounding="R"' in line, line
-    assert 'saturate="NOSAT"' in line, line
 
 
 @pytest.mark.pto

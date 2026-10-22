@@ -238,9 +238,11 @@ def _ordinary_case(dtype="float32", lanes=64, offset=0):
 # Matcher boundaries
 # ---------------------------------------------------------------------------
 class TestMatcher:
+    @pytest.mark.pto
     def test_ordinary_full_mask_passes(self):
         _accept(_ordinary_case(offset=8))
 
+    @pytest.mark.pto
     def test_ordinary_store_misaligned_and_unknown_reasons_differ(self):
         misaligned = _reject(_ordinary_case(offset=7))
         assert "destination is misaligned" in misaligned
@@ -268,6 +270,7 @@ class TestMatcher:
         assert "cannot prove alignment for every execution" in unknown
 
     @pytest.mark.parametrize("case", ["no_mask", "group", "vscatter"])
+    @pytest.mark.pto
     def test_unmatched_forms_are_untouched(self, case):
         root, alloc = _root()
         ptr = _access("float32", root, 1)
@@ -303,6 +306,7 @@ class TestMatcher:
 # Instruction-offset element unit and address resolution
 # ---------------------------------------------------------------------------
 class TestInstructionUnit:
+    @pytest.mark.pto
     def test_cross_type_inherited_offset_counted_once(self):
         root, alloc = _root()
         base = tirx.Var("base", "handle")
@@ -341,6 +345,7 @@ class TestInstructionUnit:
         text = _reject(misaligned)
         assert "byte remainder=T.int64(24)" in text
 
+    @pytest.mark.pto
     def test_merged_arena_offset_counted_once(self):
         # A descriptor offset of 400 f32 elements = 1600 bytes is 32B aligned;
         # 401 elements = 1604 bytes leaves a remainder of 4.
@@ -387,6 +392,7 @@ class TestMaskSeed:
         [("uint8", 1), ("float16", 2), ("float32", 4)],
         ids=["b8", "b16", "b32"],
     )
+    @pytest.mark.pto
     def test_point_writeback_needs_only_natural_alignment(self, dtype, natural):
         ptr, bind = _typed_int_base("mt", dtype, natural)
         _accept(_func(tirx.SeqStmt([bind, _store(_value(dtype, 1), ptr, _imm("int32", 0), _seed(1))])))
@@ -403,6 +409,7 @@ class TestMaskSeed:
         ],
         ids=["partial", "dynamic_active", "all_true_arith"],
     )
+    @pytest.mark.pto
     def test_non_full_seeds_stay_ordinary(self, mask_factory):
         root, alloc = _root()
         mask = mask_factory()
@@ -454,10 +461,12 @@ def _loop_with_offset(offset_builder):
 
 
 class TestAnalysisScope:
+    @pytest.mark.pto
     def test_loop_range_facts(self):
         _accept(_loop_with_offset(lambda i: i * _imm("int32", 8)))
         _reject(_loop_with_offset(lambda i: i))
 
+    @pytest.mark.pto
     def test_nonzero_loop_min_with_step(self):
         i = tirx.Var("i", "int32")
         offset = (i - _imm("int32", 4)) * _imm("int32", 2)
@@ -736,6 +745,7 @@ def _dynamic_offset_kernel(mult):
 
 class TestFinalPipeline:
     @pytest.mark.parametrize("dtype", ["float32", "float16"])
+    @pytest.mark.pto
     def test_compact_three_by_131_fails_before_codegen(self, dtype):
         text = _lower_expect_error(_parallel_kernel(dtype, 3, 131))
         assert "ordinary masked vstore" in text
@@ -743,10 +753,12 @@ class TestFinalPipeline:
         assert "root=" in text
         assert "normalized byte offset=" in text
 
+    @pytest.mark.pto
     def test_flat_same_address_fails(self):
         text = _lower_expect_error(_flat_kernel())
         assert "cannot prove destination alignment" in text
 
+    @pytest.mark.pto
     def test_nonzero_column_offset_fails(self):
         text = _lower_expect_error(_column_offset_kernel())
         assert "destination is misaligned" in text
@@ -759,11 +771,13 @@ class TestFinalPipeline:
             ("single_row_tail_vl64", _tail_kernel()),
         ],
     )
+    @pytest.mark.pto
     def test_aligned_controls_full_compile(self, name, kernel):
         compiled = tilelang.compile(kernel, target="pto", out_idx=-1)
         source = compiled.get_kernel_source()
         assert "vmi.vstore" in source, name
 
+    @pytest.mark.pto
     def test_dynamic_offset_controls(self):
         aligned = _dynamic_offset_kernel(8)
         module = _lower_capture(aligned)
@@ -776,6 +790,7 @@ class TestFinalPipeline:
         ("group", "size", "lanes"),
         [(None, 64, 1), (2, 128, 2), (4, 256, 4), (8, 256, 8)],
     )
+    @pytest.mark.pto
     def test_point_writeback_compiles_and_runs(self, group, size, lanes):
         _require_npu_runtime()
         kernel = tilelang.compile(
@@ -800,6 +815,7 @@ class TestFinalPipeline:
         expected[_REDUCE_INDEX : _REDUCE_INDEX + lanes] = torch.tensor(expected_slots, dtype=torch.float32)
         torch.testing.assert_close(got, expected, rtol=0.0, atol=1e-3)
 
+    @pytest.mark.pto
     def test_actual_version_layout_address_is_checked_and_runs(self):
         _require_npu_runtime()
         module = _lower_capture(_serial_version_kernel())
@@ -828,6 +844,7 @@ class TestFinalPipeline:
         torch.testing.assert_close(output.cpu(), values + 3.0, rtol=0.0, atol=0.0)
 
     @pytest.mark.parametrize("dtype", ["float16", "float32"])
+    @pytest.mark.pto
     def test_non32b_aligned_load_with_padded_source_runs(self, dtype):
         _require_npu_runtime()
         kernel = tilelang.compile(_non32b_load_kernel(dtype), target="pto", out_idx=-1)
@@ -847,6 +864,7 @@ class TestFinalPipeline:
         expected = values[131:387].float().cpu()
         torch.testing.assert_close(output.cpu().float(), expected, rtol=0.0, atol=0.0)
 
+    @pytest.mark.pto
     def test_dynamic_and_single_active_stores_reject(self):
         text = _lower_expect_error(_manual_reduce_kernel(dynamic=True))
         assert "ordinary masked vstore" in text

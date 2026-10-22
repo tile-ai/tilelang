@@ -239,6 +239,7 @@ def _view(owner, shape, *, name="view", strides=None, elem_offset=0, dtype=None,
     ],
     ids=["load64", "load-tail80"],
 )
+@pytest.mark.pto
 def test_ordinary_load_envelope(size, extent):
     work = _buffer((512,))
     call = _vload(_load(work, [_int(64)]), size=size)
@@ -252,6 +253,7 @@ def test_ordinary_load_envelope(size, extent):
     _assert_no_raw_address(body)
 
 
+@pytest.mark.pto
 def test_store_mask_keeps_full_extent():
     work = _buffer((512,))
     value = _vec("value")
@@ -266,6 +268,7 @@ def test_store_mask_keeps_full_extent():
     _assert_no_raw_address(body)
 
 
+@pytest.mark.pto
 def test_group_and_block_envelopes():
     work = _buffer((512,))
     # A negative group stride is relocated by the first candidate: the
@@ -300,6 +303,7 @@ def test_group_and_block_envelopes():
         _run(_evaluate(_vload(_load(work, [_int(0)]), size=64, block_stride=-1)))
 
 
+@pytest.mark.pto
 def test_negative_index_and_group_candidates():
     # Negative indices are normalized by the preceding pass before descriptor
     # construction consumes the scalar origin.
@@ -342,6 +346,7 @@ def test_negative_index_and_group_candidates():
 # ---------------------------------------------------------------------------
 # Explicit declarations and direct handle bindings
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_explicit_descriptor_preserved_and_diagnosed():
     work = _buffer((512,))
     pointer = _access_ptr(work, [_int(32)], 128, 3)
@@ -403,6 +408,7 @@ def test_explicit_descriptor_preserved_and_diagnosed():
 # ---------------------------------------------------------------------------
 # Logical coverage, not only physical containment
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_logical_coverage_counterexamples():
     work = _buffer((2, 128))
     body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=64)))
@@ -435,6 +441,7 @@ def test_logical_coverage_counterexamples():
 # ---------------------------------------------------------------------------
 # FP4: prove in logical units, then pack the scalar offset once
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_fp4_logical_units_and_packing():
     fp4 = _buffer((256,), dtype="float4_e2m1fn", name="fp4")
     pointer = _access_ptr(fp4, [_int(32)], 128, 1)
@@ -496,6 +503,7 @@ def _access_k(k, work, *, size=64):
     return _vload(_load(work, [_int(0), k * 64]), size=size)
 
 
+@pytest.mark.pto
 def test_branch_for_and_while_context():
     work = _buffer((2, 128))
     k, body = _bounded_2d(lambda k: _evaluate(_access_k(k, work)), 0, 1)
@@ -568,6 +576,7 @@ def test_branch_for_and_while_context():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.pto
 def test_mutable_index_is_not_a_stable_context_fact():
     work = _buffer((2, 128))
     index = tirx.decl_buffer((1,), "int32", name="index", scope="local")
@@ -582,6 +591,7 @@ def test_mutable_index_is_not_a_stable_context_fact():
 # ---------------------------------------------------------------------------
 # Indexed gather/scatter: real owner descriptors
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_indexed_uses_active_owner_descriptor():
     work = _buffer((256,))
     offsets = _vec("offsets", "uint32")
@@ -609,6 +619,7 @@ def test_indexed_uses_active_owner_descriptor():
     _assert_no_raw_address(body)
 
 
+@pytest.mark.pto
 def test_indexed_owner_extent_is_int64_and_preserves_source_types():
     offsets = _vec("offsets", "uint32")
     mask = _mask("mask")
@@ -642,6 +653,7 @@ def test_indexed_owner_extent_is_int64_and_preserves_source_types():
         _run(_sblock(_evaluate(call), overflowing))
 
 
+@pytest.mark.pto
 def test_indexed_owner_requirements():
     work = _buffer((512,), name="owner")
     offsets = _vec("offsets", "uint32")
@@ -694,6 +706,7 @@ def test_indexed_owner_requirements():
         _run(_sblock(_evaluate(gather(_load(far_view, [_int(600)]))), work))
 
 
+@pytest.mark.pto
 def test_indexed_owner_tight_stride_width():
     offsets = _vec("offsets", "uint32")
     mask = _mask("mask")
@@ -718,6 +731,7 @@ def test_indexed_owner_tight_stride_width():
         _run(_sblock(_evaluate(call), overlap))
 
 
+@pytest.mark.pto
 def test_indexed_owner_scope_and_order():
     work = _buffer((256,))
     offsets = _vec("offsets", "uint32")
@@ -770,6 +784,7 @@ def test_indexed_owner_scope_and_order():
             )
 
 
+@pytest.mark.pto
 def test_indexed_dynamic_owner_coverage():
     n = tirx.Var("n", "int32")
     offsets = _vec("offsets", "uint32")
@@ -832,6 +847,7 @@ def test_indexed_dynamic_owner_coverage():
     assert _constant(out.args[1]) == 0
 
 
+@pytest.mark.pto
 def test_indexed_offset_capacity_comparison_width():
     work = _buffer((256,), name="work")
     offsets = _vec("offsets", "uint32")
@@ -864,6 +880,7 @@ def test_indexed_offset_capacity_comparison_width():
     assert isinstance(out.args[1], tirx.Var) and out.args[1].same_as(d32u), out.args[1]
 
 
+@pytest.mark.pto
 def test_indexed_bound_pointer_snapshot():
     work = _buffer((256,))
     index = _buffer((1,), "int32", name="index", scope="shared")
@@ -969,6 +986,7 @@ def test_indexed_bound_pointer_snapshot():
     assert _constant(out.args[1]) == 32
 
 
+@pytest.mark.pto
 def test_indexed_owner_capacity_stability():
     index = _buffer((1,), "int32", name="index", scope="shared")
     offsets = _vec("offsets", "uint32")
@@ -1106,6 +1124,7 @@ def test_indexed_owner_capacity_stability():
 # ---------------------------------------------------------------------------
 # Target isolation
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_passes_through_non_target_and_non_vmi():
     work = _buffer((64,))
     body = _evaluate(_vload(_load(work, [_int(0)]), size=64))

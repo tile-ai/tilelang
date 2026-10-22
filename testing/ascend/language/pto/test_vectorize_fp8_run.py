@@ -190,14 +190,6 @@ def _f8_to_f32(f8, n, lanes):
     return main
 
 
-def _run(func, npu, source=None):
-    kernel = tilelang.compile(func, target="pto", out_idx=-1)
-    src = kernel.get_kernel_source()
-    if source is not None:
-        source(src)
-    return src
-
-
 def _bytes(tensor):
     return bytes(tensor.cpu().view(torch.uint8).flatten().tolist())
 
@@ -212,45 +204,6 @@ def _pad(values, fill=0.0):
     if len(values) % LANES:
         values = list(values) + [fill] * (LANES - len(values) % LANES)
     return values
-
-
-# ---------------------------------------------------------------------------
-# Attributes in the generated PTODSL
-# ---------------------------------------------------------------------------
-@pytest.mark.pto
-@pytest.mark.parametrize("f8", [F8_E4M3, F8_E5M2], ids=["e4m3fn", "e5m2"])
-def test_generated_attributes_default(npu, f8):
-    n, lanes = 256, 128
-    src = _run(_f32_to_f8(f8, n, lanes), npu)
-    target = "pto.f8e4m3" if f8 == F8_E4M3 else "pto.f8e5m2"
-    line = [ln.strip() for ln in src.split("\n") if "vmi.vcvt" in ln and "=" in ln]
-    assert line, src
-    assert 'rounding="R"' in line[0] and 'saturate="SAT"' in line[0], line[0]
-    assert f"to_dtype={target}" in line[0], line[0]
-    assert "to_dtype=pto.f32," not in line[0], line[0]
-
-
-@pytest.mark.pto
-@pytest.mark.parametrize("mode,rounding", [("rn", "R"), ("rz", "Z")])
-def test_generated_attributes_rounding(npu, mode, rounding):
-    src = _run(_f32_to_f8(F8_E4M3, 256, 128, round=mode), npu)
-    line = [ln.strip() for ln in src.split("\n") if "vmi.vcvt" in ln and "=" in ln][0]
-    assert f'rounding="{rounding}"' in line, line
-
-
-@pytest.mark.pto
-def test_generated_attributes_nosat(npu):
-    src = _run(_f32_to_f8(F8_E4M3, 256, 128, sat=False), npu)
-    line = [ln.strip() for ln in src.split("\n") if "vmi.vcvt" in ln and "=" in ln][0]
-    assert 'saturate="NOSAT"' in line, line
-
-
-@pytest.mark.pto
-def test_generated_attributes_widening_has_none(npu):
-    src = _run(_f8_to_f32(F8_E4M3, 256, 128), npu)
-    line = [ln.strip() for ln in src.split("\n") if "vmi.vcvt" in ln and "=" in ln][0]
-    assert "rounding" not in line and "saturate" not in line, line
-    assert "to_dtype=pto.f32" in line, line
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +226,13 @@ def test_narrow_default_rne_sat(npu, f8):
     """Default mode: ties-to-even with saturation, checked on tie cases."""
     values = _pad(_midpoints(f8))
     x = torch.tensor(values, dtype=torch.float32)
-    out = tilelang.compile(_f32_to_f8(f8, len(values), LANES), target="pto", out_idx=-1)(x.to(npu))
+    kernel = tilelang.compile(_f32_to_f8(f8, len(values), LANES), target="pto", out_idx=-1)
+    target = "pto.f8e4m3" if f8 == F8_E4M3 else "pto.f8e5m2"
+    line = next(ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt" in ln and "=" in ln)
+    assert f"to_dtype={target}" in line, line
+    assert 'rounding="R"' in line and 'saturate="SAT"' in line, line
+    assert "to_dtype=pto.f32," not in line, line
+    out = kernel(x.to(npu))
     torch.npu.synchronize()
     assert _bytes(out) == _encode_mask(values, f8, "R")
 
@@ -282,7 +241,10 @@ def test_narrow_default_rne_sat(npu, f8):
 def test_narrow_toward_zero(npu):
     values = _pad(_midpoints(F8_E4M3))
     x = torch.tensor(values, dtype=torch.float32)
-    out = tilelang.compile(_f32_to_f8(F8_E4M3, len(values), LANES, round="rz"), target="pto", out_idx=-1)(x.to(npu))
+    kernel = tilelang.compile(_f32_to_f8(F8_E4M3, len(values), LANES, round="rz"), target="pto", out_idx=-1)
+    line = next(ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt" in ln and "=" in ln)
+    assert 'rounding="Z"' in line, line
+    out = kernel(x.to(npu))
     torch.npu.synchronize()
     assert _bytes(out) == _encode_mask(values, F8_E4M3, "Z")
 
@@ -325,7 +287,11 @@ def test_widen_is_exact(npu, f8):
     codes = _pad(codes, fill=0)
     raw = torch.tensor(codes, dtype=torch.uint8).view(TORCH_F8[f8])
     expected = torch.tensor([decode(c) for c in codes], dtype=torch.float32)
-    out = tilelang.compile(_f8_to_f32(f8, len(codes), LANES), target="pto", out_idx=-1)(raw.to(npu))
+    kernel = tilelang.compile(_f8_to_f32(f8, len(codes), LANES), target="pto", out_idx=-1)
+    line = next(ln.strip() for ln in kernel.get_kernel_source().split("\n") if "vmi.vcvt" in ln and "=" in ln)
+    assert "rounding" not in line and "saturate" not in line, line
+    assert "to_dtype=pto.f32" in line, line
+    out = kernel(raw.to(npu))
     torch.npu.synchronize()
     assert torch.equal(out.cpu(), expected), (out.cpu()[:8], expected[:8])
 

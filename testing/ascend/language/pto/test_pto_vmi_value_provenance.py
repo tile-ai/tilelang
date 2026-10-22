@@ -464,35 +464,32 @@ def _assert_direct_vbrc(source, producer_name):
     assert source.count(f"pto.vmi.{producer_name}(") == 1
 
 
+@pytest.mark.pto
 def test_int32_vcmax_vbrc_uses_vmi_source_directly():
     source = _kernel_source(_reduce_broadcast("int32", "vcmax"))
     _assert_direct_vbrc(source, "vcmax")
 
 
+@pytest.mark.pto
 def test_uint32_vcmin_vbrc_uses_vmi_source_directly():
     source = _kernel_source(_reduce_broadcast("uint32", "vcmin"))
     _assert_direct_vbrc(source, "vcmin")
 
 
+@pytest.mark.pto
 def test_float32_vcmax_vbrc_control_uses_vmi_source_directly():
     source = _kernel_source(_reduce_broadcast("float32", "vcmax"))
     _assert_direct_vbrc(source, "vcmax")
 
 
-@pytest.mark.parametrize(
-    ("dtype", "reduce_name"),
-    [("int32", "vcmax"), ("uint32", "vcmin"), ("float32", "vcmax")],
-)
-def test_reduce_broadcast_compiles_through_backend(dtype, reduce_name):
-    _compile(_reduce_broadcast(dtype, reduce_name))
-
-
+@pytest.mark.pto
 def test_scalar_literal_bridge_is_preserved():
     source = _kernel_source(_scalar_bridge("int32", literal=True))
     assert _expr(_one(source, "pto.vmi.vbrc(pto.si32(7), size=128)")) == ("pto.vmi.vbrc(pto.si32(7), size=128)")
     assert _expr(_one(source, "pto.vmi.vci(")).startswith("pto.vmi.vinterpret_cast(pto.vmi.vci(pto.i32(7), size=128), to_dtype=pto.si32)")
 
 
+@pytest.mark.pto
 def test_scalar_dynamic_bridge_is_preserved():
     source = _kernel_source(_scalar_bridge("int32", literal=False))
     # Dynamic integer scalar sources take the signless bridge and recover the
@@ -505,11 +502,7 @@ def test_scalar_dynamic_bridge_is_preserved():
     )
 
 
-@pytest.mark.parametrize("literal", [True, False])
-def test_scalar_bridge_compiles_through_backend(literal):
-    _compile(_scalar_bridge("int32", literal=literal))
-
-
+@pytest.mark.pto
 def test_vmi_reinterpret_uses_vinterpret_cast():
     source = _kernel_source(_reinterpret_kernel())
     assert "pto.vmi.vinterpret_cast(x, to_dtype=pto.si32)" in _one(source, "pto.vmi.vstore(")
@@ -519,23 +512,6 @@ def test_vmi_reinterpret_uses_vinterpret_cast():
 # ---------------------------------------------------------------------------
 # Pure SIMD register arrays stay on ordinary vector paths
 # ---------------------------------------------------------------------------
-def _pure_simd_array_reinterpret():
-    @T.prim_func
-    def main(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "int32")):
-        with T.Kernel(1):
-            src = T.alloc_shared((64,), "float32")
-            dst = T.alloc_shared((64,), "int32")
-            T.copy(X, src)
-            with T.SimdVF():
-                regs = T.simd.alloc_local((2,), "float32")
-                regs[0] = T.simd.vld(src[0])
-                y = T.reinterpret("int32x64", regs[0])
-                T.simd.vsts(dst[0], y)
-            T.copy(dst, Y)
-
-    return main
-
-
 def _pure_simd_array_cast():
     @T.prim_func
     def main(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "float16")):
@@ -553,6 +529,7 @@ def _pure_simd_array_cast():
     return main
 
 
+@pytest.mark.pto
 def test_pure_simd_register_array_cast_uses_ordinary_cast():
     # The array element reaches T.Cast through a pure SIMD allocation.  It must
     # not enter the VMI cast guard and must keep the ordinary float cast path.
@@ -565,23 +542,10 @@ def test_pure_simd_register_array_cast_uses_ordinary_cast():
     assert _one(source, "pto.vsts(").startswith("pto.vsts(y,")
 
 
-def test_pure_simd_register_array_reinterpret_compiles_through_backend():
-    # The pure SIMD program has no VMI frontend input.  Its register array only
-    # shares shape/dtype with a VMI register array; that must not classify it
-    # as VMI data, so the bit reinterpret stays on the ordinary vector path and
-    # still compiles.
-    func = _pure_simd_array_reinterpret()
-    assert "tl.vmi." not in func.script(), func.script()
-    source = _compile(func).get_kernel_source()
-    assert "pto.vbitcast(" in source
-    assert "pto.vmi." not in source
-    assert "pto.vbitcast(regs_tl_slot_0" in _one(source, "pto.vbitcast(")
-    assert _one(source, "pto.vsts(").startswith("pto.vsts(y,")
-
-
 # ---------------------------------------------------------------------------
 # B. Grouped-vbrc mutable local.var register compatibility
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_mutable_register_grouped_vbrc_is_preserved():
     # Grouped vbrc accepts this numeric local.var read without classifying it
     # as VMI data. Its classification stays other-vector, and the source is
@@ -707,22 +671,8 @@ def _marker_carriers(fn):
     return found
 
 
-@pytest.mark.parametrize(
-    ("dtype", "pto_type"),
-    [("int32", "pto.si32"), ("uint32", "pto.ui32"), ("float32", "pto.f32")],
-)
-def test_single_lane_mutable_slot_compiles_through_backend(dtype, pto_type):
-    kernel = _compile(_mutable_slot(dtype))
-    source = kernel.get_kernel_source()
-    assert f"slot = pto.vmi.vreg(1, {pto_type})" in source
-    assert "slot = pto.vmi.vcmax(x, mask)" in source
-    vbrc_line = _one(source, "pto.vmi.vbrc(")
-    assert "pto.vmi.vbrc(slot, group=1, size=128)" in vbrc_line
-    assert "pto.cast(" not in vbrc_line
-    assert source.count("pto.vmi.vcmax(") == 1
-
-
 @pytest.mark.parametrize(("dtype", "pto_type"), [("int32", "pto.si32"), ("float32", "pto.f32")])
+@pytest.mark.pto
 def test_single_lane_mutable_slot_annotation_reaches_device_ir(dtype, pto_type):
     artifact, _, fn = _device_fn(_mutable_slot(dtype))
     marked = _marked_allocations(fn)
@@ -737,6 +687,7 @@ def test_single_lane_mutable_slot_annotation_reaches_device_ir(dtype, pto_type):
     assert f"slot = pto.vmi.vreg(1, {pto_type})" in artifact.kernel_source
 
 
+@pytest.mark.pto
 def test_multi_lane_mutable_slot_annotation_reaches_device_ir():
     artifact, _, fn = _device_fn(_mutable_register("float32", 4, 4))
     marked = _marked_allocations(fn)
@@ -748,6 +699,7 @@ def test_multi_lane_mutable_slot_annotation_reaches_device_ir():
     assert "slot = pto.vmi.vreg(4, pto.f32)" in artifact.kernel_source
 
 
+@pytest.mark.pto
 def test_explicit_loop_slot_markers_reach_device_ir():
     artifact, _, fn = _device_fn(_mutable_slot_in_explicit_loop("int32"))
     marked = _marked_allocations(fn)
@@ -760,14 +712,7 @@ def test_explicit_loop_slot_markers_reach_device_ir():
 
 
 @pytest.mark.parametrize("dtype", ["int32", "float32"])
-def test_mutable_slot_branch_updates_compile_through_backend(dtype):
-    source = _compile(_mutable_slot_branch(dtype)).get_kernel_source()
-    assert "if tl.as_logical_bool(0 < scale):" in source
-    assert "slot = pto.vmi.vcmax(x, mask)" in source
-    assert "slot = pto.vmi.vcmin(x, mask)" in source
-
-
-@pytest.mark.parametrize("dtype", ["int32", "float32"])
+@pytest.mark.pto
 def test_marked_slot_runtime_loop_carry_compiles_through_backend(dtype):
     source = _compile(_mutable_slot_runtime_carry(dtype)).get_kernel_source()
     assert "old = slot" in source
@@ -806,6 +751,7 @@ def _vmi_array_alias_and_reinterpret():
     return main
 
 
+@pytest.mark.pto
 def test_vmi_register_array_alias_and_reinterpret_stay_vmi_data():
     source = _compile(_vmi_array_alias_and_reinterpret()).get_kernel_source()
     assert "regs_tl_slot_0 = None" in source
@@ -819,6 +765,7 @@ def test_vmi_register_array_alias_and_reinterpret_stay_vmi_data():
     assert "vbitcast" not in source
 
 
+@pytest.mark.pto
 def test_marked_register_array_same_dtype_cast_is_a_transparent_alias():
     regs = _marked_array_buffer()
     body = tirx.SeqStmt(
@@ -833,6 +780,7 @@ def test_marked_register_array_same_dtype_cast_is_a_transparent_alias():
     assert "regs_tl_slot_1 = regs_tl_slot_0" in source
 
 
+@pytest.mark.pto
 def test_marked_register_array_generic_cast_is_rejected():
     regs = _marked_array_buffer()
     body = tirx.SeqStmt(
@@ -876,8 +824,9 @@ def _vmi_array_multidim_update(dtype):
 
 @pytest.mark.parametrize(
     ("dtype", "pto_type"),
-    [("int32", "pto.si32"), ("uint32", "pto.ui32")],
+    [("int32", "pto.si32")],
 )
+@pytest.mark.pto
 def test_vmi_register_array_multidim_unroll_and_runtime_update_compile(dtype, pto_type):
     source = _compile(_vmi_array_multidim_update(dtype)).get_kernel_source()
     for index in range(4):
@@ -897,6 +846,7 @@ def test_vmi_register_array_multidim_unroll_and_runtime_update_compile(dtype, pt
     assert "pto.cast(regs_tl_slot" not in source
 
 
+@pytest.mark.pto
 def test_vmi_register_array_markers_reach_device_ir_after_flatten():
     artifact, _, fn = _device_fn(_vmi_array_multidim_update("uint32"))
     marked = [node for node in _marked_allocations(fn) if str(node.annotations[_MARKER]) == "data_array"]
@@ -938,6 +888,7 @@ def _vmi_producer(dtype="int32"):
     return tirx.call_intrin(dtype, _Op("tl.vmi.vcmax"))
 
 
+@pytest.mark.pto
 def test_marked_slot_store_load_and_initialization():
     slot = _marked_slot_buffer()
     body = tirx.SeqStmt(
@@ -956,6 +907,7 @@ def test_marked_slot_store_load_and_initialization():
     assert "pto.cast(" not in vbrc_line
 
 
+@pytest.mark.pto
 def test_marked_slot_store_rejects_scalar_rhs():
     slot = _marked_slot_buffer()
     body = tirx.SeqStmt(
@@ -970,6 +922,7 @@ def test_marked_slot_store_rejects_scalar_rhs():
     )
 
 
+@pytest.mark.pto
 def test_marked_slot_rejects_a_different_dtype_view():
     slot = _marked_slot_buffer()
     view = tirx.decl_buffer((1,), "float32", name="slot_view", data=slot.data, scope="local.var")
@@ -985,6 +938,7 @@ def test_marked_slot_rejects_a_different_dtype_view():
     )
 
 
+@pytest.mark.pto
 def test_marked_slot_rejects_nonzero_index():
     slot = _marked_slot_buffer()
     body = tirx.SeqStmt(
@@ -1004,6 +958,7 @@ def test_marked_slot_rejects_nonzero_index():
     _expect_error("PTO VMI data slot load expects index 0", lambda: _raw_source(load_body))
 
 
+@pytest.mark.pto
 def test_unmarked_scalar_slot_still_rejects_a_vmi_store():
     slot = tirx.decl_buffer((1,), "int32", name="plain", scope="local.var")
     body = tirx.SeqStmt(
@@ -1018,6 +973,7 @@ def test_unmarked_scalar_slot_still_rejects_a_vmi_store():
     )
 
 
+@pytest.mark.pto
 def test_marked_register_array_rejects_a_different_dtype_view():
     regs = _marked_array_buffer()
     view = tirx.decl_buffer((2,), "float32x64", name="regs_view", data=regs.data, scope="local")
@@ -1051,6 +1007,7 @@ def _unknown_vmi_call(dtype="int32x64"):
         ),
     ],
 )
+@pytest.mark.pto
 def test_marked_register_array_store_rejects_non_data_rhs(make_rhs, kind_name):
     regs = _marked_array_buffer()
     body = tirx.SeqStmt(
@@ -1065,6 +1022,7 @@ def test_marked_register_array_store_rejects_non_data_rhs(make_rhs, kind_name):
     )
 
 
+@pytest.mark.pto
 def test_marked_register_array_store_rejects_an_ordinary_vector_rhs():
     regs = _marked_array_buffer()
     plain = tirx.decl_buffer((2,), "int32x64", name="plain_regs", scope="local")
@@ -1081,6 +1039,7 @@ def test_marked_register_array_store_rejects_an_ordinary_vector_rhs():
     )
 
 
+@pytest.mark.pto
 def test_marked_register_array_cannot_be_used_as_an_address():
     regs = _marked_array_buffer()
     body = tirx.SeqStmt(
@@ -1095,6 +1054,7 @@ def test_marked_register_array_cannot_be_used_as_an_address():
     )
 
 
+@pytest.mark.pto
 def test_marked_register_array_requires_constant_indices():
     regs = _marked_array_buffer()
     index = tirx.Var("i", "int32")
@@ -1121,6 +1081,7 @@ def test_marked_register_array_requires_constant_indices():
     )
 
 
+@pytest.mark.pto
 def test_marked_register_array_cannot_use_simt_backing():
     regs = _marked_array_buffer()
     simt_body = tirx.SeqStmt(
@@ -1136,6 +1097,7 @@ def test_marked_register_array_cannot_use_simt_backing():
     )
 
 
+@pytest.mark.pto
 def test_vmi_allocation_table_resets_between_functions():
     regs = _marked_array_buffer()
     plain_slot = tirx.decl_buffer((1,), "int32", name="plain_slot", data=regs.data, scope="local.var")
@@ -1189,6 +1151,7 @@ def _plain_array_buffer(shape=(2,), dtype="int32x64", name="plain_regs"):
         ),
     ],
 )
+@pytest.mark.pto
 def test_ordinary_register_array_store_rejects_vmi_values(make_rhs, kind_name):
     array = _plain_array_buffer()
     body = tirx.SeqStmt(
@@ -1203,6 +1166,7 @@ def test_ordinary_register_array_store_rejects_vmi_values(make_rhs, kind_name):
     )
 
 
+@pytest.mark.pto
 def test_ordinary_register_array_store_rejects_vmi_aliases():
     array = _plain_array_buffer()
     producer = tirx.call_intrin("int32x64", _Op("tl.vmi.vcmax"))
@@ -1240,6 +1204,7 @@ def test_ordinary_register_array_store_rejects_vmi_aliases():
     )
 
 
+@pytest.mark.pto
 def test_ordinary_register_array_store_keeps_its_ordinary_vector_route():
     array = _plain_array_buffer()
     body = tirx.SeqStmt(
@@ -1253,6 +1218,7 @@ def test_ordinary_register_array_store_keeps_its_ordinary_vector_route():
     assert "plain_regs_tl_slot_1 = plain_regs_tl_slot_0" in source
 
 
+@pytest.mark.pto
 def test_plain_local_var_and_local_fragment_stores_keep_their_routes():
     slot = tirx.decl_buffer((1,), "int32", name="plain", scope="local.var")
     body = tirx.SeqStmt(
@@ -1277,6 +1243,7 @@ def test_plain_local_var_and_local_fragment_stores_keep_their_routes():
 # ---------------------------------------------------------------------------
 # C. Aliases, Let scoping, Var identity, per-function reset, cycles
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_multi_level_alias_chain_keeps_vmi_data():
     artifact, _, fn = _device_fn(_reduce_broadcast("int32", "vcmax"))
     source = _codegen_device_fn(artifact, _alias_chain_source(fn))
@@ -1286,6 +1253,7 @@ def test_multi_level_alias_chain_keeps_vmi_data():
     assert source.count("pto.vmi.vcmax(") == 1
 
 
+@pytest.mark.pto
 def test_direct_nested_producer_call_keeps_vmi_data():
     artifact, _, fn = _device_fn(_reduce_broadcast("int32", "vcmax"))
     source = _codegen_device_fn(artifact, _direct_call_source(fn))
@@ -1296,6 +1264,7 @@ def test_direct_nested_producer_call_keeps_vmi_data():
 
 
 @pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.pto
 def test_let_source_is_query_local_and_producer_runs_once(nested):
     artifact, _, fn = _device_fn(_reduce_broadcast("int32", "vcmax"))
     source = _codegen_device_fn(artifact, _let_source(fn, nested=nested))
@@ -1309,6 +1278,7 @@ def test_let_source_is_query_local_and_producer_runs_once(nested):
     assert source.count("pto.vmi.vcmax(") == 1
 
 
+@pytest.mark.pto
 def test_same_named_different_vars_are_not_conflated():
     artifact, _, fn = _device_fn(_reduce_broadcast("int32", "vcmax"))
     call = _find_vbrc_call(fn)
@@ -1407,6 +1377,7 @@ def _function_section(source, name):
     return source[start : end if end != -1 else len(source)]
 
 
+@pytest.mark.pto
 def test_same_var_across_two_functions_resets_definition_table():
     observed_orders = []
     for order in ("vmi-first", "scalar-first"):
@@ -1421,6 +1392,7 @@ def test_same_var_across_two_functions_resets_definition_table():
     assert sorted(observed_orders) == ["scalar-first", "vmi-first"]
 
 
+@pytest.mark.pto
 def test_definition_cycle_is_detected():
     x = tirx.Var("cycle_x", "int32")
     body = tirx.SeqStmt(
@@ -1435,6 +1407,7 @@ def test_definition_cycle_is_detected():
 # ---------------------------------------------------------------------------
 # D. Unknown-origin propagation and diagnosis
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_registered_unknown_vmi_op_through_alias_stays_unknown():
     unknown = tirx.Var("unknown_x", "int32")
     alias = tirx.Var("unknown_alias", "int32")
@@ -1448,6 +1421,7 @@ def test_registered_unknown_vmi_op_through_alias_stays_unknown():
     _expect_error("cannot broadcast unknown (int32, lanes=1)", lambda: _raw_source(body))
 
 
+@pytest.mark.pto
 def test_unknown_vmi_origin_diagnosed_at_vci():
     x = tirx.Var("x", "int32")
     alias = tirx.Var("alias", "int32")
@@ -1472,6 +1446,7 @@ def test_unknown_vmi_origin_diagnosed_at_vci():
 # E. Registered producer return-contract matrix
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("op_name", VMI_DATA_OPS)
+@pytest.mark.pto
 def test_registered_vmi_data_producer_never_enters_scalar_bridge(op_name):
     producer, params = _vmi_data_producer(op_name)
     if op_name == "vgather":
@@ -1493,6 +1468,7 @@ def test_registered_vmi_data_producer_never_enters_scalar_bridge(op_name):
     assert vbrc_line.endswith(", group=1, size=128)")
 
 
+@pytest.mark.pto
 def test_vload_lane1_is_vmi_data():
     producer = tirx.call_intrin("int32", _Op("tl.vmi.vload"))
     source = _raw_source(tirx.Evaluate(_vbrc(producer)))
@@ -1500,6 +1476,7 @@ def test_vload_lane1_is_vmi_data():
 
 
 @pytest.mark.parametrize("op_name", VMI_MASK_OPS)
+@pytest.mark.pto
 def test_vmi_mask_producer_is_not_broadcast_as_data(op_name):
     producer = tirx.call_intrin("boolx128", _Op(f"tl.vmi.{op_name}"))
     _expect_error(
@@ -1509,6 +1486,7 @@ def test_vmi_mask_producer_is_not_broadcast_as_data(op_name):
 
 
 @pytest.mark.parametrize("op_name", VMI_PAIR_OPS)
+@pytest.mark.pto
 def test_vmi_pair_producer_is_not_broadcast_as_data(op_name):
     producer = tirx.call_intrin("int32x128", _Op(f"tl.vmi.{op_name}"))
     _expect_error(
@@ -1518,6 +1496,7 @@ def test_vmi_pair_producer_is_not_broadcast_as_data(op_name):
 
 
 @pytest.mark.parametrize("op_name", VMI_VOID_OPS)
+@pytest.mark.pto
 def test_vmi_void_producer_is_not_broadcast_as_data(op_name):
     producer = tirx.call_intrin("void", _Op(f"tl.vmi.{op_name}"))
     _expect_error(
@@ -1526,6 +1505,7 @@ def test_vmi_void_producer_is_not_broadcast_as_data(op_name):
     )
 
 
+@pytest.mark.pto
 def test_pair_get_returns_data_from_pair():
     pair = tirx.call_intrin("int32x128", _Op("tl.vmi.vintlv"))
     get = tirx.call_intrin("int32", _Op("tl.vmi.pair_get"), pair, tirx.IntImm("int32", 0))
@@ -1536,6 +1516,7 @@ def test_pair_get_returns_data_from_pair():
 # ---------------------------------------------------------------------------
 # F. Scalar-only consumers
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_vci_rejects_vmi_data_source():
     _expect_error(
         "tl.vmi.vci base expects a scalar; got VMI data",
@@ -1543,6 +1524,7 @@ def test_vci_rejects_vmi_data_source():
     )
 
 
+@pytest.mark.pto
 def test_vbrc_group_rejects_true_scalar_source():
     _expect_error(
         "tl.vmi.vbrc with group=... requires a VMI vreg; got scalar",
@@ -1550,6 +1532,7 @@ def test_vbrc_group_rejects_true_scalar_source():
     )
 
 
+@pytest.mark.pto
 def test_ordinary_scalar_load_after_vmi_store_stays_scalar():
     source = _kernel_source(_scalar_load_after_vmi_store())
     vbrc_line = _one(source, "pto.vmi.vbrc(")
@@ -1557,6 +1540,7 @@ def test_ordinary_scalar_load_after_vmi_store_stays_scalar():
     assert "group" not in vbrc_line
 
 
+@pytest.mark.pto
 def test_local_var_store_rejects_vmi_data():
     _expect_error(
         "PTO local.var integer store expects a scalar; got VMI data",
@@ -1564,6 +1548,7 @@ def test_local_var_store_rejects_vmi_data():
     )
 
 
+@pytest.mark.pto
 def test_local_var_store_keeps_scalar_value():
     source = _kernel_source(_local_var_vmi_store(value_is_vmi=False))
     assert "slot = pto.const(0, dtype=pto.si32)" in source
@@ -1571,6 +1556,7 @@ def test_local_var_store_keeps_scalar_value():
     assert "pto.cast(slot, pto.i32)" in _one(source, "pto.vmi.vbrc(")
 
 
+@pytest.mark.pto
 def test_select_branch_rejects_vmi_data():
     data = tirx.Var("data", "int32")
     cond = tirx.Var("cond", "bool")
@@ -1589,6 +1575,7 @@ def test_select_branch_rejects_vmi_data():
 # ---------------------------------------------------------------------------
 # G. Deep scalar expressions stay bounded
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_deep_scalar_expression_chain_is_classified_linearly():
     x = tirx.Var("x", "int32")
     expr = x

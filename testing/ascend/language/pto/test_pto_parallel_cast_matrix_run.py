@@ -232,7 +232,7 @@ def _run_pair(npu, src, dst, lanes, extent=None):
         f"{src}->{dst} VL{lanes}: value mismatch\n got={got[:16].tolist()}\n exp={expected[:16].tolist()}"
     )
     assert got.numel() == expected.numel() == storage
-    return got, expected, storage
+    return got, expected, storage, values[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -267,38 +267,28 @@ DEVICE_PAIRS = [
     ("uint32", "int32"),
 ]
 
+REFERENCE_VALUES = {
+    ("int8", "uint32"): [(-1, 4294967295)],
+    ("uint8", "int32"): [(255, 255)],
+    ("int32", "int8"): [(300, 44)],
+    ("int32", "uint8"): [(-1, 255), (256, 0)],
+}
+
 
 @pytest.mark.parametrize(("src", "dst"), DEVICE_PAIRS)
+@pytest.mark.pto
 def test_integer_pair_vl_device(npu, src, dst):
-    got, _, storage = _run_pair(npu, src, dst, 128)
+    got, _, storage, values = _run_pair(npu, src, dst, 128)
     # The returned allocation is the readable-storage contract (physical
     # load padding included); only the logical [0, 2*VL) region is written
     # and compared.  The padding beyond it is uninitialized by design.
     assert got.numel() == storage
     assert storage >= 256
-
-
-def test_reference_examples_are_exact(npu):
-    cases = [
-        ("int8", "uint32", -1, 4294967295),
-        ("uint8", "int32", 255, 255),
-        ("int32", "int8", 300, 44),
-        ("int32", "uint8", -1, 255),
-        ("int32", "uint8", 256, 0),
-    ]
-    for src, dst, value, expected in cases:
-        func, storage = _cast_kernel(src, dst, 128, extent=128)
-        kernel = tilelang.compile(func, target="pto", out_idx=-1)
-        values = [value] * storage
-        source = torch.tensor(values, dtype=TORCH_DT[src])
-        out = kernel(source.to(npu))
-        torch.npu.synchronize()
-        got = out.cpu()
-        assert got.numel() == storage
-        # Only the logical extent (128) was written; the physical-padding
-        # region is not part of the value contract.
-        assert int(got[0]) == expected, (src, dst, value, int(got[0]))
-        assert bool((got[:128] == expected).all()), (src, dst, value, got.tolist()[:8])
+    for source_value, expected_value in REFERENCE_VALUES.get((src, dst), []):
+        positions = [index for index, value in enumerate(values) if int(value) == source_value]
+        assert positions, (src, dst, source_value)
+        for index in positions:
+            assert int(got[index]) == expected_value, (src, dst, source_value, index, int(got[index]))
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +303,7 @@ def test_reference_examples_are_exact(npu):
         ("int16", "uint16", "uint32"),
     ],
 )
+@pytest.mark.pto
 def test_target_signed_continued_widening(npu, src, mid, out):
     """The converted target is consumed by its own same-sign widening: a
     '-' source value must not sign-extend through the unsigned target."""
@@ -333,6 +324,7 @@ def test_target_signed_continued_widening(npu, src, mid, out):
 # ---------------------------------------------------------------------------
 # C. Tail extent with padded source and output sentinels
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_tail_extent_with_output_sentinel(npu):
     src, dst, lanes, extent = "int8", "uint32", 128, 2 * 128 + 17
     func, storage = _tail_kernel(src, dst, lanes, extent)
@@ -358,6 +350,7 @@ SCALAR_INT_CASES = [
 
 
 @pytest.mark.parametrize(("src", "dst"), SCALAR_INT_CASES)
+@pytest.mark.pto
 def test_scalar_integer_runtime_cast(npu, src, dst):
     func = _scalar_cast_kernel(src, dst, 128)
     kernel = tilelang.compile(func, target="pto", out_idx=-1)
@@ -371,6 +364,7 @@ def test_scalar_integer_runtime_cast(npu, src, dst):
         assert bool((out == expected).all()), (src, dst, value)
 
 
+@pytest.mark.pto
 def test_scalar_integer_literal_cast(npu):
     @T.prim_func
     def main(C: T.Buffer((128,), "int32")):
@@ -387,6 +381,7 @@ def test_scalar_integer_literal_cast(npu):
     assert bool((out == 7).all()), out.tolist()[:8]
 
 
+@pytest.mark.pto
 def test_scalar_float_cast_rejected_by_device_compiler(npu):
     """The BiSheng device compiler rejects scalar float casts in an AIV loop.
 

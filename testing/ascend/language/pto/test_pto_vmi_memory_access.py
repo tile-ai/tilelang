@@ -332,6 +332,7 @@ def _func_calls(func, op_name):
     return found
 
 
+@pytest.mark.pto
 def test_frontend_keeps_ordinary_raw_address():
     """The frontend keeps automatic addresses raw until the descriptor pass.
 
@@ -378,6 +379,7 @@ def _runtime_branch_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_runtime_branch_compiles_through_pipeline():
     """The descriptor pass proves coverage from the enclosing branch facts."""
     artifact = _lower_pto(_runtime_branch_kernel())
@@ -389,6 +391,7 @@ def test_runtime_branch_compiles_through_pipeline():
     assert _const(call.args[1]) == 0
 
 
+@pytest.mark.pto
 def test_load_descriptor_originates_at_actual_load():
     """vload(work[64], size=64) declares [64,128) and instruction offset 0."""
     artifact = _lower_pto(_load_store_kernel())
@@ -400,6 +403,7 @@ def test_load_descriptor_originates_at_actual_load():
     assert ", 0, size=64)" in vload_line, vload_line
 
 
+@pytest.mark.pto
 def test_store_descriptor_originates_at_actual_destination():
     """vstore(..., work[192]) declares may-write [192,256) with offset 0."""
     artifact = _lower_pto(_load_store_kernel())
@@ -409,12 +413,6 @@ def test_store_descriptor_originates_at_actual_destination():
     vstore_line = next(ln.strip() for ln in source.splitlines() if "vmi.vstore" in ln)
     assert "addptr" in vstore_line and ", 192)" in vstore_line, vstore_line
     assert "), 0, mask)" in vstore_line, vstore_line
-
-
-def test_nonzero_load_and_store_compile_through_backend():
-    kernel = _compile_pto(_load_store_kernel())
-    source = kernel.get_kernel_source()
-    assert "pto.vmi.vload(" in source and "pto.vmi.vstore(" in source, source
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +449,12 @@ def _elem_offset_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_buffer_region_source_declares_from_region_minimum():
     assert _vload_descriptor(_buffer_region_kernel()) == (0, 64, 1, 0)
 
 
+@pytest.mark.pto
 def test_ramp_source_uses_the_public_buffer_region_base():
     """An automatic BufferLoad with a Ramp index consumes ``Ramp.base``.
 
@@ -479,6 +479,7 @@ def test_ramp_source_uses_the_public_buffer_region_base():
     assert "addptr" in vload_line and ", 32)" in vload_line, vload_line
 
 
+@pytest.mark.pto
 def test_elem_offset_counted_exactly_once():
     """A view with elem_offset=16 loaded at index 32 starts at element 48."""
     artifact = _lower_pto(_elem_offset_kernel())
@@ -498,6 +499,7 @@ def test_elem_offset_counted_exactly_once():
     ],
     ids=["b8", "b16", "b32-size80"],
 )
+@pytest.mark.pto
 def test_ordinary_load_covers_full_physical_vectors(dtype, size, expected):
     @T.prim_func
     def main(A: T.Tensor((1024,), dtype), C: T.Tensor((1024,), dtype)):
@@ -516,6 +518,7 @@ def test_ordinary_load_covers_full_physical_vectors(dtype, size, expected):
 # ---------------------------------------------------------------------------
 # Logical size 80 / masks never shrink the footprint
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_size80_load_declares_two_full_physical_reads():
     """b32 size 80 loads two 64-lane physical reads, so the extent is 128."""
 
@@ -533,6 +536,7 @@ def test_size80_load_declares_two_full_physical_reads():
     assert _vstore_descriptor(main) == (128, 80, 2, 0)
 
 
+@pytest.mark.pto
 def test_size80_backend_lowering_covers_second_physical_chunk():
     """Direct PTOAS compile of the size-80 PTO form the descriptor describes.
 
@@ -561,6 +565,7 @@ def test_size80_backend_lowering_covers_second_physical_chunk():
     assert "pto.vlds %0[%c128]" in vpto, vpto
 
 
+@pytest.mark.pto
 def test_store_mask_activity_does_not_shrink_may_write():
     """A partial or all-false mask keeps the full 64-lane may-write span."""
 
@@ -585,6 +590,7 @@ def test_store_mask_activity_does_not_shrink_may_write():
 # ---------------------------------------------------------------------------
 # Group envelopes, negative and dynamic stride
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_group_ordinary_envelope_covers_all_groups():
     """A=64, N=128, G=2, S=128 => [64,256)."""
 
@@ -602,6 +608,7 @@ def test_group_ordinary_envelope_covers_all_groups():
     assert _vload_descriptor(main) == (64, 192, 1, 0)
 
 
+@pytest.mark.pto
 def test_group_slot_uses_one_element_per_group():
     @T.prim_func
     def slot(A: T.Tensor((768,), F32), C: T.Tensor((768,), F32)):
@@ -620,6 +627,7 @@ def test_group_slot_uses_one_element_per_group():
     assert _vstore_descriptor(slot) == (256, 449, 2, 0)
 
 
+@pytest.mark.pto
 def test_group_static_negative_stride_relocates_lowest_address():
     """A=192, N=128, G=2, S=-128 => envelope [64,256) and instruction offset 128."""
 
@@ -639,6 +647,7 @@ def test_group_static_negative_stride_relocates_lowest_address():
 
 
 @pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+@pytest.mark.pto
 def test_group_dynamic_stride_has_no_proven_bounds(is_load):
     """A runtime group stride has no finite envelope, even on a tight buffer."""
 
@@ -664,6 +673,7 @@ def test_group_dynamic_stride_has_no_proven_bounds(is_load):
     _assert_descriptor_error(build, op, "group stride has no proven bounds", descriptor=False)
 
 
+@pytest.mark.pto
 def test_group_negative_stride_below_view_origin_is_rejected():
     """The envelope is finite, but no view descriptor expresses its low start."""
 
@@ -684,6 +694,7 @@ def test_group_negative_stride_below_view_origin_is_rejected():
     _assert_descriptor_error(build, "T.vmi.vload", "finite access envelope starts below the buffer view origin")
 
 
+@pytest.mark.pto
 def test_group_negative_stride_shifted_index_below_zero_is_rejected():
     """Relocating a 1-D descriptor must not produce a negative buffer index."""
 
@@ -703,6 +714,7 @@ def test_group_negative_stride_shifted_index_below_zero_is_rejected():
     _assert_descriptor_error(build, "T.vmi.vload", "finite access envelope starts below the buffer view origin")
 
 
+@pytest.mark.pto
 def test_group_negative_stride_dense_root_form_keeps_finite_descriptor():
     """The equivalent root[128] form stays supported with address-preserving offset."""
 
@@ -721,6 +733,7 @@ def test_group_negative_stride_dense_root_form_keeps_finite_descriptor():
     assert _descriptor(artifact, "tl.vmi.vstore") == (0, 192, 2, 128)
 
 
+@pytest.mark.pto
 def test_group_negative_stride_nd_uses_padded_origin_plan():
     """A dense 2-D buffer meets the padded-origin layout condition."""
 
@@ -739,6 +752,7 @@ def test_group_negative_stride_nd_uses_padded_origin_plan():
 
 
 @pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+@pytest.mark.pto
 def test_group_negative_stride_negative_coordinate_uses_legalized_address(is_load):
     """work[2,-32] is normalized to work[2,32] (linear 160) before the pass.
 
@@ -789,6 +803,7 @@ def _padded_view_kernel(row=1, col=0):
     return main, view_data["var"]
 
 
+@pytest.mark.pto
 def test_padded_group_negative_stride_uses_buffer_origin():
     """view[1,0] with group stride -256 reads [0,320): the buffer origin covers it."""
     main, view_data = _padded_view_kernel(1, 0)
@@ -808,6 +823,7 @@ def test_padded_group_negative_stride_uses_buffer_origin():
     assert _const(store_ptr.args[2]) + _const(store_call.args[2]) == 256
 
 
+@pytest.mark.pto
 def test_padded_group_negative_stride_counts_elem_offset_once():
     """The descriptor origin carries elem_offset; the relative offset excludes it."""
     view_data = {}
@@ -855,6 +871,7 @@ def _sync_events(ir):
     return events
 
 
+@pytest.mark.pto
 def test_padded_low_group_dma_synchronizes_before_vmi_load():
     """Only the low group is initialized, so no other DMA can mask a missing pair."""
 
@@ -888,6 +905,7 @@ def test_padded_low_group_dma_synchronizes_before_vmi_load():
 # ---------------------------------------------------------------------------
 # Pipeline placement and the codegen guard for the descriptor pass
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_descriptor_pipeline_order():
     """The descriptor runs once after InjectAssumes and before VerifyBufferInit.
 
@@ -939,6 +957,7 @@ def test_descriptor_pipeline_order():
             assert _const(address.args[2]) == 1
 
 
+@pytest.mark.pto
 def test_descriptor_pass_is_pto_only():
     """Plain AscendC lowering must not run the PTO descriptor or marker passes."""
 
@@ -956,6 +975,7 @@ def test_descriptor_pass_is_pto_only():
     assert artifact.kernel_source
 
 
+@pytest.mark.pto
 def test_vmi_store_does_not_fake_a_read(capfd):
     """A write-only VMI store is not reported as a read by VerifyBufferInit."""
     artifact = _lower_pto(_store_only_kernel())
@@ -965,6 +985,7 @@ def test_vmi_store_does_not_fake_a_read(capfd):
     assert _descriptor(artifact, "tl.vmi.vstore") == (_merged_target_offset(F32, F32, count=64), 64, 2, 0)
 
 
+@pytest.mark.pto
 def test_one_lane_vmi_value_remains_vmi_data():
     """A size=1 VMI value keeps its scalar TIR dtype but is still VMI data.
 
@@ -981,6 +1002,7 @@ def test_one_lane_vmi_value_remains_vmi_data():
     assert isinstance(value, tvm.tirx.Call) and value.op.name == "tl.vmi.vload", value
 
 
+@pytest.mark.pto
 def test_formal_vmi_read_does_not_hide_a_later_scalar_read(capfd):
     """A read-only VMI descriptor is not a writer for VerifyBufferInit.
 
@@ -1115,6 +1137,7 @@ def _inner_index_address_func():
     return tvm.tirx.PrimFunc([], body).with_attr("global_symbol", "main")
 
 
+@pytest.mark.pto
 def test_codegen_rejects_unlowered_outermost_vmi_address():
     """Only the actual address operand is diagnosed, with op, pass and span."""
     with pytest.raises(tvm.error.TVMError) as excinfo:
@@ -1132,6 +1155,7 @@ def test_codegen_rejects_unlowered_outermost_vmi_address():
     assert f"{_CODEGEN_SOURCE}:20:9" in message, message
 
 
+@pytest.mark.pto
 def test_codegen_allows_a_nested_index_read_in_a_formal_address():
     """The scalar read inside an explicit access_ptr is not the address operand."""
     source = _pto_source(_inner_index_address_func())
@@ -1152,6 +1176,7 @@ def test_codegen_allows_a_nested_index_read_in_a_formal_address():
     ],
     ids=["b32-single-vl-s1", "b32-single-vl-s2", "b32-double-vl-s2", "b16-single-vl-s2"],
 )
+@pytest.mark.pto
 def test_block_stride_envelope_uses_32b_blocks(dtype, size, block_stride, expected_extent):
     # The destination at 320 spans up to 320 + expected_extent = 568 (b32
     # double-VL) / 560 (b16); allocate and initialize the real footprint.
@@ -1179,6 +1204,7 @@ def test_block_stride_envelope_uses_32b_blocks(dtype, size, block_stride, expect
     ],
     ids=["dynamic", "negative"],
 )
+@pytest.mark.pto
 def test_block_stride_without_proven_bounds_is_rejected(dynamic, reason):
     def build():
         @T.prim_func
@@ -1219,6 +1245,7 @@ def _fp4_kernel(index=64, size=128):
     return main
 
 
+@pytest.mark.pto
 def test_fp4_descriptor_stays_logical_then_packed_once():
     with _capture_rewrite_input() as captured:
         artifact = _lower_pto(_fp4_kernel())
@@ -1239,6 +1266,7 @@ def test_fp4_descriptor_stays_logical_then_packed_once():
     assert load_line.rstrip().endswith("size=(128 // 2))"), load_line
 
 
+@pytest.mark.pto
 def test_fp4_odd_start_is_still_rejected():
     """The logical descriptor keeps the odd start; the later FP4 pack rejects it."""
     with pytest.raises(tvm.error.TVMError, match="fp4 access_ptr offset must be even"):
@@ -1273,6 +1301,7 @@ def _merged_target_offset(src, dst, count=512) -> int:
     ],
     ids=["pk-b32", "pk4-b32", "pk-b16"],
 )
+@pytest.mark.pto
 def test_packed_store_declares_logical_target_elements(src, dst, vcvt_kwargs):
     size = 128
 
@@ -1320,6 +1349,7 @@ def _explicit_pointer_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_explicit_pointer_keeps_declaration_and_extra_offset():
     artifact = _lower_pto(_explicit_pointer_kernel())
     func, call = _single(artifact, "tl.vmi.vload")
@@ -1338,6 +1368,7 @@ def test_explicit_pointer_keeps_declaration_and_extra_offset():
     assert "vload(p, 16, size=64)" in source, source
 
 
+@pytest.mark.pto
 def test_explicit_pointer_requires_scalar_integer_instruction_offset():
     """The explicit-pointer instruction offset stays a frontend type check.
 
@@ -1364,6 +1395,7 @@ def test_explicit_pointer_requires_scalar_integer_instruction_offset():
         build()
 
 
+@pytest.mark.pto
 def test_explicit_pointer_scope_validation_is_preserved():
     """Recovering the element type from an immediate access_ptr does not
     bypass the UB scope check for indirect-address operations."""
@@ -1447,6 +1479,7 @@ def _ordinary_access_kernel(shape, starts, size, *, is_load, strides=None, expli
     ],
     ids=["in-row", "last-row", "first-row", "cross-row-tight-2x128", "cross-row", "store-cross-row", "rounded-cross-row"],
 )
+@pytest.mark.pto
 def test_ordinary_local_descriptor_requires_complete_row_major_coverage(shape, starts, size, is_load, expected):
     """A local descriptor keeps its own start, so the existing row-major carry
     must include the whole physical envelope; there is no whole-buffer fallback.
@@ -1463,6 +1496,7 @@ def test_ordinary_local_descriptor_requires_complete_row_major_coverage(shape, s
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["store-direct", "store-explicit"])
+@pytest.mark.pto
 def test_cross_row_small_mask_store_is_rejected(explicit):
     """A one-lane store mask never shrinks the may-write envelope, so a
     cross-row store address is rejected on the direct and explicit paths."""
@@ -1475,6 +1509,7 @@ def test_cross_row_small_mask_store_is_rejected(explicit):
 
 
 @pytest.mark.parametrize("is_load", [True, False], ids=["load-direct", "store-direct"])
+@pytest.mark.pto
 def test_transposed_view_access_is_rejected(is_load):
     """A local coordinate of a non-tight view has no local coverage proof; the
     store form is not a bypass."""
@@ -1506,6 +1541,7 @@ def test_transposed_view_access_is_rejected(is_load):
         "3d-high-axis-carry-512",
     ],
 )
+@pytest.mark.pto
 def test_explicit_descriptor_must_cover_the_ordinary_access(shape, starts, extent, size, expected):
     """An explicit access_ptr is caller-declared, so it is never rewritten: its
     extent must contain the complete physical envelope and its declared region
@@ -1525,6 +1561,7 @@ def test_explicit_descriptor_must_cover_the_ordinary_access(shape, starts, exten
         assert "pto.vmi.vload(" in kernel.get_kernel_source()
 
 
+@pytest.mark.pto
 def test_explicit_pointer_whole_dense_permutation_is_accepted():
     """An exact whole dense permutation has no over-approximation or aliasing."""
 
@@ -1543,6 +1580,7 @@ def test_explicit_pointer_whole_dense_permutation_is_accepted():
     assert _vload_descriptor(main) == (0, 256, 1, 0)
 
 
+@pytest.mark.pto
 def test_explicit_pointer_partial_permutation_is_rejected():
     """A non-tight view needs an exact whole dense permutation, not a prefix."""
 
@@ -1564,6 +1602,7 @@ def test_explicit_pointer_partial_permutation_is_rejected():
     _assert_descriptor_error(build, "T.vmi.vload", "does not cover the complete access", explicit=True)
 
 
+@pytest.mark.pto
 def test_explicit_pointer_envelope_and_direction_diagnostics():
     def kernel(body):
         @T.prim_func
@@ -1619,6 +1658,7 @@ def test_explicit_pointer_envelope_and_direction_diagnostics():
     )
 
 
+@pytest.mark.pto
 def test_ordinary_address_rejects_unrecoverable_handles():
     def raw_data():
         @T.prim_func
@@ -1671,6 +1711,7 @@ def test_ordinary_address_rejects_unrecoverable_handles():
 
 
 @pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+@pytest.mark.pto
 def test_ordinary_accesses_require_a_ub_buffer(is_load):
     """Direct and explicit ordinary addresses share the UB scope check."""
 
@@ -1695,6 +1736,7 @@ def test_ordinary_accesses_require_a_ub_buffer(is_load):
         build()
 
 
+@pytest.mark.pto
 def test_ordinary_dynamic_outer_row_is_accepted():
     """The outermost axis has no outward carry to prove, so a legal dynamic
     row coordinate stays expressible without a general bounds proof."""
@@ -1719,6 +1761,7 @@ def test_ordinary_dynamic_outer_row_is_accepted():
     assert _const(call.args[1]) == 0
 
 
+@pytest.mark.pto
 def test_vstore_requires_matching_value_and_destination_element_dtype():
     """The descriptor extent and the value lanes must use the same element unit."""
 
@@ -1795,6 +1838,7 @@ def _nested_in_row():
     [_serial_in_row, _chained_let_in_row, _nested_in_row],
     ids=["serial", "chained-let", "nested"],
 )
+@pytest.mark.pto
 def test_ordinary_dynamic_in_row_indices_are_accepted(factory):
     """Loop domains and stable lets prove that the inner start stays in its row.
 
@@ -1859,12 +1903,14 @@ def _unknown_inner_start():
     [_serial_wrap, _mutable_snapshot, _unknown_inner_start],
     ids=["serial-3", "mutable-snapshot", "unknown-scalar"],
 )
+@pytest.mark.pto
 def test_ordinary_dynamic_row_crossing_is_rejected(factory):
     """An unprovable start keeps the diagnostic; a mutable read or an unknown
     scalar is never bound as an equality in the local proof environment."""
     _assert_descriptor_error(factory, "T.vmi.vload", "existing row-major carry")
 
 
+@pytest.mark.pto
 def test_ordinary_dynamic_shape_in_row_is_accepted():
     """A symbolic inner length is accepted when the static access extent stays
     inside that innermost row."""
@@ -1889,6 +1935,7 @@ def test_ordinary_dynamic_shape_in_row_is_accepted():
     assert _const(call.args[1]) == 0
 
 
+@pytest.mark.pto
 def test_ordinary_dynamic_shape_wrap_is_rejected():
     """A symbolic row length fails when the start is not provably inside it."""
 
@@ -1930,6 +1977,7 @@ def _symbolic_extent_kernel(col):
 
 
 @pytest.mark.parametrize(("col", "accepted"), [(0, True), (64, False)], ids=["in-row", "cross-row"])
+@pytest.mark.pto
 def test_explicit_symbolic_extent_must_stay_in_the_innermost_row(col, accepted):
     """A non-constant descriptor extent is provable only inside the innermost
     row: the same extent from a cross-row start is rejected."""
@@ -2007,6 +2055,7 @@ def _negative_view_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_indexed_frontend_keeps_raw_address():
     for kernel, op_name, address_index in (
         (_gather_kernel, "tl.vmi.vgather", 0),
@@ -2025,6 +2074,7 @@ def test_indexed_frontend_keeps_raw_address():
         assert address.buffer.scope() in ("shared", "shared.dyn")
 
 
+@pytest.mark.pto
 def test_gather_descriptor_uses_owner_base():
     artifact = _lower_pto(_gather_kernel())
     _, call = _single(artifact, "tl.vmi.vgather")
@@ -2047,6 +2097,7 @@ def test_gather_descriptor_uses_owner_base():
     assert "addptr" in negative_line and ", 160)" in negative_line, negative_line
 
 
+@pytest.mark.pto
 def test_scatter_descriptor_uses_owner_base():
     artifact = _lower_pto(_scatter_kernel())
     _, call = _single(artifact, "tl.vmi.vscatter")
@@ -2101,6 +2152,7 @@ def _vmi_body_kernel(body):
         ),
     ],
 )
+@pytest.mark.pto
 def test_removed_vmi_parameters_fail_in_legal_scope(case_id, body, message):
     with pytest.raises(TypeError, match=message):
         _vmi_body_kernel(body)

@@ -169,6 +169,7 @@ def _trial_input(torch_dtype, signed, trial, lanes):
 
 
 @pytest.mark.parametrize("dtype", list(CASES), ids=list(CASES))
+@pytest.mark.pto
 def test_simtvf_local_integer_roundtrip_arithmetic_and_boundaries(npu, dtype):
     torch_dtype, lanes, bounds, signed, highbit = CASES[dtype]
     kernel = tilelang.compile(
@@ -224,6 +225,7 @@ def _shared_control_kernel(dtype):
 
 
 @pytest.mark.parametrize("dtype,torch_dtype", [("uint8", torch.uint8), ("int32", torch.int32)])
+@pytest.mark.pto
 def test_simtvf_shared_integer_access_control(npu, dtype, torch_dtype):
     kernel = tilelang.compile(_shared_control_kernel(dtype), target="pto", out_idx=-1)
     source = kernel.get_kernel_source()

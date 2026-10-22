@@ -161,6 +161,7 @@ def _assert_carrier_inside_scope(block, data, kind):
 # ---------------------------------------------------------------------------
 # Frontend registration and scope
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_frontend_registers_each_explicit_slot_once():
     import tilelang.ascend.language as T
 
@@ -195,6 +196,7 @@ def test_frontend_registers_each_explicit_slot_once():
     assert not keys[0].same_as(keys[1])
 
 
+@pytest.mark.pto
 def test_frontend_registers_array_and_slot_kind_per_allocation():
     # A VMI data array and a pure SIMD register array can have identical
     # shape, dtype, and scope.  Only the VMI allocation is marked, and its
@@ -266,6 +268,7 @@ def test_frontend_registers_array_and_slot_kind_per_allocation():
     assert simd_regs.scope() == vmi_regs.scope() == "local"
 
 
+@pytest.mark.pto
 def test_frontend_rejects_mask_and_handle_register_arrays():
     # Only numeric data arrays are supported.  A mask element type would be
     # reclassified as VMI data on read, and a handle is not register data.
@@ -290,6 +293,7 @@ def test_frontend_rejects_mask_and_handle_register_arrays():
         build(T.vmi.vreg(64, "handle"))
 
 
+@pytest.mark.pto
 def test_frontend_accepts_wide_and_tfloat_array_elements():
     # The element contract is numeric, not a width whitelist: float64 and the
     # canonical tfloat32 vector descriptor are both valid register array
@@ -328,6 +332,7 @@ def test_frontend_accepts_wide_and_tfloat_array_elements():
 
 
 @pytest.mark.parametrize("api", ["alloc_local", "alloc_var"])
+@pytest.mark.pto
 def test_frontend_vmi_allocations_require_simdvf_scope(api):
     import tilelang.ascend.language as T
 
@@ -347,6 +352,7 @@ def test_frontend_vmi_allocations_require_simdvf_scope(api):
         build()
 
 
+@pytest.mark.pto
 def test_frontend_ordinary_alloc_var_keeps_its_unrestricted_scope():
     # The VMI APIs are SIMD_VF-only; the ordinary allocation API is not.
     import tilelang.ascend.language as T
@@ -364,6 +370,7 @@ def test_frontend_ordinary_alloc_var_keeps_its_unrestricted_scope():
 # ---------------------------------------------------------------------------
 # Ownership normalization emits scoped AttrStmt carriers
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_normalize_moves_marker_to_allocation_owner():
     slot_a = _slot(name="duplicate")
     slot_b = _slot(name="duplicate")
@@ -459,6 +466,7 @@ def test_normalize_moves_marker_to_allocation_owner():
     assert repeated["main"].body.same_as(rebound["main"].body)
 
 
+@pytest.mark.pto
 def test_normalize_emits_carriers_in_allocation_order():
     first = _slot(name="first")
     second = _slot(name="second")
@@ -484,6 +492,7 @@ def test_normalize_emits_carriers_in_allocation_order():
     assert scope.body.body.node.same_as(second.data)
 
 
+@pytest.mark.pto
 def test_normalize_array_marker_is_idempotent():
     regs = _array()
     vf = _vf(
@@ -504,6 +513,7 @@ def test_normalize_array_marker_is_idempotent():
     assert len(_carriers(once["main"].body)) == 1
 
 
+@pytest.mark.pto
 def test_normalize_keeps_existing_allocation_annotation_without_carrier():
     slot = _slot()
     vf = _vf(
@@ -524,6 +534,7 @@ def test_normalize_keeps_existing_allocation_annotation_without_carrier():
     assert allocation.buffer.data.same_as(slot.data)
 
 
+@pytest.mark.pto
 def test_normalize_attaches_kind_to_statement_allocation():
     slot = _slot()
     vf = _vf(
@@ -547,6 +558,7 @@ def test_normalize_attaches_kind_to_statement_allocation():
     assert len(stores) == 1
 
 
+@pytest.mark.pto
 def test_normalize_drops_residual_map_entry_but_emits_the_real_carrier():
     slot = _slot()
     stale = _slot(name="stale")
@@ -578,6 +590,7 @@ def test_normalize_drops_residual_map_entry_but_emits_the_real_carrier():
 # ---------------------------------------------------------------------------
 # Early explicit unroll clones the carrier with the allocation Var
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_unroll_copies_marker_to_each_cloned_vf_allocation():
     out = tirx.decl_buffer((2,), "int32", name="out")
     slot = _slot()
@@ -630,6 +643,7 @@ def test_unroll_copies_marker_to_each_cloned_vf_allocation():
     assert all(any(carrier_data.same_as(data) for data in data_vars) for carrier_data in carrier_nodes)
 
 
+@pytest.mark.pto
 def test_unroll_clones_array_allocation_and_marker():
     out = tirx.decl_buffer((2,), "float32x64", name="out")
     regs = _array(name="regs")
@@ -701,6 +715,7 @@ def test_unroll_clones_array_allocation_and_marker():
         assert not any(carrier.node.same_as(data) for data in twin_vars)
 
 
+@pytest.mark.pto
 def test_unroll_keeps_original_data_var_when_no_clone_rebuilds_the_allocation():
     # The carrier is inside the cloned loop, but its allocation lives on the
     # enclosing block, so the freshener has no replacement Var for it.  The
@@ -716,6 +731,7 @@ def test_unroll_keeps_original_data_var_when_no_clone_rebuilds_the_allocation():
     assert not nodes(after, tirx.For)
 
 
+@pytest.mark.pto
 def test_late_unroll_clones_marked_array_allocation_and_marker():
     # LowerOpaqueBlock hands allocations to code generation as AllocBuffer
     # statements.  If one is still inside an explicitly unrolled body at the
@@ -774,6 +790,7 @@ def test_late_unroll_clones_marked_array_allocation_and_marker():
     assert sorted(out_indices) == [0, 1]
 
 
+@pytest.mark.pto
 def test_normalize_rejects_allocation_outside_simd_vf():
     slot = _slot()
     outside = tirx.SBlock(
@@ -796,6 +813,7 @@ def test_normalize_rejects_allocation_outside_simd_vf():
         _normalize(root)
 
 
+@pytest.mark.pto
 def test_normalize_rejects_vf_owner_without_scope_statement():
     # A SIMD_VF owner must already have the scope statement as its outermost
     # body; emitting carriers there would otherwise move them outside it.
@@ -818,6 +836,7 @@ def test_normalize_rejects_vf_owner_without_scope_statement():
 
 
 @pytest.mark.parametrize("placement", ["outside-vf", "other-vf"])
+@pytest.mark.pto
 def test_normalize_rejects_existing_carrier_outside_owning_vf(placement):
     # A carrier for a marked allocation is only an existing marker when it is
     # in the region normalization would emit it into.  A carrier at the root,
@@ -841,6 +860,7 @@ def test_normalize_rejects_existing_carrier_outside_owning_vf(placement):
 # LowerOpaqueBlock preserves carriers; Import attaches final annotations
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("realized", [False, True], ids=["direct", "realized"])
+@pytest.mark.pto
 def test_lower_opaque_preserves_carrier_and_import_transfers(realized):
     slot = _slot()
     body = tirx.BufferStore(slot, tirx.IntImm("int32", 3), [0])
@@ -874,6 +894,7 @@ def test_lower_opaque_preserves_carrier_and_import_transfers(realized):
     assert len(stores) == 1
 
 
+@pytest.mark.pto
 def test_lower_opaque_materializes_allocation_before_scope_marker():
     # The final allocation may be materialized lexically before the
     # tl.simdvf_scope AttrStmt.  Import must match it by data Var identity, not
@@ -899,6 +920,7 @@ def test_lower_opaque_materializes_allocation_before_scope_marker():
 
 
 @pytest.mark.parametrize("realized", [False, True], ids=["direct", "realized"])
+@pytest.mark.pto
 def test_lower_opaque_transfers_array_kind_and_leaves_unmarked_alloc(realized):
     regs = _array(shape=(2, 3))
     slot = _slot()
@@ -932,6 +954,7 @@ def test_lower_opaque_transfers_array_kind_and_leaves_unmarked_alloc(realized):
 
 
 @pytest.mark.parametrize("dtype", ["float64x64", "custom[tfloat32]x64"])
+@pytest.mark.pto
 def test_lower_opaque_accepts_wide_and_tfloat_array_markers(dtype):
     # The allocation validator accepts every numeric width, including float64
     # and tfloat32, and excludes only bool/handle.  This is the marker
@@ -964,6 +987,7 @@ def test_lower_opaque_accepts_wide_and_tfloat_array_markers(dtype):
     ],
     ids=["not-a-map", "non-var-key", "non-string-value"],
 )
+@pytest.mark.pto
 def test_normalize_rejects_malformed_annotation_container(make_marker, message):
     slot = _slot()
     block = tirx.SBlock(
@@ -979,6 +1003,7 @@ def test_normalize_rejects_malformed_annotation_container(make_marker, message):
         _normalize(_vf(tirx.SBlockRealize([], True, block)))
 
 
+@pytest.mark.pto
 def test_normalize_rejects_invalid_allocation_markers():
     def normalized(buffer, kind):
         block = tirx.SBlock(
@@ -1034,12 +1059,14 @@ def test_normalize_rejects_invalid_allocation_markers():
     ],
     ids=["orphan", "non-var-node", "non-string-value"],
 )
+@pytest.mark.pto
 def test_import_rejects_malformed_carrier(make_statement, message):
     slot = _slot()
     with pytest.raises(tvm.error.InternalError, match=message):
         _import_raw(make_statement(slot))
 
 
+@pytest.mark.pto
 def test_marker_representations_reject_conflicting_kinds():
     slot = _slot()
 
@@ -1085,6 +1112,7 @@ def test_marker_representations_reject_conflicting_kinds():
         _normalize(root)
 
 
+@pytest.mark.pto
 def test_import_rejects_invalid_carrier_kind_and_allocation_contract():
     slot = _slot()
     invalid_kind = tirx.SeqStmt([tirx.AllocBuffer(slot), _carrier(slot.data, "mask_array")])
@@ -1098,6 +1126,7 @@ def test_import_rejects_invalid_carrier_kind_and_allocation_contract():
 
 
 @pytest.mark.parametrize("target", [None, Target("cuda")], ids=["no-target", "non-pto"])
+@pytest.mark.pto
 def test_marker_passes_are_no_ops_without_a_pto_target(target):
     slot = _slot()
     body = tirx.SeqStmt([tirx.AllocBuffer(slot), _carrier(slot.data)])
@@ -1113,6 +1142,7 @@ def test_marker_passes_are_no_ops_without_a_pto_target(target):
 # ---------------------------------------------------------------------------
 # Array markers survive flattening and keep one register index per element
 # ---------------------------------------------------------------------------
+@pytest.mark.pto
 def test_flatten_preserves_array_marker_and_index():
     regs = _array(shape=(2, 3))
     body = tirx.BufferStore(regs, tirx.BufferLoad(regs, [0, 0]), [1, 2])

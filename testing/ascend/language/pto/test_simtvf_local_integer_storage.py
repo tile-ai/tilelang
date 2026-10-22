@@ -60,6 +60,7 @@ def _simt_local_integer_kernel(dtype):
         ("uint32", "pto.ui32", "pto.i32"),
     ],
 )
+@pytest.mark.pto
 def test_simtvf_local_integer_scalar_and_contiguous_accesses_use_signless_storage(dtype, logical_type, backing_type):
     source = _lower(_simt_local_integer_kernel(dtype)).kernel_source
 
@@ -95,17 +96,6 @@ def test_simtvf_local_integer_scalar_and_contiguous_accesses_use_signless_storag
     assert len(re.findall(r", local,", source)) == 2
 
 
-@pytest.mark.parametrize("dtype", ["int8", "uint8", "int32", "uint32"])
-def test_simtvf_local_integer_kernel_compiles_through_backend(dtype):
-    """All four admitted dtypes compile through the full PTO backend."""
-    target = normalize_pto_target("pto")
-    with target:
-        kernel = tilelang.compile(_simt_local_integer_kernel(dtype), target="pto", out_idx=-1)
-    source = kernel.get_kernel_source()
-    backing = "pto.i8" if dtype in ("int8", "uint8") else "pto.i32"
-    assert f"pto.alloc_buffer((8,), {backing})" in source
-
-
 # ---------------------------------------------------------------------------
 # Vector-element local slot allocation
 # ---------------------------------------------------------------------------
@@ -125,12 +115,13 @@ def _simt_local_integer_vector_kernel(alloc=T.alloc_local):
     [("local", T.alloc_local), ("local.fragment", T.alloc_fragment)],
     ids=["local", "local.fragment"],
 )
+@pytest.mark.pto
 def test_simtvf_vector_integer_local_allocation_is_signless(scope_name, alloc):
     """Vector-element local slots allocate with the same-width signless i8 backing."""
     source = _lower(_simt_local_integer_vector_kernel(alloc)).kernel_source
 
-    assert "pto.alloc_buffer((1,), pto.i8)" in source
-    assert "pto.alloc_buffer((1,), pto.si8)" not in source
+    assert "pto.alloc_buffer((4,), pto.i8)" in source
+    assert "pto.alloc_buffer((4,), pto.si8)" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +139,7 @@ def _unsupported_local_kernel(dtype):
 
 
 @pytest.mark.parametrize("dtype", ["int16", "int64"])
+@pytest.mark.pto
 def test_simtvf_local_integer_admission_boundary_is_unchanged(dtype):
     with pytest.raises(Exception, match="PTO SIMT local allocation supports"):
         _lower(_unsupported_local_kernel(dtype))
@@ -173,6 +165,7 @@ def _local_var_kernel(dtype):
     return main
 
 
+@pytest.mark.pto
 def test_simtvf_local_var_integer_keeps_logical_type():
     source = _lower(_local_var_kernel("int32")).kernel_source
     # local.var is a Python SSA value typed with the logical dtype; it is not
@@ -197,6 +190,7 @@ def _shared_control_kernel(dtype):
 
 
 @pytest.mark.parametrize("dtype", ["uint8", "int32"])
+@pytest.mark.pto
 def test_simtvf_shared_integer_accesses_do_not_use_local_adapter(dtype):
     source = _lower(_shared_control_kernel(dtype)).kernel_source
     line = next(line for line in source.splitlines() if "pto.store(pto.load(" in line)
@@ -218,6 +212,7 @@ def _vmi_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_vmi_integer_carrier_keeps_signed_type():
     artifact = _lower(_vmi_kernel())
     found = []

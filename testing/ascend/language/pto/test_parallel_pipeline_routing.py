@@ -9,8 +9,7 @@ Scope: this file proves routing only.
   the three PTO Parallel passes;
 * PTO ``SimtVF`` and hand-written PTO VMI modules without a ``T.Parallel``
   unit enter the same three PTO pass entry points, but are bypassed inside
-  those passes and accepted without conversion;
-* ``PlanPtoSlotStorage`` is neither registered nor called.
+  those passes and accepted without conversion.
 
 This file deliberately asserts routing only: no PTO Parallel semantics, no
 lowering output, and no Fragment/slot, control-flow, or Reduce support. Use
@@ -29,7 +28,6 @@ import os
 import pytest
 
 import tilelang.ascend.language as T
-from tilelang.ascend import transform as ascend_transform
 from tilelang.ascend.target import (
     normalize_ascend_target,
     normalize_asc_target,
@@ -51,7 +49,6 @@ _PTO_PARALLEL_PASSES = (
     "tl.VectorizeParallelToPTO",
 )
 _ASCENDC_SIMDVF_PASS = "tl.AscendSimdVFLowerParallel"
-_SLOT_STORAGE_PASS = "PlanPtoSlotStorage"
 
 
 class _PassRecorder(PassEventObserver):
@@ -195,10 +192,12 @@ def _simt_kernel(n: int = 2):
 def test_pto_simdvf_parallel_routes_verify_legalize_vectorize_in_order():
     artifact, names = _lower_with_trace(_simdvf_parallel_kernel(), "pto")
     _assert_ordered(names, _PTO_PARALLEL_PASSES)
+    assert "tl.InsertSync" in names, f"InsertSync was not executed; trace tail: {names[-12:]}"
     assert _ASCENDC_SIMDVF_PASS not in names, "the PTO route must not run the AscendC SIMD_VF lowering"
     _maybe_dump_artifacts("pto-simdvf-parallel", names, artifact)
 
 
+@pytest.mark.pto
 def test_ascendc_simdvf_keeps_ascend_simdvf_lower_parallel():
     artifact, names = _lower_with_trace(_simdvf_parallel_kernel(), "ascend")
     assert _ASCENDC_SIMDVF_PASS in names, f"the AscendC route must keep AscendSimdVFLowerParallel; trace tail: {names[-12:]}"
@@ -221,13 +220,3 @@ def test_pto_handwritten_vmi_without_parallel_is_accepted():
     for pass_name in _PTO_PARALLEL_PASSES:
         assert pass_name in names, f"{pass_name} missing on the PTO route; tail: {names[-12:]}"
     _maybe_dump_artifacts("pto-handwritten-vmi", names, artifact)
-
-
-@pytest.mark.pto
-def test_plan_pto_slot_storage_is_not_registered_or_called():
-    assert not hasattr(ascend_transform, _SLOT_STORAGE_PASS), (
-        "PlanPtoSlotStorage belongs to a later pipeline stage and must not be registered yet"
-    )
-    artifact, names = _lower_with_trace(_simdvf_parallel_kernel(), "pto")
-    assert not any(_SLOT_STORAGE_PASS in name for name in names), "no PlanPtoSlotStorage step may run"
-    _maybe_dump_artifacts("pto-slot-storage-absence", names, artifact)

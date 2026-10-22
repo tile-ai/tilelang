@@ -223,6 +223,7 @@ def _dma_load_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_dma_to_nonzero_load_dependency_20_trials(npu):
     kernel, source = _compile(_dma_load_kernel())
     lines = source.splitlines()
@@ -259,6 +260,7 @@ def _store_dma_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_nonzero_store_to_dma_dependency_20_trials(npu):
     kernel, source = _compile(_store_dma_kernel())
     lines = source.splitlines()
@@ -297,6 +299,7 @@ def _indexed_gather_high_region_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_indexed_gather_high_region_dependency_20_trials(npu):
     kernel, source = _compile(_indexed_gather_high_region_kernel())
     lines = source.splitlines()
@@ -335,6 +338,7 @@ def _indexed_scatter_high_region_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_indexed_scatter_high_region_dependency_20_trials(npu):
     kernel, source = _compile(_indexed_scatter_high_region_kernel())
     lines = source.splitlines()
@@ -372,6 +376,7 @@ def _runtime_branch_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_runtime_branch_runtime_k(npu):
     """The generated kernel keeps the runtime branch and indexes with k."""
     kernel, source = _compile(_runtime_branch_kernel())
@@ -422,6 +427,7 @@ def _block_load_kernel(size, block_stride):
     [(64, 1), (64, 2), (128, 2)],
     ids=["single-vl-s1", "single-vl-s2", "multi-vl-s2"],
 )
+@pytest.mark.pto
 def test_block_stride_load(npu, size, block_stride):
     kernel, _ = _compile(_block_load_kernel(size, block_stride))
 
@@ -459,6 +465,7 @@ def _fp4_view_kernel(explicit_pointer):
 
 
 @pytest.mark.parametrize("explicit_pointer", [False, True], ids=["bufferload", "ptr-offset"])
+@pytest.mark.pto
 def test_fp4_nonzero_logical_start_raw_bytes(npu, explicit_pointer):
     kernel, source = _compile(_fp4_view_kernel(explicit_pointer))
     if explicit_pointer:
@@ -505,6 +512,7 @@ def _pk_b32_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_pk_b32_f16_store(npu):
     kernel, source = _compile(_pk_b32_kernel())
     vpto = _vpto_text(source)
@@ -538,6 +546,7 @@ def _explicit_pointer_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_explicit_pointer_base32_extra16_reads_48(npu):
     kernel, source = _compile(_explicit_pointer_kernel())
     _assert_addptr_pointer_use(source, ", 32)", "vmi.vload({name}, 16, size=64)")
@@ -602,6 +611,7 @@ def _assert_padded_group_same_view(func):
     assert tuple(int(stride) for stride in view.strides) == (256, 1), view.strides
 
 
+@pytest.mark.pto
 def test_padded_group_negative_stride_20_trials(npu):
     func = _padded_group_kernel()
     _assert_padded_group_same_view(func)
@@ -650,6 +660,7 @@ def _cross_row_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_cross_row_descriptor_20_trials(npu):
     kernel, source = _compile(_cross_row_kernel())
     lines = source.splitlines()
@@ -697,6 +708,7 @@ def _gather_kernel(explicit_pointer):
 
 
 @pytest.mark.parametrize("explicit_pointer", [False, True], ids=["direct", "ptr"])
+@pytest.mark.pto
 def test_gather_nonzero_base(npu, explicit_pointer):
     kernel, _ = _compile(_gather_kernel(explicit_pointer))
 
@@ -735,6 +747,7 @@ def _scatter_kernel(explicit_pointer):
 
 
 @pytest.mark.parametrize("explicit_pointer", [False, True], ids=["direct", "ptr"])
+@pytest.mark.pto
 def test_scatter_nonzero_base(npu, explicit_pointer):
     kernel, _ = _compile(_scatter_kernel(explicit_pointer))
 

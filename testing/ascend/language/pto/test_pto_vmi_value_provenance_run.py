@@ -62,6 +62,12 @@ def _compile(func):
     return kernel, kernel.get_kernel_source()
 
 
+def _one(source, needle):
+    hits = [line.strip() for line in source.splitlines() if needle in line]
+    assert len(hits) == 1, f"expected one line containing {needle!r}, got {hits!r}"
+    return hits[0]
+
+
 def _run_trials(kernel, make_case, device, trials):
     outputs = []
     for trial in range(trials):
@@ -162,6 +168,7 @@ INTEGER_REDUCE_CASES = [
 
 
 @pytest.mark.parametrize(("dtype", "reduce_name"), INTEGER_REDUCE_CASES)
+@pytest.mark.pto
 def test_integer_reduce_broadcast_is_bit_exact(npu, dtype, reduce_name):
     kernel, source = _compile(_reduce_broadcast(dtype, reduce_name))
     vbrc_line = next(line.strip() for line in source.splitlines() if "pto.vmi.vbrc(" in line)
@@ -178,6 +185,7 @@ def test_integer_reduce_broadcast_is_bit_exact(npu, dtype, reduce_name):
     _run_trials(kernel, make_case, npu, trials=20)
 
 
+@pytest.mark.pto
 def test_float32_reduce_broadcast_control(npu):
     kernel, source = _compile(_reduce_broadcast("float32", "vcmax"))
     vbrc_line = next(line.strip() for line in source.splitlines() if "pto.vmi.vbrc(" in line)
@@ -213,6 +221,7 @@ def _scalar_bridge(literal):
 
 
 @pytest.mark.parametrize("literal", [True, False], ids=["literal", "runtime"])
+@pytest.mark.pto
 def test_scalar_integer_bridge_device(npu, literal):
     kernel, source = _compile(_scalar_bridge(literal))
     if literal:
@@ -251,6 +260,7 @@ def _scalar_load_after_vmi_store():
     return main
 
 
+@pytest.mark.pto
 def test_scalar_buffer_load_after_vmi_store_device(npu):
     kernel, source = _compile(_scalar_load_after_vmi_store())
     vbrc_line = next(line.strip() for line in source.splitlines() if "pto.vmi.vbrc(" in line)
@@ -326,10 +336,16 @@ def _mutable_register(dtype, lanes, group):
 
 
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "float32"])
+@pytest.mark.pto
 def test_single_lane_mutable_slot_device(npu, dtype):
     kernel, source = _compile(_mutable_slot(dtype))
-    assert "slot = pto.vmi.vreg(1, " in source
+    pto_type = {"int32": "pto.si32", "uint32": "pto.ui32", "float32": "pto.f32"}[dtype]
+    assert f"slot = pto.vmi.vreg(1, {pto_type})" in source
     assert "slot = pto.vmi.vcmax(x, mask)" in source
+    vbrc_line = _one(source, "pto.vmi.vbrc(")
+    assert "pto.vmi.vbrc(slot, group=1, size=128)" in vbrc_line
+    assert "pto.cast(" not in vbrc_line
+    assert source.count("pto.vmi.vcmax(") == 1
 
     def make_case(trial):
         if dtype == "uint32":
@@ -347,9 +363,12 @@ def test_single_lane_mutable_slot_device(npu, dtype):
 
 
 @pytest.mark.parametrize("dtype", ["int32", "float32"])
+@pytest.mark.pto
 def test_mutable_slot_branch_device(npu, dtype):
     kernel, source = _compile(_mutable_slot_branch(dtype))
     assert "if tl.as_logical_bool(0 < scale):" in source
+    assert "slot = pto.vmi.vcmax(x, mask)" in source
+    assert "slot = pto.vmi.vcmin(x, mask)" in source
 
     def make_case(trial):
         if dtype == "int32":
@@ -364,6 +383,7 @@ def test_mutable_slot_branch_device(npu, dtype):
     _run_trials(kernel, make_case, npu, trials=4)
 
 
+@pytest.mark.pto
 def test_multi_lane_mutable_slot_device(npu):
     kernel, source = _compile(_mutable_register("float32", 4, 4))
     assert "slot = pto.vmi.vreg(4, pto.f32)" in source
@@ -399,10 +419,15 @@ def _simd_array_reinterpret():
     return main
 
 
+@pytest.mark.pto
 def test_pure_simd_register_array_reinterpret_device(npu):
-    kernel, source = _compile(_simd_array_reinterpret())
+    func = _simd_array_reinterpret()
+    assert "tl.vmi." not in func.script(), func.script()
+    kernel, source = _compile(func)
     assert "pto.vbitcast(" in source, source
     assert "pto.vmi." not in source, source
+    assert "pto.vbitcast(regs_tl_slot_0" in _one(source, "pto.vbitcast(")
+    assert _one(source, "pto.vsts(").startswith("pto.vsts(y,")
 
     def make_case(trial):
         generator = torch.Generator().manual_seed(20261021 + trial)
@@ -458,11 +483,22 @@ def _vmi_array_multidim_update():
     return main
 
 
+@pytest.mark.pto
 def test_vmi_register_array_multidim_update_device(npu):
     kernel, source = _compile(_vmi_array_multidim_update())
+    for index in range(4):
+        assert f"regs_tl_slot_{index} = None" in source, source
     assert "pto.vmi.vreg(4" not in source, source
     assert "slot = pto.vmi.vreg(1, pto.ui32)" in source, source
-    assert re.search(r"regs_tl_slot_3 = pto\.vmi\.vadds\(", source), source
+    assert source.count("pto.vmi.vload(") == 4, source
+    assert "regs_tl_slot_2" in _one(source, "slot = pto.vmi.vcmax(")
+    assert re.search(r"for \w+ in range\(0, 3, 1\):", source), source
+    vadds_line = _one(source, "pto.vmi.vadds(")
+    assert vadds_line.startswith("regs_tl_slot_3 = pto.vmi.vadds(regs_tl_slot_3, 1,"), vadds_line
+    vbrc_line = _one(source, "pto.vmi.vbrc(")
+    assert "pto.vmi.vbrc(slot, group=1, size=64)" in vbrc_line, vbrc_line
+    assert "pto.cast(slot" not in vbrc_line, vbrc_line
+    assert "pto.cast(regs_tl_slot" not in source, source
 
     def make_case(trial):
         values = _uint32_array_input(trial)
