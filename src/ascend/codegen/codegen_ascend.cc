@@ -341,6 +341,9 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" ";
+  if (require_batch_mode_) {
+    os << "__schedmode__(1) ";
+  }
   switch (kernel_mode_) {
   case AscendKernelMode::kMix:
     // dav-3510's direct AIC-to-AIV data paths require the physical 1:2 group.
@@ -548,6 +551,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   has_gemm_l0_ = false;
   has_gemm_l1_ = false;
   has_philox_rng_ = false;
+  require_batch_mode_ = false;
   ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
@@ -585,6 +589,20 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       }
     }
     if (const auto *call = n.as<CallNode>()) {
+      if (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
+          call->op.same_as(tl::ascend_cross_core_wait_flag())) {
+        ICHECK_EQ(call->args.size(), 3)
+            << Downcast<Op>(call->op)->name
+            << " expects exactly 3 arguments (mode_id int, pipe string, "
+               "flag_id)";
+        const auto *mode = call->args[0].as<IntImmNode>();
+        ICHECK(mode) << "Cross-core synchronization mode must be constant";
+        // Full AIC/AIV barriers and combined full-core protocols all contain
+        // a mode-0 phase. Local mode-1/2/4 handshakes do not require batch
+        // mode.
+        if (mode->value == 0)
+          require_batch_mode_ = true;
+      }
       if (call->op.same_as(tl::ascend_gemm_l1()) ||
           call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
         has_gemm_l1_ = true;
