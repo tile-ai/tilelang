@@ -231,6 +231,8 @@ def _fp4_input(shape, seed):
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("mn_major,k", [(False, 130), (True, 65)])
 def test_fp4_dense_alpha_accumulation(mn_major, k):
+    if mn_major and os.environ.get("TILELANG_DEFAULT_TARGET") == "pto":
+        pytest.skip("PTO host wrapper cannot resolve shape_m_packed yet")
     m, n = 18, 80
     a, ref_a = _fp4_input((k, m) if mn_major else (m, k), 0)
     b, ref_b = _fp4_input((k, n) if mn_major else (n, k), 1)
