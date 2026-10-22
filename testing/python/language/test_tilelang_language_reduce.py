@@ -1310,19 +1310,33 @@ def _make_fp4_reduce_kernel(reduce_fn, M, N):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize(("reduce_fn", "torch_op"), [(T.reduce_max, "max"), (T.reduce_min, "min")], ids=["max", "min"])
-def test_reduce_fp4_dst_runtime(reduce_fn, torch_op):
+@pytest.mark.parametrize(("M", "N"), [(32, 64), (2, 512), (1, 1024)])
+def test_reduce_fp4_dst_runtime(reduce_fn, torch_op, M, N):
     """reduce_max/reduce_min into a float4_e2m1fn dst failed to compile
     (ambiguous shuffle and comparison) and a bare max/min compared raw
     encodings (GH-2998)."""
-    M, N = 32, 64
     k = _compile(_make_fp4_reduce_kernel(reduce_fn, M, N))
 
-    vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float16)
+    vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4], dtype=torch.float16)
     vals = torch.cat([vals, -vals])
     a = vals[torch.randint(0, len(vals), (M, N))].cuda()
+    # A unique extremum in the last column must reach the other warps.
+    a[:, -1] = 6 if torch_op == "max" else -6
     out = k(a)
     ref = getattr(a, torch_op)(dim=1).values
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_fp4_cross_warp_workspace_codegen():
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.target.Target(target):
+        artifact = tilelang.lower(_make_fp4_reduce_kernel(T.reduce_max, 1, 1024), target=target)
+    (device_func,) = artifact.device_mod.functions.values()
+    # AllReduce indexes one byte-sized fp4_e2_t per thread, even though
+    # ordinary FP4 buffers pack two elements into each byte.
+    assert "tl::AllReduce<tl::MaxOp, 128, 1," in artifact.kernel_source
+    assert int(device_func.attrs["dyn_shared_memory_buf"]) >= 128
 
 
 @tilelang.testing.requires_cuda
