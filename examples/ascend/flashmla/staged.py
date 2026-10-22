@@ -353,7 +353,8 @@ def sparse_attention(
             s_l1 = T.alloc_l1((64, 64), "bfloat16")
             aq = T.alloc_l0a((64, 128), "bfloat16")
             bq = T.alloc_l0b((64, 128), "bfloat16")
-            bv = T.alloc_l0b((64, 128), "bfloat16")
+            # QK and PV keep distinct layouts on one physical versioned ring.
+            bv = T.view(bq, shape=(64, 128))
             cq = T.alloc_l0c((64, 64), "float32")
             # Four disjoint output-column tiles, each accumulated across all KV tiles.
             cpv = T.alloc_l0c((4, 64, 128), "float32")
@@ -418,7 +419,6 @@ def sparse_attention(
                     s_l1: 2,
                     aq: 4,
                     bq: 4,
-                    bv: 4,
                     cq: 1,
                     cpv: 1,
                     kv: 1 if decode else 3,
@@ -469,7 +469,6 @@ def sparse_attention(
             # Each nested scheduler loop is manual independently. VF loops
             # belong to their enclosing VF task and cannot contain T.Stage.
             for step in T.Pipelined(T.ceildiv(nq - bx, 32) * nb, num_stages=6 + q_lead_shift, annotations={"enable_offset": True}):
-                T.assume_conflict(bq, bv)
                 job = step // nb
                 k = step % nb
                 qidx = bx + job * 32

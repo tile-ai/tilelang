@@ -14,7 +14,7 @@ The source does not use `T.IssuePhase`, and its API is excluded from these propo
 | Preserve complete periodic buffer lifetimes | [#8](https://github.com/Denverjin/tilelang/pull/8) | [codex/ascend-periodic-buffer-lifetimes](https://github.com/Denverjin/tilelang/tree/codex/ascend-periodic-buffer-lifetimes) |
 | Establish buffer placement hints from exact L1 offsets | [#9](https://github.com/Denverjin/tilelang/pull/9) | [codex/ascend-buffer-placement-hints](https://github.com/Denverjin/tilelang/tree/codex/ascend-buffer-placement-hints) |
 | Preserve physical views and pointer units during layout lowering | [#10](https://github.com/Denverjin/tilelang/pull/10) | [codex/ascend-layout-pointer-units](https://github.com/Denverjin/tilelang/tree/codex/ascend-layout-pointer-units) |
-| Reuse storage and L0B rings for explicit conflict hints | [#11](https://github.com/Denverjin/tilelang/pull/11) | [codex/ascend-conflict-storage-rings](https://github.com/Denverjin/tilelang/tree/codex/ascend-conflict-storage-rings) |
+| Preserve independent Cube view layouts on shared storage rings | [#11](https://github.com/Denverjin/tilelang/pull/11) | [codex/ascend-conflict-storage-rings](https://github.com/Denverjin/tilelang/tree/codex/ascend-conflict-storage-rings) |
 | Preserve manual source order across physical phase ties | [#12](https://github.com/Denverjin/tilelang/pull/12) | [codex/ascend-manual-pipe-order](https://github.com/Denverjin/tilelang/tree/codex/ascend-manual-pipe-order) |
 
 The additional NZ pitch, compact-allocation, and access-footprint prerequisite
@@ -27,15 +27,18 @@ Its PR describes the intended extension to manual placement hints for every
 buffer kind. That extension is not implemented yet; the kernel still calls
 `T.annotate_l1_offsets` and uses the existing L1 placement contract.
 
-The conflict-hint changes have two parts: permission for pairwise storage reuse
-and a shared version clock/ownership protocol for a compatible isolated L0B pair.
-Both are needed for the separate QK/PV layouts to share a physical 64 KiB ring.
+The staged kernel requires PR #11's Cube-view layout support from commit
+`393a0bde46d60a3b7cfaabeeb65ebc67a7a14ec7` or later. QK allocates one
+four-version L0B buffer; PV uses a same-shape `T.view` with a different layout.
+The shared `.data` gives both views one version clock and a physical 64 KiB
+ring without an `assume_conflict` hint. Both views use BF16 and the same padded
+physical size. Copy and GEMM lowering preserve the selected view's layout.
 The raw FP8 and FP4 buffers retain independent storage and three-slot histories.
 
 ## Historical integrated measurements
 
-The implementation source in this branch is unchanged from the integrated
-kernel at `00e7b9bb64c892c5323f42bede764e8940ceb4cd`.
+The historical measurements below used the integrated kernel at
+`00e7b9bb64c892c5323f42bede764e8940ceb4cd`, before the L0B view change.
 That compiler was based on upstream main `876a59e`; its documentation was
 committed as `6bdfe6e`. The historical integration still contained an unused
 IssuePhase API. These identities describe the recorded experiments, not the
