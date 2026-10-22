@@ -11,7 +11,7 @@
 namespace tvm {
 namespace tl {
 
-/*! \brief FP32 min.xorsign.abs with PTX min-number semantics (SM86+). */
+/*! \brief FP16/BF16/FP32 min.xorsign.abs with min-number semantics (SM86+). */
 TVM_DLL const Op &clamp_symmetric();
 
 namespace attr {

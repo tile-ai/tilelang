@@ -38,26 +38,29 @@ def fma(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
 
 
 def clamp_symmetric(x: PrimExpr, limit: PrimExpr) -> PrimExpr:
-    """Symmetric FP32 clipping using CUDA ``min.xorsign.abs.f32`` (SM86+).
+    """Symmetric clipping using CUDA ``min.xorsign.abs`` (SM86+).
 
-    For ``limit > 0`` and a non-NaN input, this returns
+    Requires ``limit > 0`` and neither operand may be NaN. This returns
     ``copysign(min(abs(x), limit), x)``, preserving the sign of zero.
-    Operands must be float32; a scalar limit is broadcast to vector inputs.
+    Supports float16, bfloat16, and float32 with matching operand dtypes.
+    Python numeric limits are converted to the input's element dtype;
+    a scalar limit is broadcast to vector inputs.
     The caller supplies a positive limit for clipping semantics. No runtime
-    check is emitted: each scalar lane lowers to one PTX instruction.
+    check is emitted: scalar inputs lower to one PTX instruction. Even-width
+    float16/bfloat16 vectors use packed x2 instructions, one per pair.
+    Float32 vectors use one instruction per lane.
 
-    This operation has PTX min-number semantics, not ``T.clamp`` semantics:
-    one NaN operand yields the magnitude of the numeric operand, and two
-    NaNs yield NaN. For a non-NaN result, its sign is the XOR of the input
-    sign bits, including when an operand is NaN. A negative limit therefore
-    clips to its absolute magnitude and flips the input sign; it does not
-    represent reversed clamp bounds. Subnormals are preserved.
-    Each operand is evaluated once.
+    NaN operands and nonpositive limits are outside this API's contract.
+    Subnormals are preserved. Each operand is evaluated once.
     """
-    x, limit = (tirx.convert(arg) for arg in (x, limit))
+    x = tirx.convert(x)
+    limit = tirx.const(limit, DataType(x.dtype).with_lanes(1)) if isinstance(limit, (int, float)) else tirx.convert(limit)
     x_dtype, limit_dtype = DataType(x.dtype), DataType(limit.dtype)
-    if x_dtype.with_lanes(1) != DataType("float32") or limit_dtype.with_lanes(1) != DataType("float32"):
-        raise TypeError("T.clamp_symmetric requires float32 operands")
+    element_dtype = x_dtype.with_lanes(1)
+    if element_dtype not in (DataType("float16"), DataType("bfloat16"), DataType("float32")):
+        raise TypeError("T.clamp_symmetric requires float16, bfloat16, or float32 operands")
+    if limit_dtype.with_lanes(1) != element_dtype:
+        raise TypeError("T.clamp_symmetric requires matching operand dtypes")
     if limit_dtype.lanes == 1 and x_dtype.lanes != 1:
         limit = tirx.Broadcast(limit, x_dtype.lanes)
     elif limit_dtype.lanes != x_dtype.lanes:

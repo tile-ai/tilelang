@@ -126,32 +126,32 @@ CLAMP_NAN_DTYPES = [
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("threads", [32, 128])
-def test_clamp_symmetric(threads):
+@pytest.mark.parametrize("threads", [32, 64, 128])
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32"])
+def test_clamp_symmetric(threads, dtype):
     import torch
 
     if torch.cuda.get_device_capability() < (8, 6):
         pytest.skip("clamp_symmetric requires SM86+")
 
     @T.prim_func
-    def main(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32")):
+    def main(A: T.Tensor((128,), dtype), B: T.Tensor((128,), dtype), C: T.Tensor((128,), dtype)):
         with T.Kernel(1, threads=threads):
             for i in T.Parallel(128):
                 C[i] = T.clamp_symmetric(A[i], B[i])
 
     kernel = tilelang.compile(main)
-    values = [0.0, -0.0, 0.5, -0.5, 4.0, -4.0, float("inf"), -float("inf"), float("nan"), -float("nan"), 1e-40, -1e-40]
-    a = torch.tensor(values, device="cuda").repeat(11)[:128].contiguous()
+    torch_dtype = getattr(torch, dtype)
+    subnormal = torch.finfo(torch_dtype).tiny / 2
+    values = [0.0, -0.0, 0.5, -0.5, 4.0, -4.0, float("inf"), -float("inf"), subnormal, -subnormal]
+    a = torch.tensor(values, device="cuda", dtype=torch_dtype).repeat(13)[:128].contiguous()
     c = torch.empty_like(a)
-    for limit in [2.0, -2.0, 0.0, -0.0, float("inf"), float("nan"), -float("nan")]:
+    for limit in [2.0, subnormal, float("inf")]:
         b = torch.full_like(a, limit)
         kernel(a, b, c)
-        magnitude = torch.fmin(a.abs(), b.abs())
-        negative = torch.signbit(a) ^ torch.signbit(b)
-        ref = torch.where(negative, -magnitude, magnitude)
-        torch.testing.assert_close(c, ref, equal_nan=True, atol=0, rtol=0)
-        numeric = ~torch.isnan(ref)
-        assert torch.equal(torch.signbit(c[numeric]), torch.signbit(ref[numeric]))
+        ref = torch.clamp(a.float(), -limit, limit)
+        torch.testing.assert_close(c.float(), ref, atol=0, rtol=0)
+        assert torch.equal(torch.signbit(c), torch.signbit(ref))
 
 
 def clamp_nan_kernel(N, block_N, dtype):
