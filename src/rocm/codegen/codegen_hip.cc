@@ -1936,6 +1936,26 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::annotate_producer_reg_dealloc()) ||
              op->op.same_as(tl::annotate_consumer_reg_alloc())) {
     return;
+  } else if (op->op.same_as(tl::arg_reduce_update())) {
+    os << "tl::arg_reduce_update<" << PrintExpr(op->args[4]) << ">(";
+    for (size_t i = 0; i < 4; ++i) {
+      if (i)
+        os << ", ";
+      os << PrintExpr(op->args[i]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::arg_reduce_all())) {
+    ICHECK(op->args.size() == 7 || op->args.size() == 9);
+    os << "tl::ArgAllReduce<";
+    for (size_t i = 2; i < 7; ++i) {
+      if (i != 2)
+        os << ", ";
+      os << PrintExpr(op->args[i]);
+    }
+    os << ">::run(" << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1]);
+    for (size_t i = 7; i < op->args.size(); ++i)
+      os << ", " << PrintExpr(op->args[i]);
+    os << ")";
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
   } else if (op->op.same_as(tl::warp_reduce_max())) {

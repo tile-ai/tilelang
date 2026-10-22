@@ -110,8 +110,34 @@ GEMM and sparse GEMM
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
   reducers (`T.warp_reduce_sum`, etc.).
+- `T.reduce_argmin` and `T.reduce_argmax`: indices of extrema along one axis,
+  with `int32` or `int64` shared or fragment destinations.
 - Allocate and initialize accumulators via `T.alloc_fragment` + `T.clear` or
   `T.fill`.
+
+Index reductions accept full fragments or rectangular shared regions with
+positive static extents. `dim=-1` selects the last axis; other negative axes
+are supported. The output removes the axis or retains it at extent one, using
+shape `(1,)` for a one-dimensional input. Indices are relative to the input
+region, including when that region has a nonzero offset. Equal extrema choose
+the first logical index. NaNs win over numbers for both operations, and the
+first NaN wins when there are several. Both signs of zero compare equal.
+Inputs support `float16`, `bfloat16`, `float32`, `float64`, and signed/unsigned
+8-, 16-, 32-, and 64-bit integers. The input and output must not overlap.
+The output is always overwritten; there is no `clear=False` mode.
+
+```python
+values = T.alloc_fragment((16, 96), "float32")
+indices = T.alloc_fragment((16,), "int32")
+T.copy(A, values)
+T.reduce_argmax(values, indices, dim=1)
+```
+
+These operations currently support CUDA and ROCm with a warp-aligned
+participating thread range (ROCm requires the full block). They preserve
+fragment layouts, including GEMM outputs, and reduce value/index pairs together.
+Layouts without a suitable shuffle topology use compiler-managed shared memory
+for redistribution.
 
 Elementwise math
 - Most math ops mirror TVM TIR: `T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`,
