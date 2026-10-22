@@ -13,7 +13,7 @@ __all__ = [
 ]
 
 
-_VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter")
+_VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter", "write_counter")
 
 
 def annotate_buffer_versions(buffer_versions_map: dict):
@@ -28,11 +28,35 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     - ``(num_versions, mode)``: use a fixed count and explicit mode;
     - ``mode``: select a mode while leaving the version count to the scheduler.
 
-    ``mode`` is ``"auto"``, ``"iteration"``, or ``"counter"``.
+    ``mode`` is ``"auto"``, ``"iteration"``, ``"counter"``, or ``"write_counter"``.
     ``"iteration"`` uses the affine flattened-loop index. ``"counter"`` uses
     a monotonic local counter that advances after a completed active buffer
     epoch. ``"auto"`` keeps the affine fast path when safe and selects a
     counter for conditionally executed or non-affine epochs.
+
+    ``"write_counter"`` is opt-in and requires an explicit version count.
+    Each owner-loop iteration creates at most one new value: the first executed
+    writing Task advances the counter, and all subsequent writes in that
+    iteration use the same version. An iteration with no writing Task retains
+    the preceding value. Owners are inferred as the deepest disjoint loops
+    covering all accesses, including fills and retained-value reads. Multiple
+    owners share the same counter without resetting it between loops. Explicit
+    ``multi_buffer_eligible`` annotations override inference for the storage;
+    use them to select a larger scope for a multi-loop update.
+
+    Like automatic multi-buffer eligibility, this is a storage-level contract:
+    the user guarantees that the update defines the data subsequently read.
+    Partial, overlapping, sparse and multi-Task writes are allowed without a
+    region-coverage proof. Control flow inside one atomic Task is treated as
+    part of that Task's update. Allocation reuse independently requires physical
+    must-write evidence and remains conservative.
+
+    All accesses must have the same stage in each enclosing loop. An update
+    cannot start by reading the previous version (use an ordinary mode or bare
+    ``versions=1`` for that). Opaque pointers, changing buffer-view geometry,
+    nonuniform core placement, owner-external initialization and owner breaks
+    are diagnosed. Ordinary dependencies still order writes and reads within
+    an update, including between different pipes.
 
     A fixed count is useful when you want to guarantee double-buffering for a
     critical buffer regardless of the Z3 solver's choice.
@@ -92,6 +116,8 @@ def annotate_buffer_versions(buffer_versions_map: dict):
         if has_mode:
             if mode not in _VALID_BUFFER_VERSION_MODES:
                 raise ValueError(f"buffer version mode must be one of {_VALID_BUFFER_VERSION_MODES}, got {mode!r} for buffer {buffer}")
+            if mode == "write_counter" and not has_num_versions:
+                raise ValueError(f'write_counter requires an explicit version count; use (2, "write_counter") for buffer {buffer}')
             if data in modes and modes[data] != mode:
                 raise ValueError(f"aliases of one buffer storage must use the same version mode, got {modes[data]!r} and {mode!r}")
             modes[data] = mode

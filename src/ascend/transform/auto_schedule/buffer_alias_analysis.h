@@ -65,6 +65,13 @@ class BufferAliasAnalysisContext {
 public:
   virtual ~BufferAliasAnalysisContext() = default;
 
+  // Dynamic generations cannot be partitioned using lexical offsets. Their
+  // validated initialization permits a conservative whole-allocation lifetime
+  // at kernel scope; reuse still requires the ordinary completion proof.
+  virtual bool RequiresWholeAllocationLifetime(const tirx::Var &storage) const {
+    return false;
+  }
+
   virtual std::vector<size_t>
   ResolveLifetimeEndpoints(const tirx::Var &storage, TaskNode *task,
                            bool at_beginning, ControlNode *scope) const = 0;
@@ -185,17 +192,19 @@ using LifetimeSummaryMap =
     std::unordered_map<Var, LifetimeSummary, ObjectPtrHash, ObjectPtrEqual>;
 
 inline std::optional<BufferRegion>
-TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
+TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs,
+                     arith::Analyzer *context = nullptr) {
   if (!lhs->buffer.same_as(rhs->buffer) ||
       lhs->region.size() != rhs->region.size()) {
     return std::nullopt;
   }
-  if (RegionCovers(lhs->region, rhs->region))
+  if (RegionCovers(lhs->region, rhs->region, context))
     return lhs;
-  if (RegionCovers(rhs->region, lhs->region))
+  if (RegionCovers(rhs->region, lhs->region, context))
     return rhs;
 
-  arith::Analyzer analyzer;
+  arith::Analyzer local_analyzer;
+  arith::Analyzer &analyzer = context ? *context : local_analyzer;
   std::optional<size_t> differing_axis;
   for (size_t i = 0; i < lhs->region.size(); ++i) {
     const Range &lhs_range = lhs->region[i];
@@ -241,7 +250,8 @@ TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
 }
 
 inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
-                              const BufferRegion &read) {
+                              const BufferRegion &read,
+                              arith::Analyzer *context = nullptr) {
   // Regions describe different access points. A store can change an index
   // buffer between them, so identical BufferLoads are not an equality proof.
   // Snapshot each write independently before merging: otherwise two changing
@@ -269,7 +279,7 @@ inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
     for (size_t i = 0; i < merged.size() && !changed; ++i) {
       for (size_t j = i + 1; j < merged.size(); ++j) {
         std::optional<BufferRegion> combined =
-            TryMergeDenseRegions(merged[i], merged[j]);
+            TryMergeDenseRegions(merged[i], merged[j], context);
         if (!combined.has_value())
           continue;
         merged[i] = std::move(combined.value());
@@ -280,7 +290,7 @@ inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
     }
   }
   return std::any_of(merged.begin(), merged.end(), [&](const auto &write) {
-    return RegionCovers(write->region, read_snapshot->region);
+    return RegionCovers(write->region, read_snapshot->region, context);
   });
 }
 
@@ -494,6 +504,39 @@ private:
   std::optional<LifetimeSummary>
   BuildStorageLifetime(const StorageAccessInfo &info, ControlNode *loop,
                        const HappensBeforeQuery &happens_before) const {
+    if (context_->RequiresWholeAllocationLifetime(info.storage)) {
+      if (loop || info.opaque)
+        return std::nullopt;
+      // Write-counter eligibility is a storage-level promise, not a proof of
+      // initialization. Keep uncertain physical footprints out of allocation
+      // reuse. In particular, a may-write hull cannot kill incoming contents.
+      for (const TaskStorageAccess &writer : info.accesses) {
+        if (!writer.Writes())
+          continue;
+        for (const TaskStorageAccess &reader : info.accesses)
+          for (const BufferRegion &read : reader.read_regions)
+            if (!DenseRegionsCover(writer.must_write_regions, read))
+              return std::nullopt;
+      }
+      LifetimeSummary result;
+      result.storage = info.storage;
+      result.valid = true;
+      GenerationLifetime allocation;
+      allocation.guard = Bool(true);
+      allocation.guard_iteration_invariant = true;
+      for (const TaskStorageAccess &access : info.accesses) {
+        for (size_t site : context_->ResolveLifetimeEndpoints(
+                 info.storage, access.task, true, nullptr))
+          allocation.begin_sites.push_back({site, 0});
+        for (size_t site : context_->ResolveLifetimeEndpoints(
+                 info.storage, access.task, false, nullptr))
+          allocation.end_sites.push_back({site, 0});
+      }
+      SortUnique(&allocation.begin_sites);
+      SortUnique(&allocation.end_sites);
+      result.generations.push_back(std::move(allocation));
+      return result;
+    }
     LifetimeSummary direct = BuildGenerations(info, loop, loop, happens_before);
     if (direct.valid)
       return direct;
@@ -620,35 +663,6 @@ private:
   using VarExprMap =
       std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
   using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-
-  VarSet CollectIterationVariantVars(ControlNode *scope) const {
-    VarSet result;
-    if (scope == nullptr)
-      return result;
-
-    ControlNode *root = scope;
-    while (root->GetParentControl() != nullptr)
-      root = root->GetParentControl();
-    std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
-      if (node == nullptr)
-        return;
-      if (node->IsTask()) {
-        for (const Var &var : node->GetWriteVars())
-          result.insert(var);
-        return;
-      }
-      auto *control = static_cast<ControlNode *>(node);
-      result.insert(control->control->loop_var);
-      if (control->task) {
-        for (const Var &var : control->task->GetWriteVars())
-          result.insert(var);
-      }
-      for (const std::shared_ptr<IRStructure> &child : control->children)
-        collect(child.get());
-    };
-    collect(root);
-    return result;
-  }
 
   bool ExpressionDependsOnIteration(const PrimExpr &expr,
                                     const VarExprMap &bindings,

@@ -35,6 +35,7 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <tvm/arith/analyzer.h>
@@ -251,6 +252,17 @@ struct SyncPoint {
   int counter_group_id;
   size_t allocation_index;
   std::optional<CounterChannelKey> counter_channel;
+  // Explicit action sites replace the ordinary edge's single set/wait pair
+  // and kernel-wide seed/drain. Physical flags still use the shared allocator.
+  bool has_planned_actions{false};
+  // A closed local lifetime includes every seed, publication and drain.
+  // Ordinary cross-iteration channels keep their kernel-wide lifetime.
+  IRStructure *lifetime_begin{nullptr};
+  IRStructure *lifetime_end{nullptr};
+  bool release_requires_next_seed{false};
+  // Publication waits for an entry token seeded on its consumer lane. This
+  // certifies that earlier channels on that lane were consumed before reuse.
+  bool publication_waits_for_entry{false};
 
   SyncPoint(DepEdge edge, DependencyKind dependency_kind, int num_versions,
             ControlNode *flag_loop)
@@ -776,10 +788,88 @@ bool HasImplicitSamePipeOrder(const std::string &pipe) {
   return pipe == "S" || pipe == "V" || pipe == "M";
 }
 
+// Analysis records required actions and their sites, without constructing
+// executable statements or symbolic physical flag IDs. The materializer lowers
+// this plan only after the shared allocator has assigned every channel.
+struct FlagAction {
+  size_t sync_point;
+  bool set;
+  // An absent iteration seeds/drains every slot of the channel.
+  Optional<PrimExpr> iteration;
+};
+
+struct SyncAcquisition {
+  Buffer acquired;
+  std::string pipe;
+  std::optional<size_t> ready;
+  std::optional<size_t> free;
+};
+
+enum class AcquisitionActionKind { kInitialize, kAcquire, kRetire };
+
+struct AcquisitionAction {
+  size_t acquisition;
+  AcquisitionActionKind kind;
+  PrimExpr generation;
+};
+
+struct PipeBarrierAction {
+  std::string pipe;
+  PrimExpr condition{Bool(true)};
+};
+
+using SyncAction =
+    std::variant<FlagAction, AcquisitionAction, PipeBarrierAction>;
+
+struct SyncActionInsertion {
+  IRStructure *node;
+  SyncAction action;
+  bool at_beginning;
+  CoreMask core;
+  PrimExpr guard;
+};
+
+struct SyncActionPlan {
+  std::vector<SyncAcquisition> acquisitions;
+  std::vector<SyncActionInsertion> insertions;
+};
+
 // ============================================================================
 // Recursive dependency analysis and reuse planning
 // ============================================================================
 class SyncAnalyzer : public BufferAliasAnalysisContext {
+  struct Lane {
+    CoreMask core;
+    std::string pipe;
+    bool operator==(const Lane &other) const {
+      return core == other.core && pipe == other.pipe;
+    }
+  };
+  struct Consumer {
+    Lane lane;
+    std::vector<TaskNode *> readers;
+    Buffer acquired;
+    std::optional<size_t> ready;
+    std::optional<size_t> free;
+    std::optional<size_t> join;
+  };
+  struct WriteEpoch {
+    const MultiBufferOwnerInfo *owner;
+    std::vector<TaskNode *> advances;
+    IRStructure *begin{nullptr};
+    IRStructure *end{nullptr};
+  };
+  struct Protocol {
+    const MultiBufferInfo *info;
+    std::vector<Var> storages;
+    Lane producer;
+    std::vector<TaskNode *> writers;
+    std::vector<Consumer> consumers;
+    std::vector<WriteEpoch> epochs;
+    IRStructure *begin;
+    IRStructure *end;
+  };
+
 public:
   explicit SyncAnalyzer(const MultiBufferPlan &multi_buffer_plan,
                         const EpochDomainRegistry &domains,
@@ -817,10 +907,13 @@ public:
       nodes.push_back(child.get());
 
     site_registry_.Collect(nodes);
+    CollectGenerationChannels(root);
     scope_closures_.clear();
     lifetime_orders_.clear();
     SyncAnalysisResult root_result = AnalyzeNodeList(nodes, /*loop=*/nullptr);
     scope_closures_.insert_or_assign(nullptr, std::move(root_result.closure));
+    RecordGenerationChannelReuse(root);
+    BuildGenerationActions();
 
     // The contract's presence still enables sequential allocation downstream.
     // Synchronization and flag reuse above remain necessary in this mode.
@@ -864,6 +957,8 @@ public:
   }
 
   const BufferAliasMap &BufferAliases() const { return buffer_aliases_; }
+
+  const SyncActionPlan &Actions() const { return action_plan_; }
 
 private:
   std::vector<size_t> ResolveLifetimeEndpoints(const Var &storage,
@@ -1023,6 +1118,7 @@ private:
       max_distance = std::max(max_distance, sync_point.edge.distance);
 
     AddSamePipeEdges(result.closure, task_site_ids, max_distance, loop);
+    AddGenerationCompletionEdges(result.closure, nodes, max_distance, loop);
     OptimizeSyncPoints(local_sync_points, result.closure, max_distance, loop);
     if (loop != nullptr)
       OptimizeFlagVersions(local_sync_points, result.closure, loop);
@@ -1320,8 +1416,18 @@ private:
       const MultiBufferInfo *info =
           dep.storage.has_value() ? multi_buffer_plan_.Find(dep.storage.value())
                                   : nullptr;
+      bool write_clock = info && info->write_counter;
+      if (write_clock) {
+        const auto *owner = loop ? info->FindOwner(loop) : nullptr;
+        // The generation protocol handles owner-carried dependencies. Inside
+        // one generation, ordinary RAW/WAR/WAW and inner-loop dependencies
+        // still use the lexical clock and the existing closure/flag allocator.
+        if (!owner || (loop == owner->loop && distance != 0))
+          continue;
+        info = nullptr;
+      }
       int manual_versions = 0;
-      if (dep.storage.has_value()) {
+      if (dep.storage.has_value() && !write_clock) {
         if (auto versions = manual_.Get(dep.storage.value()))
           manual_versions = versions.value();
       }
@@ -1374,6 +1480,9 @@ private:
       }
 
       for (const auto &[producer, consumer] : dep.task_pairs) {
+        if (write_clock &&
+            GenerationCoversRead(dep.storage.value(), producer, consumer))
+          continue;
         int pair_domain_id =
             dependency_domain_id.has_value()
                 ? dependency_domain_id.value()
@@ -1411,6 +1520,23 @@ private:
             } else {
               sync_points.emplace_back(std::move(edge), dep.kind, num_versions,
                                        flag_loop);
+              if (write_clock && distance == 0 &&
+                  (producer_core != consumer_core ||
+                   producer_pipe != consumer_pipe)) {
+                // A lexical intra-update event can also execute on iterations
+                // that skip the update. The generation ring therefore cannot
+                // bound its reuse. Close it in the same lexical domain; the
+                // ordinary closure eliminates returns already implied by other
+                // dependencies, and allocates/reuses these flags together.
+                size_t release = site_registry_.FindSiteId(
+                    SyncInsertionSiteKey{dep.cons_node, consumer, false,
+                                         consumer_core, pair_domain_id});
+                size_t acquire = site_registry_.FindSiteId(
+                    SyncInsertionSiteKey{dep.prod_node, producer, true,
+                                         producer_core, pair_domain_id});
+                sync_points.emplace_back(DepEdge(release, acquire, 1, true),
+                                         DependencyKind::kData, 1, loop);
+              }
             }
           }
         }
@@ -1756,6 +1882,549 @@ private:
     }
   }
 
+  const WriteEpoch *FindWriteEpoch(const Protocol &protocol,
+                                   IRStructure *node) const {
+    for (const WriteEpoch &epoch : protocol.epochs)
+      if (node->IsWithin(epoch.owner->loop))
+        return &epoch;
+    return nullptr;
+  }
+
+  bool DuringWrites(const Protocol &protocol, IRStructure *node) const {
+    const WriteEpoch *epoch = FindWriteEpoch(protocol, node);
+    if (!epoch || !epoch->begin)
+      return false;
+    IRStructure *child = ChildAtScope(node, epoch->owner->loop);
+    return child->GetIndex() >= epoch->begin->GetIndex() &&
+           child->GetIndex() <= epoch->end->GetIndex();
+  }
+
+  bool GenerationCoversRead(const Var &storage, TaskNode *writer,
+                            TaskNode *reader) const {
+    if (!writer->WritesStorage(storage) || reader->WritesStorage(storage) ||
+        !reader->ReadsStorage(storage))
+      return false;
+    for (const Protocol &protocol : protocols_) {
+      if (std::none_of(
+              protocol.storages.begin(), protocol.storages.end(),
+              [&](const Var &member) { return member.same_as(storage); }))
+        continue;
+      const WriteEpoch *epoch = FindWriteEpoch(protocol, reader);
+      if (epoch && epoch->end && writer->IsWithin(epoch->owner->loop) &&
+          ChildAtScope(reader, epoch->owner->loop)->GetIndex() >
+              epoch->end->GetIndex())
+        return true;
+    }
+    return false;
+  }
+
+  void CollectGenerationChannels(
+      const std::vector<std::shared_ptr<IRStructure>> &root) {
+    std::vector<TaskNode *> tasks;
+    CollectAllTaskNodes(root, tasks);
+    std::vector<Protocol> groups;
+    for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
+      if (!info.write_counter)
+        continue;
+      auto found =
+          std::find_if(groups.begin(), groups.end(), [&](const Protocol &p) {
+            return p.info->counter_group_id == info.counter_group_id &&
+                   p.info->num_versions == info.num_versions;
+          });
+      if (found == groups.end()) {
+        groups.push_back({&info, {}, {}, {}, {}, {}, nullptr, nullptr});
+        found = std::prev(groups.end());
+      }
+      found->storages.push_back(info.storage);
+    }
+    for (Protocol &group : groups) {
+      std::vector<std::pair<TaskNode *, Lane>> accesses;
+      std::vector<Lane> producers;
+      for (TaskNode *task : tasks) {
+        bool writes = false, reads = false;
+        for (const Var &storage : group.storages) {
+          writes |= task->WritesStorage(storage);
+          reads |= task->ReadsStorage(storage);
+        }
+        if (!writes && !reads)
+          continue;
+        Lane lane{task->GetCoreMask(),
+                  GetResourcePipeName(task->GetPipeMask())};
+        ICHECK(std::find(site_registry_.Cores().begin(),
+                         site_registry_.Cores().end(),
+                         lane.core) != site_registry_.Cores().end())
+            << "write_counter requires one uniform core lane per Task; "
+               "split an AIC/AIV task or use uniform AIV placement for "
+            << group.info->storage->name_hint;
+        accesses.emplace_back(task, lane);
+        IRStructure *anchor = ChildAtScope(task, nullptr);
+        if (!group.begin || anchor->GetIndex() < group.begin->GetIndex())
+          group.begin = anchor;
+        if (!group.end || anchor->GetIndex() > group.end->GetIndex())
+          group.end = anchor;
+        if (writes) {
+          group.writers.push_back(task);
+          if (std::find(producers.begin(), producers.end(), lane) ==
+              producers.end())
+            producers.push_back(lane);
+        }
+      }
+      ICHECK(!group.writers.empty());
+      for (const auto &owner : group.info->owners) {
+        WriteEpoch epoch{&owner, {}, nullptr, nullptr};
+        for (TaskNode *task : tasks) {
+          if (!task->IsWithin(owner.loop))
+            continue;
+          if (task->WritesStorage(group.info->counter->data)) {
+            epoch.advances.push_back(task);
+            IRStructure *child = ChildAtScope(task, owner.loop);
+            if (!epoch.begin || child->GetIndex() < epoch.begin->GetIndex())
+              epoch.begin = child;
+          }
+          if (std::find(group.writers.begin(), group.writers.end(), task) !=
+              group.writers.end())
+            epoch.end = ChildAtScope(task, owner.loop);
+        }
+        ICHECK_EQ(epoch.begin != nullptr, epoch.end != nullptr);
+        group.epochs.push_back(std::move(epoch));
+      }
+      // One publication per producer lane, at the common end of the update.
+      // Other writer lanes are consumers too: FREE must cover their writes as
+      // well as actual reads. Intra-update ordering remains ordinary analysis.
+      for (const Lane &producer : producers) {
+        Protocol protocol = group;
+        protocol.producer = producer;
+        protocol.writers.clear();
+        for (const auto &[task, lane] : accesses) {
+          bool writes = std::find(group.writers.begin(), group.writers.end(),
+                                  task) != group.writers.end();
+          if (writes && lane == producer)
+            protocol.writers.push_back(task);
+          bool reads = writes && !(lane == producer);
+          for (const Var &storage : group.storages)
+            reads |= task->ReadsStorage(storage);
+          if (!reads)
+            continue;
+          auto consumer =
+              std::find_if(protocol.consumers.begin(), protocol.consumers.end(),
+                           [&](const Consumer &c) { return c.lane == lane; });
+          if (consumer == protocol.consumers.end()) {
+            protocol.consumers.push_back({lane, {}, {}, {}, {}, {}});
+            consumer = std::prev(protocol.consumers.end());
+          }
+          consumer->readers.push_back(task);
+        }
+        protocols_.push_back(std::move(protocol));
+      }
+    }
+    for (Protocol &protocol : protocols_) {
+      for (Consumer &consumer : protocol.consumers) {
+        if (consumer.lane == protocol.producer &&
+            HasImplicitSamePipeOrder(consumer.lane.pipe))
+          continue;
+        consumer.acquired = decl_buffer(
+            {1}, protocol.info->counter->dtype,
+            protocol.info->storage->name_hint + "_acquired_" +
+                std::to_string(protocol.producer.core) + "_" +
+                protocol.producer.pipe + "_" +
+                std::to_string(consumer.lane.core) + "_" + consumer.lane.pipe,
+            "local.var");
+        if (consumer.lane == protocol.producer)
+          continue;
+        ICHECK(consumer.lane.core == protocol.producer.core ||
+               consumer.lane.core == kCoreCube ||
+               protocol.producer.core == kCoreCube)
+            << "write_counter does not support AIV0/AIV1 synchronization for "
+            << protocol.info->storage->name_hint;
+        consumer.ready = AddChannel(protocol, consumer, /*free=*/false);
+        consumer.free = AddChannel(protocol, consumer, /*free=*/true);
+      }
+    }
+  }
+
+  void RecordGenerationChannelReuse(
+      const std::vector<std::shared_ptr<IRStructure>> &root) {
+    std::vector<TaskNode *> tasks;
+    CollectAllTaskNodes(root, tasks);
+    for (Protocol &protocol : protocols_) {
+      for (Consumer &consumer : protocol.consumers) {
+        if (!consumer.free || (protocol.producer.core == consumer.lane.core &&
+                               protocol.producer.pipe == "S"))
+          continue;
+        bool reused_later = false;
+        for (size_t i = 0; i < sync_points_.size(); ++i)
+          if (i != *consumer.free)
+            reused_later |= CanReuseChannelLifetimes(
+                sync_points_[*consumer.free], sync_points_[i]);
+        if (!reused_later)
+          continue;
+        TaskNode *scalar = nullptr;
+        for (TaskNode *task : tasks)
+          if (!task->GetParent() &&
+              task->WritesStorage(protocol.info->counter->data))
+            scalar = task;
+        ICHECK(scalar);
+        TaskNode *writer = protocol.writers.front();
+        size_t src = site_registry_.FindSiteId(SyncInsertionSiteKey{
+            writer, writer, false, protocol.producer.core,
+            domains_.UnconditionalLexicalDomain(
+                static_cast<ControlNode *>(writer->GetParent()))});
+        size_t dst = site_registry_.FindSiteId(
+            SyncInsertionSiteKey{scalar, scalar, true, consumer.lane.core,
+                                 domains_.UnconditionalLexicalDomain(nullptr)});
+        sync_points_.emplace_back(DepEdge(src, dst, 0, true),
+                                  DependencyKind::kData, 1, nullptr);
+        sync_points_.back().has_planned_actions = true;
+        sync_points_.back().lifetime_begin = protocol.begin;
+        sync_points_.back().lifetime_end = protocol.end;
+        sync_points_.back().release_requires_next_seed = true;
+        consumer.join = sync_points_.size() - 1;
+      }
+    }
+    // Feed closed-channel lifetimes into the same all-pairs allocation
+    // contract as ordinary visible sync points. This includes mixed modes.
+    for (size_t i = 0; i < sync_points_.size(); ++i)
+      for (size_t j = i + 1; j < sync_points_.size(); ++j)
+        if (CanReuseChannelLifetimes(sync_points_[i], sync_points_[j]) ||
+            CanReuseChannelLifetimes(sync_points_[j], sync_points_[i]))
+          reusable_pairs_.emplace(i, j);
+  }
+
+  bool CanReuseChannelLifetimes(const SyncPoint &earlier,
+                                const SyncPoint &later) const {
+    if ((!earlier.lifetime_end && !later.publication_waits_for_entry) ||
+        !site_registry_.UsesFlag(earlier) || !site_registry_.UsesFlag(later) ||
+        !site_registry_.HasCompatibleFlagKind(earlier, later))
+      return false;
+    const auto &a = site_registry_.Src(earlier);
+    const auto &b = site_registry_.Src(later);
+    const auto &c = site_registry_.Dst(earlier);
+    const auto &d = site_registry_.Dst(later);
+    // A drain and (for return channels) an S fence order the next publication
+    // only on the same endpoint lanes. Sharing an integer namespace is not
+    // sufficient, especially for opposite cross-core directions.
+    if (a.core != b.core || a.pipe != b.pipe || c.core != d.core ||
+        c.pipe != d.pipe)
+      return false;
+    if (earlier.release_requires_next_seed && !later.lifetime_begin)
+      return false;
+    auto ordinary_interval = [&](const SyncPoint &point)
+        -> std::optional<std::pair<IRStructure *, IRStructure *>> {
+      if (point.edge.distance != 0)
+        return std::nullopt; // Its seed/drain still spans the whole kernel.
+      if (point.counter_channel.has_value()) {
+        int owners = 0;
+        for (const SyncPoint &other : sync_points_)
+          owners += other.counter_channel == point.counter_channel;
+        if (owners != 1)
+          return std::nullopt;
+      }
+      IRStructure *begin =
+          ChildAtScope(site_registry_.Src(point).path_begin, nullptr);
+      IRStructure *end =
+          ChildAtScope(site_registry_.Dst(point).path_begin, nullptr);
+      if (begin->GetIndex() > end->GetIndex())
+        return std::nullopt;
+      return std::make_pair(begin, end);
+    };
+    IRStructure *end = earlier.lifetime_end;
+    IRStructure *begin = later.lifetime_begin;
+    if (!end) {
+      auto interval = ordinary_interval(earlier);
+      if (!interval)
+        return false;
+      end = interval->second;
+    }
+    if (!begin) {
+      auto interval = ordinary_interval(later);
+      if (!interval)
+        return false;
+      begin = interval->first;
+    }
+    return end->GetIndex() < begin->GetIndex();
+  }
+
+  void BuildGenerationActions() {
+    for (const Protocol &protocol : protocols_) {
+      PrimExpr generation = BufferLoad(protocol.info->counter, {0});
+      for (const Consumer &consumer : protocol.consumers) {
+        if (!consumer.acquired.defined())
+          continue;
+        size_t acquisition = action_plan_.acquisitions.size();
+        action_plan_.acquisitions.push_back({consumer.acquired,
+                                             consumer.lane.pipe, consumer.ready,
+                                             consumer.free});
+        QueueSyncAction(protocol.begin,
+                        AcquisitionAction{acquisition,
+                                          AcquisitionActionKind::kInitialize,
+                                          generation},
+                        true, consumer.lane.core);
+        for (size_t i = 0; i < consumer.readers.size(); ++i) {
+          TaskNode *reader = consumer.readers[i];
+          if (HasDominatingAcquire(protocol, consumer, i))
+            continue;
+          PrimExpr guard = reader->GetConditionGuard();
+          if (DuringWrites(protocol, reader))
+            guard =
+                guard && !FindWriteEpoch(protocol, reader)->owner->active_guard;
+          QueueSyncAction(reader,
+                          AcquisitionAction{acquisition,
+                                            AcquisitionActionKind::kAcquire,
+                                            generation},
+                          true, consumer.lane.core, guard);
+        }
+        if (consumer.free) {
+          for (const WriteEpoch &epoch : protocol.epochs) {
+            for (TaskNode *advance : epoch.advances) {
+              PrimExpr guard = advance->GetConditionGuard();
+              // These execute before the scalar advance, including its latch
+              // update. The same guard therefore selects exactly one entry.
+              QueueSyncAction(advance,
+                              FlagAction{*consumer.free, false, generation + 1},
+                              true, protocol.producer.core, guard);
+              QueueSyncAction(advance,
+                              AcquisitionAction{acquisition,
+                                                AcquisitionActionKind::kRetire,
+                                                generation},
+                              true, consumer.lane.core, guard);
+            }
+            if (epoch.end)
+              QueueSyncAction(
+                  epoch.end, FlagAction{*consumer.ready, true, generation},
+                  false, protocol.producer.core,
+                  epoch.owner->active_guard &&
+                      domains_
+                          .Domain(domains_.DomainForStorage(
+                              protocol.info->storage, epoch.owner->loop))
+                          .active_guard);
+          }
+          QueueSyncAction(protocol.begin, FlagAction{*consumer.free, true, {}},
+                          true, consumer.lane.core);
+          QueueSyncAction(protocol.end,
+                          AcquisitionAction{acquisition,
+                                            AcquisitionActionKind::kRetire,
+                                            generation},
+                          false, consumer.lane.core);
+          QueueSyncAction(protocol.end, FlagAction{*consumer.free, false, {}},
+                          false, protocol.producer.core);
+          if (consumer.join) {
+            // A lexical boundary alone does not stop the consumer pipe from
+            // re-seeding a reused FREE flag before the producer drains it.
+            // Waiting on S fences subsequent issue on the consumer core.
+            QueueSyncAction(
+                protocol.end,
+                FlagAction{*consumer.join, true, make_zero(generation.dtype())},
+                false, protocol.producer.core);
+            QueueSyncAction(protocol.end,
+                            FlagAction{*consumer.join, false,
+                                       make_zero(generation.dtype())},
+                            false, consumer.lane.core);
+          }
+        }
+      }
+      bool has_return_channel =
+          std::any_of(protocol.consumers.begin(), protocol.consumers.end(),
+                      [](const Consumer &c) { return c.free.has_value(); });
+      bool has_producer_reads = std::any_of(
+          protocol.consumers.begin(), protocol.consumers.end(),
+          [&](const Consumer &c) { return c.lane == protocol.producer; });
+      if ((!has_return_channel || has_producer_reads) &&
+          !HasImplicitSamePipeOrder(protocol.producer.pipe)) {
+        // Also covers a sequence of writes with no readers.
+        for (const WriteEpoch &epoch : protocol.epochs)
+          for (TaskNode *advance : epoch.advances)
+            QueueSyncAction(advance,
+                            PipeBarrierAction{protocol.producer.pipe,
+                                              generation + 1 >=
+                                                  protocol.info->num_versions},
+                            true, protocol.producer.core,
+                            advance->GetConditionGuard());
+        QueueSyncAction(protocol.end, PipeBarrierAction{protocol.producer.pipe},
+                        false, protocol.producer.core);
+      }
+    }
+  }
+
+  bool HasDominatingAcquire(const Protocol &protocol, const Consumer &consumer,
+                            size_t index) const {
+    TaskNode *reader = consumer.readers[index];
+    auto *parent = static_cast<ControlNode *>(reader->GetParent());
+    if (!parent)
+      return false;
+    for (size_t i = index; i > 0; --i) {
+      TaskNode *previous = consumer.readers[i - 1];
+      if (DuringWrites(protocol, previous))
+        continue;
+      if (previous->GetParent() != parent ||
+          previous->GetIndex() >= reader->GetIndex())
+        continue;
+      for (size_t j = previous->GetIndex() + 1; j < reader->GetIndex(); ++j)
+        for (const Var &storage : protocol.storages)
+          if (parent->children[j]->WritesStorage(storage))
+            return false;
+      if (GuardImplies(reader->GetConditionGuard(),
+                       previous->GetConditionGuard(),
+                       reader->GetContextBeforeConditionGuards()))
+        return true;
+    }
+    return false;
+  }
+
+  size_t AddChannel(const Protocol &protocol, const Consumer &consumer,
+                    bool free) {
+    auto site = [&](TaskNode *task, CoreMask core, bool beginning) {
+      ControlNode *scope = static_cast<ControlNode *>(task->GetParent());
+      return site_registry_.FindSiteId(
+          SyncInsertionSiteKey{task, task, beginning, core,
+                               domains_.UnconditionalLexicalDomain(scope)});
+    };
+    size_t src =
+        site(free ? consumer.readers.front() : protocol.writers.front(),
+             free ? consumer.lane.core : protocol.producer.core, false);
+    size_t dst =
+        site(free ? protocol.writers.front() : consumer.readers.front(),
+             free ? protocol.producer.core : consumer.lane.core, true);
+    const MultiBufferInfo &info = *protocol.info;
+    sync_points_.emplace_back(
+        DepEdge(src, dst, free ? info.num_versions : 0, true),
+        DependencyKind::kData, info.num_versions, BufferLoad(info.counter, {0}),
+        info.owners.front().loop, info.counter_group_id);
+    sync_points_.back().has_planned_actions = true;
+    sync_points_.back().lifetime_begin = protocol.begin;
+    sync_points_.back().lifetime_end = protocol.end;
+    sync_points_.back().publication_waits_for_entry = !free;
+    return sync_points_.size() - 1;
+  }
+
+  static IRStructure *ChildAtScope(IRStructure *node, ControlNode *scope) {
+    while (node && node->GetParent() != scope)
+      node = node->GetParent();
+    return node;
+  }
+
+  void AddGenerationCompletionEdges(DepClosure &closure,
+                                    const std::vector<IRStructure *> &nodes,
+                                    int max_distance,
+                                    ControlNode *scope) const {
+    if (protocols_.empty())
+      return;
+    int domain = domains_.UnconditionalLexicalDomain(scope);
+    auto add = [&](TaskNode *producer, CoreMask producer_core,
+                   TaskNode *consumer, CoreMask consumer_core) {
+      IRStructure *src = ChildAtScope(producer, scope);
+      IRStructure *dst = ChildAtScope(consumer, scope);
+      if (!src || !dst || src->GetIndex() >= dst->GetIndex())
+        return;
+      size_t a = site_registry_.FindSiteId(
+          SyncInsertionSiteKey{src, producer, false, producer_core, domain});
+      size_t b = site_registry_.FindSiteId(
+          SyncInsertionSiteKey{dst, consumer, true, consumer_core, domain});
+      SaturateDependencyEdge(closure, DepEdge(a, b, 0, true), max_distance,
+                             scope);
+    };
+    for (const Protocol &protocol : protocols_) {
+      // Acquiring the current publication completes every earlier write on
+      // its producer pipe, even when several writes precede this read. These
+      // RAW certificates can discharge dependencies of OTHER buffer modes.
+      // A change of slot does not order WAR/WAW; never publish those edges.
+      auto unconditional = [&](TaskNode *task) {
+        ConstrSet context = scope ? scope->GetLoopBodyContext() : ConstrSet();
+        for (IRStructure *node : task->PathFrom()) {
+          if (node == scope || (scope && !node->IsWithin(scope)))
+            continue;
+          if (!context.CanProve(node->GetConditionGuard()))
+            return false;
+          if (node->IsControl()) {
+            auto *control = static_cast<ControlNode *>(node);
+            if (control->BodyHasLoopBreak() ||
+                !context.CanProve(control->control->extent > 0))
+              return false;
+          }
+        }
+        return true;
+      };
+      // A lexical closure edge is unconditional in its domain. A skipped
+      // acquisition cannot order unrelated commands on that consumer pipe.
+      for (TaskNode *writer : protocol.writers)
+        if (unconditional(writer))
+          for (const Consumer &consumer : protocol.consumers)
+            for (TaskNode *reader : consumer.readers)
+              if (unconditional(reader) && !DuringWrites(protocol, reader))
+                add(writer, protocol.producer.core, reader, consumer.lane.core);
+      if (!scope) {
+        std::vector<TaskNode *> earlier;
+        for (IRStructure *node : nodes)
+          if (node->GetIndex() < protocol.begin->GetIndex())
+            CollectAllTaskNodes(node, earlier);
+        for (const Consumer &consumer : protocol.consumers) {
+          if (!consumer.free)
+            continue;
+          for (TaskNode *previous : earlier)
+            if (HasCore(previous->GetCoreMask(), consumer.lane.core) &&
+                GetResourcePipeName(previous->GetPipeMask()) ==
+                    consumer.lane.pipe)
+              for (TaskNode *writer : protocol.writers)
+                if (unconditional(writer))
+                  add(previous, consumer.lane.core, writer,
+                      protocol.producer.core);
+        }
+      }
+      if (scope)
+        continue;
+      bool published = false;
+      for (TaskNode *writer : protocol.writers) {
+        Map<Var, PrimExpr> first;
+        bool guaranteed = true;
+        for (IRStructure *node : writer->PathFrom()) {
+          arith::Analyzer analyzer;
+          guaranteed &= is_one(
+              analyzer.Simplify(Substitute(node->GetConditionGuard(), first)));
+          if (node->IsControl()) {
+            auto *control = static_cast<ControlNode *>(node);
+            guaranteed &= !control->BodyHasLoopBreak() &&
+                          is_one(analyzer.Simplify(
+                              Substitute(control->control->extent > 0, first)));
+            first.Set(control->control->loop_var,
+                      Substitute(control->control->min, first));
+          }
+        }
+        published |= guaranteed;
+      }
+      if (!published)
+        continue;
+      // The local drain completes all accesses before later issue on the
+      // producer lane. Expose that guarantee to the ordinary allocation
+      // lifetime analysis instead of maintaining a mode-specific alias map.
+      std::vector<TaskNode *> later;
+      for (IRStructure *node : nodes)
+        if (node->GetIndex() > protocol.end->GetIndex())
+          CollectAllTaskNodes(node, later);
+      for (TaskNode *next : later) {
+        if (!HasCore(next->GetCoreMask(), protocol.producer.core) ||
+            GetResourcePipeName(next->GetPipeMask()) != protocol.producer.pipe)
+          continue;
+        for (TaskNode *writer : protocol.writers)
+          add(writer, protocol.producer.core, next, protocol.producer.core);
+        for (const Consumer &consumer : protocol.consumers)
+          for (TaskNode *reader : consumer.readers)
+            add(reader, consumer.lane.core, next, protocol.producer.core);
+      }
+    }
+  }
+
+  bool RequiresWholeAllocationLifetime(const Var &storage) const final {
+    const MultiBufferInfo *info = multi_buffer_plan_.Find(storage);
+    return info && info->write_counter;
+  }
+
+  void QueueSyncAction(IRStructure *node, SyncAction action, bool at_beginning,
+                       CoreMask core, PrimExpr guard = PrimExpr()) {
+    action_plan_.insertions.push_back(
+        {node, std::move(action), at_beginning, core, std::move(guard)});
+  }
+
+  std::vector<Protocol> protocols_;
+  SyncActionPlan action_plan_;
   L0StorageGroups storage_groups_;
   const MultiBufferPlan &multi_buffer_plan_;
   const EpochDomainRegistry &domains_;
@@ -1875,6 +2544,9 @@ public:
     allocations_.clear();
     flag_infos_.clear();
     GroupCounterChannels();
+    bool has_local_lifetimes = std::any_of(
+        sync_points_.begin(), sync_points_.end(),
+        [](const SyncPoint &point) { return point.lifetime_end != nullptr; });
 
     std::map<std::string, int> required_ids;
     std::map<std::string, int> next_intra_core_id;
@@ -1980,7 +2652,8 @@ public:
 
         // CanReuse proves the lifetime of individual sync points. This proof
         // covers the whole counter channel only when it has one owner.
-        if (needs_reuse && !IsMultiOwnerCounterChannel(index)) {
+        if ((needs_reuse || has_local_lifetimes) &&
+            !IsMultiOwnerCounterChannel(index)) {
           for (size_t allocation_index = 0;
                allocation_index < allocations_.size(); ++allocation_index) {
             FlagAllocation &allocation = allocations_[allocation_index];
@@ -1990,7 +2663,10 @@ public:
                                                       representative)) {
               continue;
             }
+            if (allocation.num_versions < sync_point.num_versions)
+              continue;
             if (allocation.cross_iter != cross_iter &&
+                !sync_point.lifetime_end && !representative.lifetime_end &&
                 (!cross_core || !site_registry_.IsCrossCore(representative))) {
               continue;
             }
@@ -2053,7 +2729,8 @@ public:
     }
 
     for (const FlagAllocation &allocation : allocations_) {
-      if (allocation.cross_iter)
+      if (allocation.cross_iter &&
+          !sync_points_[allocation.sync_points.front()].has_planned_actions)
         AppendCrossIterFlagInfo(allocation);
     }
 
@@ -2393,18 +3070,133 @@ class SyncMaterializer {
 public:
   SyncMaterializer(const SyncSiteRegistry &site_registry,
                    const std::vector<SyncPoint> &sync_points,
-                   const std::vector<FlagAllocation> &allocations)
+                   const std::vector<FlagAllocation> &allocations,
+                   const SyncActionPlan &actions)
       : site_registry_(site_registry), sync_points_(sync_points),
-        allocations_(allocations) {}
+        allocations_(allocations), actions_(actions) {}
 
-  void Run(std::vector<std::shared_ptr<IRStructure>> &root) {
+  void Run(ScheduledTIR *scheduled, const FlagInfoList &flag_infos) {
+    InsertPlannedActions(scheduled);
     InsertSyncPoints();
-    MaterializeInsertions(root, nullptr);
+    MaterializeInsertions(scheduled->tree, nullptr);
+    InsertBoundaryFlags(scheduled->tree, flag_infos);
   }
 
 private:
+  std::vector<Stmt> MakeFlagActions(const SyncPoint &point, bool set,
+                                    const PrimExpr &iteration) const {
+    const auto &src = site_registry_.Src(point);
+    const auto &dst = site_registry_.Dst(point);
+    int base = allocations_[point.allocation_index].base_id;
+    PrimExpr id = MakeFlagEventId(iteration, point.num_versions, base);
+    std::string event = GetHardEvent(src.pipe, dst.pipe);
+    if (src.core == dst.core)
+      return {set ? MakeAscendSetFlag(event, id)
+                  : MakeAscendWaitFlag(event, id)};
+    size_t separator = event.find('_');
+    std::string pipe = "PIPE_" + (set ? event.substr(0, separator)
+                                      : event.substr(separator + 1));
+    CoreMask core = set ? src.core : dst.core;
+    if (core != kCoreCube)
+      return {set ? MakeAscendCrossCoreSetFlag(4, pipe, id)
+                  : MakeAscendCrossCoreWaitFlag(4, pipe, id)};
+    std::vector<Stmt> statements;
+    for (int sid = 0; sid < 2; ++sid) {
+      if (!HasCore(src.core | dst.core, VectorCore(sid)))
+        continue;
+      PrimExpr sid_id =
+          MakeFlagEventId(iteration, point.num_versions, base + 16 * sid);
+      statements.push_back(set ? MakeAscendCrossCoreSetFlag(4, pipe, sid_id)
+                               : MakeAscendCrossCoreWaitFlag(4, pipe, sid_id));
+    }
+    return statements;
+  }
+
+  Stmt MakeChannelAction(size_t point_id, bool set,
+                         const PrimExpr &iteration) const {
+    return SeqStmt::Flatten(
+        MakeFlagActions(sync_points_[point_id], set, iteration));
+  }
+
+  Stmt MakeAcquire(const SyncAcquisition &acquisition,
+                   const PrimExpr &generation) const {
+    Stmt wait = acquisition.ready
+                    ? MakeChannelAction(*acquisition.ready, false, generation)
+                    : MakeAscendPipeBarrier("PIPE_" + acquisition.pipe);
+    return WrapWithGuard(
+        SeqStmt::Flatten(wait,
+                         BufferStore(acquisition.acquired, generation, {0})),
+        BufferLoad(acquisition.acquired, {0}) != generation);
+  }
+
+  Stmt MaterializeAction(const FlagAction &action) const {
+    if (action.iteration.defined())
+      return MakeChannelAction(action.sync_point, action.set,
+                               action.iteration.value());
+    const SyncPoint &point = sync_points_[action.sync_point];
+    std::vector<Stmt> statements;
+    for (int i = 0; i < point.num_versions; ++i)
+      statements.push_back(
+          MakeChannelAction(action.sync_point, action.set,
+                            make_const(point.flag_iteration.dtype(), i)));
+    return SeqStmt::Flatten(statements);
+  }
+
+  Stmt MaterializeAction(const AcquisitionAction &action) const {
+    const SyncAcquisition &acquisition =
+        actions_.acquisitions[action.acquisition];
+    const PrimExpr &generation = action.generation;
+    switch (action.kind) {
+    case AcquisitionActionKind::kInitialize:
+      return BufferStore(acquisition.acquired,
+                         make_const(generation.dtype(), -1), {0});
+    case AcquisitionActionKind::kAcquire:
+      return MakeAcquire(acquisition, generation);
+    case AcquisitionActionKind::kRetire:
+      ICHECK(acquisition.free);
+      return WrapWithGuard(
+          SeqStmt::Flatten(
+              MakeAcquire(acquisition, generation),
+              MakeChannelAction(*acquisition.free, true, generation)),
+          generation >= 0);
+    }
+    LOG(FATAL) << "Unknown synchronization acquisition action";
+    return Stmt();
+  }
+
+  Stmt MaterializeAction(const PipeBarrierAction &action) const {
+    return WrapWithGuard(MakeAscendPipeBarrier("PIPE_" + action.pipe),
+                         action.condition);
+  }
+
+  void InsertPlannedActions(ScheduledTIR *scheduled) {
+    if (actions_.insertions.empty())
+      return;
+    class Simplifier : public StmtExprMutator {
+      PrimExpr VisitExpr(const PrimExpr &expr) final {
+        return analyzer_.Simplify(StmtExprMutator::VisitExpr(expr));
+      }
+      arith::Analyzer analyzer_;
+    } simplify;
+    for (const SyncActionInsertion &insertion : actions_.insertions) {
+      Stmt statement = std::visit(
+          [&](const auto &action) { return MaterializeAction(action); },
+          insertion.action);
+      InsertStatement(insertion.node, simplify(std::move(statement)),
+                      insertion.at_beginning, insertion.core, insertion.guard);
+    }
+    SBlock root = scheduled->metadata.kernel_root;
+    Array<Buffer> buffers = root->alloc_buffers;
+    for (const SyncAcquisition &acquisition : actions_.acquisitions)
+      buffers.push_back(acquisition.acquired);
+    root.CopyOnWrite()->alloc_buffers = std::move(buffers);
+    scheduled->metadata.kernel_root = std::move(root);
+  }
+
   void InsertSyncPoints() {
     for (const SyncPoint &sync_point : sync_points_) {
+      if (sync_point.has_planned_actions)
+        continue;
       const SyncInsertionSite &src = site_registry_.Src(sync_point);
       const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
       std::string hard_event = GetHardEvent(src.pipe, dst.pipe);
@@ -2425,53 +3217,14 @@ private:
         continue;
       }
 
-      const FlagAllocation &allocation =
-          allocations_[sync_point.allocation_index];
-      int base_id = allocation.base_id;
-      PrimExpr event_id = MakeFlagEventId(sync_point.flag_iteration,
-                                          sync_point.num_versions, base_id);
-
-      if (site_registry_.IsCrossCore(sync_point)) {
-        if (src.core != kCoreCube) {
-          InsertStatement(
-              src.path_end,
-              MakeAscendCrossCoreSetFlag(4, producer_pipe, event_id), false,
-              src.core, producer_guard);
-          for (int sid = 0; sid < 2; ++sid) {
-            if (!HasCore(src.core | dst.core, VectorCore(sid)))
-              continue;
-            PrimExpr wait_id =
-                MakeFlagEventId(sync_point.flag_iteration,
-                                sync_point.num_versions, base_id + 16 * sid);
-            InsertStatement(
-                dst.path_end,
-                MakeAscendCrossCoreWaitFlag(4, consumer_pipe, wait_id), true,
-                dst.core, consumer_guard);
-          }
-        } else {
-          for (int sid = 0; sid < 2; ++sid) {
-            if (!HasCore(src.core | dst.core, VectorCore(sid)))
-              continue;
-            PrimExpr set_id =
-                MakeFlagEventId(sync_point.flag_iteration,
-                                sync_point.num_versions, base_id + 16 * sid);
-            InsertStatement(
-                src.path_end,
-                MakeAscendCrossCoreSetFlag(4, producer_pipe, set_id), false,
-                src.core, producer_guard);
-          }
-          InsertStatement(
-              dst.path_end,
-              MakeAscendCrossCoreWaitFlag(4, consumer_pipe, event_id), true,
-              dst.core, consumer_guard);
-        }
-        continue;
-      }
-
-      InsertStatement(src.path_end, MakeAscendSetFlag(hard_event, event_id),
-                      false, src.core, producer_guard);
-      InsertStatement(dst.path_end, MakeAscendWaitFlag(hard_event, event_id),
-                      true, dst.core, consumer_guard);
+      for (const Stmt &statement :
+           MakeFlagActions(sync_point, true, sync_point.flag_iteration))
+        InsertStatement(src.path_end, statement, false, src.core,
+                        producer_guard);
+      for (const Stmt &statement :
+           MakeFlagActions(sync_point, false, sync_point.flag_iteration))
+        InsertStatement(dst.path_end, statement, true, dst.core,
+                        consumer_guard);
     }
   }
 
@@ -2520,9 +3273,40 @@ private:
     nodes = std::move(materialized);
   }
 
+  void InsertBoundaryFlags(std::vector<std::shared_ptr<IRStructure>> &root,
+                           const FlagInfoList &flag_infos) {
+    std::vector<std::shared_ptr<IRStructure>> prefix;
+    std::vector<std::shared_ptr<IRStructure>> suffix;
+    for (const FlagInfo &info : flag_infos) {
+      if (info.mode == 0) {
+        prefix.push_back(
+            MakeSyncTaskNode(MakeAscendSetFlag(info.hardevent, info.flag_var),
+                             info.core_mask, 0));
+        suffix.push_back(
+            MakeSyncTaskNode(MakeAscendWaitFlag(info.hardevent, info.flag_var),
+                             info.core_mask, 0));
+      } else if (info.mode == 1) {
+        prefix.push_back(MakeSyncTaskNode(
+            MakeAscendCrossCoreSetFlag(4, info.hardevent, info.flag_var),
+            info.core_mask, 0));
+      } else if (info.mode == 2) {
+        suffix.push_back(MakeSyncTaskNode(
+            MakeAscendCrossCoreWaitFlag(4, info.hardevent, info.flag_var),
+            info.core_mask, 0));
+      }
+    }
+    root.insert(root.begin(), prefix.begin(), prefix.end());
+    root.insert(root.end(), suffix.begin(), suffix.end());
+    for (size_t i = 0; i < root.size(); ++i) {
+      root[i]->SetIndex(i);
+      root[i]->SetParent(nullptr);
+    }
+  }
+
   const SyncSiteRegistry &site_registry_;
   const std::vector<SyncPoint> &sync_points_;
   const std::vector<FlagAllocation> &allocations_;
+  const SyncActionPlan &actions_;
 };
 
 // ============================================================================
@@ -2576,35 +3360,9 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
                                cross_core_flag_reservation);
   flag_allocator.Plan();
   SyncMaterializer(analyzer.SiteRegistry(), analyzer.SyncPoints(),
-                   flag_allocator.Allocations())
-      .Run(root);
-  FlagInfoList flag_infos = flag_allocator.TakeFlagInfos();
+                   flag_allocator.Allocations(), analyzer.Actions())
+      .Run(&scheduled_tir, flag_allocator.TakeFlagInfos());
 
-  std::vector<std::shared_ptr<IRStructure>> prefix;
-  std::vector<std::shared_ptr<IRStructure>> suffix;
-  for (const FlagInfo &info : flag_infos) {
-    if (info.mode == 0) {
-      prefix.push_back(MakeSyncTaskNode(
-          MakeAscendSetFlag(info.hardevent, info.flag_var), info.core_mask, 0));
-      suffix.push_back(
-          MakeSyncTaskNode(MakeAscendWaitFlag(info.hardevent, info.flag_var),
-                           info.core_mask, 0));
-    } else if (info.mode == 1) {
-      prefix.push_back(MakeSyncTaskNode(
-          MakeAscendCrossCoreSetFlag(4, info.hardevent, info.flag_var),
-          info.core_mask, 0));
-    } else if (info.mode == 2) {
-      suffix.push_back(MakeSyncTaskNode(
-          MakeAscendCrossCoreWaitFlag(4, info.hardevent, info.flag_var),
-          info.core_mask, 0));
-    }
-  }
-  root.insert(root.begin(), prefix.begin(), prefix.end());
-  root.insert(root.end(), suffix.begin(), suffix.end());
-  for (size_t i = 0; i < root.size(); ++i) {
-    root[i]->SetIndex(i);
-    root[i]->SetParent(nullptr);
-  }
   return EncodeScheduledTIR(std::move(scheduled_tir));
 }
 

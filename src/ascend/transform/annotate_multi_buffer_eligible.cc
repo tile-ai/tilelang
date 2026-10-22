@@ -14,9 +14,11 @@
  *
  *  Automatic claims form the deepest disjoint loop frontier that completely
  *  covers a storage's ordinary accesses; owner-external fills may initialize
- *  every physical version. Every claimed loop must write the storage before
- *  any read. If descendant loops cover only part of an epoch (for example, a
- *  row-writing loop followed by a whole-buffer consumer), the claim is
+ *  every physical version in ordinary modes. Ordinary owners must write the
+ *  storage before any read; write-counter owners may retain an earlier value,
+ *  but their updates must still be write-first. If descendant loops cover
+ *  only part of an epoch (for example, a row-writing loop followed by a
+ *  whole-buffer consumer), the claim is
  *  promoted to a write-first ancestor. Independent sibling loops may
  *  therefore become multiple owners of one storage.
  *
@@ -47,6 +49,7 @@
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/multi_buffer.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
+#include "ascend/transform/auto_schedule/write_first_analysis.h"
 #include "ascend/transform/buffer_version.h"
 #include "op/builtin.h"
 #include "transform/common/attr.h"
@@ -84,492 +87,18 @@ Array<Var> NormalizeEligibleStorages(const Any &annotation) {
 }
 
 // ---------------------------------------------------------------------------
-// WriteFirstClassifier: program-order classification of a storage's access
-// pattern inside a Stmt. All Buffer aliases sharing buffer->data participate.
-//
-// Four-state lattice:
-//   kUntouched         — subtree provably never accesses the buffer
-//   kMaybeWriteFirst   — either kUntouched or kWriteFirst (write not certain
-//                        but no read-before-write risk)
-//   kWriteFirst        — first access is a guaranteed write
-//   kReadFirst         — a read may happen before any guaranteed write
-//                        (absorbing/unsafe state)
-//
-// Both kUntouched and kMaybeWriteFirst and kWriteFirst are "safe" for
-// multi-buffering (prior content is irrelevant). kReadFirst is not. This is
-// deliberately a storage-granular heuristic: a write to any region is treated
-// as making the storage write-first; it does not prove that every later-read
-// region was overwritten. Kernels carrying untouched regions across iterations
-// must opt out via T.annotate_buffer_versions({buf: 1}) or explicitly choose an
-// owner whose epoch overwrites the complete read footprint.
-// ---------------------------------------------------------------------------
-enum class AccessOrder {
-  kUntouched,
-  kMaybeWriteFirst,
-  kWriteFirst,
-  kReadFirst,
-};
-
-// Terminal states determine the answer; further sub-events cannot change it.
-bool IsTerminal(AccessOrder order) {
-  return order == AccessOrder::kReadFirst || order == AccessOrder::kWriteFirst;
-}
-
-// Sequential composition of two sub-events in program order. Terminal states
-// absorb the suffix; a conditional write followed by a read remains read-first
-// because the write may have been skipped.
-AccessOrder SeqCompose(AccessOrder first, AccessOrder second) {
-  if (IsTerminal(first))
-    return first;
-  if (first == AccessOrder::kUntouched)
-    return second;
-  if (second == AccessOrder::kUntouched)
-    return AccessOrder::kMaybeWriteFirst;
-  return second;
-}
-
-// Merge mutually exclusive then/else branch classifications.
-AccessOrder MergeIfThenElse(AccessOrder then_order, AccessOrder else_order) {
-  if (then_order == AccessOrder::kReadFirst ||
-      else_order == AccessOrder::kReadFirst) {
-    return AccessOrder::kReadFirst;
-  }
-  if (then_order == AccessOrder::kUntouched &&
-      else_order == AccessOrder::kUntouched) {
-    return AccessOrder::kUntouched;
-  }
-  if (then_order == AccessOrder::kWriteFirst &&
-      else_order == AccessOrder::kWriteFirst) {
-    return AccessOrder::kWriteFirst;
-  }
-  return AccessOrder::kMaybeWriteFirst;
-}
-
-// Merge a single then branch with an implicit untouched else branch.
-AccessOrder MergeIfThenOnly(AccessOrder then_order) {
-  if (then_order == AccessOrder::kReadFirst)
-    return AccessOrder::kReadFirst;
-  if (then_order == AccessOrder::kUntouched)
-    return AccessOrder::kUntouched;
-  return AccessOrder::kMaybeWriteFirst;
-}
-
-// A possibly skipped scope cannot provide a guaranteed first write.
-AccessOrder DemoteIfNotMustExecute(AccessOrder order, bool must_execute) {
-  if (!must_execute && order == AccessOrder::kWriteFirst)
-    return AccessOrder::kMaybeWriteFirst;
-  return order;
-}
-
-AccessOrder AssumeForExecutes(AccessOrder body) {
-  // NOTE: intentionally aggressive. Treat every For as executing at least
-  // once, and assume a maybe-write-first body takes a writing path in some
-  // iteration. A zero-trip or fully skipped loop may therefore make a later
-  // read appear to have a preceding write.
-  return body == AccessOrder::kMaybeWriteFirst ? AccessOrder::kWriteFirst
-                                               : body;
-}
-
-class WriteFirstClassifier : public StmtExprVisitor {
-public:
-  AccessOrder Classify(const Stmt &s, const Var &storage) {
-    target_storage_ = storage;
-    result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitStmt(s);
-    return result_;
-  }
-
-  AccessOrder Classify(const PrimExpr &e, const Var &storage) {
-    target_storage_ = storage;
-    result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitExpr(e);
-    return result_;
-  }
-
-private:
-  Var target_storage_;
-  AccessOrder result_ = AccessOrder::kUntouched;
-
-  // Dispatch short-circuit: skip further work once a terminal is reached.
-  void VisitStmt(const Stmt &s) final {
-    if (IsTerminal(result_))
-      return;
-    StmtExprVisitor::VisitStmt(s);
-  }
-  void VisitExpr(const PrimExpr &e) final {
-    if (IsTerminal(result_))
-      return;
-    StmtExprVisitor::VisitExpr(e);
-  }
-
-  template <typename F> AccessOrder ClassifyLocal(F f) {
-    AccessOrder saved = result_;
-    result_ = AccessOrder::kUntouched;
-    f();
-    AccessOrder local = result_;
-    result_ = saved;
-    return local;
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    for (const auto &idx : op->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(op->buffer->data))
-      result_ = AccessOrder::kReadFirst;
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    // value first, then indices, then the store itself.
-    VisitExpr(op->value);
-    if (IsTerminal(result_))
-      return;
-    for (const auto &idx : op->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(op->buffer->data))
-      result_ = AccessOrder::kWriteFirst;
-  }
-
-  void VisitStmt_(const SeqStmtNode *op) final {
-    for (const auto &s : op->seq) {
-      VisitStmt(s);
-      if (IsTerminal(result_))
-        return;
-    }
-  }
-
-  void VisitStmt_(const EvaluateNode *op) final { VisitExpr(op->value); }
-
-  void VisitStmt_(const ForNode *op) final {
-    VisitExpr(op->min);
-    if (IsTerminal(result_))
-      return;
-    VisitExpr(op->extent);
-    if (IsTerminal(result_))
-      return;
-    if (op->step.has_value()) {
-      VisitExpr(op->step.value());
-      if (IsTerminal(result_))
-        return;
-    }
-    auto body = ClassifyLocal([&] { VisitStmt(op->body); });
-    result_ = SeqCompose(result_, AssumeForExecutes(body));
-  }
-
-  void VisitStmt_(const IfThenElseNode *op) final {
-    VisitExpr(op->condition);
-    if (IsTerminal(result_))
-      return;
-    auto t = ClassifyLocal([&] { VisitStmt(op->then_case); });
-    AccessOrder branch;
-    if (op->else_case) {
-      auto e = ClassifyLocal([&] { VisitStmt(op->else_case.value()); });
-      branch = MergeIfThenElse(t, e);
-    } else {
-      branch = MergeIfThenOnly(t);
-    }
-    result_ = SeqCompose(result_, branch);
-  }
-
-  void VisitStmt_(const BindNode *op) final { VisitExpr(op->value); }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (CanRewriteMultiBufferAttrNode(op->attr_key, op->node)) {
-      VisitExpr(Downcast<PrimExpr>(op->node));
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitExpr(op->value);
-    if (IsTerminal(result_))
-      return;
-    VisitStmt(op->body);
-  }
-
-  void VisitStmt_(const WhileNode *op) final {
-    VisitExpr(op->condition);
-    if (IsTerminal(result_))
-      return;
-    auto body = ClassifyLocal([&] { VisitStmt(op->body); });
-    result_ = SeqCompose(result_,
-                         DemoteIfNotMustExecute(body, /*must_execute=*/false));
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    // Reduce-init runs only on the first iteration of the surrounding loop;
-    // its writes are not guaranteed across iterations -> kMaybeWriteFirst.
-    if (op->init.defined()) {
-      auto init = ClassifyLocal([&] { VisitStmt(op->init.value()); });
-      AccessOrder init_eff = init;
-      if (init == AccessOrder::kWriteFirst)
-        init_eff = AccessOrder::kMaybeWriteFirst;
-      result_ = SeqCompose(result_, init_eff);
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitStmt(op->body);
-  }
-
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    VisitExpr(op->predicate);
-    if (IsTerminal(result_))
-      return;
-    bool must_execute = false;
-    if (const auto *imm = op->predicate.as<IntImmNode>())
-      must_execute = (imm->value != 0);
-    auto body = ClassifyLocal([&] { VisitStmt(op->block); });
-    result_ = SeqCompose(result_, DemoteIfNotMustExecute(body, must_execute));
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    static const Op &region_op = region();
-    static const auto access_ptr_op = Op::Get("tl.access_ptr");
-
-    if (op->op.same_as(region_op)) {
-      HandleRegionCall(op);
-      return;
-    }
-    if (op->op.same_as(access_ptr_op)) {
-      HandleAccessPtrCall(op);
-      return;
-    }
-    for (const auto &arg : op->args) {
-      VisitExpr(arg);
-      if (IsTerminal(result_))
-        return;
-    }
-  }
-
-  // tl.region(BufferLoad(buf, indices...), access_type, extents...)
-  //   access_type: bit 0 = read, bit 1 = write.
-  void HandleRegionCall(const CallNode *op) {
-    if (op->args.size() < 2) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mode = op->args[1].as<IntImmNode>();
-    if (!bl || !mode) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    for (size_t i = 2; i < op->args.size(); ++i) {
-      VisitExpr(op->args[i]);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int m = mode->value;
-      if (m & 1)
-        result_ = AccessOrder::kReadFirst;
-      else if (m & 2)
-        result_ = AccessOrder::kWriteFirst;
-    }
-  }
-
-  // tl.access_ptr(BufferLoad(buf, indices...), extent, rw_mask)
-  //   rw_mask: bit 0 = read, bit 1 = write.
-  void HandleAccessPtrCall(const CallNode *op) {
-    if (op->args.size() < 3) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mask = op->args[2].as<IntImmNode>();
-    if (!bl || !mask) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitExpr(op->args[1]);
-    if (IsTerminal(result_))
-      return;
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int rw = mask->value;
-      if (rw & 1)
-        result_ = AccessOrder::kReadFirst;
-      else if (rw & 2)
-        result_ = AccessOrder::kWriteFirst;
-    }
-  }
-};
-
-int RequestedStage(const IRStructure *node) {
-  int stage = node->GetStage();
-  return stage == kUnscheduledStage ? 0 : stage;
-}
-
-std::vector<const IRStructure *>
-GetWriteFirstOrder(const std::vector<std::shared_ptr<IRStructure>> &nodes) {
-  std::vector<const IRStructure *> result;
-  result.reserve(nodes.size());
-  bool has_requested_stage = false;
-  for (const auto &node : nodes) {
-    result.push_back(node.get());
-    has_requested_stage |= node->GetStage() != kUnscheduledStage;
-  }
-  if (has_requested_stage) {
-    std::stable_sort(result.begin(), result.end(),
-                     [](const IRStructure *lhs, const IRStructure *rhs) {
-                       return RequestedStage(lhs) < RequestedStage(rhs);
-                     });
-  }
-  return result;
-}
-
-// MaterializeScheduleUnits turns structured branches into guarded siblings.
-// Track the condition under which an earlier guaranteed write has occurred,
-// and prove that every later read executes only inside that condition. This
-// recovers both equal guards and exhaustive opposite guards without rebuilding
-// an IfThenElse tree.
-class IRWriteFirstClassifier {
-public:
-  static AccessOrder
-  Classify(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-           const Var &storage, const ConstrSet &outer_ctx) {
-    State state;
-    for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
-      ProcessNode(node, storage, outer_ctx, &state);
-      if (state.unsafe)
-        return AccessOrder::kReadFirst;
-    }
-    if (!state.touched)
-      return AccessOrder::kUntouched;
-    return IsCovered(Bool(true), state.written_guard, outer_ctx)
-               ? AccessOrder::kWriteFirst
-               : AccessOrder::kMaybeWriteFirst;
-  }
-
-private:
-  struct State {
-    bool touched{false};
-    bool unsafe{false};
-    PrimExpr written_guard{Bool(false)};
-  };
-
-  static bool IsCovered(const PrimExpr &access_guard,
-                        const PrimExpr &written_guard,
-                        const ConstrSet &outer_ctx) {
-    return GuardsEquivalent(access_guard, written_guard, outer_ctx) ||
-           GuardImplies(access_guard, written_guard, outer_ctx);
-  }
-
-  static PrimExpr MergeWriteGuard(const PrimExpr &known, const PrimExpr &added,
-                                  const ConstrSet &outer_ctx) {
-    if (is_zero(known))
-      return added;
-    if (is_zero(added) || GuardsEquivalent(known, added, outer_ctx) ||
-        GuardImplies(added, known, outer_ctx)) {
-      return known;
-    }
-    if (GuardImplies(known, added, outer_ctx))
-      return added;
-    return known || added;
-  }
-
-  static void ProcessAccess(AccessOrder order, const PrimExpr &active_guard,
-                            const ConstrSet &outer_ctx, State *state) {
-    ICHECK(state != nullptr);
-    if (order == AccessOrder::kUntouched || state->unsafe)
-      return;
-    state->touched = true;
-    if (order == AccessOrder::kReadFirst) {
-      state->unsafe = !IsCovered(active_guard, state->written_guard, outer_ctx);
-      return;
-    }
-    if (order == AccessOrder::kWriteFirst) {
-      state->written_guard =
-          MergeWriteGuard(state->written_guard, active_guard, outer_ctx);
-    }
-  }
-
-  static AccessOrder ClassifyPayload(const IRStructure *node,
-                                     const Var &storage) {
-    WriteFirstClassifier classifier;
-    if (node->IsTask()) {
-      return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
-                                 storage);
-    }
-
-    const auto *control = static_cast<const ControlNode *>(node);
-    AccessOrder header = classifier.Classify(control->task->stmt, storage);
-    if (header == AccessOrder::kReadFirst ||
-        header == AccessOrder::kWriteFirst) {
-      return header;
-    }
-
-    AccessOrder body =
-        Classify(control->children, storage, control->GetLoopBodyContext());
-    return SeqCompose(header, AssumeForExecutes(body));
-  }
-
-  static void ProcessNode(const IRStructure *node, const Var &storage,
-                          const ConstrSet &outer_ctx, State *state) {
-    PrimExpr active_guard = Bool(true);
-    WriteFirstClassifier classifier;
-    for (const auto &guard : node->GetGuards()) {
-      if (guard->IsCondition()) {
-        const PrimExpr &condition =
-            static_cast<const ConditionGuard *>(guard.get())->condition;
-        ProcessAccess(classifier.Classify(condition, storage), active_guard,
-                      outer_ctx, state);
-        active_guard =
-            is_one(active_guard) ? condition : active_guard && condition;
-        continue;
-      }
-
-      const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
-      if (auto node_expr = attribute->node.try_cast<PrimExpr>()) {
-        ProcessAccess(classifier.Classify(node_expr.value(), storage),
-                      active_guard, outer_ctx, state);
-      }
-    }
-    ProcessAccess(ClassifyPayload(node, storage), active_guard, outer_ctx,
-                  state);
-  }
-};
-
-// ---------------------------------------------------------------------------
 // MultiBufferOwnerPlanner: for each storage, choose the deepest set of
 // disjoint structural loops that covers every ordinary access. Independently
-// rewritable fills may remain outside the frontier. A loop is selected only
-// when its descendants do not already provide complete coverage and its
-// stage-ordered body is write-first.
+// rewritable fills may remain outside the frontier in ordinary modes. A loop
+// is selected only when its descendants do not already provide complete
+// coverage and its stage-ordered body satisfies the mode's write-first rule.
 // ---------------------------------------------------------------------------
 class MultiBufferOwnerPlanner {
 public:
   static ControlStorageClaims
   Plan(const std::vector<std::shared_ptr<IRStructure>> &root,
-       const StorageSet &excluded_storages, const L0StorageGroups &groups) {
+       const StorageSet &excluded_storages, const StorageSet &write_counters,
+       const L0StorageGroups &groups) {
     MultiBufferOwnerPlanner planner;
     StorageSet seen;
     for (const auto &node : root) {
@@ -579,7 +108,14 @@ public:
             excluded_storages.count(representative))
           continue;
         Array<Var> members = groups.Members(storage);
-        CoveragePlan plan = planner.PlanList(root, members);
+        bool write_counter = write_counters.count(representative);
+        CoveragePlan plan = planner.PlanList(root, members, write_counter);
+        ICHECK(!write_counter || (plan.IsComplete() && !plan.owners.empty()))
+            << "Cannot infer complete loop owners for write_counter storage "
+            << storage->name_hint
+            << "; put every access, including fills, inside a loop and write "
+               "each new value before updating it, or select the update "
+               "scope explicitly with multi_buffer_eligible";
         if (!plan.IsComplete())
           continue;
         for (ControlNode *owner : plan.owners)
@@ -587,6 +123,11 @@ public:
             planner.claims_[owner].push_back(member);
       }
     }
+    for (const Var &storage : write_counters)
+      ICHECK(excluded_storages.count(storage) ||
+             seen.count(groups.Representative(storage)))
+          << "write_counter storage " << storage->name_hint
+          << " has no accesses from which to infer an owner loop";
     return std::move(planner.claims_);
   }
 
@@ -624,13 +165,15 @@ private:
 
   ControlStorageClaims claims_;
 
-  static CoveragePlan PlanLeaf(const TaskNode *task,
-                               const Array<Var> &members) {
+  static CoveragePlan PlanLeaf(const TaskNode *task, const Array<Var> &members,
+                               bool write_counter) {
     CoveragePlan result;
     for (const Var &storage : members) {
       if (!task->TouchesStorage(storage))
         continue;
-      bool broadcast_fill = members.size() == 1 &&
+      // A write-counter fill creates a value and must belong to an owner;
+      // it cannot initialize every slot outside the generation protocol.
+      bool broadcast_fill = !write_counter && members.size() == 1 &&
                             !task->GuardsTouchStorage(storage) &&
                             CanBroadcastFillToStorage(task->stmt, storage);
       if (!broadcast_fill)
@@ -642,29 +185,36 @@ private:
   }
 
   CoveragePlan PlanList(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-                        const Array<Var> &members) {
+                        const Array<Var> &members, bool write_counter) {
     CoveragePlan result;
     for (const auto &node : nodes)
-      result.Merge(PlanNode(node.get(), members));
+      result.Merge(PlanNode(node.get(), members, write_counter));
     return result;
   }
 
-  CoveragePlan PlanNode(IRStructure *node, const Array<Var> &members) {
+  CoveragePlan PlanNode(IRStructure *node, const Array<Var> &members,
+                        bool write_counter) {
     if (node->IsTask())
-      return PlanLeaf(static_cast<const TaskNode *>(node), members);
+      return PlanLeaf(static_cast<const TaskNode *>(node), members,
+                      write_counter);
 
     auto *control = static_cast<ControlNode *>(node);
-    CoveragePlan result = PlanList(control->children, members);
+    CoveragePlan result = PlanList(control->children, members, write_counter);
     if (result.CanClaimHere()) {
-      // Each plane must be write-first independently. In particular, a data
-      // reload does not initialize or kill sticky SF contents.
+      // Write clocks allow read-only owners and retained-value reads, but an
+      // update cannot start with RMW. A rejected inner loop can still belong
+      // to an outer owner that defines the new value before that loop.
+      // Check every bound plane independently with the same mode policy.
       bool write_first = true;
       for (const Var &storage : members) {
         AccessOrder order = IRWriteFirstClassifier::Classify(
-            control->children, storage, control->GetLoopBodyContext());
+            control->children, storage, control->GetLoopBodyContext(),
+            /*writes_only=*/write_counter);
         write_first &= order != AccessOrder::kReadFirst;
       }
-      if (write_first) {
+      // A write owner cannot exit before publishing its update. An enclosing
+      // loop may still own a complete update containing this inner break.
+      if (write_first && !(write_counter && control->BodyHasLoopBreak())) {
         result.coverage = Coverage::kCovered;
         result.owners = {control};
       }
@@ -697,13 +247,27 @@ public:
       }
     }
     CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
+    StorageSet write_counters;
+    for (const auto &[storage, mode] :
+         scheduled_tir->metadata.buffer_version_modes) {
+      if (mode != "write_counter")
+        continue;
+      ICHECK(scheduled_tir->metadata.buffer_versions.count(storage))
+          << "write_counter requires an explicit version count for "
+          << storage->name_hint << "; use (num_versions, \"write_counter\")";
+      ICHECK(!manual_buffers.count(storage))
+          << "write_counter cannot be combined with manual physical versions "
+             "for "
+          << storage->name_hint;
+      write_counters.insert(storage);
+    }
     StorageSet expanded;
     for (const Var &storage : excluded_storages)
       for (const Var &member : groups.Members(storage))
         expanded.insert(member);
     excluded_storages = std::move(expanded);
     ControlStorageClaims claims = MultiBufferOwnerPlanner::Plan(
-        scheduled_tir->tree, excluded_storages, groups);
+        scheduled_tir->tree, excluded_storages, write_counters, groups);
     MultiBufferAnnotator annotator(std::move(claims), std::move(manual_buffers),
                                    std::move(single_version_buffers), groups);
     annotator.RewriteNodes(scheduled_tir->tree);

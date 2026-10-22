@@ -134,8 +134,8 @@ def _build_kernel(
                 {
                     l1a: config.num_l1_stages,
                     l1b: config.num_l1_stages,
-                    l1_sfa: config.num_l1_sf_stages,
-                    l1_sfb: config.num_l1_sf_stages,
+                    l1_sfa: (config.num_l1_sf_stages, "write_counter"),
+                    l1_sfb: (config.num_l1_sf_stages, "write_counter"),
                     l0a: config.num_l0_stages,
                     l0b: config.num_l0_stages,
                     epilogue_ub: epilogue_versions,
@@ -168,45 +168,45 @@ def _build_kernel(
                 else:
                     group_idx = 0
                 num_k_blocks = T.ceildiv(eff_shape_k if k_grouped else shape_k, BLOCK_K)
-                num_sf_chunks = T.ceildiv(num_k_blocks, config.sf_k_blocks)
                 m_idx, n_idx, actual_m, actual_n = scheduler.tile()
-                for sf_chunk_idx in range(num_sf_chunks):
+                for k_block_idx in range(num_k_blocks):
+                    sf_chunk_idx = k_block_idx // config.sf_k_blocks
+                    k_within_chunk = k_block_idx % config.sf_k_blocks
                     sf_pair_idx = (sf_idx_base if k_grouped else 0) + sf_chunk_idx * sf_pairs_per_chunk
                     chunk_k_idx = sf_chunk_idx * config.sf_k_blocks * BLOCK_K
                     chunk_k_end = T.min(chunk_k_idx + config.sf_k_blocks * BLOCK_K, eff_shape_k if k_grouped else shape_k)
                     chunk_sf_pairs = T.ceildiv(chunk_k_end - chunk_k_idx, MX_SF_DIVISOR)
+                    if k_grouped:
+                        local_k_idx = k_block_idx * BLOCK_K
+                        k_idx = k_idx_base + local_k_idx
+                        actual_k = T.min(eff_shape_k - local_k_idx, BLOCK_K)
+                    else:
+                        k_idx = k_block_idx * BLOCK_K
+                        actual_k = T.min(shape_k - k_idx, BLOCK_K)
                     with T.Task():
-                        copy_sfa(gm_sfa, l1_sfa, m_idx, sf_pair_idx, actual_m, chunk_sf_pairs, batch_idx)
-                        copy_sfb(gm_sfb, l1_sfb, n_idx, sf_pair_idx, actual_n, chunk_sf_pairs, group_idx if m_grouped else batch_idx)
-                    for k_within_chunk in range(T.ceildiv(chunk_k_end - chunk_k_idx, BLOCK_K)):
-                        k_block_idx = sf_chunk_idx * config.sf_k_blocks + k_within_chunk
-                        if k_grouped:
-                            local_k_idx = k_block_idx * BLOCK_K
-                            k_idx = k_idx_base + local_k_idx
-                            actual_k = T.min(eff_shape_k - local_k_idx, BLOCK_K)
-                        else:
-                            k_idx = k_block_idx * BLOCK_K
-                            actual_k = T.min(shape_k - k_idx, BLOCK_K)
+                        copy_a(a_operand, l1a, m_idx, k_idx, actual_m, actual_k, batch_idx)
+                        copy_b(b_operand, l1b, n_idx, k_idx, actual_n, actual_k, group_idx if m_grouped else batch_idx)
+                    if k_within_chunk == 0:
                         with T.Task():
-                            copy_a(a_operand, l1a, m_idx, k_idx, actual_m, actual_k, batch_idx)
-                            copy_b(b_operand, l1b, n_idx, k_idx, actual_n, actual_k, group_idx if m_grouped else batch_idx)
-                        compute_k_block(
-                            l1a,
-                            l1b,
-                            l0a,
-                            l0b,
-                            l0c,
-                            k_block_idx,
-                            num_k_blocks,
-                            actual_m,
-                            actual_n,
-                            actual_k,
-                            l1_sfa=l1_sfa,
-                            l1_sfb=l1_sfb,
-                            l0_sfa=l0_sfa,
-                            l0_sfb=l0_sfb,
-                            k_within_chunk=k_within_chunk,
-                        )
+                            copy_sfa(gm_sfa, l1_sfa, m_idx, sf_pair_idx, actual_m, chunk_sf_pairs, batch_idx)
+                            copy_sfb(gm_sfb, l1_sfb, n_idx, sf_pair_idx, actual_n, chunk_sf_pairs, group_idx if m_grouped else batch_idx)
+                    compute_k_block(
+                        l1a,
+                        l1b,
+                        l0a,
+                        l0b,
+                        l0c,
+                        k_block_idx,
+                        num_k_blocks,
+                        actual_m,
+                        actual_n,
+                        actual_k,
+                        l1_sfa=l1_sfa,
+                        l1_sfb=l1_sfb,
+                        l0_sfa=l0_sfa,
+                        l0_sfb=l0_sfb,
+                        k_within_chunk=k_within_chunk,
+                    )
                 store_output(
                     l0c,
                     epilogue_ub,

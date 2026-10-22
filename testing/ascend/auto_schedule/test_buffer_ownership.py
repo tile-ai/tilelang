@@ -1,9 +1,10 @@
-"""AnnotateMultiBufferEligible selects complete, write-first storage owners."""
+"""AnnotateMultiBufferEligible selects complete storage owner frontiers."""
 
 import pytest
+from tilelang import tvm
 from tilelang.ascend import transform
 from tvm import tirx
-from testing.ascend._ir import copy, kernel, nodes, seq
+from testing.ascend._ir import copy, kernel, nodes, region, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -148,6 +149,9 @@ def test_row_writes_and_whole_buffer_read_belong_to_outer_owner():
         pytest.param(1, "auto", True, id="single-auto-explicit"),
         pytest.param(1, "iteration", True, id="single-iteration"),
         pytest.param(1, "counter", True, id="single-counter"),
+        pytest.param(1, "write_counter", False, id="single-write-counter-inferred"),
+        pytest.param(2, "write_counter", False, id="write-counter-inferred"),
+        pytest.param(2, "write_counter", True, id="write-counter-explicit"),
         pytest.param(2, None, False, id="fixed-ring"),
         pytest.param(None, "auto", False, id="automatic-ring"),
     ],
@@ -197,8 +201,75 @@ def test_version_policy_controls_storage_and_alias_eligibility(versions, mode, e
     assert all((ub.data in loop.annotations.get("multi_buffer_eligible", [])) == expected for loop in loops)
 
 
-@pytest.mark.parametrize("placement,expected", [("inner", "inner"), ("outer", "outer"), ("hoisted", None)])
-def test_l0_sf_group_selects_one_complete_owner(placement, expected):
+@pytest.mark.parametrize(
+    "case, expected",
+    [
+        ("siblings", ["writer", "reader"]),
+        ("nested-siblings", ["writer", "reader"]),
+        ("fill-owner", ["writer", "reader"]),
+        ("nested-fill", ["outer"]),
+        ("nested-rmw", ["outer"]),
+        ("nested-implicit-rmw", ["outer"]),
+        ("nested-break", ["outer"]),
+        ("outside-fill", None),
+    ],
+)
+def test_write_counter_owner_frontier(case, expected):
+    a = tirx.decl_buffer((4, 64), "float32", name="A", scope="shared.dyn")
+    out = tirx.decl_buffer((64,), "float32", name="out")
+    x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
+    outer, writer, reader = [tirx.Var(name, "int32") for name in ("outer", "writer", "reader")]
+    fill = unit(tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.tileop.fill"), region(x, 2), 0.0)))
+    load = unit(copy(a, x, src_shape=[1, 64]), guard=writer % 2 == 0)
+    read = unit(copy(x, out))
+    write_loop = unit(tirx.For(writer, 0, 3, tirx.ForKind.SERIAL, load), core=None)
+    read_loop = unit(tirx.For(reader, 0, 2, tirx.ForKind.SERIAL, read), core=None)
+    body = seq(write_loop, read_loop)
+    if case == "fill-owner":
+        body = seq(unit(tirx.For(writer, 0, 3, tirx.ForKind.SERIAL, fill), core=None), read_loop)
+    elif case == "nested-fill":
+        body = seq(fill, read_loop)
+    elif case in ("nested-rmw", "nested-implicit-rmw"):
+        update = tirx.BufferStore(x, x[0] + 1, [0])
+        if case == "nested-implicit-rmw":
+            update = tirx.Evaluate(
+                tirx.call_intrin("handle", tvm.ir.Op.get("tl.tileop.reduce"), region(a, 1), region(x, 2), "sum", 0, False)
+            )
+        body = seq(fill, unit(tirx.For(writer, 0, 3, tirx.ForKind.SERIAL, seq(unit(update), read)), core=None))
+    elif case == "nested-break":
+        stop = unit(tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))), guard=writer == 1)
+        body = unit(tirx.For(writer, 0, 3, tirx.ForKind.SERIAL, seq(load, read, stop)), core=None)
+    elif case == "outside-fill":
+        body = seq(fill, body)
+    if case.startswith("nested-"):
+        body = unit(tirx.For(outer, 0, 2, tirx.ForKind.SERIAL, body), core=None)
+    before = kernel(
+        body,
+        buffers=[a, x],
+        params=[out],
+        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
+    )
+    if expected is None:
+        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+            transform.AnnotateMultiBufferEligible()(before)
+    else:
+        after = transform.AnnotateMultiBufferEligible()(before)
+        owners = [loop.loop_var.name for loop in nodes(after, tirx.For) if x.data in loop.annotations.get("multi_buffer_eligible", [])]
+        assert owners == expected
+
+
+@pytest.mark.parametrize(
+    "placement, expected, mode",
+    [
+        pytest.param("inner", "inner", "auto", id="inner-inner"),
+        pytest.param("outer", "outer", "auto", id="outer-outer"),
+        pytest.param("hoisted", None, "auto", id="hoisted-None"),
+        pytest.param("inner", "inner", "write_counter", id="inner-write-counter"),
+        pytest.param("outer", "outer", "write_counter", id="outer-write-counter"),
+        pytest.param("hoisted", None, "write_counter", id="hoisted-write-counter"),
+    ],
+)
+def test_l0_sf_group_selects_one_complete_owner(placement, expected, mode):
     data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
     sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
     out = tirx.decl_buffer((4,), "int32", name="out")
@@ -213,7 +284,14 @@ def test_l0_sf_group_selects_one_complete_owner(placement, expected):
     body = unit(tirx.For(outer, 0, 4, tirx.ForKind.SERIAL, outer_body), core=None)
     if placement == "hoisted":
         body = seq(sf_write, body)
-    before = kernel(body, buffers=[data, sf], params=[out], annotations={"tl.l0_sf_bindings": {sf.data: data.data}})
+    annotations = {"tl.l0_sf_bindings": {sf.data: data.data}}
+    if mode == "write_counter":
+        annotations.update({"tl.buffer_versions_map": {sf.data: 2}, "tl.buffer_version_mode": {sf.data: mode}})
+    before = kernel(body, buffers=[data, sf], params=[out], annotations=annotations)
+    if mode == "write_counter" and placement == "hoisted":
+        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+            transform.AnnotateMultiBufferEligible()(before)
+        return
     after = transform.AnnotateMultiBufferEligible()(before)
     for storage in (data.data, sf.data):
         owners = [loop.loop_var.name for loop in nodes(after, tirx.For) if storage in loop.annotations.get("multi_buffer_eligible", [])]
@@ -222,8 +300,6 @@ def test_l0_sf_group_selects_one_complete_owner(placement, expected):
 
 @pytest.mark.parametrize("conflict", [False, True])
 def test_sf_version_override_applies_to_the_allocation_group(conflict):
-    from tilelang import tvm
-
     data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
     sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
     versions = {sf.data: 2, **({data.data: 3} if conflict else {})}
