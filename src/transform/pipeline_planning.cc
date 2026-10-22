@@ -426,6 +426,12 @@ private:
           IsGlobalLike_(im2col->src_) && IsSharedBuffer(im2col->dst_);
       has_global_to_shared_ |= global_to_shared;
       has_tma_ |= global_to_shared && TargetIsHopper(target_);
+    } else if (op->op.same_as(mbarrier_wait_parity()) ||
+               op->op.same_as(builtin::ptx_arrive_barrier())) {
+      // Explicit pipeline synchronization belongs to the copy stage. Preserve
+      // its prefetch placement and let InjectSoftwarePipeline version the
+      // barriers, without adding implicit async-copy synchronization.
+      async_safe_ = false;
     } else if (tile_op.defined() ||
                SideEffect(GetRef<Call>(op)) > CallEffectKind::kReadState) {
       has_non_copy_ = true;

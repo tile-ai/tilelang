@@ -328,6 +328,75 @@ def test_pipeline_planning_before_after_tma_copy_plan():
     _check(before, after, target=sm90_target)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_90a", "sm_103a"])
+def test_pipeline_planning_double_buffers_warp_specialized_tma_producer(arch):
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.float16), C: T.Tensor((64,), T.float16)):
+        with T.Kernel(1, threads=256):
+            S = T.alloc_shared((16,), T.float16)
+            full = T.alloc_barrier(128)
+            empty = T.alloc_barrier(128)
+            for k in T.Pipelined(4, num_stages=2):
+                with T.ws(1):
+                    T.barrier_wait(empty, (k + 1) % 2)
+                    T.tma_copy(A[k * 16], S, barrier=full)
+                    T.barrier_arrive(full)
+                with T.ws(0):
+                    T.barrier_wait(full, k % 2)
+                    T.copy(S, C[k * 16])
+                    T.barrier_arrive(empty)
+
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = _run_pipeline_planning(mod["before"], tvm.target.Target({"kind": "cuda", "arch": arch}))
+    (anno,) = _collect_pipeline_loop_annotations(mod["main"])
+    assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
+    assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1]
+    assert "software_pipeline_async_producers" not in anno
+    assert "software_pipeline_tma_copies" not in anno
+
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    buffers = {buffer.name: buffer for block in collect_nodes(mod["main"], tvm.tirx.SBlock) for buffer in block.alloc_buffers}
+    assert [int(dim) for dim in buffers["S"].shape] == [2, 16]
+    assert [int(dim) for dim in buffers["full"].shape] == [2]
+    assert [int(dim) for dim in buffers["empty"].shape] == [2]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("extra_effect", [None, "extern", "atomic", "barrier_arg"])
+def test_pipeline_planning_explicit_barrier_copy_effects(extra_effect):
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.float16), C: T.Tensor((64,), T.float16), counter: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=128):
+            S = T.alloc_shared((16,), T.float16)
+            full = T.alloc_barrier(128)
+            empty = T.alloc_barrier(128)
+            for k in T.Pipelined(4, num_stages=2):
+                with T.sblock("producer"):
+                    if extra_effect == "barrier_arg":
+                        T.barrier_wait(empty, T.call_extern("int32", "custom_parity", k))
+                    else:
+                        T.barrier_wait(empty, (k + 1) % 2)
+                    T.copy(A[k * 16], S)
+                    if extra_effect == "extern":
+                        T.evaluate(T.call_extern("int32", "custom_side_effect"))
+                    elif extra_effect == "atomic":
+                        T.atomic_add(counter[0], 1)
+                    T.barrier_arrive(full)
+                with T.sblock("consumer"):
+                    T.barrier_wait(full, k % 2)
+                    T.copy(S, C[k * 16])
+                    T.barrier_arrive(empty)
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    (anno,) = _collect_pipeline_loop_annotations(mod["main"])
+    stages = [int(v) for v in anno["software_pipeline_stage"]]
+    assert stages == ([0, 1] if extra_effect is None else [2, 2])
+    assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1]
+    assert "software_pipeline_async_producers" not in anno
+    assert "software_pipeline_tma_copies" not in anno
+
+
 def test_pipeline_planning_before_after_wgmma_gemm_plan():
     @T.prim_func
     def before(
