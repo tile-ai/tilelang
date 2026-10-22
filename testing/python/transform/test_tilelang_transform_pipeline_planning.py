@@ -816,7 +816,7 @@ def test_pipeline_planning_waits_for_gather_index_copy(grouped):
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@pytest.mark.parametrize("form", ["statement", "expression", "nested"])
+@pytest.mark.parametrize("form", ["statement", "expression", "nested", "mixed"])
 @pytest.mark.parametrize("explicit_schedule", [False, True])
 def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy(form, explicit_schedule):
     @T.prim_func
@@ -839,6 +839,11 @@ def test_pipeline_planning_recognizes_predicated_zero_fill_parallel_copy(form, e
                         A_shared[i] = T.if_then_else(
                             ko < 2, T.if_then_else(ko * 128 + i < 130, A[ko * 128 + i], T.float16(0)), T.float16(0)
                         )
+                    elif form == "mixed":
+                        if i < 64:
+                            A_shared[i] = T.if_then_else(ko * 128 + i < 130, A[ko * 128 + i], T.float16(0))
+                        else:
+                            A_shared[i] = T.float16(0)
                     elif ko * 128 + i < 130:
                         A_shared[i] = A[ko * 128 + i]
                     else:
