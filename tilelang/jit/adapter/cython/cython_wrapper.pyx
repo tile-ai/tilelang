@@ -13,7 +13,7 @@ cdef class CythonKernelWrapper:
     cdef:
         object dynamic_symbolic_map    # Maps dynamic dimensions to their corresponding tensor indices
         object dynamic_symbolic_sources  # Maps dynamic var names to ALL buffer carriers for cascaded None resolution
-        object scalar_param_vars      # Explicit scalar vars in parameter order
+        object output_scalar_dim_map  # (output index, dimension index) -> scalar argument index
         object buffer_device_map       # Maps buffer variables to their corresponding devices
         object buffer_dtype_map        # Maps buffer variables to their corresponding dtypes
         object static_shape_map        # Maps buffer variables to their corresponding static shapes
@@ -39,7 +39,7 @@ cdef class CythonKernelWrapper:
         self.param_dtypes = [param.torch_dtype() for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
-        self.scalar_param_vars = None
+        self.output_scalar_dim_map = {}
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
         self.get_current_stream = get_current_stream
         for param in params:
@@ -65,8 +65,8 @@ cdef class CythonKernelWrapper:
         self.buffer_dtype_map = buffer_dtype_map
         return self
 
-    def set_scalar_param_vars(self, scalar_param_vars):
-        self.scalar_param_vars = scalar_param_vars
+    def set_output_scalar_dim_map(self, output_scalar_dim_map):
+        self.output_scalar_dim_map = output_scalar_dim_map
         return self
 
     def set_static_shape_map(self, static_shape_map):
@@ -212,24 +212,18 @@ cdef class CythonKernelWrapper:
                 tensor_list[i] = inputs[ins_idx]
                 ins_idx += 1
 
-        # Explicit scalars are available before any output has been allocated.
-        scalar_values = {
-            var: tensor_list[index]
-            for index, var in enumerate(self.scalar_param_vars or [])
-            if var is not None
-        }
-
         # Prepare output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
                 shape = []
                 # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
+                for dim_index, s in enumerate(self.param_shapes[i]):
+                    scalar_index = self.output_scalar_dim_map.get((i, dim_index))
+                    if scalar_index is not None:
+                        shape.append(tensor_list[scalar_index])
+                        continue
                     if isinstance(s, tirx.Var):
-                        if s in scalar_values:
-                            shape.append(scalar_values[s])
-                            continue
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):
                                 ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]

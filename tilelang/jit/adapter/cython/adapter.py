@@ -16,7 +16,14 @@ from tvm.relax import TensorType
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
-from tilelang.jit.adapter.utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target, is_metal_target
+from tilelang.jit.adapter.utils import (
+    get_output_scalar_dim_map,
+    is_ascend_target,
+    is_cpu_target,
+    is_cuda_target,
+    is_hip_target,
+    is_metal_target,
+)
 from tilelang.backend.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
@@ -167,7 +174,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
-        self.cython_wrapper.set_scalar_param_vars(self._process_scalar_param_vars())
+        self.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(self.prim_func, self.result_idx))
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
         self.cython_wrapper.set_static_strides_map(self.static_strides_map)
@@ -232,7 +239,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers())
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
-        adapter.cython_wrapper.set_scalar_param_vars(adapter._process_scalar_param_vars())
+        adapter.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(adapter.prim_func, adapter.result_idx))
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
         adapter.cython_wrapper.set_static_strides_map(adapter.static_strides_map)
@@ -242,15 +249,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         adapter._post_init()
         return adapter
-
-    def _process_scalar_param_vars(self) -> list[tirx.Var | None]:
-        """Retain explicit scalar identities for output-shape resolution.
-
-        These parameters are already passed as launch arguments and must not
-        be appended again through the implicit dynamic-symbol map.
-        """
-        func = self.prim_func
-        return [param if param not in func.buffer_map and param.dtype != "handle" else None for param in func.params]
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
