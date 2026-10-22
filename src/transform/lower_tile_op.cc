@@ -1227,7 +1227,10 @@ private:
       pushed_loop_mbar_phase = true;
     }
 
-    // First visit the body.
+    // Save the enclosing bindings before visiting the body. Partitioning
+    // substitutes logical indices in nested loop ranges without changing their
+    // Var identities, so lowering must not reuse the original body's bindings.
+    auto lowering_analyzer = analyzer_->Clone();
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     if (pushed_loop_mbar_phase) {
       loop_mbar_phase_stack_.pop_back();
@@ -1380,8 +1383,8 @@ private:
     bool parallel_loop = has_non_local_store || has_fragment_access;
 
     Stmt lowered = LowerParallelLoop(
-        for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, require_padding_guard);
+        for_node, loop_layout, CurrentThreadIndex(), lowering_analyzer.get(),
+        layout_map_, predicate, parallel_loop, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to

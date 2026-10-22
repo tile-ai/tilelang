@@ -46,6 +46,19 @@ struct __device_builtin__ __builtin_align__(32) double4_32a {
 #include <cutlass/bfloat16.h>
 #include <cutlass/float8.h>
 
+// CCCL can be installed independently of the CUDA toolkit. Version 3.0 adds
+// the complete set of 16-bit inverse and binary math overloads used below.
+#if __has_include(<cuda/std/version>)
+#include <cuda/std/version>
+#endif
+#if defined(CCCL_VERSION) && CCCL_VERSION >= 3000000
+#include <cuda/std/cmath>
+#define TL_HAS_LIBCUDACXX_16BIT_MATH                                           \
+  (_LIBCUDACXX_HAS_NVFP16() && _LIBCUDACXX_HAS_NVBF16())
+#else
+#define TL_HAS_LIBCUDACXX_16BIT_MATH 0
+#endif
+
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 
@@ -272,6 +285,33 @@ TL_PATCH TL_DEVICE bfloat16_t hnearbyint(const bfloat16_t x) {
   return bfloat16_t(nearbyintf(float(x)));
 }
 
+#if TL_HAS_LIBCUDACXX_16BIT_MATH
+#define TL_DEFINE_UNARY_16BIT_MATH(name)                                       \
+  TL_PATCH TL_DEVICE half_t h##name(const half_t x) {                          \
+    return half_t(cuda::std::name(x.to_half()));                               \
+  }                                                                            \
+  TL_PATCH TL_DEVICE bfloat16_t h##name(const bfloat16_t x) {                  \
+    return bfloat16_t(cuda::std::name(x.to_nv_bfloat16()));                    \
+  }
+#else
+#define TL_DEFINE_UNARY_16BIT_MATH(name)                                       \
+  TL_PATCH TL_DEVICE half_t h##name(const half_t x) {                          \
+    return half_t(name##f(float(x)));                                          \
+  }                                                                            \
+  TL_PATCH TL_DEVICE bfloat16_t h##name(const bfloat16_t x) {                  \
+    return bfloat16_t(name##f(float(x)));                                      \
+  }
+#endif
+
+TL_DEFINE_UNARY_16BIT_MATH(asin)
+TL_DEFINE_UNARY_16BIT_MATH(acos)
+TL_DEFINE_UNARY_16BIT_MATH(asinh)
+TL_DEFINE_UNARY_16BIT_MATH(acosh)
+TL_DEFINE_UNARY_16BIT_MATH(atanh)
+TL_DEFINE_UNARY_16BIT_MATH(log1p)
+
+#undef TL_DEFINE_UNARY_16BIT_MATH
+
 TL_PATCH TL_DEVICE half_t hpow(const half_t x, const half_t y) {
   return half_t(powf(float(x), float(y)));
 }
@@ -286,6 +326,148 @@ TL_PATCH TL_DEVICE half_t hfmod(const half_t x, const half_t y) {
 
 TL_PATCH TL_DEVICE bfloat16_t hfmod(const bfloat16_t x, const bfloat16_t y) {
   return bfloat16_t(fmodf(float(x), float(y)));
+}
+
+#if TL_HAS_LIBCUDACXX_16BIT_MATH
+TL_PATCH TL_DEVICE half_t hatan2(const half_t x, const half_t y) {
+  return half_t(cuda::std::atan2(x.to_half(), y.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hatan2(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(cuda::std::atan2(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hhypot(const half_t x, const half_t y) {
+  return half_t(cuda::std::hypot(x.to_half(), y.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hhypot(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(cuda::std::hypot(x.to_nv_bfloat16(), y.to_nv_bfloat16()));
+}
+#endif
+
+// libcu++'s 16-bit binary overloads require matching argument types. Keep a
+// wider RHS in float32 rather than rounding it to the result dtype first.
+template <typename T>
+TL_PATCH TL_DEVICE half_t hatan2(const half_t x, const T y) {
+  return half_t(atan2f(float(x), float(y)));
+}
+
+template <typename T>
+TL_PATCH TL_DEVICE bfloat16_t hatan2(const bfloat16_t x, const T y) {
+  return bfloat16_t(atan2f(float(x), float(y)));
+}
+
+template <typename T>
+TL_PATCH TL_DEVICE half_t hhypot(const half_t x, const T y) {
+  return half_t(hypotf(float(x), float(y)));
+}
+
+template <typename T>
+TL_PATCH TL_DEVICE bfloat16_t hhypot(const bfloat16_t x, const T y) {
+  return bfloat16_t(hypotf(float(x), float(y)));
+}
+
+template <typename T>
+TL_PATCH TL_DEVICE half_t hcopysign(const half_t x, const T y) {
+  // ADL selects CUTLASS signbit for a 16-bit y; CUDA handles float/double.
+  // Inspect the sign before any conversion can canonicalize a NaN.
+  return cutlass::copysign(x, half_t::bitcast(signbit(y) ? 0x8000 : 0));
+}
+
+template <typename T>
+TL_PATCH TL_DEVICE bfloat16_t hcopysign(const bfloat16_t x, const T y) {
+  return cutlass::copysign(x, bfloat16_t::bitcast(signbit(y) ? 0x8000 : 0));
+}
+
+// ldexp's second operand is an exponent, not a value of the same type.
+TL_PATCH TL_DEVICE half_t hldexp(const half_t x, const int n) {
+#if TL_HAS_LIBCUDACXX_16BIT_MATH
+  return half_t(cuda::std::ldexp(x.to_half(), n));
+#else
+  return half_t(ldexpf(float(x), n));
+#endif
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hldexp(const bfloat16_t x, const int n) {
+#if TL_HAS_LIBCUDACXX_16BIT_MATH
+  return bfloat16_t(cuda::std::ldexp(x.to_nv_bfloat16(), n));
+#else
+  return bfloat16_t(ldexpf(float(x), n));
+#endif
+}
+
+#undef TL_HAS_LIBCUDACXX_16BIT_MATH
+
+// Step the 16-bit encoding directly: a float32 step is below one 16-bit ulp
+// and rounds back. Compare as integers too, or fast math flushes bf16
+// subnormals to zero. `inf` is the dtype's +inf encoding.
+// libcu++ through CCCL 3.1 also steps in float32, so it cannot replace this.
+TL_DEVICE uint16_t nextafter_bits16(const uint16_t ux, const uint16_t uy,
+                                    const uint16_t inf) {
+  const uint16_t mx = ux & 0x7FFF, my = uy & 0x7FFF;
+  if (mx > inf || my > inf)
+    return 0x7FFF;
+  if (ux == uy || (mx | my) == 0)
+    return uy;
+  if (mx == 0)
+    return (uy & 0x8000) | 0x0001;
+  const int kx = (ux & 0x8000) ? -int(mx) : int(mx);
+  const int ky = (uy & 0x8000) ? -int(my) : int(my);
+  const bool away = (kx < ky) == !(ux & 0x8000);
+  return ux + (away ? 1 : -1);
+}
+
+TL_PATCH TL_DEVICE half_t hnextafter(const half_t x, const half_t y) {
+  return half_t::bitcast(nextafter_bits16(x.raw(), y.raw(), 0x7C00));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnextafter(const bfloat16_t x,
+                                         const bfloat16_t y) {
+  return bfloat16_t::bitcast(nextafter_bits16(x.raw(), y.raw(), 0x7F80));
+}
+
+// Directed rounding brackets a wider target without losing its direction when
+// round-to-nearest would produce x. Treat both zero encodings as equal here.
+TL_DEVICE uint16_t nextafter_bits16(const uint16_t ux, const uint16_t lower,
+                                    const uint16_t upper, const uint16_t inf) {
+  const bool at_lower = ux == lower || ((ux | lower) & 0x7FFF) == 0;
+  return nextafter_bits16(ux, at_lower ? upper : lower, inf);
+}
+
+TL_PATCH TL_DEVICE half_t hnextafter(const half_t x, const float y) {
+  const uint16_t lower = __half_as_ushort(__float2half_rd(y));
+  const uint16_t upper = __half_as_ushort(__float2half_ru(y));
+  return half_t::bitcast(nextafter_bits16(x.raw(), lower, upper, 0x7C00));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnextafter(const bfloat16_t x, const float y) {
+  const uint16_t lower = __bfloat16_as_ushort(__float2bfloat16_rd(y));
+  const uint16_t upper = __bfloat16_as_ushort(__float2bfloat16_ru(y));
+  return bfloat16_t::bitcast(nextafter_bits16(x.raw(), lower, upper, 0x7F80));
+}
+
+TL_DEVICE float2 nextafter_bounds_f32(const double y) {
+  float2 bounds;
+  // The CUDA conversion intrinsics acquire .ftz under --use_fast_math. Keep
+  // subnormal bounds: they can still determine a nonzero 16-bit step.
+  asm("cvt.rm.f32.f64 %0, %1;" : "=f"(bounds.x) : "d"(y));
+  asm("cvt.rp.f32.f64 %0, %1;" : "=f"(bounds.y) : "d"(y));
+  return bounds;
+}
+
+TL_PATCH TL_DEVICE half_t hnextafter(const half_t x, const double y) {
+  const float2 bounds = nextafter_bounds_f32(y);
+  const uint16_t lower = __half_as_ushort(__float2half_rd(bounds.x));
+  const uint16_t upper = __half_as_ushort(__float2half_ru(bounds.y));
+  return half_t::bitcast(nextafter_bits16(x.raw(), lower, upper, 0x7C00));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnextafter(const bfloat16_t x, const double y) {
+  const float2 bounds = nextafter_bounds_f32(y);
+  const uint16_t lower = __bfloat16_as_ushort(__float2bfloat16_rd(bounds.x));
+  const uint16_t upper = __bfloat16_as_ushort(__float2bfloat16_ru(bounds.y));
+  return bfloat16_t::bitcast(nextafter_bits16(x.raw(), lower, upper, 0x7F80));
 }
 
 // TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
