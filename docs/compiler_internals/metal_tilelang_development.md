@@ -467,6 +467,7 @@ descriptor shape described in Section 1.3.
 | simdgroup GEMM | Implemented | Compatibility path, Section 3.2 |
 | simdgroup id / lane id lowering | Implemented | Also used by cooperative tensor kernels |
 | `const` / `__restrict` parameter emission | Implemented | Improves MSL alias information |
+| Scalar warp reductions | Implemented | `T.warp_reduce_sum/max/min/bitand/bitor` lower to `simd_sum/max/min/and/or`; per SIMD group, for float, half and integer scalars up to 32 bits |
 
 ### 5.5 Known Limitations and Roadmap
 
