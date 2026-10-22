@@ -8,8 +8,16 @@ from tilelang import language as T
 from tilelang.transform import PassConfigKey
 
 
-def test_out_idx_via_attr_lazy():
-    """out_idx should be stored as PrimFunc attr when using T.empty + return."""
+def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
+    """T.empty outputs and their ABI should survive a disk cache round trip."""
+    from tilelang.cache import _dispatch_map
+    from tilelang.env import CacheState, env
+
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
+    monkeypatch.setattr(CacheState, "_enabled", True)
+    cache = _dispatch_map["tvm_ffi"]
+    monkeypatch.setattr(cache, "_memory_cache", {})
 
     @T.prim_func
     def kernel(A):
@@ -24,14 +32,25 @@ def test_out_idx_via_attr_lazy():
     assert "tilelang_out_idx" in kernel.attrs
     assert list(kernel.attrs["tilelang_out_idx"]) == [-1]
 
-    compiled = tilelang.compile(kernel)
     a = torch.randn(128, 128, device="cuda")
-    b = compiled(a)
-    torch.testing.assert_close(b, a + 1.0)
+    for disk_cache_hit in (False, True):
+        # Keep the disk entry, but prevent the second compile from returning
+        # the in-memory JITKernel created by the first compile.
+        cache._memory_cache.clear()
+        compiled = tilelang.compile(kernel, execution_backend="tvm_ffi")
+        assert (compiled.artifact is None) == disk_cache_hit
+        b = compiled(a)
+        torch.testing.assert_close(b, a + 1.0)
 
-    rt_mod = compiled.adapter.get_exportable_executable().jit()
-    with pytest.raises(AttributeError):
-        rt_mod.get_function(f"{kernel.attrs['global_symbol']}_auto_output", query_imports=True)
+        executable = compiled.adapter.get_exportable_executable()
+        if disk_cache_hit:
+            assert isinstance(executable, tilelang.tvm.runtime.Module)
+        else:
+            assert isinstance(executable, tilelang.tvm.runtime.Executable)
+        rt_mod = executable.jit() if isinstance(executable, tilelang.tvm.runtime.Executable) else executable
+        assert rt_mod.get_function(str(kernel.attrs["global_symbol"]), query_imports=True) is not None
+        with pytest.raises(AttributeError):
+            rt_mod.get_function(f"{kernel.attrs['global_symbol']}_auto_output", query_imports=True)
 
 
 @tilelang.testing.requires_cuda
@@ -347,12 +366,4 @@ def test_annotations_after_tensor_type():
 
 
 if __name__ == "__main__":
-    test_out_idx_via_attr_lazy()
-    test_all_attrs_together_lazy()
-    test_eager_mode_attrs()
-    test_out_idx_conflict_detection()
-    test_pass_configs_only_lazy()
-    test_compile_flags_only_lazy()
-    test_annotations_before_tensor_type()
-    test_annotations_after_tensor_type()
-    print("All tests passed!")
+    tilelang.testing.main()

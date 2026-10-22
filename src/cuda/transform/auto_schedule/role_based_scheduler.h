@@ -8,6 +8,7 @@
 
 namespace tvm {
 namespace tl {
+namespace cuda {
 
 // Fixed-role heuristic: classify ops by lowering eligibility (Load / MMA /
 // Store / Worker), pull warp-private def-use chains into their consumers'
@@ -18,5 +19,6 @@ ffi::Optional<WSSchedule> RoleBasedSchedule(const tirx::SBlock &block,
                                             int worker_threads,
                                             const Target &target);
 
+} // namespace cuda
 } // namespace tl
 } // namespace tvm

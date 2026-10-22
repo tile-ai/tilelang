@@ -64,7 +64,11 @@ def compile_grouped_unit_tvm_ffi(
                 original_symbol = str(program.attrs["global_symbol"])
                 unique_symbol = f"{original_symbol}_gc_{idx}"
                 program = program.with_attr("global_symbol", unique_symbol)
-                program, output_indices = prepare_tvm_ffi_callee_allocated_outputs(program, compile_args.out_idx)
+                program, output_indices = prepare_tvm_ffi_callee_allocated_outputs(
+                    program,
+                    compile_args.out_idx,
+                    supports_callee_allocated_outputs=backend_context.execution_backend.supports_callee_allocated_outputs,
+                )
 
                 lower_context = f"stage=grouped-lower, config={idx}, kernel={unique_symbol}"
                 config_instruments = [
@@ -182,8 +186,7 @@ def compile_grouped_unit_tvm_ffi(
                         backend_context=backend_context,
                     )
                     jit_kernel.artifact = artifact
-                    jit_kernel.adapter = adapter
-                    jit_kernel.torch_function = adapter.func
+                    jit_kernel._set_adapter(adapter)
 
                     unit_results.append((idx, config_arg, jit_kernel, None))
                 except Exception as e:

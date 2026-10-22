@@ -46,22 +46,8 @@ def kernel(
 Manually define configurations or use combinatorial generation:
 ```python
 configs = [
-    {
-        "block_M": 128,
-        "block_N": 128,
-        "block_K": 128,
-        "num_stages": 3,
-        "thread_num": 128,
-        "enable_rasteration": True
-    },
-        {
-        "block_M": 32,
-        "block_N": 32,
-        "block_K": 32,
-        "num_stages": 0,
-        "thread_num": 32,
-        "enable_rasteration": False
-    },
+    {"block_M": 128, "block_N": 128, "block_K": 128, "num_stages": 3, "thread_num": 128, "enable_rasteration": True},
+    {"block_M": 32, "block_N": 32, "block_K": 32, "num_stages": 0, "thread_num": 32, "enable_rasteration": False},
     # ...additional configurations...
 ]
 ```
@@ -83,30 +69,24 @@ _configs = list(
         num_stages,
         thread_num,
         enable_rasterization,
-    ))
+    )
+)
 
 configs = [
-    {
-        "block_M": c[0],
-        "block_N": c[1],
-        "block_K": c[2],
-        "num_stages": c[3],
-        "thread_num": c[4],
-        "enable_rasteration": c[5]
-    } for c in _configs
+    {"block_M": c[0], "block_N": c[1], "block_K": c[2], "num_stages": c[3], "thread_num": c[4], "enable_rasteration": c[5]}
+    for c in _configs
 ]
 ```
 ### Step 3: Compile and Benchmark
 Configure JIT compilation and benchmarking settings:
 ```python
-autotuner = AutoTuner.from_kernel(
-    kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
-        out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
-        target="auto",
-    )
+autotuner = AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+    out_idx=[-1],
+    supply_type=tl.TensorSupplyType.Integer,
+    ref_prog=ref_program,
+    skip_check=False,
+    target="auto",
+)
 result = autotuner.run(warmup=3, rep=20)
 out_c = result.kernel(a, b)
 ```
@@ -135,7 +115,6 @@ roller_hints = carve_template.recommend_hints(topk=10)
 
 # Configure candidate parameters
 for hint in roller_hints:
-
     # ...existing code...
 
     config["block_M"] = block_m
@@ -144,5 +123,4 @@ for hint in roller_hints:
     config["num_stages"] = hint.pipeline_stage
     config["thread_num"] = block_rows * block_cols * 32
     config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-
 ```

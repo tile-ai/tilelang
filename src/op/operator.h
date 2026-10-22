@@ -172,6 +172,10 @@ struct LayoutInferArgs {
   // that update nests must satisfy rather than widen. Empty at
   // lowering-time re-inference call sites.
   LayoutMap strict_layout_map;
+  // Per-call cap for generating a free-mode parallel candidate. Zero preserves
+  // the vectorizer's width; scalar reducer-root attempts pass one. This is
+  // a search option, not operator state or a constraint on inferred layouts.
+  int candidate_vector_size_limit = 0;
 };
 
 class TileOperator;

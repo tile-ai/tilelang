@@ -20,7 +20,6 @@ def test_normalize_threads_rejects_non_positive(threads):
 @pytest.mark.parametrize(
     "threads, expected",
     [
-        (None, [128, 1, 1]),
         (256, [256, 1, 1]),
         ([32, 4], [32, 4, 1]),
         ((32, 2, 2), [32, 2, 2]),
@@ -29,6 +28,12 @@ def test_normalize_threads_rejects_non_positive(threads):
 def test_normalize_threads_accepts_positive(threads, expected):
     """Valid extents are still normalized to a 3-D thread block."""
     assert _normalize_threads(threads) == expected
+
+
+def test_normalize_threads_leaves_default_to_backend():
+    """No threads= means no SIMT hint: the backend picks its default when it
+    materializes the launch, the frontend does not guess one."""
+    assert _normalize_threads(None) is None
 
 
 if __name__ == "__main__":

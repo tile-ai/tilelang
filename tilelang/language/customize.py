@@ -3,8 +3,8 @@
 from __future__ import annotations
 from tilelang._typing import ShapeType, DType, BufferLikeType
 import tilelang.language as T
-from tvm import arith
-from tvm.tirx import PrimExpr, Buffer, op
+from tvm import DataType, DataTypeCode, arith
+from tvm.tirx import PrimExpr, Buffer, Broadcast, convert, op
 from tilelang.utils.language import bits_product, prim_expr_equal, retrieve_buffer_and_offset
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
 
@@ -41,8 +41,21 @@ def dp4a(A: BufferLikeType, B: BufferLikeType, C: BufferLikeType) -> PrimExpr:
     )
 
 
+_NON_FLOAT_TYPE_CODES = (
+    DataTypeCode.INT,
+    DataTypeCode.UINT,
+    DataTypeCode.BOOL,
+    DataTypeCode.HANDLE,
+)
+
+
 def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     """Clamps the input value dst between [min_val, max_val]
+
+    Floating-point ``NaN`` values in the input or either bound propagate to
+    the result. When ``min_val > max_val``, the result is ``max_val`` (unless
+    an operand is ``NaN``), matching ``torch.clamp``. Each operand is evaluated
+    once, and vector operands are clamped independently in each lane.
 
     Args:
         dst: Input value to be clamped
@@ -52,9 +65,20 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     Returns:
         Value clamped to the specified range
     """
-    dst = T.max(dst, min_val)  # Ensure value is not less than minimum
-    dst = T.min(dst, max_val)  # Ensure value is not greater than maximum
-    return dst
+    dst, min_val, max_val = (convert(value) for value in (dst, min_val, max_val))
+    clamped = T.min(T.max(dst, min_val), max_val)
+    dtype = DataType(clamped.dtype)
+    if dtype.type_code in _NON_FLOAT_TYPE_CODES:
+        return clamped
+    # Match min/max's type promotion, including scalar bounds on vector inputs.
+    lanes = max(DataType(value.dtype).lanes for value in (dst, min_val, max_val))
+    dtype = dtype.with_lanes(lanes)
+    args = []
+    for value in (dst, min_val, max_val):
+        if DataType(value.dtype).lanes == 1 and lanes != 1:
+            value = Broadcast(value, lanes)
+        args.append(T.cast(value, dtype))
+    return T.call_intrin(dtype, op.Op.get("tl.clamp"), *args)
 
 
 def reshape(src: Buffer, shape: ShapeType) -> Buffer:
@@ -74,20 +98,66 @@ def reshape(src: Buffer, shape: ShapeType) -> Buffer:
     return T.Tensor(shape, src.dtype, src.data)
 
 
-def view(src: Buffer, shape: ShapeType | None = None, dtype: DType | None = None) -> Buffer:
-    """Return a Tensor view of the input buffer with an optional new shape and dtype.
+def view(
+    src: Buffer,
+    shape: ShapeType | None = None,
+    dtype: DType | None = None,
+    strides: ShapeType | None = None,
+) -> Buffer:
+    """Return a Tensor view with an optional new shape, dtype, and explicit strides.
 
-    If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
+    If ``shape`` is None, the source buffer's shape is used. If ``dtype`` is None,
+    the source buffer's dtype is used. The returned buffer shares its data with
+    ``src`` without copying.
+
+    Without ``strides``, ``src`` must be densely packed and the result uses a dense
+    layout. A non-contiguous source requires explicit ``strides``. Explicit strides are
+    expressed in units of ``dtype`` elements and allow rank changes.
+
+    The source must have zero ``elem_offset``. The caller must guarantee that explicit
+    strides are valid for the backing storage, including dtype alignment and physical
+    contiguity between any source dimensions merged by a rank-changing view.
     """
     if shape is None:
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    bits, src_bits = bits_product(shape, dtype), bits_product(src.shape, src.dtype)
-    assert prim_expr_equal(bits, src_bits) or arith.Analyzer().can_prove_equal(bits, src_bits), (
-        f"T.reshape/view shape check failed. {bits_product(shape, dtype)}, {bits_product(src.shape, src.dtype)}"
-    )
-    return T.Tensor(shape, dtype, src.data)
+
+    analyzer = arith.Analyzer()
+
+    # A view must describe the same logical storage starting at the same address.
+    view_bits = bits_product(shape, dtype)
+    src_bits = bits_product(src.shape, src.dtype)
+    if not (prim_expr_equal(view_bits, src_bits) or bool(analyzer.can_prove_equal(view_bits, src_bits))):
+        raise ValueError(
+            f"T.view shape and dtype must preserve the logical bit count of '{src.name}': {view_bits} bits != {src_bits} bits."
+        )
+    if not (prim_expr_equal(src.elem_offset, 0) or bool(analyzer.can_prove_equal(src.elem_offset, 0))):
+        raise ValueError("T.view does not support a source buffer with non-zero elem_offset.")
+
+    if strides is None:
+        # Only an already-compact source may use the implicit dense layout.
+        if len(src.strides) != 0:
+            if len(src.strides) != len(src.shape):
+                raise ValueError(f"T.view requires explicit strides for non-contiguous buffer '{src.name}'.")
+            expected_stride = 1
+            for extent, stride in zip(reversed(list(src.shape)), reversed(list(src.strides))):
+                extent_is_singleton = prim_expr_equal(extent, 1) or bool(analyzer.can_prove_equal(extent, 1))
+                stride_is_compact = prim_expr_equal(stride, expected_stride) or bool(analyzer.can_prove_equal(stride, expected_stride))
+                if not (extent_is_singleton or stride_is_compact):
+                    raise ValueError(f"T.view requires explicit strides for non-contiguous buffer '{src.name}'.")
+                expected_stride = expected_stride * extent
+        return T.Tensor(shape, dtype, src.data)
+
+    # Explicit strides are expressed in destination elements.
+    if len(strides) != len(shape):
+        raise ValueError(f"T.view expected {len(shape)} strides for shape {tuple(shape)}, but got {len(strides)}.")
+    for dim, stride in enumerate(strides):
+        is_negative = stride < 0 if isinstance(stride, int) else analyzer.can_prove(stride < 0)
+        if is_negative:
+            raise ValueError(f"T.view stride at dim {dim} must be non-negative, but got {stride}.")
+
+    return T.StridedTensor(shape, tuple(strides), dtype, data=src.data)
 
 
 def loop_break() -> PrimExpr:

@@ -1124,6 +1124,18 @@ TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   return uint1{packed};
 }
 
+// bf16 has the same exponent layout as fp32. Keep the packed source in a
+// 32-bit register so extracting the high lane does not require a permutation.
+TL_DEVICE float2 __tl_cvt_bf16x2_to_f32x2(__nv_bfloat162 src) {
+  const unsigned int bits = reinterpret_cast<const unsigned int &>(src);
+  float2 result;
+  asm("shl.b32 %0, %2, 16;\n\t"
+      "and.b32 %1, %2, 0xffff0000;"
+      : "=f"(result.x), "=f"(result.y)
+      : "r"(bits));
+  return result;
+}
+
 // ============================================================================
 // Inline PTX FP16/BF16 Conversions with Stochastic Rounding
 // ============================================================================
