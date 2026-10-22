@@ -21,10 +21,12 @@ explicit query slots when the periodic lifetime fits the event budget
 (`4 <= nb <= 15`); other shapes retain the single-query-slot path. The two
 32-row KV halves have explicit L1 offsets in separate bank groups.
 
-QK and PV use separate four-version L0B buffers with MajorK and MajorMN
-layouts. `T.assume_conflict(bq, bv)` lets the compiler give this compatible pair
-one storage-ring clock and a shared 64 KiB allocation. Their copies and matrix
-products use `T.copy` and `T.gemm`. PV dispatches its nonzero and zero unit flags
+QK and PV use two views of one four-version L0B allocation. QK's `bq` has a
+MajorK layout, while `bv = T.view(bq, shape=(64, 128))` has a MajorMN layout.
+The views share `.data`, one version clock, and a 64 KiB ring, so no
+`T.assume_conflict` hint is needed. Each producer writes the layout consumed
+through its view; creating the view does not convert existing data. Their copies
+and matrix products use `T.copy` and `T.gemm`. PV dispatches its nonzero and zero unit flags
 through two GEMM branches in one `T.Task`; the two-KV-tile path keeps the flag in
 a scalar variable so rescale synchronization survives constant folding.
 
