@@ -908,6 +908,46 @@ def test_write_counter_infers_sibling_owners_and_preserves_values_between_them()
 
 
 @tilelang.testing.requires_ascend
+def test_write_counter_shared_clock_preserves_intermediate_reads():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((7, 64), "float32"), O: T.Tensor((3, 3, 64), "float32")):
+        with T.Kernel(1):
+            x = T.alloc_shared((64,), "float32")
+            y = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({x: (2, "write_counter"), y: (2, "write_counter")})
+            for j in T.Pipelined(2, num_stages=2):
+                with T.Stage(0):
+                    with T.Task():
+                        T.copy(A[j, :], x)
+                        T.copy(A[j, :], y)
+                    T.copy(x, O[j, 1, :])
+                    T.copy(y, O[j, 2, :])
+            for i in T.Pipelined(3, num_stages=2):
+                with T.Stage(0):
+                    if i % 2 == 0:
+                        with T.Task():
+                            T.copy(A[i, :], x)
+                            T.copy(A[i, :], y)
+                    T.copy(y, O[i, 0, :])
+                    with T.Task():
+                        T.copy(A[4 + i, :], x)
+                        T.copy(A[4 + i, :], y)
+                    T.copy(x, O[i, 1, :])
+                    T.copy(y, O[i, 2, :])
+
+    compiled = tilelang.compile(main, target="ascend")
+    source = torch.arange(7 * 64, dtype=torch.float32).reshape(7, 64) + 1
+    expected = torch.stack((source[[0, 4, 2]], source[4:7], source[4:7]), dim=1)
+    a, out = source.npu(), torch.empty_like(expected).npu()
+    for _ in range(2):
+        out.fill_(-1)
+        compiled(a, out)
+        torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
 @pytest.mark.parametrize("versions", [1, 2, 3])
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
 def test_write_counter_fill_patches_and_intermediate_read(versions, loop_kind):

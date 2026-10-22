@@ -593,6 +593,44 @@ def test_same_write_event_shares_clock_and_compatible_consumer_channel(y_version
     _check_all_interleavings(_streams(_physical(before)))
 
 
+@pytest.mark.parametrize("middle_reads", [("x",), ("y",), ("x", "y")], ids=["representative", "other-member", "two-owners"])
+@pytest.mark.parametrize("y_versions", [2, 3])
+def test_shared_write_clock_preserves_every_members_intermediate_reads(middle_reads, y_versions):
+    a, c = [tirx.decl_buffer((24, 64), "float32", name=name) for name in ("A", "C")]
+    x, y = [tirx.decl_buffer((64,), "float32", name=name, scope="shared.dyn") for name in ("x", "y")]
+    loops = []
+    for index, name in enumerate(middle_reads):
+        i = tirx.Var(f"i{index}", "int32")
+        middle = x if name == "x" else y
+        body = seq(
+            unit(
+                seq(*(copy(a, buf, src_indices=[12 * index + i, 0], src_shape=[1, 64]) for buf in (x, y))),
+                guard=i % 2 == 0,
+            ),
+            unit(copy(middle, c, dst_indices=[12 * index + i, 0], dst_shape=[1, 64])),
+            unit(seq(*(copy(a, buf, src_indices=[12 * index + 4 + i, 0], src_shape=[1, 64]) for buf in (x, y)))),
+            unit(copy(x, c, dst_indices=[12 * index + 8 + i, 0], dst_shape=[1, 64])),
+            unit(copy(y, c, dst_indices=[12 * index + 8 + i, 0], dst_shape=[1, 64])),
+        )
+        loops.append(unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data, y.data]}), core=None))
+    before = kernel(
+        seq(*loops),
+        buffers=[x, y],
+        params=[a, c],
+        annotations={
+            "tl.buffer_versions_map": {x.data: 2, y.data: y_versions},
+            "tl.buffer_version_mode": {x.data: "write_counter", y.data: "write_counter"},
+        },
+    )
+    prepared = transform.PrepareMultiBuffer()(before)
+    counters = [loop.annotations["tl.multi_buffer_counter_map"] for loop in nodes(prepared, tirx.For)]
+    assert all(mapping[x.data].same_as(counters[0][x.data]) and mapping[x.data].same_as(mapping[y.data]) for mapping in counters)
+    updates = []
+    streams = _streams(_physical(before), counter_updates=updates)
+    assert [generation for _, generation in updates] == list(range(3 * len(middle_reads)))
+    _check_all_interleavings(streams)
+
+
 @pytest.mark.parametrize("subcores", [1, 2])
 def test_write_clock_cross_core_flags_cover_every_consumer_bank(subcores):
     accum = tirx.decl_buffer((1, 64), "float32", name="accum", scope="shared.l0c")
@@ -1086,19 +1124,82 @@ def test_one_update_per_owner_iteration(versions, case):
     assert [generation for _, generation in updates] == list(range(expected))
 
 
-def test_read_modify_write_cannot_start_a_later_update():
+@pytest.mark.parametrize("owner_policy", ["explicit", "inferred"])
+@pytest.mark.parametrize(
+    "case, valid",
+    [
+        ("later-update", False),
+        ("zero-trip", False),
+        ("skipped-branches", False),
+        ("skipped-loop", False),
+        ("break-before-write", False),
+        ("guarded-zero-trip", True),
+        ("guarded-branches", True),
+        ("guarded-loop", True),
+        ("guarded-nested", True),
+        ("first-trip-write", True),
+        ("guarded-snapshot", True),
+        ("preceding-write", True),
+        ("empty-rmw-loop", True),
+    ],
+)
+def test_read_modify_write_requires_a_write_in_the_current_update(owner_policy, case, valid):
     a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
     x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
-    i = tirx.Var("i", "int32")
-    body = seq(unit(copy(a, x), guard=i == 0), unit(copy(x, x)), unit(copy(x, c)))
+    i, j, enabled = tirx.Var("i", "int32"), tirx.Var("j", "int32"), tirx.Var("enabled", "bool")
+    prefix = []
+    predicate = i % 2 == 0
+    if case == "guarded-snapshot":
+        prefix = [unit(tirx.Bind(enabled, predicate))]
+        predicate = enabled
+    write = unit(copy(a, x), guard=i == 0)
+    if case != "later-update":
+        extent = 1 - i % 2 if "zero-trip" in case else 2
+        guard = None if "zero-trip" in case or case in ("preceding-write", "skipped-loop", "guarded-loop") else predicate
+        if case == "first-trip-write":
+            guard = j == 0
+        inner = unit(copy(a, x), guard=guard)
+        if case == "break-before-write":
+            stop = unit(tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))), guard=j == 0)
+            inner = seq(stop, inner)
+        if case == "guarded-nested":
+            inner = unit(tirx.For(tirx.Var("k", "int32"), 0, 2, tirx.ForKind.SERIAL, inner), core=None)
+        write = unit(
+            tirx.For(j, 0, extent, tirx.ForKind.SERIAL, inner),
+            core=None,
+            guard=predicate if case in ("skipped-loop", "guarded-loop") else None,
+        )
+    rmw = unit(copy(x, x), guard=predicate if case.startswith("guarded-") else None)
+    if case == "preceding-write":
+        # The inner loop's RMW is covered by a write in the enclosing update.
+        prefix = [unit(copy(a, x))]
+        write = unit(tirx.For(j, 0, 1 - i % 2, tirx.ForKind.SERIAL, rmw), core=None)
+    if case == "empty-rmw-loop":
+        prefix = [unit(tirx.For(j, 0, 0, tirx.ForKind.SERIAL, rmw), core=None)]
+        write = unit(copy(a, x))
+    body = seq(*prefix, write, rmw, unit(copy(x, c)))
     before = kernel(
-        unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data]}), core=None),
+        unit(
+            tirx.For(
+                i, 0, 3, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data]} if owner_policy == "explicit" else {}
+            ),
+            core=None,
+        ),
         buffers=[x],
         params=[a, c],
         annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
     )
-    with pytest.raises(tvm.error.InternalError, match="start an update with a read-modify-write"):
-        transform.PrepareMultiBuffer()(before)
+    if not valid:
+        if owner_policy == "inferred":
+            with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+                transform.AnnotateMultiBufferEligible()(before)
+        else:
+            with pytest.raises(tvm.error.InternalError, match="start an update with a read-modify-write"):
+                transform.PrepareMultiBuffer()(before)
+        return
+    if owner_policy == "inferred":
+        before = transform.AnnotateMultiBufferEligible()(before)
+    _check_all_interleavings(_streams(_physical(before)))
 
 
 @pytest.mark.parametrize("complete", [False, True])
