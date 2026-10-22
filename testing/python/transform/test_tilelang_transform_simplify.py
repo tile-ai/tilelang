@@ -641,12 +641,14 @@ def test_buffer_shape_constraint():
     def before(a: T.handle):
         n = T.int64()
         A = T.match_buffer(a, (n * 32,), "float32")
+        T.attr(n >= 0, "tl.assume", "nonnegative shape")
         A[T.min(T.int64(0), n)] = T.float32(0)
 
     @T.prim_func
     def expected(a: T.handle):
         n = T.int64()
         A = T.match_buffer(a, (n * 32,), "float32")
+        T.attr(n >= 0, "tl.assume", "nonnegative shape")
         A[T.int64(0)] = T.float32(0)
 
     mod_before = tvm.IRModule({"main": before})
