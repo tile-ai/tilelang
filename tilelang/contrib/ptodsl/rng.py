@@ -19,8 +19,11 @@ class PhiloxRNG:
     _PHILOX_M4X32_B = 0xCD9E8D57
     _PHILOX_W32_A = 0x9E3779B9
     _PHILOX_W32_B = 0xBB67AE85
-    _RAND_2POW32_INV = 2.3283064e-10
-    _RAND_2POW32_INV_HALF = _RAND_2POW32_INV / 2.0
+    # `rand_uniform` keeps the top 24 bits of the Philox word. Every integer
+    # below 2**24 is exact in float32, and the 2**-24 scaling is exact too, so
+    # the largest result is 1 - 2**-24 and cannot round up to 1.0.
+    _RAND_UNIFORM_SHIFT = 8
+    _RAND_2POW24_INV = 2.0**-24
     _BOX_MULLER_EPS = 1.0e-7
     _BOX_MULLER_TWO = 2.0
     _BOX_MULLER_TWO_PI = 6.283185307179586
@@ -97,13 +100,19 @@ class PhiloxRNG:
         # Philox words are carried as i32 bit patterns. Re-author the value as
         # unsigned before converting so high-bit words map to positive floats.
         _u = pto.cast(_u, pto.ui32)
+        # Drop the low 8 bits before converting: `to_nearest_even` rounds a
+        # near-2**32 word up to exactly 2**32, and scaling that by 2**-32 gives
+        # 1.0 (the half-unit offset is too small to change it in float32).
+        # The top 24 bits are exact in float32, and 2**-24 scaling is exact,
+        # so the result stays in [0, 1) with the largest value 1 - 2**-24.
+        _u = _u >> pto.const(self._RAND_UNIFORM_SHIFT, dtype=pto.ui32)
         _f = pto.cast(
             _u,
             pto.f32,
             rounding="to_nearest_even",
             saturation="nosat",
         )
-        result = _f * pto.const(self._RAND_2POW32_INV, dtype=pto.f32) + pto.const(self._RAND_2POW32_INV_HALF, dtype=pto.f32)
+        result = _f * pto.const(self._RAND_2POW24_INV, dtype=pto.f32)
         return result, draw_index
 
     def rand_normal(self, draw_index, normal_cache, has_normal):
