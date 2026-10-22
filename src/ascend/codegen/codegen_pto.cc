@@ -1031,6 +1031,15 @@ public:
       std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
 
   static DirectionMap Analyze(const PrimFunc &func) {
+    bool has_mad = false;
+    tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_mad |= IsMad(call);
+      }
+    });
+    if (!has_mad) {
+      return {};
+    }
     PTOMmadDirectionAnalyzer analyzer;
     analyzer.VisitStmt(func->body, FromMask(kM));
     DirectionMap result;
@@ -1060,8 +1069,25 @@ private:
            (analyzer_.CanProve(!state.n) ? 0 : kN);
   }
 
+  static bool IsMad(const CallNode *call) {
+    return call->op.same_as(tl::ascend_mad()) ||
+           call->op.same_as(tl::ascend_mad_mx()) ||
+           call->op.same_as(tl::ascend_gemm_l1()) ||
+           call->op.same_as(tl::ascend_blockscaled_gemm_l1());
+  }
+
+  PrimExpr MergePredicate(const PrimExpr &a, const PrimExpr &b) {
+    // Direction predicates contain only pure SSA conditions (see Restrict).
+    // Stateful guards leave both paths unchanged, so repeated merges would
+    // otherwise double the predicate tree before arithmetic simplification.
+    if (a.same_as(b) || ffi::StructuralEqual()(a, b)) {
+      return a;
+    }
+    return analyzer_.Simplify(a || b);
+  }
+
   State Merge(const State &a, const State &b) {
-    return {analyzer_.Simplify(a.m || b.m), analyzer_.Simplify(a.n || b.n)};
+    return {MergePredicate(a.m, b.m), MergePredicate(a.n, b.n)};
   }
 
   State Restrict(const State &state, const PrimExpr &condition) {
@@ -1197,10 +1223,7 @@ private:
                                       : State{reachable, const_false()},
               {}};
     }
-    if (call->op.same_as(tl::ascend_mad()) ||
-        call->op.same_as(tl::ascend_mad_mx()) ||
-        call->op.same_as(tl::ascend_gemm_l1()) ||
-        call->op.same_as(tl::ascend_blockscaled_gemm_l1()))
+    if (IsMad(call))
       mad_directions_[GetRef<Call>(call)] |= Mask(state);
     return {state, {}};
   }
