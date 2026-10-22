@@ -1339,25 +1339,95 @@ def test_reduce_fp4_cross_warp_workspace_codegen():
     assert int(device_func.attrs["dyn_shared_memory_buf"]) >= 128
 
 
-@tilelang.testing.requires_cuda
-def test_fp8_e8m0_non_finite_const_codegen():
-    """e8m0fnu has no inf and no sign; non-finite constants must clamp to its
-    own range, not the fp4 limit of 6.0."""
-    pos_inf = tvm.tirx.const(float("inf"), "float8_e8m0fnu")
-    neg_inf = tvm.tirx.const(float("-inf"), "float8_e8m0fnu")
+def _make_non_finite_const_kernel(dtype):
+    pos_inf = tvm.tirx.const(float("inf"), dtype)
+    neg_inf = tvm.tirx.const(float("-inf"), dtype)
+    nan = tvm.tirx.const(float("nan"), dtype)
 
     @T.prim_func
-    def kernel(B: T.Tensor((2,), T.float8_e8m0fnu)):
-        with T.Kernel(1, threads=32):
-            B[0] = pos_inf
-            B[1] = neg_inf
+    def kernel(A: T.Tensor((3,), T.float32), B: T.Tensor((6,), T.float32)):
+        with T.Kernel(1, threads=1):
+            values = T.alloc_local((6,), dtype)
+            values[0] = pos_inf
+            values[1] = neg_inf
+            values[2] = nan
+            for i in T.serial(3):
+                values[i + 3] = T.cast(A[i], dtype)
+            for i in T.serial(6):
+                B[i] = T.cast(values[i], T.float32)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dtype", "cuda_type"),
+    [(T.float8_e4m3, "fp8_e4_t"), (T.float8_e4m3fn, "fp8_e4_t"), (T.float8_e8m0fnu, "fp8_e8_t"), (T.float4_e2m1fn, "fp4_e2_t")],
+)
+def test_fp8_fp4_non_finite_const_codegen(dtype, cuda_type):
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.target.Target(target):
+        src = tilelang.lower(_make_non_finite_const_kernel(dtype), target=target).kernel_source
+    assert "#include <math_constants.h>" in src
+    for value in ("CUDART_INF_F", "-CUDART_INF_F", "CUDART_NAN_F"):
+        assert f"{cuda_type}({value})" in src
+
+
+def _check_non_finite_const_matches_runtime_conversion(dtype):
+    kernel = _compile(_make_non_finite_const_kernel(dtype))
+    values = torch.tensor([float("inf"), float("-inf"), float("nan")], device="cuda")
+    output = kernel(values)
+    torch.testing.assert_close(output[:3], output[3:], atol=0, rtol=0, equal_nan=True)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.parametrize("dtype", [T.float8_e4m3, T.float8_e4m3fn])
+def test_fp8_non_finite_const_matches_runtime_conversion(dtype):
+    _check_non_finite_const_matches_runtime_conversion(dtype)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize("dtype", [T.float8_e8m0fnu, T.float4_e2m1fn])
+def test_blackwell_non_finite_const_matches_runtime_conversion(dtype):
+    _check_non_finite_const_matches_runtime_conversion(dtype)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["max", "min"])
+@pytest.mark.parametrize("deferred", [False, True], ids=["local", "reducer"])
+def test_reduce_fp8_e8m0_identity_codegen(op, deferred):
+    reduce_fn = T.reduce_max if op == "max" else T.reduce_min
+    dtype = T.float8_e8m0fnu
+
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=1):
+            if deferred:
+                acc = T.alloc_reducer((1,), dtype, op=op)
+                T.reducer_init(acc)
+                for i in T.Parallel(4):
+                    T.reducer_update(acc[0], T.cast(A[i], dtype))
+                result = T.alloc_fragment((1,), dtype)
+                T.finalize_reducer(acc, result)
+                B[0] = T.cast(result[0], T.float32)
+            else:
+                src = T.alloc_local((4,), dtype)
+                dst = T.alloc_local((1,), dtype)
+                for i in T.serial(4):
+                    src[i] = T.cast(A[i], dtype)
+                reduce_fn(src, dst, dim=0)
+                B[0] = T.cast(dst[0], T.float32)
 
     target = {"kind": "cuda", "arch": "sm_100a"}
     with tvm.target.Target(target):
-        src = tilelang.lower(kernel, target=target).kernel_source
-    assert "fp8_e8_t(0x1p+127f" in src
-    assert "fp8_e8_t(0x1p-127f" in src
-    assert "6.000000e+00" not in src
+        source = tilelang.lower(kernel, target=target).kernel_source
+    if op == "max":
+        assert "fp8_e8_t(0x1p-127f" in source
+        assert "-CUDART_INF_F" not in source
+    else:
+        assert "fp8_e8_t(CUDART_INF_F)" in source
 
 
 @tilelang.testing.requires_cuda
