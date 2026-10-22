@@ -150,6 +150,48 @@ def test_dma_copy_preserves_buffer_element_offsets(case, store):
     _equal([copy.args[i] for i in indices], [1, 256, 256, 256] if whole_buffer else [2, 64, 320, 384])
 
 
+def _byte_backed_float4_view(shape, name, strides=None):
+    """A logical FP4 buffer whose data Var points at int8 storage."""
+    storage = tirx.decl_buffer((shape[0], shape[1] // 2), "int8", name=name)
+    view = tirx.decl_buffer(shape, "float4_e2m1fn", name=f"{name}_view", data=storage.data, strides=strides)
+    return storage, view
+
+
+def test_byte_backed_float4_view_requires_an_even_source_offset():
+    """An odd logical offset cannot be addressed by the int8 DMA that packs it."""
+    storage, src = _byte_backed_float4_view((8, 64), "src")
+    dst = tirx.decl_buffer((8, 2), "float4_e2m1fn", name="dst", scope="shared.l1")
+    with pytest.raises(tvm.error.InternalError, match="even logical source offset"):
+        _lower(src, dst, _region(src, [8, 2], [0, 1]), layouts={dst: make_ascend_nz_layout(dst)})
+
+
+def test_byte_backed_float4_view_allows_an_odd_stride_for_a_single_row():
+    """The row stride is not part of the DMA geometry of a one-row copy."""
+    storage = tirx.decl_buffer((8, 16), "int8", name="src")
+    src = tirx.decl_buffer((8, 31), "float4_e2m1fn", name="src_view", data=storage.data, strides=(31, 1))
+    dst = tirx.decl_buffer((1, 2), "float4_e2m1fn", name="dst", scope="shared.l1")
+    after = _lower(src, dst, _region(src, [1, 2]), layouts={dst: make_ascend_nz_layout(dst)})
+    (copy,) = calls(after, "tl.ascend_copy_gm_to_cbuf")
+    _equal([copy.args[1].args[2]], [0])
+
+
+def test_byte_backed_float4_view_requires_an_even_inner_extent():
+    storage, src = _byte_backed_float4_view((8, 64), "src")
+    dst = tirx.decl_buffer((8, 3), "float4_e2m1fn", name="dst", scope="shared.l1")
+    with pytest.raises(tvm.error.InternalError, match="even logical inner extent"):
+        _lower(src, dst, _region(src, [8, 3]), layouts={dst: make_ascend_nz_layout(dst)})
+
+
+def test_byte_backed_float4_view_requires_an_even_row_stride():
+    storage = tirx.decl_buffer((8, 16), "int8", name="src")
+    src = tirx.decl_buffer((8, 31), "float4_e2m1fn", name="src_view", data=storage.data, strides=(31, 1))
+    dst = tirx.decl_buffer((8, 2), "float4_e2m1fn", name="dst", scope="shared.l1")
+    with pytest.raises(tvm.error.InternalError, match="even logical row stride"):
+        _lower(src, dst, _region(src, [8, 2]), layouts={dst: make_ascend_nz_layout(dst)})
+
+
+
+
 @pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
 @pytest.mark.parametrize("cols", [3, 4], ids=["partial-byte", "whole-byte"])
 def test_packed_fp4_rows_require_whole_bytes(store, cols):
