@@ -403,6 +403,7 @@ class MoE(nn.Module):
             )
 
             # Scatter reduce
+            self.expert_cache.zero_()
             self.expert_cache = torch.scatter_reduce(
                 self.expert_cache,
                 0,
