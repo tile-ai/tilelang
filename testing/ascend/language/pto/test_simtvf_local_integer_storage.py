@@ -129,8 +129,8 @@ def test_simtvf_vector_integer_local_allocation_is_signless(scope_name, alloc):
     """Vector-element local slots allocate with the same-width signless i8 backing."""
     source = _lower(_simt_local_integer_vector_kernel(alloc)).kernel_source
 
-    assert "pto.alloc_buffer((1,), pto.i8)" in source
-    assert "pto.alloc_buffer((1,), pto.si8)" not in source
+    assert "pto.alloc_buffer((4,), pto.i8)" in source
+    assert "pto.alloc_buffer((4,), pto.si8)" not in source
 
 
 # ---------------------------------------------------------------------------
