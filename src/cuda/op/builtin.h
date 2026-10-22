@@ -11,6 +11,9 @@
 namespace tvm {
 namespace tl {
 
+/*! \brief FP32 min.xorsign.abs with PTX min-number semantics (SM86+). */
+TVM_DLL const Op &clamp_symmetric();
+
 namespace attr {
 
 // Warp-specialization annotations consumed only by CUDA lowering.

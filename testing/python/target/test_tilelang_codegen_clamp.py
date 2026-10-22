@@ -17,6 +17,39 @@ def _clamp_kernel(dtype="float32", threads=32):
     return main
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_80", "sm_86", "sm_100"])
+@pytest.mark.parametrize("threads", [32, 128])
+def test_clamp_symmetric_codegen(arch, threads):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "float32"), C: T.Tensor((128,), "float32"), limit: T.float32):
+        with T.Kernel(1, threads=threads):
+            for i in T.Parallel(128):
+                C[i] = T.clamp_symmetric(A[i], limit)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with target:
+        if arch == "sm_80":
+            with pytest.raises(Exception, match="requires CUDA SM86 or newer"):
+                lower(main, target=target)
+        else:
+            source = lower(main, target=target).kernel_source
+            assert "tl::clamp_symmetric(" in source
+            assert "tl::clamp(" not in source
+
+
+@tilelang.testing.requires_cuda
+def test_clamp_symmetric_types():
+    x = T.Var("x", "float32x4")
+    result = T.clamp_symmetric(x, 1.0)
+    assert result.dtype == "float32x4"
+    assert all(arg.dtype == "float32x4" for arg in result.args)
+    with pytest.raises(TypeError, match="float32"):
+        T.clamp_symmetric(T.Var("half_x", "float16"), 1.0)
+    with pytest.raises(ValueError, match="matching lanes"):
+        T.clamp_symmetric(x, T.Var("limit", "float32x2"))
+
+
 @pytest.mark.parametrize(
     "target_config,build_func",
     [

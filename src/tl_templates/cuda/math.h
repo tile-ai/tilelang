@@ -48,6 +48,12 @@ bfloat16_t fast_tanh(bfloat16_t x) { return bfloat16_t(fast_tanh(float(x))); }
 
 namespace tl {
 
+TL_DEVICE float clamp_symmetric(float x, float limit) {
+  float result;
+  asm("min.xorsign.abs.f32 %0, %1, %2;" : "=f"(result) : "f"(x), "f"(limit));
+  return result;
+}
+
 // Pass operands by value: checking NaN must not re-evaluate the caller's
 // expression (which can, for example, be a returning atomic operation).
 TL_DEVICE float clamp(float x, float lo, float hi) {
