@@ -501,7 +501,7 @@ def z3_schedule_loop_python(
         # max(start) - min(start) < II among that resource's tasks. For a set,
         # max - min < II is equivalent to |start_a - start_b| < II for all pairs.
         if not enable_offset:
-            pipe_bits = [1, 2, 4, 8, 16, 32, 64]  # MTE1, MTE2, MTE3, Cube, Vector, Fixpipe, Scalar
+            pipe_bits = [1 << bit for bit in range(max(resource_flags, default=0).bit_length())]
             for bit in pipe_bits:
                 group = [i for i in range(n) if resource_flags[i] & bit]
                 for a in range(len(group)):

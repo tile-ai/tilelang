@@ -1,8 +1,13 @@
+import math
+
+import pytest
+
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm.tirx.stmt_functor import ir_transform, post_order_visit
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
+from tvm.tirx.stmt_functor import ir_transform
 
 
 def _strip_block_reads_writes(stmt, strip_annotations: bool = False):
@@ -35,21 +40,6 @@ def _materialize_launch(func):
     return mod[func.attrs["global_symbol"]]
 
 
-def _collect_call_nodes(stmt, op_names):
-    if isinstance(op_names, str):
-        op_names = {op_names}
-    else:
-        op_names = set(op_names)
-    calls = []
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) in op_names:
-            calls.append(node)
-
-    post_order_visit(stmt, _visit)
-    return calls
-
-
 def _is_call_to(expr, op_name):
     return isinstance(expr, tvm.tirx.Call) and isinstance(expr.op, tvm.ir.Op) and str(expr.op.name) == op_name
 
@@ -59,20 +49,8 @@ def _is_int_zero(expr):
 
 
 def _assert_tl_access_ptr_bases_are_buffer_loads(stmt):
-    for call in _collect_call_nodes(stmt, "tl.access_ptr"):
+    for call in collect_calls(stmt, op="tl.access_ptr"):
         assert isinstance(call.args[0], tvm.tirx.BufferLoad)
-
-
-def _count_if_then_else(stmt):
-    count = 0
-
-    def _visit(node):
-        nonlocal count
-        if isinstance(node, tvm.tirx.IfThenElse):
-            count += 1
-
-    post_order_visit(stmt, _visit)
-    return count
 
 
 def _assert_legalize_matches_expected(before, expected, strip_annotations: bool = False):
@@ -253,7 +231,7 @@ def assert_cp_async_access_ptr_legalize():
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) > 0
     assert all(len(call.args) == 4 for call in cp_async_calls)
     _assert_legalize_matches_expected(func, expected)
@@ -501,10 +479,10 @@ def assert_cp_async_access_ptr_nonzero_safe_value_legalize():
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) > 0
     assert all(len(call.args) == 3 for call in cp_async_calls)
-    assert _count_if_then_else(body) > 0
+    assert collect_nodes(body, tvm.tirx.IfThenElse)
     _assert_legalize_matches_expected(func, expected, strip_annotations=True)
 
 
@@ -515,7 +493,7 @@ def assert_atomic_load_access_ptr_legalize():
     body = transformed["main"].body
 
     _assert_tl_access_ptr_bases_are_buffer_loads(body)
-    if_then_else_calls = _collect_call_nodes(body, "tirx.if_then_else")
+    if_then_else_calls = collect_calls(body, op="tirx.if_then_else")
     assert any(
         len(call.args) == 3 and _is_call_to(call.args[1], "tl.atomic_load_elem_op") and _is_int_zero(call.args[2])
         for call in if_then_else_calls
@@ -546,7 +524,7 @@ def assert_call_extern_access_ptr_mask_legalize(access_type: str):
     body = transformed["main"].body
 
     _assert_tl_access_ptr_bases_are_buffer_loads(body)
-    assert _count_if_then_else(body) > 0
+    assert collect_nodes(body, tvm.tirx.IfThenElse)
     _assert_legalize_matches_expected(func, expected)
 
 
@@ -605,6 +583,39 @@ def test_cp_async_access_ptr_nonzero_safe_value_oob():
     assert_cp_async_access_ptr_nonzero_safe_value_legalize()
 
 
+@pytest.mark.parametrize("safe_value", [-0.0, 0.0], ids=["negative_zero", "positive_zero"])
+def test_cp_async_signed_zero_safe_value_oob(safe_value):
+    @T.prim_func
+    def main(A: T.Tensor((16,), T.float32)):
+        with T.sblock("root"):
+            T.sblock_attr({"safe_value_map": {A.data: T.float32(safe_value)}})
+            shared = T.sblock_alloc_buffer((2,), T.float32, scope="shared")
+            for i in T.serial(2):
+                T.ptx_cp_async(
+                    T.access_ptr(shared[i], "w", 1),
+                    T.access_ptr(A[i + 15], "r", 1),
+                    1,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    mod = tl.transform.LegalizeSafeMemoryAccess()(tvm.IRModule.from_expr(main))
+    body = mod["main"].body
+    calls = collect_calls(body, op="tl.ptx_cp_async")
+    assert len(calls) == 1
+    if math.copysign(1.0, safe_value) > 0:
+        assert len(calls[0].args) == 4
+        assert not collect_nodes(body, tvm.tirx.IfThenElse)
+    else:
+        assert len(calls[0].args) == 3
+        assert len(collect_nodes(body, tvm.tirx.IfThenElse)) == 1
+        stores = collect_nodes(body, tvm.tirx.BufferStore)
+        assert len(stores) == 1
+        fill = stores[0].value
+        assert isinstance(fill, tvm.tirx.FloatImm)
+        assert fill.value == 0.0 and math.copysign(1.0, fill.value) < 0
+
+
 def test_atomic_load_access_ptr_oob():
     assert_atomic_load_access_ptr_legalize()
 
@@ -655,20 +666,14 @@ def test_dynamic_index_load_store_conditions_are_combined():
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
-    load_guards = _collect_call_nodes(body, "tirx.if_then_else")
+    load_guards = collect_calls(body, op="tirx.if_then_else")
     assert len(load_guards) == 1
     assert isinstance(load_guards[0].args[0], tvm.tirx.And)
     assert isinstance(load_guards[0].args[1], tvm.tirx.BufferLoad)
     assert isinstance(load_guards[0].args[2], tvm.tirx.FloatImm)
     assert float(load_guards[0].args[2].value) == 0.0
 
-    store_guards = []
-
-    def _collect_store_guard(node):
-        if isinstance(node, tvm.tirx.IfThenElse):
-            store_guards.append(node)
-
-    post_order_visit(body, _collect_store_guard)
+    store_guards = collect_nodes(body, tvm.tirx.IfThenElse)
     assert len(store_guards) == 1
     assert isinstance(store_guards[0].condition, tvm.tirx.And)
     assert isinstance(store_guards[0].then_case, tvm.tirx.BufferStore)
@@ -700,7 +705,7 @@ def test_nested_buffer_load_index_is_safely_rewritten():
         assert _is_load_from(expr.args[1], b_data)
         assert _is_int_zero(expr.args[2])
 
-    all_guards = _collect_call_nodes(body, "tirx.if_then_else")
+    all_guards = collect_calls(body, op="tirx.if_then_else")
     inner_guards = [call for call in all_guards if len(call.args) == 3 and _is_load_from(call.args[1], a_data)]
     assert len(inner_guards) == 1
 
@@ -720,9 +725,7 @@ def test_nested_buffer_load_index_is_safely_rewritten():
         assert len(safe_indices) == 1
         _assert_safe_b_index(safe_indices[0])
 
-    guarded_b_indices = [
-        call for call in _collect_call_nodes(body, "tirx.if_then_else") if len(call.args) == 3 and _is_load_from(call.args[1], b_data)
-    ]
+    guarded_b_indices = [call for call in all_guards if len(call.args) == 3 and _is_load_from(call.args[1], b_data)]
     assert len(guarded_b_indices) == 1
 
 
@@ -743,7 +746,7 @@ def test_ramp_load_conditions_are_combined():
 
     load_guards = [
         call
-        for call in _collect_call_nodes(body, "tirx.if_then_else")
+        for call in collect_calls(body, op="tirx.if_then_else")
         if len(call.args) == 3 and isinstance(call.args[1], tvm.tirx.BufferLoad)
     ]
     assert len(load_guards) == 1
@@ -755,26 +758,14 @@ def test_ramp_load_conditions_are_combined():
     assert isinstance(guard.args[2], tvm.tirx.Broadcast)
     assert guard.args[2].dtype.lanes == lanes
 
-    predicate_nodes = []
-    post_order_visit(guard.args[0], predicate_nodes.append)
+    predicate_nodes = collect_nodes(guard.args[0], tvm.runtime.Object)
     comparisons = [node for node in predicate_nodes if isinstance(node, (tvm.tirx.LT, tvm.tirx.LE, tvm.tirx.GT, tvm.tirx.GE))]
     # Prefix constraints eliminate the three lower-bound checks implied by
     # `0 <= base`, while retaining the four progressively tighter upper bounds.
     assert len(comparisons) == lanes + 1
     assert all(not isinstance(node, tvm.tirx.BufferLoad) for node in predicate_nodes)
     assert all(node.dtype.lanes == 1 for node in predicate_nodes if hasattr(node, "dtype"))
-    assert len(_collect_call_nodes(guard.args[0], "tirx.if_then_else")) == 0
-
-
-def _collect_nodes(stmt, node_type):
-    nodes = []
-
-    def _visit(node):
-        if isinstance(node, node_type):
-            nodes.append(node)
-
-    post_order_visit(stmt, _visit)
-    return nodes
+    assert_call_count(guard.args[0], op="tirx.if_then_else", count=0)
 
 
 def _comparison_uses_var(comparison, var):
@@ -783,13 +774,13 @@ def _comparison_uses_var(comparison, var):
 
 
 def _assert_single_opaque_call(body):
-    calls = _collect_call_nodes(body, "tirx.call_extern")
+    calls = collect_calls(body, op="tirx.call_extern")
     assert len(calls) == 1
     assert all(str(call.args[0].value) == "tl_test_opaque_get_index" for call in calls)
 
 
 def _assert_expr_guard_scope(body, index_var):
-    guards = [call for call in _collect_call_nodes(body, "tirx.if_then_else") if len(call.args) == 3]
+    guards = [call for call in collect_calls(body, op="tirx.if_then_else") if len(call.args) == 3]
     assert len(guards) == 4
     assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
 
@@ -809,7 +800,7 @@ def _assert_expr_guard_scope(body, index_var):
 
 
 def _assert_stmt_guard_scope(body, index_var):
-    guards = [guard for guard in _collect_nodes(body, tvm.tirx.IfThenElse)]
+    guards = collect_nodes(body, tvm.tirx.IfThenElse)
     assert len(guards) == 4
     assert all(not isinstance(guard.condition, tvm.tirx.And) for guard in guards)
 
@@ -847,7 +838,7 @@ def test_opaque_index_guard_preserves_lazy_evaluation():
 
     load = _assert_expr_guard_scope(body, main.params[-1])
     assert load.buffer.data.same_as(a_data)
-    assert len(_collect_call_nodes(load.indices[0], "tirx.call_extern")) == 1
+    assert_call_count(load.indices[0], op="tirx.call_extern", count=1)
     _assert_single_opaque_call(body)
 
 
@@ -869,7 +860,7 @@ def test_opaque_store_guard_preserves_lazy_evaluation():
 
     store = _assert_stmt_guard_scope(body, main.params[-1])
     assert store.buffer.data.same_as(a_data)
-    assert len(_collect_call_nodes(store.indices[0], "tirx.call_extern")) == 1
+    assert_call_count(store.indices[0], op="tirx.call_extern", count=1)
     _assert_single_opaque_call(body)
 
 
@@ -900,9 +891,9 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert isinstance(guarded, tvm.tirx.BufferLoad)
     assert all(not isinstance(condition, tvm.tirx.And) for condition in conditions)
     assert all(_comparison_uses_var(condition, later_index) for condition in conditions[:2])
-    assert all(not _collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
-    assert all(_collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
-    assert _collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
+    assert all(not collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
+    assert all(collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
+    assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
 if __name__ == "__main__":

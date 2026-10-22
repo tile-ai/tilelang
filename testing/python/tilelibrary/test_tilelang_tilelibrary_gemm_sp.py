@@ -186,6 +186,50 @@ def test_gemm_ss(
     )
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("in_dtype", [T.int8, T.uint8])
+def test_gemm_sp_8bit_signedness(in_dtype):
+    """Check 8-bit sparse MMA values, including unsigned operands above 127."""
+    M = N = 128
+    K = 64
+    program = matmul(
+        M,
+        N,
+        K,
+        M,
+        N,
+        K,
+        False,
+        True,
+        in_dtype,
+        T.int32,
+        T.int32,
+        T.int16,
+        get_e_factor(in_dtype, T.int16),
+        0,
+        128,
+    )
+    kernel = tilelang.compile(
+        program,
+        out_idx=[3],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+
+    # Keep positions 0 and 1 in every group of four. Each metadata nibble
+    # encodes 0 | (1 << 2) = 4; an int16 holds four such groups.
+    offset = 128 if in_dtype == T.uint8 else -64
+    a_sparse = ((torch.arange(M * K // 2).reshape(M, K // 2) % 128) + offset).to(in_dtype.as_torch())
+    b = ((torch.arange(N * K).reshape(N, K) % 127) + offset).to(in_dtype.as_torch())
+    metadata = torch.full((M, K // 16), 0x4444, dtype=torch.int16)
+    a = torch.zeros((M, K), dtype=torch.int32)
+    a.reshape(M, K // 4, 4)[:, :, :2] = a_sparse.reshape(M, K // 4, 2).to(torch.int32)
+    expected = a @ b.to(torch.int32).T
+
+    actual = kernel(a_sparse.cuda(), metadata.cuda(), b.cuda())
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
 def matmul_rs(
     M,
     N,

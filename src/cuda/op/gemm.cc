@@ -143,6 +143,51 @@ bool AllowTuringMma(const GemmNode &op) {
   return false;
 }
 
+bool AllowAmpereMMA(const GemmNode &op, Target target) {
+  DataType a = op.a_->dtype, b = op.b_->dtype, c = op.c_->dtype;
+  if (a.is_float8() && b.is_float8()) {
+    return TargetHasSMVersionGE(target, 89) &&
+           (c == DataType::Float(16) || c == DataType::Float(32));
+  }
+  if (a != b) {
+    return false;
+  }
+  if (a == DataType::Float(16)) {
+    return c == DataType::Float(16) || c == DataType::Float(32);
+  }
+  if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
+    return c == DataType::Int(32);
+  }
+  if (a.is_tfloat32() && b.is_tfloat32()) {
+    return c == DataType::Float(32);
+  }
+  if (a == DataType::BFloat(16))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(32))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(64))
+    return c == DataType::Float(64);
+  return false;
+}
+
+// fp8 (.e4m3/.e5m2) mma.sync atoms first exist on SM89; the SM80/SM86 MMA
+// path has none. CUTLASS compiles the missing atom into
+// CUTE_INVALID_CONTROL_PATH, so without this gate nvcc succeeds and the
+// device traps at launch with a bare `device-side assert triggered`.
+bool NeedsSm89Fp8Mma(const GemmNode &op) {
+  return op.a_->dtype.is_float8() || op.b_->dtype.is_float8();
+}
+
+void FatalFp8MmaUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL) << "T.gemm() with fp8 operands requires a CUDA target with fp8 "
+                "mma.sync atoms (SM89+), but got target="
+             << target << " with A(dtype=" << op.a_->dtype
+             << "), B(dtype=" << op.b_->dtype
+             << "). SM80/SM86 have no .e4m3/.e5m2 mma instruction; the kernel "
+                "would compile and then trap at launch."
+             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -163,6 +208,17 @@ void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
              << ", dtype=" << op.c_->dtype << "), M=" << op.m_
              << ", N=" << op.n_ << ", K=" << op.k_ << "."
              << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+}
+
+void FatalMmaSyncUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL)
+      << "T.gemm requires native mma.sync lowering on Ampere/Ada, "
+         "but the operand dtype configuration is not supported. Got target="
+      << target << ", A(scope=" << op.a_.scope() << ", dtype=" << op.a_->dtype
+      << "), B(scope=" << op.b_.scope() << ", dtype=" << op.b_->dtype
+      << "), C(scope=" << op.c_.scope() << ", dtype=" << op.c_->dtype
+      << "), M=" << op.m_ << ", N=" << op.n_ << ", K=" << op.k_ << "."
+      << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
 }
 
 std::pair<int, int>
@@ -370,6 +426,14 @@ struct Gemm {
     }
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
+    }
+    // Reached only by the mma.sync path: WGMMA/TCGEN05 returned above, and
+    // Volta/Turing demote fp8 to kCudaFMA.
+    if (NeedsSm89Fp8Mma(op) && !TargetHasSMVersionGE(target, 89)) {
+      FatalFp8MmaUnavailable(op, target);
+    }
+    if (TargetIsAmpere(target) && !AllowAmpereMMA(op, target)) {
+      FatalMmaSyncUnavailable(op, target);
     }
     return kCudaMMA;
   }

@@ -15,15 +15,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
+class CodeGenTileLangCUDA final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangCUDA();
-  std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f);
@@ -73,6 +72,7 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
   void ReserveKeywordsAsUnique_();
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
@@ -85,6 +85,20 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  bool TryEmitPackedBinaryOp_(const std::string &op, DataType result_type,
+                              const PrimExpr &lhs, const PrimExpr &rhs,
+                              std::ostream &os);
+  bool TryEmitPackedComparison_(const std::string &op, DataType result_type,
+                                DataType lhs_type, DataType rhs_type,
+                                const std::string &lhs, const std::string &rhs,
+                                const std::string &result);
+  void EmitScalarizedBinaryOp_(const std::string &op, DataType result_type,
+                               DataType lhs_type, DataType rhs_type,
+                               const std::string &lhs, const std::string &rhs,
+                               const std::string &result);
+  bool TryEmitFastMathCall_(const Call &call, std::ostream &os);
+  bool TryEmitIEEEMathCall_(const Call &call, std::ostream &os);
+  bool TryEmitPackedMathCall_(const Call &call, std::ostream &os);
   // Emit a vector op of dtype t as lanes/2 packed x2 calls (tl::mul2,
   // tl::fma2, ...). All args must already have dtype t; requires
   // CanEmitPackedX2Math(t).

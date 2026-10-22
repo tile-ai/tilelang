@@ -5,13 +5,14 @@
 #include <initializer_list>
 #include <string>
 
+#include "backend/common/codegen/codegen_c_base.h"
 #include "target/source/codegen_c.h"
 #include <tvm/arith/analyzer.h>
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangAscend final : public CodeGenC {
+class CodeGenTileLangAscend final : public CodeGenTileLangCBase {
 public:
   using CodeGenC::PrintType;
 
@@ -115,6 +116,7 @@ private:
   bool has_simd_inst_included_{false};
   bool has_gm_bypass_dcache_{false};
   bool has_gm_bypass_dcache_included_{false};
+  bool has_ascend_std_math_included_{false};
   bool has_philox_rng_{false};
   bool has_philox_rng_included_{false};
   bool has_cooperative_groups_included_{false};

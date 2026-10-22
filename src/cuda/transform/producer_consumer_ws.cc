@@ -599,7 +599,7 @@ static PrimExpr RewriteCopyToTmaCopy(const Call &copy_call,
 /// - Tile-op copy calls get `kAsyncCopyNoImplicitCommitWait` so copy.cc does
 ///   not emit its own implicit commit/wait either.
 /// This allows the WS pass to emit its own commit_group +
-/// cp_async_barrier_noinc, tying cp.async completion to the forward mbarrier.
+/// async arrival, tying cp.async completion to the forward mbarrier.
 class SimtProducerAnnotator : public StmtExprMutator {
 public:
   static Stmt Annotate(const Stmt &stmt, Target target) {
@@ -1444,11 +1444,15 @@ private:
     }
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
-    // Forward arrive_count:
-    //   - Pure TMA (possibly merged): 1 (leader thread only)
-    //   - Mixed TMA with SIMT/cp.async: producer_extent (all producer threads)
-    PrimExpr fwd_arrive_count = (can_merge_tma_barriers ||
-                                 (!has_simt_producer && !has_cp_async_producer))
+    bool has_async_producer = has_simt_producer || has_cp_async_producer;
+    bool has_producer_prefix =
+        !outer_leading_bindings.empty() || !inner_leading_bindings.empty();
+    for (const auto &prefix : producer_loop_prefix_stmts)
+      has_producer_prefix |= !prefix.empty();
+    bool producer_is_single_warp = !has_async_producer &&
+                                   !has_producer_prefix &&
+                                   !loop_body_condition.defined();
+    PrimExpr fwd_arrive_count = producer_is_single_warp
                                     ? IntImm(DataType::Int(32), 1)
                                     : producer_extent;
     Array<PrimExpr> arrive_counts;
@@ -1489,7 +1493,7 @@ private:
     // --- Build producer body ---
     // Producer structure (mixed TMA + SIMT/cp.async):
     //   bp_wait → SIMT copies (all threads, async) → TMA copies (leader) →
-    //   commit + cp_async_barrier_noinc.
+    //   completion tracking.
     // SIMT copies are placed after bp_wait but before TMA so cp.async
     // and TMA can overlap.
 
@@ -1559,7 +1563,7 @@ private:
         // arrive_and_expect_tx instead of separate expect_tx + arrive.
         // When merged barriers, only the last TMA copy should arrive.
         bool emit_arrive_on_this =
-            !has_simt_producer && !has_cp_async_producer &&
+            producer_is_single_warp &&
             (!can_merge_tma_barriers || tma_idx == last_tma_idx);
 
         if (tile_op.defined() && tile_op.as<CopyNode>()) {
@@ -1588,26 +1592,24 @@ private:
         producer_stmts.push_back(s);
       }
     }
-    // When any producer-side work is not single-threaded pure-TMA, all
-    // producer threads arrive on all forward barriers after finishing it.
-    // SIMT copies (later lowered to cp.async by InjectPTXAsyncCopy) and
-    // explicit cp.async groups use commit_group + cp_async_barrier_noinc
-    // so the async copy completion drives the mbarrier arrival, allowing
-    // TMA and cp.async to overlap.  Other groups use MakeArriveBarrier.
-    if (has_simt_producer || has_cp_async_producer) {
-      // Any SIMT producer will become cp.async after LowerTileOp.
-      bool group_has_async_copy = has_simt_producer || has_cp_async_producer;
-      for (int g = 0; g < num_producer_groups; ++g) {
-        int fwd_base = g * num_stages;
+    // Async-only producers already contribute one completion per thread.
+    // With a prefix, also publish any synchronous writes by a regular release.
+    if (!producer_is_single_warp) {
+      for (int fwd_base = 0; fwd_base < num_fwd; fwd_base += num_stages) {
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
-        if (group_has_async_copy) {
-          // Tie cp.async completion to the forward mbarrier.
-          // commit_group was already emitted right after the cp.async
-          // instructions (before TMA) to maximize overlap.
+        if (!has_async_producer) {
+          // No async copy: each thread publishes its writes and arrives.
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        } else if (!has_producer_prefix) {
+          // Async copy only: completion consumes the thread's arrival credit.
           producer_stmts.push_back(Evaluate(
               Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                    {MakeBarrierRef(barrier_buf, fwd_id)})));
         } else {
+          // Async copy with prefix: reserve completion, then publish writes.
+          producer_stmts.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async_barrier(),
+                            {MakeBarrierRef(barrier_buf, fwd_id)})));
           producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
         }
       }
@@ -1745,6 +1747,11 @@ private:
     // --- Rewrite threadIdx.x for WS partitions ---
     // Producer owns the low partition and already sees [0, producer_extent).
     Stmt rewritten_producer = final_producer_loop;
+    if (producer_is_single_warp) {
+      rewritten_producer = IfThenElse(
+          LT(thread_iv_->var, make_const(thread_iv_->var.dtype(), 32)),
+          rewritten_producer);
+    }
     // Consumer owns the high partition and is remapped back to
     // [0, consumer_extent) for existing tile-op layout assumptions.
     Stmt rewritten_consumer = PCThreadIdxRewriter::Rewrite(

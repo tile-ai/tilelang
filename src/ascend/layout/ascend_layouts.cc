@@ -5,12 +5,14 @@
  */
 
 #include "support/check.h"
+#include <algorithm>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/utils.h"
 #include "layout/layout.h"
 
 namespace tvm {

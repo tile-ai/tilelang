@@ -30,7 +30,7 @@ def ast_get_span(ast: ast.AST) -> Span | None:
 
 
 def ast_set_span(ast: ast.AST, span: Span | None):
-    if span is None or not ast_has_span(ast):
+    if span is None or not all(attr in ast._attributes for attr in _span_attrs):
         return
     for attr, value in zip(_span_attrs, span):
         setattr(ast, attr, value)
@@ -40,7 +40,9 @@ class QuoteVisitor(ast.NodeTransformer):
     def __init__(self, names: dict[str, QuoteReplacement], passes: Sequence[QuoteReplacement] | None = None, span: Span | None = None):
         self.names = names
         self.passes = list(passes) if passes is not None else []
-        self.span = span
+        # Template scaffolding belongs to the statement's first line; keep
+        # substituted user nodes' full spans for expression diagnostics.
+        self.span = (span[0], span[1], span[0], span[1]) if span is not None else None
 
     def generic_visit(self, node: ast.AST) -> ast.AST | list[ast.AST] | None:
         if self.span is not None:
@@ -51,11 +53,11 @@ class QuoteVisitor(ast.NodeTransformer):
         if node.id in self.names:
             return self.names[node.id]
         else:
-            return node
+            return self.generic_visit(node)
 
     def visit_Pass(self, node: ast.Pass) -> QuoteReplacement:
         item = self.passes.pop(0)
-        return item if item else node
+        return item if item else self.generic_visit(node)
 
 
 def quote(
@@ -460,10 +462,11 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.iter, ast.Call):
             call = ast.Call(
-                func=self.quote_expr("__tb.iter_call"),
+                func=self.quote_expr("__tb.iter_call", span=node),
                 args=[node.iter.func, *node.iter.args],
                 keywords=node.iter.keywords,
             )
+            # Argument expansion belongs to the user's call, not the generated helper.
             ast.copy_location(call, node.iter)
             node.iter = call
         tmp = self.get_tmp()
@@ -667,6 +670,7 @@ class DSLMutator(ast.NodeTransformer):
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
+        span = ast_get_span(node)
         stmts = []
         arg_names = set()
         all_args = node.args.posonlyargs + node.args.args
@@ -707,6 +711,7 @@ class DSLMutator(ast.NodeTransformer):
             "  return function",
             function=ast.Name(name, ctx=ast.Load()),
             passes=[node],
+            span=span,
         )
         # Captured variables are user names, not template builder arguments.
         assert isinstance(closure, ast.FunctionDef)
@@ -817,9 +822,9 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = self.quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+            expr.context_expr = self.quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=node)
         if is_kernel_ctx:
-            return [self.quote1("if __tb.skip_kernel_ctx(): return"), node]
+            return [self.quote1("if __tb.skip_kernel_ctx(): return", span=node), node]
         return node
 
     def visit_Assert(self, node: ast.Assert):
@@ -876,7 +881,7 @@ class SpanAttacher(ast.NodeTransformer):
     def visit(self, node: ast.AST):
         node = self.generic_visit(node)
         if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
-            return self.quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
+            return self.quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})", span=node) + [node]
         return node
 
 

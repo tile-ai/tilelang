@@ -11,17 +11,22 @@ layernorm epilogues) the free-mode search faces.
 import tilelang.language as T
 
 
-def _softmaxish(M, N, threads):
+def _softmaxish(M, N, threads, keepdim=False):
+    reduced_shape = (M, 1) if keepdim else (M,)
+
     @T.prim_func
     def main(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
         with T.Kernel(1, threads=threads):
             x = T.alloc_fragment((M, N), T.float32)
-            row_max = T.alloc_fragment((M,), T.float32)
+            row_max = T.alloc_fragment(reduced_shape, T.float32)
             y = T.alloc_fragment((M, N), T.float32)
             T.copy(A, x)
             T.reduce_max(x, row_max, dim=1)
             for i, j in T.Parallel(M, N):
-                y[i, j] = x[i, j] - row_max[i]
+                if keepdim:
+                    y[i, j] = x[i, j] - row_max[i, 0]
+                else:
+                    y[i, j] = x[i, j] - row_max[i]
             T.copy(y, B)
 
     return main
@@ -30,6 +35,7 @@ def _softmaxish(M, N, threads):
 VARIANTS = {
     "64x128_t128": lambda: _softmaxish(64, 128, 128),
     "128x256_t256": lambda: _softmaxish(128, 256, 256),
+    "64x128_t128_keepdim": lambda: _softmaxish(64, 128, 128, keepdim=True),
 }
 
 
@@ -37,9 +43,12 @@ def check(variant, model, result):
     for name in ("x", "y"):
         frag = result["buffers"][name]
         assert frag["replicate"] == 1, f"elementwise fragment {name} needs no replication, got: {frag}"
+    rows = result["buffers"]["x"]["input_shape"][0]
+    assert result["buffers"]["row_max"]["input_shape"] == ([rows, 1] if variant.endswith("keepdim") else [rows])
 
 
 VECTOR_ANCHOR = {
     "64x128_t128": {"A": 4, "B": 4},
     "128x256_t256": {"A": 4, "B": 4},
+    "64x128_t128_keepdim": {"A": 4, "B": 4},
 }

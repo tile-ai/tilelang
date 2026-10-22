@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "config.h"
 
 #include "runtime/metadata.h"
 #include "support/check.h"
@@ -24,6 +25,7 @@ std::string AscendCodeGen(IRModule mod) {
   bool output_ssa = false;
   CodeGenTileLangAscend cg;
   cg.Init(output_ssa);
+  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())

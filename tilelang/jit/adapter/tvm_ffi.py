@@ -61,7 +61,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
     device_kernel_source: str | None = None
-    executable: tvm.runtime.Executable | None = None
+    executable: tvm.runtime.Executable | tvm.runtime.Module | None = None
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
     # host_mod
@@ -135,12 +135,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
         executable = runtime.Executable(self.rt_mod)
-        if COMPILE_ARGS:
-            # Precompile jit module with extra arguments.
-            executable.jit(**COMPILE_ARGS)
+        compile_args = dict(COMPILE_ARGS)
+        from tilelang.cpu.toolchain import get_compile_flags
+
+        backend_flags = get_compile_flags(self.target, self.pass_configs, execution_backend="tvm_ffi")
+        if backend_flags:
+            options = list(compile_args.get("options", []))
+            options += backend_flags
+            compile_args["options"] = options
+        if compile_args:
+            # Precompile with platform and backend-owned toolchain options.
+            executable.jit(**compile_args)
         return executable
 
-    def _get_executable(self) -> tvm.runtime.Executable:
+    def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
         executable = self.executable
         if executable is not None:
             return executable
@@ -152,7 +160,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 self.executable = executable
             return executable
 
-    def get_exportable_executable(self) -> tvm.runtime.Executable:
+    def get_exportable_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
+        """Return the lazy executable, or the runnable module loaded from disk cache."""
         return self._get_executable()
 
     def _uses_ffi_callee_allocated_output_abi(self) -> bool:

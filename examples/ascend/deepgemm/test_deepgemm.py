@@ -1,5 +1,7 @@
 """Numerical checks for DeepGEMM schedulers and scale conversion."""
 
+import os
+
 import pytest
 import torch
 import tilelang.testing
@@ -16,8 +18,8 @@ def _input(shape, seed):
 def test_bf16_dense_alpha_accumulation():
     a, b = _input((17, 64), 0), _input((32, 64), 1)
     c = _input((17, 32), 2)
-    d = torch.empty(c.shape, dtype=torch.float32, device="npu")
-    api.bf16_gemm_nt(a.to(device="npu", dtype=torch.bfloat16), b.to(device="npu", dtype=torch.bfloat16), d, c=c.npu(), alpha=0.5)
+    d = c.npu()
+    api.bf16_gemm_nt(a.to(device="npu", dtype=torch.bfloat16), b.to(device="npu", dtype=torch.bfloat16), d, c=d, alpha=0.5)
     torch.testing.assert_close(d.cpu(), 0.5 * (a @ b.T) + c, rtol=0, atol=0)
 
 
@@ -31,11 +33,16 @@ def test_fp8_batched_scales():
         (a.to(torch.float8_e4m3fn).npu(), sfa),
         (b.to(torch.float8_e4m3fn).npu(), sfb),
         d,
+        epilogue=api.epilogue.Alpha(0.5),
     )
-    torch.testing.assert_close(d.cpu(), (a @ b.transpose(-2, -1)) * 0.125, rtol=0, atol=0)
+    torch.testing.assert_close(d.cpu(), (a @ b.transpose(-2, -1)) * 0.0625, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
 def test_bf16_m_grouped_padding():
     a, b = _input((512, 64), 0), _input((2, 32, 64), 1)
     a[17:256] = 0
@@ -54,7 +61,8 @@ def test_bf16_m_grouped_padding():
 
 
 @tilelang.testing.requires_ascend
-def test_fp8_k_grouped_scale_tail():
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_fp8_k_grouped_scale_tail(accumulate):
     # The final group ends before its 256-aligned boundary; scales only cover K.
     a, b = _input((385, 16), 0), _input((385, 32), 1)
     a[65:256] = 0
@@ -63,19 +71,81 @@ def test_fp8_k_grouped_scale_tail():
     # Padding scales must be cleared before the power-of-two validation.
     sfa[3:8] = -3
     sfb[3:8] = -3
-    c = _input((2, 16, 32), 2)
-    d = torch.empty(c.shape, dtype=torch.float32, device="npu")
-    layout = torch.tensor([65, 385], dtype=torch.int32, device="npu")
+    c = _input((4, 16, 32), 2)
+    d = torch.full(c.shape, float("nan"), dtype=torch.float32, device="npu")
+    layout = torch.tensor([0, 65, 256, 385], dtype=torch.int32, device="npu")
     api.k_grouped_fp8_gemm_tn_contiguous(
         (a.to(torch.float8_e4m3fn).npu(), sfa.npu()),
         (b.to(torch.float8_e4m3fn).npu(), sfb.npu()),
         d,
-        ks_cpu=[65, 129],
+        ks_cpu=[0, 65, 0, 129],
         grouped_layout=layout,
-        c=c.npu(),
+        c=c.npu() if accumulate else None,
     )
-    expected = torch.stack((a[:65].T @ b[:65], a[256:].T @ b[256:])) + c
+    expected = torch.zeros_like(c)
+    expected[1], expected[3] = a[:65].T @ b[:65], a[256:].T @ b[256:]
+    if accumulate:
+        expected += c
     torch.testing.assert_close(d.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_bf16_dense_bias():
+    a, b = _input((17, 64), 0), _input((70, 64), 1)
+    bias = _input((1, 70), 2) * 0.25
+    d = torch.empty((17, 70), dtype=torch.bfloat16, device="npu")
+    api.bf16_gemm_nt(a.bfloat16().npu(), b.bfloat16().npu(), d, c=bias.bfloat16().npu())
+    torch.testing.assert_close(d.cpu(), (a @ b.T + bias).bfloat16(), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support FP32-to-BF16 conversion yet",
+)
+def test_fp8_quantization_epilogue():
+    batches, m, n, k = 2, 17, 256, 64
+    a, b = _input((batches, m, k), 0), _input((batches, n, k), 1)
+    sfa = torch.ones((batches, m, k // 32), device="npu")
+    sfb = torch.ones((batches, n, k // 32), device="npu")
+    d = torch.empty((m, batches, n), dtype=torch.float8_e4m3fn, device="npu").permute(1, 0, 2)
+    sfd = torch.empty((batches * n // 64, m), dtype=torch.int16, device="npu").T
+    api.fp8_bmm(
+        (a.to(torch.float8_e4m3fn).npu(), sfa),
+        (b.to(torch.float8_e4m3fn).npu(), sfb),
+        d,
+        epilogue=api.epilogue.FP8Quantization(sfd),
+    )
+    values = (a @ b.transpose(-2, -1)).bfloat16().float().reshape(batches, m, n // 32, 32)
+    exponent = torch.ceil(torch.log2(values.abs().amax(-1) / 448)).clamp_min(-22)
+    expected = (values / torch.pow(2.0, exponent)[..., None]).reshape(batches, m, n).to(torch.float8_e4m3fn)
+    expected_sf = (exponent + 127).to(torch.uint8).view(torch.int16).transpose(0, 1).reshape(m, batches * n // 64)
+    torch.testing.assert_close(d.float().cpu(), expected.float(), rtol=0, atol=0)
+    torch.testing.assert_close(sfd.cpu(), expected_sf, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO codegen does not support tl.simd.vst2 yet",
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_stochastic_rounding(dtype):
+    a = (_input((17, 128), 0) / 7).to(dtype)
+    b = (_input((70, 128), 1) / 7).to(dtype)
+    d = torch.empty((17, 70), dtype=torch.bfloat16, device="npu")
+    epilogue = api.epilogue.BF16StochasticRounding()
+    if dtype == torch.bfloat16:
+        api.bf16_gemm_nt(a.npu(), b.npu(), d, epilogue=epilogue)
+    else:
+        api.fp8_gemm_nt(
+            (a.npu(), torch.ones((17, 4), device="npu")),
+            (b.npu(), torch.ones((70, 4), device="npu")),
+            d,
+            epilogue=epilogue,
+        )
+    # Stochastic rounding may choose either adjacent BF16 value (one ULP).
+    torch.testing.assert_close(d.float().cpu(), a.float() @ b.float().T, rtol=8e-3, atol=1e-5)
 
 
 @pytest.mark.parametrize(
