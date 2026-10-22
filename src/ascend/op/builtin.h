@@ -56,6 +56,7 @@ TVM_DLL const Op &simd_pst();
 TVM_DLL const Op &simd_vld();
 TVM_DLL const Op &simd_vld2(); // dual-dest load (e.g. DINTLV_B16) → vec_pair
 TVM_DLL const Op &simd_vsts();
+TVM_DLL const Op &simd_vst2();
 TVM_DLL const Op &simd_vsstb();
 
 // -- Binary arithmetic

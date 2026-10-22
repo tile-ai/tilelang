@@ -2424,6 +2424,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ");\n";
   }
 
+  // --- SimdVF dual-source interleaved store: (addr, src0, src1) ---
+  else if (op->op.same_as(tl::simd_vst2())) {
+    ICHECK_EQ(op->args.size(), 3);
+    DataType dtype = op->args[1].dtype().element_of();
+    std::string src0 = this->PrintExpr(op->args[1]);
+    std::string src1 = this->PrintExpr(op->args[2]);
+    std::string addr = this->PrintExpr(op->args[0]);
+    this->PrintIndent();
+    this->stream << "simd_inst::vst_x2(" << src0 << ", " << src1
+                 << ", (__ubuf__ " << CCEUBufType(dtype) << "*)" << addr
+                 << ");\n";
+  }
+
   // --- SimdVF scatter-store blocks: (src, base, stride, mask [, post]) ---
   else if (op->op.same_as(tl::simd_vsstb())) {
     ICHECK(op->args.size() == 4 || op->args.size() == 5);
