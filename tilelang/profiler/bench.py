@@ -16,6 +16,7 @@ from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
     _cuda_synchronize as _cuda_synchronize,
+    _record_cuda_events,
     bench_with_cuda_events as _bench_with_cuda_events,
     bench_with_cudagraph as _bench_with_cudagraph,
     bench_with_cupti as _bench_with_cupti,
@@ -70,6 +71,9 @@ def do_bench(
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
         cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
+        early_stop_baseline: Optional millisecond threshold for event or wall timing.
+            Other backends perform their full measurement because their timing
+            protocols differ from the event pilot.
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -219,29 +223,37 @@ def _do_bench_impl(
     cache.zero_()
     _cuda_synchronize(device_idx)
 
-    # Estimate kernel runtime with 5 iterations
+    # The flushed batch estimates the iteration budget. Event early stopping
+    # additionally needs kernel-only samples, matching the final measurement.
     start_event = Event(enable_timing=True)
     end_event = Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        fn()
-    end_event.record()
+    pilot_events = None
+    if backend == "event" and early_stop_baseline is not None:
+        pilot_events = _record_cuda_events(fn, cache, 5, batch_events=(start_event, end_event))
+    else:
+        start_event.record()
+        for _ in range(5):
+            cache.zero_()
+            fn()
+        end_event.record()
     start_event.synchronize()
     end_event.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
-    # Early stop: skip full benchmark if estimate exceeds baseline
-    if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
-        logger.debug(
-            "Early stop: estimate_ms=%.3fms exceeds baseline=%.3fms, skipping full benchmark.",
-            estimate_ms,
-            early_stop_baseline,
-        )
-        if quantiles is not None:
-            return [estimate_ms] * len(quantiles)
-        return estimate_ms
+    if pilot_events is not None:
+        starts, ends = pilot_events
+        kernel_estimate_ms = sum(start.elapsed_time(end) for start, end in zip(starts, ends)) / 5
+        if kernel_estimate_ms > early_stop_baseline:
+            logger.debug(
+                "Early stop: kernel_estimate_ms=%.3fms exceeds baseline=%.3fms, skipping full benchmark.",
+                kernel_estimate_ms,
+                early_stop_baseline,
+            )
+            if quantiles is not None:
+                return kernel_estimate_ms if len(quantiles) == 1 else [kernel_estimate_ms] * len(quantiles)
+            return kernel_estimate_ms
 
+    estimate_ms = max(estimate_ms, 1e-6)
     # Calculate warmup and repeat counts (minimum 1 iteration each)
     n_warmup = _n_warmup if _n_warmup > 0 else max(1, int(warmup / estimate_ms))
     n_repeat = _n_repeat if _n_repeat > 0 else max(1, int(rep / estimate_ms))
