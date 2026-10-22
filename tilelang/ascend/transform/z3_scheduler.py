@@ -427,7 +427,11 @@ def z3_schedule_loop_python(
             for i, stage in enumerate(manual_stages):
                 solver.add(k_vars[i] == stage)
         for previous, current in pipe_order_deps:
-            solver.add(r_vars[previous] <= r_vars[current])
+            # Reconstruction places larger stages first at equal physical
+            # phases. Separate ascending stages to preserve manual source
+            # order; this gap expresses ordering, not instruction latency.
+            gap = int(manual_schedule and enable_offset and manual_stages[previous] < manual_stages[current])
+            solver.add(r_vars[previous] + gap <= r_vars[current])
 
         buffer_vars = [z3.Int(f"buf_{i}", ctx) for i in range(len(buffer_sizes))]
         for i in range(len(buffer_sizes)):
@@ -501,7 +505,7 @@ def z3_schedule_loop_python(
         # max(start) - min(start) < II among that resource's tasks. For a set,
         # max - min < II is equivalent to |start_a - start_b| < II for all pairs.
         if not enable_offset:
-            pipe_bits = [1, 2, 4, 8, 16, 32, 64]  # MTE1, MTE2, MTE3, Cube, Vector, Fixpipe, Scalar
+            pipe_bits = [1 << bit for bit in range(max(resource_flags, default=0).bit_length())]
             for bit in pipe_bits:
                 group = [i for i in range(n) if resource_flags[i] & bit]
                 for a in range(len(group)):

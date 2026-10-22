@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--mode", choices=["smoke", "correctness", "bench"], default="smoke")
+    parser.add_argument("--implementation", choices=["both", "all", "reference", "manual", "staged"], default="both")
     parser.add_argument("--output", type=Path, default=Path("decode-results.json"))
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--repeat", type=int, default=10)
@@ -127,15 +128,20 @@ def main():
         inputs = lib.generate_testcase_for_decode(p)
         torch.npu.synchronize()
         metadata, _ = flash_mla.get_mla_metadata()
-        funcs = {"reference": partial(lib.run_flash_mla_decode, p, inputs, metadata, None)}
-        kernel, funcs["manual"] = prepare_decode(p, inputs)
-        source_path = args.output.parent / args.output.stem / f"manual_decode_{case_id}.asc"
-        source_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.write_text(kernel.get_kernel_source())
-        print("Compiled cache:", getattr(kernel, "_tilelang_cache_path", None), flush=True)
+        funcs = {}
+        if args.implementation in ("reference", "both", "all"):
+            funcs["reference"] = partial(lib.run_flash_mla_decode, p, inputs, metadata, None)
+        for name in ("manual", "staged"):
+            if args.implementation != name and args.implementation != "all" and not (args.implementation == "both" and name == "manual"):
+                continue
+            kernel, funcs[name] = prepare_decode(p, inputs, implementation=name)
+            source_path = args.output.parent / args.output.stem / f"{name}_decode_{case_id}.asc"
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(kernel.get_kernel_source())
+            print("Compiled cache:", getattr(kernel, "_tilelang_cache_path", None), flush=True)
         outputs = {name: fn() for name, fn in funcs.items()}
         torch.npu.synchronize()
-        expected = ref.ref_sparse_attn_decode(p, inputs) if args.mode != "bench" else outputs["reference"]
+        expected = outputs["reference"] if args.mode == "bench" and "reference" in outputs else ref.ref_sparse_attn_decode(p, inputs)
         case = {
             "id": case_id,
             "b": rp.b,

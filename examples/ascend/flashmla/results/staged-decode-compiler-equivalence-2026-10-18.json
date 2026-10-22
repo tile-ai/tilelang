@@ -1,0 +1,633 @@
+{
+  "status": "PASS",
+  "completed_cases": 23,
+  "expected_cases": 23,
+  "source_sha256": "f93885c71bba1103c1b98569a1cad4c5a56d044e7d47207f5b502ca26ed1aa4e",
+  "native_sha256": "22613b62b8e1c783b8c5592d808fa62ef8466c99613ea34d83a5b751ab832112",
+  "compiler_commit": "34894d2ee0bf1c311e3587dd530ddb989ae8fa70",
+  "measurement_compiler_commit": "0d86dd0b886624bb2e35bbfdf83e9e30cc358c98",
+  "scope": "Host compilation and fresh-process cache-hit verification only. Every complete executable and its host source, device source, and parameter file match the historical device-tested baseline byte for byte.",
+  "cases": [
+    {
+      "case": "perf-decode-0",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 105364,
+          "sha256": "3f182b885d5105f0b135f294f3c99a4dfd28404e7332dafabe0c59a3b52ff9af",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "84e6d5599db6daf18ca59232ad82561e728cc61a31cd08ae60e03415d0414457",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60356,
+          "sha256": "7582cfe0527c3b7ccc01702722b9cce149e32367fb8dce0067dd47c55b64ace9",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2862,
+          "sha256": "d5a314ba8db2a69f313bab7347872212d1f9c46e97c21f226e15d4d76e562211",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-1",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 105400,
+          "sha256": "0d646f68dd381cc577402f82c3f5bc5455728abc9ca31bef7666fa1e6e01e1f4",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "591fa54ff4571f5faad6e6d86a89bbde6b1d216e6ef3e43911c4c01fbac8ca72",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60356,
+          "sha256": "a3a0dd5de1452b50b5c5a69ee76f256cedbf451e45b5c0b288f3e66beb3e4f83",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2809,
+          "sha256": "e515f6c202ccd4cde465c188840f4490791b2ed3ea1a4f33ab7fea218e66e08c",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-2",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 105400,
+          "sha256": "58ea1413acf70fcc352190b48a0663173a05cb68bffa059a487637ffa7ce0c40",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "c1e6b2a804b993b324c9ff5766a22a83039317a8ab8967fac8c812c332007b4c",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60372,
+          "sha256": "01289211fb6626b2861cfb49b674f7b18b4ecdca2676300dffc4067864de6c42",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2864,
+          "sha256": "dbf841db05620f5711b86b0807713403f1ee5372dbc328657ce74d7a59a8f50e",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-3",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 105400,
+          "sha256": "20f3b161427a3e863eed3d1a61cc6e68d51c137d815b85c2d1697e847cb2ee13",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "64c8fe00c66cdeffce87e76e6c78a28f0501677aaa7d806ccf066639ef0a083d",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60374,
+          "sha256": "67f1b1503749629d20878d9a6fcd0995ac3561a2276a9d3f068baa8ba49f4a4b",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2865,
+          "sha256": "038917e697b9bcc5efd07aeb93cc48cd4d7da9d0dc8290696ebd74b4c1d18013",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-4",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 111833,
+          "sha256": "4e55816d2dec25b4a1c9c516cc494f23dcd43369c60b465682102e283d970e2b",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "5ef3da32809002d3aa30233dc1178af0bb08adaf29bc79a2d178b8429cfd6e71",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60354,
+          "sha256": "2b19a9354c0f4e1bfeac6d340b8866ec2d7795cf538b873f42967efd6a9b34d5",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2861,
+          "sha256": "a84e210bbd51b76b4b019d0f6659e6fe0dc5a3e7f159c226652182c016f1bc23",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-5",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 111869,
+          "sha256": "555a06d258fc7240aac3e1c619b1528c441ae96de766fd261febd131d5fe6016",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "2fed385fe047ee3b00cee4862d562f4f3731ca5069b23a0ef3d9bcdc47a8a18f",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60356,
+          "sha256": "7681a7cd8d92b8274fd4b907e29c69b283cdc84454b890266f117eddb8de49a0",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2809,
+          "sha256": "bc6e53a560ab7684e31c6f5f3c9b4e020efc0a52ff4801dc6e58496466d7b3a6",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-6",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 111869,
+          "sha256": "d65c768511aca6d4d976fbadad83f3851d6af32c45ab52864844a3ccf4f3c9d0",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "e2a86bcd3ea646947bbb08065cc768a0d6747b24be15924e8cf892176a790770",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60372,
+          "sha256": "4dd59184755da84b04d09158324fb02684948283e52746ebecea1154895fc04a",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2864,
+          "sha256": "d524ba9e5f24a6071ffafdf6708c76d2af50f3570938e92fc13bfac49bac2e90",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-7",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 111869,
+          "sha256": "39b24eeae366e9e57a5202dfc9270143169fbc3da2eb6d6c7cc70383669289a6",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "fe0d24847c7bf4735006ba7ede767cc7818a24bb98db3ab0ad2db8cd71b598d0",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60372,
+          "sha256": "74beeec3d688b78e2cbfcee5d113a7fb1ed3c57c719a75aaf8c49dfe0096b364",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2864,
+          "sha256": "26dcb19de9551a0592cf84c10dd253110771dc7d23f57ef13a342d026276ed00",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-8",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 105436,
+          "sha256": "5be6061dce1d74f9b648bd6fbf52031d2dbe7169339851417a98fa14722753a4",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "af6c14d547ede8f7d14e85dc602a02aa05377a51fb58289f0deb399ab3e5c013",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60364,
+          "sha256": "04832a6a3ad52ed8fa0412894f93c0bf0e2decb87205f1c19c8a63e768f871cf",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2803,
+          "sha256": "c01ab086bd7771473683ebb5947a425938a778ff9910a7e02a67a7652f78b203",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "perf-decode-9",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 111905,
+          "sha256": "6a5d45879fed20f4019e5ffa19d3ad37b479cb85d09599f544d0e4df3069a7ee",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "be18457d3269f3dd4f90d89c23d88cf7384fb0361d98ec4b30b6a6e1b060a29b",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60364,
+          "sha256": "e2076bdeb21b05920833d8c9ed1d5aa4d9fe049265fed60d82a8cce724cab7bd",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2860,
+          "sha256": "f0a5605b652aa67bcd6f730006e0d2a37cffb8bf87804d28b3d9872ea1017f07",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-0",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 97643,
+          "sha256": "0ad1ea20e17c87a94ffb52c12e6f08a01f37b0e9adb0864aba80a24b4ef083b6",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "3081a2a724d690b948464d37874d3252fbe16940b5fc3e2da8b5c7cecd4c2b2c",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 58553,
+          "sha256": "9c4f71285635719cdd36dbb259496627455e696a67d009308a42d1069da8687c",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2852,
+          "sha256": "94729d9223242e5c03962eadf44ebc94979a14b2ddcddbdc18af13975cb92beb",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-1",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 101442,
+          "sha256": "92894373cc2a837955af5432294f9d152c44dd9c669bddb228573cde737136e7",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "8d0fb2103260a53cb85d7c362eaf1423ecd9d52fff00993c5d23c02ff365bdc6",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60336,
+          "sha256": "a00ea8a9f7539186f05b656ad0a803e18bb985aebd41ca7d660a184fba18bb7d",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2859,
+          "sha256": "1f47371b2a141d3625d94c5e4e87b5cf7b4d5f6493576e9faf2be5ca78399595",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-2",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 107786,
+          "sha256": "d814f4a9dd22ee06d601060941fd692e925900619e9792c4bd163a7167d5f516",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "5c24323e386d36ba414b113959e4c1e82b9cca152ed9e9750868bb478c9675aa",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60336,
+          "sha256": "b0958f7e793451cad9b2f1bfa1d6d7bce5b37da8d3790ccf99e8bd3b10cc319f",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2859,
+          "sha256": "746ff6c0e045bd0f25f8208aca39f37eb91766c821bd5de346ddeeacd687102d",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-3",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 101329,
+          "sha256": "4af566bd786c638ad462ae9e138f26bab28c3c914fe32922f97d073c5b734feb",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "6eb10f40cefe97202945f9833fb6250b8e34bfc86a9134f7f9f0b86118efa62a",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60009,
+          "sha256": "cb0dd345f72f51cf001f91e0654086909de260dce63e19a023624394201b3d3f",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2855,
+          "sha256": "aa9c3d468b4c1209d6337f643f10fd390abfce90cca32212d40a2dbaf3a7b54a",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-4",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 109589,
+          "sha256": "bb4189d1d1dde66ee6dfecdc4d91439d496754284982984b760cba581c1e27bf",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "3671b825e0a53435f50329ff5eff5ffc5ee1df819df7967ee9cde560fa998f37",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60897,
+          "sha256": "8da2d08d3096cd5df3794df8a4f68fcfb98e97cab34c5b2d0a992bf0b7a37963",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2861,
+          "sha256": "55b0ecd4268cced9151f70f8d00399f5a23d013810cf119e5016618aa774bb31",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-5",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 107790,
+          "sha256": "5edfa1f0c7db7538623dc09e7fb86f040b293a9e528fd482203e993ecfcfacc8",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "5d6dffe740fa0c28cd96b2782d3e9242eca35b6943cb0129ee27dbf54b344ed3",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60044,
+          "sha256": "c070f8da4186926f6fd570420e52e821eb107b64d981cb1611a0d27dc5af554c",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2861,
+          "sha256": "06e5d5e49db8db55f1beb8d43c023efffe4a195febb07ced6ff8f740f023fb3b",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-6",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 107612,
+          "sha256": "f09c7e08504d16ac21f1f506317e4f843496032322efdfe7799e403b71f79d11",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "c347793c8a4d99a65cfad592757bdb445b250fffffec6aefcdaaf2896a26f307",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60007,
+          "sha256": "4f4874ff1ba3e93e2d49582b8e5ba917a079291963123dfbda1b186d74769140",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2854,
+          "sha256": "46a61247a5e9390efa77afee7c96334b274acbad63be7a6d16a8d67c4c4b1ab9",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-7",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 115867,
+          "sha256": "69a02cba0945aef1a9358a311f4145f996037295bdbc0f88d7a947f1a8fb2d1a",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 135880,
+          "sha256": "f27002b699edc27ac145a3380e4d867b7df2972ca055a4d28122619200dab9aa",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60897,
+          "sha256": "167912293d2f0a6bec374adaac0fe9dbe3c22d09567efa38902daa5ce0662df7",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2861,
+          "sha256": "62db1a54698793add527e0843a8703a51f35addd5f6ddcac984ac3ba5a25fe5b",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "correct-decode-8",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 114167,
+          "sha256": "aa6fe6f6c65d17f2a4af8b6b7ee265045f974462c165d0fb1026d7a7ffe875d4",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 135880,
+          "sha256": "9c38f3417e390bc81f481364c2e300f361c36153478895f6f8e5d8fa552927a8",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60042,
+          "sha256": "0ed5752689d6bb4b6ed00c01546c9253bea34434fdea5bf104d0eba5e63d3be7",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2860,
+          "sha256": "746380a3d7bb6458fc0f70bbde299f51c59bdc8f95854666a86788394e3c8041",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "boundary-decode-0",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 107075,
+          "sha256": "dd6fb499a6654bcaaba3f272a784576bfaaf99f6a0ea882d1d07769de8f88050",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "859c08dc36d4f7b98b5d52e08b4237571db63bfdf90f15cffa5cbef21d45b4ae",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60645,
+          "sha256": "2c8799d1b3443e07f07bb62be08144694de7bc65d60568f1adb1f8aecbd6e64f",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2914,
+          "sha256": "9cb5ecb4d1a7baf7cdfa9b0c2f524f151879d3912f1ded4543b4ad0fef1eb953",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "boundary-decode-1",
+      "status": "PASS",
+      "baseline": "v91",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 107096,
+          "sha256": "7d230e386970e45785eed8336fe1399fb22cfb437a41bdb8e949e09408510212",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 70344,
+          "sha256": "40afcbee81d771f2276a16476bfeaa5772d2d39313f7cb5e97293794ee8fcb77",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60610,
+          "sha256": "11b0de30e2b6ecd06b67671f4dd1a675c45423b9142dcf552d14b9431e10a871",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2914,
+          "sha256": "9cb5ecb4d1a7baf7cdfa9b0c2f524f151879d3912f1ded4543b4ad0fef1eb953",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "boundary-decode-2",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 113091,
+          "sha256": "55f07ca2e19041ad53fc055a0f5a1f39f5514ecba6f6f2e1f45e8d40fabff67f",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 135880,
+          "sha256": "2cae8754ea7a6e8c8a2bcc3722cf7fc1d6a551bbf36f2101c29808b9fd61a21d",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60645,
+          "sha256": "f4a49fe73206259166424470e9253687a9c733bc2dbf96cb5629058c0aff75d2",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2914,
+          "sha256": "4765edbf2a3716f1a1c859198fccb8480be80dfefcf0252485756a9f8c6404ae",
+          "byte_exact": true
+        }
+      }
+    },
+    {
+      "case": "boundary-decode-3",
+      "status": "PASS",
+      "baseline": "v100",
+      "files": {
+        "device_kernel.asc": {
+          "bytes": 113112,
+          "sha256": "86ab9683466f7c9470772d7b6d3870f90b69a0b4ecf06a574bd6923310765b12",
+          "byte_exact": true
+        },
+        "executable.so": {
+          "bytes": 135880,
+          "sha256": "d0056be9e191fb2db0125d6fda50fb5b5cc9673b44ef03acacdc986d954f9032",
+          "byte_exact": true
+        },
+        "host_kernel.c": {
+          "bytes": 60610,
+          "sha256": "cb5c35ce0c5ee2334795c654c5645c6c24af3804dc1374896972a51c4b2ebee3",
+          "byte_exact": true
+        },
+        "params.json": {
+          "bytes": 2914,
+          "sha256": "4765edbf2a3716f1a1c859198fccb8480be80dfefcf0252485756a9f8c6404ae",
+          "byte_exact": true
+        }
+      }
+    }
+  ]
+}

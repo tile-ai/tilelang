@@ -51,6 +51,7 @@
 #include "ascend/transform/attr.h"
 #include "op/builtin.h"
 #include "support/check.h"
+#include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -194,9 +195,10 @@ bool IsGuardedTaskBind(const AttrStmtNode *marker) {
 class CoreExtractor : public StmtMutator {
 public:
   static Optional<Stmt> Extract(const Stmt &stmt, CoreMask target_core,
-                                bool broadcast_establishes_stream = false) {
-    ICHECK(IsConcreteCore(target_core));
-    CoreExtractor extractor(target_core, broadcast_establishes_stream);
+                                bool allow_shared_scalar_stream = false,
+                                Optional<Var> sid = std::nullopt) {
+    ICHECK(IsCoreLocalMask(target_core));
+    CoreExtractor extractor(target_core, allow_shared_scalar_stream, sid);
     Stmt result = extractor.VisitStmt(stmt);
     if (!extractor.found_core_)
       return std::nullopt;
@@ -206,9 +208,29 @@ public:
   }
 
 private:
-  CoreExtractor(CoreMask target_core, bool broadcast_establishes_stream)
+  CoreExtractor(CoreMask target_core, bool allow_shared_scalar_stream,
+                Optional<Var> sid)
       : target_core_(target_core),
-        broadcast_establishes_stream_(broadcast_establishes_stream) {}
+        allow_shared_scalar_stream_(allow_shared_scalar_stream), sid_(sid) {}
+
+  CoreMask VectorMask(const Stmt &stmt) const {
+    CoreMask result = kCoreUnassigned;
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (const auto *attr = node.as<AttrStmtNode>();
+          attr && IsScheduleUnit(attr))
+        if (auto mask = GetScheduledCoreMask(attr))
+          result |= *mask & kCoreVector;
+    });
+    return result;
+  }
+
+  Stmt GuardSubcore(Stmt stmt, CoreMask mask) const {
+    if (target_core_ == kCoreVector && IsVectorCore(mask)) {
+      ICHECK(sid_.has_value()) << "An AIV-specific task requires a sid";
+      return IfThenElse(sid_.value() == VectorSid(mask), std::move(stmt));
+    }
+    return stmt;
+  }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
     Array<Stmt> statements;
@@ -233,8 +255,11 @@ private:
     var_remap_ = std::move(outer_remap);
     if (!body.defined())
       return Stmt();
-    return For(loop_var, min, extent, op->kind, std::move(body),
-               op->thread_binding, op->annotations, step, op->span);
+    Stmt loop = For(loop_var, min, extent, op->kind, std::move(body),
+                    op->thread_binding, op->annotations, step, op->span);
+    return target_core_ == kCoreVector
+               ? GuardSubcore(std::move(loop), VectorMask(GetRef<Stmt>(op)))
+               : loop;
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -276,31 +301,32 @@ private:
 
   Stmt ExtractCoreOwnedUnit(const AttrStmtNode *op) {
     CoreMask task_core_mask = GetUnitCoreMask(op);
-    // Broadcast tasks normally follow an existing concrete stream. The caller
-    // may allow them to establish the historical Vector fallback when the
-    // complete kernel has no concrete task.
-    found_core_ |=
-        task_core_mask == target_core_ ||
-        (broadcast_establishes_stream_ && task_core_mask == kCoreBroadcast);
-    if (!HasCore(task_core_mask, target_core_))
+    CoreMask selected = task_core_mask & target_core_;
+    if (selected == kCoreUnassigned)
       return Stmt();
+    // Scalars shared across core types follow their consumers. An all-scalar
+    // kernel can establish a Vector stream when no consumer selects a core.
+    found_core_ |=
+        IsCoreLocalMask(task_core_mask) || allow_shared_scalar_stream_;
 
     Stmt body = SubstituteLetVars(op->body, var_remap_);
     Optional<Bind> bind = FindTaskBind(body);
-    if (task_core_mask == kCoreBroadcast && bind.defined()) {
+    if (!IsCoreLocalMask(task_core_mask) && bind.defined()) {
       Var source_var = bind.value()->var;
       Var output_var = source_var.copy_with_suffix("");
       body = ReplaceTaskBind(
           body, Bind(output_var, bind.value()->value, bind.value()->span));
       var_remap_.Set(source_var, output_var);
     }
+    body = GuardSubcore(std::move(body), selected);
     return AttrStmt(op->node, op->attr_key, op->value, std::move(body),
                     op->span);
   }
 
   CoreMask target_core_;
-  bool broadcast_establishes_stream_{false};
+  bool allow_shared_scalar_stream_{false};
   bool found_core_{false};
+  Optional<Var> sid_;
   Map<Var, PrimExpr> var_remap_;
 };
 
@@ -501,9 +527,10 @@ private:
 };
 
 Optional<Stmt> LowerCore(const Stmt &scheduled_body, CoreMask target_core,
-                         bool broadcast_establishes_stream = false) {
+                         bool allow_shared_scalar_stream = false,
+                         Optional<Var> sid = std::nullopt) {
   Optional<Stmt> extracted = CoreExtractor::Extract(
-      scheduled_body, target_core, broadcast_establishes_stream);
+      scheduled_body, target_core, allow_shared_scalar_stream, sid);
   if (!extracted.has_value())
     return std::nullopt;
   Stmt lowered = PipelineLowerer::Lower(extracted.value());
@@ -658,15 +685,51 @@ private:
 
 Stmt LowerScheduledKernel(const Stmt &scheduled_body,
                           Optional<Var> external_sid, int vector_count) {
-  Optional<Stmt> vector_body = LowerCore(scheduled_body, kCoreVector);
+  CoreMask vector_mask = VectorCoreMask(vector_count);
+  Var sid = external_sid.has_value() ? external_sid.value()
+                                     : Var("sid", DataType::Int(32));
+  Optional<Stmt> vector_body =
+      LowerCore(scheduled_body, vector_mask, false, sid);
   Optional<Stmt> cube_body = LowerCore(scheduled_body, kCoreCube);
+  bool allow_shared_scalar_stream = false;
   if (!vector_body.has_value() && !cube_body.has_value()) {
-    // Match AssignCore's historical fallback for an all-Broadcast scalar
-    // kernel. Broadcast tasks normally follow an existing concrete stream;
-    // when no stream exists, establish a Vector stream instead of dropping
-    // the complete kernel.
-    vector_body = LowerCore(scheduled_body, kCoreVector,
-                            /*broadcast_establishes_stream=*/true);
+    allow_shared_scalar_stream = true;
+    vector_body = LowerCore(scheduled_body, vector_mask,
+                            /*allow_shared_scalar_stream=*/true, sid);
+  }
+  bool needs_sid = vector_body.has_value() &&
+                   UsesVar(vector_body.value(), [&](const VarNode *var) {
+                     return var == sid.get();
+                   });
+  if (needs_sid && vector_count == 2) {
+    // Select the subcore once, before entering its pipeline. Interleaving
+    // guarded AIV tasks would otherwise test sid throughout the issue stream.
+    // Extract each stream independently to retain its own scalar bindings and
+    // loop variables, then specialize the remaining shared sid expressions.
+    auto project = [&](CoreMask core) -> Optional<Stmt> {
+      Optional<Stmt> body =
+          LowerCore(scheduled_body, core, allow_shared_scalar_stream, sid);
+      if (body.has_value())
+        return Substitute(body.value(),
+                          {{sid, IntImm(sid.dtype(), VectorSid(core))}});
+      return std::nullopt;
+    };
+    Optional<Stmt> aiv0 = project(kCoreVector0);
+    Optional<Stmt> aiv1 = project(kCoreVector1);
+    ICHECK(aiv0.has_value() || aiv1.has_value());
+    if (aiv0.has_value())
+      vector_body = IfThenElse(sid == 0, aiv0.value(), aiv1);
+    else
+      vector_body = IfThenElse(sid == 1, aiv1.value());
+    // Shared tasks can contain nested Bind/For/AllocBuffer definitions too.
+    vector_body = ConvertSSA(vector_body.value());
+  }
+  if (vector_body.has_value() && !external_sid.has_value() &&
+      (cube_body.has_value() || needs_sid)) {
+    IterVar sid_thread(Range(0, vector_count), sid, IterVarType::kThreadIndex,
+                       "cthread");
+    vector_body = AttrStmt(sid_thread, tirx::attr::thread_extent,
+                           Integer(vector_count), vector_body.value());
   }
   if (vector_body.has_value() && cube_body.has_value()) {
     Array<Stmt> blocks;
@@ -674,24 +737,16 @@ Stmt LowerScheduledKernel(const Stmt &scheduled_body,
                             {}, {}, {}));
     Map<String, ffi::Any> vector_annotations;
     vector_annotations.Set("vector_count", Integer(vector_count));
-    if (external_sid.has_value()) {
-      blocks.push_back(SBlock({}, {}, {}, "VECTOR", vector_body.value(),
-                              std::nullopt, {}, {}, vector_annotations));
-    } else {
-      Var sid("sid", DataType::Int(32));
-      IterVar sid_thread(Range(0, vector_count), sid, IterVarType::kThreadIndex,
-                         "cthread");
-      Stmt threaded_vector_body =
-          AttrStmt(sid_thread, tirx::attr::thread_extent, Integer(vector_count),
-                   vector_body.value());
-      blocks.push_back(SBlock({}, {}, {}, "VECTOR", threaded_vector_body,
-                              std::nullopt, {}, {}, vector_annotations));
-    }
+    blocks.push_back(SBlock({}, {}, {}, "VECTOR", vector_body.value(),
+                            std::nullopt, {}, {}, vector_annotations));
     return SeqStmt(blocks);
   }
   if (vector_body.has_value()) {
+    Map<String, ffi::Any> annotations;
+    if (external_sid.has_value() || needs_sid)
+      annotations.Set("vector_count", Integer(vector_count));
     return SBlock({}, {}, {}, "VECTOR", vector_body.value(), std::nullopt, {},
-                  {}, {});
+                  {}, annotations);
   }
   if (cube_body.has_value()) {
     return SBlock({}, {}, {}, "CUBE", cube_body.value(), std::nullopt, {}, {},
@@ -729,6 +784,12 @@ tvm::transform::Pass LowerScheduledTIR() {
             body = AttrStmt(aliases.value(), kBufferAliasMap, Integer(1),
                             std::move(body));
           }
+          if (auto aiv_storages = root->annotations.Get(kAivStorageMap)) {
+            body = AttrStmt(aiv_storages.value(), kAivStorageMap, Integer(1),
+                            body);
+            writer->annotations.erase(kAivStorageMap);
+          }
+          writer->annotations.erase(kSplitSubcores);
           writer->body = std::move(body);
           return root;
         });

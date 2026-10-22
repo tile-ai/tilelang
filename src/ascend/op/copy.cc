@@ -186,6 +186,224 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
   return analyzer->Simplify(has_data);
 }
 
+} // namespace
+
+L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
+                                   const LayoutMap &layouts,
+                                   arith::Analyzer *analyzer) {
+  PrimExpr has_data =
+      MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
+  if (analyzer->CanProve(!has_data))
+    return {BufferRegion(op.src, op.src_range),
+            BufferRegion(op.dst, op.dst_range),
+            op.l0_pitch.value_or(Integer(1))};
+  Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
+  Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
+  NormalizeTrailingMTE2DLayout(op.src, src_range, analyzer,
+                               "Ascend L1->L0 source");
+  NormalizeTrailingMTE2DLayout(op.dst, dst_range, analyzer,
+                               "Ascend L1->L0 destination");
+  AscendFractalLayoutInfo src_info, dst_info;
+  Optional<Layout> src_layout = FindLayoutForBuffer(layouts, op.src);
+  Optional<Layout> dst_layout = FindLayoutForBuffer(layouts, op.dst);
+  ICHECK(src_layout.defined() && dst_layout.defined() &&
+         TryExtractAscendFractalLayout(src_layout.value(), op.src, &src_info) &&
+         TryExtractAscendFractalLayout(dst_layout.value(), op.dst, &dst_info) &&
+         IsAscendMajorKind(src_info.kind) && IsAscendMajorKind(dst_info.kind))
+      << "Ascend L1->L0 lowering requires canonical MajorK/MajorMN layouts";
+  TVM_FFI_CHECK(op.src->dtype == op.dst->dtype, ValueError)
+      << "Ascend L1->L0 copy requires matching source/destination dtypes";
+
+  AscendFractalRegionInfo src_region, dst_region;
+  ICHECK(TryExtractAscendFractalRegion(src_layout.value(), src_range,
+                                       &src_region));
+  ICHECK(TryExtractAscendFractalRegion(dst_layout.value(), dst_range,
+                                       &dst_region));
+  PrimExpr m_step = src_region.outer1->extent;
+  PrimExpr k_step = src_region.outer0->extent;
+  PrimExpr dst_stride = op.l0_pitch.value_or(dst_region.outer1->extent);
+  PrimExpr written_outer0 = k_step;
+  PrimExpr written_outer1 = m_step;
+  {
+    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    TVM_FFI_CHECK(analyzer->CanProve(dst_stride > 0) &&
+                      analyzer->CanProve(dst_stride <= dst_info.outer1,
+                                         arith::ProofStrength::kSymbolicBound),
+                  ValueError)
+        << "Ascend L1->L0 l0_pitch must be positive and fit destination "
+           "capacity";
+    auto require_multiple = [&](const PrimExpr &value, int multiple,
+                                const char *parameter) {
+      TVM_FFI_CHECK(
+          analyzer->CanProveEqual(
+              FloorMod(value, make_const(value.dtype(), multiple)), 0),
+          ValueError)
+          << "Ascend L1->L0 copy of " << op.src->name << " (" << op.src->dtype
+          << ") requires " << parameter << " to be divisible by " << multiple
+          << ", got " << value
+          << ". Copy complete fractals/transpose groups; restrict GEMM to "
+             "the effective M/N/K.";
+    };
+    bool nonzero_destination = false;
+    for (size_t i = dst_range.size() - 2; i < dst_range.size(); ++i)
+      nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->min, 0);
+    TVM_FFI_CHECK(!nonzero_destination || op.l0_pitch.defined(), ValueError)
+        << "Ascend partial L1->L0 copy with a nonzero destination origin "
+           "requires an explicit l0_pitch";
+    auto check_region = [&](const Buffer &buffer, const Array<Range> &ranges,
+                            const AscendFractalLayoutInfo &info,
+                            const AscendFractalRegionInfo &region,
+                            bool source) {
+      size_t row16_axis =
+          ranges.size() - 2 + (info.row16_axis == LogicalAxis::kCol);
+      size_t c0_axis = ranges.size() - 2 + (info.c0_axis == LogicalAxis::kCol);
+      require_multiple(ranges[row16_axis]->min, 16,
+                       source ? "source row16 origin"
+                              : "destination row16 origin");
+      require_multiple(ranges[c0_axis]->min, AscendC0(buffer->dtype.bits()),
+                       source ? "source C0 origin" : "destination C0 origin");
+      // Keep existing zero-origin padded loads. Newly supported offset writes
+      // explicitly select complete fractals, including their padding lanes.
+      if (nonzero_destination) {
+        require_multiple(ranges[row16_axis]->extent, 16,
+                         source ? "source row16 extent"
+                                : "destination row16 extent");
+        require_multiple(ranges[c0_axis]->extent,
+                         AscendC0(buffer->dtype.bits()),
+                         source ? "source C0 extent" : "destination C0 extent");
+      }
+      for (size_t i = 0; i + 2 < ranges.size(); ++i) {
+        TVM_FFI_CHECK(
+            analyzer->CanProve(ranges[i]->min >= 0) &&
+                analyzer->CanProve(ranges[i]->min + ranges[i]->extent <=
+                                   buffer->shape[i]),
+            ValueError)
+            << "Ascend L1->L0 leading plane is outside buffer " << buffer->name;
+      }
+      TVM_FFI_CHECK(
+          analyzer->CanProve(region.outer0->min >= 0) &&
+              analyzer->CanProve(region.outer1->min >= 0) &&
+              analyzer->CanProve(region.outer0->min + region.outer0->extent <=
+                                     info.outer0,
+                                 arith::ProofStrength::kSymbolicBound) &&
+              analyzer->CanProve(region.outer1->min + region.outer1->extent <=
+                                     info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
+          << "Ascend L1->L0 " << (source ? "source" : "destination")
+          << " region exceeds or cannot be proved within the physical "
+             "allocation of "
+          << buffer->name;
+    };
+    check_region(op.src, src_range, src_info, src_region, true);
+    check_region(op.dst, dst_range, dst_info, dst_region, false);
+
+    // Explicit logical transpose and the layout conversion cancel each other.
+    bool needs_transpose =
+        (op.transpose != 0) ^ (src_info.c0_axis != dst_info.c0_axis);
+    if (needs_transpose) {
+      int c0 = AscendC0(op.src->dtype.bits());
+      require_multiple(m_step, c0 > 16 ? c0 / 16 : 1, "m_step");
+      require_multiple(k_step, c0 < 16 ? 16 / c0 : 1, "k_step");
+      written_outer0 = FloorDiv(m_step * 16, c0);
+      written_outer1 = FloorDiv(k_step * c0, 16);
+    }
+    TVM_FFI_CHECK(
+        analyzer->CanProve(written_outer0 <= dst_region.outer0->extent) &&
+            analyzer->CanProve(written_outer1 <= dst_region.outer1->extent),
+        ValueError)
+        << "Ascend L1->L0 copy writes " << written_outer0 << "x"
+        << written_outer1 << " fractals, but destination region "
+        << op.dst->name << " only covers " << dst_region.outer0->extent << "x"
+        << dst_region.outer1->extent
+        << ". Pad the allocation and copy region; use effective K in T.gemm.";
+    TVM_FFI_CHECK(
+        analyzer->CanProve(dst_region.outer0->min + written_outer0 <=
+                           dst_info.outer0) &&
+            analyzer->CanProve(dst_region.outer1->min + written_outer1 <=
+                               dst_stride),
+        ValueError)
+        << "Ascend L1->L0 copy exceeds the physical L0 allocation "
+        << "or l0_pitch of " << op.dst->name;
+    if (nonzero_destination) {
+      TVM_FFI_CHECK(
+          analyzer->CanProveEqual(written_outer0, dst_region.outer0->extent) &&
+              analyzer->CanProveEqual(written_outer1,
+                                      dst_region.outer1->extent),
+          ValueError)
+          << "Ascend partial L1->L0 copy requires matching physical source and "
+             "destination extents";
+    }
+  }
+
+  // Validate the original operands above, before making the full-block
+  // transfers explicit. In particular, rounding must not legalize an invalid
+  // offset write or an incomplete transpose group.
+  auto transfer_region = [&](const Buffer &buffer, Array<Range> ranges,
+                             const AscendFractalLayoutInfo &info,
+                             PrimExpr outer0, PrimExpr outer1) {
+    for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis) {
+      bool c0_axis =
+          axis == ranges.size() - 2 + (info.c0_axis == LogicalAxis::kCol);
+      PrimExpr extent = c0_axis ? outer0 * info.c0 : outer1 * info.row_frac;
+      extent = analyzer->Simplify(extent);
+      // Keep the original empty-copy predicate even when one operand's
+      // nonpositive extent would otherwise be replaced by a positive count.
+      if (!analyzer->CanProve(has_data))
+        extent = analyzer->Simplify(
+            Select(has_data, extent, make_zero(extent.dtype())));
+      ranges.Set(axis, Range::FromMinExtent(ranges[axis]->min, extent));
+    }
+    return BufferRegion(buffer, ranges);
+  };
+  return {transfer_region(op.src, src_range, src_info, k_step, m_step),
+          transfer_region(op.dst, dst_range, dst_info, written_outer0,
+                          written_outer1),
+          dst_stride};
+}
+
+BufferRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
+                                     const LayoutMap &layouts,
+                                     arith::Analyzer *analyzer) {
+  PrimExpr has_data =
+      MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
+  if (analyzer->CanProve(!has_data))
+    return BufferRegion(op.src, op.src_range);
+  AscendFractalLayoutInfo info;
+  Optional<Layout> layout = FindLayoutForBuffer(layouts, op.src);
+  ICHECK(layout.defined() &&
+         TryExtractAscendFractalLayout(layout.value(), op.src, &info) &&
+         info.kind == AscendFractalKind::kSF)
+      << "L0 SF copy requires the canonical SF_K layout on its L1 source";
+  Array<Range> ranges = op.src_range;
+  for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis) {
+    PrimExpr alignment = axis + 1 == ranges.size() ? info.c0 : info.row_frac;
+    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    ICHECK(analyzer->CanProveEqual(floormod(ranges[axis]->min, alignment), 0))
+        << "L0 SF source origin must align to 16 MN rows and a scale pair";
+    PrimExpr extent = analyzer->Simplify(
+        floordiv(ranges[axis]->extent + alignment - 1, alignment) * alignment);
+    PrimExpr capacity =
+        alignment * (axis + 1 == ranges.size() ? info.outer1 : info.outer0);
+    ICHECK(analyzer->CanProve(ranges[axis]->min >= 0) &&
+           analyzer->CanProve(ranges[axis]->min + extent <= capacity,
+                              arith::ProofStrength::kSymbolicBound))
+        << "L0 SF source region exceeds its physical allocation";
+    ranges.Set(axis, Range::FromMinExtent(ranges[axis]->min, extent));
+  }
+  if (!analyzer->CanProve(has_data)) {
+    for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis)
+      ranges.Set(axis, Range::FromMinExtent(
+                           ranges[axis]->min,
+                           analyzer->Simplify(Select(
+                               has_data, ranges[axis]->extent,
+                               make_zero(ranges[axis]->extent.dtype())))));
+  }
+  return BufferRegion(op.src, ranges);
+}
+
+namespace {
+
 Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                   arith::Analyzer *analyzer, DMAPath dma_path) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
@@ -414,129 +632,34 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // applies the empty-tile guard after constructing this DMA call.
 
   } else if (dma_path == DMAPath::kL1ToL0A || dma_path == DMAPath::kL1ToL0B) {
-    NormalizeTrailingMTE2DLayout(op.src, src_range, analyzer,
-                                 "Ascend L1->L0 source");
-    NormalizeTrailingMTE2DLayout(op.dst, dst_range, analyzer,
-                                 "Ascend L1->L0 destination");
-    CheckCompactL0Region(op.dst, dst_range, analyzer,
-                         "Ascend L1->L0 compact destination");
-    // M/K positions go through intrinsic args; leading dims (e.g. version)
-    // through the pointer offset.
-    PrimExpr src_base_ptr =
-        MakeAscendLeadingDimAccessPtr(BufferRegion(op.src, src_range), 1);
-
-    AscendFractalLayoutInfo src_info;
-    AscendFractalLayoutInfo dst_info;
+    L0CopyRegions regions = GetL1ToL0CopyRegions(op, T.layout_map, analyzer);
     Optional<Layout> src_layout = FindLayoutForBuffer(T.layout_map, op.src);
     Optional<Layout> dst_layout = FindLayoutForBuffer(T.layout_map, op.dst);
-    bool have_src_layout =
-        src_layout.defined() &&
-        TryExtractAscendFractalLayout(src_layout.value(), op.src, &src_info);
-    bool have_dst_layout =
-        dst_layout.defined() &&
-        TryExtractAscendFractalLayout(dst_layout.value(), op.dst, &dst_info);
-
-    PrimExpr m_start, k_start, m_step, k_step, src_stride, dst_stride;
-
-    ICHECK(have_src_layout && have_dst_layout)
-        << "Ascend L1->L0 compact-region lowering requires canonical fractal "
-           "layouts on both buffers, got source "
-        << op.src->name << " layout=" << src_layout.defined()
-        << " and destination " << op.dst->name
-        << " layout=" << dst_layout.defined() << ".";
+    AscendFractalLayoutInfo src_info, dst_info;
+    ICHECK(
+        TryExtractAscendFractalLayout(src_layout.value(), op.src, &src_info));
+    ICHECK(
+        TryExtractAscendFractalLayout(dst_layout.value(), op.dst, &dst_info));
     AscendFractalRegionInfo src_region;
-    AscendFractalRegionInfo dst_region;
-    ICHECK(TryExtractAscendFractalRegion(src_layout.value(), src_range,
-                                         &src_region))
-        << "Failed to map L1->L0 source region through layout for buffer "
-        << op.src->name;
-    ICHECK(TryExtractAscendFractalRegion(dst_layout.value(), dst_range,
-                                         &dst_region))
-        << "Failed to map L1->L0 destination region through layout for buffer "
-        << op.dst->name;
-    m_start = src_region.outer1->min;
-    k_start = src_region.outer0->min;
-    m_step = src_region.outer1->extent;
-    k_step = src_region.outer0->extent;
-    src_stride = src_info.outer1;
-    // L0 regions are compact MAD tiles: the destination pitch is the mapped
-    // region pitch, while the L1 source keeps its allocation-wide NZ pitch.
-    dst_stride = dst_region.outer1->extent;
-
-    // The user may request an explicit transpose via T.copy(..,
-    // transpose=True).  Additionally, when the L1 source and the L0
-    // destination carry different fractal majors (e.g. a K-major L1 tile
-    // feeding an MN-major L0 fractal, or vice versa), an implicit transpose is
-    // required to reconcile the two layouts.  The effective transpose is the
-    // XOR of the user request and the major mismatch: two transposes cancel.
-    //
-    // L1 tiles are canonically K-major (reduce-K on the C0 axis); when the L1
-    // source carries no explicit layout we assume K-major so the mismatch is
-    // driven purely by the inferred L0 major.
-    bool user_transpose = op.transpose != 0;
-    LogicalAxis src_c0_axis =
-        have_src_layout ? src_info.c0_axis : LogicalAxis::kCol;
-    LogicalAxis dst_c0_axis =
-        have_dst_layout ? dst_info.c0_axis : LogicalAxis::kCol;
-    bool major_mismatch = src_c0_axis != dst_c0_axis;
-    bool needs_transpose = user_transpose ^ major_mismatch;
-
-    if (needs_transpose) {
-      // Validate the emitted load after storage normalization and OOB
-      // clamping. Logical extents need not cover whole fractals (e.g. bf16
-      // MN=24), but the hardware's transpose groups must be complete.
-      int c0 = AscendC0(op.src->dtype.bits());
-      auto require_multiple = [&](const PrimExpr &value, int multiple,
-                                  const char *parameter) {
-        if (multiple == 1)
-          return;
-        // Empty copies never issue the instruction. Scope this assumption
-        // to the proof so the runtime has_data guard is preserved below.
-        With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-        ICHECK(analyzer->CanProveEqual(
-            FloorMod(value, make_const(value.dtype(), multiple)), 0))
-            << "Ascend transposed L1->L0 copy of " << op.src->name << " ("
-            << op.src->dtype << ") requires " << parameter
-            << " to be divisible by " << multiple << ", got " << value
-            << ". Copy a padded source region covering complete transpose "
-               "groups; restrict the GEMM region to the effective M/N/K.";
-      };
-      require_multiple(m_step, c0 > 16 ? c0 / 16 : 1, "m_step");
-      require_multiple(k_step, c0 < 16 ? 16 / c0 : 1, "k_step");
-      size_t ndim = src_range.size();
-      require_multiple(
-          src_range[ndim - 2 + (src_info.row16_axis == LogicalAxis::kCol)]->min,
-          16, "source row16 origin");
-      require_multiple(
-          src_range[ndim - 2 + (src_info.c0_axis == LogicalAxis::kCol)]->min,
-          c0, "source C0 origin");
-
-      // Transposition exchanges the source's row16 and C0 dimensions.
-      // Compare physical regions, not logical extents or allocation bytes:
-      // the declared destination also describes the copy's write effects.
-      PrimExpr written_outer0 = FloorDiv(m_step * 16, c0);
-      PrimExpr written_outer1 = FloorDiv(k_step * c0, 16);
-      ICHECK(!analyzer->CanProve(written_outer0 > dst_region.outer0->extent) &&
-             !analyzer->CanProve(written_outer1 > dst_region.outer1->extent))
-          << "Ascend transposed L1->L0 copy writes " << written_outer0 << "x"
-          << written_outer1 << " fractals, but destination region "
-          << op.dst->name << " only covers " << dst_region.outer0->extent << "x"
-          << dst_region.outer1->extent
-          << ". Pad the L0 allocation and copy destination region to cover "
-             "the physical write; use the effective K only in T.gemm.";
-      ICHECK(!analyzer->CanProve(written_outer0 > dst_info.outer0) &&
-             !analyzer->CanProve(written_outer1 > dst_info.outer1))
-          << "Ascend transposed L1->L0 copy exceeds the physical L0 allocation "
-          << op.dst->name;
-    }
-
+    ICHECK(TryExtractAscendFractalRegion(src_layout.value(),
+                                         regions.source->region, &src_region));
+    PrimExpr src_base_ptr = MakeAscendLeadingDimAccessPtr(regions.source, 1);
+    PrimExpr m_start = src_region.outer1->min;
+    PrimExpr k_start = src_region.outer0->min;
+    PrimExpr m_step = src_region.outer1->extent;
+    PrimExpr k_step = src_region.outer0->extent;
+    PrimExpr src_stride = src_info.outer1;
+    PrimExpr dst_stride = regions.pitch;
+    bool needs_transpose =
+        (op.transpose != 0) ^ (src_info.c0_axis != dst_info.c0_axis);
+    Call ptr = Downcast<Call>(dst_ptr);
+    ptr.CopyOnWrite()->annotations.Set(attr::kL0AccessPitch, dst_stride);
+    dst_ptr = ptr;
     auto intrinsic = dma_path == DMAPath::kL1ToL0A ? ascend_load_cbuf_to_ca()
                                                    : ascend_load_cbuf_to_cb();
-    Array<PrimExpr> ld_args = {
-        dst_ptr,    src_base_ptr, m_start,
-        k_start,    m_step,       k_step,
-        src_stride, dst_stride,   I(needs_transpose ? 1 : 0)};
-    call = Call(DataType::Void(), intrinsic, ld_args);
+    call = Call(DataType::Void(), intrinsic,
+                {dst_ptr, src_base_ptr, m_start, k_start, m_step, k_step,
+                 src_stride, dst_stride, I(needs_transpose ? 1 : 0)});
   } else if (dma_path == DMAPath::kL0CToUB) {
     StridedLayout src_layout = NormalizeTrailingMTE2DLayout(
         op.src, src_range, analyzer, "Ascend L0C->UB source");
@@ -576,6 +699,19 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
+    if (op.l0_pitch.defined()) {
+      PrimExpr compact_pitch = op.l0_pitch.value();
+      With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(
+          analyzer->CanProve(compact_src_region.outer1->extent <=
+                             compact_pitch) &&
+              analyzer->CanProve(compact_pitch <= info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
+          << "Ascend L0C copy l0_pitch must cover the source region and fit "
+             "capacity";
+      loop_src_stride = compact_pitch * info.row_frac;
+    }
 
     int dual_dst_ctl = op.dual_dst_ctl;
     PrimExpr copy_inner = src_inner.size;
@@ -731,6 +867,19 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->GM source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
+    if (op.l0_pitch.defined()) {
+      PrimExpr compact_pitch = op.l0_pitch.value();
+      With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(
+          analyzer->CanProve(compact_src_region.outer1->extent <=
+                             compact_pitch) &&
+              analyzer->CanProve(compact_pitch <= info.outer1,
+                                 arith::ProofStrength::kSymbolicBound),
+          ValueError)
+          << "Ascend L0C copy l0_pitch must cover the source region and fit "
+             "capacity";
+      loop_src_stride = compact_pitch * info.row_frac;
+    }
     // L0C->GM needs the physical distance between adjacent destination rows,
     // not the logical last dimension.  They are equal for compact tensors but
     // differ for padded/runtime StridedTensor outputs.
@@ -796,6 +945,9 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
     return Evaluate(0);
   }
 
+  // Validate the same full-group source contract used by normalization.
+  // Keep symbolic operands here; the final DMA guard excludes empty tiles.
+  GetL1ToL0SFSourceRegion(op, T.layout_map, analyzer);
   Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
   Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
   ICHECK_EQ(sf_buf->dtype.bits(), handle->dtype.bits())
@@ -1050,6 +1202,23 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   node->sub_blockid = IntImm(DataType::Int(32), 0);
   if (auto val = node->annotations.Get("sub_blockid")) {
     node->sub_blockid = Downcast<PrimExpr>(val.value());
+  }
+  node->l0_pitch = std::nullopt;
+  if (auto val = node->annotations.Get("l0_pitch")) {
+    node->l0_pitch = Downcast<PrimExpr>(val.value());
+    TVM_FFI_CHECK(node->l0_pitch.value().dtype().is_scalar() &&
+                      (node->l0_pitch.value().dtype().is_int() ||
+                       node->l0_pitch.value().dtype().is_uint()),
+                  ValueError)
+        << "Ascend copy l0_pitch must be a scalar integer";
+    auto path = ascend::GetDMAPath(node->src, node->dst);
+    TVM_FFI_CHECK(path == ascend::DMAPath::kL1ToL0A ||
+                      path == ascend::DMAPath::kL1ToL0B ||
+                      path == ascend::DMAPath::kL0CToUB ||
+                      path == ascend::DMAPath::kL0CToGM,
+                  ValueError)
+        << "Ascend copy l0_pitch is supported only for L1->L0A/L0B and "
+           "L0C->UB/GM";
   }
   node->pad_value = std::nullopt;
   if (auto val = node->annotations.Get("pad_value")) {

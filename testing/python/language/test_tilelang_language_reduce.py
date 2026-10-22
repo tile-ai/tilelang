@@ -7,6 +7,7 @@ import tilelang.testing
 import pytest
 import torch
 from tilelang import tvm
+from tilelang.utils.language import to_tile_region
 
 tilelang.testing.set_random_seed()
 
@@ -143,7 +144,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128, group_stride: int = 
     return make_kernel()
 
 
-def _make_offset_thread_reduce_kernel():
+def _make_offset_thread_reduce_kernel(keepdim=False, clear=True):
     """Reduction whose participating threads occupy a non-zero thread range,
     i.e. tx in [32, 96) of a 128-thread block."""
 
@@ -161,6 +162,7 @@ def _make_offset_thread_reduce_kernel():
         rows = 2
         width = 512
         vector_size = 8
+        sum_shape = (rows, 1) if keepdim else (rows,)
 
         @T.prim_func
         def offset_thread_reduce(
@@ -169,7 +171,7 @@ def _make_offset_thread_reduce_kernel():
         ) -> None:
             with T.Kernel(1, threads=128):
                 x_frag = T.alloc_fragment((rows, width), "float32")
-                sum_frag = T.alloc_fragment((rows,), "float32")
+                sum_frag = T.alloc_fragment(sum_shape, "float32")
                 T.annotate_layout(
                     {
                         x_frag: T.Fragment(
@@ -180,17 +182,22 @@ def _make_offset_thread_reduce_kernel():
                             ),
                         ),
                         sum_frag: T.Fragment(
-                            sum_frag.shape,
+                            (rows,),
                             forward_fn=lambda i, rep: (thread_offset + rep, i),
                             replicate=fragment_threads,
-                        ),
+                        ).reshape(sum_shape),
                     }
                 )
                 for i, j in T.Parallel(rows, width):
                     x_frag[i, j] = x[i, j]
-                T.reduce_sum(x_frag, sum_frag, dim=1)
+                if not clear:
+                    T.fill(sum_frag, 1)
+                T.reduce_sum(x_frag, sum_frag, dim=1, clear=clear)
                 for i, j in T.Parallel(rows, width):
-                    out[i, j] = x_frag[i, j] / sum_frag[i]
+                    if keepdim:
+                        out[i, j] = x_frag[i, j] / sum_frag[i, 0]
+                    else:
+                        out[i, j] = x_frag[i, j] / sum_frag[i]
 
         return offset_thread_reduce
 
@@ -367,14 +374,15 @@ def test_reduce_partial_thread_barrier_multiple_groups_in_partial_cta():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
-def test_reduce_partial_thread_barrier_offset_thread_range():
+@pytest.mark.parametrize("keepdim,clear", [(False, True), (True, True), (True, False)])
+def test_reduce_partial_thread_barrier_offset_thread_range(keepdim, clear):
     torch.manual_seed(3)
     x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
-    out = _make_offset_thread_reduce_kernel()(x)
+    out = _make_offset_thread_reduce_kernel(keepdim=keepdim, clear=clear)(x)
     torch.cuda.synchronize()
     torch.testing.assert_close(
         out,
-        x / x.sum(dim=1, keepdim=True),
+        x / (x.sum(dim=1, keepdim=True) + (0 if clear else 1)),
         rtol=1e-5,
         atol=1e-6,
     )
@@ -646,6 +654,84 @@ def test_reduce_clear(op, dtype, M, N, src_scope, dst_scope):
     elif op == "max":
         ref = A.max(dim=1).values
     torch.testing.assert_close(B, ref, atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Keep-dim reductions
+# ---------------------------------------------------------------------------
+
+
+@tilelang.testing.requires_cuda_or_cdna
+@pytest.mark.parametrize(
+    "op,dtype,shape,dim,clear",
+    [
+        ("sum", T.float32, (64, 64), 1, True),
+        ("sum", T.float32, (64, 64), 0, True),
+        ("sum", T.float32, (8, 16, 32), 1, True),
+        ("sum", T.float32, (8, 1, 32), 2, True),
+        ("sum", T.float32, (8, 1, 32), 1, True),
+        ("sum", T.float32, (64,), 0, True),
+        ("sum", T.float16, (8, 16, 32), 2, True),
+        ("sum", T.float32, (64, 64), 1, False),
+        ("max", T.float16, (64, 64), 1, False),
+        ("min", T.bfloat16, (64, 64), 0, False),
+    ],
+)
+def test_reduce_keepdim(op, dtype, shape, dim, clear):
+    out_shape = tuple(1 if axis == dim else extent for axis, extent in enumerate(shape))
+    initial = 1 if op == "sum" else 0
+
+    @T.prim_func
+    def kernel(A: T.Tensor(shape, dtype), B: T.Tensor(out_shape, dtype)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment(shape, dtype)
+            dst = T.alloc_fragment(out_shape, dtype)
+            T.copy(A, src)
+            if not clear:
+                T.fill(dst, initial)
+            T.reduce(src, dst, op, dim=dim, clear=clear)
+            T.copy(dst, B)
+
+    # Small integers give exact references even for the fp16 sum. Alternating
+    # positive/negative slices exercise both preserving and updating min/max.
+    A = torch.randint(-2, 3, shape, device="cuda", dtype=getattr(torch, dtype))
+    if not clear:
+        offsets = torch.arange(A.numel() // shape[dim], device="cuda").reshape(out_shape) % 2 * 8 - 4
+        A += offsets.to(A.dtype)
+    B = tilelang.compile(kernel, out_idx=-1)(A)
+    ref = {"sum": torch.sum, "max": torch.amax, "min": torch.amin}[op](A, dim=dim, keepdim=True)
+    if not clear:
+        if op == "sum":
+            ref += initial
+        elif op == "max":
+            ref = ref.clamp_min(initial)
+        else:
+            ref = ref.clamp_max(initial)
+    assert tuple(B.shape) == out_shape
+    torch.testing.assert_close(B, ref, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("out_shape", [(32, 1), (32, 2), (4, 4, 4)])
+def test_reduce_rejects_invalid_destination_shape(out_shape):
+    @T.prim_func
+    def kernel(A: T.Tensor((64, 64), T.float32), B: T.Tensor(out_shape, T.float32)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((64, 64), T.float32)
+            dst = T.alloc_fragment(out_shape, T.float32)
+            T.copy(A, src)
+            # Bypass the frontend's shape check to exercise the native contract
+            # before layout reshape could accept an unrelated equal-size shape.
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            T.copy(dst, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target, pytest.raises(tvm.error.InternalError, match="ReduceOp: invalid destination shape"):
+        tilelang.lower(kernel, target=target)
 
 
 # ---------------------------------------------------------------------------
@@ -1220,6 +1306,66 @@ def test_reduce_packed_max_nan_batch_runtime():
         B = _compile(_make_nan_reduce_kernel(T.reduce_max, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
         assert not math.isnan(B[0].float().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
         assert math.isnan(B[2].float().item()), f"{tl_dtype}: NaN row must produce NaN"
+
+
+# ---------------------------------------------------------------------------
+# Frontend legality: the bitwise reduce dtype gate covers both faces
+# ---------------------------------------------------------------------------
+
+
+def _make_bitwise_reduce_kernel(op, src_dtype, dst_dtype, M=4, N=4):
+    @T.prim_func
+    def main(A: T.Tensor((M, N), src_dtype), Out: T.Tensor((M,), dst_dtype)):
+        with T.Kernel(1, threads=128):
+            A_fr = T.alloc_fragment((M, N), src_dtype)
+            B_fr = T.alloc_fragment((M,), dst_dtype)
+            T.copy(A, A_fr)
+            op(A_fr, B_fr, dim=1)
+            T.copy(B_fr, Out)
+
+    return main
+
+
+def _compile_bitwise_reduce(program):
+    tilelang.disable_cache()
+    try:
+        return tilelang.compile(program, out_idx=-1, target="cuda")
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name", ["reduce_bitand", "reduce_bitor", "reduce_bitxor"])
+def test_bitwise_reduce_rejects_float_source(op_name):
+    """A float source must be rejected rather than silently value-cast to int.
+
+    The gate inspected only the destination, so a float source was truncated
+    before the bitwise reduction ran.
+    """
+    op = getattr(T, op_name)
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(op, "float32", "int32"))
+
+    message = str(exc_info.value)
+    assert op_name in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_rejects_float_destination():
+    """The destination face of the gate keeps firing."""
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "float32"))
+
+    message = str(exc_info.value)
+    assert "reduce_bitor" in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_accepts_integer_faces():
+    """Control: an integer source and destination still lower."""
+    _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "int32"))
 
 
 if __name__ == "__main__":

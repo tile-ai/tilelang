@@ -635,7 +635,8 @@ def test_sm120_fulltile_package_contract_odd_warp_atom_grid(warp_m, warp_n):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])
 def test_nvf4_mma_block_scale_codegen(K):
     kernel = tilelang.compile(
@@ -661,7 +662,8 @@ def test_nvf4_mma_block_scale_codegen(K):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
     with pytest.raises(ValueError, match="Unsupported SM120 scale layout: cutlass_128x4"):
         tilelang.compile(
@@ -679,7 +681,8 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 @pytest.mark.parametrize(
     "M, N, K, warp_row_tiles, warp_col_tiles",
     [
@@ -710,7 +713,8 @@ def test_nvf4_mma_block_scale_fulltile_is_frontend_lowered(M, N, K, warp_row_til
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 def test_nvf4_mma_block_scale_packed_smem_offsets():
     kernel = tilelang.compile(
         _make_nvf4_matmul_codegen_kernel(256, 256, 256, num_stages=3),
@@ -757,7 +761,8 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 @pytest.mark.parametrize(
     "K,input_mode",
     [
@@ -788,7 +793,8 @@ def test_nvf4_mma_block_scale_constant_scale_correctness(K, input_mode):
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 def test_nvf4_mma_block_scale_varying_scale_correctness():
     import torch
 
@@ -811,7 +817,8 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 @pytest.mark.parametrize(
     "K, fragment_a, fragment_scales, transpose_a, compact, policy",
     [
@@ -851,7 +858,7 @@ def test_nvf4_mma_block_scale_fragments_and_odd_warps(K, fragment_a, fragment_sc
             sf_layout="blockscaled_chunk_kmajor" if compact else "rowmajor",
             policy=policy,
         ),
-        target={"kind": "cuda", "arch": "sm_120a"},
+        target="cuda",
         out_idx=[4],
     )
     torch.testing.assert_close(kernel(A, B, SFA, SFB), ref, atol=0, rtol=0)
@@ -937,7 +944,8 @@ def _load_sm120_example(monkeypatch):
     return module
 
 
-@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(12, 0)
+@tilelang.testing.requires_cuda_compute_version_lt(13, 0)
 def test_sm120_nvfp4_example_kernel_handles_mn_tail_tiles(monkeypatch):
     import pytest
 

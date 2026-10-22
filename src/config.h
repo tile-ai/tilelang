@@ -62,7 +62,7 @@ inline bool Vectorize256Disabled() {
  * \brief Check if ``#line`` directive emission from TIR source spans is
  * enabled. When on, C-family codegen maps generated statements back to
  * their Python source lines via ``#line N "file"`` (consumed by the
- * CodeGenCWithLineDirectives builders).
+ * CodeGenTileLangCBase builders).
  */
 inline bool EmitLineDirectivesEnabled() {
   auto ctxt = tvm::transform::PassContext::Current();
