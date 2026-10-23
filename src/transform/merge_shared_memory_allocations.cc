@@ -37,21 +37,12 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-using runtime::StorageRank;
-using runtime::StorageScope;
-
 static bool IsDynamicSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
-  return storage_scope.rank == runtime::StorageRank::kShared &&
-         storage_scope.tag == ".dyn";
+  return GetPtrStorageScope(std::move(buffer_var)) == "shared.dyn";
 }
 
 static bool IsStaticSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
-  return storage_scope.rank == runtime::StorageRank::kShared &&
-         storage_scope.tag.empty();
+  return GetPtrStorageScope(std::move(buffer_var)) == "shared";
 }
 
 // Scalar packed NVFP4 stores two logical elements per byte, and its buffer
