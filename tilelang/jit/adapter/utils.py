@@ -169,7 +169,7 @@ def pythonic_expr(
     # Based on Python's operator precedence
     PRECEDENCE = {
         tvm.tirx.Call: 20,  # Includes min, max
-        tvm.tirx.Cast: 20,  # Treated like a function call
+        tvm.tirx.Cast: 20,  # C-style cast, tighter than binary operators
         tvm.tirx.Mul: 13,
         tvm.tirx.FloorDiv: 13,
         tvm.tirx.Div: 13,  # For tvm.tirx.Div if it appears
@@ -204,14 +204,16 @@ def pythonic_expr(
         elif isinstance(node, (tvm.tirx.IntImm, tvm.tirx.FloatImm)):
             s, p = str(node.value), ATOMIC_PRECEDENCE
         elif isinstance(node, tvm.tirx.Cast):
-            # C-style cast has high precedence
-            value_str, _ = node_to_result_map[node.value]
+            value_str, value_precedence = node_to_result_map[node.value]
             if ignore_cast:
-                s = value_str
+                # Removing a cast must not hide its operand's precedence.
+                s, p = value_str, value_precedence
             else:
+                p = PRECEDENCE[type(node)]
+                if value_precedence < p:
+                    value_str = f"({value_str})"
                 type_str = _target_type(node.dtype) if dtype_map is not None or expression_style == "cxx" else node.dtype
                 s = f"({type_str}){value_str}"
-            p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
             node,
             (
