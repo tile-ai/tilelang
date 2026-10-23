@@ -124,6 +124,56 @@ def make_multi_kernel_program():
     return main
 
 
+def _make_per_core_strided_store_program():
+    num_tokens = T.dynamic("num_tokens")
+
+    @T.prim_func
+    def main(src: T.Tensor((512,), "float32"), out: T.Tensor((num_tokens,), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((256,), "float32")
+            T.assume(num_tokens <= 512)
+            T.copy(src[sid * 256 : sid * 256 + 256], ub)
+            num_stages = T.ceildiv(num_tokens - sid * 64, 128)
+            with T.PerCoreTask():
+                for stage in T.Serial(num_stages):
+                    begin = stage * 128 + sid * 64
+                    extent = T.min(num_tokens - begin, 64)
+                    T.copy(ub[stage * 64 : stage * 64 + extent], out[begin : begin + extent])
+
+    return main
+
+
+def test_per_core_strided_stores_lower_with_independent_subcore_loops():
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots[info.name] = mod
+
+    with tvm.target.Target("ascend"), tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_make_per_core_strided_store_program(), target="ascend", enable_device_compile=False)
+    synced = snapshots["tl.InsertSync"]
+    cores = {int(task.node["core_mask"]) for task in nodes(synced, tirx.AttrStmt) if task.attr_key == "tl.ascend_per_core_task"}
+    assert cores == {1, 4}
+    assert not calls(synced, "tl.ascend_cross_core_set_flag")
+    assert artifact.kernel_source
+
+
+@tilelang.testing.requires_ascend
+def test_per_core_strided_stores_cover_dynamic_tails():
+    import torch
+
+    src = torch.arange(512, dtype=torch.float32).npu()
+    expected = src.cpu().reshape(2, 4, 64).permute(1, 0, 2).flatten()
+    compiled = tilelang.compile(_make_per_core_strided_store_program(), target="ascend")
+    for num_tokens in (0, 1, 65, 129, 512):
+        out = torch.full((num_tokens,), -1.0, dtype=torch.float32, device="npu")
+        compiled(src, out)
+        torch.testing.assert_close(out.cpu(), expected[:num_tokens], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("k_tiles", [1, 2], ids=["single-k-tile", "pipelined-k"])
 def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     snapshots = {}
