@@ -77,7 +77,8 @@ bool GuardsEquivalentWithAnalyzer(arith::Analyzer *analyzer, const PrimExpr &a,
   ICHECK(a.defined() && b.defined());
   if (GuardsStructurallyEqual(a, b))
     return true;
-  return analyzer->CanProveEqual(a, b);
+  // CanProveEqual subtracts its operands, which is not valid for booleans.
+  return analyzer->CanProve(a == b);
 }
 
 bool GuardImpliesWithAnalyzer(arith::Analyzer *analyzer,

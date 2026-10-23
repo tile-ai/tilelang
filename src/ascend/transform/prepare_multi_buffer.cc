@@ -77,7 +77,7 @@ PrimExpr DisjoinGuards(const PrimExpr &a, const PrimExpr &b,
     exit_constraint();
     return result;
   };
-  if (analyzer->CanProveEqual(a, b) || implies(b, a))
+  if (analyzer->CanProve(a == b) || implies(b, a))
     return a;
   if (implies(a, b))
     return b;
@@ -1116,8 +1116,8 @@ LoopEpochPlans AnalyzeStorageEpochs(
           continue;
         }
         if (GuardExprEqual(representative.expression, epoch.active_guard) ||
-            domain_analyzer.CanProveEqual(representative.expression,
-                                          epoch.active_guard)) {
+            domain_analyzer.CanProve(representative.expression ==
+                                     epoch.active_guard)) {
           representative_index = i;
           break;
         }
@@ -1166,9 +1166,9 @@ LoopEpochPlans AnalyzeStorageEpochs(
 }
 
 // Eligibility is a storage-level contract, just as in
-// AnnotateMultiBufferEligible. Validate clock placement and initial
-// availability, not element coverage. Allocation reuse must establish its own,
-// stronger physical must-write proof.
+// AnnotateMultiBufferEligible. Check clock placement and initial availability
+// under the same write-first assumptions, not element coverage. Allocation
+// reuse must establish its own, stronger physical must-write proof.
 class WriteCounterValidator {
 public:
   WriteCounterValidator(const MultiBufferInfo &info, const LayoutMap &layouts)
@@ -1336,7 +1336,16 @@ private:
                     loop_context);
         }
       }
-      if (!loop->BodyHasLoopBreak() && entry_defined)
+      // Summarize a completed For with the same execution assumptions used by
+      // eligibility and by a For inside an atomic Task. A conditional write
+      // need not occur on the first trip. Body reads have already been checked
+      // above; this summary only supplies the value available after the loop.
+      AccessOrder body_order = IRWriteFirstClassifier::Classify(
+          loop->children, info_.storage, loop->GetLoopBodyContext());
+      if (!loop->BodyHasLoopBreak() &&
+          AssumeForExecutes(body_order) == AccessOrder::kWriteFirst) {
+        initialized = specialize(initialized || guard);
+      } else if (!loop->BodyHasLoopBreak() && entry_defined)
         initialized =
             specialize(initialized || (guard && loop->control->extent > 0));
       else if (!loop->BodyHasLoopBreak()) {
