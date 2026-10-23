@@ -87,6 +87,31 @@ def test_dma_issue_order_is_not_completion_order():
     assert len(_events(after, "wait", "MTE3_MTE2")) == 1
 
 
+@pytest.mark.parametrize(
+    "write_start, write_extent, overlap",
+    [(0, 1, True), (-1, 1, False), (-1, 2, True)],
+    ids=["last-element", "adjacent", "overlapping-tail"],
+)
+def test_dma_regions_at_int32_limit(write_start, write_extent, overlap):
+    # The last valid int32 index has an int64 half-open endpoint. No device
+    # allocation is needed to check the dependency at this pass boundary.
+    limit = (1 << 31) - 1
+    gm = tirx.decl_buffer((tirx.IntImm("int64", limit + 1),), "float32", name="gm")
+    src = tirx.decl_buffer((2,), "float32", name="src", scope="shared.dyn")
+    dst = tirx.decl_buffer((2,), "float32", name="dst", scope="shared.dyn")
+    before = kernel(
+        seq(
+            unit(copy(src, gm, src_shape=[write_extent], dst_indices=[limit + write_start], dst_shape=[write_extent])),
+            unit(copy(gm, dst, src_indices=[limit], src_shape=[1], dst_shape=[1])),
+        ),
+        buffers=[src, dst],
+        params=[gm],
+    )
+    after = transform.InsertSync()(before)
+    assert bool(_events(after, "set", "MTE3_MTE2")) == overlap
+    assert bool(_events(after, "wait", "MTE3_MTE2")) == overlap
+
+
 def test_manually_indexed_storage_keeps_the_lexical_clock_under_a_guard():
     a = tirx.decl_buffer((4, 64), "float32", name="A")
     c = tirx.decl_buffer((4, 64), "float32", name="C")
