@@ -317,9 +317,6 @@ jobs:
       - name: Test built wheels (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          PYTHONPATH: ""
-          TILELANG_DISABLE_CACHE: "1"
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           Remove-Item Env:CXX, Env:CC -ErrorAction SilentlyContinue
