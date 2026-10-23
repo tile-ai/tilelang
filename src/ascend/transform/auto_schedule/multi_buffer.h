@@ -62,7 +62,6 @@ constexpr const char *kMultiBufferCounterMap = "tl.multi_buffer_counter_map";
 constexpr const char *kStorageEpochGuardMap = "tl.storage_epoch_guard_map";
 constexpr const char *kWriteCounterUpdateGuardMap =
     "tl.write_counter_update_guard_map";
-constexpr const char *kWriteCounterBuffers = "tl.write_counter_buffers";
 constexpr const char *kMultiBufferBroadcastFill =
     "tl.multi_buffer_broadcast_fill";
 
@@ -407,10 +406,11 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
       MultiBufferOwnerInfo owner;
       owner.loop = owner_loop;
       bool write_counter = false;
-      if (auto value =
-              owner_loop->control->annotations.Get(kWriteCounterBuffers)) {
-        for (const Var &member : value.value().cast<ffi::Array<Var>>())
-          write_counter |= member.same_as(storage);
+      if (auto value = owner_loop->control->annotations.Get(
+              kWriteCounterUpdateGuardMap)) {
+        // Read-only owners retain an entry with a false update guard.
+        write_counter =
+            value.value().cast<StorageEpochGuardMap>().count(storage);
       }
       ICHECK(info.owners.empty() || info.write_counter == write_counter)
           << "Disjoint multi-buffer owners must agree on the write clock for "

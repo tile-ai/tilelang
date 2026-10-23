@@ -942,7 +942,6 @@ ParseBufferVersionModes(const BufferVersionModeMap &serialized_modes) {
 struct LoopEpochPlan {
   MultiBufferCounterMap counters;
   StorageEpochGuardMap guards;
-  Array<Var> write_counters;
   StorageEpochGuardMap write_updates;
 };
 
@@ -1131,18 +1130,11 @@ LoopEpochPlans AnalyzeStorageEpochs(
                     guard_representatives[representative_index].expression);
     }
 
-    Array<Var> write_counters;
-    for (const MultiBufferInfo &info : plan.Infos())
-      if (info.write_counter)
-        for (const auto &owner : info.owners)
-          if (owner.loop == loop)
-            write_counters.push_back(info.storage);
     StorageEpochGuardMap write_updates;
     if (auto map = loop->control->annotations.Get(kWriteCounterUpdateGuardMap))
       write_updates = map.value().cast<StorageEpochGuardMap>();
     result.emplace(loop,
                    LoopEpochPlan{std::move(counter_map), std::move(guard_map),
-                                 std::move(write_counters),
                                  std::move(write_updates)});
   }
 
@@ -1401,8 +1393,6 @@ void MaterializeMultiBufferPreparation(ScheduledTIR *scheduled,
     ForNode *node = rewritten.CopyOnWrite();
     if (!epoch.counters.empty())
       node->annotations.Set(kMultiBufferCounterMap, epoch.counters);
-    if (!epoch.write_counters.empty())
-      node->annotations.Set(kWriteCounterBuffers, epoch.write_counters);
     if (!epoch.write_updates.empty())
       node->annotations.Set(kWriteCounterUpdateGuardMap, epoch.write_updates);
     node->annotations.Set(kStorageEpochGuardMap, epoch.guards);

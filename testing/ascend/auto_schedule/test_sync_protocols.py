@@ -57,7 +57,7 @@ def _physical(before):
     counters = {
         loop.annotations["tl.multi_buffer_counter_map"][storage].data
         for loop in nodes(mod, tirx.For)
-        for storage in loop.annotations.get("tl.write_counter_buffers", [])
+        for storage in loop.annotations.get("tl.write_counter_update_guard_map", {})
     }
     mod = transform.ResolveCore()(mod)
     mod = transform.InsertSync()(mod)
