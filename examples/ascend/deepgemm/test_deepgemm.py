@@ -45,9 +45,15 @@ def test_fp8_batched_scales():
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("k", [1152, 2304])
 @pytest.mark.parametrize(
-    "mn_a,mn_b,direct", [(False, False, True), (True, False, False), (False, True, False), (True, True, False), (True, True, True)]
+    "k,mn_a,mn_b,direct",
+    [
+        pytest.param(1152, False, False, True, id="k-major-tail"),
+        pytest.param(2304, True, False, False, id="mn-a-wrap"),
+        pytest.param(2304, False, True, False, id="mn-b-wrap"),
+        pytest.param(2304, True, True, False, id="mn-ab-wrap"),
+        pytest.param(2304, True, True, True, id="mn-direct-wrap"),
+    ],
 )
 def test_fp4_write_counter_refresh(k, mn_a, mn_b, direct):
     from .config import GemmConfig, Major

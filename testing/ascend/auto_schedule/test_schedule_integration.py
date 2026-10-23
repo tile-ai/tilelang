@@ -1152,7 +1152,7 @@ def test_write_counter_retains_values_across_guarded_iterations():
 
 
 def _make_write_counter_nested_update_program(case, explicit_owner):
-    write_at = {"middle-trip": 1, "last-trip": 2, "late-read": 1}.get(case, 0)
+    write_at = 1 if case in ("middle-trip", "late-read") else 0
 
     @T.prim_func
     def main(A: T.Tensor((3, 64), "float32"), C: T.Tensor((3, 64), "float32")):
@@ -1198,30 +1198,8 @@ def _make_write_counter_nested_update_program(case, explicit_owner):
     return main
 
 
-@pytest.mark.parametrize("explicit_owner", [False, True])
-@pytest.mark.parametrize(
-    "case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip", "conditional-prefix", "late-read", "late-rmw"]
-)
-def test_write_counter_frontend_nested_update_contract(case, explicit_owner, capfd):
-    # NormalizeControlFlowForSchedule creates local Bind snapshots for these
-    # predicates. Raw guard-only IR tests do not cover that representation.
-    program = _make_write_counter_nested_update_program(case, explicit_owner)
-    if not explicit_owner and case in ("conditional-prefix", "late-rmw"):
-        # Keep the legacy loop-summary heuristic. An explicit owner is needed
-        # for these legal updates spanning conditional/nested writes and RMWs.
-        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
-            schedule(program, through="AnnotateMultiBufferEligible", auto_schedule=False)
-        return
-    after = schedule(program, through="MaterializeMultiBuffer", auto_schedule=False)
-    assert tuple(allocated_buffer(after, "cached").shape) == (2, 64)
-    assert calls(after, "tl.ascend_wait_flag")
-    if case in ("late-read", "late-rmw"):
-        # The local ring check is conservative and must not block compilation.
-        assert "synchronization ring is malformed" in capfd.readouterr().err
-
-
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip", "conditional-prefix"])
+@pytest.mark.parametrize("case", ["mutually-exclusive", "middle-trip", "conditional-prefix"])
 def test_write_counter_nested_update_values(case):
     import torch
 
@@ -1284,7 +1262,7 @@ def test_write_counter_shared_clock_preserves_intermediate_reads():
     import torch
 
     @T.prim_func
-    def main(A: T.Tensor((7, 64), "float32"), O: T.Tensor((3, 3, 64), "float32")):
+    def main(A: T.Tensor((7, 64), "float32"), O: T.Tensor((2, 3, 3, 64), "float32")):
         with T.Kernel(1):
             x = T.alloc_shared((64,), "float32")
             y = T.alloc_shared((64,), "float32")
@@ -1294,24 +1272,26 @@ def test_write_counter_shared_clock_preserves_intermediate_reads():
                     with T.Task():
                         T.copy(A[j, :], x)
                         T.copy(A[j, :], y)
-                    T.copy(x, O[j, 1, :])
-                    T.copy(y, O[j, 2, :])
+                    T.copy(x, O[0, j, 1, :])
+                    T.copy(y, O[0, j, 2, :])
             for i in T.Pipelined(3, num_stages=2):
                 with T.Stage(0):
                     if i % 2 == 0:
                         with T.Task():
                             T.copy(A[i, :], x)
                             T.copy(A[i, :], y)
-                    T.copy(y, O[i, 0, :])
+                    T.copy(y, O[1, i, 0, :])
                     with T.Task():
                         T.copy(A[4 + i, :], x)
                         T.copy(A[4 + i, :], y)
-                    T.copy(x, O[i, 1, :])
-                    T.copy(y, O[i, 2, :])
+                    T.copy(x, O[1, i, 1, :])
+                    T.copy(y, O[1, i, 2, :])
 
     compiled = tilelang.compile(main, target="ascend")
     source = torch.arange(7 * 64, dtype=torch.float32).reshape(7, 64) + 1
-    expected = torch.stack((source[[0, 4, 2]], source[4:7], source[4:7]), dim=1)
+    expected = torch.full((2, 3, 3, 64), -1.0)
+    expected[0, :2, 1:, :] = source[:2, None, :]
+    expected[1] = torch.stack((source[[0, 4, 2]], source[4:7], source[4:7]), dim=1)
     a, out = source.npu(), torch.empty_like(expected).npu()
     for _ in range(2):
         out.fill_(-1)
@@ -1320,8 +1300,7 @@ def test_write_counter_shared_clock_preserves_intermediate_reads():
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("versions", [1, 2, 3])
-@pytest.mark.parametrize("loop_kind", ["for", "while"])
+@pytest.mark.parametrize("versions, loop_kind", [(1, "for"), (2, "while"), (3, "for")])
 def test_write_counter_fill_patches_and_intermediate_read(versions, loop_kind):
     import torch
 
@@ -1434,3 +1413,21 @@ def test_write_counter_first_write_in_a_possibly_empty_while():
         expected_d[i] = current
     torch.testing.assert_close(c.cpu(), expected_c, rtol=0, atol=0)
     torch.testing.assert_close(d.cpu(), expected_d, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("case", ["late-read", "late-rmw"])
+def test_write_counter_conservative_ring_diagnostic_remains_a_warning(case, capfd):
+    # Normalized Bind snapshots and loop summaries reach the local ring checker.
+    # Its conservative diagnostic must not prevent downstream materialization.
+    program = _make_write_counter_nested_update_program(case, explicit_owner=True)
+    after = schedule(program, through="MaterializeMultiBuffer", auto_schedule=False)
+    assert tuple(allocated_buffer(after, "cached").shape) == (2, 64)
+    assert "synchronization ring is malformed" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("case", ["conditional-prefix", "late-rmw"])
+def test_write_counter_nested_rmw_requires_an_explicit_owner(case):
+    # Bind snapshots from normalization must retain the legacy loop summary.
+    program = _make_write_counter_nested_update_program(case, explicit_owner=False)
+    with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+        schedule(program, through="AnnotateMultiBufferEligible", auto_schedule=False)

@@ -345,3 +345,43 @@ def test_sf_version_override_applies_to_the_allocation_group(conflict):
         after = transform.AnnotateMultiBufferEligible()(before)
         root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
         assert int(root.annotations["tl.buffer_versions_map"][data.data]) == 2
+
+
+@pytest.mark.parametrize("initialization", ["none", "separate", "atomic", "clear"])
+def test_implicit_read_modify_write_uses_the_same_write_first_analysis(initialization):
+    a = tirx.decl_buffer((4, 64), "float32", name="A")
+    r = tirx.decl_buffer((4, 64), "float32", name="r", scope="shared.dyn")
+    x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
+    c = tirx.decl_buffer((64,), "float32", name="C")
+    i = tirx.Var("i", "int32")
+    reduction = tirx.Evaluate(
+        tirx.Call(
+            "handle",
+            tvm.ir.Op.get("tl.tileop.reduce"),
+            [region(r, 1), region(x, 2), "sum", 0, tirx.const(initialization == "clear", "bool")],
+        )
+    )
+    fill = tirx.Evaluate(tirx.Call("handle", tvm.ir.Op.get("tl.tileop.fill"), [region(x, 2), tirx.const(0, "float32")]))
+    clear_reduction = tirx.Evaluate(
+        tirx.Call("handle", tvm.ir.Op.get("tl.tileop.reduce"), [region(r, 1), region(x, 2), "sum", 0, tirx.const(True, "bool")])
+    )
+    tasks = [unit(seq(clear_reduction, reduction))] if initialization == "atomic" else [unit(reduction)]
+    if initialization == "separate":
+        tasks.insert(0, unit(fill))
+    tasks.append(unit(copy(x, c)))
+    before = kernel(
+        seq(
+            unit(copy(a, r)),
+            unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, seq(*tasks)), core=None),
+        ),
+        buffers=[r, x],
+        params=[a, c],
+        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
+    )
+    if initialization == "none":
+        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+            transform.AnnotateMultiBufferEligible()(before)
+    else:
+        before = transform.AnnotateMultiBufferEligible()(before)
+        owners = [loop for loop in nodes(before, tirx.For) if x.data in loop.annotations.get("multi_buffer_eligible", [])]
+        assert len(owners) == 1 and owners[0].loop_var.same_as(i)
