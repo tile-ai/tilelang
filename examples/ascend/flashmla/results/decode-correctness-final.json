@@ -1,0 +1,116 @@
+{
+  "torch": "2.13.0+cpu",
+  "torch_npu": "2.13.0rc1",
+  "device": "Ascend950DT_9581",
+  "visible_devices": "5",
+  "cases": [
+    {
+      "id": 0,
+      "b": 4,
+      "sq": 1,
+      "topk": 128,
+      "extra_topk": null,
+      "extra_format": "fp8",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 1,
+      "b": 4,
+      "sq": 3,
+      "topk": 128,
+      "extra_topk": 128,
+      "extra_format": "fp8",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 2,
+      "b": 4,
+      "sq": 3,
+      "topk": 128,
+      "extra_topk": 128,
+      "extra_format": "fp4",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 3,
+      "b": 1,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp8",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 4,
+      "b": 74,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp8",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 5,
+      "b": 35,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp8",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 6,
+      "b": 1,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp4",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 7,
+      "b": 74,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp4",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "id": 8,
+      "b": 35,
+      "sq": 3,
+      "topk": 576,
+      "extra_topk": 64,
+      "extra_format": "fp4",
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    }
+  ]
+}

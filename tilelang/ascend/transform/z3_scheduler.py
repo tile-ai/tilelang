@@ -427,7 +427,11 @@ def z3_schedule_loop_python(
             for i, stage in enumerate(manual_stages):
                 solver.add(k_vars[i] == stage)
         for previous, current in pipe_order_deps:
-            solver.add(r_vars[previous] <= r_vars[current])
+            # Reconstruction places larger stages first at equal physical
+            # phases. Separate ascending stages to preserve manual source
+            # order; this gap expresses ordering, not instruction latency.
+            gap = int(manual_schedule and enable_offset and manual_stages[previous] < manual_stages[current])
+            solver.add(r_vars[previous] + gap <= r_vars[current])
 
         buffer_vars = [z3.Int(f"buf_{i}", ctx) for i in range(len(buffer_sizes))]
         for i in range(len(buffer_sizes)):
