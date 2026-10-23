@@ -6200,6 +6200,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
 
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
+  // NVCC can misparse FP32 subnormals with a full double-precision mantissa.
+  // Round literals with an f suffix before formatting; preserve FP64 values.
+  const double value =
+      op->dtype.bits() == 64 ? op->value : static_cast<float>(op->value);
   // Type code is kBFloat/kFloat16
   // which is indeed CUTLASS supported types currently
   if (op->dtype.is_bfloat16() || op->dtype.is_float16()) {
@@ -6217,7 +6221,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ">::quiet_NaN()";
     } else {
       p->PrintType(op->dtype, temp);
-      temp << '(' << FlexibleHexFormat(op->value) << 'f';
+      temp << '(' << FlexibleHexFormat(value) << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
     }
@@ -6239,7 +6243,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << "tfloat32_t::bitcast(0x7fffffff)";
     } else {
       p->PrintType(op->dtype, temp);
-      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << '(' << std::hexfloat << value << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
     }
@@ -6281,7 +6285,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
-      temp << FlexibleHexFormat(op->value);
+      temp << FlexibleHexFormat(value);
       if (op->dtype.bits() == 32)
         temp << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
