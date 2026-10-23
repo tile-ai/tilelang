@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from numbers import Integral
+from numbers import Integral, Real
 from typing import Any
 
 import tvm
@@ -120,11 +120,7 @@ shift_left = _tvm_op.shift_left
 shift_right = _tvm_op.shift_right
 fmod = _tvm_op.fmod
 if_then_else = _tvm_op.if_then_else
-truncdiv = _tvm_op.truncdiv
 truncmod = _tvm_op.truncmod
-floordiv = _tvm_op.floordiv
-floormod = _tvm_op.floormod
-ceildiv = _tvm_op.ceildiv
 TVMBackendAllocWorkspace = _tvm_op.TVMBackendAllocWorkspace
 TVMBackendFreeWorkspace = _tvm_op.TVMBackendFreeWorkspace
 anylist_getitem = _tvm_op.anylist_getitem
@@ -132,6 +128,38 @@ anylist_resetitem = _tvm_op.anylist_resetitem
 anylist_setitem_call_packed = _tvm_op.anylist_setitem_call_packed
 anylist_setitem_call_cpacked = _tvm_op.anylist_setitem_call_cpacked
 vscale = _tvm_op.vscale
+
+
+def _check_integer_divmod(name, lhs, rhs):
+    """Reject floating-point operands before TVM's integer-only FFI operators."""
+    for value in (lhs, rhs):
+        dtype = getattr(value, "dtype", "")
+        if (isinstance(value, Real) and not isinstance(value, Integral)) or str(dtype).startswith(("float", "bfloat")):
+            raise TypeError(f"{name} requires integer operands, but received a floating-point operand ({dtype or type(value).__name__}).")
+
+
+def truncdiv(a, b, span=None):
+    """Truncating integer division; floating-point operands are not supported."""
+    _check_integer_divmod("T.truncdiv", a, b)
+    return _tvm_op.truncdiv(a, b, span)
+
+
+def floordiv(a, b, span=None):
+    """Floor integer division; floating-point operands are not supported."""
+    _check_integer_divmod("T.floordiv", a, b)
+    return _tvm_op.floordiv(a, b, span)
+
+
+def floormod(a, b, span=None):
+    """Floor integer remainder; floating-point operands are not supported."""
+    _check_integer_divmod("T.floormod", a, b)
+    return _tvm_op.floormod(a, b, span)
+
+
+def ceildiv(lhs, rhs, span=None):
+    """Ceiling integer division; floating-point operands are not supported."""
+    _check_integer_divmod("T.ceildiv", lhs, rhs)
+    return _tvm_op.ceildiv(lhs, rhs, span)
 
 
 def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None) -> PrimExpr:
