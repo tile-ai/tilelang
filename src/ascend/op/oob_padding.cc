@@ -132,26 +132,24 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                    ? std::vector<size_t>{dst_inner_axis, dst_row_axis}
                    : std::vector<size_t>{dst_row_axis, dst_inner_axis};
 
-    auto collect_other_axes = [](size_t ndim, size_t axis0, size_t axis1) {
-      std::vector<size_t> axes;
-      for (size_t i = 0; i < ndim; ++i) {
-        if (i != axis0 && i != axis1) {
-          axes.push_back(i);
-        }
-      }
-      return axes;
-    };
-    src_singleton_axes =
-        collect_other_axes(op.src_range.size(), src_row_axis, src_inner_axis);
-    dst_singleton_axes =
-        collect_other_axes(op.dst_range.size(), dst_row_axis, dst_inner_axis);
     if (batched) {
-      // Clamp the batch tail just like the matrix axes. Zero valid batches
-      // suppress the DMA; the padding pass still fills the missing matrices.
+      // Batch participates in tail clamping, not singleton-axis guards.
       src_axes.push_back(0);
       dst_axes.push_back(0);
-      src_singleton_axes.clear();
-      dst_singleton_axes.clear();
+    } else {
+      auto collect_other_axes = [](size_t ndim, size_t axis0, size_t axis1) {
+        std::vector<size_t> axes;
+        for (size_t i = 0; i < ndim; ++i) {
+          if (i != axis0 && i != axis1) {
+            axes.push_back(i);
+          }
+        }
+        return axes;
+      };
+      src_singleton_axes =
+          collect_other_axes(op.src_range.size(), src_row_axis, src_inner_axis);
+      dst_singleton_axes =
+          collect_other_axes(op.dst_range.size(), dst_row_axis, dst_inner_axis);
     }
   } else {
     auto collect_non_singleton_axes = [](const Array<Range> &ranges) {
