@@ -55,7 +55,7 @@ def test_storage_clock(mode, guarded, owners, uses_counter, versions):
         assert analyzer.can_prove_equal(store.value, counter[0] + 1)
         owner = next(parent for parent in reversed(parents) if isinstance(parent, tirx.For))
         if mode == "write_counter":
-            assert ub.data in owner.annotations["tl.write_counter_buffers"]
+            assert ub.data in owner.annotations["tl.write_counter_update_guard_map"]
             statements_in_owner = [stmt for stmt, _ in statements(owner)]
             update_index = next(index for index, stmt in enumerate(statements_in_owner) if stmt.same_as(store))
             copy_indices = [

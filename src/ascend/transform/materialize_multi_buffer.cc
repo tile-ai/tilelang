@@ -334,7 +334,6 @@ void RewriteScheduledTree(std::vector<std::shared_ptr<IRStructure>> *nodes,
     auto *for_node = loop.CopyOnWrite();
     for_node->annotations.erase(kMultiBufferCounterMap);
     for_node->annotations.erase(kStorageEpochGuardMap);
-    for_node->annotations.erase(kWriteCounterBuffers);
     for_node->annotations.erase(kWriteCounterUpdateGuardMap);
     control->control = std::move(loop);
   }

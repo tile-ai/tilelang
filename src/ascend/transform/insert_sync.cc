@@ -2446,15 +2446,6 @@ private:
 // ============================================================================
 // Flag data model, explicit reservation, and physical allocation
 // ============================================================================
-struct FlagInfo {
-  CoreMask core_mask;
-  PrimExpr flag_var;
-  std::string hardevent;
-  int mode;
-};
-
-using FlagInfoList = std::vector<FlagInfo>;
-
 struct CrossCoreFlagReservation {
   // Inclusive ranges of flag IDs used explicitly by the source kernel, for
   // every mode. Dynamic expressions contribute the ConstIntBound inferred
@@ -2542,7 +2533,6 @@ public:
 
   void Plan() {
     allocations_.clear();
-    flag_infos_.clear();
     GroupCounterChannels();
     bool has_local_lifetimes = std::any_of(
         sync_points_.begin(), sync_points_.end(),
@@ -2729,12 +2719,6 @@ public:
     }
 
     for (const FlagAllocation &allocation : allocations_) {
-      if (allocation.cross_iter &&
-          !sync_points_[allocation.sync_points.front()].has_planned_actions)
-        AppendCrossIterFlagInfo(allocation);
-    }
-
-    for (const FlagAllocation &allocation : allocations_) {
       auto multi_owner = std::find_if(
           allocation.sync_points.begin(), allocation.sync_points.end(),
           [&](size_t member) { return IsMultiOwnerCounterChannel(member); });
@@ -2754,8 +2738,6 @@ public:
   const std::vector<FlagAllocation> &Allocations() const {
     return allocations_;
   }
-
-  FlagInfoList TakeFlagInfos() { return std::move(flag_infos_); }
 
 private:
   void GroupCounterChannels() {
@@ -2806,55 +2788,6 @@ private:
                         site_registry_.Dst(sync_point).pipe);
   }
 
-  void AppendCrossIterFlagInfo(const FlagAllocation &allocation) {
-    const SyncPoint &sync_point = sync_points_[allocation.sync_points.front()];
-    const SyncInsertionSite &src = site_registry_.Src(sync_point);
-    const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
-    std::string hard_event = GetHardEvent(src.pipe, dst.pipe);
-    size_t separator = hard_event.find('_');
-    std::string producer_pipe = "PIPE_" + hard_event.substr(0, separator);
-    std::string consumer_pipe = "PIPE_" + hard_event.substr(separator + 1);
-    int base_id = allocation.base_id;
-
-    if (!site_registry_.IsCrossCore(sync_point)) {
-      for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), hard_event, 0});
-      }
-      return;
-    }
-
-    if (src.core != kCoreCube) {
-      for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), producer_pipe, 1});
-      }
-      for (int sid = 0; sid < 2; ++sid) {
-        if (!HasCore(src.core | dst.core, VectorCore(sid)))
-          continue;
-        for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         consumer_pipe, 2});
-        }
-      }
-    } else {
-      for (int sid = 0; sid < 2; ++sid) {
-        if (!HasCore(src.core | dst.core, VectorCore(sid)))
-          continue;
-        for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         producer_pipe, 1});
-        }
-      }
-      for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{dst.core, Integer(base_id + version), consumer_pipe, 2});
-      }
-    }
-  }
-
   static constexpr int kIntraCoreFlagLimit = 8;
   static constexpr int kCrossCoreFlagLimit = 16;
 
@@ -2863,7 +2796,6 @@ private:
   const std::set<std::pair<size_t, size_t>> &reusable_pairs_;
   const CrossCoreFlagReservation &cross_core_flag_reservation_;
   std::vector<FlagAllocation> allocations_;
-  FlagInfoList flag_infos_;
   std::vector<size_t> counter_channel_representative_;
   std::vector<size_t> counter_channel_size_;
 };
@@ -3075,41 +3007,56 @@ public:
       : site_registry_(site_registry), sync_points_(sync_points),
         allocations_(allocations), actions_(actions) {}
 
-  void Run(ScheduledTIR *scheduled, const FlagInfoList &flag_infos) {
+  void Run(ScheduledTIR *scheduled) {
     InsertPlannedActions(scheduled);
     InsertSyncPoints();
     MaterializeInsertions(scheduled->tree, nullptr);
-    InsertBoundaryFlags(scheduled->tree, flag_infos);
+    InsertBoundaryFlags(scheduled->tree);
   }
 
 private:
   std::vector<Stmt> MakeFlagActions(const SyncPoint &point, bool set,
-                                    const PrimExpr &iteration) const {
+                                    const Array<PrimExpr> &iterations,
+                                    int num_versions) const {
     const auto &src = site_registry_.Src(point);
     const auto &dst = site_registry_.Dst(point);
     int base = allocations_[point.allocation_index].base_id;
-    PrimExpr id = MakeFlagEventId(iteration, point.num_versions, base);
     std::string event = GetHardEvent(src.pipe, dst.pipe);
-    if (src.core == dst.core)
-      return {set ? MakeAscendSetFlag(event, id)
-                  : MakeAscendWaitFlag(event, id)};
+    std::vector<Stmt> statements;
+    if (src.core == dst.core) {
+      for (const PrimExpr &iteration : iterations) {
+        PrimExpr id = MakeFlagEventId(iteration, num_versions, base);
+        statements.push_back(set ? MakeAscendSetFlag(event, id)
+                                 : MakeAscendWaitFlag(event, id));
+      }
+      return statements;
+    }
     size_t separator = event.find('_');
     std::string pipe = "PIPE_" + (set ? event.substr(0, separator)
                                       : event.substr(separator + 1));
     CoreMask core = set ? src.core : dst.core;
-    if (core != kCoreCube)
-      return {set ? MakeAscendCrossCoreSetFlag(4, pipe, id)
-                  : MakeAscendCrossCoreWaitFlag(4, pipe, id)};
-    std::vector<Stmt> statements;
-    for (int sid = 0; sid < 2; ++sid) {
-      if (!HasCore(src.core | dst.core, VectorCore(sid)))
-        continue;
-      PrimExpr sid_id =
-          MakeFlagEventId(iteration, point.num_versions, base + 16 * sid);
-      statements.push_back(set ? MakeAscendCrossCoreSetFlag(4, pipe, sid_id)
-                               : MakeAscendCrossCoreWaitFlag(4, pipe, sid_id));
+    auto append_bank = [&](int offset) {
+      for (const PrimExpr &iteration : iterations) {
+        PrimExpr id = MakeFlagEventId(iteration, num_versions, base + offset);
+        statements.push_back(set ? MakeAscendCrossCoreSetFlag(4, pipe, id)
+                                 : MakeAscendCrossCoreWaitFlag(4, pipe, id));
+      }
+    };
+    if (core != kCoreCube) {
+      append_bank(0);
+    } else {
+      for (int sid = 0; sid < 2; ++sid) {
+        if (HasCore(src.core | dst.core, VectorCore(sid)))
+          append_bank(16 * sid);
+      }
     }
     return statements;
+  }
+
+  std::vector<Stmt> MakeFlagActions(const SyncPoint &point, bool set,
+                                    const PrimExpr &iteration) const {
+    return MakeFlagActions(point, set, Array<PrimExpr>{iteration},
+                           point.num_versions);
   }
 
   Stmt MakeChannelAction(size_t point_id, bool set,
@@ -3199,20 +3146,14 @@ private:
         continue;
       const SyncInsertionSite &src = site_registry_.Src(sync_point);
       const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
-      std::string hard_event = GetHardEvent(src.pipe, dst.pipe);
-      size_t separator = hard_event.find('_');
-      std::string producer_pipe = "PIPE_" + hard_event.substr(0, separator);
-      std::string consumer_pipe = "PIPE_" + hard_event.substr(separator + 1);
       PrimExpr producer_guard = src.GetGuard();
       PrimExpr consumer_guard = dst.GetGuard();
 
-      if (!site_registry_.IsCrossCore(sync_point) &&
-          producer_pipe == consumer_pipe) {
-        if (producer_pipe == "PIPE_S" || producer_pipe == "PIPE_V" ||
-            producer_pipe == "PIPE_M") {
+      if (!site_registry_.IsCrossCore(sync_point) && src.pipe == dst.pipe) {
+        if (HasImplicitSamePipeOrder(src.pipe)) {
           continue;
         }
-        InsertStatement(dst.path_end, MakeAscendPipeBarrier(producer_pipe),
+        InsertStatement(dst.path_end, MakeAscendPipeBarrier("PIPE_" + src.pipe),
                         true, dst.core, consumer_guard);
         continue;
       }
@@ -3273,27 +3214,26 @@ private:
     nodes = std::move(materialized);
   }
 
-  void InsertBoundaryFlags(std::vector<std::shared_ptr<IRStructure>> &root,
-                           const FlagInfoList &flag_infos) {
+  void InsertBoundaryFlags(std::vector<std::shared_ptr<IRStructure>> &root) {
     std::vector<std::shared_ptr<IRStructure>> prefix;
     std::vector<std::shared_ptr<IRStructure>> suffix;
-    for (const FlagInfo &info : flag_infos) {
-      if (info.mode == 0) {
+    for (const FlagAllocation &allocation : allocations_) {
+      const SyncPoint &point = sync_points_[allocation.sync_points.front()];
+      if (!allocation.cross_iter || point.has_planned_actions)
+        continue;
+      // Seed/drain the whole allocation once, even when several sync points
+      // share it. Batched actions preserve the Cube's bank-major slot order.
+      Array<PrimExpr> iterations;
+      for (int version = 0; version < allocation.num_versions; ++version)
+        iterations.push_back(Integer(version));
+      for (const Stmt &statement :
+           MakeFlagActions(point, true, iterations, allocation.num_versions))
         prefix.push_back(
-            MakeSyncTaskNode(MakeAscendSetFlag(info.hardevent, info.flag_var),
-                             info.core_mask, 0));
+            MakeSyncTaskNode(statement, site_registry_.Src(point).core, 0));
+      for (const Stmt &statement :
+           MakeFlagActions(point, false, iterations, allocation.num_versions))
         suffix.push_back(
-            MakeSyncTaskNode(MakeAscendWaitFlag(info.hardevent, info.flag_var),
-                             info.core_mask, 0));
-      } else if (info.mode == 1) {
-        prefix.push_back(MakeSyncTaskNode(
-            MakeAscendCrossCoreSetFlag(4, info.hardevent, info.flag_var),
-            info.core_mask, 0));
-      } else if (info.mode == 2) {
-        suffix.push_back(MakeSyncTaskNode(
-            MakeAscendCrossCoreWaitFlag(4, info.hardevent, info.flag_var),
-            info.core_mask, 0));
-      }
+            MakeSyncTaskNode(statement, site_registry_.Dst(point).core, 0));
     }
     root.insert(root.begin(), prefix.begin(), prefix.end());
     root.insert(root.end(), suffix.begin(), suffix.end());
@@ -3361,7 +3301,7 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   flag_allocator.Plan();
   SyncMaterializer(analyzer.SiteRegistry(), analyzer.SyncPoints(),
                    flag_allocator.Allocations(), analyzer.Actions())
-      .Run(&scheduled_tir, flag_allocator.TakeFlagInfos());
+      .Run(&scheduled_tir);
 
   return EncodeScheduledTIR(std::move(scheduled_tir));
 }

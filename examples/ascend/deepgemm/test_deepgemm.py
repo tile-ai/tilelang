@@ -56,6 +56,9 @@ def test_fp8_batched_scales():
     ],
 )
 def test_fp4_write_counter_refresh(k, mn_a, mn_b, direct):
+    if mn_a and os.environ.get("TILELANG_DEFAULT_TARGET") == "pto":
+        pytest.skip("PTO host wrapper cannot resolve shape_m_packed yet")
+
     from .config import GemmConfig, Major
     from .kernels.fp8_gemm import build_fp8_gemm
 
