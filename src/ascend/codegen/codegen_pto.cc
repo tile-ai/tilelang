@@ -5490,12 +5490,13 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
   ICHECK(StartsWith(op_name, "tl.vmi."))
       << "Expected a tl.vmi.* call, got " << op_name;
 
-  // Ordinary VMI addresses are lowered by LegalizePTOVMIMemoryAccess into an
-  // explicit descriptor before code generation.  A raw BufferLoad at the
-  // address operand means that pass was skipped or never ran on this
-  // function, so report the actual offending operand instead of emitting an
-  // invalid PTODSL memory access.  Nested loads (for example a descriptor's
-  // index[0]) remain ordinary reads and are not diagnosed here.
+  // VMI addresses, both ordinary and indexed, are lowered by
+  // LegalizePTOVMIMemoryAccess into an explicit descriptor before code
+  // generation.  A raw BufferLoad at the address operand means that pass was
+  // skipped or never ran on this function, so report the actual offending
+  // operand instead of emitting an invalid PTODSL memory access.  Nested loads
+  // (for example a descriptor's index[0]) remain ordinary reads and are not
+  // diagnosed here.
   {
     int address_index = -1;
     if (op_name == "tl.vmi.vload" || op_name == "tl.vmi.vgather" ||
@@ -5518,8 +5519,8 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
         op->args[address_index].as<BufferLoadNode>() != nullptr) {
       LOG(FATAL) << "LegalizePTOVMIMemoryAccess: unlowered raw BufferLoad at "
                  << op_name << " address operand " << address_index
-                 << "; ordinary VMI memory descriptors must be legalized "
-                    "before code generation"
+                 << "; VMI memory descriptors must be legalized before code "
+                    "generation"
                  << tvm::tl::SpanHintSuffix(op->span);
     }
   }

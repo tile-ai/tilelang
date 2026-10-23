@@ -102,11 +102,15 @@ def LegalizePTOVMIMemoryAccess():
     rw_mask)`` plus a rewritten instruction scalar offset.  The pass proves,
     in one shared acceptance exit, that the descriptor preserves the source
     address, contains the complete physical access envelope and covers the
-    declared extent under the existing logical pointer-region analysis.  A
-    caller-written explicit descriptor is preserved and only verified.  There
-    is no whole-allocation fallback for an ordinary access.  Functions without
-    a PTO target pass through unchanged; the pass is a no-op on IR without VMI
-    accesses.
+    declared extent under the existing logical pointer-region analysis.  An
+    ordinary caller-written explicit descriptor is preserved and only verified;
+    there is no whole-allocation fallback for an ordinary access.  Indexed
+    ``vgather`` / ``vgatherb`` / ``vscatter`` addresses, including one reached
+    through a direct handle binding, are instead rebuilt as an owner-origin
+    descriptor with capacity ``prod(owner.shape)`` after the owner identity,
+    layout, capacity, stable-coverage and bound-address snapshot proofs.
+    Functions without a PTO target pass through unchanged; the pass is a no-op
+    on IR without VMI accesses.
     """
     return _ffi_api.LegalizePTOVMIMemoryAccess()  # type: ignore
 

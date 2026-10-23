@@ -10,7 +10,6 @@ from tvm.tirx import Buffer, BufferLoad, BufferRegion
 from tvm.tirx.script.builder.ir import bind as _bind, sblock_attr as _sblock_attr
 from tvm.script.ir_builder import IRBuilder
 
-from tilelang.language.builtin import access_ptr
 from tilelang.language.dtypes import dtype as _dtype
 from .frame import inside_simdvf as _inside_simdvf
 
@@ -529,7 +528,7 @@ def _parse_access_ptr_call(call, *, source, is_load, context):
 
 
 def _parse_vmi_address(source, *, is_load, context):
-    """Resolve one ordinary address form exactly once.
+    """Resolve one VMI address form exactly once.
 
     Accepted forms are ``Buffer``, ``BufferLoad``, ``BufferRegion``, a direct
     ``tl.access_ptr`` call, and a handle ``Var`` whose direct let binding is that
@@ -537,7 +536,10 @@ def _parse_vmi_address(source, *, is_load, context):
     no axis separators; a numeric ``Var`` is never followed to its definition
     and treated as a pointer.  Python aliases of the same object resolve
     identically; genuine multi-level handle chains, raw ``data`` handles, and
-    unknown handles are rejected with a controlled diagnostic.
+    unknown handles are rejected with a controlled diagnostic.  The frontend
+    keeps the resulting address raw; the descriptor Pass builds an ordinary
+    descriptor from it and rebuilds an indexed gather/gatherb/scatter
+    descriptor at the real owner origin.
     """
     if isinstance(source, tirx.Var):
         from tilelang.language.frame import get_let_value, has_let_value
@@ -581,11 +583,14 @@ def _normalize_vmi_address_operand(source, *, context, offset=None):
 
     Automatic buffer addresses become the ``BufferLoad(buffer, scalar_starts)``
     consumed by ``LegalizePTOVMIMemoryAccess``; the descriptor itself is built
-    later in TIR.  Explicit pointer operands keep the original expression and
-    caller offset so the pass can verify the declaration without rewriting it.
-    The instruction offset remains a frontend API/type check (scalar integer):
-    it selects the position inside the explicit descriptor and is not a
-    coverage proof.
+    later in TIR.  An ordinary explicit pointer operand keeps the original
+    expression and caller offset so the pass can verify the declaration without
+    rewriting it.  For indexed gather/gatherb/scatter, an explicit or bound
+    pointer is only the address-snapshot input: the pass rejects a rebuild that
+    would re-read memory, then emits the owner-origin descriptor and the D
+    offset.  The instruction offset remains a frontend API/type check (scalar
+    integer): it is part of the indexed address / the position inside an
+    ordinary explicit descriptor, not a coverage proof.
     """
     if isinstance(source, (BufferLoad, Buffer, BufferRegion)):
         if offset is not None:
@@ -598,19 +603,6 @@ def _normalize_vmi_address_operand(source, *, context, offset=None):
     offset = offset if isinstance(offset, tirx.PrimExpr) else tirx.convert(offset)
     if not _is_integer_scalar(offset):
         raise TypeError(f"{context} requires a scalar integer instruction offset, got {offset!r}")
-    return source, offset
-
-
-def _resolve_ptr_and_offset(source, offset=None, *, access_type: str, extent=None, descriptor=None, instruction_offset=None):
-    """Normalize VMI address syntax into PTODSL's explicit ptr+offset ABI."""
-    if isinstance(source, (BufferLoad, Buffer, BufferRegion)) and offset is not None:
-        raise TypeError("T.vmi buffer addresses do not accept an offset; express the offset in the buffer index")
-    base = descriptor if descriptor is not None else source
-    if isinstance(base, (BufferLoad, Buffer, BufferRegion)):
-        ptr = access_ptr(base, access_type, extent=extent, offset=0)
-        return ptr, instruction_offset if instruction_offset is not None else _zero_offset()
-    if offset is None:
-        return source, _zero_offset()
     return source, offset
 
 
@@ -1271,7 +1263,8 @@ def vgather(source, offsets, mask, *, pmode=None, loc=None, ip=None):
         raise TypeError("T.vmi.vgather(...) does not support packed FP4 source buffers")
     _require_integer_vector(offsets, context="T.vmi.vgather(...)")
     mask = _require_compatible_mask(mask, _lanes_of(offsets), context="T.vmi.vgather(...)")
-    ptr, offset = _resolve_ptr_and_offset(source, access_type="r", extent=_lanes_of(offsets))
+    address = _parse_vmi_address(source, is_load=True, context="T.vmi.vgather(...)")
+    ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vgather(...)")
     return _call_vmi(
         "vgather",
         _vector_result_dtype(
@@ -1296,7 +1289,8 @@ def vgatherb(source, offsets, mask, *, pmode=None, loc=None, ip=None):
         raise TypeError("T.vmi.vgatherb(...) does not support packed FP4 source buffers")
     _require_integer_vector(offsets, context="T.vmi.vgatherb(...)")
     mask = _require_compatible_mask(mask, _lanes_of(offsets), context="T.vmi.vgatherb(...)")
-    ptr, offset = _resolve_ptr_and_offset(source, access_type="r", extent=_lanes_of(mask))
+    address = _parse_vmi_address(source, is_load=True, context="T.vmi.vgatherb(...)")
+    ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vgatherb(...)")
     return _call_vmi(
         "vgatherb",
         _vector_result_dtype(mask, elem_dtype=source_elem),
@@ -1321,7 +1315,8 @@ def vscatter(value, destination, offsets, mask, *, pmode=None, loc=None, ip=None
     if _lanes_of(value) != _lanes_of(offsets):
         raise TypeError("T.vmi.vscatter(...) requires value and offset lane counts to match")
     mask = _require_compatible_mask(mask, _lanes_of(value), context="T.vmi.vscatter(...)")
-    ptr, offset = _resolve_ptr_and_offset(destination, access_type="w", extent=_lanes_of(value))
+    address = _parse_vmi_address(destination, is_load=False, context="T.vmi.vscatter(...)")
+    ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vscatter(...)")
     return _call_vmi(
         "vscatter",
         "void",

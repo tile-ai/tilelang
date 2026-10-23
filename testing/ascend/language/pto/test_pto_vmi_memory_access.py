@@ -2129,23 +2129,106 @@ def _scatter_kernel():
     return main
 
 
-def test_gather_descriptor_preserves_nonzero_base():
+def _gatherb_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), I: T.Tensor((64,), "uint32"), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            index = T.alloc_shared((64,), "uint32")
+            T.copy(A, work)
+            T.copy(I, index)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vload(index[0], size=64)
+                v = T.vmi.vgatherb(work[64], offsets, mask)
+                T.vmi.vstore(v, work[192], mask)
+            T.copy(work, C)
+
+    return main
+
+
+def _negative_view_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((4, 64), F32), I: T.Tensor((64,), "uint32"), C: T.Tensor((4, 64), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((4, 64), F32)
+            index = T.alloc_shared((64,), "uint32")
+            T.copy(A, work)
+            T.copy(I, index)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vload(index[0], size=64)
+                v = T.vmi.vgather(work[2, -32], offsets, mask)
+                T.vmi.vstore(v, work[3, -64], mask)
+            T.copy(work, C)
+
+    return main
+
+
+def test_indexed_frontend_keeps_raw_address():
+    for kernel, op_name, address_index in (
+        (_gather_kernel, "tl.vmi.vgather", 0),
+        (_gatherb_kernel, "tl.vmi.vgatherb", 0),
+        (_scatter_kernel, "tl.vmi.vscatter", 1),
+    ):
+        found = []
+
+        def visit(node, found=found, op_name=op_name):
+            if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "") == op_name:
+                found.append(node)
+
+        tvm.tirx.stmt_functor.post_order_visit(kernel().body, visit)
+        assert len(found) == 1, (op_name, found)
+        address = found[0].args[address_index]
+        assert isinstance(address, tvm.tirx.BufferLoad), (op_name, address)
+        assert address.buffer.scope() in ("shared", "shared.dyn")
+
+
+def test_gather_descriptor_uses_owner_base():
     artifact = _lower_pto(_gather_kernel())
     _, call = _single(artifact, "tl.vmi.vgather")
     ptr = call.args[0]
-    assert _const(ptr.args[2]) == 64
-    # Lanes extent: generic index footprints are explicitly out of scope.
-    assert _const(ptr.args[3]) == 64
-    assert _const(call.args[1]) == 0
+    assert _const(ptr.args[2]) == 0, "the descriptor origin is the real owner origin"
+    assert _const(ptr.args[3]) == 256, "the descriptor covers the whole owner"
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 64
     line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vgather" in ln)
     assert "addptr" in line and ", 64)" in line, line
 
 
-def test_scatter_descriptor_preserves_nonzero_base():
+def test_gatherb_descriptor_uses_owner_base_and_keeps_offsets():
+    artifact = _lower_pto(_gatherb_kernel())
+    _, call = _single(artifact, "tl.vmi.vgatherb")
+    ptr = call.args[0]
+    assert _const(ptr.args[2]) == 0
+    assert _const(ptr.args[3]) == 256
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 64, "the scalar D stays in pointer element units"
+    assert str(call.args[2].dtype) == "uint32x64", "the byte-offset vector is not rewritten"
+    line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vgatherb" in ln)
+    assert "addptr" in line and ", 64)" in line, line
+
+
+def test_negative_view_descriptor_uses_owner_base():
+    artifact = _lower_pto(_negative_view_kernel())
+    _, call = _single(artifact, "tl.vmi.vgather")
+    ptr = call.args[0]
+    assert _const(ptr.args[2]) == 0
+    assert _const(ptr.args[3]) == 256
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 160, "the negative view coordinate is normalized to 2*64+32"
+    line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vgather" in ln)
+    assert "addptr" in line and ", 160)" in line, line
+
+
+def test_scatter_descriptor_uses_owner_base():
     artifact = _lower_pto(_scatter_kernel())
     _, call = _single(artifact, "tl.vmi.vscatter")
-    assert _const(call.args[1].args[2]) == 64
-    assert _const(call.args[2]) == 0
+    ptr = call.args[1]
+    assert _const(ptr.args[2]) == 0
+    assert _const(ptr.args[3]) == 256
+    assert _const(ptr.args[4]) == 2
+    assert _const(call.args[2]) == 64
     line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vscatter" in ln)
     assert "addptr" in line and ", 64)" in line, line
 
