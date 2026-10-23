@@ -548,6 +548,13 @@ def transpose(
     assert len(src_extent) >= 2, "Transpose requires at least 2D buffers."
     assert len(dst_extent) >= 2, "Transpose requires at least 2D buffers."
 
+    # The docstring contract (dst[j, i] = src[i, j]) fixes dst's shape relative to
+    # src's. Without this check a mismatched dst compiles and silently truncates.
+    if list(dst_extent[-2:]) != list(src_extent[-2:])[::-1]:
+        raise ValueError(
+            f"Transpose requires dst's last two extents to be the swap of src's, got src {list(src_extent)} and dst {list(dst_extent)}."
+        )
+
     src_region = to_buffer_region(src)
     dst_region = to_buffer_region(dst)
     src = buffer_region_to_tile_region(src_region, "r", list(src_extent))
