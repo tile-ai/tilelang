@@ -16,6 +16,7 @@ from testing.ascend.auto_schedule._scheduled_ir import unit
         ("same-guard", True),
         ("disjoint-guards", False),
         ("exhaustive-writes", True),
+        ("unreachable-then-write", True),
         ("manual-stage-order", True),
         ("vf-write-first", True),
         ("vf-read-first", False),
@@ -39,6 +40,10 @@ def test_write_first_ownership(case, expected):
         body = seq(unit(write, guard=enabled), unit(read, guard=tirx.Not(enabled)))
     elif case == "exhaustive-writes":
         body = seq(unit(write, guard=enabled), unit(write, guard=tirx.Not(enabled)), unit(read))
+    elif case == "unreachable-then-write":
+        # In this loop the first guard is false and the second is true.
+        # Equivalence must use boolean logic, not subtraction of predicates.
+        body = seq(unit(write, guard=i < 0), unit(write, guard=i >= 0), unit(read))
     elif case == "manual-stage-order":
         body = seq(unit(read, stage=1), unit(write, stage=0))
     else:
@@ -65,6 +70,31 @@ def test_nested_alias_accesses_have_one_complete_owner():
     after = transform.AnnotateMultiBufferEligible()(before)
     owners = [loop for loop in nodes(after, tirx.For) if base.data in loop.annotations.get("multi_buffer_eligible", [])]
     assert len(owners) == 1 and owners[0].loop_var.same_as(outer)
+
+
+@pytest.mark.parametrize("mode", ["auto", "write_counter"])
+@pytest.mark.parametrize("atomic", [False, True])
+@pytest.mark.parametrize("case", ["zero-trip", "skipped-write", "later-write"])
+def test_write_first_for_assumptions_are_shared_across_modes_and_task_boundaries(mode, atomic, case):
+    a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
+    x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    extent = 1 - i % 2 if case == "zero-trip" else 3
+    guard = i % 2 == 0 if case == "skipped-write" else j == 1 if case == "later-write" else tirx.const(True, "bool")
+    writer = tirx.IfThenElse(guard, copy(a, x), None) if atomic else unit(copy(a, x), guard=guard)
+    inner = unit(tirx.For(j, 0, extent, tirx.ForKind.SERIAL, writer), core=5 if atomic else None)
+    body = seq(inner, unit(copy(x, x)), unit(copy(x, c)))
+    before = kernel(
+        unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, body), core=None),
+        buffers=[x],
+        params=[a, c],
+        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: mode}},
+    )
+    # The first two cases deliberately violate the execution assumptions.
+    # Test only eligibility's policy; accepting them is not a correctness claim.
+    after = transform.AnnotateMultiBufferEligible()(before)
+    owners = [loop for loop in nodes(after, tirx.For) if x.data in loop.annotations.get("multi_buffer_eligible", [])]
+    assert len(owners) == 1 and owners[0].loop_var.same_as(i)
 
 
 def test_ss_packed_publication_has_one_shared_owner():

@@ -1129,21 +1129,19 @@ def test_one_update_per_owner_iteration(versions, case):
     "case, valid",
     [
         ("later-update", False),
-        ("zero-trip", False),
-        ("skipped-branches", False),
         ("skipped-loop", False),
-        ("break-before-write", False),
         ("guarded-zero-trip", True),
         ("guarded-branches", True),
         ("guarded-loop", True),
         ("guarded-nested", True),
         ("first-trip-write", True),
+        ("middle-trip-write", True),
+        ("last-trip-write", True),
         ("guarded-snapshot", True),
         ("preceding-write", True),
-        ("empty-rmw-loop", True),
     ],
 )
-def test_read_modify_write_requires_a_write_in_the_current_update(owner_policy, case, valid):
+def test_read_modify_write_uses_storage_write_first_heuristic(owner_policy, case, valid):
     a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
     x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
     i, j, enabled = tirx.Var("i", "int32"), tirx.Var("j", "int32"), tirx.Var("enabled", "bool")
@@ -1154,14 +1152,11 @@ def test_read_modify_write_requires_a_write_in_the_current_update(owner_policy, 
         predicate = enabled
     write = unit(copy(a, x), guard=i == 0)
     if case != "later-update":
-        extent = 1 - i % 2 if "zero-trip" in case else 2
+        extent = 1 - i % 2 if "zero-trip" in case else 3
         guard = None if "zero-trip" in case or case in ("preceding-write", "skipped-loop", "guarded-loop") else predicate
-        if case == "first-trip-write":
-            guard = j == 0
+        if case.endswith("trip-write"):
+            guard = j == {"first-trip-write": 0, "middle-trip-write": 1, "last-trip-write": 2}[case]
         inner = unit(copy(a, x), guard=guard)
-        if case == "break-before-write":
-            stop = unit(tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))), guard=j == 0)
-            inner = seq(stop, inner)
         if case == "guarded-nested":
             inner = unit(tirx.For(tirx.Var("k", "int32"), 0, 2, tirx.ForKind.SERIAL, inner), core=None)
         write = unit(
@@ -1174,9 +1169,6 @@ def test_read_modify_write_requires_a_write_in_the_current_update(owner_policy, 
         # The inner loop's RMW is covered by a write in the enclosing update.
         prefix = [unit(copy(a, x))]
         write = unit(tirx.For(j, 0, 1 - i % 2, tirx.ForKind.SERIAL, rmw), core=None)
-    if case == "empty-rmw-loop":
-        prefix = [unit(tirx.For(j, 0, 0, tirx.ForKind.SERIAL, rmw), core=None)]
-        write = unit(copy(a, x))
     body = seq(*prefix, write, rmw, unit(copy(x, c)))
     before = kernel(
         unit(

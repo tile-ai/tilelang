@@ -10,7 +10,7 @@ import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import nodes, calls, allocated_buffer
+from testing.ascend._ir import nodes, calls, allocated_buffer, schedule
 
 TILE = 16
 STEPS = 4
@@ -1149,6 +1149,59 @@ def test_write_counter_retains_values_across_guarded_iterations():
             if (i - start) % 3 != 2:
                 expected[i] = source[start + ((i - start) // 6) * 6]
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+def _make_write_counter_nested_update_program(case, explicit_owner):
+    write_at = {"mutually-exclusive": 0, "first-trip": 0, "middle-trip": 1, "last-trip": 2}[case]
+
+    @T.prim_func
+    def main(A: T.Tensor((3, 64), "float32"), C: T.Tensor((3, 64), "float32")):
+        with T.Kernel(1):
+            cached = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({cached: (2, "write_counter")})
+            for i in T.Pipelined(3, num_stages=2, annotations={"multi_buffer_eligible": [cached]} if explicit_owner else {}):
+                with T.Stage(0):
+                    if case == "mutually-exclusive":
+                        if i % 2 == 1:
+                            T.copy(A[i, :], cached)
+                        if i % 2 == 0:
+                            for _j in T.serial(2):
+                                T.copy(A[i, :], cached)
+                    else:
+                        for j in T.serial(3):
+                            if j == write_at:
+                                T.copy(A[i, :], cached)
+                        with T.SimtVF(threads=64):
+                            for k in T.Parallel(64):
+                                cached[k] = cached[k] + 1.0
+                    T.copy(cached, C[i, :])
+
+    return main
+
+
+@pytest.mark.parametrize("explicit_owner", [False, True])
+@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip"])
+def test_write_counter_frontend_nested_write_first(case, explicit_owner):
+    # NormalizeControlFlowForSchedule creates local Bind snapshots for these
+    # predicates. Raw guard-only IR tests do not cover that representation.
+    after = schedule(_make_write_counter_nested_update_program(case, explicit_owner), through="MaterializeMultiBuffer", auto_schedule=False)
+    assert tuple(allocated_buffer(after, "cached").shape) == (2, 64)
+    assert calls(after, "tl.ascend_wait_flag")
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip"])
+def test_write_counter_nested_update_values(case):
+    import torch
+
+    compiled = tilelang.compile(_make_write_counter_nested_update_program(case, False), target="ascend")
+    source = torch.arange(3 * 64, dtype=torch.float32).reshape(3, 64)
+    expected = source if case == "mutually-exclusive" else source + 1
+    a, c = source.npu(), torch.empty_like(source).npu()
+    for _ in range(2):
+        c.fill_(-1)
+        compiled(a, c)
+        torch.testing.assert_close(c.cpu(), expected, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend

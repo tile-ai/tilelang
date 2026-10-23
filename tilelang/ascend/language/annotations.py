@@ -109,9 +109,17 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     Like automatic multi-buffer eligibility, this is a storage-level contract:
     the user guarantees that the update defines the data subsequently read.
     Partial, overlapping, sparse and multi-Task writes are allowed without a
-    region-coverage proof. Control flow inside one atomic Task is treated as
-    part of that Task's update. Allocation reuse independently requires physical
-    must-write evidence and remains conservative.
+    region-coverage proof. Write-first classification also retains eligibility's
+    aggressive For-loop assumptions: a For executes at least once, and a
+    conditional write in its body takes a writing path in some iteration.
+    These assumptions apply both inside a Task and across scheduled Tasks;
+    they are not a proof that a write actually executes. If a zero-trip loop,
+    skipped writing branches or an early exit leaves an RMW as the first write
+    of an update, the program violates the contract and is not guaranteed to
+    be diagnosed. Restructure the update or opt out with bare ``versions=1``.
+    Control flow inside one atomic Task is part of that Task's
+    update. Allocation reuse independently requires physical must-write
+    evidence and remains conservative.
 
     All accesses must have the same stage in each enclosing loop. An update
     cannot start by reading the previous version (use an ordinary mode or bare
