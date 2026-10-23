@@ -356,6 +356,13 @@ different canonical layouts inferred from their operations or supplied with
 shared `.data` keeps one allocation and version clock; `T.assume_conflict` is
 unnecessary for these aliases.
 
+Memory layout annotations apply only to the named Buffer view. They do not
+propagate through `T.view`, `T.reshape`, or a shared `.data` Var. Annotate each
+view that needs a non-default interpretation; otherwise its own operations
+infer the layout or ordinary dense/strided addressing applies. Accessed Cube
+views require their own canonical layout from an annotation or a TileOp.
+Fragment aliases still share thread ownership.
+
 These views require dense logical strides, zero base offset, the same accessed
 dtype, and equal padded physical sizes. They reinterpret storage without moving
 existing values: the producer must write the representation its consumer uses.

@@ -58,7 +58,10 @@ def test_pointer_base_is_reexpressed_in_canonical_indices(raw):
     row = tirx.Var("row", "int32")
     pointer = owner.access_ptr("r", offset=15, extent=1) if raw else T.access_ptr(alias[row, 0], "r", extent=1)
     body = tirx.Evaluate(tirx.call_extern("int32", "consume", pointer))
-    before = _module(owner, owner, body if raw else tirx.For(row, 0, 3, tirx.ForKind.SERIAL, body))
+    layouts = {owner: make_ascend_nz_layout(owner)}
+    if not raw:
+        layouts[alias] = layouts[owner].reshape(alias.shape)
+    before = kernel(body if raw else tirx.For(row, 0, 3, tirx.ForKind.SERIAL, body), buffers=[owner], annotations={"layout_map": layouts})
     after = transform.NormalizeAscendFractalStorage()(before)
     (pointer,) = calls(after, "tl.access_ptr")
     load, extent, _ = pointer.args
@@ -66,6 +69,15 @@ def test_pointer_base_is_reexpressed_in_canonical_indices(raw):
     analyzer = tvm.arith.Analyzer()
     assert analyzer.can_prove_equal(load.indices[0], 1 if raw else row * 5)
     assert int(load.indices[1]) == 0 and int(extent) == 1
+
+
+def test_accessed_cube_view_cannot_borrow_another_views_layout():
+    owner = tirx.decl_buffer((15, 15), "bfloat16", name="owner", scope="shared.l1")
+    alias = tirx.decl_buffer((3, 75), "bfloat16", name="alias", data=owner.data)
+    pointer = T.access_ptr(alias[1, 0], "r", extent=1)
+    before = _module(owner, owner, tirx.Evaluate(tirx.call_extern("int32", "consume", pointer)))
+    with pytest.raises(tvm.error.InternalError, match="Cube view alias needs its own layout"):
+        transform.NormalizeAscendFractalStorage()(before)
 
 
 @pytest.mark.parametrize(

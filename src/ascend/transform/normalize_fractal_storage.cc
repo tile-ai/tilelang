@@ -86,6 +86,18 @@ public:
       rewriter.matrix_views_.Set(buffer->data, views);
     }
     Map<Var, PrimExpr> storage_bits;
+    for (const auto &[var, owner] : collector.owners) {
+      if (collector.layouts.count(owner) || rewriter.matrix_views_.count(var) ||
+          IsFragmentBuffer(owner))
+        continue;
+      // An unannotated memory owner keeps its ordinary allocation size.
+      // A view annotation must not silently enlarge that storage.
+      PrimExpr bits = Integer(owner->dtype.bits() * owner->dtype.lanes());
+      Buffer flat = owner.GetFlattenedBuffer();
+      for (const PrimExpr &extent : flat->shape)
+        bits = bits * extent;
+      storage_bits.Set(var, bits);
+    }
     for (const Buffer &buffer : collector.buffers) {
       if (auto views = rewriter.matrix_views_.Get(buffer->data)) {
         Buffer matrix = rewriter.FindMatrixView_(
@@ -131,6 +143,9 @@ private:
     Optional<Layout> layout = layouts_.Get(buffer);
     if (layout.defined() && IsAscendFractalLayout(layout.value()))
       return buffer;
+    ICHECK(layout.defined() || !accessed)
+        << "Cube view " << buffer->name
+        << " needs its own layout; annotate this view explicitly";
     Optional<Buffer> matrix;
     for (const Buffer &view : views) {
       Layout candidate = layouts_[view]->Reshape(buffer->shape, analyzer_);
@@ -138,13 +153,9 @@ private:
         continue;
       if (!matrix.defined())
         matrix = view;
-      if (layout.defined() || !accessed)
-        break;
-      ICHECK(layouts_[matrix.value()]
-                 ->Reshape(buffer->shape, analyzer_)
-                 ->IsEqual(candidate.get()))
-          << "Ambiguous layout for Cube view " << buffer->name
-          << "; annotate this view explicitly";
+      // An unused owner only supplies allocation geometry. Accessed views
+      // must supply their own layout or receive one from their TileOps.
+      break;
     }
     ICHECK(matrix.defined())
         << "Cube view layout must be a reshape of a canonical matrix layout: "

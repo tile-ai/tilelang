@@ -605,7 +605,8 @@ def test_address_backed_l0_view_remaps_partial_copy_origin(major_mn, pitch, offs
 )
 @pytest.mark.parametrize("prefix", [0, 64])
 @pytest.mark.parametrize("row,col", [(0, 0), (1, 16)])
-def test_dma_reinterpreted_view_prefix_uses_pointer_element_units(storage_dtype, view_dtype, view_cols, prefix, row, col):
+@pytest.mark.parametrize("annotate_view", [False, True], ids=["ordinary-view", "explicit-view"])
+def test_dma_reinterpreted_view_prefix_uses_pointer_element_units(storage_dtype, view_dtype, view_cols, prefix, row, col, annotate_view):
     """Both DMA directions must agree with the view's byte address."""
     import tilelang
 
@@ -619,6 +620,14 @@ def test_dma_reinterpreted_view_prefix_uses_pointer_element_units(storage_dtype,
             storage = T.alloc_shared((4, 128), storage_dtype)
             view = T.view(storage, shape=(view_rows, view_cols), dtype=view_dtype)
             T.annotate_layout({storage: tilelang.layout.Layout((4, 128), lambda r, c: r * 128 + c + prefix)})
+            if annotate_view:
+                T.annotate_layout(
+                    {
+                        view: tilelang.layout.Layout(
+                            (view_rows, view_cols), lambda r, c: r * view_cols + c + prefix * storage_bytes // view_bytes
+                        )
+                    }
+                )
             with T.Vector():
                 T.copy(A, view[row : row + 2, col : col + 32])
                 T.copy(view[row : row + 2, col : col + 32], O)
@@ -638,9 +647,9 @@ def test_dma_reinterpreted_view_prefix_uses_pointer_element_units(storage_dtype,
     lowered = tl_transform.LowerAccessPtr()(captured[0])
     (load,) = calls(lowered, "tl.ascend_copy_gm_to_ubuf")
     (store,) = calls(lowered, "tl.ascend_copy_ubuf_to_gm")
-    # This byte address comes directly from the storage prefix and the view's
-    # row/column coordinates, independently of the layout reshape machinery.
-    expected_bytes = prefix * storage_bytes + (row * view_cols + col) * view_bytes
+    # Only the view's own annotation selects the prefix. The owner's layout
+    # changes its allocation size, but never the view's addressing.
+    expected_bytes = (prefix * storage_bytes if annotate_view else 0) + (row * view_cols + col) * view_bytes
     for ptr in (load.args[0], store.args[1]):
         assert ptr.op.name == "tirx.tvm_access_ptr"
         assert ptr.args[0].dtype == view_dtype

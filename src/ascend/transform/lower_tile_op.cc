@@ -50,19 +50,13 @@ using namespace ffi;
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
-  const auto *ptr_type =
-      TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
-  Type new_type;
-  // convert fragments to normal local buffer
+  // Memory views keep their storage identity, including an unannotated owner.
+  // Only Fragment lowering changes the pointer's storage scope.
+  Var new_var = buffer->data;
   if (IsFragmentBuffer(buffer)) {
-    new_type = PointerType(ptr_type->element_type, "local");
-  } else {
-    new_type = buffer->data->type_annotation;
-  }
-  Var new_var;
-  if (IsGlobalBuffer(buffer)) {
-    new_var = buffer->data;
-  } else {
+    const auto *ptr_type =
+        TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+    Type new_type = PointerType(ptr_type->element_type, "local");
     if (var_remap.count(buffer->data)) {
       new_var = var_remap[buffer->data];
     } else {

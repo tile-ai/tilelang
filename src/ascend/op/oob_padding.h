@@ -54,7 +54,7 @@ DMAPath GetDMAPath(const Buffer &src, const Buffer &dst);
 
 /*!
  * \brief Look up a view's inferred Layout by Buffer identity. Storage aliases
- * may have distinct layouts; inference resolves any layout inheritance.
+ * may have distinct layouts; an unannotated memory view has no entry here.
  */
 Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
                                      const Buffer &buffer);

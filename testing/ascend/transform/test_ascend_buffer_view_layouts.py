@@ -37,7 +37,7 @@ def test_explicit_layouts_remain_attached_to_each_view(region):
 
 
 @pytest.mark.parametrize("annotate_owner", [True, False], ids=["owner", "unused-view"])
-def test_unconstrained_reshape_inherits_the_unique_layout(annotate_owner):
+def test_unannotated_reshape_does_not_inherit_a_memory_layout(annotate_owner):
     owner, _, layout, _ = _views()
     view = tirx.decl_buffer((4, 32), owner.dtype, name="reshaped", data=owner.data)
     annotations = {owner: layout} if annotate_owner else {view: layout.reshape(view.shape)}
@@ -46,19 +46,24 @@ def test_unconstrained_reshape_inherits_the_unique_layout(annotate_owner):
     with tvm.target.Target("ascend"):
         inferred = transform.AscendLayoutInference()(mod)
     layouts = inferred["main"].body.block.annotations["layout_map"]
-    assert layouts[owner].is_equal(layout)
-    assert layouts[view].is_equal(layout.reshape(view.shape))
+    annotated = owner if annotate_owner else view
+    assert layouts[annotated].is_equal(annotations[annotated])
+    assert accessed not in layouts
 
 
 @pytest.mark.parametrize("access_annotated_view", [True, False], ids=["accessed-view", "unused-view"])
-def test_unconstrained_access_cannot_choose_between_distinct_layouts(access_annotated_view):
+def test_unannotated_access_is_independent_of_distinct_alias_layouts(access_annotated_view):
     owner, view, first, second = _views()
     unknown = tirx.decl_buffer(owner.shape, owner.dtype, name="unknown", data=owner.data)
     accessed = (owner, view, unknown) if access_annotated_view else (owner, unknown)
     body = tirx.SeqStmt([tirx.Evaluate(buf[0, 0]) for buf in accessed])
     mod = kernel(body, buffers=[owner], annotations={"layout_map": {owner: first, view: second}})
-    with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="Ambiguous layout for buffer view unknown"):
-        transform.AscendLayoutInference()(mod)
+    with tvm.target.Target("ascend"):
+        inferred = transform.AscendLayoutInference()(mod)
+    layouts = inferred["main"].body.block.annotations["layout_map"]
+    assert layouts[owner].is_equal(first)
+    assert layouts[view].is_equal(second)
+    assert unknown not in layouts
 
 
 @pytest.mark.parametrize(
@@ -71,7 +76,7 @@ def test_unconstrained_access_cannot_choose_between_distinct_layouts(access_anno
         ("shared.l1", "shared.l0b", False),
     ],
 )
-def test_copy_defaults_do_not_override_the_unique_alias_layout(src_scope, dst_scope, alias_on_source):
+def test_copy_defaults_do_not_inherit_another_view_layout(src_scope, dst_scope, alias_on_source):
     owner = tirx.decl_buffer((32, 32), "bfloat16", name="owner", scope=src_scope if alias_on_source else dst_scope)
     view = tirx.decl_buffer(owner.shape, owner.dtype, name="view", data=owner.data)
     other = tirx.decl_buffer(owner.shape, owner.dtype, name="other", scope=dst_scope if alias_on_source else src_scope)
@@ -86,10 +91,11 @@ def test_copy_defaults_do_not_override_the_unique_alias_layout(src_scope, dst_sc
     with tvm.target.Target("ascend"):
         inferred = transform.AscendLayoutInference()(mod)
     layouts = inferred["main"].body.block.annotations["layout_map"]
-    assert layouts[view].is_equal(layout)
+    assert layouts[owner].is_equal(layout)
+    assert layouts[view].is_equal(make_ascend_major_k_layout(view))
 
 
-def test_copy_default_cannot_hide_ambiguous_alias_layouts():
+def test_copy_default_is_independent_of_distinct_alias_layouts():
     owner = tirx.decl_buffer((32, 32), "bfloat16", name="owner", scope="shared.l1")
     second = tirx.decl_buffer(owner.shape, owner.dtype, name="second", data=owner.data)
     unknown = tirx.decl_buffer(owner.shape, owner.dtype, name="unknown", data=owner.data)
@@ -100,8 +106,11 @@ def test_copy_default_cannot_hide_ambiguous_alias_layouts():
         buffers=[owner, dst],
         annotations={"layout_map": {owner: make_ascend_major_mn_layout(owner), second: make_ascend_major_k_layout(second)}},
     )
-    with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="Ambiguous layout for buffer view unknown"):
-        transform.AscendLayoutInference()(mod)
+    with tvm.target.Target("ascend"):
+        inferred = transform.AscendLayoutInference()(mod)
+    layouts = inferred["main"].body.block.annotations["layout_map"]
+    assert layouts[owner].is_equal(make_ascend_major_mn_layout(owner))
+    assert layouts[unknown].is_equal(make_ascend_major_k_layout(unknown))
 
 
 def test_unused_storage_owner_does_not_need_a_view_layout():
@@ -116,6 +125,14 @@ def test_unused_storage_owner_does_not_need_a_view_layout():
     layouts = inferred["main"].body.block.annotations["layout_map"]
     assert layouts[first_view].is_equal(first)
     assert layouts[second_view].is_equal(second)
+    assert owner not in layouts
+
+
+def test_layout_annotations_require_buffer_keys():
+    owner, view, layout, _ = _views()
+    mod = kernel(tirx.Evaluate(view[0, 0]), buffers=[owner], annotations={"layout_map": {owner.data: layout}})
+    with tvm.target.Target("ascend"), pytest.raises(TypeError, match="Buffer"):
+        transform.AscendLayoutInference()(mod)
 
 
 def test_fragment_aliases_reject_conflicting_thread_ownership():
@@ -128,11 +145,13 @@ def test_fragment_aliases_reject_conflicting_thread_ownership():
         transform.AscendLayoutInference()(mod)
 
 
-def test_view_layouts_must_preserve_the_storage_footprint():
+@pytest.mark.parametrize("annotate_owner", [True, False])
+def test_view_layouts_must_preserve_the_storage_footprint(annotate_owner):
     owner, view, first, _ = _views()
     second = Layout(view.shape, lambda i, j: (i, j * 2))
     body = tirx.SeqStmt([tirx.Evaluate(buf[0, 0]) for buf in (owner, view)])
-    mod = kernel(body, buffers=[owner], annotations={"layout_map": {owner: first, view: second}})
+    layouts = {owner: first, view: second} if annotate_owner else {view: second}
+    mod = kernel(body, buffers=[owner], annotations={"layout_map": layouts})
     with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="equal physical sizes"):
         transform.NormalizeAscendFractalStorage()(transform.AscendLayoutInference()(mod))
 
@@ -153,7 +172,8 @@ def test_typed_pointers_use_each_view_layout_and_one_storage():
 
 
 @tilelang.testing.requires_ascend
-def test_ub_view_reads_the_same_bytes_through_its_own_layout():
+@pytest.mark.parametrize("annotation", ["both", "owner", "view", "unused-view"])
+def test_ub_view_reads_the_same_bytes_through_its_own_layout(annotation):
     import torch
 
     @T.prim_func
@@ -161,7 +181,15 @@ def test_ub_view_reads_the_same_bytes_through_its_own_layout():
         with T.Kernel(1):
             storage = T.alloc_shared((8, 16), "float32")
             view = T.view(storage, (16, 8))
-            T.annotate_layout({storage: Layout((8, 16), lambda i, j: (i, j)), view: Layout((16, 8), lambda i, j: (j, i))})
+            if annotation == "both":
+                T.annotate_layout({storage: Layout((8, 16), lambda i, j: (i, j)), view: Layout((16, 8), lambda i, j: (j, i))})
+            elif annotation == "owner":
+                T.annotate_layout({storage: Layout((8, 16), lambda i, j: (j, i))})
+            elif annotation == "view":
+                T.annotate_layout({view: Layout((16, 8), lambda i, j: (j, i))})
+            else:
+                unused = T.view(storage, (8, 16))
+                T.annotate_layout({unused: Layout((8, 16), lambda i, j: (j, i))})
             with T.SimtVF(threads=128):
                 for i, j in T.Parallel(8, 16):
                     storage[i, j] = A[i, j]
@@ -170,12 +198,13 @@ def test_ub_view_reads_the_same_bytes_through_its_own_layout():
 
     compiled = tilelang.compile(transpose, target="ascend", out_idx=-1)
     source = torch.arange(128, dtype=torch.float32, device="npu").reshape(8, 16)
-    torch.testing.assert_close(compiled(source), source.T, rtol=0, atol=0)
+    expected = source.reshape(16, 8) if annotation == "unused-view" else source.T
+    torch.testing.assert_close(compiled(source), expected, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("annotate_owner", [True, False], ids=["owner", "unused-view"])
-def test_l1_reshape_inherits_major_mn_before_copy_defaults(annotate_owner):
+@pytest.mark.parametrize("annotation", ["both", "unused-view"])
+def test_l1_views_use_only_their_own_layouts(annotation):
     import torch
 
     @T.prim_func
@@ -187,15 +216,13 @@ def test_l1_reshape_inherits_major_mn_before_copy_defaults(annotate_owner):
             a0 = T.alloc_l0a((32, 32), "bfloat16")
             b0 = T.alloc_l0b((32, 32), "bfloat16")
             accum = T.alloc_l0c((32, 32), "float32")
-            if annotate_owner:
-                T.annotate_layout({owner: make_ascend_major_mn_layout(owner)})
+            if annotation == "both":
+                T.annotate_layout({owner: make_ascend_major_mn_layout(owner), view: make_ascend_major_mn_layout(view)})
             else:
-                # An annotation-only view still constrains its storage aliases.
                 T.annotate_layout({view: make_ascend_major_mn_layout(view)})
-            # Write the physical MajorMN representation before the L1->L0 read.
-            T.copy(A, owner, transpose=True)
+            T.copy(A, owner, transpose=annotation == "both")
             T.copy(B, b)
-            if annotate_owner:
+            if annotation == "both":
                 T.copy(view, a0)
             else:
                 T.copy(owner, a0)

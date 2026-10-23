@@ -1068,8 +1068,8 @@ struct AscendCopyImpl {
         Optional<Layout> existing_src_layout =
             FindLayoutForBuffer(T.layout_map, op.src);
         if (!existing_src_layout.defined() && level == InferLevel::kFree) {
-          // Allow explicit layouts and per-view operation requirements to
-          // reach aliases before choosing a default for this endpoint.
+          // Give this endpoint's operation requirements priority over the
+          // standalone-copy default.
           existing_src_layout = MakeAscendMajorKLayout(op.src);
           result_map.Set(op.src, existing_src_layout.value());
         }
