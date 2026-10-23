@@ -9,6 +9,7 @@
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
 #include "backend/common/target_utils.h"
+#include "span_utils.h"
 #include "support/check.h"
 #include "transform/common/vmi_alloc.h"
 #include "tvm/ir/repr.h"
@@ -5375,28 +5376,27 @@ CodeGenTileLangPTO::PtoValueKind CodeGenTileLangPTO::ClassifyVmiCallResult_(
     return PtoValueKind::kVoid;
   }
   static const std::unordered_set<std::string> kDataOps = {
-      "tl.vmi.vci",      "tl.vmi.vbrc",
-      "tl.vmi.vzip",     "tl.vmi.vadd",
-      "tl.vmi.vsub",     "tl.vmi.vmul",
-      "tl.vmi.vdiv",     "tl.vmi.vmax",
-      "tl.vmi.vmin",     "tl.vmi.vand",
-      "tl.vmi.vor",      "tl.vmi.vxor",
-      "tl.vmi.vshl",     "tl.vmi.vshr",
-      "tl.vmi.vabs",     "tl.vmi.vneg",
-      "tl.vmi.vrelu",    "tl.vmi.vexp",
-      "tl.vmi.vln",      "tl.vmi.vsqrt",
-      "tl.vmi.vnot",     "tl.vmi.vadds",
-      "tl.vmi.vmuls",    "tl.vmi.vmaxs",
-      "tl.vmi.vmins",    "tl.vmi.vshls",
-      "tl.vmi.vshrs",    "tl.vmi.vsel",
-      "tl.vmi.vselr",    "tl.vmi.vcadd",
-      "tl.vmi.vcmax",    "tl.vmi.vcmin",
-      "tl.vmi.vcvt",     "tl.vmi.vinterpret_cast",
-      "tl.vmi.vexpdif",  "tl.vmi.vaxpy",
-      "tl.vmi.vlrelu",   "tl.vmi.vprelu",
-      "tl.vmi.vmula",    "tl.vmi.vdhist",
-      "tl.vmi.vchist",   "tl.vmi.vgather",
-      "tl.vmi.vgatherb",
+      "tl.vmi.vci",     "tl.vmi.vbrc",
+      "tl.vmi.vzip",    "tl.vmi.vadd",
+      "tl.vmi.vsub",    "tl.vmi.vmul",
+      "tl.vmi.vdiv",    "tl.vmi.vmax",
+      "tl.vmi.vmin",    "tl.vmi.vand",
+      "tl.vmi.vor",     "tl.vmi.vxor",
+      "tl.vmi.vshl",    "tl.vmi.vshr",
+      "tl.vmi.vabs",    "tl.vmi.vneg",
+      "tl.vmi.vrelu",   "tl.vmi.vexp",
+      "tl.vmi.vln",     "tl.vmi.vsqrt",
+      "tl.vmi.vnot",    "tl.vmi.vadds",
+      "tl.vmi.vmuls",   "tl.vmi.vmaxs",
+      "tl.vmi.vmins",   "tl.vmi.vshls",
+      "tl.vmi.vshrs",   "tl.vmi.vsel",
+      "tl.vmi.vselr",   "tl.vmi.vcadd",
+      "tl.vmi.vcmax",   "tl.vmi.vcmin",
+      "tl.vmi.vcvt",    "tl.vmi.vinterpret_cast",
+      "tl.vmi.vexpdif", "tl.vmi.vaxpy",
+      "tl.vmi.vlrelu",  "tl.vmi.vprelu",
+      "tl.vmi.vmula",   "tl.vmi.vdhist",
+      "tl.vmi.vchist",  "tl.vmi.vgather",
   };
   if (kDataOps.count(name) != 0U) {
     return PtoValueKind::kVmiData;
@@ -5494,6 +5494,40 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
   std::string op_name = opt_call_op.value()->name;
   ICHECK(StartsWith(op_name, "tl.vmi."))
       << "Expected a tl.vmi.* call, got " << op_name;
+
+  // VMI addresses, both ordinary and indexed, are lowered by
+  // LegalizePTOVMIMemoryAccess into an explicit descriptor before code
+  // generation.  A raw BufferLoad at the address operand means that pass was
+  // skipped or never ran on this function, so report the actual offending
+  // operand instead of emitting an invalid PTODSL memory access.  Nested loads
+  // (for example a descriptor's index[0]) remain ordinary reads and are not
+  // diagnosed here.
+  {
+    int address_index = -1;
+    if (op_name == "tl.vmi.vload" || op_name == "tl.vmi.vgather") {
+      address_index = 0;
+    } else if (op_name == "tl.vmi.vscatter") {
+      address_index = 1;
+    } else if (op_name == "tl.vmi.vstore") {
+      auto dist_mode_it = op->annotations.find("dist_mode");
+      const ObjectRef dist_mode = dist_mode_it != op->annotations.end()
+                                      ? (*dist_mode_it).second
+                                      : ObjectRef();
+      const bool is_dintlv_store =
+          dist_mode.defined() && dist_mode.as<StringImmNode>() != nullptr &&
+          Downcast<StringImm>(dist_mode)->value == "dintlv";
+      address_index = is_dintlv_store ? 2 : 1;
+    }
+    if (address_index >= 0 &&
+        static_cast<size_t>(address_index) < op->args.size() &&
+        op->args[address_index].as<BufferLoadNode>() != nullptr) {
+      LOG(FATAL) << "LegalizePTOVMIMemoryAccess: unlowered raw BufferLoad at "
+                 << op_name << " address operand " << address_index
+                 << "; VMI memory descriptors must be legalized before code "
+                    "generation"
+                 << tvm::tl::SpanHintSuffix(op->span);
+    }
+  }
 
   std::vector<std::pair<std::string, ObjectRef>> kwargs;
   kwargs.reserve(op->annotations.size());
@@ -5599,8 +5633,8 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
     PrintExpr_(arg, os);
   };
 
-  // PTODSL vgather/vgatherb/vscatter take a single pointer operand. TileLang
-  // lowers buffer addresses to (ptr, elem_offset); fold them with addptr here.
+  // PTODSL vgather/vscatter take a single pointer operand. TileLang lowers
+  // buffer addresses to (ptr, elem_offset); fold them with addptr here.
   auto print_ptr_with_offset = [&](const PrimExpr &ptr,
                                    const PrimExpr &offset) {
     if (is_zero(offset)) {
@@ -5611,7 +5645,7 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
        << RemoveOutermostParentheses(PrintExpr_(offset)) << ")";
   };
 
-  if (op_name == "tl.vmi.vgather" || op_name == "tl.vmi.vgatherb") {
+  if (op_name == "tl.vmi.vgather") {
     ICHECK_EQ(op->args.size(), 4U)
         << op_name << " expects (ptr, offset, offsets, mask)";
     print_ptr_with_offset(op->args[0], op->args[1]);

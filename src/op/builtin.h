@@ -403,7 +403,6 @@ TVM_DLL const Op &vmi_vmula();
 TVM_DLL const Op &vmi_vdhist();
 TVM_DLL const Op &vmi_vchist();
 TVM_DLL const Op &vmi_vgather();
-TVM_DLL const Op &vmi_vgatherb();
 TVM_DLL const Op &vmi_vscatter();
 
 /*!

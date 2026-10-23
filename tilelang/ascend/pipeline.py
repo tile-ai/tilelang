@@ -61,6 +61,15 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     if should_enable_race_check(pass_ctx=pass_ctx):
         mod = tilelang.transform.VerifyParallelLoop()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
+    # PTO functions normalize VMI allocation markers onto the owning
+    # allocations and lower ordinary VMI memory descriptors while the early
+    # unroll still sees them.  The default mutator-with-analyzer supplies the
+    # enclosing If/loop facts used by the descriptor proof; InjectAssumes only
+    # contributes explicit assumption facts.  VerifyBufferInit and scheduling
+    # both consume the descriptor produced here.
+    if target_is_pto(target):
+        mod = ascend_transform.NormalizePTOAllocMarkers()(mod)
+        mod = ascend_transform.LegalizePTOVMIMemoryAccess()(mod)
     # Expand AIV-side dual copies before layout, OOB, and scheduling passes.
     # Reuse an enclosing cthread sid from an explicit T.Vector block; an
     # auto-scheduled mixed T.Kernel gets one synthesized before its core
@@ -76,10 +85,6 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
-    # PTO functions normalize VMI allocation markers onto the owning
-    # allocations before the early unroll clones them.
-    if target_is_pto(target):
-        mod = ascend_transform.NormalizePTOAllocMarkers()(mod)
     # Materialize only user-requested explicit unrolls outside VF blocks so
     # LayoutInference and AutoSchedule can consume the expanded operations.
     mod = ascend_transform.UnrollLoopSkipVF()(mod)

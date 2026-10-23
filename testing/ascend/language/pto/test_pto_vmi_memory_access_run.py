@@ -6,22 +6,35 @@ MTE sync flags; no test disables scheduling).  Inputs are built on CPU with
 torch, copied to the NPU, and compared against an independent CPU reference
 after ``torch.npu.synchronize()``.
 
-Critical dependency paths execute 20 fresh trials each with independently
-prepared inputs and a fresh output tensor, and also assert the
+The long-running dependency paths execute 20 fresh trials each with
+independently prepared inputs and a fresh output tensor, and also assert the
 generated-source order and MTE sync pair:
 
 * a DMA that writes only the non-zero ``[64,128)`` region feeding
   ``vload(work[64], size=64)``;
 * ``vstore(..., work[64])`` feeding a DMA that reads only ``[64,128)``;
+* a DMA that writes only ``[192,256)`` feeding the indexed
+  ``vgather(work[64], offsets=128, mask)`` (every lane reads ``input[0]``);
+* ``vscatter(value, work[64], offsets=128+arange(64), mask)`` writing only
+  ``[192,256)``, consumed by a DMA of that subregion;
 * a padded view whose low group is written by DMA and read by a static
-  negative group stride, with both groups initialized for the reference.
+  negative group stride, with both groups initialized for the reference;
+* an explicit descriptor crossing a row (seeded row-0 tail plus a DMA
+  row-1 head) read as one 128-lane load;
+* an ordinary broadcast descriptor fed by a real DMA producer.
 
-The remaining cases are one device-numerics representative per access mode:
-block_stride, FP4 raw packed bytes (buffer and explicit-pointer forms), a
-packed (PK) narrowing store, an explicit ``access_ptr`` plus extra offset, and
-gather/scatter with non-zero bases (direct and explicit-pointer forms).  The
-device numerical reference is exact for copy-like kernels and an independent
-CPU computation (torch cast reference) for narrowing.
+The runtime branch kernel is a separate dispatch case: a runtime ``k``
+inside ``0 <= k <= 1`` selects ``input[0:64]`` or ``input[64:128]`` through a
+real ``if``.  It runs both branch values (four trials, two per value), which
+is the coverage this case needs; it is not expanded to 20 trials.
+
+The remaining cases each run a small fixed number of seeded trials (3-5) and
+cover one device-numerics representative per access mode: block_stride, FP4
+raw packed bytes (buffer and explicit-pointer forms), a packed (PK) narrowing
+store, an explicit ``access_ptr`` plus extra offset, and gather/scatter with
+non-zero bases (direct and explicit-pointer forms).  The device numerical
+reference is exact for copy-like kernels and an independent CPU computation
+(torch cast reference) for narrowing.
 
 A runtime group stride has no proven physical envelope, so those kernels are
 rejected at compile time and their diagnostics live in the structural suite;
@@ -150,22 +163,40 @@ def _line_index(lines, predicate, start=0, what="line"):
     raise AssertionError(f"missing {what} from line {start}:\n" + "\n".join(lines))
 
 
-def _assert_mte2_to_v_then_load(lines, dma_predicate, descriptor_needle):
+def _assert_mte2_to_v_then_load(lines, dma_predicate, instruction_fragment):
     dma = _line_index(lines, dma_predicate, what="producer MTE2 DMA")
     set_index = _line_index(lines, lambda line: 'set_flag("MTE2", "V"' in line, dma, "MTE2->V set_flag")
     wait_index = _line_index(lines, lambda line: 'wait_flag("MTE2", "V"' in line, set_index, "MTE2->V wait_flag")
     vload = _line_index(lines, lambda line: "vmi.vload" in line, wait_index, "vmi.vload")
     assert dma < set_index < wait_index < vload
-    assert descriptor_needle in lines[vload], lines[vload]
+    assert instruction_fragment in lines[vload], lines[vload]
 
 
-def _assert_store_then_v_to_mte3(lines, dma_predicate, store_needle):
+def _assert_store_then_v_to_mte3(lines, dma_predicate, instruction_fragment):
     store = _line_index(lines, lambda line: "vmi.vstore" in line, what="vmi.vstore")
     set_index = _line_index(lines, lambda line: 'set_flag("V", "MTE3"' in line, store, "V->MTE3 set_flag")
     wait_index = _line_index(lines, lambda line: 'wait_flag("V", "MTE3"' in line, set_index, "V->MTE3 wait_flag")
     dma = _line_index(lines, dma_predicate, wait_index, "consumer MTE3 DMA")
     assert store < set_index < wait_index < dma
-    assert store_needle in lines[store], lines[store]
+    assert instruction_fragment in lines[store], lines[store]
+
+
+def _assert_mte2_to_v_then_indexed(lines, dma_predicate, op_needle, instruction_fragment):
+    dma = _line_index(lines, dma_predicate, what="producer MTE2 DMA")
+    set_index = _line_index(lines, lambda line: 'set_flag("MTE2", "V"' in line, dma, "MTE2->V set_flag")
+    wait_index = _line_index(lines, lambda line: 'wait_flag("MTE2", "V"' in line, set_index, "MTE2->V wait_flag")
+    indexed = _line_index(lines, lambda line: op_needle in line, wait_index, op_needle)
+    assert dma < set_index < wait_index < indexed
+    assert instruction_fragment in lines[indexed], lines[indexed]
+
+
+def _assert_indexed_then_v_to_mte3(lines, dma_predicate, op_needle, instruction_fragment):
+    indexed = _line_index(lines, lambda line: op_needle in line, what=op_needle)
+    set_index = _line_index(lines, lambda line: 'set_flag("V", "MTE3"' in line, indexed, "V->MTE3 set_flag")
+    wait_index = _line_index(lines, lambda line: 'wait_flag("V", "MTE3"' in line, set_index, "V->MTE3 wait_flag")
+    dma = _line_index(lines, dma_predicate, wait_index, "consumer MTE3 DMA")
+    assert indexed < set_index < wait_index < dma
+    assert instruction_fragment in lines[indexed], lines[indexed]
 
 
 def _float_inputs(shape, trial, base=0.0, step=1.0):
@@ -244,6 +275,119 @@ def test_nonzero_store_to_dma_dependency_20_trials(npu):
         return [a, sentinel], a
 
     _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Indexed gather owner dependency: DMA writing only [192,256) -> indexed
+# vgather(work[64], 128)
+# ---------------------------------------------------------------------------
+def _indexed_gather_high_region_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            out = T.alloc_shared((64,), F32)
+            T.copy(A, work[192:256])  # producer DMA: only the consumed region
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vbrc(T.uint32(128), size=64)
+                value = T.vmi.vgather(work[64], offsets, mask)
+                T.vmi.vstore(value, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def test_indexed_gather_high_region_dependency_20_trials(npu):
+    kernel, source = _compile(_indexed_gather_high_region_kernel())
+    lines = source.splitlines()
+    _assert_mte2_to_v_then_indexed(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" in line and ", 192)" in line,
+        "vmi.vgather",
+        ", 64)",
+    )
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], torch.full((64,), a[0].item())
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Indexed scatter owner dependency: indexed vscatter(work[64], 128+arange)
+# -> DMA reading only [192,256)
+# ---------------------------------------------------------------------------
+def _indexed_scatter_high_region_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            src = T.alloc_shared((64,), F32)
+            T.copy(A, src)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vci(T.uint32(128), size=64)
+                value = T.vmi.vload(src[0], size=64)
+                T.vmi.vscatter(value, work[64], offsets, mask)
+            T.copy(work[192:256], C)  # consumer DMA: only the written region
+
+    return main
+
+
+def test_indexed_scatter_high_region_dependency_20_trials(npu):
+    kernel, source = _compile(_indexed_scatter_high_region_kernel())
+    lines = source.splitlines()
+    _assert_indexed_then_v_to_mte3(
+        lines,
+        lambda line: "mte_ub_gm" in line and "addptr" in line and ", 192)" in line,
+        "vmi.vscatter",
+        ", 64)",
+    )
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], a.clone()
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Runtime branch constrained tight-view start with a runtime k
+# ---------------------------------------------------------------------------
+def _runtime_branch_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), k: T.int32, C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            view = tirx.decl_buffer((2, 128), F32, data=work.data, scope="shared.dyn")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                if k >= 0 and k <= 1:
+                    v = T.vmi.vload(view[0, k * 64], size=64)
+                    T.vmi.vstore(v, view[1, 0], mask)
+            T.copy(work[128:192], C)
+
+    return main
+
+
+def test_runtime_branch_runtime_k(npu):
+    """The generated kernel keeps the runtime branch and indexes with k."""
+    kernel, source = _compile(_runtime_branch_kernel())
+    lines = source.splitlines()
+    branch = next(line.strip() for line in lines if line.strip().startswith("if ") and "k" in line)
+    assert "0 <= k" in branch and "k <= 1" in branch, branch
+    vload = next(line.strip() for line in lines if "vmi.vload" in line)
+    assert "k * 64" in vload, vload
+
+    def make_case(trial):
+        a = _float_inputs((256,), trial)
+        k = trial % 2
+        return [a, k], a[64 * k : 64 * (k + 1)]
+
+    _run_trials(kernel, make_case, npu, trials=4)
 
 
 # ---------------------------------------------------------------------------
@@ -440,8 +584,13 @@ def _assert_padded_group_same_view(func):
         name = getattr(call.op, "name", "")
         if name == "tl.vmi.vload":
             source = call.args[0]
-            assert isinstance(source, tirx.Call) and getattr(source.op, "name", "") == "tl.access_ptr", source
-            vload_buffers.append(source.args[0].buffer)
+            if isinstance(source, tirx.Call) and getattr(source.op, "name", "") == "tl.access_ptr":
+                vload_buffers.append(source.args[0].buffer)
+            else:
+                # Ordinary automatic addresses stay raw in the frontend; the
+                # descriptor is built by LegalizePTOVMIMemoryAccess.
+                assert isinstance(source, tirx.BufferLoad), source
+                vload_buffers.append(source.buffer)
         elif name == "tl.tileop.ascend_copy":
             dma_destinations.append(call.args[1].args[0])
     assert len(vload_buffers) == 1, vload_buffers

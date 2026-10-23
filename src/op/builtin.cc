@@ -207,7 +207,6 @@ TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmula).set_num_inputs(-1);
 TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vdhist).set_num_inputs(-1);
 TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vchist).set_num_inputs(-1);
 TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vgather).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vgatherb).set_num_inputs(-1);
 TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vscatter).set_num_inputs(-1);
 
 TIR_DEFINE_TL_BUILTIN(any_sync).set_num_inputs(2).set_attr<TCallEffectKind>(

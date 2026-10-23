@@ -6,47 +6,46 @@ backend can express also call ``tilelang.compile``, which runs PTODSL -> PTOAS
 (VPTO) -> Bisheng; that is compile evidence, not numerical evidence (device
 results live in ``test_pto_vmi_memory_access_run.py``).
 
-Contracts verified here:
+The frontend keeps an ordinary ``T.vmi.vload``/``T.vmi.vstore`` address as the
+raw ``BufferLoad``; ``LegalizePTOVMIMemoryAccess`` builds the descriptor in TIR
+after ``InjectAssumes``, so the proof sees branch facts and the result is
+visible to the scheduler.  This file verifies:
 
-* ``T.vmi.vload``/``T.vmi.vstore`` access descriptors carry the true start
-  address and a per-access-mode effective extent.  The VMI instruction offset
-  is zero unless a relocation candidate moves the source position into it;
-  descriptor base + instruction offset always equals the original access
-  address after the normal negative-index legalization, so the scheduler sees
-  the actual accessed range.
-* Ordinary continuous loads round up to full physical vectors; ordinary
-  broadcast declares the single element it actually reads; ``dintlv`` loads declare both
-  results and a two-input ``dintlv`` store declares the full 2*N span (its
-  PTODSL attribute is emitted as ``intlv``); group envelopes cover all
-  groups (slot/broadcast count one element per group, a static negative
-  stride relocates the lowest address and compensates with the instruction
-  offset, a view whose strides are at least dense row-major declares its
-  logical prefix from the buffer origin, and a whole tight buffer is used
-  only when its envelope and every axis start are proven compatible with
-  the buffer).  A group or group stride without proven bounds is rejected
-  at compile time; a static negative stride is rejected only when no
-  complete descriptor can be constructed without changing the address,
-  and a single group's dynamic stride stays supported because it produces
-  no inter-group displacement.  ``block_stride`` extents are measured in
-  32B blocks; a dynamic or negative block stride is likewise rejected
-  instead of falling back to a fabricated range;
-  genuine FP4 descriptors stay logical and are packed exactly once (odd
-  starts are rejected); packed (PK) store extents stay logical target
-  elements; an explicit ``access_ptr`` keeps the caller-declared descriptor
-  plus the extra offset and the UB scope check; gather/scatter preserve
-  non-zero bases.
-* Ordinary ``vload``/``vstore`` validate the complete physical envelope against
-  the existing logical pointer-region analysis.  A local descriptor must prove the
-  row-major carry from its own start (there is no whole-buffer fallback);
+* Descriptor construction: the true start address and the per-access-mode
+  effective extent.  The VMI instruction offset is zero unless a relocation
+  candidate moves the source position into it; descriptor base + instruction
+  offset always equals the original access address after the normal
+  negative-index legalization.
+* Physical envelopes: ordinary continuous loads round up to full physical
+  vectors; ordinary broadcast declares the single element it actually reads;
+  ``dintlv`` loads declare both results and a two-input ``dintlv`` store
+  declares the full 2*N span (its PTODSL attribute is emitted as ``intlv``);
+  group envelopes cover all groups (slot/broadcast count one element per
+  group, a static negative stride relocates the lowest address and compensates
+  with the instruction offset, a padded row-major view declares its logical
+  prefix from the buffer origin, and a whole tight buffer is used only when
+  its envelope and every axis start are proven compatible with the buffer).
+  A dynamic group or block stride is rejected instead of falling back to a
+  fabricated range; a static negative stride is rejected only when no complete
+  descriptor preserves the address; ``block_stride`` extents are measured in
+  32B blocks.  Genuine FP4 descriptors stay logical and are packed exactly
+  once; packed (PK) store extents stay logical target elements; gather/scatter
+  preserve non-zero bases.
+* Coverage diagnostics from the descriptor pass: a local descriptor must prove
+  the row-major carry from its own start (there is no whole-buffer fallback);
   dynamic indices may use active loop domains and stable integer lets, but a
   mutable read or an unknown scalar is never bound as an equality; dynamic
   inner dimensions and symbolic multi-dimensional extents require an in-row
   proof.  An explicit ``access_ptr`` keeps its caller-declared descriptor only
   when its extent contains the envelope and its declared region still covers
-  the access; unrecoverable handles, multi-level aliases, direction mismatches
-  and element-unit mismatches are rejected.
-* Masks never shrink the may-write extent, and a logical ``size=80`` load
-  declares both physical reads.
+  the access.  API, UB-scope, mask, direction and element-unit checks stay in
+  the frontend.
+* Masks never shrink the may-write extent, a logical ``size=80`` load declares
+  both physical reads, and the descriptor pass runs exactly once on the PTO
+  path in the documented position (and never for plain AscendC).
+* Code generation rejects an unlowered outermost raw address at the correct
+  VMI operand; a nested scalar read inside a formal descriptor stays a real
+  read.
 * Removed interface parameters (``repeat_stride``, vload ``unpack`` /
   ``to_dtype``, vstore ``pmode``) fail in a legal scope.
 
@@ -58,6 +57,7 @@ diagnostics/descriptors are verified structurally.
 
 from __future__ import annotations
 
+import itertools
 import os
 import subprocess
 import tempfile
@@ -71,8 +71,15 @@ import tilelang
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform as ascend_transform
-from tilelang.ascend.target import normalize_pto_target
+from tilelang.ascend.target import normalize_ascend_target, normalize_pto_target
 from tilelang.engine.lower import lower as _lower
+from tilelang.instrumentation import (
+    PassEventObserver,
+    PassInstrumentationTool,
+    StackedPassInstrument,
+    compile_pass_instrumentation,
+    create_pass_instruments,
+)
 
 FP4 = "float4_e2m1fn"
 F16 = "float16"
@@ -93,6 +100,69 @@ def _lower_pto(func):
 def _compile_pto(func):
     """Compile through the PTODSL -> PTOAS (VPTO) -> Bisheng pipeline."""
     return tilelang.compile(func, target="pto", out_idx=-1)
+
+
+class _TraceObserver(PassEventObserver):
+    """Record visited pass names and optionally capture a module boundary."""
+
+    def __init__(self, capture_start=None, capture_finish=None):
+        self.names = []
+        self.capture_start = capture_start
+        self.capture_finish = capture_finish
+        self.started_module = None
+        self.finished_module = None
+
+    def pass_started(self, mod, event):
+        self.names.append(event.name)
+        if event.name == self.capture_start and self.started_module is None:
+            self.started_module = mod
+
+    def pass_finished(self, mod, event, state):
+        if event.name == self.capture_finish and self.finished_module is None:
+            self.finished_module = mod
+
+
+class _TraceTool(PassInstrumentationTool):
+    def __init__(self, observer):
+        self.observer = observer
+
+    def create_pass_instrument(self):
+        return StackedPassInstrument(self.observer)
+
+
+_TRACE_IDS = itertools.count()
+
+
+def _lower_pto_traced(
+    func,
+    *,
+    target_name="pto",
+    auto_schedule=True,
+    capture_start=None,
+    capture_finish=None,
+):
+    """Lower *func* with the real product pipeline and record its pass trace."""
+    observer = _TraceObserver(capture_start=capture_start, capture_finish=capture_finish)
+    name = f"vmi-descriptor-trace-{next(_TRACE_IDS)}"
+    target = normalize_pto_target("pto") if target_name == "pto" else normalize_ascend_target("ascend")
+    with (
+        compile_pass_instrumentation(name=name, tools=[_TraceTool(observer)]),
+        tvm.transform.PassContext(
+            config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: auto_schedule},
+            instruments=create_pass_instruments(context=name),
+        ),
+        target,
+    ):
+        artifact = _lower(func, target=target)
+    return artifact, observer
+
+
+def _pto_source(func):
+    """Generate PTODSL for *func* without compiling, through the real backend."""
+    target = normalize_pto_target("pto")
+    build = tvm.ffi.get_global_func("target.build.tilelang_pto_without_compile")
+    with target:
+        return build(tvm.IRModule({"main": func}), target).inspect_source()
 
 
 def _iter_calls(artifact, op_name):
@@ -136,17 +206,26 @@ def _single(artifact, op_name):
     return pairs[0]
 
 
-def _assert_descriptor_error(build, op, reason, *, explicit=False):
-    """Assert an unprovable footprint is rejected with the right op and reason."""
-    with pytest.raises(ValueError) as excinfo:
-        build()
+def _assert_descriptor_error(build, op, reason, *, explicit=False, descriptor=True):
+    """Assert the descriptor pass rejects an unprovable footprint.
+
+    ``descriptor=False`` covers diagnostics emitted directly by the pass before
+    it selects a plan (dynamic/negative group and block strides); those do not
+    carry the descriptor-context sentence or the buffer context.
+    """
+    with pytest.raises(tvm.error.TVMError) as excinfo:
+        _lower_pto(build())
     message = str(excinfo.value)
-    prefix = (
-        "cannot verify the explicit access_ptr descriptor"
-        if explicit
-        else "cannot construct a descriptor covering the complete physical access"
-    )
-    assert f"{op} {prefix}" in message, message
+    assert "LegalizePTOVMIMemoryAccess" in message, message
+    if descriptor:
+        prefix = (
+            "cannot verify the explicit access_ptr descriptor"
+            if explicit
+            else "cannot construct a descriptor covering the complete physical access"
+        )
+        assert f"{op} {prefix}" in message, message
+        assert "buffer '" in message and ": shape=[" in message, message
+    assert f"{op} " in message, message
     assert reason in message, message
     return message
 
@@ -244,6 +323,75 @@ def _load_store_kernel():
             T.copy(work[0:320], C)
 
     return main
+
+
+def _func_calls(func, op_name):
+    """Calls of *op_name* in an unlowered frontend PrimFunc."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "") == op_name:
+            found.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
+    return found
+
+
+def test_frontend_keeps_ordinary_raw_address():
+    """The frontend keeps automatic addresses raw until the descriptor pass.
+
+    ``vload``/``vstore`` address operands stay ``BufferLoad`` with their
+    original scalar starts; an explicit binding keeps the original ``p`` Var.
+    No automatic ``tl.access_ptr`` is constructed before lowering.
+    """
+    ordinary = _load_store_kernel()
+    (load,) = _func_calls(ordinary, "tl.vmi.vload")
+    assert isinstance(load.args[0], tvm.tirx.BufferLoad), load.args[0]
+    assert int(load.args[0].indices[0]) == 64
+    assert _const(load.args[1]) == 0
+    (store,) = _func_calls(ordinary, "tl.vmi.vstore")
+    assert isinstance(store.args[1], tvm.tirx.BufferLoad), store.args[1]
+    assert int(store.args[1].indices[0]) == 192
+    assert not _func_calls(ordinary, "tl.access_ptr")
+
+    explicit = _explicit_pointer_kernel()
+    (bound_load,) = _func_calls(explicit, "tl.vmi.vload")
+    assert isinstance(bound_load.args[0], tvm.tirx.Var), bound_load.args[0]
+    assert _const(bound_load.args[1]) == 16
+    (pointer,) = _func_calls(explicit, "tl.access_ptr")
+    assert isinstance(pointer.args[0], tvm.tirx.BufferLoad)
+    assert _const(pointer.args[1]) == 128
+    assert _const(pointer.args[2]) == 1
+
+
+def _runtime_branch_kernel():
+    """Tight (2,128) view whose row-0 coverage follows from a real branch."""
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), k: T.int32, C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            view = tvm.tirx.decl_buffer((2, 128), F32, data=work.data, scope="shared.dyn")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                if k >= 0 and k <= 1:
+                    value = T.vmi.vload(view[0, k * 64], size=64)
+                    T.vmi.vstore(value, view[1, 0], mask)
+            T.copy(work, C)
+
+    return main
+
+
+def test_runtime_branch_compiles_through_pipeline():
+    """The descriptor pass proves coverage from the enclosing branch facts."""
+    artifact = _lower_pto(_runtime_branch_kernel())
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr"), ptr
+    assert _const(ptr.args[3]) == 64
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 0
 
 
 def test_load_descriptor_originates_at_actual_load():
@@ -658,7 +806,7 @@ def test_group_dynamic_stride_has_no_proven_bounds(is_load):
         return main
 
     op = "T.vmi.vload" if is_load else "T.vmi.vstore"
-    _assert_descriptor_error(build, op, "group stride has no proven bounds")
+    _assert_descriptor_error(build, op, "group stride has no proven bounds", descriptor=False)
 
 
 def test_group_negative_stride_below_view_origin_is_rejected():
@@ -736,29 +884,33 @@ def test_group_negative_stride_nd_uses_padded_origin_plan():
 
 
 @pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
-def test_group_negative_stride_nd_negative_start_is_rejected(is_load):
-    """work[2,-32] legalizes to 160; relocating the descriptor would start at 96."""
+def test_group_negative_stride_negative_coordinate_uses_legalized_address(is_load):
+    """work[2,-32] is normalized to work[2,32] (linear 160) before the pass.
 
-    def build():
-        @T.prim_func
-        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
-            with T.Kernel(1):
-                work = T.alloc_shared((4, 64), F32)
-                T.copy(A, work)
-                with T.SimdVF():
-                    if is_load:
-                        mask = T.vmi.create_mask(128, size=128)
-                        v = T.vmi.vload(work[2, -32], size=128, group=2, stride=-64)
-                        T.vmi.vstore(v, work[0, 0], mask)
-                    else:
-                        v = T.vmi.vload(work[0, 0], size=128)
-                        T.vmi.vstore(v, work[2, -32], group=2, stride=-64)
-                T.copy(work, C)
+    The descriptor relocates to the tight buffer origin with instruction offset
+    160, so the group-1 address (96) still matches the normalized coordinate.
+    """
 
-        return main
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((4, 64), F32)
+            T.copy(A, work)
+            with T.SimdVF():
+                if is_load:
+                    mask = T.vmi.create_mask(128, size=128)
+                    v = T.vmi.vload(work[2, -32], size=128, group=2, stride=-64)
+                    T.vmi.vstore(v, work[0, 0], mask)
+                else:
+                    v = T.vmi.vload(work[0, 0], size=128)
+                    T.vmi.vstore(v, work[2, -32], group=2, stride=-64)
+            T.copy(work, C)
 
-    op = "T.vmi.vload" if is_load else "T.vmi.vstore"
-    _assert_descriptor_error(build, op, "negative-index legalization")
+    artifact = _lower_pto(main)
+    if is_load:
+        assert _descriptor(artifact, "tl.vmi.vload") == (0, 256, 1, 160)
+    else:
+        assert _descriptor(artifact, "tl.vmi.vstore") == (0, 256, 2, 160)
 
 
 # ---------------------------------------------------------------------------
@@ -864,9 +1016,8 @@ def test_padded_low_group_dma_synchronizes_before_vmi_load():
                 T.vmi.vstore(value, out[0], mask)
             T.copy(out, C)
 
-    from testing.ascend._ir import schedule as ir_schedule
-
-    events = _sync_events(ir_schedule(main, through="InsertSync", auto_schedule=True))
+    _, observer = _lower_pto_traced(main, capture_finish="tl.InsertSync")
+    events = _sync_events(observer.finished_module)
     dma = [index for index, event in enumerate(events) if event == ("copy", (0, 0))]
     assert len(dma) == 1, events
     loads = [index for index, event in enumerate(events) if event[0] == "vload"]
@@ -879,53 +1030,258 @@ def test_padded_low_group_dma_synchronizes_before_vmi_load():
     assert dma[0] < set_index < wait_index < loads[0], events
 
 
-@pytest.mark.parametrize(
-    ("shape", "strides", "indices", "accepted"),
-    [
-        ((2, 128), (256, 1), (1, 0), True),
-        ((2, 128), (256, 1), (0, 0), False),
-        ((2, 128), (1, 2), (1, 0), False),
-        ((2, 128), (64, 1), (1, 0), False),
-        ((4, 128), (256, 1), (-1, 512), False),
-    ],
-    ids=["padded", "unproven-low", "transposed", "compressed", "negative-start"],
-)
-def test_padded_origin_plan_static_layout_boundaries(shape, strides, indices, accepted):
-    """The origin plan requires non-negative starts, a padded layout and an
-    envelope above the origin.
+# ---------------------------------------------------------------------------
+# Pipeline placement and the codegen guard for the descriptor pass
+# ---------------------------------------------------------------------------
+def test_descriptor_pipeline_order():
+    """The descriptor runs once after InjectAssumes and before VerifyBufferInit.
 
-    A layout-incompatible source makes this candidate return ``None`` so the
-    caller keeps trying other constructions.  A candidate that can be built is
-    still subject to the shared acceptance exit (address preservation,
-    containment and logical coverage), so an envelope below the origin is
-    rejected there rather than silently dropped.
+    AutoSchedule only controls the later scheduling passes; it never gates or
+    duplicates descriptor legalization.
     """
-    from tilelang.ascend.language import vmi as vmi_language
+    expected = [
+        "tl.LegalizeNegativeIndex",
+        "tl.InjectAssumes",
+        "tl.NormalizePTOAllocMarkers",
+        "tl.LegalizePTOVMIMemoryAccess",
+        "tl.VerifyBufferInit",
+    ]
+    for auto_schedule in (True, False):
+        artifact, observer = _lower_pto_traced(
+            _load_store_kernel(),
+            auto_schedule=auto_schedule,
+            capture_start="tl.VerifyBufferInit" if auto_schedule else None,
+        )
+        names = observer.names
+        assert names.count("tl.LegalizePTOVMIMemoryAccess") == 1, (auto_schedule, names)
+        positions = [names.index(name) for name in expected]
+        assert positions == sorted(positions), (auto_schedule, positions)
+        if auto_schedule:
+            assert "tl.MaterializeScheduleUnits" in names, names
+            assert names.index("tl.VerifyBufferInit") < names.index("tl.MaterializeScheduleUnits")
+        else:
+            assert "tl.MaterializeScheduleUnits" not in names, names
+            assert "tl.InsertSync" not in names, names
+        assert "pto.vmi.vload(" in artifact.kernel_source
+        if auto_schedule:
+            module = observer.started_module
+            assert module is not None
+            func = next(iter(module.functions.values()))
+            loads = []
 
-    buffer = tvm.tirx.decl_buffer(shape, F32, name="view", strides=strides, scope="shared.dyn")
-    source = tvm.tirx.BufferLoad(buffer, list(indices))
-    proof = vmi_language._local_analyzer([*indices, *shape])
-    candidate = vmi_language._padded_origin_plan(source, proof, low=-256, high=64)
-    if candidate is None:
-        assert not accepted
-        return
-    zero = tvm.tirx.IntImm("int32", 0)
-    plan = vmi_language._DescriptorPlan(
-        base=candidate[1],
-        starts=[zero for _ in shape],
-        extent=candidate[0],
-        offset=candidate[2],
-        relative=zero,
-        kind="origin",
-        require_static_shape=True,
+            def collect_vload(node, loads=loads):
+                if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "") == "tl.vmi.vload":
+                    loads.append(node)
+
+            tvm.tirx.stmt_functor.post_order_visit(
+                func.body,
+                collect_vload,
+            )
+            assert len(loads) == 1, loads
+            address = loads[0].args[0]
+            assert isinstance(address, tvm.tirx.Call) and address.op.name == "tl.access_ptr", address
+            assert _const(address.args[1]) == 64
+            assert _const(address.args[2]) == 1
+
+
+def test_descriptor_pass_is_pto_only():
+    """Plain AscendC lowering must not run the PTO descriptor or marker passes."""
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            T.copy(A, work)
+            T.copy(work, C)
+
+    artifact, observer = _lower_pto_traced(main, target_name="ascend")
+    assert "tl.LegalizePTOVMIMemoryAccess" not in observer.names
+    assert "tl.NormalizePTOAllocMarkers" not in observer.names
+    assert "tl.VerifyBufferInit" in observer.names
+    assert artifact.kernel_source
+
+
+def test_vmi_store_does_not_fake_a_read(capfd):
+    """A write-only VMI store is not reported as a read by VerifyBufferInit."""
+    artifact = _lower_pto(_store_only_kernel())
+    stderr = capfd.readouterr().err
+    assert "Buffer read before initialization" not in stderr, stderr
+    # The merged UB layout places the source first; only the rw mask matters here.
+    assert _descriptor(artifact, "tl.vmi.vstore") == (_merged_target_offset(F32, F32, count=64), 64, 2, 0)
+
+
+def test_one_lane_vmi_value_remains_vmi_data():
+    """A size=1 VMI value keeps its scalar TIR dtype but is still VMI data.
+
+    Lane count is not a provenance check: the pass must admit the value the
+    frontend produced instead of rejecting it as a non-vector scalar.
+    """
+    artifact = _lower_pto(_lane_one_store_kernel())
+    load = _descriptor(artifact, "tl.vmi.vload")
+    store = _descriptor(artifact, "tl.vmi.vstore")
+    assert load[1:] == (1, 1, 0), load
+    assert store[1:] == (1, 2, 0), store
+    func, call = _single(artifact, "tl.vmi.vstore")
+    value = _resolve_binding(call.args[0], func)
+    assert isinstance(value, tvm.tirx.Call) and value.op.name == "tl.vmi.vload", value
+
+
+def test_formal_vmi_read_does_not_hide_a_later_scalar_read(capfd):
+    """A read-only VMI descriptor is not a writer for VerifyBufferInit.
+
+    The raw-address form made ``ForEachOpaqueWrite`` treat the direct
+    ``BufferLoad`` argument as a possible writer, which hid the existing
+    uninitialized-read warning for the later scalar read.  With the descriptor
+    in place, the later scalar read of ``work`` is diagnosed.  This does not
+    claim detection of VMI-only uninitialized loads: the unchanged verifier
+    skips read descriptors on opaque calls.
+    """
+    _lower_pto(_uninitialized_vmi_read_kernel())
+    stderr = capfd.readouterr().err
+    assert "Buffer read before initialization" in stderr, stderr
+    assert "`work`" in stderr, stderr
+
+
+def _store_only_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            source = T.alloc_shared((64,), F32)
+            dest = T.alloc_shared((64,), F32)
+            T.copy(A, source)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                v = T.vmi.vload(source[0], size=64)
+                T.vmi.vstore(v, dest[0], mask)
+            T.copy(source, C)
+
+    return main
+
+
+def _lane_one_store_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            source = T.alloc_shared((64,), F32)
+            dest = T.alloc_shared((64,), F32)
+            T.copy(A, source)
+            with T.SimdVF():
+                value = T.vmi.vload(source[0], size=1, group=1, stride=1)
+                T.vmi.vstore(value, dest[0], group=1, stride=1)
+            T.copy(dest, C)
+
+    return main
+
+
+def _uninitialized_vmi_read_kernel():
+    @T.prim_func
+    def main(C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((64,), F32)  # never written
+            out = T.alloc_shared((64,), F32)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                v = T.vmi.vload(work[0], size=64)
+                scalar = work[0]  # ordinary scalar read of the same buffer
+                T.vmi.vstore(T.vmi.vadd(v, T.vmi.vbrc(scalar, size=64), mask), out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+_CODEGEN_SOURCE = "vmi_unlowered_address_case.py"
+
+
+def _raw_vload_address_func():
+    work = tvm.tirx.decl_buffer((256,), F32, name="work", scope="shared.dyn")
+    raw = tvm.tirx.BufferLoad(work, [tvm.tirx.IntImm("int32", 64)])
+    span = tvm.ir.Span(tvm.ir.SourceName(_CODEGEN_SOURCE), 12, 12, 7, 24)
+    call = tvm.tirx.call_intrin(
+        "float32x64",
+        tvm.ir.Op.get("tl.vmi.vload"),
+        raw,
+        tvm.tirx.IntImm("int32", 0),
+        annotations={"size": 64},
+        span=span,
     )
-    address = vmi_language._VmiAddress("buffer", source=source, buffer=buffer, starts=list(indices))
-    rejection = vmi_language._accept_plan(proof, address, plan, low=-256, high=64)
-    assert (rejection is None) == accepted, rejection
-    if accepted:
-        assert candidate[0] == 320
-        assert candidate[1] is not None and candidate[1].same_as(buffer)
-        assert _const(candidate[2]) == 256
+    return tvm.tirx.PrimFunc([], tvm.tirx.Evaluate(call)).with_attr("global_symbol", "main")
+
+
+def _raw_vstore_address_func():
+    work = tvm.tirx.decl_buffer((256,), F32, name="work", scope="shared.dyn")
+    out = tvm.tirx.decl_buffer((256,), F32, name="out", scope="shared.dyn")
+    value = tvm.tirx.call_intrin(
+        "float32x64",
+        tvm.ir.Op.get("tl.vmi.vload"),
+        tvm.tirx.tvm_access_ptr(
+            tvm.tirx.type_annotation(F32),
+            work.data,
+            tvm.tirx.IntImm("int32", 0),
+            tvm.tirx.IntImm("int32", 64),
+            tvm.tirx.IntImm("int32", 1),
+        ),
+        tvm.tirx.IntImm("int32", 0),
+        annotations={"size": 64},
+    )
+    raw = tvm.tirx.BufferLoad(out, [tvm.tirx.IntImm("int32", 128)])
+    span = tvm.ir.Span(tvm.ir.SourceName(_CODEGEN_SOURCE), 20, 20, 9, 30)
+    store = tvm.tirx.call_intrin(
+        "void",
+        tvm.ir.Op.get("tl.vmi.vstore"),
+        value,
+        raw,
+        tvm.tirx.IntImm("int32", 0),
+        annotations={"size": 64},
+        span=span,
+    )
+    body = tvm.tirx.SeqStmt([tvm.tirx.AllocBuffer(work), tvm.tirx.AllocBuffer(out), tvm.tirx.Evaluate(store)])
+    return tvm.tirx.PrimFunc([], body).with_attr("global_symbol", "main")
+
+
+def _inner_index_address_func():
+    data = tvm.tirx.decl_buffer((256,), F32, name="data", scope="shared.dyn")
+    index = tvm.tirx.decl_buffer((2,), "int32", name="index", scope="shared.dyn")
+    offset = tvm.tirx.BufferLoad(index, [tvm.tirx.IntImm("int32", 0)])
+    pointer = tvm.tirx.tvm_access_ptr(
+        tvm.tirx.type_annotation(F32),
+        data.data,
+        offset,
+        tvm.tirx.IntImm("int32", 64),
+        tvm.tirx.IntImm("int32", 1),
+    )
+    value = tvm.tirx.call_intrin(
+        "float32x64",
+        tvm.ir.Op.get("tl.vmi.vload"),
+        pointer,
+        tvm.tirx.IntImm("int32", 0),
+        annotations={"size": 64},
+    )
+    body = tvm.tirx.SeqStmt([tvm.tirx.AllocBuffer(data), tvm.tirx.AllocBuffer(index), tvm.tirx.Evaluate(value)])
+    return tvm.tirx.PrimFunc([], body).with_attr("global_symbol", "main")
+
+
+def test_codegen_rejects_unlowered_outermost_vmi_address():
+    """Only the actual address operand is diagnosed, with op, pass and span."""
+    with pytest.raises(tvm.error.TVMError) as excinfo:
+        _pto_source(_raw_vload_address_func())
+    message = str(excinfo.value)
+    assert "LegalizePTOVMIMemoryAccess" in message, message
+    assert "tl.vmi.vload address operand 0" in message, message
+    assert f"{_CODEGEN_SOURCE}:12:7" in message, message
+
+    with pytest.raises(tvm.error.TVMError) as excinfo:
+        _pto_source(_raw_vstore_address_func())
+    message = str(excinfo.value)
+    assert "LegalizePTOVMIMemoryAccess" in message, message
+    assert "tl.vmi.vstore address operand 1" in message, message
+    assert f"{_CODEGEN_SOURCE}:20:9" in message, message
+
+
+def test_codegen_allows_a_nested_index_read_in_a_formal_address():
+    """The scalar read inside an explicit access_ptr is not the address operand."""
+    source = _pto_source(_inner_index_address_func())
+    assert "pto.vmi.vload(" in source, source
+    assert "pto.load(index, 0)" in source, source
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +1342,7 @@ def test_block_stride_without_proven_bounds_is_rejected(dynamic, reason):
 
         return main
 
-    _assert_descriptor_error(build, "T.vmi.vload", reason)
+    _assert_descriptor_error(build, "T.vmi.vload", reason, descriptor=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1029,7 +1385,8 @@ def test_fp4_descriptor_stays_logical_then_packed_once():
 
 
 def test_fp4_odd_start_is_still_rejected():
-    with pytest.raises(Exception, match="fp4 access_ptr offset must be even"):
+    """The logical descriptor keeps the odd start; the later FP4 pack rejects it."""
+    with pytest.raises(tvm.error.TVMError, match="fp4 access_ptr offset must be even"):
         _lower_pto(_fp4_kernel(index=65))
 
 
@@ -1124,6 +1481,32 @@ def test_explicit_pointer_keeps_declaration_and_extra_offset():
     assert "pto.addptr(" in definition and ", 32)" in definition, definition
     # The VMI instruction offset stays 16: the base is counted once.
     assert "vload(p, 16, size=64)" in source, source
+
+
+def test_explicit_pointer_requires_scalar_integer_instruction_offset():
+    """The explicit-pointer instruction offset stays a frontend type check.
+
+    Range/coverage proofs moved to the descriptor pass, but the offset selects
+    a position inside the caller-declared descriptor and must remain a scalar
+    integer at the API boundary.
+    """
+
+    def build():
+        @T.prim_func
+        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+            with T.Kernel(1):
+                work = T.alloc_shared((256,), F32)
+                T.copy(A, work)
+                with T.SimdVF():
+                    p = T.access_ptr(work[0], "r", extent=64)
+                    value = T.vmi.vload(p, 0.5, size=64)
+                    T.vmi.vstore(value, work[64])
+                T.copy(work, C)
+
+        return main
+
+    with pytest.raises(TypeError, match="scalar integer instruction offset"):
+        build()
 
 
 def test_explicit_pointer_scope_validation_is_preserved():
@@ -1323,8 +1706,7 @@ def test_explicit_pointer_partial_permutation_is_rejected():
 
         return main
 
-    with pytest.raises(ValueError, match="does not cover the complete access"):
-        build()
+    _assert_descriptor_error(build, "T.vmi.vload", "does not cover the complete access", explicit=True)
 
 
 def test_explicit_pointer_envelope_and_direction_diagnostics():
@@ -1344,20 +1726,29 @@ def test_explicit_pointer_envelope_and_direction_diagnostics():
         p = T.access_ptr(work[0], "r", extent=32)
         return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
 
-    with pytest.raises(ValueError, match="instruction_offset \\+ envelope_high <= descriptor_extent"):
-        kernel(too_small)()
+    _assert_descriptor_error(
+        lambda: kernel(too_small),
+        "T.vmi.vload",
+        "instruction_offset + envelope_high <= descriptor_extent cannot be proven",
+        explicit=True,
+    )
 
     def negative_offset(work):
         p = T.access_ptr(work[64], "r", extent=128)
         return T.vmi.vstore(T.vmi.vload(p, -16, size=64), work[128])
 
-    with pytest.raises(ValueError, match="0 <= instruction_offset \\+ envelope_low"):
-        kernel(negative_offset)()
+    _assert_descriptor_error(
+        lambda: kernel(negative_offset),
+        "T.vmi.vload",
+        "0 <= instruction_offset + envelope_low cannot be proven",
+        explicit=True,
+    )
 
     def wrong_direction(work):
         p = T.access_ptr(work[0], "w", extent=64)
         return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
 
+    # Direction is an API contract, not a footprint proof: it stays frontend.
     with pytest.raises(TypeError, match="declare read access"):
         kernel(wrong_direction)()
 
@@ -1365,8 +1756,12 @@ def test_explicit_pointer_envelope_and_direction_diagnostics():
         p = T.access_ptr(work[0], "r", extent=0)
         return T.vmi.vstore(T.vmi.vload(p, 0, size=64), work[128])
 
-    with pytest.raises(ValueError, match="descriptor extent must be positive"):
-        kernel(zero_extent)()
+    _assert_descriptor_error(
+        lambda: kernel(zero_extent),
+        "T.vmi.vload",
+        "descriptor extent must be positive",
+        explicit=True,
+    )
 
 
 def test_ordinary_address_rejects_unrecoverable_handles():
@@ -1739,23 +2134,72 @@ def _scatter_kernel():
     return main
 
 
-def test_gather_descriptor_preserves_nonzero_base():
+def _negative_view_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((4, 64), F32), I: T.Tensor((64,), "uint32"), C: T.Tensor((4, 64), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((4, 64), F32)
+            index = T.alloc_shared((64,), "uint32")
+            T.copy(A, work)
+            T.copy(I, index)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vload(index[0], size=64)
+                v = T.vmi.vgather(work[2, -32], offsets, mask)
+                T.vmi.vstore(v, work[3, -64], mask)
+            T.copy(work, C)
+
+    return main
+
+
+def test_indexed_frontend_keeps_raw_address():
+    for kernel, op_name, address_index in (
+        (_gather_kernel, "tl.vmi.vgather", 0),
+        (_scatter_kernel, "tl.vmi.vscatter", 1),
+    ):
+        found = []
+
+        def visit(node, found=found, op_name=op_name):
+            if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "") == op_name:
+                found.append(node)
+
+        tvm.tirx.stmt_functor.post_order_visit(kernel().body, visit)
+        assert len(found) == 1, (op_name, found)
+        address = found[0].args[address_index]
+        assert isinstance(address, tvm.tirx.BufferLoad), (op_name, address)
+        assert address.buffer.scope() in ("shared", "shared.dyn")
+
+
+def test_gather_descriptor_uses_owner_base():
     artifact = _lower_pto(_gather_kernel())
     _, call = _single(artifact, "tl.vmi.vgather")
     ptr = call.args[0]
-    assert _const(ptr.args[2]) == 64
-    # Lanes extent: generic index footprints are explicitly out of scope.
-    assert _const(ptr.args[3]) == 64
-    assert _const(call.args[1]) == 0
+    assert _const(ptr.args[2]) == 0, "the descriptor origin is the real owner origin"
+    assert _const(ptr.args[3]) == 256, "the descriptor covers the whole owner"
+    assert _const(ptr.args[4]) == 1
+    assert _const(call.args[1]) == 64
     line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vgather" in ln)
     assert "addptr" in line and ", 64)" in line, line
 
+    negative_artifact = _lower_pto(_negative_view_kernel())
+    _, negative_call = _single(negative_artifact, "tl.vmi.vgather")
+    negative_ptr = negative_call.args[0]
+    assert _const(negative_ptr.args[2]) == 0
+    assert _const(negative_ptr.args[3]) == 256
+    assert _const(negative_ptr.args[4]) == 1
+    assert _const(negative_call.args[1]) == 160
+    negative_line = next(ln.strip() for ln in negative_artifact.kernel_source.splitlines() if "vmi.vgather" in ln)
+    assert "addptr" in negative_line and ", 160)" in negative_line, negative_line
 
-def test_scatter_descriptor_preserves_nonzero_base():
+
+def test_scatter_descriptor_uses_owner_base():
     artifact = _lower_pto(_scatter_kernel())
     _, call = _single(artifact, "tl.vmi.vscatter")
-    assert _const(call.args[1].args[2]) == 64
-    assert _const(call.args[2]) == 0
+    ptr = call.args[1]
+    assert _const(ptr.args[2]) == 0
+    assert _const(ptr.args[3]) == 256
+    assert _const(ptr.args[4]) == 2
+    assert _const(call.args[2]) == 64
     line = next(ln.strip() for ln in artifact.kernel_source.splitlines() if "vmi.vscatter" in ln)
     assert "addptr" in line and ", 64)" in line, line
 

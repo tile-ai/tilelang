@@ -93,7 +93,6 @@ VMI_DATA_OPS = [
     "vdhist",
     "vchist",
     "vgather",
-    "vgatherb",
 ]
 VMI_MASK_OPS = ["create_mask", "vcmp", "vcmps"]
 VMI_PAIR_OPS = ["vintlv", "vdintlv", "vunzip", "vmull"]
@@ -333,7 +332,7 @@ def _vmi_data_producer(op_name):
     op = _Op(f"tl.vmi.{op_name}")
     if op_name in ("vci", "vbrc"):
         return tirx.call_intrin("int32", op, tirx.IntImm("int32", 0)), ()
-    if op_name in ("vgather", "vgatherb"):
+    if op_name == "vgather":
         ptr = tirx.Var("ptr", "handle")
         offsets = tirx.Var("offsets", "int32x128")
         mask = tirx.Var("mask", "boolx128")
@@ -1460,7 +1459,7 @@ def test_unknown_vmi_origin_diagnosed_at_vci():
 @pytest.mark.parametrize("op_name", VMI_DATA_OPS)
 def test_registered_vmi_data_producer_never_enters_scalar_bridge(op_name):
     producer, params = _vmi_data_producer(op_name)
-    if op_name in ("vgather", "vgatherb"):
+    if op_name == "vgather":
         # The gather printer requires a real access-pointer operand and the
         # function-signature printer cannot emit a synthetic handle parameter.
         # The return contract is asserted through pair_get's source validation,

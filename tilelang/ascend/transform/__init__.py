@@ -94,6 +94,27 @@ def NormalizePTOAllocMarkers():
     return _ffi_api.NormalizePTOAllocMarkers()  # type: ignore
 
 
+def LegalizePTOVMIMemoryAccess():
+    """Build and verify the explicit VMI memory descriptor before scheduling.
+
+    Every ordinary ``T.vmi.vload`` / ``T.vmi.vstore`` address (a scalar-origin
+    ``BufferLoad``) is replaced with ``tl.access_ptr(BufferLoad, extent,
+    rw_mask)`` plus a rewritten instruction scalar offset.  The pass proves,
+    in one shared acceptance exit, that the descriptor preserves the source
+    address, contains the complete physical access envelope and covers the
+    declared extent under the existing logical pointer-region analysis.  An
+    ordinary caller-written explicit descriptor is preserved and only verified;
+    there is no whole-allocation fallback for an ordinary access.  Indexed
+    ``vgather`` / ``vscatter`` addresses, including one reached
+    through a direct handle binding, are instead rebuilt as an owner-origin
+    descriptor with capacity ``prod(owner.shape)`` after the owner identity,
+    layout, capacity, stable-coverage and bound-address snapshot proofs.
+    Functions without a PTO target pass through unchanged; the pass is a no-op
+    on IR without VMI accesses.
+    """
+    return _ffi_api.LegalizePTOVMIMemoryAccess()  # type: ignore
+
+
 def AutoSchedule():
     """Schedule materialized internal schedule units for downstream lowering."""
     return _ffi_api.AutoSchedule()  # type: ignore
@@ -310,6 +331,7 @@ __all__ = [
     "NormalizeControlFlowForSchedule",
     "NormalizeConflictHints",
     "LegalizeParallelToPTO",
+    "LegalizePTOVMIMemoryAccess",
     "PrepareMultiBuffer",
     "ResolveCore",
     "RewriteAscendBufferVersionLayout",
