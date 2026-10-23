@@ -780,6 +780,151 @@ AnalyzeBufferDataAccess(const Stmt &stmt, const Var &buffer_data,
   return detector.Result();
 }
 
+/// Whether `stmt` may access the shared memory of any buffer whose data var is
+/// in `stage_data` through the generic proxy (ld/st.shared, ldmatrix, ...).
+///
+/// Only two consumers are known to touch shared memory exclusively through the
+/// async proxy: TMA stores (source operand) and GEMMs that lower to
+/// wgmma.mma_async or tcgen05.mma (A/B operands). The GEMM instruction is
+/// chosen exactly as LowerTileOp will choose it for the consumer partition
+/// (`thread_extent` threads); a GEMM under a condition on the thread index may
+/// see narrower thread bounds there, so it is treated as generic. Everything
+/// else that names a stage buffer, including calls this pass cannot classify,
+/// counts as a generic access.
+static bool HasGenericProxyAccess(const Stmt &stmt, const VarSet &stage_data,
+                                  const Target &target, const Var &thread_var,
+                                  const PrimExpr &thread_extent) {
+  class Detector : public StmtExprVisitor {
+  public:
+    Detector(const VarSet &stage_data, const Target &target,
+             const Var &thread_var, const PrimExpr &thread_extent)
+        : stage_data_(stage_data), target_(target), thread_var_(thread_var),
+          thread_extent_(thread_extent) {}
+
+    bool found{false};
+
+  private:
+    void VisitStmt(const Stmt &stmt) final {
+      if (!found) {
+        StmtExprVisitor::VisitStmt(stmt);
+      }
+    }
+
+    void VisitStmt_(const IfThenElseNode *op) final {
+      bool old = under_thread_condition_;
+      under_thread_condition_ =
+          old || UsesVar(op->condition, [this](const VarNode *v) {
+            return v == thread_var_.get();
+          });
+      StmtExprVisitor::VisitStmt_(op);
+      under_thread_condition_ = old;
+    }
+
+    void VisitExpr_(const CallNode *op) final {
+      Call call = GetRef<Call>(op);
+      TileOperator tile_op = ParseOperator(call);
+      if (!tile_op.defined()) {
+        StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
+      // Only the operand arguments themselves are exempt; any other
+      // argument (scalars such as `clear_accum`) and the operands' own
+      // indices and extents are still checked.
+      std::vector<bool> async_arg = AsyncOperandArgs(call, tile_op);
+      for (size_t i = 0; i < op->args.size(); ++i) {
+        if (async_arg[i]) {
+          VisitAsyncOperand(op->args[i]);
+        } else {
+          VisitExpr(op->args[i]);
+        }
+      }
+    }
+
+    /// Argument positions of `call` that `tile_op` reads only through the
+    /// async proxy: the source of a TMA store, and A/B (args 0 and 1) of a
+    /// GEMM lowering to wgmma or tcgen05.
+    std::vector<bool> AsyncOperandArgs(const Call &call,
+                                       const TileOperator &tile_op) {
+      std::vector<bool> async_arg(call->args.size(), false);
+      if (ClassifyStmt(Evaluate(call), target_) == TileStmtKind::kTmaStore) {
+        async_arg[0] = true;
+        return async_arg;
+      }
+      const auto *gemm = tile_op.as<GemmNode>();
+      if (gemm == nullptr || under_thread_condition_) {
+        return async_arg;
+      }
+      const int64_t *threads = as_const_int(thread_extent_);
+      if (threads == nullptr) {
+        return async_arg;
+      }
+      String inst = gemm->GetGemmInstructionKey(*threads, target_);
+      if (inst == "cuda.wgmma" || inst == "cuda.tcgen05") {
+        async_arg[0] = true;
+        async_arg[1] = true;
+      }
+      return async_arg;
+    }
+
+    /// Visit an operand argument (BufferLoad, BufferRegion, or tl.region)
+    /// without counting its buffer reference, but still checking its
+    /// indices and extents.
+    void VisitAsyncOperand(const PrimExpr &arg) {
+      if (const auto *load = arg.as<BufferLoadNode>()) {
+        for (const PrimExpr &index : load->indices) {
+          VisitExpr(index);
+        }
+        return;
+      }
+      if (const auto *region = arg.as<BufferRegionNode>()) {
+        for (const Range &range : region->region) {
+          VisitExpr(range->min);
+          VisitExpr(range->extent);
+        }
+        return;
+      }
+      if (const auto *call = arg.as<CallNode>()) {
+        if (call->op.same_as(region()) && !call->args.empty()) {
+          VisitAsyncOperand(call->args[0]);
+          for (size_t i = 1; i < call->args.size(); ++i) {
+            VisitExpr(call->args[i]);
+          }
+          return;
+        }
+      }
+      VisitExpr(arg);
+    }
+
+    void Check(const Var &data) {
+      if (stage_data_.count(data)) {
+        found = true;
+      }
+    }
+
+    void VisitExpr_(const BufferLoadNode *op) final {
+      Check(op->buffer->data);
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitStmt_(const BufferStoreNode *op) final {
+      Check(op->buffer->data);
+      StmtExprVisitor::VisitStmt_(op);
+    }
+
+    void VisitExpr_(const VarNode *op) final { Check(GetRef<Var>(op)); }
+
+    const VarSet &stage_data_;
+    const Target &target_;
+    const Var &thread_var_;
+    const PrimExpr &thread_extent_;
+    bool under_thread_condition_{false};
+  };
+
+  Detector detector(stage_data, target, thread_var, thread_extent);
+  detector(stmt);
+  return detector.found;
+}
+
 class PreludeStmtsToPipelineLoopCollector
     : public StmtFunctor<Optional<Array<Stmt>>(const Stmt &)> {
 public:
@@ -1623,7 +1768,51 @@ private:
     // When barriers are merged, iterate over a single effective group.
     int consumer_barrier_groups =
         can_merge_tma_barriers ? 1 : num_producer_groups;
+    // A back-pressure arrive hands a stage back to TMA, whose writes go
+    // through the async proxy. Its release semantics only order this
+    // thread's earlier generic-proxy accesses of the stage against later
+    // generic-proxy accesses, so a consumer that touched a TMA-filled buffer
+    // through the generic proxy must issue fence.proxy.async before
+    // arriving; otherwise the next TMA load may overwrite the stage while
+    // those loads are still in flight. Every consumer thread arrives (the
+    // count is consumer_extent), so each thread fences its own accesses.
+    std::vector<VarSet> group_tma_buffers(consumer_barrier_groups);
+    std::vector<bool> group_needs_proxy_fence(consumer_barrier_groups, false);
+    for (size_t i = 0, tma_i = 0; i < flat_stmts.size(); ++i) {
+      if (kinds[i] != TileStmtKind::kTmaProducer) {
+        continue;
+      }
+      int g = can_merge_tma_barriers ? 0 : static_cast<int>(tma_i++);
+      Optional<Var> data = ExtractProducerWriteBufferData(flat_stmts[i]);
+      if (data.defined()) {
+        group_tma_buffers[g].insert(data.value());
+      } else {
+        group_needs_proxy_fence[g] = true; // unknown destination
+      }
+    }
+    for (int g = 0; g < consumer_barrier_groups; ++g) {
+      for (int ci = 0; ci < arrive_insert_pos[g] && !group_needs_proxy_fence[g];
+           ++ci) {
+        group_needs_proxy_fence[g] =
+            !moved_compute_stmts[ci] &&
+            HasGenericProxyAccess(consumer_compute_stmts[ci],
+                                  group_tma_buffers[g], target_,
+                                  thread_iv_->var, consumer_extent);
+      }
+    }
     Array<Stmt> consumer_stmts;
+    // One fence covers every arrive until the next compute statement.
+    bool proxy_fenced = false;
+    auto emit_release = [&](int g) {
+      if (group_needs_proxy_fence[g] && !proxy_fenced) {
+        consumer_stmts.push_back(
+            Evaluate(Call(DataType::Handle(), fence_proxy_async(), {})));
+        proxy_fenced = true;
+      }
+      int bp_base = num_fwd + g * num_stages;
+      PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + c_stage_expr;
+      consumer_stmts.push_back(MakeArriveBarrier(barrier_buf, bp_id));
+    };
     std::vector<bool> arrive_emitted(consumer_barrier_groups, false);
     for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
       for (const auto &stmt : prelude_waits_before_consumer[ci]) {
@@ -1639,12 +1828,11 @@ private:
       }
       if (!moved_compute_stmts[ci]) {
         consumer_stmts.push_back(consumer_compute_stmts[ci]);
+        proxy_fenced = false;
       }
       for (int g = 0; g < consumer_barrier_groups; ++g) {
         if (arrive_insert_pos[g] == static_cast<int>(ci + 1)) {
-          int bp_base = num_fwd + g * num_stages;
-          PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + c_stage_expr;
-          consumer_stmts.push_back(MakeArriveBarrier(barrier_buf, bp_id));
+          emit_release(g);
           arrive_emitted[g] = true;
         }
       }
@@ -1661,9 +1849,7 @@ private:
       if (!arrive_emitted[g] &&
           arrive_insert_pos[g] ==
               static_cast<int>(consumer_compute_stmts.size())) {
-        int bp_base = num_fwd + g * num_stages;
-        PrimExpr bp_id = IntImm(DataType::Int(32), bp_base) + c_stage_expr;
-        consumer_stmts.push_back(MakeArriveBarrier(barrier_buf, bp_id));
+        emit_release(g);
       }
     }
     // Phase counter increment at end of consumer guarded iteration
