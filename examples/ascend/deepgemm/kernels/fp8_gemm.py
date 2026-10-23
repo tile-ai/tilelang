@@ -1,4 +1,4 @@
-"""FP8 GEMM: dense, batched, M-grouped and K-grouped variants."""
+"""FP8 and packed FP4 GEMM kernels: dense, batched and grouped variants."""
 
 import tilelang
 import tilelang.ascend.language as T
@@ -10,10 +10,14 @@ from .copy import make_gm_to_l1_copy, make_scale_copy
 from .epilogue import make_store_output, zero_empty_groups
 
 
-def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind="identity"):
-    shape_m = m if m is not None else T.dynamic("shape_m")
-    shape_n = n if n is not None else T.dynamic("shape_n")
-    shape_k = k if k is not None else T.dynamic("shape_k")
+def _build_kernel(
+    m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind="identity", operand_dtype="float8_e4m3fn"
+):
+    operand_bits = 4 if operand_dtype == "float4_e2m1fn" else 8
+    # Infer dynamic logical dimensions from the packed runtime tensor shapes.
+    shape_m = m if m is not None else T.dynamic("shape_m_packed") * 2 if operand_bits == 4 and major_a == Major.MN else T.dynamic("shape_m")
+    shape_n = n if n is not None else T.dynamic("shape_n_packed") * 2 if operand_bits == 4 and major_b == Major.MN else T.dynamic("shape_n")
+    shape_k = k if k is not None else T.dynamic("shape_k_packed") * 2 if operand_bits == 4 and major_a == Major.K else T.dynamic("shape_k")
     BLOCK_M, BLOCK_N, BLOCK_K = config.block_m, config.block_n, config.block_k
     MAD_M, MAD_N, MAD_K = config.mad_m, config.mad_n, config.mad_k
     with_fp8_cast = epilogue_kind == "fp8"
@@ -32,13 +36,14 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
     copy_b = make_gm_to_l1_copy(major_b, config.l2_ctrl_b)
     copy_sfa = make_scale_copy(config.l2_ctrl_a)
     copy_sfb = make_scale_copy(config.l2_ctrl_b)
-    compute_k_block = make_compute(config, major_a, major_b, blockscaled=True)
+    compute_k_block = make_compute(config, major_a, major_b, blockscaled=True, operand_bits=operand_bits)
     store_output = make_store_output(
         config,
         major_a,
         major_b,
         epilogue_kind=epilogue_kind,
         blockscaled=True,
+        operand_bits=operand_bits,
     )
 
     batched = gemm_type == GemmType.Batched
@@ -47,6 +52,8 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
     num_groups = T.dynamic("num_groups") if gemm_type != GemmType.Normal else None
 
     def tensor(name, shape, dtype, grouped=False):
+        if dtype == "float4_e2m1fn":
+            shape, dtype = (*shape[:-1], shape[-1] // 2), "int8"
         strides = (T.dynamic(f"{name}_outer_stride", dtype="int64"), 1)
         if grouped:
             group_stride = "batch" if batched else "group"
@@ -54,8 +61,8 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
             strides = (T.dynamic(f"{name}_{group_stride}_stride", dtype="int64"), *strides)
         return T.StridedTensor(shape, strides, dtype)
 
-    a_type = tensor("a", physical_shape(shape_m, shape_k, major_a), "float8_e4m3fn", batched)
-    b_type = tensor("b", physical_shape(shape_n, shape_k, major_b), "float8_e4m3fn", batched or m_grouped)
+    a_type = tensor("a", physical_shape(shape_m, shape_k, major_a), operand_dtype, batched)
+    b_type = tensor("b", physical_shape(shape_n, shape_k, major_b), operand_dtype, batched or m_grouped)
     sfa_type = tensor("sfa", (shape_sf_k, shape_m), "int16", batched)
     sfb_type = tensor("sfb", (shape_sf_k, shape_n), "int16", batched or m_grouped)
     d_type = tensor("d", (shape_m, shape_n), out_dtype, batched or k_grouped)
@@ -81,6 +88,14 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
     alpha_type = T.float32 if gemm_type == GemmType.Normal or epilogue_kind == "alpha" else 1.0
     bias_type = T.Tensor((1, shape_n), out_dtype) if epilogue_kind == "bias" else None
 
+    def fp4_view(tensor):
+        return T.view(
+            tensor,
+            (*tensor.shape[:-1], tensor.shape[-1] * 2),
+            "float4_e2m1fn",
+            strides=(*[stride * 2 for stride in tensor.strides[:-1]], 1),
+        )
+
     @T.prim_func
     def kernel(
         gm_a: a_type,
@@ -93,18 +108,23 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
         gm_sfd: sfd_type if with_fp8_cast else None,
         gm_bias: bias_type,
     ):
+        if operand_bits == 4:
+            T.assume((shape_k if major_a == Major.K else shape_m) % 2 == 0)
+            T.assume((shape_k if major_b == Major.K else shape_n) % 2 == 0)
+        a_operand = fp4_view(gm_a) if operand_bits == 4 else gm_a
+        b_operand = fp4_view(gm_b) if operand_bits == 4 else gm_b
         # Codegen keeps a pure Cube launch when no AIV work survives.
         with T.MixedKernel(config.num_blocks) as (block_idx, sid):
             if m_grouped or k_grouped:
                 scheduler = scheduler_type(**scheduler_kwargs, grouped_layout=grouped_layout)
             else:
                 scheduler = scheduler_type(**scheduler_kwargs)
-            l1a = T.alloc_l1(physical_shape(BLOCK_M, BLOCK_K, major_a), "float8_e4m3fn")
-            l1b = T.alloc_l1(physical_shape(BLOCK_N, BLOCK_K, major_b), "float8_e4m3fn")
+            l1a = T.alloc_l1(physical_shape(BLOCK_M, BLOCK_K, major_a), operand_dtype)
+            l1b = T.alloc_l1(physical_shape(BLOCK_N, BLOCK_K, major_b), operand_dtype)
             l1_sfa = T.alloc_l1((BLOCK_M, sf_pairs_per_chunk), "int16")
             l1_sfb = T.alloc_l1((BLOCK_N, sf_pairs_per_chunk), "int16")
-            l0a = T.alloc_l0a((MAD_M, MAD_K), "float8_e4m3fn")
-            l0b = T.alloc_l0b((MAD_N, MAD_K), "float8_e4m3fn")
+            l0a = T.alloc_l0a((MAD_M, MAD_K), operand_dtype)
+            l0b = T.alloc_l0b((MAD_N, MAD_K), operand_dtype)
             l0_sfa = T.alloc_l0a_sf(l0a, sf_dtype="int16")
             l0_sfb = T.alloc_l0b_sf(l0b, sf_dtype="int16")
             l0c = T.alloc_l0c((num_mad_m_tiles, num_mad_n_tiles, MAD_M, MAD_N), "float32")
@@ -168,8 +188,8 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
                             k_idx = k_block_idx * BLOCK_K
                             actual_k = T.min(shape_k - k_idx, BLOCK_K)
                         with T.Task():
-                            copy_a(gm_a, l1a, m_idx, k_idx, actual_m, actual_k, batch_idx)
-                            copy_b(gm_b, l1b, n_idx, k_idx, actual_n, actual_k, group_idx if m_grouped else batch_idx)
+                            copy_a(a_operand, l1a, m_idx, k_idx, actual_m, actual_k, batch_idx)
+                            copy_b(b_operand, l1b, n_idx, k_idx, actual_n, actual_k, group_idx if m_grouped else batch_idx)
                         compute_k_block(
                             l1a,
                             l1b,
@@ -213,17 +233,32 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
-def build_fp8_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, epilogue_kind="identity", gemm_type=GemmType.Normal):
-    return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind)
+def build_fp8_gemm(
+    m,
+    n,
+    k,
+    major_a,
+    major_b,
+    out_dtype,
+    accumulate,
+    config,
+    epilogue_kind="identity",
+    gemm_type=GemmType.Normal,
+    operand_dtype="float8_e4m3fn",
+):
+    return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm_type, epilogue_kind, operand_dtype)
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
-def build_fp8_batched_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, epilogue_kind="identity"):
-    return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Batched, epilogue_kind)
+def build_fp8_batched_gemm(
+    m, n, k, major_a, major_b, out_dtype, accumulate, config, epilogue_kind="identity", operand_dtype="float8_e4m3fn"
+):
+    """Build a batched FP8/FP4 kernel; FP4 uses int8 storage and logical M/N/K."""
+    return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Batched, epilogue_kind, operand_dtype)
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
-def build_fp8_m_grouped_gemm(total_m, n, k, major_b, out_dtype, config, epilogue_kind="identity"):
+def build_fp8_m_grouped_gemm(total_m, n, k, major_b, out_dtype, config, epilogue_kind="identity", operand_dtype="float8_e4m3fn"):
     return _build_kernel(
         total_m,
         n,
@@ -235,11 +270,12 @@ def build_fp8_m_grouped_gemm(total_m, n, k, major_b, out_dtype, config, epilogue
         config,
         GemmType.MGroupedContiguousWithPsumLayout,
         epilogue_kind,
+        operand_dtype,
     )
 
 
 @tilelang.jit(compile_flags=COMPILE_FLAGS)
-def build_fp8_k_grouped_gemm(m, n, total_k, out_dtype, config, epilogue_kind="identity", accumulate=True):
+def build_fp8_k_grouped_gemm(m, n, total_k, out_dtype, config, epilogue_kind="identity", accumulate=True, operand_dtype="float8_e4m3fn"):
     return _build_kernel(
         m,
         n,
@@ -251,4 +287,5 @@ def build_fp8_k_grouped_gemm(m, n, total_k, out_dtype, config, epilogue_kind="id
         config,
         GemmType.KGroupedContiguousWithPsumLayout,
         epilogue_kind,
+        operand_dtype,
     )

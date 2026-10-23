@@ -1,4 +1,4 @@
-"""BF16 and FP8 tensor APIs backed by TileLang kernels.
+"""BF16, FP8 and packed FP4 tensor APIs backed by TileLang kernels.
 
 The API suffix describes the logical expression. Physical K/MN major is
 derived from tensor strides. Dimensions omitted from ``compiled_dims`` and
@@ -12,6 +12,10 @@ end rounded up to ``MK_ALIGNMENT``. M-grouped A/D must include the full aligned
 row allocation. ``ensure_zero_padding`` does not clear inputs: zero output
 padding requires zero input padding and valid scales.
 Prepacked int16 scales are used directly, including caller-provided padding.
+Quantized dense and grouped GEMMs accept FP8/FP8 or packed FP4/FP4 inputs.
+As in DeepGEMM-Ascend-Nightly, fp8_bmm/fp8_einsum accept FP8 inputs only.
+FP4 E2M1 values use int8 or float4_e2m1fn_x2 storage, with the lower nibble
+first along the contiguous axis; shapes and strides count packed bytes.
 """
 
 from __future__ import annotations
@@ -45,10 +49,30 @@ class BindingLayout(str, enum.Enum):
         return self.value[1] == "n"
 
 
+def _input_dtype(tensor):
+    if tensor.dtype in (torch.int8, getattr(torch, "float4_e2m1fn_x2", None)):
+        return "float4_e2m1fn_x2"
+    return str(tensor.dtype).removeprefix("torch.")
+
+
+def _logical_shape(tensor, major):
+    mn, k = tensor.shape[-2:]
+    if _input_dtype(tensor) == "float4_e2m1fn_x2":
+        if major == Major.K:
+            k *= 2
+        else:
+            mn *= 2
+    return mn, k
+
+
 def _check_quantized_pair(a, b):
-    if a.dtype != torch.float8_e4m3fn or b.dtype != torch.float8_e4m3fn:
-        # TODO: the heuristic models FP4/dequant, but those kernels are separate work.
-        raise NotImplementedError("Only FP8 x FP8 kernels are implemented; FP4/dequant are TODO")
+    pair = (_input_dtype(a), _input_dtype(b))
+    fp8, fp4 = "float8_e4m3fn", "float4_e2m1fn_x2"
+    if pair == (fp8, fp4):
+        # TODO: port Nightly's FP8 x FP4 dequant kernel; the heuristic already models it.
+        raise NotImplementedError("FP8 x FP4 (FP8 dequant) kernels are not implemented")
+    if pair not in ((fp8, fp8), (fp4, fp4)):
+        raise TypeError(f"Supported quantized dtype pairs are FP8/FP8 and FP4/FP4, got {pair}")
 
 
 def _dtype_name(dtype: torch.dtype) -> str:
@@ -155,8 +179,8 @@ def _get_gemm_desc(
     out_dtype = _dtype_name(d.dtype)
     major_a, major_b = _get_major_type_ab(a, "a"), _get_major_type_ab(b, "b")
     _check_major_type_cd(d, "d")
-    m, k = a.shape[-2:]
-    n, b_k = b.shape[-2:]
+    m, k = _logical_shape(a, major_a)
+    n, b_k = _logical_shape(b, major_b)
     if batched:
         num_groups = a.shape[0]
     elif m_grouped:
@@ -202,8 +226,8 @@ def _get_gemm_desc(
         m=m,
         n=n,
         k=k,
-        a_dtype=str(a.dtype).removeprefix("torch."),
-        b_dtype=str(b.dtype).removeprefix("torch."),
+        a_dtype=_input_dtype(a),
+        b_dtype=_input_dtype(b),
         cd_dtype=out_dtype,
         major_a=major_a,
         major_b=major_b,
@@ -225,7 +249,8 @@ def _get_gemm_desc(
 
 
 def _physical(logical: torch.Tensor, major: Major) -> torch.Tensor:
-    return logical if major == Major.K else logical.transpose(-2, -1)
+    physical = logical if major == Major.K else logical.transpose(-2, -1)
+    return physical.view(torch.int8) if _input_dtype(physical) == "float4_e2m1fn_x2" else physical
 
 
 def _compiled_shape(m: int, n: int, k: int, compiled_dims: str):
@@ -371,6 +396,7 @@ def _prepare_scales(desc, sfa, sfb, recipe, *, grouped_layout=None, disable_ue8m
 def _launch_gemm(desc, a, b, d, epilogue, *, scales=(), grouped_layout=None):
     config = execution_config(desc, select_gemm_config(desc))
     build = build_fp8_gemm if scales else build_bf16_gemm
+    options = {"operand_dtype": "float4_e2m1fn"} if desc.a_dtype == "float4_e2m1fn_x2" else {}
     kernel = build(
         *_compiled_shape(desc.m, desc.n, desc.k, desc.compiled_dims),
         desc.major_a,
@@ -380,6 +406,7 @@ def _launch_gemm(desc, a, b, d, epilogue, *, scales=(), grouped_layout=None):
         config,
         desc.epilogue_kind,
         desc.gemm_type,
+        **options,
     )
     args = (_physical(a, desc.major_a), _physical(b, desc.major_b), *scales, d)
     if grouped_layout is not None:
@@ -489,8 +516,9 @@ def bf16_bmm(a, b, d, c=None, compiled_dims="nk", epilogue=None) -> None:
 def fp8_bmm(a, b, d, c=None, recipe=(1, 1, 32), compiled_dims="nk", epilogue=None) -> None:
     a_data, sfa = _fp8_operand(a, "a")
     b_data, sfb = _fp8_operand(b, "b")
+    # Match DeepGEMM-Ascend-Nightly's fp8_bmm dtype contract.
     if a_data.dtype != torch.float8_e4m3fn or b_data.dtype != torch.float8_e4m3fn:
-        raise TypeError("fp8_bmm supports FP8/FP8 inputs; FP4/dequant kernels are TODO")
+        raise TypeError("fp8_bmm supports FP8/FP8 inputs only, matching DeepGEMM-Ascend-Nightly")
     d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue, allow_fp8=True)
     desc = _get_gemm_desc(
         GemmType.Batched,
