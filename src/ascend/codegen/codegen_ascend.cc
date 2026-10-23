@@ -1448,15 +1448,20 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
-  ICHECK_EQ(op->args.size(), 12)
-      << "tl.ascend_copy_gm_to_cbuf expects exactly 12 arguments";
+  ICHECK(op->args.size() == 12 || op->args.size() == 14)
+      << "tl.ascend_copy_gm_to_cbuf expects 12 or 14 arguments";
 
   const bool use_dn2nz =
       GetIntImmArg(op, 9, "tl.ascend_copy_gm_to_cbuf", "transpose") != 0;
   const std::string nz_c0_stride = PrintExpr(op->args[10]);
+  const std::string num_batches =
+      op->args.size() == 14 ? PrintExpr(op->args[12]) : "1";
+  const std::string batch_stride =
+      op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << "asc_set_gm2l1_nz_para(1, 1, static_cast<uint16_t>(" << nz_c0_stride
-         << "), 0);\n";
+  stream << "asc_set_gm2l1_nz_para(" << num_batches
+         << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
+         << batch_stride << ");\n";
 
   std::string destination_prefix;
   std::string source_prefix;

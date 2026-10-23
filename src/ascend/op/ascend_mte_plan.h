@@ -201,9 +201,11 @@ struct StridedLayout {
 /// dimensions when needed, and prefers the trailing pair when several pairs
 /// are equivalent. Return nullopt if no pair can be proven valid; this includes
 /// both unsupported layouts and inconclusive stride/extent proofs.
+/// Batched GM->L1 copies may exclude the leading axis of a 3D region.
 inline std::optional<StridedLayout>
 TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
-                        arith::Analyzer *analyzer) {
+                        arith::Analyzer *analyzer,
+                        bool allow_leading_batch = false) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
 
   if (range.size() != buf->shape.size() || range.size() < 2)
@@ -225,7 +227,8 @@ TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
     for (int row = inner - 1; row >= 0; --row) {
       bool all_other_axes_are_unit = true;
       for (int axis = 0; axis < ndim; ++axis) {
-        if (axis == row || axis == inner) {
+        if (axis == row || axis == inner ||
+            (allow_leading_batch && ndim == 3 && axis == 0)) {
           continue;
         }
         PrimExpr extent = range[axis]->extent;
@@ -254,14 +257,16 @@ TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
 inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
                                           const ffi::Array<Range> &range,
                                           arith::Analyzer *analyzer,
-                                          const std::string &context) {
+                                          const std::string &context,
+                                          bool allow_leading_batch = false) {
   ICHECK_EQ(range.size(), buf->shape.size())
       << context << " requires one access range per buffer axis, got ranges "
       << range << " for buffer " << buf->name << " shape " << buf->shape;
   ICHECK_GE(range.size(), 2U)
       << context << " requires at least a 2D region, got buffer " << buf->name
       << " shape " << buf->shape << " ranges " << range;
-  auto layout = TryNormalizeMTE2DLayout(buf, range, analyzer);
+  auto layout =
+      TryNormalizeMTE2DLayout(buf, range, analyzer, allow_leading_batch);
   ICHECK(layout.has_value())
       << context
       << " cannot represent this region with one 2D MTE descriptor: all axes "
@@ -275,12 +280,15 @@ inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
 }
 
 /// Normalize a region whose hardware layout assigns matrix semantics to the
-/// trailing two axes (L1/L0 buffers). Leading axes may only select one plane.
+/// trailing two axes (L1/L0 buffers). Leading axes select one plane unless
+/// a leading batch axis is explicitly allowed.
 inline StridedLayout
 NormalizeTrailingMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
                              arith::Analyzer *analyzer,
-                             const std::string &context) {
-  StridedLayout layout = NormalizeMTE2DLayout(buf, range, analyzer, context);
+                             const std::string &context,
+                             bool allow_leading_batch = false) {
+  StridedLayout layout =
+      NormalizeMTE2DLayout(buf, range, analyzer, context, allow_leading_batch);
   int ndim = static_cast<int>(range.size());
   ICHECK_EQ(layout.modes[0].axis, ndim - 1)
       << context << " requires the contiguous transfer axis to be the last "

@@ -195,6 +195,18 @@ TileLang path divides the work as follows:
 Automatic scheduling handles task order and dependencies; it does not imply
 automatic tensorization of arbitrary `T.Parallel` code into SIMD instructions.
 
+### Batched GM-to-L1 copies
+
+With the Ascend C target, `T.copy` can transfer a three-dimensional
+`[batch, rows, cols]` GM region into L1 using one batched ND2NZ descriptor.
+The source batch and row strides are preserved; destination batches are spaced
+by the complete physical matrix footprint, including layout padding.
+
+Source and destination batch counts must match, and the batch ranges must be
+provably in bounds. Matrix tails use the existing OOB clipping and L1 padding;
+padding is emitted separately for each batch. The destination must use a
+canonical matrix layout. This batched path is not supported by the PTO target.
+
 ## Examples
 
 Start with the [persistent GEMM](../../examples/ascend/example_gemm.py), which

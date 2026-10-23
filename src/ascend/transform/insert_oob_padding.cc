@@ -110,7 +110,9 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   if (!bounded.clamped)
     return stmts;
   StridedLayout src_layout = NormalizeMTE2DLayout(
-      copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding");
+      copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding",
+      copy->src_range.size() == 3 && copy->dst_range.size() == 3 &&
+          !analyzer->CanProveEqual(copy->src_range[0]->extent, Integer(1)));
   size_t src_inner_axis = static_cast<size_t>(src_layout.modes[0].axis);
   size_t src_row_axis = static_cast<size_t>(src_layout.modes[1].axis);
   PrimExpr valid_src_rows = bounded.src[src_row_axis]->extent;

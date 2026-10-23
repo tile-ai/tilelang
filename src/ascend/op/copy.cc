@@ -546,10 +546,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       }
     }
   } else if (dma_path == DMAPath::kGMToL1) {
-    StridedLayout src_layout =
-        NormalizeMTE2DLayout(op.src, src_range, analyzer, "Ascend GM->L1 copy");
+    bool batched = src_range.size() == 3 && dst_range.size() == 3 &&
+                   !analyzer->CanProveEqual(src_range[0]->extent, I(1));
+    StridedLayout src_layout = NormalizeMTE2DLayout(
+        op.src, src_range, analyzer, "Ascend GM->L1 copy", batched);
     StridedLayout dst_region_layout = NormalizeTrailingMTE2DLayout(
-        op.dst, dst_range, analyzer, "Ascend GM->L1 destination");
+        op.dst, dst_range, analyzer, "Ascend GM->L1 destination", batched);
     const Mode &src_inner = src_layout.modes[0];
     const Mode &src_row = src_layout.modes[1];
     PrimExpr src_row_stride_bytes = AscendMTEBytesFromElements(
@@ -623,10 +625,23 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       physical_dtype = "uint16_t";
       n_value = n_value / I(2);
     }
-    call = Call(DataType::Void(), ascend_copy_gm_to_cbuf(),
-                {dst_ptr, src_ptr, sid, src_row_stride_bytes, l2_cache_ctrl,
-                 n_value, d_value, zero, zero, transpose_flag, dst_n_value,
-                 StringImm(physical_dtype)});
+    Array<PrimExpr> args{
+        dst_ptr,       src_ptr,        sid,         src_row_stride_bytes,
+        l2_cache_ctrl, n_value,        d_value,     zero,
+        zero,          transpose_flag, dst_n_value, StringImm(physical_dtype)};
+    if (batched) {
+      ICHECK(has_dst_layout && IsAscendMajorKind(dst_layout.kind))
+          << "Batched GM->L1 copy requires a canonical matrix layout.";
+      PrimExpr matrix_bytes =
+          AscendMTEBytesFromElements(dst_layout.outer0 * dst_layout.outer1 *
+                                         dst_layout.row_frac * dst_layout.c0,
+                                     elem_bits);
+      args.Set(
+          7, AscendMTEBytesFromElements(src_region.modes[2].stride, elem_bits));
+      args.push_back(src_range[0]->extent);
+      args.push_back(matrix_bytes / I(32));
+    }
+    call = Call(DataType::Void(), ascend_copy_gm_to_cbuf(), args);
     // OOB clamping and the padding fill for a padded GM->L1 copy are handled
     // before lowering by AscendInsertOOBPadding. The common epilogue below
     // applies the empty-tile guard after constructing this DMA call.
