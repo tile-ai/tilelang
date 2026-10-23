@@ -159,6 +159,55 @@ def test_counter_slot_is_compatible_with_l1_layout_lowering():
     assert artifact.kernel_source and artifact.device_mod
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "prefix,versions,storage_dtype,view_dtype,mode",
+    [
+        (64, 1, "float32", "float32", "iteration"),
+        (0, 2, "float32", "float32", "iteration"),
+        (64, 2, "float32", "float32", "iteration"),
+        (64, 3, "float32", "bfloat16", "counter"),
+        (64, 2, "bfloat16", "float32", "iteration"),
+        (1, 2, "float32", "float32", "iteration"),
+    ],
+    ids=["single-version", "dense", "padded", "narrow-counter", "widen", "unaligned-slot"],
+)
+def test_padded_storage_versions_preserve_ordinary_view_addresses(prefix, versions, storage_dtype, view_dtype, mode):
+    """Layout padding, version expansion and UB alignment must agree in bytes."""
+    import torch
+
+    storage_bits, view_bits = tvm.DataType(storage_dtype).bits, tvm.DataType(view_dtype).bits
+    view_extent = 512 * storage_bits // view_bits
+    view_prefix = prefix * storage_bits // view_bits
+    output_extent = view_extent - view_prefix
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 512), storage_dtype), O: T.Tensor((4, output_extent), view_dtype)):
+        with T.Kernel(1):
+            owner = T.alloc_shared((512,), storage_dtype)
+            view = T.view(owner, shape=(view_extent,), dtype=view_dtype)
+            T.annotate_layout({owner: tilelang.layout.Layout((512,), lambda i: i + prefix)})
+            T.annotate_buffer_versions({owner: (versions, mode)})
+            for step in T.Pipelined(4, num_stages=max(versions, 2)):
+                if prefix == 1:
+                    # Scalar accesses allow a slot whose physical size is not
+                    # 32B-aligned; the later UB alignment pass must preserve it.
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(512):
+                            owner[i] = A[step, i]
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(output_extent):
+                            O[step, i] = view[i + view_prefix]
+                else:
+                    T.copy(A[step, :], owner)
+                    T.copy(view[view_prefix:view_extent], O[step, :])
+
+    a = torch.arange(1, 4 * 512 + 1, dtype=torch.float32).reshape(4, 512).to(getattr(torch, storage_dtype))
+    result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
+    expected = a.view(getattr(torch, view_dtype))[:, :output_extent]
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
     @T.prim_func
     def main(

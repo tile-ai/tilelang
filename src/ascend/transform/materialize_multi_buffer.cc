@@ -160,10 +160,33 @@ private:
       explicit Collector(VersionedBufferRegistry *registry)
           : registry_(registry) {}
 
+      Map<Var, PrimExpr> layout_pitch_bits;
+
     private:
       void VisitStmt_(const SBlockNode *op) final {
         for (const Buffer &buffer : op->alloc_buffers)
           registry_->RegisterAllocation(buffer);
+        if (auto value = op->annotations.Get(attr::kLayoutMap)) {
+          for (const auto &[buffer, layout] :
+               value.value().cast<Map<Buffer, Layout>>()) {
+            if (!registry_->storage_versions_.count(buffer->data) ||
+                layout.as<FragmentNode>())
+              continue;
+            PrimExpr bits =
+                make_const(buffer->DefaultIndexType(),
+                           buffer->dtype.bits() * buffer->dtype.lanes());
+            for (const PrimExpr &extent : layout->OutputShape())
+              bits = bits * extent;
+            arith::Analyzer analyzer;
+            bits = analyzer.Simplify(bits);
+            if (auto previous = layout_pitch_bits.Get(buffer->data))
+              ICHECK(analyzer.CanProveEqual(previous.value(), bits))
+                  << "Automatic multi-buffer storage "
+                  << buffer->data->name_hint
+                  << " has inconsistent layout storage pitches";
+            layout_pitch_bits.Set(buffer->data, bits);
+          }
+        }
         StmtVisitor::VisitStmt_(op);
       }
 
@@ -175,6 +198,14 @@ private:
       VersionedBufferRegistry *registry_;
     } collector(this);
     collector(kernel_root);
+    // Layout lowering sizes the allocation from its physical output shape.
+    // Ordinary views must use the same version pitch without inheriting the
+    // annotated view's within-version index mapping.
+    for (const auto &[storage, bits] : collector.layout_pitch_bits) {
+      auto allocation = storage_pitch_bits_.find(storage);
+      if (allocation != storage_pitch_bits_.end())
+        allocation->second = bits;
+    }
   }
 
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> storage_versions_;
