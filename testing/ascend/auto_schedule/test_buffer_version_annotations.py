@@ -34,6 +34,7 @@ def test_buffer_version_annotations_use_storage_identity():
 @pytest.mark.parametrize(
     "annotation, message",
     [
+        pytest.param("write_counter", "explicit version count", id="write-counter-needs-count"),
         pytest.param("lexical", "buffer version mode", id="unknown-mode"),
         pytest.param((2, "counter", "extra"), r"must be \(num_versions, mode\)", id="tuple-arity"),
         pytest.param((2, None), "buffer version mode", id="tuple-mode"),

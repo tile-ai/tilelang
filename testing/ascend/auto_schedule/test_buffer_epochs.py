@@ -19,12 +19,18 @@ from testing.ascend.auto_schedule._scheduled_ir import copy_ring
         pytest.param("auto", True, 1, True, id="auto-sparse"),
         pytest.param("auto", False, 2, True, id="auto-siblings"),
         pytest.param("counter", True, 2, True, id="sparse-siblings"),
+        pytest.param("write_counter", False, 1, True, id="write-clock"),
+        pytest.param("write_counter", True, 1, True, id="sparse-write-clock"),
+        pytest.param("write_counter", True, 2, True, id="shared-write-clock"),
     ],
 )
 @pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
 def test_storage_clock(mode, guarded, owners, uses_counter, versions):
     before = copy_ring(mode=mode, versions=versions, owners=owners, guarded=guarded)
     after = transform.PrepareMultiBuffer()(before)
+    # The clock kind is metadata consumed by later passes and must round-trip.
+    if mode == "write_counter":
+        after = tvm.ir.load_json(tvm.ir.save_json(after))
     ub = allocated_buffer(after, "ub")
     assert tuple(int(dim) for dim in ub.shape) == (64,)  # Preparation does not expand data.
     loops = [loop for loop in nodes(after, tirx.For) if ub.data in loop.annotations.get("multi_buffer_eligible", [])]
@@ -35,19 +41,29 @@ def test_storage_clock(mode, guarded, owners, uses_counter, versions):
         return
     counter = counters[0]
     assert all(other.same_as(counter) for other in counters)
-    assert counter.dtype == "int32" and counter.scope() == "local.var"
+    assert counter.dtype == ("int64" if mode == "write_counter" else "int32") and counter.scope() == "local.var"
     updates = [
         (store, parents) for store, parents in statements(after) if isinstance(store, tirx.BufferStore) and store.buffer.same_as(counter)
     ]
     resets = [(store, parents) for store, parents in updates if isinstance(store.value, tirx.IntImm)]
     advances = [(store, parents) for store, parents in updates if not isinstance(store.value, tirx.IntImm)]
-    assert len(resets) == 1 and int(resets[0][0].value) == 0
+    assert len(resets) == 1 and int(resets[0][0].value) == (-1 if mode == "write_counter" else 0)
     assert not any(isinstance(parent, tirx.For) for parent in resets[0][1])
     assert len(advances) == owners
     analyzer = tvm.arith.Analyzer()
     for store, parents in advances:
         assert analyzer.can_prove_equal(store.value, counter[0] + 1)
         owner = next(parent for parent in reversed(parents) if isinstance(parent, tirx.For))
+        if mode == "write_counter":
+            assert ub.data in owner.annotations["tl.write_counter_buffers"]
+            statements_in_owner = [stmt for stmt, _ in statements(owner)]
+            update_index = next(index for index, stmt in enumerate(statements_in_owner) if stmt.same_as(store))
+            copy_indices = [
+                index
+                for index, stmt in enumerate(statements_in_owner)
+                if isinstance(stmt, tirx.Evaluate) and isinstance(stmt.value, tirx.Call) and stmt.value.op.name == "tl.tileop.ascend_copy"
+            ]
+            assert len(copy_indices) == 2 and update_index < min(copy_indices)
         if guarded:
             expected_guard = owner.loop_var % 2 == 0
             actual_guard = owner.annotations["tl.storage_epoch_guard_map"][ub.data]
