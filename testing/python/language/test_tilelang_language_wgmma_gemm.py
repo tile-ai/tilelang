@@ -313,7 +313,7 @@ def test_async_wgmma_operand_not_merged_before_wait_correctness(conditional_firs
         torch.testing.assert_close(o1, ref1, rtol=1e-2, atol=1e-2)
 
 
-def _merged_shared_dyn_sizes(func):
+def _merged_shared_dyn_sizes(func, aggressive=False):
     import re
 
     mod = tvm.IRModule.from_expr(func)
@@ -321,7 +321,7 @@ def _merged_shared_dyn_sizes(func):
     mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
     mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
     mod = tvm.tirx.transform.SplitHostDevice()(mod)
-    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations(enable_aggressive_merge=aggressive)(mod)
     return [int(size) for size in re.findall(r'alloc_buffer\(\((\d+),\), "uint8", scope="shared.dyn"\)', mod.script())]
 
 
@@ -350,6 +350,29 @@ def _wgmma_ir_helpers():
         return T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
 
     return T, init, issue, wait
+
+
+def _wgmma_ir_control_helpers():
+    from tvm.script import tirx as T
+
+    op = tvm.ir.Op.get
+
+    def access_ptr(buf):
+        return T.tvm_access_ptr(T.type_annotation("uint8"), buf.data, 0, 4096, 1)
+
+    def init_ptr(desc, ptr):
+        return T.evaluate(T.call_intrin("handle", op("tl.initialize_wgmma_descriptor"), desc[0], ptr, 1, 1, 64))
+
+    def commit():
+        return T.evaluate(T.call_intrin("handle", op("tl.warpgroup_commit_batch")))
+
+    def loop_break():
+        return T.evaluate(T.call_intrin("handle", op("tl.loop_break")))
+
+    def continue_loop():
+        return T.evaluate(tvm.tirx.continue_loop())
+
+    return access_ptr, init_ptr, commit, loop_break, continue_loop
 
 
 # Each builder returns hand-written IR and the shared-memory bytes expected when every buffer
@@ -431,11 +454,296 @@ def _ir_descriptor_initialized_on_two_paths():
     return func, 3 * 4096
 
 
+def _ir_break_with_wgmma_in_flight():
+    # The break path skips the in-loop wait, so B0 is still read after the loop.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, loop_break, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            init(desc, B0)
+            issue(desc)
+            commit()
+            if k == 1:
+                loop_break()
+            wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_continue_skips_wait():
+    # On the last iteration the continue skips the wait, so B0 is still read after the loop.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, continue_loop = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            init(desc, B0)
+            issue(desc)
+            commit()
+            if k == 3:
+                continue_loop()
+            wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _make_ir_wait_in_next_iteration(alloc_in_loop):
+    # Each iteration's WGMMA reads X until the wait of the next iteration, which comes after
+    # that iteration's write of Z.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def in_loop():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for _k in T.serial(4):
+            Z = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            X = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            Z[tx] = T.uint8(1)
+            wait()
+            X[tx] = T.uint8(2)
+            init(desc, X)
+            issue(desc)
+            commit()
+        wait()
+
+    @T.prim_func(private=True)
+    def at_top():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        Z = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        X = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for _k in T.serial(4):
+            Z[tx] = T.uint8(1)
+            wait()
+            X[tx] = T.uint8(2)
+            init(desc, X)
+            issue(desc)
+            commit()
+        wait()
+
+    return (in_loop if alloc_in_loop else at_top), 2 * 4096
+
+
+def _ir_wait_in_other_warp_specialized_role():
+    # The wait in the else role runs on the other warpgroup and does not retire the MMA of the
+    # then role.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 256)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        with T.attr([128, 128], "kWarpSpecializationScope", 0):
+            if tx < 128:
+                init(desc, B0)
+                issue(desc)
+                commit()
+            else:
+                wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_operand_through_bound_pointer():
+    # The initialization names B0 only through a bound pointer, as the atom-level macros emit it.
+    T, _, issue, wait = _wgmma_ir_helpers()
+    access_ptr, init_ptr, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for _k in T.serial(4):
+            p = T.bind(access_ptr(B0))
+            init_ptr(desc, p)
+            issue(desc)
+            commit()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_wait_before_commit():
+    # wait_wgmma only waits for committed groups, so the first wait does not retire the MMA.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        init(desc, B0)
+        issue(desc)
+        wait()
+        Tmp[tx] = T.uint8(1)
+        commit()
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_descriptor_issued_in_next_iteration():
+    # The descriptor initialized on X at the end of one iteration is issued again at the start of
+    # the next, so X's data must survive the write of T0 that comes first.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        L = T.alloc_buffer((1,), "uint8", scope="local")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            X = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            T0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            T0[tx] = T.uint8(1)
+            L[0] = T0[tx]
+            if k > 0:
+                issue(desc)
+                commit()
+                wait()
+            X[tx] = T.uint8(2)
+            init(desc, X)
+            issue(desc)
+            commit()
+            wait()
+
+    return func, 2 * 4096
+
+
+def _ir_break_keeps_earlier_reuse():
+    # Only the break path leaves X in flight, and nothing is written on it before the final wait,
+    # so T0, used earlier in every iteration, can share X's storage.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, loop_break, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        L = T.alloc_buffer((1,), "uint8", scope="local")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            T0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            X = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            T0[tx] = T.uint8(1)
+            L[0] = T0[tx]
+            X[tx] = T.uint8(2)
+            init(desc, X)
+            issue(desc)
+            commit()
+            if k == 1:
+                loop_break()
+            wait()
+        wait()
+
+    return func, 4096
+
+
+def _ir_descriptor_rebound_in_next_loop():
+    # The second loop re-initializes the descriptor on B1 before every issue and the first loop
+    # retires all of its MMAs, so B1 can share B0's storage.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            if k == 0:
+                B0[tx] = T.uint8(1)
+            init(desc, B0)
+            issue(desc)
+            commit()
+            wait()
+        for k in T.serial(4):
+            B1 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+            if k == 0:
+                B1[tx] = T.uint8(2)
+            init(desc, B1)
+            issue(desc)
+            commit()
+            wait()
+
+    return func, 4096
+
+
 @pytest.mark.parametrize(
-    "build",
-    [_ir_descriptor_reused_after_full_wait, _ir_wait_in_sibling_branch, _ir_descriptor_initialized_on_two_paths],
-    ids=["descriptor_reused", "sibling_branch", "two_paths"],
+    "build,aggressive",
+    [
+        pytest.param(_ir_descriptor_reused_after_full_wait, False, id="descriptor_reused"),
+        pytest.param(_ir_wait_in_sibling_branch, False, id="sibling_branch"),
+        pytest.param(_ir_descriptor_initialized_on_two_paths, False, id="two_paths"),
+        pytest.param(_ir_break_with_wgmma_in_flight, False, id="break"),
+        pytest.param(_ir_continue_skips_wait, False, id="continue"),
+        pytest.param(lambda: _make_ir_wait_in_next_iteration(True), False, id="wait_in_next_iteration"),
+        pytest.param(lambda: _make_ir_wait_in_next_iteration(False), True, id="wait_in_next_iteration_aggressive"),
+        pytest.param(_ir_wait_in_other_warp_specialized_role, False, id="warp_specialized"),
+        pytest.param(_ir_operand_through_bound_pointer, False, id="bound_pointer"),
+        pytest.param(_ir_wait_before_commit, False, id="wait_before_commit"),
+        pytest.param(_ir_descriptor_issued_in_next_iteration, False, id="issued_in_next_iteration"),
+        pytest.param(_ir_break_keeps_earlier_reuse, False, id="break_keeps_reuse"),
+        pytest.param(_ir_descriptor_rebound_in_next_loop, False, id="rebound_in_next_loop"),
+    ],
 )
-def test_wgmma_operands_stay_live_until_full_wait(build):
+def test_wgmma_operands_stay_live_until_full_wait(build, aggressive):
     func, expected_bytes = build()
-    assert _merged_shared_dyn_sizes(func) == [expected_bytes]
+    assert _merged_shared_dyn_sizes(func, aggressive) == [expected_bytes]
