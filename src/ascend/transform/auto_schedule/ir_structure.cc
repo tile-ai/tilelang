@@ -334,13 +334,13 @@ std::shared_ptr<IRStructure> ControlNode::Clone() const {
 }
 
 std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
-CollectIterationVariantVars(ControlNode *scope, bool include_ancestors) {
+CollectIterationVariantVars(ControlNode *scope) {
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> result;
   if (scope == nullptr)
     return result;
 
   ControlNode *root = scope;
-  while (include_ancestors && root->GetParentControl() != nullptr)
+  while (root->GetParentControl() != nullptr)
     root = root->GetParentControl();
   std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
     if (node == nullptr)

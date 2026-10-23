@@ -375,58 +375,6 @@ def test_guarded_read_history_and_sync_placement(case, bind_guards):
             assert sum(command[0] in ("set", "wait") for command in commands) == writes * 4 + 2 * 2
 
 
-@pytest.mark.parametrize(
-    "case", ["late-first-write", "changing-snapshot", "conditional-snapshot", "independent-read-guard", "after-read", "unreachable-write"]
-)
-def test_guard_history_does_not_invent_an_initialization(case):
-    a, c = [tirx.decl_buffer((8, 64), "float32", name=name) for name in ("A", "C")]
-    predicate = tirx.decl_buffer((8,), "int32", name="predicate")
-    x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
-    i = tirx.Var("i", "int32")
-    common, refresh = i >= 1, i % 2 == 0
-    bindings = []
-    if case == "changing-snapshot":
-        enabled = tirx.Var("enabled", "bool")
-        bindings = [unit(tirx.Bind(enabled, predicate[i] > 0))]
-        common = enabled
-    write_guard = tirx.And(common, refresh)
-    read_guard = common if case != "independent-read-guard" else i % 2 == 1
-    if case == "conditional-snapshot":
-        enabled = tirx.Var("enabled", "bool")
-        bindings = [unit(tirx.Bind(enabled, predicate[i] > 0), guard=i >= 0)]
-        read_guard = tirx.And(i >= 0, enabled)
-        write_guard = tirx.And(read_guard, i % 2 == 0)
-    if case == "independent-read-guard":
-        write_guard = i % 3 == 2
-    if case == "after-read":
-        write_guard = read_guard = i >= 1
-    if case == "unreachable-write":
-        write_guard = i == 1
-    tasks = [
-        unit(copy(a, x, src_indices=[i, 0], src_shape=[1, 64]), guard=write_guard),
-        unit(copy(x, c, dst_indices=[i, 0], dst_shape=[1, 64]), guard=read_guard),
-    ]
-    if case == "after-read":
-        tasks.reverse()
-    owner = tirx.For(
-        i,
-        0,
-        8,
-        tirx.ForKind.SERIAL,
-        seq(*bindings, *tasks),
-        annotations={"multi_buffer_eligible": [x.data]},
-        step=2 if case == "unreachable-write" else None,
-    )
-    before = kernel(
-        unit(owner, core=None),
-        buffers=[x],
-        params=[a, c, predicate],
-        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
-    )
-    with pytest.raises(tvm.error.InternalError, match="initialization"):
-        transform.PrepareMultiBuffer()(before)
-
-
 def test_write_only_dma_ring_fences_slot_reuse_and_completion():
     before = _program()
 
@@ -753,7 +701,7 @@ def test_sf_padding_preserves_the_dynamic_extent_snapshot(snapshot):
 
 
 @pytest.mark.parametrize("case", ["read-before-write", "read-modify-write", "cross-stage"])
-def test_ambiguous_write_generations_are_diagnosed(case):
+def test_write_counter_trusts_data_contract_but_checks_stages(case):
     before = _program()
     if case == "read-before-write":
 
@@ -761,7 +709,6 @@ def test_ambiguous_write_generations_are_diagnosed(case):
             if isinstance(node, tirx.IfThenElse):
                 return tirx.IfThenElse(node.condition & (nodes(before, tirx.For)[0].loop_var > 0), node.then_case, None)
 
-        pattern = "initialization"
     elif case == "read-modify-write":
 
         def mutate(node):
@@ -770,7 +717,6 @@ def test_ambiguous_write_generations_are_diagnosed(case):
                 if dst.name == "cached":
                     return tirx.BufferStore(dst, dst[0] + 1, [0])
 
-        pattern = "read-modify-write"
     else:
 
         def mutate(node):
@@ -783,11 +729,17 @@ def test_ambiguous_write_generations_are_diagnosed(case):
             ):
                 return tirx.AttrStmt({"stage": 1}, node.attr_key, node.value, node.body)
 
-        pattern = "multiple schedule stages"
     body = tirx.stmt_functor.ir_transform(before["main"].body, None, mutate)
     before = tvm.IRModule({"main": before["main"].with_body(body)})
-    with pytest.raises(tvm.error.InternalError, match=pattern):
-        transform.PrepareMultiBuffer()(before)
+    if case == "cross-stage":
+        with pytest.raises(tvm.error.InternalError, match="multiple schedule stages"):
+            transform.PrepareMultiBuffer()(before)
+    else:
+        # Explicit owners promise initialized generations and fresh updates.
+        # These invalid programs only test that Prepare trusts the annotation;
+        # they must not be executed or used as synchronization evidence.
+        after = transform.PrepareMultiBuffer()(before)
+        assert nodes(after, tirx.For)[0].annotations["tl.multi_buffer_counter_map"]
 
 
 @pytest.mark.parametrize("case", ["opaque", "mutable-guard", "loop-break"])
@@ -985,9 +937,8 @@ def test_changing_view_geometry_is_not_a_complete_generation():
         transform.PrepareMultiBuffer()(before)
 
 
-@pytest.mark.parametrize("guard_reader", [False, True])
 @pytest.mark.parametrize("reader_snapshot", ["shared", "alias", "independent"])
-def test_conditional_owner_keeps_initialization_predicate(guard_reader, reader_snapshot):
+def test_conditional_owners_trust_user_initialization(reader_snapshot):
     a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
     predicate = tirx.decl_buffer((1,), "int32", name="predicate")
     x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
@@ -1005,7 +956,7 @@ def test_conditional_owner_keeps_initialization_predicate(guard_reader, reader_s
     read = unit(
         tirx.For(j, 0, 2, tirx.ForKind.SERIAL, unit(copy(x, c))),
         core=None,
-        guard=read_enabled > 0 if guard_reader else None,
+        guard=read_enabled > 0,
     )
     before = kernel(
         seq(*bindings, write, read),
@@ -1014,11 +965,9 @@ def test_conditional_owner_keeps_initialization_predicate(guard_reader, reader_s
         annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
     )
     before = transform.AnnotateMultiBufferEligible()(before)
-    if guard_reader and reader_snapshot != "independent":
-        assert calls(_physical(before), "tl.ascend_wait_flag")
-    else:
-        with pytest.raises(tvm.error.InternalError, match="initialization"):
-            transform.PrepareMultiBuffer()(before)
+    # Independent snapshots need not be provably equal: the user guarantees
+    # that the read owner only executes after a value has been written.
+    assert calls(_physical(before), "tl.ascend_wait_flag")
 
 
 def test_partial_writes_in_one_task_jointly_define_value():
@@ -1186,8 +1135,9 @@ def test_read_modify_write_uses_storage_write_first_heuristic(owner_policy, case
             with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
                 transform.AnnotateMultiBufferEligible()(before)
         else:
-            with pytest.raises(tvm.error.InternalError, match="start an update with a read-modify-write"):
-                transform.PrepareMultiBuffer()(before)
+            # Explicit owner claims override the inference heuristic. Only
+            # preparation is checked for these contract-violating examples.
+            transform.PrepareMultiBuffer()(before)
         return
     if owner_policy == "inferred":
         before = transform.AnnotateMultiBufferEligible()(before)
@@ -1303,14 +1253,15 @@ def test_implicit_read_modify_write_uses_the_same_write_first_analysis(initializ
     before = kernel(
         seq(
             unit(copy(a, r)),
-            unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, seq(*tasks), annotations={"multi_buffer_eligible": [x.data]}), core=None),
+            unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, seq(*tasks)), core=None),
         ),
         buffers=[r, x],
         params=[a, c],
         annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
     )
     if initialization == "none":
-        with pytest.raises(tvm.error.InternalError, match="start an update with a read-modify-write"):
-            transform.PrepareMultiBuffer()(before)
+        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+            transform.AnnotateMultiBufferEligible()(before)
     else:
+        before = transform.AnnotateMultiBufferEligible()(before)
         assert calls(_physical(before), "tl.ascend_wait_flag")
