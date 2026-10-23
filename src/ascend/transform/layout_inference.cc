@@ -1085,6 +1085,18 @@ private:
             annotated.defined() ? annotated.value()->data : Downcast<Var>(key);
         ICHECK(buffer_data_to_buffers_.count(var))
             << "buffer " << var << " is not found in the block";
+        if (annotated.defined()) {
+          // An annotation-only view still constrains its storage aliases,
+          // without representing a memory access itself.
+          Array<Buffer> aliases = buffer_data_to_buffers_[var];
+          if (std::none_of(aliases.begin(), aliases.end(),
+                           [&](const Buffer &alias) {
+                             return alias.same_as(annotated.value());
+                           })) {
+            aliases.push_back(annotated.value());
+            buffer_data_to_buffers_.Set(var, aliases);
+          }
+        }
         Array<Buffer> buffers = annotated.defined()
                                     ? Array<Buffer>{annotated.value()}
                                     : buffer_data_to_buffers_[var];
