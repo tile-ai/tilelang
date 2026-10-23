@@ -356,6 +356,15 @@ private:
     return buffer;
   }
 
+  PrimExpr VisitExpr_(const tirx::VarNode *op) final {
+    auto allocation = allocations_.find(op);
+    if (allocation == allocations_.end())
+      return ffi::GetRef<tirx::Var>(op);
+    // Raw storage pointers can escape through extern calls or handle values.
+    // Reuse the typed access_ptr rewrite, conservatively allowing reads/writes.
+    return VisitExpr(allocation->second->buffer.access_ptr(3));
+  }
+
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
     if (!op->op.same_as(tirx::builtin::tvm_access_ptr()))
       return tirx::StmtExprMutator::VisitExpr_(op);

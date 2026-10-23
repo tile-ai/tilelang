@@ -1005,6 +1005,96 @@ def test_ub_placement_keeps_only_active_subcore_storage(owner):
     assert artifact.kernel_source
 
 
+@pytest.mark.parametrize("place_live", [False, True])
+@pytest.mark.parametrize("dead_use", ["unused", "constant-branch"])
+def test_placement_drops_eliminated_allocations(place_live, dead_use):
+    @T.prim_func
+    def main(A: T.Tensor((64,), "float32"), C: T.Tensor((64,), "float32")):
+        with T.Kernel(1) as bx:
+            live = T.alloc_shared((64,), "float32")
+            dead = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({live: 1, dead: 1})
+            if place_live:
+                T.annotate_buffer_addresses({live: 512, dead: 64})
+            else:
+                T.annotate_buffer_addresses({dead: 64})
+            if dead_use == "constant-branch" and bx >= 1:
+                T.copy(A, dead)
+            T.copy(A, live)
+            T.copy(live, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendRemoveNoOp":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    after = snapshots["tl.AscendRemoveNoOp"]
+    addresses = [node.node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_buffer_addresses"]
+    assert len(addresses) == int(place_live)
+    if place_live:
+        (storage,) = addresses[0]
+        assert int(addresses[0][storage]) == 512
+        assert any(storage.same_as(node.buffer.data) for node in nodes(after, tirx.AllocBuffer))
+    allocations = [
+        node.buffer
+        for func in artifact.device_mod.functions.values()
+        for node in nodes(func, tirx.AllocBuffer)
+        if node.buffer.scope() == "shared.dyn"
+    ]
+    (allocation,) = allocations
+    assert int(allocation.shape[0]) * tvm.DataType(allocation.dtype).bits // 8 == (512 if place_live else 0) + 256
+    assert artifact.kernel_source
+
+
+@pytest.mark.parametrize("pointer_kind", ["raw", "access_ptr"])
+@pytest.mark.parametrize("address", [0, 64])
+@pytest.mark.parametrize("dtype,ctype", [("int32", "int32_t"), ("float16", "half")])
+def test_placement_rewrites_extern_storage_pointers(pointer_kind, address, dtype, ctype):
+    @T.prim_func
+    def main(out: T.Tensor((1,), dtype)):
+        with T.Kernel(1):
+            T.import_source(f"__aicore__ inline {ctype} read_second(__ubuf__ {ctype}* p) {{ return p[1]; }}\n")
+            a = T.alloc_shared((8,), dtype)
+            T.annotate_buffer_versions({a: 1})
+            T.annotate_buffer_addresses({a: address})
+            with T.Task():
+                a[0] = T.Cast(dtype, 100)
+                a[1] = T.Cast(dtype, 200)
+                if pointer_kind == "raw":
+                    out[0] = T.call_extern(dtype, "read_second", a.data) + a[0]
+                else:
+                    out[0] = T.call_extern(dtype, "read_second", T.access_ptr(a[0], "r", extent=2)) + a[0]
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.MergeUBAllocations":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    merged = snapshots["tl.MergeUBAllocations"]
+    (allocation,) = [
+        node.buffer for func in merged.functions.values() for node in nodes(func, tirx.AllocBuffer) if node.buffer.scope() == "shared.dyn"
+    ]
+    (external,) = [
+        call for func in merged.functions.values() for call in calls(func, "tirx.call_extern") if call.args[0].value == "read_second"
+    ]
+    pointer = external.args[1]
+    assert pointer.op.name == "tirx.tvm_access_ptr"
+    assert pointer.args[0].dtype == dtype
+    assert pointer.args[1].same_as(allocation.data)
+    assert int(tvm.arith.Analyzer().simplify(pointer.args[2])) * tvm.DataType(dtype).bits // 8 == address
+    assert artifact.kernel_source
+
+
 def _placed_ss_kernel():
     @T.prim_func
     def main(seed: T.Tensor((16, 16), "float16"), out: T.Tensor((4, 2), "uint32")):

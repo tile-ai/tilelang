@@ -130,6 +130,14 @@ def test_invalid_physical_plans_fail(case, message):
         transform.MergeUBAllocations()(_allocation_program(buffers, addresses, aliases=case != "no-contract"))
 
 
+def test_dead_allocation_cleanup_preserves_invalid_unknown_placement():
+    a, unknown = _buffer("a"), _buffer("unknown")
+    before = _allocation_program([a], {unknown.data: 512})
+    after = transform.AscendRemoveNoOp()(before)
+    with pytest.raises(tvm.error.InternalError, match="unknown allocation"):
+        transform.MergeUBAllocations()(after)
+
+
 def test_existing_dynamic_arena_is_rejected():
     a = _buffer("a")
     arena = _buffer("arena", scope="shared.l1.dyn")
