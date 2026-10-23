@@ -180,6 +180,35 @@ void ForEachOpaqueWrite(const CallNode *op, const F &record) {
   }
 }
 
+/*! \brief Report buffers read through a TileLang pointer, including nested
+ * calls.
+ *
+ * The BufferLoad in tl.access_ptr denotes an address, not a scalar read.
+ * Its access mask determines whether the pointed-to buffer is actually read.
+ * In contrast, address_of has no read intent of its own.
+ */
+template <typename F>
+void ForEachOpaqueRead(const CallNode *op, const F &record) {
+  if (op->op.same_as(tl::access_ptr())) {
+    if (op->args.size() >= 3 &&
+        (GetConservativeAccessMask(op->args[2]) & kAccessRead)) {
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        record(load->buffer);
+      }
+    }
+    return;
+  }
+  if (op->op.same_as(builtin::address_of()) ||
+      op->op.same_as(builtin::tvm_access_ptr())) {
+    return;
+  }
+  for (const PrimExpr &arg : op->args) {
+    if (const auto *call = arg.as<CallNode>()) {
+      ForEachOpaqueRead(call, record);
+    }
+  }
+}
+
 /*! \brief Collects every buffer a function potentially writes.
  *
  * Records which node performed each write so that a read can discount the
@@ -208,6 +237,21 @@ struct PotentialWriteCollector : public StmtExprVisitor {
     }
     if (EscapesThroughArgs(op)) {
       ForEachOpaqueWrite(op, [&](const Var &var) { Record(var, op); });
+      // The opaque call owns writes through nested pointers. Do not count the
+      // same write again with the pointer call as a second shared-memory
+      // writer. Other arguments can still contain independent writes worth
+      // visiting.
+      for (const PrimExpr &arg : op->args) {
+        if (const auto *call = arg.as<CallNode>()) {
+          if (call->op.same_as(tl::access_ptr()) ||
+              call->op.same_as(builtin::tvm_access_ptr()) ||
+              call->op.same_as(builtin::address_of())) {
+            continue;
+          }
+        }
+        VisitExpr(arg);
+      }
+      return;
     }
     StmtExprVisitor::VisitExpr_(op);
   }
@@ -337,6 +381,9 @@ struct BufferInitVerifier : public StmtExprVisitor {
       return;
     }
     if (EscapesThroughArgs(op)) {
+      ForEachOpaqueRead(op, [&](const Buffer &buffer) {
+        CheckRead(buffer, Kind::kGeneric, op);
+      });
       ForEachOpaqueWrite(op, [&](const Var &var) { written_.insert(var); });
       return;
     }
