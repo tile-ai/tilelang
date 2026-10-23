@@ -74,6 +74,13 @@ static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
   return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
 }
 
+static void AppendUnique(std::vector<const VarNode *> *vars,
+                         const VarNode *var) {
+  if (std::find(vars->begin(), vars->end(), var) == vars->end()) {
+    vars->push_back(var);
+  }
+}
+
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
@@ -279,39 +286,21 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  // Operands of in-flight WGMMAs are tracked along control flow: a wait that
-  // only runs on one path retires them on that path alone, so the state after
-  // a branch is the union of its paths and the state after a loop also keeps
-  // what a zero-trip execution would leave pending.
+  // Branches and loops join the WGMMA state of their paths; see the comment
+  // on the CallNode visitor below.
   void VisitScopeBody(const IfThenElseNode *op) {
     this->VisitExpr(op->condition);
-    const auto before = pending_wgmma_buffers_;
-    this->VisitStmt(op->then_case);
-    const auto after_then = std::move(pending_wgmma_buffers_);
-    pending_wgmma_buffers_ = before;
-    if (op->else_case) {
-      this->VisitStmt(op->else_case.value());
-    }
-    for (const VarNode *buf : after_then) {
-      MarkWgmmaOperandPending(buf);
-    }
+    VisitBranches(op->then_case, op->else_case);
   }
 
   void VisitScopeBody(const ForNode *op) {
-    const auto before = pending_wgmma_buffers_;
-    StmtExprVisitor::VisitStmt_(op);
-    for (const VarNode *buf : before) {
-      MarkWgmmaOperandPending(buf);
-    }
+    // Like InjectFenceProxy, assume a zero-trip execution unless the extent is
+    // a known positive constant.
+    const auto *extent = op->extent.as<IntImmNode>();
+    VisitLoopBody(op, extent == nullptr || extent->value <= 0);
   }
 
-  void VisitScopeBody(const WhileNode *op) {
-    const auto before = pending_wgmma_buffers_;
-    StmtExprVisitor::VisitStmt_(op);
-    for (const VarNode *buf : before) {
-      MarkWgmmaOperandPending(buf);
-    }
-  }
+  void VisitScopeBody(const WhileNode *op) { VisitLoopBody(op, true); }
 
   void VisitStmt_(const AttrStmtNode *op) final {
     // Only record the outer most thread extent.
@@ -360,83 +349,121 @@ public:
 
   // An async WGMMA keeps reading its shared operands through the descriptor
   // until the wait that retires it, but the only syntactic access to such a
-  // buffer is the descriptor initialization. Keep those buffers live until the
-  // next WGMMA wait, otherwise a later buffer can be merged onto their storage
-  // while the MMA is still in flight.
+  // buffer is the descriptor initialization. So the operands that may still be
+  // in flight are tracked along control flow, and every WGMMA wait counts as a
+  // read of them. A descriptor initialization makes its operands pending and
+  // binds them to the descriptor on the current path, and every issue makes
+  // pending what its descriptors are bound to. Only a full wait retires them,
+  // and only if no WGMMA was issued after the last commit, since a wait does
+  // not cover uncommitted ones. Branches join their paths, and a break, a
+  // continue or a thread_return ends its path. An operand still pending at a
+  // loop's back edge (the end of its body or a continue) is also read on the
+  // loop's own frame, so it stays live across every iteration up to the wait
+  // that retires it. So is an operand that an issue reads through a binding
+  // made in an earlier iteration, since its data crosses the back edge.
+  // Otherwise a later buffer could be merged onto its storage while the MMA is
+  // still in flight.
   void VisitExpr_(const CallNode *op) final {
     StmtExprVisitor::VisitExpr_(op);
+    // Code after a break, a continue or a thread_return is never reached.
+    if (!wgmma_state_.reachable) {
+      return;
+    }
     if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
-      std::vector<const VarNode *> operands;
-      for (const PrimExpr &arg : op->args) {
-        PostOrderVisit(arg, [&](const ObjectRef &node) {
-          const VarNode *buf = nullptr;
-          if (const auto *load = node.as<BufferLoadNode>()) {
-            buf = load->buffer->data.get();
-          } else if (const auto *var = node.as<VarNode>()) {
-            buf = var;
-          }
-          if (buf != nullptr && alloc_info_.count(buf) &&
-              alloc_info_[buf].alloc &&
-              IsAppropriateSharedMemory(GetRef<Var>(buf)) &&
-              std::find(operands.begin(), operands.end(), buf) ==
-                  operands.end()) {
-            operands.push_back(buf);
-          }
-        });
-      }
-      // Remember which buffers the descriptor addresses: it can be issued by
-      // several WGMMA batches after a single initialization. Initializations
-      // on different paths are accumulated, since which one a later issue sees
-      // is not known here.
-      if (!op->args.empty()) {
-        if (const auto *desc = op->args[0].as<BufferLoadNode>()) {
-          auto &known = wgmma_descriptor_operands_[desc->buffer->data.get()];
-          for (const VarNode *buf : operands) {
-            if (std::find(known.begin(), known.end(), buf) == known.end()) {
-              known.push_back(buf);
-            }
-          }
-        }
-      }
-      for (const VarNode *buf : operands) {
-        MarkWgmmaOperandPending(buf);
-      }
+      VisitWgmmaInit(op);
     } else if (op->op.same_as(tl::ptx_wgmma_ss()) ||
                op->op.same_as(tl::ptx_wgmma_rs()) ||
                op->op.same_as(tl::ptx_wgmma_sp_ss()) ||
                op->op.same_as(tl::ptx_wgmma_sp_rs())) {
-      // Every issue re-arms the operands of the descriptors it reads, since an
-      // earlier full wait may have retired them.
-      for (const PrimExpr &arg : op->args) {
-        if (const auto *var = arg.as<VarNode>()) {
-          auto it = wgmma_descriptor_operands_.find(var);
-          if (it != wgmma_descriptor_operands_.end()) {
-            for (const VarNode *buf : it->second) {
-              MarkWgmmaOperandPending(buf);
-            }
-          }
-        }
-      }
+      VisitWgmmaIssue(op);
+      wgmma_state_.uncommitted = true;
+    } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
+      wgmma_state_.uncommitted = false;
     } else if (op->op.same_as(tl::wait_wgmma()) ||
                op->op.same_as(tl::warpgroup_wait())) {
-      for (const VarNode *buf : pending_wgmma_buffers_) {
-        // Count the wait as a read, with the same scope attribution as a
-        // BufferLoad.
-        if (enable_aggressive_merge_) {
-          scope_.back().touched.push_back(buf);
-        } else {
-          size_t access_level =
-              std::min(alloc_info_[buf].level, scope_.size() - 1);
-          scope_[access_level].touched.push_back(buf);
-        }
+      for (const VarNode *buf : wgmma_state_.pending) {
+        TouchAsLoad(buf);
       }
-      // wait(N) leaves up to N MMAs in flight; only a full wait retires them.
+      // wait(N) leaves up to N groups in flight; only a full wait retires them.
       const auto *count =
           op->args.empty() ? nullptr : op->args[0].as<IntImmNode>();
-      if (count != nullptr && count->value == 0) {
-        pending_wgmma_buffers_.clear();
+      if (count != nullptr && count->value == 0 && !wgmma_state_.uncommitted) {
+        wgmma_state_.pending.clear();
       }
+    } else if (op->op.same_as(tl::loop_break()) ||
+               op->op.same_as(builtin::break_loop())) {
+      // Control leaves the loop, so the state reaches only the code after it.
+      if (!wgmma_loops_.empty()) {
+        wgmma_loops_.back().breaks.Join(wgmma_state_);
+        wgmma_state_ = WgmmaState::Unreachable();
+      }
+    } else if (op->op.same_as(builtin::continue_loop())) {
+      // Control goes to the next iteration, so the state reaches the back edge.
+      if (!wgmma_loops_.empty()) {
+        wgmma_loops_.back().continues.Join(wgmma_state_);
+        wgmma_state_ = WgmmaState::Unreachable();
+      }
+    } else if (op->op.same_as(builtin::thread_return())) {
+      // The thread exits, so nothing it issued can be observed afterwards.
+      wgmma_state_ = WgmmaState::Unreachable();
     }
+  }
+
+  // Records, before the linear scan and regardless of control flow, the shared
+  // buffers each WGMMA descriptor may address. Pointers are resolved first: a
+  // variable bound by a Bind (as the atom-level emitter's macros do) or a Let,
+  // and a handle stored in a buffer, stand for the buffers their value
+  // addresses. A pointer may be defined from one visited after it (an inner
+  // Let, or a handle stored later in a loop body), so this repeats until
+  // nothing new is found. Descriptors are then collected with every alias
+  // known.
+  void CollectWgmmaDescriptors(const Stmt &stmt) {
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      PostOrderVisit(stmt, [&](const ObjectRef &node) {
+        if (const auto *bind = node.as<BindNode>()) {
+          changed |= RecordWgmmaPointer(bind->var.get(), bind->value);
+        } else if (const auto *let = node.as<LetNode>()) {
+          changed |= RecordWgmmaPointer(let->var.get(), let->value);
+        } else if (const auto *store = node.as<BufferStoreNode>()) {
+          if (store->value.dtype().is_handle()) {
+            changed |= AddWgmmaPointerOperands(store->buffer->data.get(),
+                                               store->value);
+          }
+        }
+      });
+    }
+    PostOrderVisit(stmt, [this](const ObjectRef &node) {
+      if (const auto *store = node.as<BufferStoreNode>()) {
+        // A descriptor written other than by its initialization (e.g. copied
+        // from another one) cannot be resolved.
+        const VarNode *desc = ResolveWgmmaDescriptor(store->buffer->data);
+        if (IsWgmmaDescriptorBuffer(desc)) {
+          rewritten_wgmma_descriptors_.insert(desc);
+        }
+        return;
+      }
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr ||
+          !call->op.same_as(tl::initialize_wgmma_descriptor()) ||
+          call->args.empty()) {
+        return;
+      }
+      std::vector<const VarNode *> operands = CollectWgmmaInitOperands(call);
+      for (const VarNode *buf : operands) {
+        AppendUnique(&all_wgmma_operands_, buf);
+      }
+      if (const VarNode *desc = ResolveWgmmaDescriptor(call->args[0])) {
+        auto &known = wgmma_descriptor_operands_[desc];
+        for (const VarNode *buf : operands) {
+          AppendUnique(&known, buf);
+        }
+      } else {
+        // A computed descriptor (e.g. a select between two) may be any one.
+        unresolved_wgmma_init_ = true;
+      }
+    });
   }
 
   // linearized access sequence.
@@ -455,10 +482,9 @@ private:
       return;
     }
     if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-      this->VisitStmt(if_node->then_case);
-      if (if_node->else_case.defined()) {
-        this->VisitStmt(if_node->else_case.value());
-      }
+      // The roles run concurrently, but each warpgroup follows one branch, so
+      // its WGMMA state is joined like an ordinary branch.
+      VisitBranches(if_node->then_case, if_node->else_case);
       return;
     }
     if (const auto *attr = stmt.as<AttrStmtNode>()) {
@@ -485,20 +511,408 @@ private:
   std::vector<StmtEntry> scope_;
   // The size of the scope.
   size_t scope_level_{0};
-  // Shared buffers read by WGMMAs that no full wait has retired yet.
+
+  // The binding of a WGMMA descriptor on a control-flow path.
+  struct WgmmaBinding {
+    // Shared buffers the descriptor may address.
+    std::vector<const VarNode *> operands;
+    // The depth in wgmma_loops_ of the outermost loop whose back edge may have
+    // carried this binding here, or -1 if it was made on this iteration.
+    int carried_loop{-1};
+  };
+
+  // The WGMMA state on the current control-flow path.
+  struct WgmmaState {
+    // Whether control can reach this point.
+    bool reachable{true};
+    // Shared buffers read by WGMMAs that no full wait has retired.
+    std::vector<const VarNode *> pending;
+    // Whether a WGMMA was issued after the last warpgroup_commit_batch.
+    bool uncommitted{false};
+    // The binding of each descriptor initialized on the way here.
+    std::unordered_map<const VarNode *, WgmmaBinding> descriptors;
+
+    static WgmmaState Unreachable() {
+      WgmmaState state;
+      state.reachable = false;
+      return state;
+    }
+
+    void Join(const WgmmaState &other) {
+      if (!other.reachable) {
+        return;
+      }
+      if (!reachable) {
+        *this = other;
+        return;
+      }
+      for (const VarNode *buf : other.pending) {
+        AppendUnique(&pending, buf);
+      }
+      uncommitted = uncommitted || other.uncommitted;
+      for (const auto &[desc, binding] : other.descriptors) {
+        auto it = descriptors.find(desc);
+        if (it == descriptors.end()) {
+          descriptors.emplace(desc, binding);
+          continue;
+        }
+        for (const VarNode *buf : binding.operands) {
+          AppendUnique(&it->second.operands, buf);
+        }
+        if (binding.carried_loop >= 0 &&
+            (it->second.carried_loop < 0 ||
+             binding.carried_loop < it->second.carried_loop)) {
+          it->second.carried_loop = binding.carried_loop;
+        }
+      }
+    }
+  };
+
+  // A loop whose body is being visited.
+  struct WgmmaLoop {
+    // The states at its continues and at its breaks.
+    WgmmaState continues{WgmmaState::Unreachable()};
+    WgmmaState breaks{WgmmaState::Unreachable()};
+    // Operands read through a binding carried across its back edge.
+    std::vector<const VarNode *> carried;
+  };
+
+  // Counts a read of `buf` with the same scope attribution as a BufferLoad.
+  // Only buffers allocated (so far) in this kernel take part.
+  void TouchAsLoad(const VarNode *buf) {
+    auto it = alloc_info_.find(buf);
+    if (it == alloc_info_.end() || !it->second.alloc) {
+      return;
+    }
+    size_t access_level = scope_.size() - 1;
+    if (!enable_aggressive_merge_) {
+      access_level = std::min(it->second.level, access_level);
+    }
+    scope_[access_level].touched.push_back(buf);
+  }
+
+  // An operand allocated further on (e.g. later in a loop body that re-issues
+  // it) is tracked too; TouchAsLoad ignores it until its allocation.
   void MarkWgmmaOperandPending(const VarNode *buf) {
-    if (std::find(pending_wgmma_buffers_.begin(), pending_wgmma_buffers_.end(),
-                  buf) == pending_wgmma_buffers_.end()) {
-      pending_wgmma_buffers_.push_back(buf);
+    AppendUnique(&wgmma_state_.pending, buf);
+  }
+
+  // Visits both branches from the same WGMMA state and joins the results: a
+  // wait on one path retires the operands on that path only.
+  void VisitBranches(const Stmt &then_case, const Optional<Stmt> &else_case) {
+    const WgmmaState before = wgmma_state_;
+    this->VisitStmt(then_case);
+    WgmmaState after_then = std::move(wgmma_state_);
+    wgmma_state_ = before;
+    if (else_case) {
+      this->VisitStmt(else_case.value());
+    }
+    wgmma_state_.Join(after_then);
+  }
+
+  // Visits a loop body once. Everything pending at the back edge (the end of
+  // the body or a continue), and everything read through a binding carried
+  // across it, is read on the loop's frame (scope_.back() here), so its live
+  // range covers every iteration. One visit suffices: each path through the
+  // body either adds to the pending set or replaces it, and the bindings at the
+  // entry already include those the body makes, so a second visit adds nothing
+  // at the back edge. The state after the loop joins the back edge with the
+  // breaks, and keeps the incoming one when the body may not run at all.
+  template <typename T> void VisitLoopBody(const T *op, bool may_skip) {
+    const WgmmaState before = wgmma_state_;
+    const int depth = static_cast<int>(wgmma_loops_.size());
+    wgmma_loops_.emplace_back();
+    BindWgmmaDescriptorsAtLoopEntry(op->body, depth);
+    StmtExprVisitor::VisitStmt_(op);
+    WgmmaLoop loop = std::move(wgmma_loops_.back());
+    wgmma_loops_.pop_back();
+    WgmmaState state = std::move(wgmma_state_);
+    state.Join(loop.continues);
+    for (const VarNode *buf : state.pending) {
+      TouchAsLoad(buf);
+    }
+    for (const VarNode *buf : loop.carried) {
+      TouchAsLoad(buf);
+    }
+    state.Join(loop.breaks);
+    if (may_skip) {
+      state.Join(before);
+    }
+    // Past the loop its back edge carries nothing.
+    for (auto &entry : state.descriptors) {
+      if (entry.second.carried_loop >= depth) {
+        entry.second.carried_loop = -1;
+      }
+    }
+    wgmma_state_ = std::move(state);
+  }
+
+  // A descriptor initialized in a loop body may reach an issue earlier in the
+  // body through the back edge. So at the loop entry its binding also covers
+  // what the body binds, and is carried by this loop unless an outer loop
+  // already carries it.
+  void BindWgmmaDescriptorsAtLoopEntry(const Stmt &body, int depth) {
+    if (wgmma_descriptor_operands_.empty()) {
+      return;
+    }
+    PostOrderVisit(body, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call == nullptr ||
+          !call->op.same_as(tl::initialize_wgmma_descriptor()) ||
+          call->args.empty()) {
+        return;
+      }
+      const VarNode *desc = ResolveWgmmaDescriptor(call->args[0]);
+      if (desc == nullptr) {
+        return;
+      }
+      WgmmaBinding &binding = wgmma_state_.descriptors[desc];
+      for (const VarNode *buf : CollectWgmmaInitOperands(call)) {
+        AppendUnique(&binding.operands, buf);
+      }
+      if (binding.carried_loop < 0) {
+        binding.carried_loop = depth;
+      }
+    });
+  }
+
+  // An initialization makes its operands pending and binds them to the
+  // descriptor. Writing the only element of a descriptor buffer replaces its
+  // binding; otherwise the buffer may still hold other descriptors.
+  void VisitWgmmaInit(const CallNode *op) {
+    if (op->args.empty()) {
+      return;
+    }
+    std::vector<const VarNode *> operands = CollectWgmmaInitOperands(op);
+    for (const VarNode *buf : operands) {
+      MarkWgmmaOperandPending(buf);
+    }
+    const VarNode *desc = ResolveWgmmaDescriptor(op->args[0]);
+    if (desc == nullptr) {
+      return;
+    }
+    WgmmaBinding &binding = wgmma_state_.descriptors[desc];
+    if (IsWholeWgmmaDescriptor(op->args[0])) {
+      binding = WgmmaBinding{std::move(operands), -1};
+    } else {
+      for (const VarNode *buf : operands) {
+        AppendUnique(&binding.operands, buf);
+      }
     }
   }
 
-  // Shared buffers read by WGMMAs that no full wait has retired on the
-  // current path.
-  std::vector<const VarNode *> pending_wgmma_buffers_;
-  // Shared buffers addressed by each WGMMA descriptor's initialization.
+  // An issue makes pending what each descriptor it reads is bound to. A
+  // descriptor that cannot be resolved (unknown, copied, or initialized
+  // through a computed descriptor) may address the operand of any
+  // initialization, bound in an earlier iteration of any enclosing loop.
+  void VisitWgmmaIssue(const CallNode *op) {
+    bool resolved = false;
+    bool unresolved = unresolved_wgmma_init_;
+    for (const PrimExpr &arg : op->args) {
+      for (const VarNode *desc : ResolveWgmmaDescriptors(arg)) {
+        if (wgmma_descriptor_operands_.count(desc) &&
+            !rewritten_wgmma_descriptors_.count(desc)) {
+          RearmWgmmaDescriptor(desc);
+          resolved = true;
+        } else if (IsWgmmaDescriptorBuffer(desc) ||
+                   rewritten_wgmma_descriptors_.count(desc)) {
+          unresolved = true;
+        }
+      }
+    }
+    if (resolved && !unresolved) {
+      return;
+    }
+    for (const VarNode *buf : all_wgmma_operands_) {
+      MarkWgmmaOperandPending(buf);
+      if (!wgmma_loops_.empty()) {
+        AppendUnique(&wgmma_loops_.front().carried, buf);
+      }
+    }
+  }
+
+  // Makes pending what `desc` is bound to on the current path or, when no
+  // initialization reaches here, what any of its initializations binds. An
+  // operand bound in an earlier iteration of a loop is live across that loop.
+  void RearmWgmmaDescriptor(const VarNode *desc) {
+    auto it = wgmma_state_.descriptors.find(desc);
+    if (it == wgmma_state_.descriptors.end()) {
+      for (const VarNode *buf : wgmma_descriptor_operands_.at(desc)) {
+        MarkWgmmaOperandPending(buf);
+      }
+      return;
+    }
+    const WgmmaBinding &binding = it->second;
+    for (const VarNode *buf : binding.operands) {
+      MarkWgmmaOperandPending(buf);
+    }
+    if (binding.carried_loop >= 0) {
+      ICHECK_LT(binding.carried_loop, static_cast<int>(wgmma_loops_.size()));
+      for (const VarNode *buf : binding.operands) {
+        AppendUnique(&wgmma_loops_[binding.carried_loop].carried, buf);
+      }
+    }
+  }
+
+  // Records the buffers a variable bound to `value` may point to. A variable
+  // bound to another one names the same descriptor, while one bound to a value
+  // read from a descriptor holds a copy that later initializations do not
+  // update. Returns whether anything new was recorded.
+  bool RecordWgmmaPointer(const VarNode *var, const PrimExpr &value) {
+    bool changed = AddWgmmaPointerOperands(var, value);
+    if (const auto *alias = value.as<VarNode>()) {
+      return wgmma_aliases_.emplace(var, alias).second || changed;
+    }
+    for (const VarNode *desc : ResolveWgmmaDescriptors(value)) {
+      if (IsWgmmaDescriptorBuffer(desc) ||
+          rewritten_wgmma_descriptors_.count(desc)) {
+        changed |= rewritten_wgmma_descriptors_.insert(var).second;
+      }
+    }
+    return changed;
+  }
+
+  // Adds the buffers `value` addresses to those pointer `var` may address.
+  // Returns whether any was new.
+  bool AddWgmmaPointerOperands(const VarNode *var, const PrimExpr &value) {
+    std::vector<const VarNode *> operands = CollectWgmmaOperands(value);
+    if (operands.empty()) {
+      return false;
+    }
+    std::vector<const VarNode *> &bound = bound_wgmma_operands_[var];
+    const size_t size = bound.size();
+    for (const VarNode *buf : operands) {
+      AppendUnique(&bound, buf);
+    }
+    return bound.size() != size;
+  }
+
+  // The variables a descriptor argument may name: the one it resolves to or,
+  // for a computed value (e.g. a select between two descriptors), every one it
+  // reads.
+  std::vector<const VarNode *>
+  ResolveWgmmaDescriptors(const PrimExpr &expr) const {
+    if (const VarNode *var = ResolveWgmmaDescriptor(expr)) {
+      return {var};
+    }
+    std::vector<const VarNode *> vars;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (node->IsInstance<VarNode>() || node->IsInstance<BufferLoadNode>()) {
+        AppendUnique(&vars, ResolveWgmmaDescriptor(Downcast<PrimExpr>(node)));
+      }
+    });
+    return vars;
+  }
+
+  // The variable a descriptor argument names: the data of a loaded buffer or
+  // a variable, followed through Bind and Let aliases.
+  const VarNode *ResolveWgmmaDescriptor(const PrimExpr &expr) const {
+    const VarNode *var = expr.as<VarNode>();
+    if (const auto *load = expr.as<BufferLoadNode>()) {
+      var = load->buffer->data.get();
+    }
+    for (size_t hops = 0; var != nullptr && hops < wgmma_aliases_.size();
+         ++hops) {
+      auto it = wgmma_aliases_.find(var);
+      if (it == wgmma_aliases_.end()) {
+        break;
+      }
+      var = it->second;
+    }
+    return var;
+  }
+
+  // Whether `var` is the data of a WGMMA descriptor buffer.
+  static bool IsWgmmaDescriptorBuffer(const VarNode *var) {
+    const auto *ptr_type = var->type_annotation.as<PointerTypeNode>();
+    return ptr_type != nullptr &&
+           ptr_type->storage_scope == "local.descriptor.wgmma";
+  }
+
+  // Whether `desc` loads the only element of its descriptor buffer.
+  static bool IsWholeWgmmaDescriptor(const PrimExpr &desc) {
+    const auto *load = desc.as<BufferLoadNode>();
+    if (load == nullptr) {
+      return false;
+    }
+    for (const PrimExpr &extent : load->buffer->shape) {
+      const auto *imm = extent.as<IntImmNode>();
+      if (imm == nullptr || imm->value != 1) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Shared buffers the address arguments of a descriptor initialization point
+  // to.
+  std::vector<const VarNode *> CollectWgmmaInitOperands(const CallNode *init) {
+    std::vector<const VarNode *> operands;
+    for (size_t i = 1; i < init->args.size(); ++i) {
+      for (const VarNode *buf : CollectWgmmaOperands(init->args[i])) {
+        AppendUnique(&operands, buf);
+      }
+    }
+    return operands;
+  }
+
+  // Shared buffers addressed by `expr`: shared pointers, buffers whose element
+  // address is taken (by address_of or tl.access_ptr), and pointers held in a
+  // variable or stored in a buffer. Any other load reads a value (e.g. an
+  // offset), not an operand.
+  std::vector<const VarNode *> CollectWgmmaOperands(const PrimExpr &expr) {
+    std::vector<const VarNode *> operands;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      const VarNode *var = node.as<VarNode>();
+      if (const auto *load = node.as<BufferLoadNode>()) {
+        if (load->dtype.is_handle()) {
+          var = load->buffer->data.get();
+        }
+      } else if (const auto *call = node.as<CallNode>()) {
+        if ((call->op.same_as(builtin::address_of()) ||
+             call->op.same_as(tl::access_ptr())) &&
+            !call->args.empty()) {
+          if (const auto *element = call->args[0].as<BufferLoadNode>()) {
+            var = element->buffer->data.get();
+          }
+        }
+      }
+      if (var == nullptr) {
+        return;
+      }
+      auto bound = bound_wgmma_operands_.find(var);
+      if (bound != bound_wgmma_operands_.end()) {
+        for (const VarNode *buf : bound->second) {
+          AppendUnique(&operands, buf);
+        }
+      } else if (var->type_annotation.as<PointerTypeNode>() &&
+                 IsAppropriateSharedMemory(GetRef<Var>(var))) {
+        AppendUnique(&operands, var);
+      }
+    });
+    return operands;
+  }
+
+  WgmmaState wgmma_state_;
+  // The loops being visited, innermost last.
+  std::vector<WgmmaLoop> wgmma_loops_;
+  // Shared buffers addressed by each WGMMA descriptor's initializations.
   std::unordered_map<const VarNode *, std::vector<const VarNode *>>
       wgmma_descriptor_operands_;
+  // Shared buffers addressed by any WGMMA descriptor initialization.
+  std::vector<const VarNode *> all_wgmma_operands_;
+  // WGMMA descriptors written other than by an initialization, and variables
+  // holding a copy of one.
+  std::unordered_set<const VarNode *> rewritten_wgmma_descriptors_;
+  // Whether an initialization writes a descriptor that cannot be resolved.
+  bool unresolved_wgmma_init_{false};
+  // Shared buffers a pointer may address, for each variable bound by a Bind or
+  // a Let and each buffer a handle is stored in.
+  std::unordered_map<const VarNode *, std::vector<const VarNode *>>
+      bound_wgmma_operands_;
+  // The variable each Bind- or Let-bound variable is bound to, when its value
+  // is a variable.
+  std::unordered_map<const VarNode *, const VarNode *> wgmma_aliases_;
 };
 
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
@@ -609,6 +1023,7 @@ public:
                      &explicit_alignments = {}) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
+    finder.CollectWgmmaDescriptors(stmt);
     finder(stmt);
     shmem_alignment_map_ =
         SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
