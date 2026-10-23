@@ -66,3 +66,41 @@ def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd, copy_tar
     assert f"Requested coalesced_width={coalesced_width}" in warnings
     assert "using 4 instead" in warnings
     assert "float4" in artifact.kernel_source
+
+
+@pytest.mark.parametrize("coalesced_width", [2, 4])
+def test_parallel_coalesced_width_integer(coalesced_width):
+    # Regression test for issue: T.Parallel(coalesced_width=<int>) should accept
+    # raw Python integers without crashing LayoutInference with "coalesced_width should be an IntImmNode".
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    m, n = 128, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((m, n), T.float32),
+        B: T.Tensor((m, n), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            for i, j in T.Parallel(m, n, coalesced_width=coalesced_width):
+                B[i, j] = A[i, j]
+
+    artifact = _lower_without_device_compile(main, target)
+    assert artifact.kernel_source
+
+
+def test_parallel_coalesced_width_annotation_dict():
+    # Regression test: T.Parallel with annotations={"coalesced_width": <int>}
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    m, n = 128, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((m, n), T.float32),
+        B: T.Tensor((m, n), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            for i, j in T.Parallel(m, n, annotations={"coalesced_width": 4}):
+                B[i, j] = A[i, j]
+
+    artifact = _lower_without_device_compile(main, target)
+    assert artifact.kernel_source
