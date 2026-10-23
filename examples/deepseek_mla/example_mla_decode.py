@@ -27,7 +27,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        glse = T.alloc_global([batch, heads, num_split], dtype)
+        glse = T.alloc_global([batch, heads, num_split], accum_dtype)
         Output_partial = T.alloc_global([batch, heads, num_split, dim], dtype)
         # flash_attn_split
         with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
@@ -191,6 +191,11 @@ def ref_program(q, q_pe, kv, k_pe):
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """
+    output_dtype = q.dtype
+    q = q.float()
+    q_pe = q_pe.float()
+    kv = kv.float()
+    k_pe = k_pe.float()
     dim = q.shape[-1]
     pe_dim = q_pe.shape[-1]
     num_head_groups = q.shape[1] // kv.shape[2]
@@ -212,7 +217,7 @@ def ref_program(q, q_pe, kv, k_pe):
 
     out = einsum(attention, kv, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
-    return out
+    return out.to(output_dtype)
 
 
 def main(
