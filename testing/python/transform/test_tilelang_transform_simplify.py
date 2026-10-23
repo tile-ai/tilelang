@@ -947,5 +947,91 @@ def test_simplify_dead_bind_with_shared_nodes(store_uses_shared_value):
     simplify_and_compare(mod_before, mod_expected)
 
 
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+@pytest.mark.parametrize("form", ["recompose", "remainder", "offset"])
+def test_symbolic_layout_divmod(dtype, form):
+    x, a, b, offset = [tirx.Var(name, dtype) for name in ("x", "a", "b", "offset")]
+    divisor = a * b
+    product = (x // divisor) * b * a
+    if form == "recompose":
+        value, expected = product + x % divisor, x
+    elif form == "remainder":
+        value, expected = x - product, x % divisor
+    else:
+        value, expected = (x + offset) - product, x % divisor + offset
+    before = tvm.IRModule({"main": tirx.PrimFunc([x, a, b, offset], tirx.Evaluate(value))})
+    after = tvm.IRModule({"main": tirx.PrimFunc([x, a, b, offset], tirx.Evaluate(expected))})
+    simplify_and_compare(before, after)
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+def test_layout_mixed_radix_bounded(dtype):
+    x, a, b = [tirx.Var(name, dtype) for name in ("x", "a", "b")]
+
+    def body(value):
+        stmt = tirx.Evaluate(value)
+        for condition in (a > 0, a <= 1024, b > 0, b <= 1024):
+            stmt = tirx.AttrStmt(condition, "tl.assume", tirx.StringImm("layout extent"), stmt)
+        return stmt
+
+    before = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body((x // (a * b)) * b + (x // a) % b))})
+    expected = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body(x // a))})
+    simplify_and_compare(before, expected)
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+def test_layout_mixed_radix_unknown_product(dtype):
+    x, a, b = [tirx.Var(name, dtype) for name in ("x", "a", "b")]
+    # Positive factors alone do not establish a non-wrapping product.
+    value = (x // (a * b)) * b + (x // a) % b
+    body = tirx.AttrStmt(
+        a > 0,
+        "tl.assume",
+        tirx.StringImm("positive"),
+        tirx.AttrStmt(
+            b > 0,
+            "tl.assume",
+            tirx.StringImm("positive"),
+            tirx.AttrStmt(
+                a * b > 0,
+                "tl.assume",
+                tirx.StringImm("positive product"),
+                tirx.AttrStmt(a * b <= 200000, "tl.assume", tirx.StringImm("bounded wrapped product"), tirx.Evaluate(value)),
+            ),
+        ),
+    )
+    mod = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body)})
+    simplify_and_compare(mod, mod)
+
+
+def test_layout_divmod_preserves_widening_boundary():
+    x = tirx.Var("x", "int64")
+    a, b = [tirx.Var(name, "int32") for name in ("a", "b")]
+    divisor = tirx.Cast("int64", a * b)
+    # Casting a wrapped product is not multiplying the widened factors.
+    value = x - (x // divisor) * tirx.Cast("int64", a) * tirx.Cast("int64", b)
+    mod = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], tirx.Evaluate(value))})
+    simplify_and_compare(mod, mod)
+
+
+@pytest.mark.parametrize("radix", [16, 31, 32])
+def test_layout_remainder_recovers_block_offset(radix):
+    block, lane, base, divisor = [tirx.Var(name, "int32") for name in ("block", "lane", "base", "divisor")]
+    x = block * 128 + lane + base
+    value = (lane + base - (x // divisor) * divisor) % radix
+    # The removed block offset is divisible by 16 and 32, but not by 31.
+    expected = value if radix == 31 else (x % divisor) % radix
+
+    def body(expr):
+        stmt = tirx.Evaluate(expr)
+        for condition in (block >= 0, block < 3, lane >= 0, lane < 128):
+            stmt = tirx.AttrStmt(condition, "tl.assume", tirx.StringImm("index bound"), stmt)
+        return stmt
+
+    before = tvm.IRModule({"main": tirx.PrimFunc([block, lane, base, divisor], body(value))})
+    after = tvm.IRModule({"main": tirx.PrimFunc([block, lane, base, divisor], body(expected))})
+    simplify_and_compare(before, after)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
