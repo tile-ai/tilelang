@@ -102,7 +102,10 @@ class ProfileArgs:
     Attributes:
         warmup: Number of warmup iterations.
         rep: Number of repetitions for timing.
-        timeout: Maximum time per configuration.
+        timeout: Seconds per isolated benchmark trial, including artifact loading,
+            input supply, validation, measurement and GPU synchronization.
+            Compilation/export and worker startup are separate. Nonpositive
+            values disable isolation and the deadline.
         backend: Profiler backend - "event", "cupti", or "cudagraph".
         supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
