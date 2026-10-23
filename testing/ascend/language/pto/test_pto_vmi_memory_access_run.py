@@ -6,22 +6,31 @@ MTE sync flags; no test disables scheduling).  Inputs are built on CPU with
 torch, copied to the NPU, and compared against an independent CPU reference
 after ``torch.npu.synchronize()``.
 
-Critical dependency paths execute 20 fresh trials each with independently
-prepared inputs and a fresh output tensor, and also assert the
+The long-running dependency paths execute 20 fresh trials each with
+independently prepared inputs and a fresh output tensor, and also assert the
 generated-source order and MTE sync pair:
 
 * a DMA that writes only the non-zero ``[64,128)`` region feeding
   ``vload(work[64], size=64)``;
 * ``vstore(..., work[64])`` feeding a DMA that reads only ``[64,128)``;
 * a padded view whose low group is written by DMA and read by a static
-  negative group stride, with both groups initialized for the reference.
+  negative group stride, with both groups initialized for the reference;
+* an explicit descriptor crossing a row (seeded row-0 tail plus a DMA
+  row-1 head) read as one 128-lane load;
+* an ordinary broadcast descriptor fed by a real DMA producer.
 
-The remaining cases are one device-numerics representative per access mode:
-block_stride, FP4 raw packed bytes (buffer and explicit-pointer forms), a
-packed (PK) narrowing store, an explicit ``access_ptr`` plus extra offset, and
-gather/scatter with non-zero bases (direct and explicit-pointer forms).  The
-device numerical reference is exact for copy-like kernels and an independent
-CPU computation (torch cast reference) for narrowing.
+The P2 branch kernel is a separate runtime-dispatch case: a runtime ``k``
+inside ``0 <= k <= 1`` selects ``input[0:64]`` or ``input[64:128]`` through a
+real ``if``.  It runs both branch values (four trials, two per value), which
+is the coverage this case needs; it is not expanded to 20 trials.
+
+The remaining cases each run a small fixed number of seeded trials (3-5) and
+cover one device-numerics representative per access mode: block_stride, FP4
+raw packed bytes (buffer and explicit-pointer forms), a packed (PK) narrowing
+store, an explicit ``access_ptr`` plus extra offset, and gather/scatter with
+non-zero bases (direct and explicit-pointer forms).  The device numerical
+reference is exact for copy-like kernels and an independent CPU computation
+(torch cast reference) for narrowing.
 
 A runtime group stride has no proven physical envelope, so those kernels are
 rejected at compile time and their diagnostics live in the structural suite;
@@ -247,6 +256,43 @@ def test_nonzero_store_to_dma_dependency_20_trials(npu):
 
 
 # ---------------------------------------------------------------------------
+# P2: branch-constrained tight-view start with a runtime k
+# ---------------------------------------------------------------------------
+def _p2_branch_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), k: T.int32, C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            view = tirx.decl_buffer((2, 128), F32, data=work.data, scope="shared.dyn")
+            T.copy(A, work)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                if k >= 0 and k <= 1:
+                    v = T.vmi.vload(view[0, k * 64], size=64)
+                    T.vmi.vstore(v, view[1, 0], mask)
+            T.copy(work[128:192], C)
+
+    return main
+
+
+def test_p2_branch_runtime_k(npu):
+    """The generated kernel keeps the runtime branch and indexes with k."""
+    kernel, source = _compile(_p2_branch_kernel())
+    lines = source.splitlines()
+    branch = next(line.strip() for line in lines if line.strip().startswith("if ") and "k" in line)
+    assert "0 <= k" in branch and "k <= 1" in branch, branch
+    vload = next(line.strip() for line in lines if "vmi.vload" in line)
+    assert "k * 64" in vload, vload
+
+    def make_case(trial):
+        a = _float_inputs((256,), trial)
+        k = trial % 2
+        return [a, k], a[64 * k : 64 * (k + 1)]
+
+    _run_trials(kernel, make_case, npu, trials=4)
+
+
+# ---------------------------------------------------------------------------
 # Block stride: stride 1/2, single and multi VL
 # ---------------------------------------------------------------------------
 def _block_expected(a, base, lanes, block_stride, vector=64, block=8):
@@ -440,8 +486,13 @@ def _assert_padded_group_same_view(func):
         name = getattr(call.op, "name", "")
         if name == "tl.vmi.vload":
             source = call.args[0]
-            assert isinstance(source, tirx.Call) and getattr(source.op, "name", "") == "tl.access_ptr", source
-            vload_buffers.append(source.args[0].buffer)
+            if isinstance(source, tirx.Call) and getattr(source.op, "name", "") == "tl.access_ptr":
+                vload_buffers.append(source.args[0].buffer)
+            else:
+                # Ordinary automatic addresses stay raw in the frontend; the
+                # descriptor is built by LegalizePTOVMIMemoryAccess.
+                assert isinstance(source, tirx.BufferLoad), source
+                vload_buffers.append(source.buffer)
         elif name == "tl.tileop.ascend_copy":
             dma_destinations.append(call.args[1].args[0])
     assert len(vload_buffers) == 1, vload_buffers

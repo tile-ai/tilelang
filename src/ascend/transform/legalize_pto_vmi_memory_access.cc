@@ -1413,9 +1413,11 @@ private:
           mask = call->args[3];
         }
       }
-      if (!value0.dtype().is_vector()) {
-        Fail(op_name + " requires a vector value", span);
-      }
+      // A one-lane VMI value has a scalar TIR dtype, so lane count is not a
+      // provenance check.  This pass admits the value exactly as the frontend
+      // produced it and only checks the element dtype below.  Ordinary vstore
+      // has no consumer-side provenance check in codegen; the PTODSL builder
+      // and the PTO MLIR verifier reject a non-VMI value operand.
       lanes = value0.dtype().lanes();
       if (modes.group.has_value() && has_mask) {
         Fail(op_name + " group mode does not take a mask operand", span);

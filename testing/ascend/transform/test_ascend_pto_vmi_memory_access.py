@@ -8,9 +8,9 @@ envelopes, negative-index/group candidates, explicit preservation and logical
 coverage before the pass is wired into the pipeline, where the existing
 frontend tests cannot observe them.
 
-These are host-only IR tests.  The complete 34-item acceptance matrix, the
-decoder malformed matrix and the standalone arithmetic probes are retained in
-the task materials and are not part of this trimmed product file.
+These are host-only IR tests covering the contracts that must remain in-tree.
+Broader exploratory matrices and replay scripts are kept outside the
+repository.
 """
 
 import pytest

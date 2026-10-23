@@ -8,6 +8,7 @@
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
 #include "backend/common/target_utils.h"
+#include "span_utils.h"
 #include "support/check.h"
 #include "transform/common/vmi_alloc.h"
 #include "tvm/ir/repr.h"
@@ -5488,6 +5489,40 @@ void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
   std::string op_name = opt_call_op.value()->name;
   ICHECK(StartsWith(op_name, "tl.vmi."))
       << "Expected a tl.vmi.* call, got " << op_name;
+
+  // Ordinary VMI addresses are lowered by LegalizePTOVMIMemoryAccess into an
+  // explicit descriptor before code generation.  A raw BufferLoad at the
+  // address operand means that pass was skipped or never ran on this
+  // function, so report the actual offending operand instead of emitting an
+  // invalid PTODSL memory access.  Nested loads (for example a descriptor's
+  // index[0]) remain ordinary reads and are not diagnosed here.
+  {
+    int address_index = -1;
+    if (op_name == "tl.vmi.vload" || op_name == "tl.vmi.vgather" ||
+        op_name == "tl.vmi.vgatherb") {
+      address_index = 0;
+    } else if (op_name == "tl.vmi.vscatter") {
+      address_index = 1;
+    } else if (op_name == "tl.vmi.vstore") {
+      auto dist_mode_it = op->annotations.find("dist_mode");
+      const ObjectRef dist_mode = dist_mode_it != op->annotations.end()
+                                      ? (*dist_mode_it).second
+                                      : ObjectRef();
+      const bool is_dintlv_store =
+          dist_mode.defined() && dist_mode.as<StringImmNode>() != nullptr &&
+          Downcast<StringImm>(dist_mode)->value == "dintlv";
+      address_index = is_dintlv_store ? 2 : 1;
+    }
+    if (address_index >= 0 &&
+        static_cast<size_t>(address_index) < op->args.size() &&
+        op->args[address_index].as<BufferLoadNode>() != nullptr) {
+      LOG(FATAL) << "LegalizePTOVMIMemoryAccess: unlowered raw BufferLoad at "
+                 << op_name << " address operand " << address_index
+                 << "; ordinary VMI memory descriptors must be legalized "
+                    "before code generation"
+                 << tvm::tl::SpanHintSuffix(op->span);
+    }
+  }
 
   std::vector<std::pair<std::string, ObjectRef>> kwargs;
   kwargs.reserve(op->annotations.size());
