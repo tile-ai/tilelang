@@ -100,6 +100,10 @@ unset(_suffix)
 # non-Windows host.
 file(GLOB TILE_LANG_ASCEND_ACTIVE_SRCS
   src/ascend/*.cc
+  src/ascend/costmodel/simtvf/*.cc
+  src/ascend/costmodel/simtvf/intrinsic/*.cc
+  src/ascend/costmodel/simtvf/model/*.cc
+  src/ascend/costmodel/simtvf/analysis/*.cc
   src/ascend/codegen/*.cc
   src/ascend/layout/*.cc
   src/ascend/op/*.cc

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -25,6 +26,8 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "ascend/costmodel/simtvf/analysis/ownership_effect.h"
+#include "ascend/op/builtin.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/vf_regions.h"
 #include "backend/common/target_utils.h"
@@ -732,7 +735,24 @@ public:
     ICHECK(target.defined())
         << "Layout_Inference: Require the target attribute";
     target_ = target.value();
+    for (const auto &param : f->params)
+      if (!param.dtype().is_handle())
+        ownership_uniform_vars_.insert(param.get());
     this->operator()(f->body);
+    std::unordered_set<const Object *> known;
+    for (const auto &stmt : infer_list_stmt_)
+      PostOrderVisit(stmt,
+                     [&](const ObjectRef &node) { known.insert(node.get()); });
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (known.count(node.get()))
+        return;
+      if (const auto *load = node.as<BufferLoadNode>())
+        ownership_unknown_uses_.insert(load->buffer->data.get());
+      if (const auto *store = node.as<BufferStoreNode>())
+        ownership_unknown_uses_.insert(store->buffer->data.get());
+      if (const auto *var = node.as<VarNode>(); var && var->dtype.is_handle())
+        ownership_unknown_uses_.insert(var);
+    });
     // Compute floating fragment buffers after collection
     ComputeFloatingFragmentBuffers(f->body);
   }
@@ -822,8 +842,13 @@ private:
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
+      ownership_outer_loops_.push_back(ownership_loop_stack_);
 
       // Add the tile operator to infer_list_
+      if (!ownership_simple_scope_)
+        ownership_excluded_ops_.insert(infer_list_.size());
+      if (p.as<CopyNode>() && !region_thread_scope_stack_.empty())
+        ownership_simt_copies_.insert(infer_list_.size());
       infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(p));
     }
@@ -892,6 +917,8 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
+      if (!region_thread_scope_stack_.empty())
+        simt_loops_.insert(op);
       auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
@@ -976,14 +1003,46 @@ private:
           }
         }
       });
+      if (!ownership_simple_scope_)
+        ownership_excluded_ops_.insert(infer_list_.size());
       infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
+      ownership_outer_loops_.push_back(ownership_loop_stack_);
     } else {
+      bool saved = ownership_simple_scope_;
+      ownership_simple_scope_ &=
+          (op->kind == ForKind::kSerial || op->kind == ForKind::kUnrolled) &&
+          IsOwnershipUniformExpr(op->min, ownership_loop_stack_) &&
+          IsOwnershipUniformExpr(op->extent, ownership_loop_stack_);
+      ownership_loop_stack_.push_back(GetRef<For>(op));
       IRVisitorWithAnalyzer::VisitStmt(op->body);
+      ownership_loop_stack_.pop_back();
+      ownership_simple_scope_ = saved;
     }
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    bool saved = ownership_simple_scope_;
+    ownership_simple_scope_ = false;
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+    ownership_simple_scope_ = saved;
+  }
+
+  void VisitStmt_(const WhileNode *op) final {
+    bool saved = ownership_simple_scope_;
+    ownership_simple_scope_ = false;
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+    ownership_simple_scope_ = saved;
+  }
+
+  void VisitStmt_(const SBlockRealizeNode *op) final {
+    bool saved = ownership_simple_scope_;
+    ownership_simple_scope_ &= is_one(op->predicate);
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+    ownership_simple_scope_ = saved;
   }
 
   void VisitStmt_(const SBlockNode *op) final {
@@ -1119,6 +1178,8 @@ private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
+      if (std::string(iv->thread_tag).rfind("blockIdx.", 0) == 0)
+        ownership_uniform_vars_.insert(iv->var.get());
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
         if (!region_thread_scope_stack_.empty()) {
@@ -1380,6 +1441,14 @@ private:
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   L0SFBindings l0_sf_bindings_;
   Target target_;
+  std::unordered_set<const VarNode *> ownership_unknown_uses_;
+  std::unordered_set<const VarNode *> ownership_uniform_vars_;
+  std::unordered_set<int> ownership_excluded_ops_;
+  std::unordered_set<int> ownership_simt_copies_;
+  std::vector<For> ownership_loop_stack_;
+  std::vector<std::vector<For>> ownership_outer_loops_;
+  bool ownership_simple_scope_{true};
+  std::unordered_set<const ForNode *> simt_loops_;
   LayoutMap annotated_layout_map_;
 
   std::vector<TileOperator> BackupInferList() {
@@ -1389,6 +1458,75 @@ private:
       back_infer_list.push_back(p->Clone());
     }
     return back_infer_list;
+  }
+
+  struct OwnershipCandidate {
+    const ParallelOpNode *loop;
+    Fragment layout;
+    bool requires_padding_guard;
+  };
+
+  // Adapt a trial to the existing ParallelOp annotation input within one
+  // inference call. Restore the original metadata on success or conflict;
+  // only the solved layout may survive the attempt. Keep this bridge local to
+  // Ascend rather than extending the shared inference API for one consumer.
+  class ScopedOwnershipCandidate {
+  public:
+    explicit ScopedOwnershipCandidate(
+        const std::optional<OwnershipCandidate> &candidate)
+        : loop_(candidate ? candidate->loop : nullptr) {
+      if (!loop_)
+        return;
+      saved_layout_ = loop_->annotated_layout_unbound_;
+      saved_padding_ = loop_->annotated_requires_padding_guard_;
+      loop_->annotated_layout_unbound_ = candidate->layout;
+      loop_->annotated_requires_padding_guard_ =
+          candidate->requires_padding_guard;
+    }
+    ~ScopedOwnershipCandidate() {
+      if (!loop_)
+        return;
+      loop_->annotated_layout_unbound_ = saved_layout_;
+      loop_->annotated_requires_padding_guard_ = saved_padding_;
+    }
+    ScopedOwnershipCandidate(const ScopedOwnershipCandidate &) = delete;
+    ScopedOwnershipCandidate &
+    operator=(const ScopedOwnershipCandidate &) = delete;
+
+  private:
+    const ParallelOpNode *loop_;
+    Optional<Fragment> saved_layout_;
+    bool saved_padding_{false};
+  };
+
+  // Candidate construction is part of the transformation, not the cost model.
+  // Ownership width can exceed the eventual machine vector width; normal
+  // lowering may scalarize the accesses while retaining this partition.
+  std::optional<OwnershipCandidate> MakeOwnershipCandidate(int member,
+                                                           int width) {
+    const auto *loop = infer_list_[member].as<ParallelOpNode>();
+    if (width <= 0 || !loop || loop->GetLoopLayout().defined() ||
+        loop->annotated_layout_unbound_.defined())
+      return std::nullopt;
+    const auto &threads = thread_bounds_vec_[member];
+    arith::Analyzer analyzer;
+    PrimExpr total = IntImm(DataType::Int(64), 1);
+    for (const auto &iv : loop->GetLoopVars())
+      total = total * cast(DataType::Int(64), iv->dom->extent);
+    PrimExpr count = cast(DataType::Int(64), threads->extent);
+    bool padded = loop->GetIndiceMap().empty();
+    PrimExpr covered = padded ? ceildiv(total, count) * count : total;
+    // Preserve the planner's minimum-padding policy. Fragment domains stay
+    // exact; non-fragment domains may cover the final partial thread group.
+    while (width > 1 &&
+           !analyzer.CanProveEqual(floormod(covered, count * width), 0))
+      width /= 2;
+    return OwnershipCandidate{
+        loop,
+        PlanLoopPartition(loop->GetRoot(),
+                          static_cast<size_t>(*as_const_int(threads->extent)),
+                          width),
+        padded};
   }
 
   // One complete free-mode attempt over `members`: seed pre-owned layouts
@@ -1405,11 +1543,13 @@ private:
     LayoutMap layout_map;
     AttemptCost cost;
   };
-  std::optional<AttemptOutcome> RunOneAttempt(
-      int attempt_root, const std::vector<int> &members,
-      const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
-      const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
+  std::optional<AttemptOutcome>
+  RunOneAttempt(int attempt_root, const std::vector<int> &members,
+                const LayoutMap &base_layout_map,
+                const LayoutMap &strict_layout_map,
+                const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
+                const LayoutCostModel &cost_model,
+                int candidate_vector_size_limit = 0, int ownership_width = 0) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     // A failed attempt can leave pending propagation work. Keep both the
@@ -1424,20 +1564,20 @@ private:
     bool ok = true;
     std::string failure;
     try {
-      // Only the root's first inference receives the candidate cap. Its
-      // solved layout is frozen; propagation and later visits use normal args.
-      RunInferStep(attempt_root, InferLevel::kFree, true, tmp_layout_map,
-                   strict_layout_map, q, in_queue, candidate_vector_size_limit);
-      FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map, q,
-                       in_queue);
-      for (int other : members) {
-        if (other != attempt_root) {
-          RunInferStep(other, InferLevel::kFree, true, tmp_layout_map,
-                       strict_layout_map, q, in_queue);
-          FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
-                           q, in_queue);
+      auto infer_member = [&](int member, int vector_limit) {
+        {
+          ScopedOwnershipCandidate candidate(
+              MakeOwnershipCandidate(member, ownership_width));
+          RunInferStep(member, InferLevel::kFree, true, tmp_layout_map,
+                       strict_layout_map, q, in_queue, vector_limit);
         }
-      }
+        FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
+                         q, in_queue);
+      };
+      infer_member(attempt_root, candidate_vector_size_limit);
+      for (int other : members)
+        if (other != attempt_root)
+          infer_member(other, 0);
     } catch (const LayoutConflictException &e) {
       ok = false;
       failure = e.what();
@@ -1459,6 +1599,113 @@ private:
     }
     infer_list_ = std::move(back_infer_list);
     return outcome;
+  }
+
+  // Fragment edges drive inference. Shared-storage edges additionally gate
+  // ownership changes, without changing the inference propagation graph.
+  std::unordered_set<int>
+  FindOwnershipEligibleOps(UnionFind<int> ownership_uf) {
+    std::unordered_set<int> ownership_eligible;
+    std::unordered_map<const VarNode *, int> first_user;
+    for (int i = 0; i < infer_list_stmt_.size(); ++i) {
+      PostOrderVisit(infer_list_stmt_[i], [&](const ObjectRef &node) {
+        const VarNode *data = nullptr;
+        if (const auto *load = node.as<BufferLoadNode>())
+          data = load->buffer->data.get();
+        if (const auto *store = node.as<BufferStoreNode>())
+          data = store->buffer->data.get();
+        if (const auto *var = node.as<VarNode>(); var && var->dtype.is_handle())
+          data = var;
+        if (data) {
+          auto [it, inserted] = first_user.emplace(data, i);
+          if (!inserted)
+            ownership_uf.Union(it->second, i);
+        }
+      });
+    }
+    std::unordered_map<int, std::vector<int>> ownership_groups;
+    for (int i = 0; i < infer_list_.size(); ++i)
+      ownership_groups[ownership_uf.Find(i)].push_back(i);
+    for (const auto &[group, ops] : ownership_groups) {
+      if (CanChangeUbOwnership(ops))
+        ownership_eligible.insert(ops.begin(), ops.end());
+    }
+    return ownership_eligible;
+  }
+
+  // Bound the search by the solved per-thread work, not by machine vector
+  // width. Candidate enumeration and minimum-padding rules belong to inference.
+  int MaxOwnershipWidth(const std::vector<int> &members,
+                        const std::vector<TileOperator> &native_ops) const {
+    int max_width = 1;
+    for (int member : members) {
+      const auto *loop = native_ops[member].as<ParallelOpNode>();
+      if (!loop)
+        continue;
+      arith::Analyzer analyzer;
+      PrimExpr slots = 1;
+      for (const auto &extent : loop->GetLoopLayout()->OutputShape())
+        slots = slots * extent;
+      slots = analyzer.Simplify(slots);
+      if (const auto *count = slots.as<IntImmNode>()) {
+        int width = 1;
+        while (width <= count->value / 2 &&
+               width <= std::numeric_limits<int>::max() / 2)
+          width *= 2;
+        max_width = std::max(max_width, width);
+      }
+    }
+    return max_width;
+  }
+
+  struct OwnershipSelection {
+    AttemptOutcome outcome;
+    int root;
+  };
+
+  std::optional<OwnershipSelection> TryImproveUbOwnership(
+      const std::vector<int> &members, const LayoutMap &layout_map,
+      const LayoutMap &strict_layout_map,
+      const std::vector<TileOperator> &native_ops,
+      const LayoutMap &native_layouts, const LayoutCostModel &cost_model) {
+    auto analyze = [&](const std::vector<TileOperator> &ops,
+                       const LayoutMap &layouts) {
+      return costmodel::simtvf::AnalyzeOwnershipEffect(
+          ops, members, thread_bounds_vec_, layouts, ownership_outer_loops_);
+    };
+    auto best_effect = analyze(native_ops, native_layouts);
+    // Unknown costs cannot justify changing the native plan. The model owns
+    // latency composition and comparison; this pass owns attempts and adoption.
+    if (!best_effect)
+      return std::nullopt;
+    std::optional<OwnershipSelection> best;
+    int max_width = MaxOwnershipWidth(members, native_ops);
+    for (int width = 1;; width *= 2) {
+      for (int root : members) {
+        if (!infer_list_[root].as<ParallelOpNode>())
+          continue;
+        auto outcome =
+            RunOneAttempt(root, members, layout_map, strict_layout_map,
+                          /*seed_layouts=*/{}, cost_model,
+                          /*candidate_vector_size_limit=*/0, width);
+        if (!outcome)
+          continue;
+        auto effect = analyze(outcome->infer_list, outcome->layout_map);
+        if (effect &&
+            costmodel::simtvf::IsBetterOwnership(*effect, *best_effect)) {
+          best_effect = std::move(effect);
+          best = OwnershipSelection{std::move(*outcome), root};
+        }
+      }
+      if (width == max_width)
+        break;
+    }
+    DLOG(INFO) << "[UB ownership] estimated_latency="
+               << *best_effect->ub_access.estimated_latency
+               << " requests=" << best_effect->ub_access.requests
+               << " entries=" << best_effect->ub_access.entries
+               << " partial=" << best_effect->ub_access.partial;
+    return best;
   }
 
   void InferInFreeMode(LayoutMap &layout_map,
@@ -1506,6 +1753,8 @@ private:
         }
       }
     }
+    auto ownership_eligible = FindOwnershipEligibleOps(uf);
+
     // (An epoch's update nests and its init/finalize ops now share the
     // reducer buffer in use_list_, so the union above already links them.)
 
@@ -1605,6 +1854,13 @@ private:
         }
       }
       ICHECK(has_best) << "no available layout found" << '\n';
+      if (ownership_eligible.count(members.front())) {
+        auto improved = TryImproveUbOwnership(
+            members, layout_map, strict_layout_map, best_infer_list,
+            best_layout_map, *cost_model);
+        if (improved)
+          adopt(std::move(improved->outcome), improved->root);
+      }
       // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
@@ -1613,6 +1869,240 @@ private:
                  << " output: mem=" << best_cost.mem
                  << " regs=" << best_cost.regs;
     }
+  }
+
+  // Uniform scalar expressions may depend on parameters, block coordinates
+  // and surrounding uniform loop indices, but not loads, calls or local binds.
+  bool IsOwnershipUniformExpr(const PrimExpr &expr,
+                              const std::vector<For> &loops) const {
+    bool uniform = true;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (node.as<BufferLoadNode>() || node.as<CallNode>())
+        uniform = false;
+      if (const auto *var = node.as<VarNode>();
+          var && !ownership_uniform_vars_.count(var) &&
+          std::none_of(loops.begin(), loops.end(), [&](const For &loop) {
+            return loop->loop_var.get() == var;
+          }))
+        uniform = false;
+    });
+    return uniform;
+  }
+
+  // Only static UB/fragment storage is in scope. Buffer metadata is not
+  // traversed with loads/stores, so check it explicitly here.
+  bool CanChangeBufferOwnership(const Buffer &buffer) {
+    if (buffer.scope() != "shared" && buffer.scope() != "shared.dyn" &&
+        buffer.scope() != "local.fragment")
+      return false;
+    if (!buffer->elem_offset.as<IntImmNode>())
+      return false;
+    for (const auto &extent : buffer->shape)
+      if (!extent.as<IntImmNode>())
+        return false;
+    for (const auto &stride : buffer->strides)
+      if (!stride.as<IntImmNode>())
+        return false;
+    if (ownership_unknown_uses_.count(buffer->data.get()))
+      return false;
+    for (const auto &[annotated, layout] : annotated_layout_map_)
+      if (annotated->data.same_as(buffer->data))
+        return false;
+    if (auto views = buffer_data_to_buffers_.Get(buffer->data))
+      for (const auto &view : views.value())
+        if (!view.same_as(buffer))
+          return false;
+    return true;
+  }
+
+  /*!
+   * Check a static GM <-> UB <-> fragment component in uniform For loops.
+   * DMA copies preserve physical storage and must have uniform arguments.
+   * Full-tile SIMT copies are checked as their generated Parallel loops;
+   * fragment edges carry the selected ownership through copies and compute.
+   * Each loop needs static domains, supported accesses and injective stores
+   * with consistent access maps. Explicit layouts, aliases, escaping uses,
+   * conditional control and other TileOps retain native inference. Enclosing
+   * serial/unrolled loops may repeat the same SIMT access maps; their indices
+   * can select GM tiles or scalar values but cannot change SIMT buffer indices.
+   * This preserves per-iteration ownership, including loop-carried fragments.
+   * Loop contexts go to the model for execution counts; pipeline annotations
+   * remain with the existing scheduler and do not change this legality rule.
+   * At least one SIMT access must touch UB for the component to be scored.
+   */
+  bool CanChangeUbOwnership(const std::vector<int> &members) {
+    arith::Analyzer analyzer;
+    bool has_ub = false;
+    for (int member : members) {
+      if (ownership_excluded_ops_.count(member))
+        return false;
+      const auto &outer_loops = ownership_outer_loops_[member];
+      std::unordered_set<const VarNode *> outer_vars;
+      for (const auto &outer : outer_loops)
+        outer_vars.insert(outer->loop_var.get());
+      const auto *loop = infer_list_[member].as<ParallelOpNode>();
+      ParallelOp copy_loop;
+      if (const auto *copy = infer_list_[member].as<CopyNode>()) {
+        auto is_ub = [](const Buffer &buffer) {
+          return buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
+        };
+        if (!copy->annotations.empty() || copy->dst_block.defined())
+          return false;
+        if (!ownership_simt_copies_.count(member)) {
+          // DMA is a storage boundary: ownership changes neither its UB
+          // address range nor its execution. Reject fragment-dependent DMA
+          // arguments; parameters, block coordinates and loop indices are
+          // uniform.
+          if (!((copy->src.scope() == "global" && is_ub(copy->dst)) ||
+                (is_ub(copy->src) && copy->dst.scope() == "global")))
+            return false;
+          if (!CanChangeBufferOwnership(is_ub(copy->src) ? copy->src
+                                                         : copy->dst))
+            return false;
+          Array<PrimExpr> arguments;
+          for (const auto &buffer : {copy->src, copy->dst}) {
+            for (const auto &shape : buffer->shape)
+              arguments.push_back(shape);
+            for (const auto &stride : buffer->strides)
+              arguments.push_back(stride);
+            arguments.push_back(buffer->elem_offset);
+          }
+          for (const auto &ranges : {copy->src_range, copy->dst_range})
+            for (const auto &range : ranges)
+              for (const auto &expr : {range->min, range->extent})
+                arguments.push_back(expr);
+          for (const auto &expr : arguments)
+            if (!IsOwnershipUniformExpr(expr, outer_loops))
+              return false;
+          continue;
+        }
+        // Full-tile UB/fragment copies use the existing SIMT copy loop and
+        // fragment propagation. Partial regions, casts and annotated copies
+        // retain native inference until their contracts are supported.
+        if ((!IsFragmentBuffer(copy->src) && !IsFragmentBuffer(copy->dst)) ||
+            !CanChangeBufferOwnership(copy->src) ||
+            !CanChangeBufferOwnership(copy->dst) ||
+            copy->src->dtype != copy->dst->dtype ||
+            !ShapesEqual(copy->src->shape, copy->dst->shape, &analyzer))
+          return false;
+        for (const auto &[buffer, ranges] :
+             {std::make_pair(copy->src, copy->src_range),
+              std::make_pair(copy->dst, copy->dst_range)}) {
+          if (ranges.size() != buffer->shape.size())
+            return false;
+          for (size_t i = 0; i < ranges.size(); ++i)
+            if (!is_zero(ranges[i]->min) ||
+                !analyzer.CanProveEqual(ranges[i]->extent, buffer->shape[i]))
+              return false;
+        }
+        copy_loop = ParallelOp(copy->MakeSIMTLoop(&analyzer));
+        loop = copy_loop.get();
+      } else if (loop && !simt_loops_.count(loop->GetRoot().get())) {
+        return false;
+      }
+      if (!loop)
+        return false;
+      if (loop->HasReducerUpdates() || loop->GetLoopLayout().defined() ||
+          loop->annotated_layout_unbound_.defined() ||
+          loop->GetRoot()->annotations.count(attr::kCoalescedWidth))
+        return false;
+      const auto *count = thread_bounds_vec_[member]->extent.as<IntImmNode>();
+      if (!count || count->value <= 0)
+        return false;
+      std::unordered_set<const VarNode *> logical_vars;
+      PrimExpr total = 1;
+      for (const auto &var : loop->GetLoopVars()) {
+        const auto *extent = var->dom->extent.as<IntImmNode>();
+        if (!extent || extent->value <= 0 || !is_zero(var->dom->min))
+          return false;
+        logical_vars.insert(var->var.get());
+        analyzer.Bind(var->var, var->dom);
+        total = total * var->dom->extent;
+      }
+      bool legal = true, has_store = false, has_fragment = false;
+      struct Accesses {
+        Array<PrimExpr> offsets;
+        bool written{false};
+      };
+      std::unordered_map<const BufferNode *, Accesses> accesses;
+      auto access = [&](const Buffer &buffer, const Array<PrimExpr> &indices,
+                        bool store) {
+        has_ub |= buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
+        has_fragment |= IsFragmentBuffer(buffer);
+        if (buffer->dtype.lanes() != 1 || buffer->dtype.bits() < 8 ||
+            indices.size() != buffer->shape.size()) {
+          legal = false;
+          return;
+        }
+        if (!CanChangeBufferOwnership(buffer)) {
+          legal = false;
+          return;
+        }
+        PrimExpr offset = 0;
+        for (size_t i = 0; i < indices.size(); ++i) {
+          // Changing access maps across iterations needs a dependence proof;
+          // repeated fixed maps keep the same logical element's ownership.
+          PostOrderVisit(indices[i], [&](const ObjectRef &node) {
+            if (const auto *var = node.as<VarNode>(); outer_vars.count(var))
+              legal = false;
+          });
+          if (indices[i].dtype().lanes() != 1)
+            legal = false;
+          if (buffer->strides.empty())
+            offset = offset * buffer->shape[i] + indices[i];
+          else
+            offset = offset + buffer->strides[i] * indices[i];
+        }
+        auto &uses = accesses[buffer.get()];
+        uses.offsets.push_back(analyzer.Simplify(offset));
+        uses.written |= store;
+      };
+      PostOrderVisit(loop->GetRoot(), [&](const ObjectRef &node) {
+        if (const auto *load = node.as<BufferLoadNode>())
+          access(load->buffer, load->indices, false);
+        if (const auto *store = node.as<BufferStoreNode>()) {
+          has_store = true;
+          access(store->buffer, store->indices, true);
+        }
+        if (const auto *var = node.as<VarNode>();
+            var && !logical_vars.count(var) && !outer_vars.count(var) &&
+            !ownership_uniform_vars_.count(var))
+          legal = false;
+        // This fast path accepts only a straight-line parallel loop nest.
+        // Calls, local bindings and control flow need a separate legality
+        // proof.
+        if (node.as<StmtNode>() && !node.as<ForNode>() &&
+            !node.as<BufferStoreNode>() && !node.as<SeqStmtNode>())
+          legal = false;
+        if (node.as<CallNode>())
+          legal = false;
+        if (const auto *for_node = node.as<ForNode>()) {
+          if (for_node->kind != ForKind::kParallel ||
+              !for_node->annotations.empty())
+            legal = false;
+        }
+      });
+      if (!legal || !has_store)
+        return false;
+      // ParallelOp only permits padded inversion for non-fragment loops.
+      if (has_fragment &&
+          !analyzer.CanProveEqual(floormod(total, count->value), 0))
+        return false;
+      for (const auto &[buffer, uses] : accesses) {
+        if (!uses.written)
+          continue;
+        const PrimExpr &offset = uses.offsets[0];
+        for (const auto &other : uses.offsets) {
+          // Multiple maps of a written buffer need a dependence analysis.
+          if (!analyzer.CanProveEqual(offset, other))
+            return false;
+        }
+        Layout address_map(loop->GetLoopVars(), {offset});
+        if (!address_map->DetectInjective()->errors.empty())
+          return false;
+      }
+    }
+    return has_ub;
   }
 };
 
