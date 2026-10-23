@@ -204,7 +204,9 @@ by the complete physical matrix footprint, including layout padding.
 
 Requested source and destination batch counts must match. The source batch
 origin must be nonnegative; a source batch tail beyond the GM tensor is clipped
-and the corresponding destination matrices are filled with zero. The destination batch range must remain provably in bounds.
+and the corresponding destination matrices are filled with zero. Every requested
+destination axis (batch, rows and columns) must remain provably in bounds;
+invalid destination ranges are rejected before DMA clipping or padding.
 Matrix tails use the existing OOB clipping and L1 padding; padding is emitted
 separately for each batch. The destination must use a canonical matrix layout.
 This batched path is not supported by the PTO target.

@@ -209,3 +209,12 @@ def test_batch_tail_fill_region(batch_begin):
     else:
         assert not loops
     assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_l1_destination_rejects_negative_origin(axis):
+    dst_min = [0, 0]
+    dst_min[axis] = -1
+    before = _copy_module((16, 16), (16, 16), [0, 0], [16, 16], dst_min=dst_min)
+    with pytest.raises(tvm.error.InternalError, match=f"in-bounds destination axis {axis}"):
+        transform.AscendInsertOOBPadding()(before)

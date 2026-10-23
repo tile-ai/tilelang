@@ -81,14 +81,28 @@ def test_batched_nd2nz_batch_and_matrix_tails():
     assert "asc_fill_l1(" in source
 
 
-def test_batched_nd2nz_rejects_out_of_bounds_destination_batch():
+@pytest.mark.parametrize(
+    "source_shape,destination_shape,axis",
+    [
+        ((32, 16), (16, 16), 0),
+        ((16, 32), (16, 16), 1),
+        ((4, 16, 16), (2, 16, 16), 0),
+    ],
+    ids=["row", "column", "batch"],
+)
+def test_nd2nz_rejects_out_of_bounds_destination(source_shape, destination_shape, axis):
     @T.prim_func
-    def main(source: T.Tensor((4, 16, 16), T.bfloat16)):
+    def main(source: T.Tensor(source_shape, T.bfloat16)):
         with T.Kernel(1):
-            target = T.alloc_l1((2, 16, 16), T.bfloat16)
-            T.copy(source, target[:4, :, :])
+            target = T.alloc_l1(destination_shape, T.bfloat16)
+            if len(source_shape) == 2:
+                T.copy(source, target[: source_shape[0], : source_shape[1]])
+            else:
+                T.copy(source, target[: source_shape[0], :, :])
 
-    with pytest.raises(Exception, match="in-bounds destination batch axis"):
+    # Previously the 32x16 -> 16x16 case clipped the DMA but emitted a fill
+    # starting at target + 512 bytes, beyond the 512-byte L1 allocation.
+    with pytest.raises(Exception, match=f"in-bounds destination axis {axis}"):
         tilelang.lower(main, target="ascend")
 
 

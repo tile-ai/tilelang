@@ -625,9 +625,13 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       physical_dtype = "uint16_t";
       n_value = n_value / I(2);
     }
+    PrimExpr src_batch_stride_bytes =
+        batched
+            ? AscendMTEBytesFromElements(src_region.modes[2].stride, elem_bits)
+            : zero;
     Array<PrimExpr> args{
         dst_ptr,       src_ptr,        sid,         src_row_stride_bytes,
-        l2_cache_ctrl, n_value,        d_value,     zero,
+        l2_cache_ctrl, n_value,        d_value,     src_batch_stride_bytes,
         zero,          transpose_flag, dst_n_value, StringImm(physical_dtype)};
     if (batched) {
       ICHECK(has_dst_layout && IsAscendMajorKind(dst_layout.kind))
@@ -636,8 +640,6 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           AscendMTEBytesFromElements(dst_layout.outer0 * dst_layout.outer1 *
                                          dst_layout.row_frac * dst_layout.c0,
                                      elem_bits);
-      args.Set(
-          7, AscendMTEBytesFromElements(src_region.modes[2].stride, elem_bits));
       args.push_back(src_range[0]->extent);
       args.push_back(matrix_bytes / I(32));
     }

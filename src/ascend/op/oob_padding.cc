@@ -95,6 +95,22 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   std::vector<size_t> src_singleton_axes, dst_singleton_axes;
 
   if (dma_path == DMAPath::kGMToL1) {
+    // Padding uses the requested destination region, so validate it before
+    // clamping the source. Otherwise a clipped DMA could be followed by an
+    // out-of-bounds fill.
+    for (size_t axis = 0; axis < op.dst_range.size(); ++axis) {
+      const Range &range = op.dst_range[axis];
+      ICHECK(
+          analyzer->CanProve(range->min >= 0,
+                             arith::ProofStrength::kSymbolicBound) &&
+          analyzer->CanProve(range->extent >= 0,
+                             arith::ProofStrength::kSymbolicBound) &&
+          analyzer->CanProve(range->min + range->extent <= op.dst->shape[axis],
+                             arith::ProofStrength::kSymbolicBound))
+          << "GM->L1 copy requires an in-bounds destination axis " << axis
+          << "; buffer " << op.dst->name << " has range " << range
+          << " and axis extent " << op.dst->shape[axis] << ".";
+    }
     bool batched = op.src_range.size() == 3 && op.dst_range.size() == 3;
     if (batched) {
       ICHECK(analyzer->CanProveEqual(op.src_range[0]->extent,
@@ -102,12 +118,6 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
           << "Batched GM->L1 copy requires matching batch counts.";
       ICHECK(analyzer->CanProve(op.src_range[0]->min >= 0))
           << "Batched GM->L1 copy requires a nonnegative source batch origin.";
-      ICHECK(
-          analyzer->CanProve(op.dst_range[0]->min >= 0) &&
-          analyzer->CanProve(op.dst_range[0]->min + op.dst_range[0]->extent <=
-                             op.dst->shape[0]))
-          << "Batched GM->L1 copy requires an in-bounds destination batch "
-             "axis.";
     }
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling", batched);
