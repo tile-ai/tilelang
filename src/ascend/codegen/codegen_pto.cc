@@ -4,6 +4,7 @@
  */
 #include "ascend/codegen/codegen_pto.h"
 #include "ascend/codegen/sfu_precision.h"
+#include "ascend/op/nd2nz.h"
 
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
@@ -435,6 +436,21 @@ void CheckContiguousRampStride(const PrimExpr &index, const char *access_kind) {
         << " emits a contiguous vector access, so Ramp stride must be 1, got "
         << ramp->stride;
   }
+}
+
+PrimExpr SIMTVectorLocalScalarOffset(const PrimExpr &index, int element_lanes,
+                                     const char *access_kind) {
+  // BufferLoad/Store indices count vector slots, including Ramp indices.
+  PrimExpr slot = index;
+  if (const auto *ramp = index.as<RampNode>()) {
+    CheckContiguousRampStride(index, access_kind);
+    slot = ramp->base;
+  }
+  ICHECK(slot.dtype().is_scalar())
+      << "PTO SIMT vector local " << access_kind
+      << " requires a scalar index or a unit-stride Ramp, got " << index;
+  return arith::Analyzer().Simplify(slot *
+                                    make_const(slot.dtype(), element_lanes));
 }
 
 void CheckConstZero(const PrimExpr &expr, const char *name) {
@@ -1016,6 +1032,15 @@ public:
       std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
 
   static DirectionMap Analyze(const PrimFunc &func) {
+    bool has_mad = false;
+    tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_mad |= IsMad(call);
+      }
+    });
+    if (!has_mad) {
+      return {};
+    }
     PTOMmadDirectionAnalyzer analyzer;
     analyzer.VisitStmt(func->body, FromMask(kM));
     DirectionMap result;
@@ -1045,8 +1070,25 @@ private:
            (analyzer_.CanProve(!state.n) ? 0 : kN);
   }
 
+  static bool IsMad(const CallNode *call) {
+    return call->op.same_as(tl::ascend_mad()) ||
+           call->op.same_as(tl::ascend_mad_mx()) ||
+           call->op.same_as(tl::ascend_gemm_l1()) ||
+           call->op.same_as(tl::ascend_blockscaled_gemm_l1());
+  }
+
+  PrimExpr MergePredicate(const PrimExpr &a, const PrimExpr &b) {
+    // Direction predicates contain only pure SSA conditions (see Restrict).
+    // Stateful guards leave both paths unchanged, so repeated merges would
+    // otherwise double the predicate tree before arithmetic simplification.
+    if (a.same_as(b) || ffi::StructuralEqual()(a, b)) {
+      return a;
+    }
+    return analyzer_.Simplify(a || b);
+  }
+
   State Merge(const State &a, const State &b) {
-    return {analyzer_.Simplify(a.m || b.m), analyzer_.Simplify(a.n || b.n)};
+    return {MergePredicate(a.m, b.m), MergePredicate(a.n, b.n)};
   }
 
   State Restrict(const State &state, const PrimExpr &condition) {
@@ -1182,10 +1224,7 @@ private:
                                       : State{reachable, const_false()},
               {}};
     }
-    if (call->op.same_as(tl::ascend_mad()) ||
-        call->op.same_as(tl::ascend_mad_mx()) ||
-        call->op.same_as(tl::ascend_gemm_l1()) ||
-        call->op.same_as(tl::ascend_blockscaled_gemm_l1()))
+    if (IsMad(call))
       mad_directions_[GetRef<Call>(call)] |= Mask(state);
     return {state, {}};
   }
@@ -2653,18 +2692,20 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
 
   if (scope == "local.fragment" || scope == "local") {
     if (inside_simtvf_body_) {
-      ICHECK(IsSupportedSIMTLocalScalarAccessType(buffer->dtype))
+      // The index addresses scalar storage, including lanes of vector locals.
+      DataType dtype = buffer->dtype.element_of();
+      ICHECK(IsSupportedSIMTLocalScalarAccessType(dtype))
           << "PTO SIMT local scalar store supports float16, bfloat16, "
              "float32, int8, uint8, int32, uint32, and FP8 only, got "
-          << buffer->dtype;
+          << dtype;
       std::string store_value = value;
-      if (tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      if (tl::IsAscendVectorizableFP8(dtype)) {
         stream << "tl.fp8_byte_store(" << store_value << ", "
                << GetVarID(buffer->data.get()) << ", " << index_str << ", "
-               << FP8TypeName(buffer->dtype) << ")\n";
+               << FP8TypeName(dtype) << ")\n";
         return;
       }
-      if (IsInteger32(buffer->dtype)) {
+      if (IsInteger32(dtype)) {
         store_value = "pto.cast(" + store_value + ", pto.i32)";
       }
       stream << "pto.store(" << store_value << ", "
@@ -2771,13 +2812,10 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
              "float32, int8, uint8, int32, uint32, and "
              "float8_e4m3fn/float8_e5m2, got "
           << buffer->dtype;
-      stream << vid << " = pto.alloc_buffer((" << opt_size.value() << ",), "
-             << (buffer->dtype.is_vector()
-                     ? (tl::IsAscendVectorizableFP8(buffer->dtype)
-                            ? DataTypeName(buffer->dtype)
-                            : ScalarType(elem))
-                     : SIMTLocalStorageTypeName(buffer->dtype))
-             << ")\n";
+      // SIMT locals use scalar-addressed storage, including vector slots.
+      stream << vid << " = pto.alloc_buffer(("
+             << opt_size.value() * buffer->dtype.lanes() << ",), "
+             << SIMTLocalStorageTypeName(elem) << ")\n";
     } else if (persistent) {
       ICHECK(IsFloat32(buffer->dtype))
           << "PTO persistent local allocation currently supports float32 "
@@ -4512,29 +4550,15 @@ void CodeGenTileLangPTO::EmitAscendCopyUbufToCbuf(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
-  // ascend_nd2nz_post_copy(dst_l1, src_nz_ub, rows, cols, full_rows,
-  //                        dst_dtype_str [, split_dim_neg2, half_extent])
-  // The dual extras (args 6-7) are consumed by warpgroup_partition before
-  // codegen; by the time we get here, the dst access_ptr already has the
-  // sid-based offset baked in.
-  ICHECK(op->args.size() == 6U || op->args.size() == 8U)
-      << "tl.ascend_nd2nz_post_copy expects 6 or 8 arguments, got "
-      << op->args.size();
-
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
   std::string dst = GetLocalPtrExpr(op->args[0], "mat", DataType::BFloat(16));
   std::string src = GetLocalPtrExpr(op->args[1], "ub", DataType::BFloat(16));
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  int64_t full_rows = ConstArgDim(op, 4, "full_rows");
-  std::string dst_dtype = Downcast<StringImm>(op->args[5])->value;
-
-  int elem_bytes = (dst_dtype == "float") ? 4 : 2;
-  int elems_perC0 = 32 / elem_bytes;
-  int64_t burst_num = cols / elems_perC0;
-  int64_t burst_len = rows;
-  int64_t src_gap = 1;
-  int64_t dst_gap = full_rows - rows;
+  int64_t burst_num = geometry.Bursts();
+  int64_t burst_len = geometry.rows;
+  int64_t src_gap = geometry.src_pitch - geometry.rows;
+  int64_t dst_gap = geometry.dst_pitch - geometry.rows;
 
   PrintIndent();
   stream << "pto.mte_ub_l1(" << src << ", " << dst << ", " << burst_len
@@ -4543,17 +4567,12 @@ void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
-  // ascend_nd2nz_scatter(src_ub, tmp_nz_ub, rows, cols,
-  //                      dst_dtype_str, src_dtype_str)
-  // Emits inline PTO SIMD calls that reorder [ROWS, COLS] data from ND
-  // (row-major) to NZ (fractal) layout within UB.
-  ICHECK_EQ(op->args.size(), 6U)
-      << "tl.ascend_nd2nz_scatter expects exactly 6 arguments";
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  std::string dst_dtype = Downcast<StringImm>(op->args[4])->value;
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
   std::string src_dtype = Downcast<StringImm>(op->args[5])->value;
+  std::string dst_dtype = Downcast<StringImm>(op->args[6])->value;
 
   ICHECK(rows % 16 == 0) << "PTO nd2nz_scatter requires ROWS % 16 == 0, got "
                          << rows;
@@ -4598,7 +4617,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
     }
 
     int src_offset = pass * vl_elems;
-    int dst_pass_offset = pass * (static_cast<int>(rows) + 1) * vl_elems;
+    int dst_pass_offset =
+        pass * static_cast<int>(geometry.dst_pitch) * vl_elems;
 
     for (int r = 0; r < rows; ++r) {
       int row_src_offset = src_offset + r * static_cast<int>(cols);
@@ -4616,8 +4636,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
              << " dist=\"NORM\")\n";
       PrintIndent();
       stream << "pto.vsstb(" << var << ", pto.addptr(" << dst_ptr << ", "
-             << row_dst_offset << "), " << (rows + 1) << ", 0, " << mask_fn
-             << ")\n";
+             << row_dst_offset << "), " << geometry.dst_pitch << ", 0, "
+             << mask_fn << ")\n";
     }
   }
 }
@@ -4818,10 +4838,17 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
       op->op.same_as(tl::warp_reduce_min())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "PTO warp reduction expects exactly one argument";
+    DataType dtype = op->args[0].dtype();
+    ICHECK(IsSupportedSIMTAllReduceType(dtype))
+        << "PTO warp reduction currently supports float16, float32, int32, "
+           "and uint32 only, got "
+        << dtype
+        << ". Use a supported reducer dtype, such as float32, and cast the "
+           "result afterward.";
     const char *name = op->op.same_as(tl::warp_reduce_sum())   ? "redux_add"
                        : op->op.same_as(tl::warp_reduce_max()) ? "redux_max"
                                                                : "redux_min";
-    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ")";
+    os << "tl." << name << "(" << PrintExpr_(op->args[0]) << ")";
     return;
   }
 
@@ -7431,6 +7458,14 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
   DataType value_dtype = op->dtype;
   DataType element_dtype = op->buffer->dtype;
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && element_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Convert vector slots to scalar offsets for the existing contiguous load.
+    index = SIMTVectorLocalScalarOffset(index, element_dtype.lanes(), "load");
+    element_dtype = element_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): reading one slot yields a whole vector register. Emit a plain
@@ -7467,15 +7502,20 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
            "and 8 only, got "
         << value_dtype;
     const int lanes = value_dtype.lanes();
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "load");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "load");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     if (scope == "local.fragment" || scope == "local") {
-      os << "pto.load(" << GetVarID(op->buffer->data.get()) << ", " << index_str
-         << ", contiguous=" << lanes << ")";
+      std::string value = "pto.load(" + GetVarID(op->buffer->data.get()) +
+                          ", " + index_str +
+                          ", contiguous=" + std::to_string(lanes) + ")";
+      // Local integer storage is signless; restore the authored signedness.
+      os << (IsInteger32(element_dtype)
+                 ? ScalarCastExpr(value, element_dtype,
+                                  "PTO SIMT local vector load")
+                 : value);
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
@@ -7616,11 +7656,18 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   DataType buffer_dtype = op->buffer->dtype;
   DataType value_dtype = op->value.dtype();
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && buffer_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Match the scalar-addressed allocation and contiguous load path.
+    index = SIMTVectorLocalScalarOffset(index, buffer_dtype.lanes(), "store");
+    buffer_dtype = buffer_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): the value is a whole vector register stored into one buffer
-  // slot. Emit a plain Python assignment; the buffer was allocated as a list
-  // (non-SIMT) or pto.alloc_buffer (SIMT).
+  // slot outside SIMT. Emit an assignment to its Python vector value.
   if (buffer_dtype.lanes() > 1) {
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
     PrintIndent();
@@ -7651,7 +7698,7 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
         << "PTO SIMT vector BufferStore expects the value element dtype to "
            "match the buffer element dtype, got "
         << value_dtype << " vs " << buffer_dtype;
-    if (TryEmitRngBroadcastStore(op)) {
+    if (TryEmitRngBroadcastStore(op, index)) {
       return;
     }
     ICHECK(!tl::IsAscendVectorizableFP8(buffer_dtype) ||
@@ -7660,10 +7707,9 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
            "4, and 8 only, got "
         << value_dtype;
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "store");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "store");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     PrintIndent();
@@ -7735,7 +7781,8 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   LOG(FATAL) << "PTO non-SIMT vector BufferStore is not supported yet";
 }
 
-bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
+bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op,
+                                                  const PrimExpr &index) {
   const auto *broadcast = op->value.as<BroadcastNode>();
   if (broadcast == nullptr) {
     return false;
@@ -7758,9 +7805,9 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
       << "PTO RNG broadcast store currently supports exactly 2 lanes, got "
       << broadcast->dtype;
 
-  PrimExpr base_index = op->indices[0];
+  PrimExpr base_index = index;
   if (const auto *ramp = base_index.as<RampNode>()) {
-    CheckContiguousRampStride(op->indices[0], "store");
+    CheckContiguousRampStride(index, "store");
     base_index = ramp->base;
   }
 
