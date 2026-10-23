@@ -190,8 +190,6 @@ def test_byte_backed_float4_view_requires_an_even_row_stride():
         _lower(src, dst, _region(src, [8, 2]), layouts={dst: make_ascend_nz_layout(dst)})
 
 
-
-
 @pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
 @pytest.mark.parametrize("cols", [3, 4], ids=["partial-byte", "whole-byte"])
 def test_packed_fp4_rows_require_whole_bytes(store, cols):
