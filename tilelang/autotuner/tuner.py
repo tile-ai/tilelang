@@ -35,7 +35,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.report import TrialReporter
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
-from tilelang.utils.device import get_available_cpu_count
+from tilelang.utils.device import get_available_cpu_count, get_current_device
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.engine.param import KernelParam
 from tilelang import __version__
@@ -280,18 +280,15 @@ class AutoTuner:
             frozen_inputs = list(captured_inputs)
             cached_tensors_by_device = {}
 
-            def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
-                if not isinstance(device, (int, str, torch.device)):
-                    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+            def supply_prog(_params, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
+                # supply benchmark tensors on the current device of the active backend,
+                # like the default tensor supply
+                device = get_current_device()
+                if device is None:
+                    device = "cpu"
                 if device not in _cached_tensors_by_device:
-                    if isinstance(device, torch.device):
-                        target_device = device
-                    elif isinstance(device, str):
-                        target_device = torch.device(device)
-                    else:
-                        target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
                     _cached_tensors_by_device[device] = [
-                        tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
+                        tensor.to(device=device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
                 return _cached_tensors_by_device[device]
 
