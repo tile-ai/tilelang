@@ -27,6 +27,14 @@ from tilelang import jit
 | `break` / `continue`    | ✅        |                                          |
 | `enumerate()` / `zip()` | ✅        | Compile-time iteration over Python iterables |
 
+Scalar numeric expressions used as conditions in `if`, `while`, `assert`,
+`not`, `and`, `or`, and Python ternary expressions are tested for nonzero values,
+equivalent to writing `expr != 0`. Symbolic `and` and `or` interpret both operands
+as conditions and yield a boolean result. Boolean expressions retain their
+existing meaning.
+Conditions whose values are known during IR construction are evaluated at
+compile time; symbolic conditions produce device-side control flow.
+
 ### Device loops and compile-time iteration
 
 In a `for` statement, calling Python's built-in `range` creates a serial device
