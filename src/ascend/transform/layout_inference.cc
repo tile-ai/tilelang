@@ -317,8 +317,8 @@ public:
       auto propagate_alias = [&](const Buffer &src_buffer,
                                  const Layout &src_layout) {
         // Fragment aliases participate in the thread-ownership solver.
-        // Memory layouts belong to individual views; fill missing layouts
-        // only after each view's own constraints have been inferred.
+        // Memory layouts belong to individual views. Inherit missing layouts
+        // after all strict constraints, before common/free-mode defaults.
         if (!src_layout.as<FragmentNode>())
           return;
         if (!buffer_data_to_buffers_.count(src_buffer->data))
@@ -653,6 +653,11 @@ public:
                    q, in_queue);
     }
 
+    // Memory views keep their explicit or operation-required layouts. Only
+    // after all strict requirements are known may unconstrained aliases
+    // inherit a unique interpretation, before a soft default can hide it.
+    InheritUnconstrainedAliasLayouts_(layout_map);
+
     for (const auto &[buffer, layout] : layout_map) {
       strict_layout_map.Set(buffer, layout);
     }
@@ -662,43 +667,8 @@ public:
                      in_queue);
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-    // step 4: fill unconstrained views only when all known interpretations of
-    // their storage agree. A shared data Var does not impose layout equality.
-    const LayoutMap inferred_layouts = layout_map;
-    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
-      for (const auto &buf : buffers) {
-        if (layout_map.count(buf))
-          continue;
-        Optional<Layout> inherited;
-        bool ambiguous = false;
-        for (const auto &source : buffers) {
-          Optional<Layout> known = inferred_layouts.Get(source);
-          if (!known.defined())
-            continue;
-          Layout candidate =
-              ShapesEqual(known.value()->InputShape(), buf->shape, &analyzer_)
-                  ? known.value()
-                  : known.value()->Reshape(
-                        buf->shape, &analyzer_,
-                        Integer(GetElementStorageBits(source->dtype)),
-                        Integer(GetElementStorageBits(buf->dtype)));
-          if (inherited.defined() &&
-              !inherited.value()->IsEqual(candidate.get())) {
-            ambiguous = true;
-            break;
-          }
-          inherited = candidate;
-        }
-        ICHECK(!ambiguous || !accessed_buffers_.count(buf))
-            << "Ambiguous layout for buffer view " << buf->name << ": storage "
-            << var->name_hint
-            << " has distinct layouts. Annotate this view explicitly.";
-        // An unused backing Buffer only supplies allocation geometry. Any
-        // candidate suffices; storage normalization checks physical footprints.
-        if (inherited.defined())
-          layout_map.Set(buf, inherited.value());
-      }
-    }
+    // step 4: fill remaining aliases of storage resolved by free inference.
+    InheritUnconstrainedAliasLayouts_(layout_map);
 
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
@@ -773,6 +743,46 @@ public:
   }
 
 private:
+  void InheritUnconstrainedAliasLayouts_(LayoutMap &layout_map) {
+    // Use a snapshot so an unused owner's allocation-only choice cannot
+    // influence another view's inherited layout during this traversal.
+    const LayoutMap inferred_layouts = layout_map;
+    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
+      for (const auto &buf : buffers) {
+        if (layout_map.count(buf))
+          continue;
+        Optional<Layout> inherited;
+        bool ambiguous = false;
+        for (const auto &source : buffers) {
+          Optional<Layout> known = inferred_layouts.Get(source);
+          if (!known.defined())
+            continue;
+          Layout candidate =
+              ShapesEqual(known.value()->InputShape(), buf->shape, &analyzer_)
+                  ? known.value()
+                  : known.value()->Reshape(
+                        buf->shape, &analyzer_,
+                        Integer(GetElementStorageBits(source->dtype)),
+                        Integer(GetElementStorageBits(buf->dtype)));
+          if (inherited.defined() &&
+              !inherited.value()->IsEqual(candidate.get())) {
+            ambiguous = true;
+            break;
+          }
+          inherited = candidate;
+        }
+        ICHECK(!ambiguous || !accessed_buffers_.count(buf))
+            << "Ambiguous layout for buffer view " << buf->name << ": storage "
+            << var->name_hint
+            << " has distinct layouts. Annotate this view explicitly.";
+        // An unused backing Buffer only supplies allocation geometry. Any
+        // candidate suffices; storage normalization checks physical footprints.
+        if (inherited.defined())
+          layout_map.Set(buf, inherited.value());
+      }
+    }
+  }
+
   // Region-local execution scope of an opaque region block (see
   // RegionOpImpl::enter_scope). While non-empty, layout inference records
   // the innermost region's thread var and bounds instead of the kernel's.

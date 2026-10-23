@@ -5,10 +5,10 @@ import tilelang
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import Fragment, Layout
+from tilelang.layout import Fragment, Layout, make_ascend_major_k_layout, make_ascend_major_mn_layout
 from tvm import tirx
 
-from testing.ascend._ir import calls, kernel
+from testing.ascend._ir import calls, copy, kernel
 
 
 def _views():
@@ -51,6 +51,49 @@ def test_unconstrained_access_cannot_choose_between_distinct_layouts():
     unknown = tirx.decl_buffer(owner.shape, owner.dtype, name="unknown", data=owner.data)
     body = tirx.SeqStmt([tirx.Evaluate(buf[0, 0]) for buf in (owner, view, unknown)])
     mod = kernel(body, buffers=[owner], annotations={"layout_map": {owner: first, view: second}})
+    with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="Ambiguous layout for buffer view unknown"):
+        transform.AscendLayoutInference()(mod)
+
+
+@pytest.mark.parametrize(
+    "src_scope,dst_scope,alias_on_source",
+    [
+        ("global", "shared.l1", False),
+        ("shared.l1", "shared.l0a", True),
+        ("shared.l1", "shared.l0b", True),
+        ("shared.l1", "shared.l0a", False),
+        ("shared.l1", "shared.l0b", False),
+    ],
+)
+def test_copy_defaults_do_not_override_the_unique_alias_layout(src_scope, dst_scope, alias_on_source):
+    owner = tirx.decl_buffer((32, 32), "bfloat16", name="owner", scope=src_scope if alias_on_source else dst_scope)
+    view = tirx.decl_buffer(owner.shape, owner.dtype, name="view", data=owner.data)
+    other = tirx.decl_buffer(owner.shape, owner.dtype, name="other", scope=dst_scope if alias_on_source else src_scope)
+    layout = make_ascend_major_mn_layout(owner)
+    body = copy(view, other) if alias_on_source else copy(other, view)
+    mod = kernel(
+        body,
+        buffers=[owner] if other.scope() == "global" else [owner, other],
+        params=[other] if other.scope() == "global" else [],
+        annotations={"layout_map": {owner: layout}},
+    )
+    with tvm.target.Target("ascend"):
+        inferred = transform.AscendLayoutInference()(mod)
+    layouts = inferred["main"].body.block.annotations["layout_map"]
+    assert layouts[view].is_equal(layout)
+
+
+def test_copy_default_cannot_hide_ambiguous_alias_layouts():
+    owner = tirx.decl_buffer((32, 32), "bfloat16", name="owner", scope="shared.l1")
+    second = tirx.decl_buffer(owner.shape, owner.dtype, name="second", data=owner.data)
+    unknown = tirx.decl_buffer(owner.shape, owner.dtype, name="unknown", data=owner.data)
+    dst = tirx.decl_buffer(owner.shape, owner.dtype, name="dst", scope="shared.l0a")
+    body = tirx.SeqStmt([tirx.Evaluate(second[0, 0]), copy(unknown, dst)])
+    mod = kernel(
+        body,
+        buffers=[owner, dst],
+        annotations={"layout_map": {owner: make_ascend_major_mn_layout(owner), second: make_ascend_major_k_layout(second)}},
+    )
     with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="Ambiguous layout for buffer view unknown"):
         transform.AscendLayoutInference()(mod)
 
@@ -122,6 +165,34 @@ def test_ub_view_reads_the_same_bytes_through_its_own_layout():
     compiled = tilelang.compile(transpose, target="ascend", out_idx=-1)
     source = torch.arange(128, dtype=torch.float32, device="npu").reshape(8, 16)
     torch.testing.assert_close(compiled(source), source.T, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_l1_reshape_inherits_major_mn_before_copy_defaults():
+    import torch
+
+    @T.prim_func
+    def program(A: T.Tensor((32, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((32, 32), "float32")):
+        with T.Kernel(1):
+            owner = T.alloc_l1((32, 32), "bfloat16")
+            view = T.reshape(owner, (32, 32))
+            b = T.alloc_l1((32, 32), "bfloat16")
+            a0 = T.alloc_l0a((32, 32), "bfloat16")
+            b0 = T.alloc_l0b((32, 32), "bfloat16")
+            accum = T.alloc_l0c((32, 32), "float32")
+            T.annotate_layout({owner: make_ascend_major_mn_layout(owner)})
+            # Write the physical MajorMN representation before reading its alias.
+            T.copy(A, owner, transpose=True)
+            T.copy(B, b)
+            T.copy(view, a0)
+            T.copy(b, b0)
+            T.gemm(a0, b0, accum, transpose_B=True, clear_accum=True)
+            T.copy(accum, C)
+
+    compiled = tilelang.compile(program, target="ascend", out_idx=-1)
+    a = ((torch.arange(1024).reshape(32, 32) * 7 + 3) % 17 - 8).to(device="npu", dtype=torch.bfloat16)
+    b = ((torch.arange(1024).reshape(32, 32) * 5 + 1) % 13 - 6).to(device="npu", dtype=torch.bfloat16)
+    torch.testing.assert_close(compiled(a, b).cpu(), a.cpu().float() @ b.cpu().float().T, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend

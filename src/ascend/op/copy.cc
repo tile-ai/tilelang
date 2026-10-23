@@ -1067,16 +1067,19 @@ struct AscendCopyImpl {
                  dma_path == DMAPath::kL1ToL0B) {
         Optional<Layout> existing_src_layout =
             FindLayoutForBuffer(T.layout_map, op.src);
-        Layout src_layout = existing_src_layout.defined()
-                                ? existing_src_layout.value()
-                                : MakeAscendMajorKLayout(op.src);
-        if (!existing_src_layout.defined()) {
-          result_map.Set(op.src, src_layout);
+        if (!existing_src_layout.defined() && level == InferLevel::kFree) {
+          // Allow explicit layouts and per-view operation requirements to
+          // reach aliases before choosing a default for this endpoint.
+          existing_src_layout = MakeAscendMajorKLayout(op.src);
+          result_map.Set(op.src, existing_src_layout.value());
         }
-        AscendFractalLayoutInfo src_info;
-        ICHECK(TryExtractAscendFractalLayout(src_layout, op.src, &src_info))
-            << "Ascend L1->L0 copy expects a fractal layout on source L1 "
-            << op.src->name;
+        if (existing_src_layout.defined()) {
+          AscendFractalLayoutInfo src_info;
+          ICHECK(TryExtractAscendFractalLayout(existing_src_layout.value(),
+                                               op.src, &src_info))
+              << "Ascend L1->L0 copy expects a fractal layout on source L1 "
+              << op.src->name;
+        }
 
         Optional<Layout> dst_layout = FindLayoutForBuffer(T.layout_map, op.dst);
         if (!dst_layout.defined() && level == InferLevel::kFree) {

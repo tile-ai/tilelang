@@ -10,7 +10,7 @@ from tvm import tirx
 from testing.ascend._ir import nodes
 
 
-def _retimed_layout_views(qk_steps=4, pv_steps=4, alias_kind="view", transpose_pv=False, annotated=True):
+def _retimed_layout_views(qk_steps=4, pv_steps=4, alias_kind="view", transpose_pv=False, annotation="both"):
     @T.prim_func
     def main(
         Q: T.Tensor((64, 128), "bfloat16"),
@@ -31,13 +31,15 @@ def _retimed_layout_views(qk_steps=4, pv_steps=4, alias_kind="view", transpose_p
             cq = T.alloc_l0c((64, 64), "float32")
             cv = T.alloc_l0c((pv_steps, 64, 128), "float32")
             T.annotate_buffer_versions({q: 1, k0: 1, k1: 1, aq: 4, bq: 4, cq: 1, cv: 1})
-            if annotated:
+            if annotation == "both":
                 T.annotate_layout(
                     {
                         bq: make_ascend_major_k_layout(bq),
                         bv: make_ascend_major_k_layout(bv) if transpose_pv else make_ascend_major_mn_layout(bv),
                     }
                 )
+            elif annotation == "owner":
+                T.annotate_layout({bq: make_ascend_major_k_layout(bq)})
             T.copy(Q, q)
             T.copy(K[:32, :], k0)
             T.copy(K[32:, :], k1)
@@ -75,8 +77,8 @@ def _retimed_layout_views(qk_steps=4, pv_steps=4, alias_kind="view", transpose_p
 
 
 @pytest.mark.parametrize("alias_kind", ["view", "reshape"])
-@pytest.mark.parametrize("transpose_pv,annotated", [(False, True), (True, True), (False, False), (True, False)])
-def test_storage_views_keep_layouts_and_share_one_version_clock(alias_kind, transpose_pv, annotated):
+@pytest.mark.parametrize("transpose_pv,annotation", [(False, "both"), (True, "both"), (False, "none"), (True, "none"), (False, "owner")])
+def test_storage_views_keep_layouts_and_share_one_version_clock(alias_kind, transpose_pv, annotation):
     snapshots = {}
 
     @tvm.instrument.pass_instrument
@@ -91,7 +93,7 @@ def test_storage_views_keep_layouts_and_share_one_version_clock(alias_kind, tran
                 snapshots[info.name] = mod
 
     with tvm.target.Target("ascend"), tvm.transform.PassContext(config={"tl.disable_shared_memory_reuse": True}, instruments=[Capture()]):
-        tilelang.lower(_retimed_layout_views(3, 2, alias_kind, transpose_pv, annotated), target="ascend", enable_device_compile=False)
+        tilelang.lower(_retimed_layout_views(3, 2, alias_kind, transpose_pv, annotation), target="ascend", enable_device_compile=False)
 
     def l0b_layouts(mod):
         return {
@@ -132,15 +134,18 @@ def test_storage_views_keep_layouts_and_share_one_version_clock(alias_kind, tran
     assert int(allocations[0].shape[0]) * tvm.DataType(allocations[0].dtype).bits // 8 == 65536
 
 
-@pytest.mark.parametrize("alias_kind,transpose_pv,annotated", [("view", False, True), ("reshape", True, True), ("view", True, False)])
+@pytest.mark.parametrize(
+    "alias_kind,transpose_pv,annotation",
+    [("view", False, "both"), ("reshape", True, "both"), ("view", True, "none"), ("view", False, "owner")],
+)
 @tilelang.testing.requires_ascend
-def test_view_values_across_owner_lengths_and_launches(alias_kind, transpose_pv, annotated):
+def test_view_values_across_owner_lengths_and_launches(alias_kind, transpose_pv, annotation):
     import torch
 
     torch.npu.set_device(0)
     torch.npu.set_op_timeout_ms(30000)
     with tvm.target.Target("ascend"):
-        kernel = tilelang.compile(_retimed_layout_views(3, 2, alias_kind, transpose_pv, annotated), target="ascend", out_idx=[2, 3])
+        kernel = tilelang.compile(_retimed_layout_views(3, 2, alias_kind, transpose_pv, annotation), target="ascend", out_idx=[2, 3])
     for seed in (7, 11, 19):
         torch.manual_seed(seed)
         q = torch.randint(-2, 3, (64, 128), dtype=torch.int32).to(dtype=torch.bfloat16, device="npu")

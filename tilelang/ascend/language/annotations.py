@@ -26,6 +26,12 @@ def annotate_layout(layout_map: dict):
     representation consumed through each view; annotating a view never moves
     or transposes existing values. Canonical Cube views sharing storage must
     have the same dtype and padded physical size.
+
+    Each memory view keeps its explicit or operation-required layout. An
+    unconstrained view inherits the unique layout of its aliases before copy
+    defaults are applied; distinct candidates require an explicit annotation.
+    With no such constraint, normal automatic inference applies. Fragment
+    aliases must always agree on thread ownership.
     """
     return sblock_attr({"layout_map": _normalize_layout_map(layout_map)})
 
