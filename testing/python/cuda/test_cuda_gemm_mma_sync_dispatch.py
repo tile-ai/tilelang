@@ -6,8 +6,8 @@ import tilelang.testing
 from tilelang import tvm
 
 
-def _make_gemm_kernel(dtype, accum_dtype):
-    M = N = K = 64
+def _make_gemm_kernel(dtype, accum_dtype, K=64):
+    M = N = 64
 
     @T.prim_func
     def main(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype), C: T.Tensor((M, N), accum_dtype)):
@@ -85,3 +85,39 @@ def test_gemm_mma_sync_supported_dtype_combo_runs(dtype, accum_dtype):
     out = kernel(a, b)
     ref = (a.float() @ b.float()).to(getattr(torch, accum_dtype))
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "arch,dtype,accum_dtype,k",
+    [
+        ("sm_75", "float16", "float32", 24),
+        ("sm_80", "float16", "float32", 16),
+        ("sm_80", "float64", "float64", 4),
+    ],
+)
+def test_gemm_k_shape_uses_architecture_specific_atom(arch, dtype, accum_dtype, k):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with target:
+        lowered = tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)
+    assert "tl::mma_sync" in lowered.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "arch,dtype,accum_dtype,k,atom_k",
+    [
+        ("sm_75", "float16", "float32", 4, 8),
+        ("sm_80", "float16", "float32", 8, 16),
+        ("sm_80", "float16", "float32", 20, 16),
+        ("sm_80", "bfloat16", "float32", 8, 16),
+        ("sm_80", "int8", "int32", 16, 32),
+        ("sm_80", "int4", "int32", 32, 64),
+        ("sm_80", "float32", "float32", 4, 8),
+        ("sm_80", "float64", "float64", 2, 4),
+    ],
+)
+def test_gemm_partial_k_atom_requires_padding(arch, dtype, accum_dtype, k, atom_k):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with target, pytest.raises(ValueError, match=rf"tile K={k} must be divisible by {atom_k}"):
+        tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)

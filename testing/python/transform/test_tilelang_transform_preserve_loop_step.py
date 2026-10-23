@@ -68,6 +68,33 @@ def test_unroll_loop_preserves_non_unit_loop_step(rng, explicit):
     )
 
 
+def test_unroll_loop_preserves_empty_non_unit_loop():
+    output_buffer = tvm.tirx.decl_buffer((1,), "int32", name="output")
+    i = tvm.tirx.Var("i", "int32")
+    loop = tvm.tirx.For(
+        i,
+        0,
+        0,
+        tvm.tirx.ForKind.UNROLLED,
+        tvm.tirx.BufferStore(output_buffer, 1, [0]),
+        step=tvm.tirx.IntImm("int32", 2),
+        annotations={"pragma_unroll_explicit": True},
+    )
+    before = tvm.tirx.PrimFunc(
+        [output_buffer.data],
+        loop,
+        buffer_map={output_buffer.data: output_buffer},
+    ).with_attr("global_symbol", "main")
+
+    mod = tl.transform.UnrollLoop()(tvm.IRModule.from_expr(before))
+    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+
+    output = tvm.runtime.tensor(np.zeros(1, dtype="int32"))
+    executable["main"](output)
+
+    np.testing.assert_array_equal(output.numpy(), np.zeros(1, dtype="int32"))
+
+
 def _build_loop_source(backend, start, stop, step, kind, unroll_factor=None, lexical_scope=False):
     i = tvm.tirx.Var("i", "int32")
     output = tvm.tirx.decl_buffer((32,), "int32", name="output")

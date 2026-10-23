@@ -137,31 +137,6 @@ static Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-static Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
-  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
-  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
-  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
-
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto thd = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
-  }
-
-  auto reducer_layout =
-      Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
-          ->CondenseReplicateVar()
-          ->BindThreadRange(src_layout->ThreadRange());
-  return reducer_layout;
-}
-
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -212,6 +187,26 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
 
+    // Match the frontend's reduction shape contract before Reshape, which
+    // only checks the total element count.
+    Array<PrimExpr> expected_shape = reducer_layout->InputShape();
+    if (dst->shape.size() == src_layout->InputShape().size()) {
+      // Keeping the reduced axis requires its extent to be one.
+      expected_shape = src_layout->InputShape();
+      expected_shape.Set(dim, make_const(expected_shape[dim].dtype(), 1));
+    }
+    bool valid_shape = dst->shape.size() == expected_shape.size();
+    for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
+      valid_shape =
+          layout_args.analyzer->CanProveEqual(dst->shape[i], expected_shape[i]);
+    }
+    ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst->shape
+                        << " for " << dst << ", expected " << expected_shape
+                        << " when reducing axis " << dim << " of "
+                        << src->shape;
+    reducer_layout = Downcast<Fragment>(
+        reducer_layout->Reshape(dst->shape, layout_args.analyzer));
+
     if (!layout_args.layout_map.count(dst)) {
       return {{dst, reducer_layout}};
     }
@@ -220,8 +215,9 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
         layout_args.layout_map.Get(dst).value().as<Fragment>().value();
     ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
 
-    auto indices = InputPlaceholders(reducer_layout->InputDim());
+    // Keep placeholder bindings local to this containment check.
     arith::Analyzer analyzer;
+    auto indices = InputPlaceholders(reducer_layout->InputDim());
     for (size_t i = 0; i < indices.size(); i++) {
       analyzer.Bind(Downcast<Var>(indices[i]),
                     Range(0, reducer_layout->InputShape()[i]));

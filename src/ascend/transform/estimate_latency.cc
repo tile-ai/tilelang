@@ -50,6 +50,7 @@
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
+#include "ascend/op/nd2nz.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/attr.h"
 #include "op/copy.h"
@@ -1198,10 +1199,10 @@ private:
 
     int64_t EstimateNd2NzScatterLatency(const CallNode *op) const {
       // InsertNd2Nz validates this template contract before EstimateLatency.
-      ICHECK_EQ(op->args.size(), 6U);
+      ICHECK_EQ(op->args.size(), 7U);
       const int64_t *rows = as_const_int(op->args[2]);
       const int64_t *cols = as_const_int(op->args[3]);
-      const auto *dst_dtype = op->args[4].as<StringImmNode>();
+      const auto *dst_dtype = op->args[6].as<StringImmNode>();
       const auto *src_dtype = op->args[5].as<StringImmNode>();
       ICHECK(rows && cols && src_dtype && dst_dtype)
           << "ND->NZ scatter requires static shape and dtype arguments: "
@@ -1592,11 +1593,9 @@ private:
   }
 
   void RecordNd2NzPostCopy(const CallNode *op) {
-    ICHECK_EQ(op->args.size(), 6)
-        << "tl.ascend_nd2nz_post_copy expects 6 arguments";
-    const auto *dtype = op->args[5].as<StringImmNode>();
-    ICHECK(dtype) << "tl.ascend_nd2nz_post_copy dtype must be a StringImm";
-    int64_t element_bytes = dtype->value == "float" ? 4 : 2;
+    ICHECK_EQ(op->args.size(), 7)
+        << "tl.ascend_nd2nz_post_copy expects 7 arguments";
+    int64_t element_bytes = Nd2NzElementBytes(op->args[6]);
     int64_t rows = EstimateExprUpperBound(op->args[2]);
     int64_t cols = EstimateExprUpperBound(op->args[3]);
     int64_t bytes = SafeMultiply(SafeMultiply(rows, cols), element_bytes);

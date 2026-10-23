@@ -440,19 +440,20 @@ jobs:
           fi
 
   ascend:
-    name: Ascend tests
+    name: Test for Ascend
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
     timeout-minutes: 120
     env:
       PIP_USER: "0"
       USE_CUDA: "OFF"
       USE_ASCEND: "ON"
+      CMAKE_BUILD_PARALLEL_LEVEL: "64"
 
     steps:
       - name: Checkout repository
@@ -467,7 +468,8 @@ jobs:
           # rejects it as "dubious ownership"; CMake's submodule check needs it.
           git config --global --add safe.directory '*'
 
-      - name: Build and test Ascend
+      - name: Set up environment and build Ascend
+        id: ascend-build
         shell: bash
         run: |
           # Keep the runner's preinstalled Torch/Torch-NPU stack.
@@ -483,6 +485,14 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
@@ -505,13 +515,55 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-          cd testing
-          for TARGET in ascend pto; do
-            echo "Running Ascend examples with TILELANG_DEFAULT_TARGET=${TARGET}"
-            TILELANG_DEFAULT_TARGET="${TARGET}" TILELANG_EXECUTION_BACKEND=auto \
-              python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
-          done
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
+      - name: Run AscendC examples
+        id: ascendc-examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run PTO examples
+        id: pto-examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: pto
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run Ascend unit tests
+        id: ascend-unit-tests
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 testing/ascend
+
+      - name: Summarize Ascend results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ steps.ascend-build.outcome }}
+          ASCENDC_RESULT: ${{ steps.ascendc-examples.outcome }}
+          PTO_RESULT: ${{ steps.pto-examples.outcome }}
+          UNIT_RESULT: ${{ steps.ascend-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Test for Ascend"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Build | ${BUILD_RESULT} |"
+            echo "| AscendC examples | ${ASCENDC_RESULT} |"
+            echo "| PTO examples | ${PTO_RESULT} |"
+            echo "| Unit tests | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
     name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)

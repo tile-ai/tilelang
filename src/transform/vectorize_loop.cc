@@ -1142,6 +1142,13 @@ public:
             << " for target " << Target::Current();
       }
       ICHECK(is_zero(op->min));
+      // Vectorize only sees (loop_var, extent, body), so a step here would be
+      // dropped and the lowered loop would visit every index of [0, extent)
+      // instead of every step-th one. Reject it rather than miscompile.
+      ICHECK(!op->step.has_value() || is_one(op->step.value()))
+          << "VectorizeLoop does not support a vectorized loop with a non-unit "
+             "step, got step="
+          << op->step.value();
       return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body);
     } else {
       return StmtMutator::VisitStmt_(op);

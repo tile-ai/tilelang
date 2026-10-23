@@ -1,45 +1,35 @@
-"""BF16 and FP8 tensor APIs backed by TileLang kernels.
+"""BF16, FP8 and packed FP4 tensor APIs backed by TileLang kernels.
 
 The API suffix describes the logical expression. Physical K/MN major is
 derived from tensor strides. Dimensions omitted from ``compiled_dims`` and
 all outer strides stay in the runtime launch ABI.
 Dense GEMMs accept ``alpha=None`` or a runtime FP32 multiplier for A @ B,
-applied before output conversion and accumulation into C.
-
-Set ``TILELANG_DEEPGEMM_LOOP_ORDER`` to ``mnk`` or ``kmn`` before the first
-import; changing it after import does not switch the kernel builders.
+applied before output conversion and accumulation into C. Dense C must alias D
+for accumulation; a separate contiguous [1, N] C selects fused bias instead.
 
 Grouped layouts contain logical end offsets; each group starts at the previous
 end rounded up to ``MK_ALIGNMENT``. M-grouped A/D must include the full aligned
 row allocation. ``ensure_zero_padding`` does not clear inputs: zero output
 padding requires zero input padding and valid scales.
 Prepacked int16 scales are used directly, including caller-provided padding.
+Quantized dense and grouped GEMMs accept FP8/FP8 or packed FP4/FP4 inputs.
+As in DeepGEMM-Ascend-Nightly, fp8_bmm/fp8_einsum accept FP8 inputs only.
+FP4 E2M1 values use int8 or float4_e2m1fn_x2 storage, with the lower nibble
+first along the contiguous axis; shapes and strides count packed bytes.
 """
 
 from __future__ import annotations
 
 import enum
-import os
 import warnings
 
 import torch
 
-from .config import GemmDesc, GemmType, Major, ceil_div, select_gemm_config, select_transform_sf_config
-from .kernels import load_kernels
+from . import epilogue as epilogue_ops
+from .config import GemmDesc, GemmType, Major, ceil_div, select_gemm_config, select_transform_sf_config, execution_config
+from .kernels import build_bf16_gemm, build_fp8_gemm
 from .kernels.common import MK_ALIGNMENT
 from .kernels.transform_sf import build_transform_sf
-
-
-LOOP_ORDER = os.environ.get("TILELANG_DEEPGEMM_LOOP_ORDER", "mnk").lower()
-_kernels = load_kernels(LOOP_ORDER)
-build_bf16_gemm = _kernels.build_bf16_gemm
-build_bf16_batched_gemm = _kernels.build_bf16_batched_gemm
-build_bf16_m_grouped_gemm = _kernels.build_bf16_m_grouped_gemm
-build_bf16_k_grouped_gemm = _kernels.build_bf16_k_grouped_gemm
-build_fp8_gemm = _kernels.build_fp8_gemm
-build_fp8_batched_gemm = _kernels.build_fp8_batched_gemm
-build_fp8_m_grouped_gemm = _kernels.build_fp8_m_grouped_gemm
-build_fp8_k_grouped_gemm = _kernels.build_fp8_k_grouped_gemm
 
 
 class BindingLayout(str, enum.Enum):
@@ -59,12 +49,40 @@ class BindingLayout(str, enum.Enum):
         return self.value[1] == "n"
 
 
+def _input_dtype(tensor):
+    if tensor.dtype in (torch.int8, getattr(torch, "float4_e2m1fn_x2", None)):
+        return "float4_e2m1fn_x2"
+    return str(tensor.dtype).removeprefix("torch.")
+
+
+def _logical_shape(tensor, major):
+    mn, k = tensor.shape[-2:]
+    if _input_dtype(tensor) == "float4_e2m1fn_x2":
+        if major == Major.K:
+            k *= 2
+        else:
+            mn *= 2
+    return mn, k
+
+
+def _check_quantized_pair(a, b):
+    pair = (_input_dtype(a), _input_dtype(b))
+    fp8, fp4 = "float8_e4m3fn", "float4_e2m1fn_x2"
+    if pair == (fp8, fp4):
+        # TODO: port Nightly's FP8 x FP4 dequant kernel; the heuristic already models it.
+        raise NotImplementedError("FP8 x FP4 (FP8 dequant) kernels are not implemented")
+    if pair not in ((fp8, fp8), (fp4, fp4)):
+        raise TypeError(f"Supported quantized dtype pairs are FP8/FP8 and FP4/FP4, got {pair}")
+
+
 def _dtype_name(dtype: torch.dtype) -> str:
+    if dtype is torch.float8_e4m3fn:
+        return "float8_e4m3fn"
     if dtype is torch.bfloat16:
         return "bfloat16"
     if dtype is torch.float32:
         return "float32"
-    raise TypeError(f"d must be bfloat16 or float32, got {dtype}")
+    raise TypeError(f"d must be bfloat16, float32 or float8_e4m3fn, got {dtype}")
 
 
 def _same_device(*tensors: torch.Tensor | None) -> None:
@@ -90,8 +108,6 @@ def _get_major_type_ab(tensor: torch.Tensor, mn_axis: str) -> Major:
 def _check_major_type_cd(tensor: torch.Tensor, name: str) -> None:
     if tensor.ndim < 2:
         raise ValueError(f"{name} must have at least two dimensions")
-    if tensor.stride(-2) == 1 and tensor.stride(-1) == 1:
-        raise ValueError(f"{name} has an ambiguous major axis, got strides={tensor.stride()}")
     if tensor.stride(-1) != 1:
         raise ValueError(f"{name} must have unit stride along N, got {tensor.stride()}")
 
@@ -106,7 +122,7 @@ def _copy_source(d: torch.Tensor, c: torch.Tensor | None) -> None:
         d.copy_(c)
 
 
-def _gemm_early_return(m: int, n: int, k: int, d: torch.Tensor, c: torch.Tensor | None) -> bool:
+def _gemm_early_return(m: int, n: int, k: int, d: torch.Tensor, c: torch.Tensor | None, *, with_bias=False) -> bool:
     if m == 0 or n == 0:
         return True
     if c is not None:
@@ -115,11 +131,12 @@ def _gemm_early_return(m: int, n: int, k: int, d: torch.Tensor, c: torch.Tensor 
             raise ValueError("aliased c and d must have identical strides")
     if k == 0:
         if c is None:
-            d.zero_()
+            (d.view(torch.uint8) if d.dtype == torch.float8_e4m3fn else d).zero_()
         else:
             _copy_source(d, c)
         return True
-    _copy_source(d, c)
+    if not with_bias:
+        _copy_source(d, c)
     return False
 
 
@@ -144,7 +161,8 @@ def _get_gemm_desc(
     grouped_layout: torch.Tensor | None = None,
     expected_m: int | None = None,
     ks_cpu=None,
-    with_alpha: bool = False,
+    epilogue: epilogue_ops.Epilogue,
+    compiled_dims: str = "nk",
 ) -> GemmDesc | None:
     """Validate logical MK/NK operands and prepare the shared heuristic metadata.
 
@@ -161,8 +179,8 @@ def _get_gemm_desc(
     out_dtype = _dtype_name(d.dtype)
     major_a, major_b = _get_major_type_ab(a, "a"), _get_major_type_ab(b, "b")
     _check_major_type_cd(d, "d")
-    m, k = a.shape[-2:]
-    n, b_k = b.shape[-2:]
+    m, k = _logical_shape(a, major_a)
+    n, b_k = _logical_shape(b, major_b)
     if batched:
         num_groups = a.shape[0]
     elif m_grouped:
@@ -174,8 +192,9 @@ def _get_gemm_desc(
     output_shape = (num_groups, m, n) if batched or k_grouped else (m, n)
     if b_k != k or tuple(d.shape) != output_shape or (batched and b.shape[0] != num_groups):
         raise ValueError(f"incompatible {gemm_type.name} shapes: a={tuple(a.shape)}, b={tuple(b.shape)}, d={tuple(d.shape)}")
-    if c is not None and (c.shape != d.shape or c.dtype != d.dtype):
-        raise ValueError("c and d must have identical shape, dtype, and device")
+    with_bias = epilogue.kind == "bias"
+    if c is not None and (tuple(c.shape) != ((1, n) if with_bias else tuple(d.shape)) or c.dtype != d.dtype):
+        raise ValueError("c must have D's dtype and shape, or be a separate contiguous [1, N] bias for dense GEMM")
     if m_grouped or k_grouped:
         if (
             grouped_layout is None
@@ -188,18 +207,17 @@ def _get_gemm_desc(
             raise ValueError(f"grouped_layout must have {num_groups} entries, got {grouped_layout.numel()}")
         if m_grouped and major_a != Major.K:
             raise ValueError("M-grouped A must be K-major")
-        if k_grouped:
-            if major_a != Major.MN or major_b != Major.MN:
-                raise ValueError("K-grouped A and B must be MN-major after logical transpose")
-            if c is None:
-                raise ValueError("K-grouped GEMM requires accumulation into c")
+        if k_grouped and (major_a != Major.MN or major_b != Major.MN):
+            raise ValueError("K-grouped A and B must be MN-major after logical transpose")
     if (batched or m_grouped or k_grouped) and num_groups == 0:
         if m_grouped and d.numel():
             raise ValueError("nonempty M-grouped GEMM requires at least one group")
         return None
     if m_grouped and m and n and k and m % MK_ALIGNMENT:
         raise ValueError(f"M-grouped A/D must include physical padding to {MK_ALIGNMENT} rows, got M={m}")
-    if _gemm_early_return(m, n, k, d, c):
+    if _gemm_early_return(m, n, k, d, c, with_bias=with_bias):
+        if k == 0 and m and n and isinstance(epilogue, epilogue_ops.FP8Quantization):
+            epilogue.sfd.zero_()
         return None
 
     estimated_m = m // num_groups if m_grouped else m
@@ -208,29 +226,35 @@ def _get_gemm_desc(
         m=m,
         n=n,
         k=k,
-        a_dtype=str(a.dtype).removeprefix("torch."),
-        b_dtype=str(b.dtype).removeprefix("torch."),
+        a_dtype=_input_dtype(a),
+        b_dtype=_input_dtype(b),
         cd_dtype=out_dtype,
         major_a=major_a,
         major_b=major_b,
-        acc=c is not None,
+        acc=c is not None and not with_bias,
         gemm_type=gemm_type,
         num_groups=num_groups,
         expected_m=estimated_m if expected_m is None else int(expected_m),
         expected_k=expected_k,
         num_cores=_num_cores(d.device),
-        with_alpha=with_alpha,
+        epilogue_kind=epilogue.kind,
         outer_stride_a=_get_outer_stride(a, major_a),
         outer_stride_b=_get_outer_stride(b, major_b),
+        outer_stride_d=d.stride(-2),
+        output_alignment=d.data_ptr() % 32 if d.device.type != "meta" else 0,
+        compiled_dims=compiled_dims,
+        stride_batch_a=a.stride(0) if batched else 0,
+        stride_batch_b=b.stride(0) if batched else 0,
     )
 
 
 def _physical(logical: torch.Tensor, major: Major) -> torch.Tensor:
-    return logical if major == Major.K else logical.transpose(-2, -1)
+    physical = logical if major == Major.K else logical.transpose(-2, -1)
+    return physical.view(torch.int8) if _input_dtype(physical) == "float4_e2m1fn_x2" else physical
 
 
 def _compiled_shape(m: int, n: int, k: int, compiled_dims: str):
-    return tuple(dim if name in compiled_dims else None for name, dim in zip("mnk", (m, n, k)))
+    return tuple(dim if name in compiled_dims else None for name, dim in zip(("m", "n", "k"), (m, n, k)))
 
 
 def _fp8_operand(operand, name: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -347,37 +371,70 @@ def _transform_sf_into_required_layout(
     return result.squeeze(0) if scale.ndim == 2 else result
 
 
-def _physical_scale(scale: torch.Tensor) -> torch.Tensor:
-    """View MN-major logical scales as the kernel's physical K-pair rows."""
+def _prepare_scales(desc, sfa, sfb, recipe, *, grouped_layout=None, disable_ue8m0_cast=False):
+    """Normalize each operand's scales, including its batch/group padding policy."""
+    batched = desc.gemm_type == GemmType.Batched
+    m_grouped = desc.gemm_type == GemmType.MGroupedContiguousWithPsumLayout
+    k_grouped = desc.gemm_type == GemmType.KGroupedContiguousWithPsumLayout
+    scales = []
+    for scale, mn, is_sfa in ((sfa, desc.m, True), (sfb, desc.n, False)):
+        transformed = _transform_sf_into_required_layout(
+            scale,
+            mn,
+            desc.k,
+            recipe,
+            is_sfa=is_sfa,
+            num_groups=desc.num_groups if batched or (m_grouped and not is_sfa) else None,
+            disable_ue8m0_cast=disable_ue8m0_cast,
+            grouped_layout=grouped_layout if k_grouped or (m_grouped and is_sfa) else None,
+            k_grouped=k_grouped,
+        )
+        scales.append(transformed.transpose(-2, -1))
+    return tuple(scales)
 
-    return scale.transpose(-2, -1)
+
+def _launch_gemm(desc, a, b, d, epilogue, *, scales=(), grouped_layout=None):
+    config = execution_config(desc, select_gemm_config(desc))
+    build = build_fp8_gemm if scales else build_bf16_gemm
+    options = {"operand_dtype": "float4_e2m1fn"} if desc.a_dtype == "float4_e2m1fn_x2" else {}
+    kernel = build(
+        *_compiled_shape(desc.m, desc.n, desc.k, desc.compiled_dims),
+        desc.major_a,
+        desc.major_b,
+        desc.cd_dtype,
+        desc.acc,
+        config,
+        desc.epilogue_kind,
+        desc.gemm_type,
+        **options,
+    )
+    args = (_physical(a, desc.major_a), _physical(b, desc.major_b), *scales, d)
+    if grouped_layout is not None:
+        args += (grouped_layout,)
+    kernel(*args, *epilogue_ops.arguments(epilogue, dense=desc.gemm_type == GemmType.Normal))
 
 
 def _make_bf16_gemm(layout: BindingLayout):
     trans_a, trans_b = layout.trans_a, layout.trans_b
 
-    def bf16_gemm(a, b, d, c=None, compiled_dims="mn" if trans_a else "nk", alpha=None) -> None:
+    def bf16_gemm(a, b, d, c=None, compiled_dims="mn" if trans_a else "nk", alpha=None, epilogue=None) -> None:
         if a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
             raise TypeError(f"a and b must be bfloat16, got {a.dtype} and {b.dtype}")
+        d, resolved = epilogue_ops.resolve(d, c, alpha, epilogue, dense=True)
         logical_a = a.transpose(0, 1) if trans_a else a
         logical_b = b.transpose(0, 1) if trans_b else b
-        desc = _get_gemm_desc(GemmType.Normal, logical_a, logical_b, d, c, with_alpha=alpha is not None)
+        desc = _get_gemm_desc(
+            GemmType.Normal,
+            logical_a,
+            logical_b,
+            d,
+            c,
+            epilogue=resolved,
+            compiled_dims=compiled_dims,
+        )
         if desc is None:
             return
-        config = select_gemm_config(desc)
-        m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-        kernel = build_bf16_gemm(
-            m_static,
-            n_static,
-            k_static,
-            desc.major_a,
-            desc.major_b,
-            desc.cd_dtype,
-            desc.acc,
-            config,
-            with_alpha=desc.with_alpha,
-        )
-        kernel(_physical(logical_a, desc.major_a), _physical(logical_b, desc.major_b), d, 1.0 if alpha is None else float(alpha))
+        _launch_gemm(desc, logical_a, logical_b, d, resolved)
 
     bf16_gemm.__name__ = bf16_gemm.__qualname__ = f"bf16_gemm_{layout.value}"
     return bf16_gemm
@@ -403,56 +460,30 @@ def _make_fp8_gemm(layout: BindingLayout):
         compiled_dims="mn" if trans_a else "nk",
         disable_ue8m0_cast=False,
         alpha=None,
+        epilogue=None,
     ) -> None:
         a_data, sfa = _fp8_operand(a, "a")
         b_data, sfb = _fp8_operand(b, "b")
-        if a_data.dtype is not torch.float8_e4m3fn or b_data.dtype is not torch.float8_e4m3fn:
-            raise TypeError(f"a and b data must be float8_e4m3fn, got {a_data.dtype} and {b_data.dtype}")
+        _check_quantized_pair(a_data, b_data)
+        d, resolved = epilogue_ops.resolve(d, c, alpha, epilogue, dense=True)
         logical_a = a_data.transpose(0, 1) if trans_a else a_data
         logical_b = b_data.transpose(0, 1) if trans_b else b_data
         logical_sfa = sfa.transpose(0, 1) if trans_a else sfa
         logical_sfb = sfb.transpose(0, 1) if trans_b else sfb
-        desc = _get_gemm_desc(GemmType.Normal, logical_a, logical_b, d, c, with_alpha=alpha is not None)
+        desc = _get_gemm_desc(
+            GemmType.Normal,
+            logical_a,
+            logical_b,
+            d,
+            c,
+            epilogue=resolved,
+            compiled_dims=compiled_dims,
+        )
         if desc is None:
             return
         recipe = _get_recipe(recipe, recipe_a, recipe_b)
-        transformed_sfa = _transform_sf_into_required_layout(
-            logical_sfa,
-            desc.m,
-            desc.k,
-            recipe,
-            is_sfa=True,
-            disable_ue8m0_cast=disable_ue8m0_cast,
-        )
-        transformed_sfb = _transform_sf_into_required_layout(
-            logical_sfb,
-            desc.n,
-            desc.k,
-            recipe,
-            is_sfa=False,
-            disable_ue8m0_cast=disable_ue8m0_cast,
-        )
-        config = select_gemm_config(desc)
-        m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-        kernel = build_fp8_gemm(
-            m_static,
-            n_static,
-            k_static,
-            desc.major_a,
-            desc.major_b,
-            desc.cd_dtype,
-            desc.acc,
-            config,
-            with_alpha=desc.with_alpha,
-        )
-        kernel(
-            _physical(logical_a, desc.major_a),
-            _physical(logical_b, desc.major_b),
-            _physical_scale(transformed_sfa),
-            _physical_scale(transformed_sfb),
-            d,
-            1.0 if alpha is None else float(alpha),
-        )
+        scales = _prepare_scales(desc, logical_sfa, logical_sfb, recipe, disable_ue8m0_cast=disable_ue8m0_cast)
+        _launch_gemm(desc, logical_a, logical_b, d, resolved, scales=scales)
 
     fp8_gemm.__name__ = fp8_gemm.__qualname__ = f"fp8_gemm_{layout.value}"
     return fp8_gemm
@@ -464,60 +495,48 @@ fp8_gemm_tn = _make_fp8_gemm(BindingLayout.TN)
 fp8_gemm_tt = _make_fp8_gemm(BindingLayout.TT)
 
 
-def bf16_bmm(a, b, d, c=None, compiled_dims="nk") -> None:
+def bf16_bmm(a, b, d, c=None, compiled_dims="nk", epilogue=None) -> None:
     if a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
         raise TypeError(f"a and b must be bfloat16, got {a.dtype} and {b.dtype}")
-    desc = _get_gemm_desc(GemmType.Batched, a, b, d, c)
+    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue)
+    desc = _get_gemm_desc(
+        GemmType.Batched,
+        a,
+        b,
+        d,
+        c,
+        epilogue=resolved,
+        compiled_dims=compiled_dims,
+    )
     if desc is None:
         return
-    config = select_gemm_config(desc)
-    m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-    kernel = build_bf16_batched_gemm(
-        m_static,
-        n_static,
-        k_static,
-        desc.major_a,
-        desc.major_b,
-        desc.cd_dtype,
-        desc.acc,
-        config,
-    )
-    kernel(_physical(a, desc.major_a), _physical(b, desc.major_b), d)
+    _launch_gemm(desc, a, b, d, resolved)
 
 
-def fp8_bmm(a, b, d, c=None, recipe=(1, 1, 32), compiled_dims="nk") -> None:
+def fp8_bmm(a, b, d, c=None, recipe=(1, 1, 32), compiled_dims="nk", epilogue=None) -> None:
     a_data, sfa = _fp8_operand(a, "a")
     b_data, sfb = _fp8_operand(b, "b")
-    if a_data.dtype is not torch.float8_e4m3fn or b_data.dtype is not torch.float8_e4m3fn:
-        raise TypeError("a and b data must be float8_e4m3fn")
-    desc = _get_gemm_desc(GemmType.Batched, a_data, b_data, d, c)
+    # Match DeepGEMM-Ascend-Nightly's fp8_bmm dtype contract.
+    if a_data.dtype != torch.float8_e4m3fn or b_data.dtype != torch.float8_e4m3fn:
+        raise TypeError("fp8_bmm supports FP8/FP8 inputs only, matching DeepGEMM-Ascend-Nightly")
+    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue, allow_fp8=True)
+    desc = _get_gemm_desc(
+        GemmType.Batched,
+        a_data,
+        b_data,
+        d,
+        c,
+        epilogue=resolved,
+        compiled_dims=compiled_dims,
+    )
     if desc is None:
         return
     recipe = _get_recipe(recipe, None, None)
-    transformed_sfa = _transform_sf_into_required_layout(sfa, desc.m, desc.k, recipe, is_sfa=True, num_groups=desc.num_groups)
-    transformed_sfb = _transform_sf_into_required_layout(sfb, desc.n, desc.k, recipe, is_sfa=False, num_groups=desc.num_groups)
-    config = select_gemm_config(desc)
-    m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-    kernel = build_fp8_batched_gemm(
-        m_static,
-        n_static,
-        k_static,
-        desc.major_a,
-        desc.major_b,
-        desc.cd_dtype,
-        desc.acc,
-        config,
-    )
-    kernel(
-        _physical(a_data, desc.major_a),
-        _physical(b_data, desc.major_b),
-        _physical_scale(transformed_sfa),
-        _physical_scale(transformed_sfb),
-        d,
-    )
+    scales = _prepare_scales(desc, sfa, sfb, recipe)
+    _launch_gemm(desc, a_data, b_data, d, resolved, scales=scales)
 
 
-def einsum(expr, a, b, d, c=None, use_cublaslt=False) -> None:
+def einsum(expr, a, b, d, c=None, use_cublaslt=False, epilogue=None) -> None:
     if use_cublaslt:
         raise RuntimeError("einsum: use_cublaslt is not implemented on Ascend")
     if expr == "bhr,hdr->bhd":
@@ -527,6 +546,7 @@ def einsum(expr, a, b, d, c=None, use_cublaslt=False) -> None:
             d.permute(1, 0, 2),
             c.permute(1, 0, 2) if c is not None else None,
             "nk",
+            epilogue=epilogue,
         )
     elif expr == "bhd,hdr->bhr":
         bf16_bmm(
@@ -535,6 +555,7 @@ def einsum(expr, a, b, d, c=None, use_cublaslt=False) -> None:
             d.permute(1, 0, 2),
             c.permute(1, 0, 2) if c is not None else None,
             "nk",
+            epilogue=epilogue,
         )
     elif expr == "bhd,bhr->hdr":
         bf16_bmm(
@@ -543,12 +564,18 @@ def einsum(expr, a, b, d, c=None, use_cublaslt=False) -> None:
             d,
             c,
             "mn",
+            epilogue=epilogue,
         )
     else:
         raise ValueError(f"unsupported einsum expression: {expr!r}")
 
 
-def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 1, 32)) -> None:
+def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 1, 32), epilogue=None) -> None:
+    if isinstance(d, (tuple, list)):
+        if len(d) != 2 or epilogue is not None:
+            raise ValueError("The FP8 output pair and epilogue are mutually exclusive")
+        d, sfd = d
+        epilogue = epilogue_ops.FP8Quantization(sfd)
     a_data, sfa = _fp8_operand(a, "a")
     b_data, sfb = _fp8_operand(b, "b")
 
@@ -563,6 +590,7 @@ def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 1, 32)) -> None:
             c.permute(1, 0, 2) if c is not None else None,
             recipe,
             "nk",
+            epilogue=epilogue,
         )
     elif expr == "bhd,hdr->bhr":
         fp8_bmm(
@@ -572,6 +600,7 @@ def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 1, 32)) -> None:
             c.permute(1, 0, 2) if c is not None else None,
             recipe,
             "nk",
+            epilogue=epilogue,
         )
     elif expr == "bhd,bhr->hdr":
         fp8_bmm(
@@ -581,6 +610,7 @@ def fp8_einsum(expr, a, b, d, c=None, recipe=(1, 1, 32)) -> None:
             c,
             recipe,
             "mn",
+            epilogue=epilogue,
         )
     else:
         raise ValueError(f"unsupported FP8 einsum expression: {expr!r}")
@@ -598,12 +628,14 @@ def _make_m_grouped_bf16_gemm_contiguous(layout: BindingLayout):
         use_psum_layout=True,
         ensure_zero_padding=True,
         expected_m_for_psum_layout=None,
+        epilogue=None,
     ) -> None:
         del ensure_zero_padding  # Input padding is supplied by the caller.
         if not use_psum_layout:
             raise ValueError("M-grouped BF16 GEMM requires use_psum_layout=True")
         if a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
             raise TypeError("a and b must be bfloat16")
+        d, resolved = epilogue_ops.resolve(d, epilogue=epilogue)
         logical_b = b.transpose(1, 2) if trans_b else b
         desc = _get_gemm_desc(
             GemmType.MGroupedContiguousWithPsumLayout,
@@ -612,13 +644,12 @@ def _make_m_grouped_bf16_gemm_contiguous(layout: BindingLayout):
             d,
             grouped_layout=grouped_layout,
             expected_m=expected_m_for_psum_layout,
+            epilogue=resolved,
+            compiled_dims=compiled_dims,
         )
         if desc is None:
             return
-        config = select_gemm_config(desc)
-        m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-        kernel = build_bf16_m_grouped_gemm(m_static, n_static, k_static, desc.major_b, desc.cd_dtype, config)
-        kernel(a, _physical(logical_b, desc.major_b), d, grouped_layout)
+        _launch_gemm(desc, a, logical_b, d, resolved, grouped_layout=grouped_layout)
 
     m_grouped_bf16_gemm_contiguous.__name__ = m_grouped_bf16_gemm_contiguous.__qualname__ = f"m_grouped_bf16_gemm_{layout.value}_contiguous"
     return m_grouped_bf16_gemm_contiguous
@@ -644,14 +675,15 @@ def _make_m_grouped_fp8_gemm_contiguous(layout: BindingLayout):
         use_psum_layout=True,
         ensure_zero_padding=True,
         expected_m_for_psum_layout=None,
+        epilogue=None,
     ) -> None:
         del ensure_zero_padding  # Input padding is supplied by the caller.
         if not use_psum_layout:
             raise ValueError("M-grouped FP8 GEMM requires use_psum_layout=True")
         a_data, sfa = _fp8_operand(a, "a")
         b_data, sfb = _fp8_operand(b, "b")
-        if a_data.dtype is not torch.float8_e4m3fn or b_data.dtype is not torch.float8_e4m3fn:
-            raise TypeError("a and b data must be float8_e4m3fn")
+        _check_quantized_pair(a_data, b_data)
+        d, resolved = epilogue_ops.resolve(d, epilogue=epilogue)
         logical_b = b_data.transpose(1, 2) if trans_b else b_data
         logical_sfb = sfb.transpose(1, 2) if trans_b else sfb
         desc = _get_gemm_desc(
@@ -661,39 +693,14 @@ def _make_m_grouped_fp8_gemm_contiguous(layout: BindingLayout):
             d,
             grouped_layout=grouped_layout,
             expected_m=0 if expected_m_for_psum_layout is None else expected_m_for_psum_layout,
+            epilogue=resolved,
+            compiled_dims=compiled_dims,
         )
         if desc is None:
             return
         recipe = _get_recipe(recipe, recipe_a, recipe_b)
-        transformed_sfa = _transform_sf_into_required_layout(
-            sfa,
-            desc.m,
-            desc.k,
-            recipe,
-            is_sfa=True,
-            disable_ue8m0_cast=disable_ue8m0_cast,
-            grouped_layout=grouped_layout,
-        )
-        transformed_sfb = _transform_sf_into_required_layout(
-            logical_sfb,
-            desc.n,
-            desc.k,
-            recipe,
-            is_sfa=False,
-            num_groups=desc.num_groups,
-            disable_ue8m0_cast=disable_ue8m0_cast,
-        )
-        config = select_gemm_config(desc)
-        m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-        kernel = build_fp8_m_grouped_gemm(m_static, n_static, k_static, desc.major_b, desc.cd_dtype, config)
-        kernel(
-            a_data,
-            _physical(logical_b, desc.major_b),
-            _physical_scale(transformed_sfa),
-            _physical_scale(transformed_sfb),
-            d,
-            grouped_layout,
-        )
+        scales = _prepare_scales(desc, sfa, logical_sfb, recipe, grouped_layout=grouped_layout, disable_ue8m0_cast=disable_ue8m0_cast)
+        _launch_gemm(desc, a_data, logical_b, d, resolved, scales=scales, grouped_layout=grouped_layout)
 
     m_grouped_fp8_gemm_contiguous.__name__ = m_grouped_fp8_gemm_contiguous.__qualname__ = f"m_grouped_fp8_gemm_{layout.value}_contiguous"
     return m_grouped_fp8_gemm_contiguous
@@ -703,11 +710,14 @@ m_grouped_fp8_gemm_nt_contiguous = _make_m_grouped_fp8_gemm_contiguous(BindingLa
 m_grouped_fp8_gemm_nn_contiguous = _make_m_grouped_fp8_gemm_contiguous(BindingLayout.NN)
 
 
-def k_grouped_bf16_gemm_tn_contiguous(a, b, d, ks_cpu, grouped_layout, c=None, compiled_dims="mn", use_psum_layout=True) -> None:
+def k_grouped_bf16_gemm_tn_contiguous(
+    a, b, d, ks_cpu, grouped_layout, c=None, compiled_dims="mn", use_psum_layout=True, epilogue=None
+) -> None:
     if not use_psum_layout:
         raise ValueError("K-grouped BF16 GEMM requires use_psum_layout=True")
     if a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
         raise TypeError("a and b must be bfloat16")
+    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue)
     desc = _get_gemm_desc(
         GemmType.KGroupedContiguousWithPsumLayout,
         a.transpose(0, 1),
@@ -716,13 +726,12 @@ def k_grouped_bf16_gemm_tn_contiguous(a, b, d, ks_cpu, grouped_layout, c=None, c
         c,
         grouped_layout=grouped_layout,
         ks_cpu=ks_cpu,
+        epilogue=resolved,
+        compiled_dims=compiled_dims,
     )
     if desc is None:
         return
-    config = select_gemm_config(desc)
-    m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-    kernel = build_bf16_k_grouped_gemm(m_static, n_static, k_static, desc.cd_dtype, config)
-    kernel(a, b, d, grouped_layout)
+    _launch_gemm(desc, a.transpose(0, 1), b.transpose(0, 1), d, resolved, grouped_layout=grouped_layout)
 
 
 def k_grouped_fp8_gemm_tn_contiguous(
@@ -735,13 +744,14 @@ def k_grouped_fp8_gemm_tn_contiguous(
     recipe=(1, 1, 32),
     compiled_dims="mn",
     use_psum_layout=True,
+    epilogue=None,
 ) -> None:
     if not use_psum_layout:
         raise ValueError("K-grouped FP8 GEMM requires use_psum_layout=True")
     a_data, sfa = _fp8_operand(a, "a")
     b_data, sfb = _fp8_operand(b, "b")
-    if a_data.dtype is not torch.float8_e4m3fn or b_data.dtype is not torch.float8_e4m3fn:
-        raise TypeError("a and b data must be float8_e4m3fn")
+    _check_quantized_pair(a_data, b_data)
+    d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue)
     desc = _get_gemm_desc(
         GemmType.KGroupedContiguousWithPsumLayout,
         a_data.transpose(0, 1),
@@ -750,32 +760,14 @@ def k_grouped_fp8_gemm_tn_contiguous(
         c,
         grouped_layout=grouped_layout,
         ks_cpu=ks_cpu,
+        epilogue=resolved,
+        compiled_dims=compiled_dims,
     )
     if desc is None:
         return
     recipe = _get_recipe(recipe, None, None)
-    transformed_sfa = _transform_sf_into_required_layout(
-        sfa.transpose(0, 1),
-        desc.m,
-        desc.k,
-        recipe,
-        is_sfa=True,
-        grouped_layout=grouped_layout,
-        k_grouped=True,
-    )
-    transformed_sfb = _transform_sf_into_required_layout(
-        sfb.transpose(0, 1),
-        desc.n,
-        desc.k,
-        recipe,
-        is_sfa=False,
-        grouped_layout=grouped_layout,
-        k_grouped=True,
-    )
-    config = select_gemm_config(desc)
-    m_static, n_static, k_static = _compiled_shape(desc.m, desc.n, desc.k, compiled_dims)
-    kernel = build_fp8_k_grouped_gemm(m_static, n_static, k_static, desc.cd_dtype, config)
-    kernel(a_data, b_data, _physical_scale(transformed_sfa), _physical_scale(transformed_sfb), d, grouped_layout)
+    scales = _prepare_scales(desc, sfa.transpose(0, 1), sfb.transpose(0, 1), recipe, grouped_layout=grouped_layout)
+    _launch_gemm(desc, a_data.transpose(0, 1), b_data.transpose(0, 1), d, resolved, scales=scales, grouped_layout=grouped_layout)
 
 
 def k_grouped_fp8_gemm_nt_contiguous(
@@ -788,6 +780,7 @@ def k_grouped_fp8_gemm_nt_contiguous(
     recipe=(1, 1, 32),
     compiled_dims="mn",
     use_psum_layout=True,
+    epilogue=None,
 ) -> None:
     warnings.warn(
         "Calling k_grouped_fp8_gemm_nt_contiguous is deprecated; transpose a and b "
@@ -807,11 +800,27 @@ def k_grouped_fp8_gemm_nt_contiguous(
         recipe,
         compiled_dims,
         use_psum_layout,
+        epilogue,
     )
 
 
+fp8_fp4_gemm_nt = fp8_gemm_nt
+fp8_fp4_gemm_nn = fp8_gemm_nn
+fp8_fp4_gemm_tn = fp8_gemm_tn
+fp8_fp4_gemm_tt = fp8_gemm_tt
+m_grouped_fp8_fp4_gemm_nt_contiguous = m_grouped_fp8_gemm_nt_contiguous
+m_grouped_fp8_fp4_gemm_nn_contiguous = m_grouped_fp8_gemm_nn_contiguous
+epilogue = epilogue_ops
+
+
 __all__ = [
-    "LOOP_ORDER",
+    "epilogue",
+    "fp8_fp4_gemm_nt",
+    "fp8_fp4_gemm_nn",
+    "fp8_fp4_gemm_tn",
+    "fp8_fp4_gemm_tt",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nn_contiguous",
     "bf16_bmm",
     "bf16_gemm_nn",
     "bf16_gemm_nt",

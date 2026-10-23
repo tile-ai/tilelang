@@ -45,7 +45,7 @@ bool ValueIsReplicaSafe(const PrimExpr &value) {
 }
 
 /*! \brief One projection step of the induced-layout construction: identical
- *  to backend::reduce::ComputeReducerLayout minus the scale-ordered
+ *  to ComputeReducerLayout minus the scale-ordered
  *  CondenseReplicateVar (which would destroy the low-bits combine/copy
  *  boundary) and the thread-range bind (done once after the final,
  *  boundary-preserving condensation). The projected dim's lanes take the
