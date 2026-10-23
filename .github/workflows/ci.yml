@@ -447,7 +447,7 @@ jobs:
     needs: [lint]
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
     timeout-minutes: 120
     env:
       PIP_USER: "0"
