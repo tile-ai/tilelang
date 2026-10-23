@@ -113,13 +113,11 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 // Return true only when every point in `inner` is provably contained in
 // `outer`. This is stricter than overlap and is suitable for checking whether
 // one task's declared write footprint fully defines another task's read.
-inline bool RegionCovers(const Region &outer, const Region &inner,
-                         arith::Analyzer *context = nullptr) {
+inline bool RegionCovers(const Region &outer, const Region &inner) {
   if (outer.size() != inner.size())
     return false;
 
-  arith::Analyzer local_analyzer;
-  arith::Analyzer &analyzer = context ? *context : local_analyzer;
+  arith::Analyzer analyzer;
   for (size_t i = 0; i < outer.size(); ++i) {
     PrimExpr outer_end = outer[i]->min + outer[i]->extent;
     PrimExpr inner_end = inner[i]->min + inner[i]->extent;

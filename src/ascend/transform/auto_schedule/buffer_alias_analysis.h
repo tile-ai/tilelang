@@ -65,9 +65,8 @@ class BufferAliasAnalysisContext {
 public:
   virtual ~BufferAliasAnalysisContext() = default;
 
-  // Dynamic generations cannot be partitioned using lexical offsets. Their
-  // validated initialization permits a conservative whole-allocation lifetime
-  // at kernel scope; reuse still requires the ordinary completion proof.
+  // Dynamic generations use a whole-allocation lifetime at kernel scope;
+  // reuse still requires must-write coverage and completion proofs.
   virtual bool RequiresWholeAllocationLifetime(const tirx::Var &storage) const {
     return false;
   }
@@ -192,19 +191,17 @@ using LifetimeSummaryMap =
     std::unordered_map<Var, LifetimeSummary, ObjectPtrHash, ObjectPtrEqual>;
 
 inline std::optional<BufferRegion>
-TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs,
-                     arith::Analyzer *context = nullptr) {
+TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
   if (!lhs->buffer.same_as(rhs->buffer) ||
       lhs->region.size() != rhs->region.size()) {
     return std::nullopt;
   }
-  if (RegionCovers(lhs->region, rhs->region, context))
+  if (RegionCovers(lhs->region, rhs->region))
     return lhs;
-  if (RegionCovers(rhs->region, lhs->region, context))
+  if (RegionCovers(rhs->region, lhs->region))
     return rhs;
 
-  arith::Analyzer local_analyzer;
-  arith::Analyzer &analyzer = context ? *context : local_analyzer;
+  arith::Analyzer analyzer;
   std::optional<size_t> differing_axis;
   for (size_t i = 0; i < lhs->region.size(); ++i) {
     const Range &lhs_range = lhs->region[i];
@@ -250,8 +247,7 @@ TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs,
 }
 
 inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
-                              const BufferRegion &read,
-                              arith::Analyzer *context = nullptr) {
+                              const BufferRegion &read) {
   // Regions describe different access points. A store can change an index
   // buffer between them, so identical BufferLoads are not an equality proof.
   // Snapshot each write independently before merging: otherwise two changing
@@ -279,7 +275,7 @@ inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
     for (size_t i = 0; i < merged.size() && !changed; ++i) {
       for (size_t j = i + 1; j < merged.size(); ++j) {
         std::optional<BufferRegion> combined =
-            TryMergeDenseRegions(merged[i], merged[j], context);
+            TryMergeDenseRegions(merged[i], merged[j]);
         if (!combined.has_value())
           continue;
         merged[i] = std::move(combined.value());
@@ -290,7 +286,7 @@ inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
     }
   }
   return std::any_of(merged.begin(), merged.end(), [&](const auto &write) {
-    return RegionCovers(write->region, read_snapshot->region, context);
+    return RegionCovers(write->region, read_snapshot->region);
   });
 }
 
