@@ -45,7 +45,6 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
-#include "./auto_schedule/write_first_analysis.h"
 #include "ascend/transform/attr.h"
 #include "ascend/transform/buffer_version.h"
 #include "tir/transforms/ir_utils.h"
@@ -1165,10 +1164,15 @@ LoopEpochPlans AnalyzeStorageEpochs(
   return result;
 }
 
-// Eligibility is a storage-level contract, just as in
-// AnnotateMultiBufferEligible. Check clock placement and initial availability
-// under the same write-first assumptions, not element coverage. Allocation
-// reuse must establish its own, stronger physical must-write proof.
+// An explicit write_counter annotation promises that reads see an initialized
+// generation and that an update does not start by reading the previous value.
+// Trust this storage-level contract, like an explicit multi_buffer_eligible
+// claim: do not re-prove data initialization, first-write dominance or region
+// coverage here. Such proofs reject valid multi-Task/loop/sparse updates.
+// Automatic owner inference is still a heuristic; users can select the owner
+// explicitly when it fails. Violating the contract can read stale/uninitialized
+// data without a diagnostic. Allocation reuse keeps its own must-write proof.
+// Only structural requirements of counter lowering are checked below.
 class WriteCounterValidator {
 public:
   WriteCounterValidator(const MultiBufferInfo &info, const LayoutMap &layouts)
@@ -1233,23 +1237,12 @@ public:
           << "write_counter requires a uniform writing/reading Task for "
           << info_.storage->name_hint;
     }
-    for (const auto &owner : info_.owners)
-      ICHECK(IRWriteFirstClassifier::Classify(
-                 owner.loop->children, info_.storage,
-                 owner.loop->GetLoopBodyContext(),
-                 /*writes_only=*/true) != AccessOrder::kReadFirst)
-          << "write_counter cannot start an update with a read-modify-write of "
-          << info_.storage->name_hint
-          << "; write the new value before updating it, or use an ordinary "
-             "mode";
-    CheckList(root, Bool(false), {}, Bool(true));
+    CheckStructure(root);
   }
 
 private:
-  PrimExpr CheckList(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-                     PrimExpr initialized, Map<Var, PrimExpr> first_values,
-                     PrimExpr path_guard, bool *proof = nullptr,
-                     const ConstrSet &history = {}) const {
+  void
+  CheckStructure(const std::vector<std::shared_ptr<IRStructure>> &nodes) const {
     int stage = -1;
     for (const auto &node : nodes) {
       if (!node->TouchesStorage(info_.storage))
@@ -1260,230 +1253,19 @@ private:
           << "write_counter accesses must have equal T.Stage values in each "
              "containing loop: "
           << info_.storage->name_hint;
-      arith::Analyzer analyzer;
-      if (node->IsTask()) {
-        ConstrSet context = static_cast<TaskNode *>(node.get())
-                                ->GetContextBeforeConditionGuards()
-                                .Substitute(first_values);
-        if (!history.constrs_.empty())
-          context = context.Merge(history);
-        context.Populate(analyzer);
-      }
-      // Carry predicates in the program's SSA vocabulary. Simplified
-      // expressions may contain fresh variables private to this analyzer.
-      arith::Analyzer structural;
-      auto specialize = [&](const PrimExpr &expr) {
-        return structural.Simplify(Substitute(expr, first_values));
-      };
-      PrimExpr guard = specialize(path_guard && node->GetConditionGuard());
-      ICHECK(!node->GuardsTouchStorage(info_.storage))
+      if (node->IsTask())
+        continue;
+      auto *loop = static_cast<ControlNode *>(node.get());
+      ICHECK(!loop->GuardsTouchStorage(info_.storage))
           << "write_counter control guards must snapshot reads of "
           << info_.storage->name_hint << " in a separate Task";
-      if (node->IsTask()) {
-        auto *task = static_cast<TaskNode *>(node.get());
-        bool reads_first =
-            WriteFirstClassifier(/*physical_reads=*/true)
-                .Classify(task->stmt, info_.storage) == AccessOrder::kReadFirst;
-        if (reads_first) {
-          bool dominated = analyzer.CanProve(!guard || initialized);
-          if (proof) {
-            *proof &= dominated;
-          } else {
-            ICHECK(dominated)
-                << "write_counter cannot prove initialization before a read of "
-                << info_.storage->name_hint
-                << "; ensure the first executed read is dominated by a "
-                   "write (including on the first loop iteration)"
-                << "; read guard: " << guard
-                << "; reaching initialization: " << initialized;
-          }
-        }
-        if (node->WritesStorage(info_.storage)) {
-          initialized = specialize(initialized || guard);
-          if (analyzer.CanProve(initialized))
-            initialized = Bool(true);
-        }
-        continue;
-      }
-      auto *loop = static_cast<ControlNode *>(node.get());
       const MultiBufferOwnerInfo *owner = info_.FindOwner(loop);
       ICHECK(!owner || owner->loop != loop || !loop->BodyHasLoopBreak())
           << "write_counter does not yet support loop_break in its owner "
              "loop: "
           << info_.storage->name_hint;
-      if (analyzer.CanProve(specialize(!guard || loop->control->extent <= 0)))
-        continue;
-      Map<Var, PrimExpr> entry_values = first_values;
-      entry_values.Set(loop->control->loop_var, specialize(loop->control->min));
-      // The loop context also records conditionally executed Bind tasks as
-      // guarded equalities. A leaf's lexical context only has flat bindings.
-      ConstrSet loop_context =
-          loop->GetLoopBodyContext().Substitute(first_values).Merge(history);
-      PrimExpr entry_initialized =
-          CheckList(loop->children, initialized, entry_values, guard, proof,
-                    loop_context.Substitute(entry_values));
-      bool entry_defined = analyzer.CanProve(!guard || entry_initialized);
-      if (!entry_defined) {
-        bool valid = true;
-        CheckList(loop->children, initialized, first_values, guard, &valid,
-                  loop_context);
-        if (!valid &&
-            !ProveLoopCarriedInitialization(loop, initialized, first_values,
-                                            guard, loop_context)) {
-          // Replay the failed query to retain the read's diagnostic. Merely
-          // checking the first trip would miss a later uninitialized read.
-          CheckList(loop->children, initialized, first_values, guard, proof,
-                    loop_context);
-        }
-      }
-      // Summarize a completed For with the same execution assumptions used by
-      // eligibility and by a For inside an atomic Task. A conditional write
-      // need not occur on the first trip. Body reads have already been checked
-      // above; this summary only supplies the value available after the loop.
-      AccessOrder body_order = IRWriteFirstClassifier::Classify(
-          loop->children, info_.storage, loop->GetLoopBodyContext());
-      if (!loop->BodyHasLoopBreak() &&
-          AssumeForExecutes(body_order) == AccessOrder::kWriteFirst) {
-        initialized = specialize(initialized || guard);
-      } else if (!loop->BodyHasLoopBreak() && entry_defined)
-        initialized =
-            specialize(initialized || (guard && loop->control->extent > 0));
-      else if (!loop->BodyHasLoopBreak()) {
-        // A first-trip definition under a loop-invariant predicate remains
-        // available on that path, even when other paths never write.
-        VarSet varying = CollectIterationVariantVars(loop, false);
-        if (!UsesVar(entry_initialized, [&](const VarNode *var) {
-              return varying.count(ffi::GetRef<Var>(var));
-            }))
-          initialized =
-              specialize(initialized || (guard && loop->control->extent > 0 &&
-                                         entry_initialized));
-      }
+      CheckStructure(loop->children);
     }
-    return initialized;
-  }
-
-  bool ProveLoopCarriedInitialization(ControlNode *loop,
-                                      const PrimExpr &initialized,
-                                      const Map<Var, PrimExpr> &first_values,
-                                      const PrimExpr &guard,
-                                      const ConstrSet &outer_history) const {
-    if (loop->BodyHasLoopBreak())
-      return false;
-    PrimExpr step = loop->control->step.value_or(
-        make_const(loop->control->loop_var.dtype(), 1));
-    step = Substitute(step, first_values);
-    ConstrSet context = loop->GetLoopBodyContext().Substitute(first_values);
-    arith::Analyzer analyzer;
-    context.Merge(outer_history).Populate(analyzer);
-    if (!analyzer.CanProve(step > 0))
-      return false;
-
-    // Strong induction: any read in a strictly earlier iteration has already
-    // been validated, so an executed read OR write there establishes a value.
-    // These are witnesses, not an assumed iteration-to-generation mapping.
-    PrimExpr accessed = Bool(false);
-    for (const auto &child : loop->children)
-      if (child->IsTask() && child->TouchesStorage(info_.storage))
-        accessed = accessed || child->GetConditionGuard();
-    accessed = Substitute(accessed, first_values);
-    if (is_zero(accessed))
-      return false;
-
-    VarSet varying = CollectIterationVariantVars(loop, false);
-    // Conditional Bind facts contain fresh variables for mutable reads.
-    // They are local to this body execution too, although they have no Bind
-    // in the source IR. Keep only program/entry-context variables shared.
-    VarSet program_vars = varying;
-    for (const Var &var : loop->GetReadVars())
-      program_vars.insert(var);
-    for (const Constr &constraint : loop->task->outer_ctx.constrs_) {
-      for (const Var &var : ConstrSet::ReadVars(constraint))
-        program_vars.insert(var);
-      if (constraint.kind != Constr::kConstr)
-        program_vars.insert(constraint.var);
-    }
-    for (const Constr &constraint : context.constrs_)
-      for (const Var &var : ConstrSet::ReadVars(constraint))
-        if (!program_vars.count(var))
-          varying.insert(var);
-    Var iv = loop->control->loop_var;
-    PrimExpr start = Substitute(loop->control->min, first_values);
-    std::vector<PrimExpr> witnesses{start, iv - step};
-    auto add_witness = [&](const PrimExpr &candidate) {
-      for (const PrimExpr &witness : witnesses)
-        if (GuardExprEqual(witness, candidate))
-          return;
-      witnesses.push_back(candidate);
-    };
-    auto collect_witnesses = [&](const ObjectRef &node) {
-      // A predicate boundary can identify the first active iteration even
-      // when subsequent reads are separated by an arbitrarily long gap.
-      auto boundary = [&](const PrimExpr &a, const PrimExpr &b) {
-        if (a.same_as(iv)) {
-          add_witness(b);
-          add_witness(b + step);
-          add_witness(b - step);
-        }
-      };
-      if (const auto *op = node.as<EQNode>()) {
-        boundary(op->a, op->b);
-        boundary(op->b, op->a);
-      } else if (const auto *op = node.as<LENode>()) {
-        boundary(op->a, op->b);
-        boundary(op->b, op->a);
-      } else if (const auto *op = node.as<LTNode>()) {
-        boundary(op->a, op->b);
-        boundary(op->b, op->a);
-      } else if (const auto *op = node.as<GENode>()) {
-        boundary(op->a, op->b);
-        boundary(op->b, op->a);
-      } else if (const auto *op = node.as<GTNode>()) {
-        boundary(op->a, op->b);
-        boundary(op->b, op->a);
-      }
-      PrimExpr period;
-      if (const auto *mod = node.as<FloorModNode>())
-        period = mod->b;
-      else if (const auto *div = node.as<FloorDivNode>())
-        period = div->b;
-      if (!period.defined() ||
-          UsesVar(period,
-                  [&](const VarNode *var) {
-                    return varying.count(ffi::GetRef<Var>(var));
-                  }) ||
-          !analyzer.CanProve(period > 0))
-        return;
-      add_witness(iv - step * period);
-    };
-    // Candidate selection is only a proof heuristic. Every witness must be
-    // reachable and strictly earlier; all reads, including the first, are
-    // checked under the same induction hypothesis.
-    PostOrderVisit(accessed, collect_witnesses);
-    for (const Constr &constraint : context.constrs_)
-      PostOrderVisit(constraint.ToGenericConstr(), collect_witnesses);
-
-    ConstrSet history = outer_history;
-    PrimExpr available = initialized;
-    for (size_t index = 0; index < witnesses.size(); ++index) {
-      PrimExpr previous = witnesses[index];
-      PrimExpr valid = start <= previous && previous < iv &&
-                       indexmod(previous - start, step) == 0;
-      Map<Var, PrimExpr> rename;
-      for (const Var &var : varying)
-        rename.Set(var,
-                   var.copy_with_suffix("_history_" + std::to_string(index)));
-      rename.Set(iv, previous);
-      // A previous iteration may not exist. Its range and local definitions
-      // must not constrain the first trip, or make that proof vacuous.
-      ConstrSet previous_context = context.Substitute(rename).ToConstraints();
-      for (const Constr &constraint : previous_context.constrs_)
-        history.AddConstr(!valid || constraint.value);
-      available = available || (guard && valid && Substitute(accessed, rename));
-    }
-    bool valid = true;
-    CheckList(loop->children, available, first_values, guard, &valid, history);
-    return valid;
   }
 
   const MultiBufferInfo &info_;

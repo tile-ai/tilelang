@@ -1152,7 +1152,7 @@ def test_write_counter_retains_values_across_guarded_iterations():
 
 
 def _make_write_counter_nested_update_program(case, explicit_owner):
-    write_at = {"mutually-exclusive": 0, "first-trip": 0, "middle-trip": 1, "last-trip": 2}[case]
+    write_at = {"middle-trip": 1, "last-trip": 2, "late-read": 1}.get(case, 0)
 
     @T.prim_func
     def main(A: T.Tensor((3, 64), "float32"), C: T.Tensor((3, 64), "float32")):
@@ -1167,6 +1167,25 @@ def _make_write_counter_nested_update_program(case, explicit_owner):
                         if i % 2 == 0:
                             for _j in T.serial(2):
                                 T.copy(A[i, :], cached)
+                    elif case == "conditional-prefix":
+                        if i % 2 == 0:
+                            T.copy(A[i, :], cached)
+                        for _j in T.serial(2):
+                            if i % 2 == 0:
+                                with T.SimtVF(threads=64):
+                                    for k in T.Parallel(64):
+                                        cached[k] = cached[k] + 1.0
+                    elif case == "late-read" or case == "late-rmw":
+                        for j in T.serial(3):
+                            if j == write_at:
+                                T.copy(A[i, :], cached)
+                            if j == 2:
+                                if case == "late-read":
+                                    T.copy(cached, C[i, :])
+                                else:
+                                    with T.SimtVF(threads=64):
+                                        for k in T.Parallel(64):
+                                            cached[k] = cached[k] + 1.0
                     else:
                         for j in T.serial(3):
                             if j == write_at:
@@ -1180,23 +1199,37 @@ def _make_write_counter_nested_update_program(case, explicit_owner):
 
 
 @pytest.mark.parametrize("explicit_owner", [False, True])
-@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip"])
-def test_write_counter_frontend_nested_write_first(case, explicit_owner):
+@pytest.mark.parametrize(
+    "case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip", "conditional-prefix", "late-read", "late-rmw"]
+)
+def test_write_counter_frontend_nested_update_contract(case, explicit_owner, capfd):
     # NormalizeControlFlowForSchedule creates local Bind snapshots for these
     # predicates. Raw guard-only IR tests do not cover that representation.
-    after = schedule(_make_write_counter_nested_update_program(case, explicit_owner), through="MaterializeMultiBuffer", auto_schedule=False)
+    program = _make_write_counter_nested_update_program(case, explicit_owner)
+    if not explicit_owner and case in ("conditional-prefix", "late-rmw"):
+        # Keep the legacy loop-summary heuristic. An explicit owner is needed
+        # for these legal updates spanning conditional/nested writes and RMWs.
+        with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
+            schedule(program, through="AnnotateMultiBufferEligible", auto_schedule=False)
+        return
+    after = schedule(program, through="MaterializeMultiBuffer", auto_schedule=False)
     assert tuple(allocated_buffer(after, "cached").shape) == (2, 64)
     assert calls(after, "tl.ascend_wait_flag")
+    if case in ("late-read", "late-rmw"):
+        # The local ring check is conservative and must not block compilation.
+        assert "synchronization ring is malformed" in capfd.readouterr().err
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip"])
+@pytest.mark.parametrize("case", ["mutually-exclusive", "first-trip", "middle-trip", "last-trip", "conditional-prefix"])
 def test_write_counter_nested_update_values(case):
     import torch
 
-    compiled = tilelang.compile(_make_write_counter_nested_update_program(case, False), target="ascend")
+    compiled = tilelang.compile(_make_write_counter_nested_update_program(case, case == "conditional-prefix"), target="ascend")
     source = torch.arange(3 * 64, dtype=torch.float32).reshape(3, 64)
     expected = source if case == "mutually-exclusive" else source + 1
+    if case == "conditional-prefix":
+        expected = source[[0, 0, 2]] + 2
     a, c = source.npu(), torch.empty_like(source).npu()
     for _ in range(2):
         c.fill_(-1)

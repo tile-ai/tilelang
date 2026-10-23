@@ -96,37 +96,12 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     epoch. ``"auto"`` keeps the affine fast path when safe and selects a
     counter for conditionally executed or non-affine epochs.
 
-    ``"write_counter"`` is opt-in and requires an explicit version count.
-    Each owner-loop iteration creates at most one new value: the first executed
-    writing Task advances the counter, and all subsequent writes in that
-    iteration use the same version. An iteration with no writing Task retains
-    the preceding value. Owners are inferred as the deepest disjoint loops
-    covering all accesses, including fills and retained-value reads. Multiple
-    owners share the same counter without resetting it between loops. Explicit
-    ``multi_buffer_eligible`` annotations override inference for the storage;
-    use them to select a larger scope for a multi-loop update.
-
-    Like automatic multi-buffer eligibility, this is a storage-level contract:
-    the user guarantees that the update defines the data subsequently read.
-    Partial, overlapping, sparse and multi-Task writes are allowed without a
-    region-coverage proof. Write-first classification also retains eligibility's
-    aggressive For-loop assumptions: a For executes at least once, and a
-    conditional write in its body takes a writing path in some iteration.
-    These assumptions apply both inside a Task and across scheduled Tasks;
-    they are not a proof that a write actually executes. If a zero-trip loop,
-    skipped writing branches or an early exit leaves an RMW as the first write
-    of an update, the program violates the contract and is not guaranteed to
-    be diagnosed. Restructure the update or opt out with bare ``versions=1``.
-    Control flow inside one atomic Task is part of that Task's
-    update. Allocation reuse independently requires physical must-write
-    evidence and remains conservative.
-
-    All accesses must have the same stage in each enclosing loop. An update
-    cannot start by reading the previous version (use an ordinary mode or bare
-    ``versions=1`` for that). Opaque pointers, changing buffer-view geometry,
-    nonuniform core placement, owner-external initialization and owner breaks
-    are diagnosed. Ordinary dependencies still order writes and reads within
-    an update, including between different pipes.
+    ``"write_counter"`` requires an explicit version count and advances on the
+    first executed writing Task in each owner-loop iteration; later writes use
+    the same version, and iterations without writes retain the preceding value.
+    Users guarantee initialized reads and that each update writes the new value
+    before reading it; use ``multi_buffer_eligible`` to override inferred owners
+    when needed.
 
     A fixed count is useful when you want to guarantee double-buffering for a
     critical buffer regardless of the Z3 solver's choice.
