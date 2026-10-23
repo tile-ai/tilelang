@@ -38,9 +38,9 @@ def fma(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
 
 
 def clamp_symmetric(x: PrimExpr, limit: PrimExpr) -> PrimExpr:
-    """Symmetric clipping using CUDA ``min.xorsign.abs`` (SM86+).
+    """Symmetric clipping using CUDA ``min.NaN.xorsign.abs`` (SM86+).
 
-    Requires ``limit > 0`` and neither operand may be NaN. This returns
+    For non-NaN operands, requires ``limit > 0`` and returns
     ``copysign(min(abs(x), limit), x)``, preserving the sign of zero.
     Supports float16, bfloat16, and float32 with matching operand dtypes.
     Python numeric limits are converted to the input's element dtype;
@@ -50,7 +50,9 @@ def clamp_symmetric(x: PrimExpr, limit: PrimExpr) -> PrimExpr:
     float16/bfloat16 vectors use packed x2 instructions, one per pair.
     Float32 vectors use one instruction per lane.
 
-    NaN operands and nonpositive limits are outside this API's contract.
+    If either operand is NaN, the result is a canonical NaN; its original
+    sign and payload are not preserved. Nonpositive numeric limits are
+    outside this API's contract.
     Subnormals are preserved. Each operand is evaluated once.
     """
     x = tirx.convert(x)

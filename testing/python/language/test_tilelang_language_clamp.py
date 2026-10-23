@@ -143,15 +143,27 @@ def test_clamp_symmetric(threads, dtype):
     kernel = tilelang.compile(main)
     torch_dtype = getattr(torch, dtype)
     subnormal = torch.finfo(torch_dtype).tiny / 2
-    values = [0.0, -0.0, 0.5, -0.5, 4.0, -4.0, float("inf"), -float("inf"), subnormal, -subnormal]
-    a = torch.tensor(values, device="cuda", dtype=torch_dtype).repeat(13)[:128].contiguous()
+    values = [0.0, -0.0, 0.5, -0.5, 4.0, -4.0, float("inf"), -float("inf"), float("nan"), -float("nan"), subnormal, -subnormal]
+    a = torch.tensor(values, device="cuda", dtype=torch_dtype).repeat(11)[:128].contiguous()
+    int_dtype = torch.int32 if dtype == "float32" else torch.int16
+    sign_mask = torch.iinfo(int_dtype).min
+    # Construct negative NaNs by bits: narrowing may canonicalize their sign.
+    a.view(int_dtype)[9::12].bitwise_or_(sign_mask)
     c = torch.empty_like(a)
     for limit in [2.0, subnormal, float("inf")]:
         b = torch.full_like(a, limit)
+        # Input-only, limit-only, and both-NaN lanes, mixed with numeric lanes
+        # in the same packed x2 call. Include both NaN signs in each operand.
+        b[2::12] = float("nan")
+        b[5::12] = float("nan")
+        b.view(int_dtype)[5::12].bitwise_or_(sign_mask)
+        b[8::24] = float("nan")
+        b[9::24] = float("nan")
         kernel(a, b, c)
-        ref = torch.clamp(a.float(), -limit, limit)
-        torch.testing.assert_close(c.float(), ref, atol=0, rtol=0)
-        assert torch.equal(torch.signbit(c), torch.signbit(ref))
+        ref = torch.clamp(a.float(), -b.float(), b.float())
+        torch.testing.assert_close(c.float(), ref, equal_nan=True, atol=0, rtol=0)
+        numeric = ~torch.isnan(ref)
+        assert torch.equal(torch.signbit(c[numeric]), torch.signbit(ref[numeric]))
 
 
 def clamp_nan_kernel(N, block_N, dtype):
