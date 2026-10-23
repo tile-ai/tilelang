@@ -5000,6 +5000,35 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       TryEmitPackedMathCall_(call, os)) {
     return true;
   }
+  if (op->op.same_as(tl::clamp_symmetric())) {
+    ICHECK_EQ(op->args.size(), 2);
+    DataType dtype = op->dtype;
+    ICHECK(dtype.element_of() == DataType::Float(32) || dtype.is_float16() ||
+           dtype.is_bfloat16())
+        << "tl.clamp_symmetric requires float16, bfloat16, or float32 operands";
+    Target target = Target::Current(/*allow_not_defined=*/true);
+    ICHECK(target.defined() && tl::TargetHasSMVersionGE(target, 86))
+        << "tl.clamp_symmetric requires CUDA SM86 or newer";
+    need_math_h_ = true;
+    std::vector<PrimExpr> args(op->args.begin(), op->args.end());
+    for (PrimExpr &arg : args) {
+      ICHECK_EQ(arg.dtype(), dtype);
+      if (!dtype.is_scalar() && SideEffect(arg) > CallEffectKind::kPure) {
+        Var value("clamp_symmetric_arg", dtype);
+        arg = Let(value, arg, value);
+      }
+    }
+    if (dtype.is_scalar()) {
+      os << "tl::clamp_symmetric(" << PrintExpr(args[0]) << ", "
+         << PrintExpr(args[1]) << ")";
+    } else if ((dtype.is_float16() || dtype.is_bfloat16()) &&
+               CanEmitPackedX2Math(dtype)) {
+      EmitPackedX2Call("clamp_symmetric2", dtype, args, os);
+    } else {
+      EmitPerLaneScalarCall("tl::clamp_symmetric", dtype, args, os);
+    }
+    return true;
+  }
   if (op->op.same_as(tl::clamp())) {
     ICHECK_EQ(op->args.size(), 3);
     need_math_h_ = true;
