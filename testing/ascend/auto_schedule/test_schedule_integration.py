@@ -968,6 +968,43 @@ def test_simt_context_limits_placement_after_full_lowering():
         tilelang.lower(_placed_ub_kernel(address=216 * 1024 - 256, simt=True), target="ascend")
 
 
+@pytest.mark.parametrize("owner", [0, 1], ids=["aiv0", "aiv1"])
+def test_ub_placement_keeps_only_active_subcore_storage(owner):
+    @T.prim_func
+    def main(A: T.Tensor((16, 16), "float32"), C: T.Tensor((16, 16), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            cube = T.alloc_l1((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            T.annotate_buffer_versions({ub: 1})
+            T.annotate_buffer_addresses({ub: 64})
+            T.copy(A, cube)
+            if sid == owner:
+                T.copy(A, ub)
+                T.copy(ub, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AssignCore":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    (root,) = [block for block in nodes(snapshots["tl.AssignCore"], tirx.SBlock) if "tl.ascend_buffer_addresses" in block.annotations]
+    (buffer,) = [buffer for buffer in root.alloc_buffers if buffer.scope() == "shared.dyn"]
+    addresses = root.annotations["tl.ascend_buffer_addresses"]
+    assert len(addresses) == 1 and int(addresses[buffer.data]) == 64
+    assert int(root.annotations["tl.buffer_versions_map"][buffer.data]) == 1
+    assert int(root.annotations["tl.aiv_storage_map"][buffer.data]) == owner
+
+    allocations = [node for func in artifact.device_mod.functions.values() for node in nodes(func, tirx.AllocBuffer)]
+    (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.dyn"]
+    assert int(allocation.buffer.shape[0]) == 64 + 16 * 16 * 4
+    assert artifact.kernel_source
+
+
 def _placed_ss_kernel():
     @T.prim_func
     def main(seed: T.Tensor((16, 16), "float16"), out: T.Tensor((4, 2), "uint32")):
