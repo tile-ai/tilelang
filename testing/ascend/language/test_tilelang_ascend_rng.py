@@ -1,4 +1,4 @@
-"""Ascend codegen RNG state isolation across device kernels.
+"""Ascend RNG range and codegen state isolation across device kernels.
 
 One ``CodeGenTileLangAscend`` instance serves every ``PrimFunc`` of the device
 module, so the Philox state variable name emitted for ``tl::philox_rand*`` is
@@ -90,12 +90,47 @@ def test_two_kernels_each_with_rng_init_get_isolated_state():
     kernel(out_a, out_b)
     torch.npu.synchronize()
     a, b = out_a.cpu(), out_b.cpu()
-    assert bool(((a >= 0) & (a < 1)).all())
-    assert bool(((b >= 0) & (b < 1)).all())
+    assert bool(((a > 0) & (a <= 1)).all())
+    assert bool(((b > 0) & (b <= 1)).all())
     assert torch.equal(a, b)
     kernel(out_a, out_b)
     torch.npu.synchronize()
     assert torch.equal(a, out_a.cpu())
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_philox_uniform_endpoints(target):
+    # Inverting Philox4x32-10 gives this aligned stream position whose first
+    # block is [0, 0xffffff7f, 0xffffff80, 0xffffffff]. Check the raw words too
+    # so the endpoint coverage cannot silently disappear if the stream changes.
+    seed = 39
+    seq = 904192493351575326
+    off = 436980385747072128
+
+    @T.prim_func
+    def main(words: T.Tensor((4,), "uint32"), uniform: T.Tensor((4,), "float32")):
+        with T.Kernel(1):
+            words_ub = T.alloc_shared((4,), "uint32")
+            uniform_ub = T.alloc_shared((4,), "float32")
+            with T.SimtVF(threads=1):
+                T.rng_init(seed, seq=T.int64(seq), off=T.int64(off))
+                for i in T.serial(4):
+                    words_ub[i] = T.rng_rand()
+                T.rng_init(seed, seq=T.int64(seq), off=T.int64(off))
+                for i in T.serial(4):
+                    uniform_ub[i] = T.rng_rand_float()
+            T.copy(words_ub, words)
+            T.copy(uniform_ub, uniform)
+
+    kernel = tilelang.compile(main, target=target, out_idx=[0, 1])
+    words, uniform = kernel()
+    torch.npu.synchronize()
+    assert torch.equal(words.cpu(), torch.tensor([0, 0xFFFFFF7F, 0xFFFFFF80, 0xFFFFFFFF], dtype=torch.uint32))
+    # The smallest draw is positive. The last two words round up to one,
+    # while the preceding word yields the largest float32 below one.
+    expected = torch.tensor([2.0**-33, 1.0 - 2.0**-24, 1.0, 1.0], dtype=torch.float32)
+    torch.testing.assert_close(uniform.cpu(), expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
