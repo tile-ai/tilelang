@@ -58,8 +58,9 @@ using BufferMap =
     std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 using BufferShapeMap =
     std::unordered_map<Buffer, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
+// Keyed by data var, so that views of a buffer share its commit group.
 using BufferCommitGroupMap =
-    std::unordered_map<Buffer, int, ObjectPtrHash, ObjectPtrEqual>;
+    std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>;
 using BlockDependencyGraph =
     std::unordered_map<SBlock, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>;
 
@@ -172,7 +173,11 @@ public:
   BufferUsageCollector(const Map<Var, Buffer> &buffer_data_to_buffer,
                        const BufferSet &allocated_buffers)
       : buffer_data_to_buffer_(buffer_data_to_buffer),
-        allocated_buffers_(allocated_buffers) {}
+        allocated_buffers_(allocated_buffers) {
+    for (const Buffer &buffer : allocated_buffers_) {
+      allocated_data_to_buffer_.emplace(buffer->data, buffer);
+    }
+  }
 
   Array<Buffer> Collect(const Stmt &stmt) {
     this->VisitStmt(stmt);
@@ -232,11 +237,19 @@ private:
     // Only add buffers that are allocated (not function input/output buffers)
     if (allocated_buffers_.count(buffer)) {
       used_buffers_.insert(buffer);
+      return;
+    }
+    // A view (T.reshape / T.view) shares the data var of its allocation.
+    auto it = allocated_data_to_buffer_.find(buffer->data);
+    if (it != allocated_data_to_buffer_.end()) {
+      used_buffers_.insert(it->second);
     }
   }
 
   const Map<Var, Buffer> &buffer_data_to_buffer_;
   const BufferSet &allocated_buffers_;
+  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual>
+      allocated_data_to_buffer_;
   BufferSet used_buffers_;
 };
 
@@ -1218,17 +1231,23 @@ public:
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
     // number of versions need to maintain for each buffer.
-    std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<Var, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
         infos = GetBufferAccessInfo();
     for (const Buffer &buffer : pipeline_allocs_) {
-      auto it = infos.find(buffer);
+      auto it = infos.find(buffer->data);
       if (it == infos.end()) {
         // Buffer is not accessed in the pipeline blocks, skip it
         continue;
       }
       int num_versions = ComputeBufferVersions(buffer, it->second);
       if (num_versions > 1) {
-        buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
+        Buffer new_buffer = RewriteAllocBuffer(buffer, num_versions);
+        buffer_remap_.Set(buffer, new_buffer);
+        // Version views of the buffer with it, so that every access to the
+        // storage selects the same version.
+        for (const Buffer &view : CollectBufferViews(buffer)) {
+          buffer_remap_.Set(view, RewriteViewBuffer(view, new_buffer));
+        }
       }
     }
     std::vector<std::pair<int, SBlock>> ordered_blocks;
@@ -1426,11 +1445,12 @@ private:
    *
    * This method check the 'define' and 'use' stage of the buffers in the
    * software pipeline, which can be used to compute the number of versions
-   * needed to maintain after rewriting.
+   * needed to maintain after rewriting. Accesses are keyed by data var, so an
+   * access through a view (T.reshape / T.view) counts for the buffer it views.
    */
-  std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
+  std::unordered_map<Var, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
   GetBufferAccessInfo() {
-    std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<Var, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
         infos;
     for (const auto &pair : pipeline_info_) {
       const SBlock &block = pair.first;
@@ -1438,10 +1458,10 @@ private:
       max_stage_ = std::max(max_stage_, stage);
 
       for (const BufferRegion &write : block->writes) {
-        if (!infos.count(write->buffer)) {
-          infos.emplace(write->buffer, BufferAccessInfo{});
+        if (!infos.count(write->buffer->data)) {
+          infos.emplace(write->buffer->data, BufferAccessInfo{});
         }
-        auto &info = infos.at(write->buffer);
+        auto &info = infos.at(write->buffer->data);
         if (info.def == -1) {
           info.def = stage;
         } else {
@@ -1450,10 +1470,10 @@ private:
       }
 
       for (const BufferRegion &read : block->reads) {
-        if (!infos.count(read->buffer)) {
-          infos.emplace(read->buffer, BufferAccessInfo{});
+        if (!infos.count(read->buffer->data)) {
+          infos.emplace(read->buffer->data, BufferAccessInfo{});
         }
-        auto &info = infos.at(read->buffer);
+        auto &info = infos.at(read->buffer->data);
         info.use = std::max(info.use, stage);
       }
     }
@@ -1492,34 +1512,28 @@ private:
       // needed in this case when these exists a reader block_i and a writer
       // block_j such that order(block_i) < order(block_j) and stage(block_i) <
       // stage(block_j) and the access regions of block_i and block_j overlap.
-      bool need_multi_version = false;
-      for (const auto &pair1 : pipeline_info_) {
-        const SBlock &writer_block = pair1.first;
-        const auto &writer_info = pair1.second;
-
-        auto it1 = std::find_if(writer_block->writes.begin(),
-                                writer_block->writes.end(),
-                                [&](const BufferRegion &buffer_region) {
-                                  return buffer_region->buffer.same_as(buffer);
-                                });
-        if (it1 == writer_block->writes.end()) {
-          continue;
-        }
-
-        for (const auto &pair2 : pipeline_info_) {
-          const SBlock &reader_block = pair2.first;
-          const auto &reader_info = pair2.second;
-          auto it2 = std::find_if(
-              reader_block->reads.begin(), reader_block->reads.end(),
-              [&](const BufferRegion &buffer_region) {
-                return buffer_region->buffer.same_as(buffer);
-              });
-          if (it2 == reader_block->reads.end()) {
+      // Match the regions by data var, since the writer and the reader may
+      // access the buffer through different views.
+      auto may_conflict = [&](const SBlock &writer_block,
+                              const SBlock &reader_block) {
+        for (const BufferRegion &write : writer_block->writes) {
+          if (!write->buffer->data.same_as(buffer->data)) {
             continue;
           }
+          for (const BufferRegion &read : reader_block->reads) {
+            if (PipelineRegionsMayConflict(write, read, thread_domains_)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      bool need_multi_version = false;
+      for (const auto &[writer_block, writer_info] : pipeline_info_) {
+        for (const auto &[reader_block, reader_info] : pipeline_info_) {
           if (writer_info.order < reader_info.order &&
               writer_info.stage < reader_info.stage &&
-              PipelineRegionsMayConflict(*it1, *it2, thread_domains_)) {
+              may_conflict(writer_block, reader_block)) {
             need_multi_version = true;
             break;
           }
@@ -1549,14 +1563,105 @@ private:
     return Buffer(new_buffer);
   }
 
+  /*!
+   * \brief Collect the views of a buffer accessed in the software pipeline.
+   *
+   * T.reshape and T.view return a new Buffer on the data var of their source,
+   * so the pipeline may access a buffer through other Buffer objects.
+   * \param buffer The target buffer.
+   * \return The other Buffer objects on the data var of the target buffer.
+   */
+  Array<Buffer> CollectBufferViews(const Buffer &buffer) const {
+    Array<Buffer> views;
+    BufferSet seen{buffer};
+    auto add_view = [&](const Buffer &candidate) {
+      if (candidate->data.same_as(buffer->data) &&
+          seen.insert(candidate).second) {
+        views.push_back(candidate);
+      }
+    };
+    auto visit = [&](const SBlock &block) {
+      PostOrderVisit(block, [&](const ObjectRef &node) {
+        if (const auto *load = node.as<BufferLoadNode>()) {
+          add_view(load->buffer);
+        } else if (const auto *store = node.as<BufferStoreNode>()) {
+          add_view(store->buffer);
+        } else if (const auto *inner = node.as<SBlockNode>()) {
+          for (const BufferRegion &region : inner->reads) {
+            add_view(region->buffer);
+          }
+          for (const BufferRegion &region : inner->writes) {
+            add_view(region->buffer);
+          }
+        }
+      });
+    };
+    for (const auto &[block, _] : pipeline_info_) {
+      visit(block);
+    }
+    for (const SBlock &block : scalar_binding_blocks_) {
+      visit(block);
+    }
+    // tvm_access_ptr resolves its data var through buffer_data_to_buffer_.
+    if (auto registered = buffer_data_to_buffer_.Get(buffer->data)) {
+      add_view(registered.value());
+    }
+    return views;
+  }
+
+  /*!
+   * \brief Rewrite a view of a multi-versioned buffer to keep the same
+   * versions. The new leading dimension of the view steps over one version of
+   * the multi-versioned buffer.
+   * \param view The view to be resized.
+   * \param new_buffer The multi-versioned buffer that the view aliases.
+   * \return The resized view.
+   */
+  Buffer RewriteViewBuffer(const Buffer &view, const Buffer &new_buffer) {
+    auto element_count = [](const Array<PrimExpr> &shape, size_t begin) {
+      PrimExpr count = make_const(DataType::Int(32), 1);
+      for (size_t i = begin; i < shape.size(); ++i) {
+        count = count * shape[i];
+      }
+      return count;
+    };
+    arith::Analyzer analyzer;
+    PrimExpr version_bits =
+        (new_buffer->strides.empty() ? element_count(new_buffer->shape, 1)
+                                     : new_buffer->strides[0]) *
+        new_buffer->dtype.bits() * new_buffer->dtype.lanes();
+    int view_bits = view->dtype.bits() * view->dtype.lanes();
+    ICHECK(analyzer.CanProve(floormod(version_bits, view_bits) == 0))
+        << "InjectSoftwarePipeline: cannot multi-version view " << view->name
+        << " of buffer " << new_buffer->name
+        << ", whose versions are not a whole number of view elements";
+    PrimExpr version_stride =
+        analyzer.Simplify(floordiv(version_bits, view_bits));
+
+    ObjectPtr<BufferNode> new_view = make_object<BufferNode>(*(view.get()));
+    new_view->shape.insert(new_view->shape.begin(), new_buffer->shape[0]);
+    if (!new_view->strides.empty()) {
+      new_view->strides.insert(new_view->strides.begin(), version_stride);
+    } else {
+      ICHECK(
+          analyzer.CanProveEqual(element_count(view->shape, 0), version_stride))
+          << "InjectSoftwarePipeline: cannot multi-version view " << view->name
+          << " of buffer " << new_buffer->name
+          << ", which does not span the whole buffer";
+    }
+    return Buffer(new_view);
+  }
+
   struct AsyncStateGlobal {
-    BufferSet dst_buffers;
+    // Data vars of the destination buffers, so that a read through a view
+    // waits for an async write through another view of the same storage.
+    VarSet dst_buffers;
     BufferCommitGroupMap buffer_to_commit_group;
     int commit_group_count{0};
     Optional<PrimExpr> producer_head{PrimExpr(-1)};
 
     bool writes(const Buffer &buffer) const {
-      return dst_buffers.count(buffer) > 0;
+      return dst_buffers.count(buffer->data) > 0;
     }
   };
 
@@ -2601,8 +2706,8 @@ private:
             if (!global_state.writes(read_region->buffer)) {
               continue;
             }
-            auto it =
-                global_state.buffer_to_commit_group.find(read_region->buffer);
+            auto it = global_state.buffer_to_commit_group.find(
+                read_region->buffer->data);
             if (it == global_state.buffer_to_commit_group.end()) {
               handled = false;
               break;
@@ -2660,7 +2765,8 @@ private:
         if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
           continue;
         }
-        auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
+        auto commit_group_id =
+            buffer_to_commit_group.at(read_region->buffer->data);
         ICHECK_GE(commit_group_id, 0);
         ICHECK_LT(commit_group_id, num_commit_group);
         if (!need_wait_count[commit_group_id]) {
@@ -2959,13 +3065,13 @@ private:
 
         for (const BufferRegion &write_region : new_block->writes) {
           auto &global_state = async_states_[stage];
-          global_state.dst_buffers.insert(write_region->buffer);
-          global_state.buffer_to_commit_group[write_region->buffer] =
+          global_state.dst_buffers.insert(write_region->buffer->data);
+          global_state.buffer_to_commit_group[write_region->buffer->data] =
               commit_group_id;
           global_state.commit_group_count =
               std::max(global_state.commit_group_count,
                        static_cast<int>(local_state.commit_groups.size()));
-          buffer_to_commit_group[write_region->buffer] = commit_group_id;
+          buffer_to_commit_group[write_region->buffer->data] = commit_group_id;
         }
         async_states_[stage].producer_head = normalized_access_index;
         local_state.producer_head = normalized_access_index;
