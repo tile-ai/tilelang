@@ -697,7 +697,12 @@ def get_nvcc_compiler() -> str:
 @cache
 def get_nvcc_version() -> tuple[int, ...]:
     """Return the selected NVCC's full version, cached for this process."""
-    output = subprocess.check_output([get_nvcc_compiler(), "--version"], stderr=subprocess.STDOUT, text=True)
+    cmd = [get_nvcc_compiler(), "--version"]
+    timeout = _get_compile_timeout_seconds()
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"NVCC version query timed out after {timeout} seconds.\nCommand: {' '.join(cmd)}") from exc
     match = re.search(r"\bV(\d+\.\d+\.\d+)\b", output)
     if match is None:
         raise RuntimeError(f"Cannot determine NVCC version from: {output}")

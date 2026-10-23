@@ -548,7 +548,7 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     T.copy(ub, C[i, :, :])
                     progress += 1
 
-    resolved = schedule(main, through="ResolveCore", auto_schedule=False)
+    resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
     assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
     masks = {
