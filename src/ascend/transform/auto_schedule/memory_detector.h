@@ -101,7 +101,6 @@ public:
   explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
                                 LayoutMap layouts = {})
       : layouts_(std::move(layouts)), mode_(mode) {}
-
   // Analyze a statement and collect read/write regions
   void Analyze(const Stmt &stmt) {
     l0_pitches_.clear();
@@ -1188,12 +1187,32 @@ private:
     }
 
     if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
-      // Visit the original operands first so symbolic indices and the logical
-      // source/destination regions retain their normal access accounting.
-      StmtExprVisitor::VisitExpr_(op);
       AscendCopy copy(op->args, op->annotations);
+      bool exact = true;
+      if (IsGlobalBuffer(copy->src) && IsL1Buffer(copy->dst)) {
+        // GM->L1 lowering transfers the source geometry. A larger declared
+        // destination is a may-write bound, not a guaranteed initialization.
+        size_t src_rank = copy->src_range.size(),
+               dst_rank = copy->dst_range.size();
+        exact = src_rank >= 2 && dst_rank >= 2;
+        if (exact) {
+          for (size_t i = 0; i + 2 < src_rank; ++i)
+            exact &= ana_.CanProveEqual(copy->src_range[i]->extent, 1);
+          for (size_t i = 0; i + 2 < dst_rank; ++i)
+            exact &= ana_.CanProveEqual(copy->dst_range[i]->extent, 1);
+          for (size_t i = 0; i < 2; ++i)
+            exact &= ana_.CanProveEqual(
+                copy->src_range[src_rank - 2 + (copy->transpose ? 1 - i : i)]
+                    ->extent,
+                copy->dst_range[dst_rank - 2 + i]->extent);
+        }
+      }
+      size_t must_begin = unconditional_write_regions_.size();
+      StmtExprVisitor::VisitExpr_(op);
       for (const BufferRegion &write : copy->GetAccessRegions().writes)
         RecordBufferRegion(ExpandPaddedCopyWriteRegion(copy, write), false);
+      if (!exact)
+        unconditional_write_regions_.resize(must_begin);
       return;
     }
 

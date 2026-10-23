@@ -334,6 +334,7 @@ void RewriteScheduledTree(std::vector<std::shared_ptr<IRStructure>> *nodes,
     auto *for_node = loop.CopyOnWrite();
     for_node->annotations.erase(kMultiBufferCounterMap);
     for_node->annotations.erase(kStorageEpochGuardMap);
+    for_node->annotations.erase(kWriteCounterUpdateGuardMap);
     control->control = std::move(loop);
   }
 }
@@ -489,7 +490,8 @@ void ElideUnitVersionCounterGroups(ScheduledTIR *scheduled_tir,
                                    const MultiBufferPlan &plan) {
   std::unordered_set<int> versioned_counter_groups;
   for (const MultiBufferInfo &info : plan.Infos()) {
-    if (info.UsesCounter() && info.NeedsVersionDimension())
+    if (info.UsesCounter() &&
+        (info.NeedsVersionDimension() || info.write_counter))
       versioned_counter_groups.insert(info.counter_group_id);
   }
 
