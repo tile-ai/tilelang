@@ -131,18 +131,30 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
-    def _make_executable(self) -> tvm.runtime.Executable:
-        if self.rt_mod is None:
-            raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
-        executable = runtime.Executable(self.rt_mod)
+    def get_compile_args(self) -> dict[str, Any]:
+        """Source compiler options shared by JIT, cache, and library export."""
         compile_args = dict(COMPILE_ARGS)
         from tilelang.cpu.toolchain import get_compile_flags
 
         backend_flags = get_compile_flags(self.target, self.pass_configs, execution_backend="tvm_ffi")
+        if self.target.kind.name == "c":
+            from tilelang.env import TILELANG_TEMPLATE_PATH
+
+            # CPU source modules use C++ templates even though TVM labels them C.
+            backend_flags += ["-I" + TILELANG_TEMPLATE_PATH]
+            backend_flags += ["/TP", "/std:c++17", "/EHsc"] if sys.platform == "win32" else ["-std=c++17"]
+            backend_flags += [item for flag in (self.compile_flags or []) for item in flag.split()]
         if backend_flags:
             options = list(compile_args.get("options", []))
             options += backend_flags
             compile_args["options"] = options
+        return compile_args
+
+    def _make_executable(self) -> tvm.runtime.Executable:
+        if self.rt_mod is None:
+            raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
+        executable = runtime.Executable(self.rt_mod)
+        compile_args = self.get_compile_args()
         if compile_args:
             # Precompile with platform and backend-owned toolchain options.
             executable.jit(**compile_args)
@@ -272,10 +284,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
-            # if available, otherwise use PyTorch's current device.
+            # if available; CPU output-only kernels must not probe an accelerator.
             out_device: torch.device | None = next(
                 (input.device for input in inputs if isinstance(input, torch.Tensor)),
-                None,
+                torch.device("cpu") if self.target.kind.name in ("c", "llvm") else None,
             )
 
             # Stitch the full positional argument list expected by the TVM executable.
@@ -417,6 +429,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             else None
         )
         adapter.pass_configs = pass_configs
+        adapter.compile_flags = compile_flags
 
         if isinstance(func_or_mod, tirx.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})

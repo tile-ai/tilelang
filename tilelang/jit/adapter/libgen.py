@@ -21,7 +21,7 @@ from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.contrib.hip_resource_info import filter_and_record
 
-from .utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target
+from .utils import is_ascend_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
@@ -166,18 +166,6 @@ class LibraryGenerator:
                 "--shared",
                 src.name,
             ]
-        elif is_cpu_target(target):
-            from tilelang.contrib.cc import get_cplus_compiler
-            from tilelang.cpu.toolchain import get_compile_flags
-
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
-
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-            ]
-            command += get_compile_flags(target, self.pass_configs, execution_backend="cython")
         else:
             raise ValueError(f"Unsupported target: {target}")
 

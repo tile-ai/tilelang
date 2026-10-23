@@ -36,7 +36,7 @@ def _compile_c(func, out_idx):
             out_idx=out_idx,
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
 

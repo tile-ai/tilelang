@@ -46,7 +46,7 @@ def test_matmul_compile():
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
     with tvm.target.Target("c"):
-        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="cython")
+        complied_fun = tilelang.compile(cpu_func, -1, target="c", target_host="c", execution_backend="tvm_ffi")
 
     in_dtype = T.float16
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))
@@ -58,12 +58,12 @@ def test_matmul_compile():
     tilelang.testing.torch_assert_close(C, C_torch, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-def test_matmul_with_copy_cython():
-    """CPU kernel using T.copy with cython backend.
+def test_matmul_with_copy_tvm_ffi():
+    """CPU kernel using T.copy with TVM-FFI backend.
 
     Verifies that T.copy works end-to-end on CPU: the vectorized copy
     uses vector types (e.g. float4) defined in common.h, and the
-    wrapper correctly skips redundant re-lowering.
+    TVM-FFI runtime executes the generated C source.
     """
     M, N, K = 128, 128, 128
     block_M, block_N, block_K = 32, 32, 32
@@ -87,7 +87,7 @@ def test_matmul_with_copy_cython():
                     C_local[i, j] += A_local[i, k] * B_local[k, j]
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    compiled = tilelang.compile(matmul, target="c", out_idx=-1, execution_backend="cython")
+    compiled = tilelang.compile(matmul, target="c", target_host="c", out_idx=-1, execution_backend="tvm_ffi")
 
     a = torch.randn(M, K, dtype=torch.float32)
     b = torch.randn(K, N, dtype=torch.float32)
