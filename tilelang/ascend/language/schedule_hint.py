@@ -15,17 +15,20 @@ def PerCoreTask():
 
     AutoSchedule treats the enclosed control flow as one logical task when it
     analyzes dependencies, estimates cost, and allocates flags. When
-    synchronization is emitted, the same logical wait/set pair is placed next
-    to every candidate access under its original control-flow guard.
+    synchronization is emitted for a loop-free dispatch, the same logical
+    wait/set pair can be placed next to every candidate access under its
+    original control-flow guard. If the region contains internal loops,
+    external synchronization stays at the region boundary: one wait/set pair
+    per logical task, including when an internal loop executes zero times.
 
     The compiler preserves explicit ``T.Task()`` candidates and infers markers
     for the remaining supported dependency-bearing candidate boundaries.
     Explicit and inferred candidates may therefore be mixed in one region.
     Every candidate must use the same single hardware pipe and represent the
-    same logical read/write role. For every dynamic invocation and every
-    participating block index, the candidate guards must be mutually exclusive
-    and collectively exhaustive: exactly one candidate must execute on each
-    core. Conditions inside this scope may dispatch by block/core ID, but must
+    same logical read/write role. For loop-free dispatch, on every dynamic
+    invocation and every participating block index, the candidate guards must
+    be mutually exclusive and collectively exhaustive: exactly one candidate
+    must execute on each core. Conditions may dispatch by block/core ID, but must
     not make the operation data-dependent, optional, or executable more than
     once on one core. This exact-once property is a user control-flow contract.
 
@@ -36,9 +39,8 @@ def PerCoreTask():
 
     Scalar bindings may remain outside candidate markers when they do not
     access buffers and therefore cannot form buffer dependencies with statements
-    outside the PerCoreTask. External synchronization is emitted only at
-    ``T.Task`` candidate sites, so put any buffer access in a supported
-    single-pipe candidate rather than an unmarked scalar binding.
+    outside the PerCoreTask. Put buffer accesses in supported single-pipe
+    candidates so they participate in the logical task's dependency analysis.
 
     Explicit candidates also define the latency model. Statements inside one
     ``T.Task`` are serial, candidates before the same inter-core wait
