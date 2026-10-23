@@ -343,6 +343,133 @@ def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=Fa
         )
 
 
+def region_atomic_program(operation, source_shape=(4, 8, 16), destination_shape=(8, 16)):
+    @T.prim_func
+    def main(
+        A: T.Tensor(source_shape, "float32"),
+        B: T.Tensor(destination_shape, "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(source_shape, "float32")
+            B_shared = T.alloc_shared(destination_shape, "float32")
+            T.clear(A_shared)
+            T.clear(B_shared)
+            source_region = tuple(slice(None) for _ in source_shape)
+            destination_region = tuple(slice(None) for _ in destination_shape)
+            if operation == "add":
+                T.atomic_add(B_shared[destination_region], A_shared[source_region])
+            elif operation == "max":
+                T.atomic_max(B_shared[destination_region], A_shared[source_region])
+            else:
+                T.atomic_min(B_shared[destination_region], A_shared[source_region])
+
+    return main
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks(support_required="compile-only")),
+        pytest.param("hip", marks=tilelang.testing.requires_rocm.marks(support_required="compile-only")),
+    ]
+)
+def region_atomic_target(request):
+    kind = request.param
+    if tvm.get_global_func(f"target.build.tilelang_{kind}_without_compile", allow_missing=True) is None:
+        pytest.skip(f"TileLang {kind} codegen is not enabled")
+    config = {"kind": "cuda", "arch": "sm_89"} if kind == "cuda" else {"kind": "hip", "mcpu": "gfx942"}
+    return tvm.target.Target(config)
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
+        ((4, 8, 16), (8, 16)),
+        ((2, 4, 8, 16), (8, 16)),
+        ((8, 16), (4, 8, 16)),
+        ((1, 8, 16), (4, 8, 16)),
+    ],
+)
+def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target, pytest.raises(ValueError, match="Cannot map atomic region") as exc_info:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    message = str(exc_info.value)
+    for context in (f"tl.atomic_{operation}_elem_op", "src=A_shared", "dst=B_shared", "src_range=", "dst_range="):
+        assert context in message
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
+        ((8, 16), (8, 16)),
+        ((1, 8, 16), (8, 16)),
+        ((8, 1, 16), (1, 8, 16, 1)),
+        ((1, 1), (1,)),
+    ],
+)
+def test_region_atomic_matching_rank_is_accepted(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
+def region_atomic_scalar_source_program(operation, source_form, source_index=1):
+    atomic_op = getattr(T, f"atomic_{operation}")
+
+    @T.prim_func
+    def main(A: T.Tensor((4,), "float32"), B: T.Tensor((20,), "float32")):
+        with T.Kernel(1, threads=128):
+            if source_form == "load":
+                atomic_op(B[2:18], A[source_index])
+            elif source_form == "region":
+                atomic_op(B[2:18], A[source_index : source_index + 1])
+            else:
+                atomic_op(B[2:18], A[source_index] + 1.0)
+
+    return main
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize("source_form", ["load", "region", "expression"])
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source_codegen(operation, source_form, source_index, region_atomic_target):
+    with region_atomic_target:
+        artifact = tilelang.lower(
+            region_atomic_scalar_source_program(operation, source_form, source_index),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    assert f"A[{source_index}]" in artifact.kernel_source
+    assert f"Atomic{operation.title()}(" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize("source_form", ["load", "region", "expression"])
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source(operation, source_form, source_index):
+    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form, source_index))
+    source = torch.tensor([99.0, 3.0, -77.0, 55.0], device="cuda")
+    value = (99.0 if source_index == 0 else 3.0) + (1.0 if source_form == "expression" else 0.0)
+    destination = torch.full((20,), value + 4.0 if operation == "min" else 1.0, device="cuda")
+    expected = destination.clone()
+    expected[2:18] = 1.0 + value if operation == "add" else value
+
+    kernel(source, destination)
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
 def get_tma_atomic_add_descriptor_args(artifact):
     for func in artifact.host_mod.functions.values():
         if func.attrs is None or "tma_descriptor_args" not in func.attrs:

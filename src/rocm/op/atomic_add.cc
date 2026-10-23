@@ -8,6 +8,7 @@
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 
+#include "backend/common/op/atomic_simt.h"
 #include "backend/common/target_utils.h"
 #include "layout/layout.h"
 #include "op/utils.h"
@@ -45,112 +46,23 @@ bool UseTMA(const AtomicAddNode &op) {
   return false;
 }
 
-Array<IterVar> MakeIterVars(const AtomicAddNode &op) {
-  Array<IterVar> loop_vars;
-  size_t idx = 0;
-  for (size_t i = 0; i < op.dst_range.size(); i++) {
-    if (is_one(op.dst_range[i]->extent)) {
-      continue;
-    }
-    Var var = Var(std::string{char('i' + idx)}, op.dst_range[i]->extent->dtype);
-    idx++;
-    loop_vars.push_back(
-        {Range(0, op.dst_range[i]->extent), var, IterVarType::kDataPar});
-  }
-
-  if (loop_vars.empty()) {
-    Var var = Var("i");
-    loop_vars.push_back({Range(0, 1), var, IterVarType::kDataPar});
-  }
-
-  return loop_vars;
-}
-
-Array<PrimExpr> MakeIndices(const AtomicAddNode &op, const Array<IterVar> &ivs,
-                            int src_dst) {
-  Array<PrimExpr> indices;
-  Array<Range> ranges = src_dst == 0 ? op.src_range : op.dst_range;
-  size_t idx = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent)) {
-      indices.push_back(ranges[i]->min);
-    } else {
-      indices.push_back(ranges[i]->min + ivs[idx]->var);
-      idx++;
-    }
-  }
-
-  ICHECK(idx == ivs.size() || (idx == 0 && ivs.size() == 1))
-      << "Unmatched indices: idx = " << idx << ", ivs.size() = " << ivs.size()
-      << ", dst name = " << op.dst->name;
-  return indices;
-}
-
-PrimExpr MakePredicate(const AtomicAddNode &op, arith::Analyzer *analyzer,
-                       const Array<IterVar> &ivs, Array<PrimExpr> extents,
-                       int src_dst) {
-  Array<Range> ranges = src_dst == 0 ? op.src_range : op.dst_range;
-  Array<PrimExpr> cond_list;
-  ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
-  size_t idx = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent)) {
-      continue;
-    }
-    PrimExpr cond = ranges[i]->min + ivs[idx]->var < extents[i];
-    if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
-      cond_list.push_back(cond);
-    }
-    cond = ranges[i]->min + ivs[idx]->var >= 0;
-    if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
-      cond_list.push_back(cond);
-    }
-    idx++;
-  }
-  if (cond_list.empty()) {
-    return {};
-  }
-  PrimExpr cond = cond_list[0];
-  for (size_t i = 1; i < cond_list.size(); i++) {
-    cond = And(cond, cond_list[i]);
-  }
-  return cond;
-}
-
 For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
-  Array<IterVar> loop_vars = MakeIterVars(op);
-  ICHECK(!loop_vars.empty()) << "MakeIterVars in AtomicOp should not return "
-                                "empty vars (at least 1 var)";
-
+  Optional<BufferRegion> src_region;
+  if (!op.src_value.defined()) {
+    src_region = BufferRegion(op.src, op.src_range);
+  }
+  backend::AtomicSIMTIndexMap index_map = backend::MakeAtomicSIMTIndexMap(
+      op.GetElemOp(), BufferRegion(op.dst, op.dst_range), src_region);
+  const Array<IterVar> &loop_vars = index_map.loop_vars;
   for (const auto &iv : loop_vars) {
     analyzer->Bind(iv->var, iv->dom);
   }
 
-  ICHECK(loop_vars.size() <= op.dst_range.size())
-      << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << op.dst_range.size()
-      << ", dst = " << op.dst->name;
-
-  Array<PrimExpr> dst_indices = MakeIndices(op, loop_vars, 1);
+  const Array<PrimExpr> &dst_indices = index_map.dst_indices;
   Array<PrimExpr> new_args;
-
-  PrimExpr dst_predicate =
-      MakePredicate(op, analyzer, loop_vars, op.dst->shape, 1);
-
-  PrimExpr src_value_arg;
-
+  PrimExpr src_value_arg = op.src_value;
   if (!op.src_value.defined()) {
-    ICHECK(loop_vars.size() <= op.src_range.size())
-        << "loop_vars.size() = " << loop_vars.size()
-        << ", src_range.size() = " << op.src_range.size()
-        << ", src = " << op.src->name << ", dst = " << op.dst->name;
-
-    Array<PrimExpr> src_indices = MakeIndices(op, loop_vars, 0);
-    PrimExpr src_predicate =
-        MakePredicate(op, analyzer, loop_vars, op.src->shape, 0);
-    src_value_arg = BufferLoad(op.src, src_indices);
-  } else {
-    src_value_arg = op.src_value;
+    src_value_arg = BufferLoad(op.src, index_map.src_indices);
   }
 
   if (src_value_arg->dtype != op.dst->dtype) {
