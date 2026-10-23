@@ -198,8 +198,8 @@ reviews:
         construction, host compiler integration, or platform-specific build behavior.
         Windows HIP changes fit here when they concern build/toolchain integration
         rather than AMD device execution semantics.
-        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 for HIP
-        execution semantics, AMD intrinsics, and wavefront algorithms; involve
+        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 or zhangnju
+        for HIP execution semantics, AMD intrinsics, and wavefront algorithms; involve
         LeiWang1999 for substantive release-wide or cross-backend compatibility
         decisions rather than routine packaging. Never suggest the PR author.
         Path hints: src/metal/, tilelang/metal/, cmake/, CMakeLists.txt,
@@ -226,6 +226,8 @@ reviews:
 
     - reviewers:
         - handle: andyluo7
+          type: user
+        - handle: zhangnju
           type: user
       instructions: |
         Primary scope: ROCm/HIP, AMD kernel behavior, wavefront and intrinsic

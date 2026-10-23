@@ -396,6 +396,11 @@ class Environment:
     TILELANG_PASS_PROFILE = EnvVar("TILELANG_PASS_PROFILE", "0")  # "0"=off, "1"/"true"=on
     TILELANG_PASS_PROFILE_THRESHOLD_MS = EnvVar("TILELANG_PASS_PROFILE_THRESHOLD_MS", "0")  # 0=show all
 
+    # Host-side profiling for Ascend kernel calls
+    TILELANG_ASCEND_PROFILE = EnvVar(
+        "TILELANG_ASCEND_PROFILE", "0"
+    )  # Python host ranges and native CANN Node reporting for Ascend kernel calls
+
     # Source span injection into tirx IR (error locations / LSP / visualization)
     TILELANG_ENABLE_IR_SPAN = EnvVar("TILELANG_ENABLE_IR_SPAN", "1")  # "1"=on (default), "0"=off
 

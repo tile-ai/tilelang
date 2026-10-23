@@ -63,26 +63,26 @@ _ENTRIES: list[tuple[str, str, dict]] = [
         "example_gemm_splitk.py",
         {"deterministic": True},
     ),
-    # Four dense shapes cover both dtypes and traversal orders without a sweep.
+    # Four dense shapes cover both dtypes, small M and an M tail without a sweep.
     (
-        "ascend_deepgemm_bf16_mnk_4096x4096x4096",
+        "ascend_deepgemm_bf16_4096x4096x4096",
         "deepgemm/bench_deepgemm.py",
-        {"m": 4096, "n": 4096, "k": 4096, "dtype": "bfloat16", "loop_order": "mnk"},
+        {"m": 4096, "n": 4096, "k": 4096, "dtype": "bfloat16"},
     ),
     (
-        "ascend_deepgemm_bf16_kmn_128x4096x7168",
+        "ascend_deepgemm_bf16_128x4096x7168",
         "deepgemm/bench_deepgemm.py",
-        {"m": 128, "n": 4096, "k": 7168, "dtype": "bfloat16", "loop_order": "kmn"},
+        {"m": 128, "n": 4096, "k": 7168, "dtype": "bfloat16"},
     ),
     (
-        "ascend_deepgemm_fp8_mnk_1024x4096x7168",
+        "ascend_deepgemm_fp8_1024x4096x7168",
         "deepgemm/bench_deepgemm.py",
-        {"m": 1024, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn", "loop_order": "mnk"},
+        {"m": 1024, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn"},
     ),
     (
-        "ascend_deepgemm_fp8_kmn_1025x4096x7168",
+        "ascend_deepgemm_fp8_1025x4096x7168",
         "deepgemm/bench_deepgemm.py",
-        {"m": 1025, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn", "loop_order": "kmn"},
+        {"m": 1025, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn"},
     ),
     # Scale packing, transpose and broadcast share the DeepGEMM benchmark module.
     (

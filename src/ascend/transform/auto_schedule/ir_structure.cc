@@ -299,6 +299,7 @@ std::shared_ptr<IRStructure> TaskNode::Clone() const {
   // Copy memory access regions
   new_task->SetReadRegions(GetReadRegions());
   new_task->SetWriteRegions(GetWriteRegions());
+  new_task->SetL0Pitches(GetL0Pitches());
   new_task->SetReadVars(GetReadVars());
   new_task->SetWriteVars(GetWriteVars());
   new_task->outer_ctx = outer_ctx;

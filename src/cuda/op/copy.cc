@@ -1218,8 +1218,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   }
   const int elems_per_reg = 4 / shared_elem_bytes;
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
-  if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
-                           loop_vars.back()->dom->extent,
+  if (!IndicesCanVectorize(flattened_indice, col_var->var, col_var->dom->extent,
                            use_m16n8_stmatrix ? 16 : 8, analyzer)) {
     return LowerNormal(op, lower_args, analyzer);
   }
