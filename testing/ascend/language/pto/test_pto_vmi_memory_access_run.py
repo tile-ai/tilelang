@@ -13,6 +13,10 @@ generated-source order and MTE sync pair:
 * a DMA that writes only the non-zero ``[64,128)`` region feeding
   ``vload(work[64], size=64)``;
 * ``vstore(..., work[64])`` feeding a DMA that reads only ``[64,128)``;
+* a DMA that writes only ``[192,256)`` feeding the indexed
+  ``vgather(work[64], offsets=128, mask)`` (every lane reads ``input[0]``);
+* ``vscatter(value, work[64], offsets=128+arange(64), mask)`` writing only
+  ``[192,256)``, consumed by a DMA of that subregion;
 * a padded view whose low group is written by DMA and read by a static
   negative group stride, with both groups initialized for the reference;
 * an explicit descriptor crossing a row (seeded row-0 tail plus a DMA
@@ -177,6 +181,24 @@ def _assert_store_then_v_to_mte3(lines, dma_predicate, store_needle):
     assert store_needle in lines[store], lines[store]
 
 
+def _assert_mte2_to_v_then_indexed(lines, dma_predicate, op_needle, descriptor_needle):
+    dma = _line_index(lines, dma_predicate, what="producer MTE2 DMA")
+    set_index = _line_index(lines, lambda line: 'set_flag("MTE2", "V"' in line, dma, "MTE2->V set_flag")
+    wait_index = _line_index(lines, lambda line: 'wait_flag("MTE2", "V"' in line, set_index, "MTE2->V wait_flag")
+    indexed = _line_index(lines, lambda line: op_needle in line, wait_index, op_needle)
+    assert dma < set_index < wait_index < indexed
+    assert descriptor_needle in lines[indexed], lines[indexed]
+
+
+def _assert_indexed_then_v_to_mte3(lines, dma_predicate, op_needle, descriptor_needle):
+    indexed = _line_index(lines, lambda line: op_needle in line, what=op_needle)
+    set_index = _line_index(lines, lambda line: 'set_flag("V", "MTE3"' in line, indexed, "V->MTE3 set_flag")
+    wait_index = _line_index(lines, lambda line: 'wait_flag("V", "MTE3"' in line, set_index, "V->MTE3 wait_flag")
+    dma = _line_index(lines, dma_predicate, wait_index, "consumer MTE3 DMA")
+    assert indexed < set_index < wait_index < dma
+    assert descriptor_needle in lines[indexed], lines[indexed]
+
+
 def _float_inputs(shape, trial, base=0.0, step=1.0):
     generator = torch.Generator().manual_seed(1000 + trial)
     values = torch.randn(shape, generator=generator)
@@ -251,6 +273,81 @@ def test_nonzero_store_to_dma_dependency_20_trials(npu):
         a = _float_inputs((64,), trial)
         sentinel = torch.full((64,), -888.0 - trial)
         return [a, sentinel], a
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Indexed P1: DMA writing only [192,256) -> indexed vgather(work[64], 128)
+# ---------------------------------------------------------------------------
+def _indexed_gather_high_region_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            out = T.alloc_shared((64,), F32)
+            T.copy(A, work[192:256])  # producer DMA: only the consumed region
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vbrc(T.uint32(128), size=64)
+                value = T.vmi.vgather(work[64], offsets, mask)
+                T.vmi.vstore(value, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+def test_indexed_gather_high_region_dependency_20_trials(npu):
+    kernel, source = _compile(_indexed_gather_high_region_kernel())
+    lines = source.splitlines()
+    _assert_mte2_to_v_then_indexed(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" in line and ", 192)" in line,
+        "vmi.vgather",
+        ", 64)",
+    )
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], torch.full((64,), a[0].item())
+
+    _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Indexed P1: indexed vscatter(work[64], 128+arange) -> DMA reading only
+# [192,256)
+# ---------------------------------------------------------------------------
+def _indexed_scatter_high_region_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((64,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            src = T.alloc_shared((64,), F32)
+            T.copy(A, src)
+            with T.SimdVF():
+                mask = T.vmi.create_mask(64, size=64)
+                offsets = T.vmi.vci(T.uint32(128), size=64)
+                value = T.vmi.vload(src[0], size=64)
+                T.vmi.vscatter(value, work[64], offsets, mask)
+            T.copy(work[192:256], C)  # consumer DMA: only the written region
+
+    return main
+
+
+def test_indexed_scatter_high_region_dependency_20_trials(npu):
+    kernel, source = _compile(_indexed_scatter_high_region_kernel())
+    lines = source.splitlines()
+    _assert_indexed_then_v_to_mte3(
+        lines,
+        lambda line: "mte_ub_gm" in line and "addptr" in line and ", 192)" in line,
+        "vmi.vscatter",
+        ", 64)",
+    )
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], a.clone()
 
     _run_trials(kernel, make_case, npu, trials=20)
 
