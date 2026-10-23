@@ -947,6 +947,21 @@ def test_simplify_dead_bind_with_shared_nodes(store_uses_shared_value):
     simplify_and_compare(mod_before, mod_expected)
 
 
+def canonicalize_layout_assumptions(stmt):
+    """Normalize assumption wrappers without simplifying expected arithmetic."""
+    analyzer = tvm.arith.Analyzer()
+
+    def visit(stmt):
+        if not isinstance(stmt, tirx.AttrStmt) or stmt.attr_key != "tl.assume":
+            return stmt
+        condition = analyzer.simplify(stmt.node)
+        with analyzer.constraint_scope(condition):
+            body = visit(stmt.body)
+        return tirx.AttrStmt(condition, stmt.attr_key, stmt.value, body)
+
+    return visit(stmt)
+
+
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
 @pytest.mark.parametrize("form", ["recompose", "remainder", "offset"])
 def test_symbolic_layout_divmod(dtype, form):
@@ -975,7 +990,7 @@ def test_layout_mixed_radix_bounded(dtype):
         return stmt
 
     before = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body((x // (a * b)) * b + (x // a) % b))})
-    expected = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body(x // a))})
+    expected = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], canonicalize_layout_assumptions(body(x // a)))})
     simplify_and_compare(before, expected)
 
 
@@ -1001,7 +1016,8 @@ def test_layout_mixed_radix_unknown_product(dtype):
         ),
     )
     mod = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], body)})
-    simplify_and_compare(mod, mod)
+    expected = tvm.IRModule({"main": tirx.PrimFunc([x, a, b], canonicalize_layout_assumptions(body))})
+    simplify_and_compare(mod, expected)
 
 
 def test_layout_divmod_preserves_widening_boundary():
@@ -1029,7 +1045,7 @@ def test_layout_remainder_recovers_block_offset(radix):
         return stmt
 
     before = tvm.IRModule({"main": tirx.PrimFunc([block, lane, base, divisor], body(value))})
-    after = tvm.IRModule({"main": tirx.PrimFunc([block, lane, base, divisor], body(expected))})
+    after = tvm.IRModule({"main": tirx.PrimFunc([block, lane, base, divisor], canonicalize_layout_assumptions(body(expected)))})
     simplify_and_compare(before, after)
 
 
