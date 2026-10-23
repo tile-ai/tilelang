@@ -1105,6 +1105,12 @@ private:
 
     AddWorkspaceCallback add_workspace_callback = [this](int num_elem,
                                                          DataType dtype) {
+      // Runtime helpers index scalar FP4 workspace slots as byte-sized
+      // fp4_e2_t objects. Reserve two packed elements per slot so buffer
+      // storage sizing and shared-memory merging account for the full byte.
+      if (dtype.is_float4_e2m1fn() && dtype.is_scalar()) {
+        num_elem *= 2;
+      }
       auto workspace =
           decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
       // Record workspace under the innermost block scope so its lifetime

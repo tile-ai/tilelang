@@ -44,6 +44,31 @@ struct fp4_e2_t {
   TL_DEVICE operator __half() const { return __half(float(*this)); }
 };
 
+// fp4_e2_t converts implicitly to several types, so shuffles and comparisons
+// on it are ambiguous, and a bare max/min would compare raw encodings. Shuffle
+// the raw bits and compare through float.
+TL_DEFINE_SHFL_SYNC_OVERLOADS(fp4_e2_t, uint8_t)
+
+namespace tl {
+template <> TL_DEVICE fp4_e2_t fast_max(fp4_e2_t a, fp4_e2_t b) {
+  return fp4_e2_t(::fmaxf(static_cast<float>(a), static_cast<float>(b)));
+}
+
+template <> TL_DEVICE fp4_e2_t fast_min(fp4_e2_t a, fp4_e2_t b) {
+  return fp4_e2_t(::fminf(static_cast<float>(a), static_cast<float>(b)));
+}
+} // namespace tl
+
+// Global, not in tl: generated code calls max/min unqualified, and fp4_e2_t
+// is a global type, so argument-dependent lookup would not find tl:: ones.
+TL_DEVICE fp4_e2_t max(fp4_e2_t lhs, fp4_e2_t rhs) {
+  return tl::fast_max(lhs, rhs);
+}
+
+TL_DEVICE fp4_e2_t min(fp4_e2_t lhs, fp4_e2_t rhs) {
+  return tl::fast_min(lhs, rhs);
+}
+
 // Tag for tcgen05 unpacked FP4 shared-memory layout. The hardware atom carries
 // 16 4-bit payload values in the low 64 bits of a 128-bit aligned region.
 // See:
