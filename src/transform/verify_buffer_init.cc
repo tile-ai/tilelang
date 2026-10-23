@@ -297,14 +297,17 @@ struct BufferInitVerifier : public StmtExprVisitor {
     potential_writers_ = std::move(collector.writers);
   }
 
-  /*! \brief Whether some node other than \p reader writes \p var. */
+  /*! \brief Whether a node outside the read and its enclosing store writes var.
+   *
+   * A store evaluates its RHS before writing, even when the RHS uses a pointer.
+   */
   bool WrittenByAnotherNode(const Var &var, const Object *reader) const {
     auto it = potential_writers_.find(var.get());
     if (it == potential_writers_.end()) {
       return false;
     }
     for (const Object *writer : it->second) {
-      if (writer != reader) {
+      if (writer != reader && writer != active_store_) {
         return true;
       }
     }

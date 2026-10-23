@@ -221,6 +221,27 @@ def test_write_only_access_ptr_does_not_read(capfd):
     assert MESSAGE not in _verify(kernel, capfd)
 
 
+@pytest.mark.parametrize("op", ["any", "atomic_add"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_shared_store_with_pointer_read_checks_initialization(capfd, op, initialized):
+    """Neither the enclosing store nor its atomic RHS initializes the old value."""
+    dtype = "bool" if op == "any" else "float32"
+
+    @T.prim_func
+    def kernel(C: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=64) as _:
+            acc = T.alloc_shared((1,), dtype)
+            if initialized:
+                T.clear(acc)
+            if op == "any":
+                acc[0] = T.any_of(acc)
+            else:
+                acc[0] = T.atomic_add(acc[0], T.float32(1), return_prev=True)
+            C[0] = acc[0]
+
+    assert (MESSAGE in _verify(kernel, capfd)) is not initialized
+
+
 def test_reports_an_uninitialized_local_buffer(capfd):
     """Register-scope buffers are covered too, not just shared memory."""
 
