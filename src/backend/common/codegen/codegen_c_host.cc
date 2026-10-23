@@ -423,6 +423,13 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
+  } else if (auto call_op = op->op.as<Op>();
+             call_op && op_attr_global_symbol_.count(call_op.value())) {
+    // Runtime operators use their declared C ABI. A buffer's pointer annotation
+    // does not determine the runtime function's parameter type.
+    tvm::codegen::CodeGenC::PrintCallExtern(
+        GetType(GetRef<PrimExpr>(op)), op_attr_global_symbol_[call_op.value()],
+        op->args, false, os);
   } else {
     tvm::codegen::CodeGenC::VisitExpr_(op, os);
   }

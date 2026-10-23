@@ -6,6 +6,7 @@ import torch
 import pytest
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm is required")
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
 def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     """Each non-null carrier must retain whether it supplies a shape or stride."""
@@ -21,7 +22,7 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({"main": func})
     adapter.result_idx = []
-    adapter.target = tvm.target.Target("c")
+    adapter.target = tvm.target.Target("hip" if torch.version.hip else "cuda")
 
     class CaptureLibrary:
         def call(self, *args):
@@ -41,8 +42,8 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     wrapper.set_static_strides_map(strides)
     wrapper.set_static_contiguous_list(contiguous)
 
-    a = torch.empty_strided((2, 3), (4, 1)) if present[0] else None
-    b = torch.empty((4,)) if present[1] else None
+    a = torch.empty_strided((2, 3), (4, 1), device="cuda") if present[0] else None
+    b = torch.empty((4,), device="cuda") if present[1] else None
     wrapper.forward([a, b], stream=0)
     assert lib.symbol == (4 if any(present) else 0)
 
