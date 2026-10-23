@@ -5,7 +5,7 @@ import tilelang
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import Layout
+from tilelang.layout import Fragment, Layout
 from tvm import tirx
 
 from testing.ascend._ir import calls, kernel
@@ -69,6 +69,16 @@ def test_unused_storage_owner_does_not_need_a_view_layout():
     assert layouts[second_view].is_equal(second)
 
 
+def test_fragment_aliases_reject_conflicting_thread_ownership():
+    owner = tirx.decl_buffer((256,), "float32", name="owner", scope="local.fragment")
+    view = tirx.decl_buffer(owner.shape, owner.dtype, name="view", data=owner.data)
+    first = Fragment((256,), forward_thread_fn=lambda i: i % 32, forward_index_fn=lambda i: i // 32)
+    second = Fragment((256,), forward_thread_fn=lambda i: (i + 1) % 32, forward_index_fn=lambda i: i // 32)
+    mod = kernel(tirx.Evaluate(view[0]), buffers=[owner], annotations={"layout_map": {owner: first, view: second}})
+    with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="Conflicting fragment layouts for aliases"):
+        transform.AscendLayoutInference()(mod)
+
+
 def test_view_layouts_must_preserve_the_storage_footprint():
     owner, view, first, _ = _views()
     second = Layout(view.shape, lambda i, j: (i, j * 2))
@@ -112,3 +122,41 @@ def test_ub_view_reads_the_same_bytes_through_its_own_layout():
     compiled = tilelang.compile(transpose, target="ascend", out_idx=-1)
     source = torch.arange(128, dtype=torch.float32, device="npu").reshape(8, 16)
     torch.testing.assert_close(compiled(source), source.T, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("annotate_owner", [True, False], ids=["owner", "view"])
+def test_fragment_reshape_preserves_annotated_thread_ownership(annotate_owner):
+    import torch
+
+    layout = Fragment(
+        (16, 16),
+        forward_thread_fn=lambda i, j: (j * 16 + i) % 32,
+        forward_index_fn=lambda i, j: (j * 16 + i) // 32,
+    )
+
+    @T.prim_func
+    def program(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+        with T.Kernel(1):
+            src = T.alloc_shared((256,), "float32")
+            dst = T.alloc_shared((256,), "float32")
+            T.copy(A, src)
+            with T.SimtVF(threads=32):
+                owner = T.alloc_fragment((16, 16), "float32")
+                view = T.reshape(owner, (256,))
+                if annotate_owner:
+                    T.annotate_layout({owner: layout})
+                else:
+                    T.annotate_layout({view: layout.reshape((256,))})
+                for i in T.Parallel(256):
+                    view[i] = src[i] + T.cast(T.get_thread_binding(), "float32")
+                for i in T.Parallel(256):
+                    dst[i] = view[i]
+            T.copy(dst, B)
+
+    # Observe scalar lane ownership without relying on vectorized casts.
+    compiled = tilelang.compile(program, target="ascend", out_idx=-1, pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True})
+    source = torch.arange(256, dtype=torch.float32, device="npu")
+    logical = torch.arange(256, dtype=torch.int64, device="npu")
+    lanes = ((logical % 16) * 16 + logical // 16) % 32
+    torch.testing.assert_close(compiled(source), source + lanes.float(), rtol=0, atol=0)

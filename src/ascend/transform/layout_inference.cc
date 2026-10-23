@@ -562,6 +562,40 @@ public:
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
     }
 
+    // Unlike memory layouts, Fragment layouts define thread ownership for the
+    // shared storage. Seed every alias before inference can choose a different
+    // ownership for an unannotated view. Collection is complete here, including
+    // aliases visited after the annotation's block.
+    const LayoutMap annotations = annotated_layout_map_;
+    for (const auto &[buffer, layout] : annotations) {
+      if (!layout.as<FragmentNode>())
+        continue;
+      for (const auto &alias : buffer_data_to_buffers_[buffer->data]) {
+        if (alias.same_as(buffer))
+          continue;
+        Fragment inherited = Downcast<Fragment>(
+            ShapesEqual(layout->InputShape(), alias->shape, &analyzer_)
+                ? layout
+                : layout->Reshape(
+                      alias->shape, &analyzer_,
+                      Integer(GetElementStorageBits(buffer->dtype)),
+                      Integer(GetElementStorageBits(alias->dtype))));
+        if (auto existing = annotated_layout_map_.Get(alias)) {
+          const auto *existing_fragment = existing.value().as<FragmentNode>();
+          // The Layout overload alone does not compare Fragment threads;
+          // retain its kind check as well for reducer partials.
+          ICHECK(existing_fragment && inherited->IsEqual(existing_fragment) &&
+                 inherited->IsEqual(existing.value().get()))
+              << "Conflicting fragment layouts for aliases " << buffer->name
+              << " and " << alias->name << ":\n"
+              << inherited->DebugOutput() << "\n"
+              << existing.value()->DebugOutput();
+        } else {
+          annotated_layout_map_.Set(alias, inherited);
+        }
+      }
+    }
+
     steering_.Reserve(infer_list_, thread_bounds_vec_, analyzer_vec_,
                       annotated_layout_map_);
 
@@ -989,6 +1023,17 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
+    // VF-local owners may only be referenced through reshaped aliases.
+    for (auto buffer : op->alloc_buffers) {
+      if (buffer_data_to_buffers_.count(buffer->data)) {
+        auto buffers = buffer_data_to_buffers_[buffer->data];
+        buffers.push_back(buffer);
+        buffer_data_to_buffers_.Set(buffer->data, buffers);
+      } else {
+        buffer_data_to_buffers_.Set(buffer->data, {buffer});
+      }
+    }
+
     if (IsVFRegion(op->name_hint)) {
       // A VF region is opaque to the worklist itself: visit the body first
       // (under the region's lane scope for SIMT_VF) so nested TileOps
@@ -1011,16 +1056,6 @@ private:
         region_thread_scope_stack_.pop_back();
       }
       return;
-    }
-
-    for (auto buffer : op->alloc_buffers) {
-      if (buffer_data_to_buffers_.count(buffer->data)) {
-        auto buffers = buffer_data_to_buffers_[buffer->data];
-        buffers.push_back(buffer);
-        buffer_data_to_buffers_.Set(buffer->data, buffers);
-      } else {
-        buffer_data_to_buffers_.Set(buffer->data, {buffer});
-      }
     }
 
     // First, visit the block body to collect all buffers from
