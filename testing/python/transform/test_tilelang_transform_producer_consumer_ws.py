@@ -2,6 +2,7 @@
 
 import re
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -216,6 +217,100 @@ def prelude_tma_bound_index(block=64, iters=2, dtype="float16", threads=128):
                     out[i, j] += acc[i, j] + T.cast(start, "float32")
 
             T.copy(out, O[0, 0])
+
+    return main
+
+
+def prelude_shared_read(scalar=False, guarded=False, overwrite=False, dynamic=True, block=32):
+    """Read a preloaded shared value before, inside, and after a pipeline."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, block, block), "float16"),
+        M: T.Tensor((block, block), "float16"),
+        O: T.Tensor((block, block), "float32"),
+        iterations: T.int32,
+        enabled: T.int32,
+    ):
+        with T.Kernel(1, threads=128):
+            m = T.alloc_shared((block, block), "float16")
+            a = T.alloc_shared((block, block), "float16")
+            acc = T.alloc_fragment((block, block), "float32")
+            offset = T.alloc_fragment((block, block), "float32")
+            scalar_offset = T.alloc_local((1,), "float32")
+
+            if guarded:
+                T.clear(m)
+                if enabled != 0:
+                    T.copy(M, m)
+            else:
+                T.copy(M, m)
+            if scalar:
+                scalar_offset[0] = T.cast(m[0, 0], "float32") * 4
+            else:
+                for i, j in T.Parallel(block, block):
+                    offset[i, j] = T.cast(m[i, j], "float32") * 4
+            if overwrite:
+                T.fill(m, 1)
+            T.clear(acc)
+            for k in T.Pipelined(iterations if dynamic else 2, num_stages=2):
+                T.copy(A[k, 0, 0], a)
+                for i, j in T.Parallel(block, block):
+                    acc[i, j] += T.cast(a[i, j], "float32") + T.cast(m[i, j], "float32")
+            for i, j in T.Parallel(block, block):
+                if scalar:
+                    O[i, j] = acc[i, j] + scalar_offset[0] + T.cast(m[i, j], "float32")
+                else:
+                    O[i, j] = acc[i, j] + offset[i, j] + T.cast(m[i, j], "float32")
+
+    return main
+
+
+def shared_prelude_index(block=32):
+    """A shared initialization needed by both a TMA producer and its consumer."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((3 * block, block), "float16"),
+        Idx: T.Tensor((block,), "int32"),
+        O: T.Tensor((block, block), "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            idx = T.alloc_shared((block,), "int32")
+            a = T.alloc_shared((block, block), "float16")
+            acc = T.alloc_fragment((block, block), "float32")
+            T.copy(Idx, idx)
+            T.clear(acc)
+            for k in T.Pipelined(2, num_stages=2):
+                T.copy(A[(k + idx[0]) * block, 0], a)
+                for i, j in T.Parallel(block, block):
+                    acc[i, j] += T.cast(a[i, j], "float32") + T.cast(idx[0], "float32")
+            T.copy(acc, O)
+
+    return main
+
+
+def prelude_outside_outer_loop(block=32):
+    """The accumulator initialization must execute once, before both loops."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, block, block), "float16"),
+        M: T.Tensor((block, block), "float16"),
+        O: T.Tensor((block, block), "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            m = T.alloc_shared((block, block), "float16")
+            a = T.alloc_shared((block, block), "float16")
+            acc = T.alloc_fragment((block, block), "float32")
+            T.copy(M, m)
+            T.clear(acc)
+            for _outer in T.serial(2):
+                for k in T.Pipelined(2, num_stages=2):
+                    T.copy(A[k, 0, 0], a)
+                    for i, j in T.Parallel(block, block):
+                        acc[i, j] += T.cast(a[i, j], "float32") + T.cast(m[i, j], "float32")
+            T.copy(acc, O)
 
     return main
 
@@ -747,6 +842,82 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
 
     assert min(k_load, v_load, branch, first_wait) >= 0
     assert k_load < v_load < branch < first_wait
+
+    # The prefetches must also complete at runtime, not merely survive codegen.
+    import torch
+
+    q = torch.randn((128, 64), device="cuda", dtype=torch.float16)
+    k = torch.randn((64, 64), device="cuda", dtype=torch.float16)
+    v = torch.randn_like(k)
+    result = kernel(q, k, v)
+    expected = (k.float() @ q[64:].float().T + v.float() @ q[64:].float().T).half()
+    torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize(
+    "scalar,guarded,overwrite",
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+)
+def test_tiled_ws_prelude_read_before_loop(scalar, guarded, overwrite, dynamic):
+    """A first-iteration wait cannot protect pre-loop reads or a zero-trip loop."""
+    import torch
+
+    kernel = _compile_tvm_ffi(
+        prelude_shared_read(scalar=scalar, guarded=guarded, overwrite=overwrite, dynamic=dynamic),
+        {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+        out_idx=[2],
+    )
+    # This path keeps WS but does not create a deferred prelude TMA wait.
+    src = kernel.get_kernel_source()
+    assert "__launch_bounds__(256, 1)" in src
+    cases = [(2, 1), (0, 1), (2, 0)] if dynamic else [(2, 1), (2, 0)]
+    for iterations, enabled in cases:
+        a = torch.randn((2, 32, 32), device="cuda", dtype=torch.float16)
+        m = torch.randn((32, 32), device="cuda", dtype=torch.float16)
+        value = m.float() if enabled or not guarded else torch.zeros_like(m, dtype=torch.float32)
+        offset = 4 * (value[0, 0] if scalar else value)
+        if overwrite:
+            value = torch.ones_like(value)
+        expected = a[:iterations].float().sum(0) + (iterations + 1) * value + offset
+        result = kernel(a, m, iterations, enabled)
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_keeps_shared_prelude_write_single():
+    """Fall back when shared initialization needs unplanned cross-group ordering."""
+    import torch
+
+    kernel = _compile_tvm_ffi(
+        shared_prelude_index(),
+        {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+        out_idx=[2],
+    )
+    assert "__launch_bounds__(256, 1)" not in kernel.get_kernel_source()
+    a = torch.randn((96, 32), device="cuda", dtype=torch.float16)
+    idx = torch.ones((32,), device="cuda", dtype=torch.int32)
+    expected = a[32:].float().reshape(2, 32, 32).sum(0) + 2
+    torch.testing.assert_close(kernel(a, idx), expected, rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_preserves_outer_prelude_execution_count():
+    import torch
+
+    kernel = _compile_tvm_ffi(
+        prelude_outside_outer_loop(),
+        {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+        out_idx=[2],
+    )
+    a = torch.randn((2, 32, 32), device="cuda", dtype=torch.float16)
+    m = torch.randn((32, 32), device="cuda", dtype=torch.float16)
+    expected = 2 * a.float().sum(0) + 4 * m.float()
+    torch.testing.assert_close(kernel(a, m), expected, rtol=1e-5, atol=1e-5)
 
 
 @tilelang.testing.requires_cuda
