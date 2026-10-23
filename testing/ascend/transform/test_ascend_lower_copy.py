@@ -108,6 +108,48 @@ def test_dma_bursts_follow_both_physical_row_boundaries(src_shape, dst_shape, sr
     _equal([copy.args[i] for i in indices], expected)
 
 
+@pytest.mark.parametrize("case", ["whole-buffer", "strided-slice", "symbolic-strided-slice"])
+@pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
+def test_dma_copy_preserves_buffer_element_offsets(case, store):
+    whole_buffer = case == "whole-buffer"
+    src_offset = tirx.Var("src_offset", "int64") if case == "symbolic-strided-slice" else 256
+    dst_offset = tirx.Var("dst_offset", "int64") if case == "symbolic-strided-slice" else 512
+    shape = (256,) if whole_buffer else (4, 64)
+    dtype = "uint8" if whole_buffer else "int32"
+    src = tirx.decl_buffer(
+        shape,
+        dtype,
+        name="src",
+        scope="shared.dyn" if store else "global",
+        strides=None if whole_buffer else (80, 1),
+        elem_offset=src_offset,
+    )
+    dst = tirx.decl_buffer(
+        shape,
+        dtype,
+        name="dst",
+        scope="global" if store else "shared.dyn",
+        strides=None if whole_buffer else (96, 1),
+        elem_offset=dst_offset,
+    )
+    after = _lower(
+        src,
+        dst,
+        None if whole_buffer else _region(src, [2, 16], [1, 8]),
+        None if whole_buffer else _region(dst, [2, 16], [2, 16]),
+    )
+    (copy,) = calls(after, "tl.ascend_copy_ubuf_to_gm" if store else "tl.ascend_copy_gm_to_ubuf")
+    dst_ptr, src_ptr = copy.args[:2]
+    assert src_ptr.args[1].same_as(src.data)
+    assert dst_ptr.args[1].same_as(dst.data)
+    _equal(
+        [src_ptr.args[2], dst_ptr.args[2]],
+        [src_offset, dst_offset] if whole_buffer else [src_offset + 88, dst_offset + 208],
+    )
+    indices = (3, 4, 7, 6) if store else (3, 4, 9, 10)
+    _equal([copy.args[i] for i in indices], [1, 256, 256, 256] if whole_buffer else [2, 64, 320, 384])
+
+
 @pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
 @pytest.mark.parametrize("cols", [3, 4], ids=["partial-byte", "whole-byte"])
 def test_packed_fp4_rows_require_whole_bytes(store, cols):
