@@ -168,6 +168,80 @@ def test_silent_when_shared_buffer_is_copied_first(capfd):
     assert MESSAGE not in _verify(kernel, capfd)
 
 
+@pytest.mark.parametrize("op", ["any", "all"])
+@pytest.mark.parametrize("scope", ["local", "shared"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_logical_access_ptr_checks_initialization(capfd, op, scope, initialized):
+    """The read-only pointer in any_of/all_of reads the underlying buffer."""
+
+    @T.prim_func
+    def kernel(C: T.Tensor((1,), torch.int32)):
+        with T.Kernel(1, threads=64) as _:
+            mask = T.alloc_buffer((BC,), "bool", scope=scope)
+            if initialized:
+                T.clear(mask)
+            if op == "any":
+                if T.any_of(mask):
+                    C[0] = 1
+            else:
+                if T.all_of(mask):
+                    C[0] = 1
+
+    assert (MESSAGE in _verify(kernel, capfd)) is not initialized
+
+
+@pytest.mark.parametrize("scope", ["local", "shared"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_atomic_access_ptr_checks_read_before_write(capfd, scope, initialized):
+    """Atomic add reads the old destination even though its pointer also writes."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((BC,), torch.float32), C: T.Tensor((BC,), torch.float32)):
+        with T.Kernel(1, threads=64) as _:
+            acc = T.alloc_buffer((BC,), "float32", scope=scope)
+            if initialized:
+                T.clear(acc)
+            for i in T.Parallel(BC):
+                T.atomic_add(acc[i], A[i])
+            T.copy(acc, C)
+
+    assert (MESSAGE in _verify(kernel, capfd)) is not initialized
+
+
+def test_write_only_access_ptr_does_not_read(capfd):
+    """Taking a write-only pointer to a buffer does not read stale contents."""
+
+    @T.prim_func
+    def kernel(C: T.Tensor((BC,), torch.float32)):
+        with T.Kernel(1, threads=64) as _:
+            shared = T.alloc_shared((BC,), torch.float32)
+            T.call_extern("handle", "fill_it", T.access_ptr(shared[0], "w", BC))
+            T.copy(shared, C)
+
+    assert MESSAGE not in _verify(kernel, capfd)
+
+
+@pytest.mark.parametrize("op", ["any", "atomic_add"])
+@pytest.mark.parametrize("initialized", [False, True])
+def test_shared_store_with_pointer_read_checks_initialization(capfd, op, initialized):
+    """Neither the enclosing store nor its atomic RHS initializes the old value."""
+    dtype = "bool" if op == "any" else "float32"
+
+    @T.prim_func
+    def kernel(C: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=64) as _:
+            acc = T.alloc_shared((1,), dtype)
+            if initialized:
+                T.clear(acc)
+            if op == "any":
+                acc[0] = T.any_of(acc)
+            else:
+                acc[0] = T.atomic_add(acc[0], T.float32(1), return_prev=True)
+            C[0] = acc[0]
+
+    assert (MESSAGE in _verify(kernel, capfd)) is not initialized
+
+
 def test_reports_an_uninitialized_local_buffer(capfd):
     """Register-scope buffers are covered too, not just shared memory."""
 
