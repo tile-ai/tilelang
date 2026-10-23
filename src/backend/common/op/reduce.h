@@ -198,7 +198,9 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto bits = dst_dtype.bits();
 
   PrimExpr scalar;
-  if (op.type->IsSum() || op.type->IsAbsSum()) {
+  if (op.type->IsLogical()) {
+    scalar = make_const(DataType::Int(32), op.type->IsAll() ? 1 : 0);
+  } else if (op.type->IsSum() || op.type->IsAbsSum()) {
     scalar = make_zero(op.dst->dtype);
   } else if (op.type->IsMax()) {
     if (is_int) {
@@ -246,6 +248,18 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
   }
 
   PrimExpr rhs = b;
+  if (op.type->IsLogical()) {
+    // Compare before narrowing: casting 2 to a one-bit value is not truth
+    // conversion, and floating-point NaNs must remain true.
+    PrimExpr predicate = b != make_zero(b.dtype());
+    if (b.dtype().is_float16() || b.dtype().is_bfloat16()) {
+      // Some device half != operators use an ordered comparison. Include NaN
+      // explicitly so truth conversion agrees with the floating-point contract.
+      predicate = predicate || isnan(Cast(DataType::Float(32), b));
+    }
+    rhs = Cast(acc.dtype(), predicate);
+    return op.type->IsAny() ? bitwise_or(acc, rhs) : bitwise_and(acc, rhs);
+  }
   if (acc->dtype != rhs->dtype) {
     rhs = Cast(acc->dtype, rhs);
   }
@@ -313,9 +327,9 @@ inline std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
       return use_nan_op ? "tl::MinOpNan" : "tl::MinOp";
     if (op.type->IsAbsMax())
       return use_nan_op ? "tl::MaxOpNan" : "tl::MaxOp";
-    if (op.type->IsBitAnd())
+    if (op.type->IsBitAnd() || op.type->IsAll())
       return "tl::BitAndOp";
-    if (op.type->IsBitOr())
+    if (op.type->IsBitOr() || op.type->IsAny())
       return "tl::BitOrOp";
     if (op.type->IsBitXor())
       return "tl::BitXorOp";
@@ -596,6 +610,14 @@ MakeReduceOwnershipPlan(const Array<PrimExpr> &src_indices,
 
 inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
                            PrimExpr src_val) {
+  if (op.type->IsLogical()) {
+    PrimExpr value = src_val != make_zero(src_val.dtype());
+    if (op.clear) {
+      return value;
+    }
+    return op.type->IsAny() ? PrimExpr(Or(dst_val, value))
+                            : PrimExpr(And(dst_val, value));
+  }
   const bool use_nan_op = op.nan_propagate && (dst_val.dtype().is_float16() ||
                                                dst_val.dtype().is_bfloat16());
   if (op.type->IsSum() || op.type->IsAbsSum()) {
@@ -620,6 +642,11 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  static std::optional<std::string> MakeCodegenReducer(const ReduceOpNode &op,
+                                                       Target, int vsize = 1) {
+    return reduce::MakeCodegenReducer(op, vsize);
+  }
+
   static void CheckAllReduceWidth(int reducing_threads, int scale,
                                   const char *op_name, Target) {
     reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
@@ -753,9 +780,11 @@ template <typename Impl> struct ReduceLowerer {
     if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
       auto src_buffer = get_buffer(op.src);
       auto dst_buffer = get_buffer(op.dst);
-      auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
+      auto src_layout = op.NormalizeSourceLayoutForReduction(
+          lower_args.layout_map[op.src].as<Fragment>().value(), analyzer);
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = ComputeReducerLayout(src_layout, op.dim);
+      int reduce_dim = op.ReductionDim();
+      auto red_layout = ComputeReducerLayout(src_layout, reduce_dim);
       // Lower in the canonical reduced shape while preserving the destination's
       // physical register indices, replication, and participating thread range.
       dst_layout = Downcast<Fragment>(
@@ -783,9 +812,9 @@ template <typename Impl> struct ReduceLowerer {
       if (!is_1d_reduce) {
         src_vars = dst_vars;
       }
-      Range reduce_dom(0, src_layout->InputShape()[op.dim]);
+      Range reduce_dom(0, src_layout->InputShape()[reduce_dim]);
       IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
-      src_vars.insert(src_vars.begin() + op.dim, reduce_iv);
+      src_vars.insert(src_vars.begin() + reduce_dim, reduce_iv);
 
       auto src_indices = src_layout->Forward(
           src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
@@ -796,14 +825,15 @@ template <typename Impl> struct ReduceLowerer {
       auto src_thread = src_layout->ForwardThread(
           src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
 
-      auto reduce_plan = reduce::MakeReduceOwnershipPlan(
-          src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
+      auto reduce_plan =
+          reduce::MakeReduceOwnershipPlan(src_indices, src_thread, src_vars,
+                                          src_vars[reduce_dim]->var, analyzer);
 
       Array<Stmt> stmts;
 
       auto require_init = op.clear;
       if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
-          op.type->IsBitOr() || op.type->IsBitXor()) {
+          op.type->IsBitOr() || op.type->IsBitXor() || op.type->IsLogical()) {
         require_init = true;
       }
 
@@ -830,13 +860,21 @@ template <typename Impl> struct ReduceLowerer {
                               red_layout->ReplicateExtent())) {
         need_duplicate = true;
       }
+      if (op.type->IsLogical()) {
+        // Keep predicate communication in int32 while the public destination
+        // remains bool. The final update converts back and applies clear=False.
+        need_duplicate = true;
+        need_update = true;
+      }
       ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
                                  red_layout->ReplicateExtent()))
           << "Inconsistent layouts between src and dst in ReduceOp: "
           << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
       if (need_duplicate) {
-        clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
+        DataType accumulator_dtype =
+            op.type->IsLogical() ? DataType::Int(32) : dst_buffer->dtype;
+        clear_buffer = decl_buffer(red_layout->OutputShape(), accumulator_dtype,
                                    dst_buffer->name + "_clear",
                                    GetPtrStorageScope(dst_buffer->data));
       }
@@ -1013,7 +1051,8 @@ template <typename Impl> struct ReduceLowerer {
               reduce::MakeCodegenReducer(op, vsize).has_value();
           int eff_batch = can_batch_pack ? (batch / vsize) : batch;
           std::string reducer =
-              reduce::MakeCodegenReducer(op, can_batch_pack ? vsize : 1)
+              Impl::MakeCodegenReducer(op, lower_args.target,
+                                       can_batch_pack ? vsize : 1)
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
@@ -1207,8 +1246,9 @@ template <typename Impl> struct ReduceLowerer {
           all_threads = thread_range->extent;
         }
         std::string allreduce = Impl::MakeScalarAllReduce(
-            reduce::MakeCodegenReducer(op).value(), reducing_threads,
-            thread_step.scale, thread_offset, all_threads, lower_args.target);
+            Impl::MakeCodegenReducer(op, lower_args.target).value(),
+            reducing_threads, thread_step.scale, thread_offset, all_threads,
+            lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
         if (Impl::AllReduceNeedsWorkspace(reducing_threads, thread_step.scale,

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 from typing import Literal
-from tvm import tirx
-from tilelang.language.common import copy, macro, alloc_fragment, evaluate
+from tvm import arith, tirx
+from tilelang import _ffi_api
+from tilelang.language.common import copy, macro, alloc_fragment, evaluate, fill
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment, is_local
+from tilelang._typing import BufferLikeType
 from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
@@ -18,7 +20,7 @@ def _legalize_dim(buffer: tirx.Buffer, dim: int):
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
 
-ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
+ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor", "any", "all"]
 
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
@@ -26,7 +28,7 @@ def reduce(
     buffer: tirx.Buffer,
     out: tirx.Buffer,
     reduce_type: ReduceKind,
-    dim: int,
+    dim: int | None,
     clear: bool,
     batch: int = 1,
     annotations: dict | None = None,
@@ -55,46 +57,47 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    out_region = to_buffer_region(out)
-    out_buffer = out_region.buffer
-    if reduce_type in ("bitand", "bitor", "bitxor"):
-        # Both faces must be integral: a float source would otherwise be silently
-        # value-cast to an integer before the bitwise reduction runs.
-        buf_dtype = _get_buffer(buffer).dtype
-        if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
-    # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-    buf_shape = retrieve_shape(buffer)
-    out_shape = retrieve_shape(out_region)
-    expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
-    if list(out_shape) not in expected_shapes:
-        expected_shapes_str = " or ".join(map(str, expected_shapes))
-        raise ValueError(
-            f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
-            f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
-        )
-
     annotations = _normalize_annotations(annotations)
     if batch > 1:
         annotations["batch"] = batch
+    out_region = to_buffer_region(out)
+    out_buffer = out_region.buffer
+    if reduce_type in ("any", "all"):
+        if dim is not None:
+            if not isinstance(dim, int) or isinstance(dim, bool):
+                raise TypeError(f"reduce_{reduce_type} dim must be an integer or None, got {dim}")
+            dim = _legalize_dim(buffer, dim)
+            # -1 is reserved for whole-region reductions in the native op.
+            if dim < 0:
+                raise ValueError(f"reduce_{reduce_type} axis is out of range for input rank {len(retrieve_shape(buffer))}")
+        else:
+            dim = -1
+
+    # Validate every reduction through the native constructor before shared
+    # operands are staged or an empty logical reduction is folded away.
+    call = tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get(_REDUCE_OP_KEY),
+        to_tile_region(buffer, access_type="r"),
+        to_tile_region(out_region, access_type="w" if clear else "rw"),
+        reduce_type,
+        dim,
+        clear,
+        annotations=annotations,
+    )
+    _ffi_api.ReduceOp(call.args, call.annotations)
+
+    if reduce_type in ("any", "all"):
+        analyzer = arith.Analyzer()
+        if any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(buffer)):
+            if clear and not any(analyzer.can_prove(extent == 0) for extent in retrieve_shape(out_region)):
+                evaluate(fill(out, tirx.const(reduce_type == "all", "bool")))
+            return
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.
     if is_local(buffer) and out_buffer.scope() in ("local", "local.var"):
-        return evaluate(
-            tirx.call_intrin(
-                "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
-                to_tile_region(buffer, access_type="r"),
-                to_tile_region(out_buffer, access_type="w"),
-                reduce_type,
-                dim,
-                clear,
-                annotations=annotations,
-            )
-        )
+        return evaluate(call)
 
     @macro
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
@@ -177,6 +180,38 @@ def reduce(
             raise ValueError(f"Invalid buffer scopes: {buf_scope} and {out_scope}")
 
     reduce_macro(buffer, out, reduce_type, dim, clear)
+
+
+def reduce_any(
+    buffer: BufferLikeType, out: BufferLikeType, dim: int | None = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
+    """Reduce ``element != 0`` with logical OR into a bool output buffer.
+
+    Input and output must be full fragment buffers or shared buffers/rectangular
+    regions with static extents. ``dim`` defaults to the last axis; ``None``
+    reduces the whole region into an output of shape ``(1,)``. Axis reductions
+    accept either a removed axis or an extent-one axis in the output, using
+    ``(1,)`` for a one-dimensional input. Fragment subregions are not yet supported.
+
+    The identity, including for an empty region, is false. With ``clear=False``,
+    OR the result with the initialized output. Input and output must not overlap.
+    Floating-point NaNs are true; both signs of zero are false. ``batch`` and
+    ``annotations`` have the same meaning as in the other reduction APIs.
+    """
+    reduce(buffer, out, "any", dim, clear, batch=batch, annotations=annotations)
+
+
+def reduce_all(
+    buffer: BufferLikeType, out: BufferLikeType, dim: int | None = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+) -> None:
+    """Reduce ``element != 0`` with logical AND into a bool output buffer.
+
+    The shape, scope, dtype, and option contracts match :func:`reduce_any`.
+    The identity, including for an empty region, is true. With ``clear=False``,
+    AND the result with the initialized output. The complete logical region is
+    reduced, including elements distributed across fragment owners.
+    """
+    reduce(buffer, out, "all", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_max(

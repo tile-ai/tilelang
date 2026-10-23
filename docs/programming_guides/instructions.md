@@ -110,8 +110,45 @@ GEMM and sparse GEMM
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
   reducers (`T.warp_reduce_sum`, etc.).
+- `T.reduce_any` and `T.reduce_all`: logical OR/AND reductions into boolean
+  shared or fragment destinations.
 - Allocate and initialize accumulators via `T.alloc_fragment` + `T.clear` or
   `T.fill`.
+
+Logical reductions accept shared (`shared` or `shared.dyn`) and full fragment
+inputs. Shared operands also support rectangular subregions. Each boolean,
+integer, or floating-point element contributes `element != 0`: NaNs are true,
+and both signs of zero are false. Supported floating-point inputs are `float16`,
+`bfloat16`, `float32`, and `float64`. The output dtype must be `bool`.
+`T.reduce_bitor` and `T.reduce_bitand` instead combine the bits of integer values
+without this truth conversion.
+
+```python
+values = T.alloc_fragment((16, 64), "float32")
+row_any = T.alloc_fragment((16,), "bool")
+tile_all = T.alloc_fragment((1,), "bool")
+T.copy(A, values)
+T.reduce_any(values, row_any, dim=1)
+T.reduce_all(values, tile_all, dim=None)
+```
+
+The default `dim=-1` reduces the last axis; other negative axes are normalized
+in the same way as existing reductions. Axis reductions accept an output with
+the axis removed or retained at extent one, using `(1,)` for a one-dimensional
+input. `dim=None` reduces the whole logical region to an output of shape `(1,)`,
+across all participating fragment owners.
+Shared-memory swizzles and fragment layouts preserve logical region indexing.
+
+With the default `clear=True`, any starts from false and all starts from true;
+these are also their results for an empty reduction domain. With `clear=False`,
+the destination must already be initialized: any ORs with it, and all ANDs with
+it. An empty domain then leaves it unchanged. Input and output regions must not
+overlap. Region extents currently must be static; shared-region offsets may be
+symbolic. Fragment subregions are not yet supported; copy the full fragment to
+shared memory before selecting a subregion.
+For a partially populated tile, initialize unused elements to the corresponding
+identity. Direct local/global inputs and outputs are unsupported; use `T.copy`
+to stage global data through shared or fragment buffers.
 
 Elementwise math
 - Most math ops mirror TVM TIR: `T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`,
@@ -188,6 +225,7 @@ Compute primitives
   target‑selected instruction; explicit `T.tcgen05_gemm_blockscaled` /
   `T.mma_gemm_blockscaled`.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
+- Logical reductions: `T.reduce_any/all`, with boolean outputs.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).

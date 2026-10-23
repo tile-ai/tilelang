@@ -47,8 +47,8 @@ def run_single_bitwise_reduce(
     a,
     clear=True,
 ):
-    M, N = 32, 32
-    block_M, block_N = 32, 32
+    M, N = a.shape
+    block_M, block_N = M, N
     kernel = bitwise_reduce(M, N, block_M, block_N, name, func, clear)
 
     if name == "reduce_bitand":
@@ -92,9 +92,9 @@ def reference_bitwise_reduce(name, a):
     return reduced[:, 0]
 
 
-@pytest.fixture(scope="module")
-def bitwise_reduce_input():
-    M, N = 32, 32
+@pytest.fixture(scope="module", params=[(32, 32), (4, 128)], ids=["subwarp", "full-warp"])
+def bitwise_reduce_input(request):
+    M, N = request.param
     rows = torch.arange(M, dtype=torch.int32)[:, None]
     cols = torch.arange(N, dtype=torch.int32)[None, :]
 
