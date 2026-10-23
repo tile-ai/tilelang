@@ -34,6 +34,7 @@ def WarpSpecialize(*warp_group_idx) -> WarpSpecializeFrame:
         >>> T.ws(0) -> if tx < 128
         >>> T.ws(1) -> if tx >= 128 and tx < 256
         >>> T.ws(0, 1) -> if tx < 128 or (tx >= 128 and tx < 256)
+        >>> T.ws(-1) -> runs on every thread, so no condition is emitted
     """
     id_x, id_y, id_z = get_thread_bindings()
     ex_x, ex_y, ex_z = get_thread_extents()
