@@ -134,6 +134,15 @@ anylist_setitem_call_cpacked = _tvm_op.anylist_setitem_call_cpacked
 vscale = _tvm_op.vscale
 
 
+def mulhi(a: PrimExpr, b: PrimExpr, span: Span | None = None) -> PrimExpr:
+    """Return the high half of the product of matching uint32 or uint64 operands."""
+    a, b = tvm.tirx.convert(a), tvm.tirx.convert(b)
+    dtype = tvm.DataType(a.dtype)
+    if a.dtype != b.dtype or dtype.type_code != tvm.DataTypeCode.UINT or dtype.bits not in (32, 64) or dtype.lanes != 1:
+        raise TypeError("mulhi requires matching uint32 or uint64 operands")
+    return call_intrin(a.dtype, "tirx.mulhi", a, b, span=span)
+
+
 def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None) -> PrimExpr:
     """Extract one scalar lane from a fixed-width vector expression.
 

@@ -1776,6 +1776,15 @@ bool CodeGenTileLangAscend::EmitAscendMemoryCall_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
+  if (op->op.same_as(Op::Get("tirx.mulhi"))) {
+    const DataType dtype = op->dtype;
+    const char *name = IsInsideSimtVF()
+                           ? (dtype.bits() == 64 ? "__umul64hi" : "__umulhi")
+                           : "tl::scalar_mulhi";
+    os << name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   std::string simd_op_name;
   if (IsSimdOp(op, &simd_op_name)) {
     if (!IsInsideSimdVF()) {

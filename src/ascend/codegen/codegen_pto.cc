@@ -4709,6 +4709,21 @@ std::string CodeGenTileLangPTO::EmitAllReduceExpr_(const std::string &func_name,
 
 void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  if (op->op.same_as(Op::Get("tirx.mulhi"))) {
+    const DataType dtype = op->dtype;
+    if (inside_simtvf_body_) {
+      // PTO mulhi takes signless carriers and explicit arithmetic signedness.
+      const char *carrier = dtype.bits() == 64 ? "pto.i64" : "pto.i32";
+      os << "pto.cast(pto.mulhi(pto.cast(" << PrintExpr_(op->args[0]) << ", "
+         << carrier << "), pto.cast(" << PrintExpr_(op->args[1]) << ", "
+         << carrier << "), signedness=\"unsigned\"), " << DataTypeName(dtype)
+         << ")";
+    } else {
+      os << "tl.scalar_mulhi(" << PrintExpr_(op->args[0]) << ", "
+         << PrintExpr_(op->args[1]) << ", " << dtype.bits() << ")";
+    }
+    return;
+  }
   if (EmitSimdMergingCall_(op, os)) {
     return;
   }
