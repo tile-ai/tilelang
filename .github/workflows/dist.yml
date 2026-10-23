@@ -21,10 +21,6 @@ on:
       - .github/workflows/dist.yml
       # Exercised by the GPU wheel-test job below.
       - maint/scripts/smoke_test_wheel.py
-      # Exercised by the Windows CPU JIT wheel tests below.
-      - tilelang/jit/adapter/libgen.py
-      - tilelang/jit/adapter/wrapper.py
-      - testing/python/target/test_tilelang_codegen_clamp.py
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
