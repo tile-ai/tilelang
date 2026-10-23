@@ -337,9 +337,11 @@ jobs:
           Remove-Item Env:CXX, Env:CC -ErrorAction SilentlyContinue
           $cpuTestDir = Join-Path $env:RUNNER_TEMP "tilelang-cpu-wheel-tests"
           New-Item -ItemType Directory -Force $cpuTestDir | Out-Null
-          # Copy the test outside the checkout so testing/conftest.py cannot
+          # Copy CPU tests outside the checkout so testing/conftest.py cannot
           # prepend the source tree and hide a broken wheel installation.
-          Copy-Item testing/python/target/test_tilelang_codegen_clamp.py $cpuTestDir
+          foreach ($test in @("test_tilelang_cpu_fp16_const.py", "test_tilelang_cpu_vec_type.py", "test_tilelang_cpu_atomic.py")) {
+            Copy-Item (Join-Path "testing/python/cpu" $test) $cpuTestDir
+          }
           Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
             $wheel = $_.FullName
             Write-Host "Testing wheel: $wheel"
@@ -353,21 +355,33 @@ jobs:
             $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
 
             uv pip install -v --python $python $wheel pytest
+            $originalCacheDir = $env:TILELANG_CACHE_DIR
+            $wheelCacheDir = Join-Path $env:RUNNER_TEMP ("tilelang-cpu-wheel-cache-" + [guid]::NewGuid().ToString("N"))
             Push-Location $cpuTestDir
             try {
               & $python -c "import sys, tilelang; from pathlib import Path; print(tilelang.__version__, tilelang.__file__); assert Path(tilelang.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())"
               foreach ($disableClang in @("0", "1")) {
                 $env:TILELANG_DISABLE_CLANG_CL = $disableClang
                 $expectedCompiler = if ($disableClang -eq "0") { "clang-cl" } else { "cl" }
+                # Each wheel/compiler pair must compile its own kernels rather
+                # than loading the other compiler's binaries from disk cache.
+                $env:TILELANG_CACHE_DIR = Join-Path $wheelCacheDir $expectedCompiler
                 # Do not let the clang-cl run silently fall back to cl.exe.
                 & $python -c "import sys; from pathlib import Path; from tilelang.contrib.cc import get_cplus_compiler; compiler = get_cplus_compiler(); print('CPU JIT compiler:', compiler); assert compiler and Path(compiler).stem.lower() == sys.argv[1], compiler" $expectedCompiler
                 & $python -m pytest -q `
-                  test_tilelang_codegen_clamp.py::test_clamp_cpu_templates `
-                  test_tilelang_codegen_clamp.py::test_clamp_cpu_single_evaluation
+                  test_tilelang_cpu_fp16_const.py::test_fp16_finite_constant_arithmetic `
+                  test_tilelang_cpu_fp16_const.py::test_float32_finite_constant_sanity `
+                  test_tilelang_cpu_vec_type.py::test_vec_type_arith_compiles_and_executes_on_cpu `
+                  test_tilelang_cpu_atomic.py::test_cpu_atomic_multiple_return_prev_one_statement
               }
             } finally {
               Pop-Location
               Remove-Item Env:TILELANG_DISABLE_CLANG_CL -ErrorAction SilentlyContinue
+              if ($null -eq $originalCacheDir) {
+                Remove-Item Env:TILELANG_CACHE_DIR -ErrorAction SilentlyContinue
+              } else {
+                $env:TILELANG_CACHE_DIR = $originalCacheDir
+              }
             }
             Remove-Item -Recurse -Force test-venv
           }
