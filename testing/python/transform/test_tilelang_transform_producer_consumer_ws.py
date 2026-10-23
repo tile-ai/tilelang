@@ -915,6 +915,149 @@ def test_tiled_ws_wide_linear_smem_three_stages():
     _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
 
 
+def _fragment_a_gemm_with_row_bias(M, N, K, block_M, block_N, block_K, num_stages, bias_words=2, threads=128):
+    """Pipelined GEMM with A read through a register fragment, plus a per-row
+    bias tile of `bias_words` float32 per row that the epilogue reads after the
+    GEMM. With 8-byte rows the bias copy is not TMA-eligible, so warp
+    specialization moves it into the A group's producer prefix."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((N, K), T.float16),
+        S: T.Tensor((M, (K // block_K) * bias_words), T.float32),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), T.float16)
+            B_shared = T.alloc_shared((block_N, block_K), T.float16)
+            S_shared = T.alloc_shared((block_M, bias_words), T.float32)
+            A_frag = T.alloc_fragment((block_M, block_K), T.float16)
+            C_frag = T.alloc_fragment((block_M, block_N), T.float32)
+            T.clear(C_frag)
+            for ko in T.Pipelined(K // block_K, num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                T.copy(S[by * block_M, ko * bias_words], S_shared)
+                for i, k in T.Parallel(block_M, block_K):
+                    A_frag[i, k] = A_shared[i, k]
+                T.gemm(A_frag, B_shared, C_frag, transpose_B=True)
+                for i, j in T.Parallel(block_M, block_N):
+                    C_frag[i, j] += S_shared[i, 0]
+            T.copy(C_frag, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_release_covers_moved_non_tma_copy():
+    """A non-TMA shared copy moved into a TMA group's producer prefix is
+    written under that group's back-pressure barrier, so the group's consumer
+    release must follow the last read of the moved buffer. Before the fix the
+    A group released the stage right after `A_frag = A_shared`, and the
+    producer overwrote `S_shared` while the epilogue still read it."""
+    import torch
+
+    M, N, K, block_K, bias_words = 256, 256, 1024, 64, 2
+    func = _fragment_a_gemm_with_row_bias(M, N, K, 128, 128, block_K, num_stages=2, bias_words=bias_words)
+    kernel = tilelang.compile(func, target=determine_target(), out_idx=[3])
+    src = kernel.get_kernel_source()
+    consumer = src[src.index("} else {") :]
+    assert consumer.rindex("S_shared)[") < consumer.rindex("].arrive();")
+
+    # Small integers keep the float32 reference exact.
+    A = torch.randint(-2, 3, (M, K), device="cuda").half()
+    B = torch.randint(-2, 3, (N, K), device="cuda").half()
+    S = torch.randint(-64, 64, (M, (K // block_K) * bias_words), device="cuda").float()
+    C = kernel(A, B, S)
+    ref = A.float() @ B.float().T + S[:, 0::bias_words].sum(1, keepdim=True)
+    torch.testing.assert_close(C, ref, rtol=0, atol=0)
+
+
+def _fragment_a_blockscaled_gemm(M, N, K, block_M, block_N, block_K, num_stages, threads=128):
+    """SM120 NVFP4 block-scaled GEMM with A in a fragment and row-major packed
+    scales; `block_K=128` gives 8-byte scale rows that cannot use TMA."""
+    words = block_K // 64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float4_e2m1fn),
+        B: T.Tensor((N, K), T.float4_e2m1fn),
+        SFA: T.Tensor((M, K // 64), T.uint32),
+        SFB: T.Tensor((N, K // 64), T.uint32),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), T.float4_e2m1fn)
+            B_shared = T.alloc_shared((block_N, block_K), T.float4_e2m1fn)
+            SFA_shared = T.alloc_shared((block_M, words), T.uint32)
+            SFB_shared = T.alloc_shared((block_N, words), T.uint32)
+            A_frag = T.alloc_fragment((block_M, block_K), T.float4_e2m1fn)
+            C_frag = T.alloc_fragment((block_M, block_N), T.float32)
+            T.clear(C_frag)
+            for ko in T.Pipelined(K // block_K, num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                T.copy(SFA[by * block_M, ko * words], SFA_shared)
+                T.copy(SFB[bx * block_N, ko * words], SFB_shared)
+                for i, k in T.Parallel(block_M, block_K):
+                    A_frag[i, k] = A_shared[i, k]
+                T.gemm_blockscaled(
+                    A_frag,
+                    B_shared,
+                    C_frag,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    k_start=0,
+                    sf_a_granularity_k=16,
+                    sf_b_granularity_k=16,
+                    sf_layout="rowmajor",
+                )
+            T.copy(C_frag, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_tiled_ws_release_covers_moved_scale_copies_sm120_blockscaled():
+    """Same release bug through the SM120 block-scaled GEMM: the 8-byte-row
+    scale copies are moved into the A group's producer prefix and read by the
+    MMA after the A fragment copy."""
+    import torch
+
+    M, N, K = 256, 256, 1024
+    func = _fragment_a_blockscaled_gemm(M, N, K, 128, 128, 128, num_stages=2)
+    kernel = tilelang.compile(func, target=determine_target(), out_idx=[4])
+
+    fp4_values = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0], device="cuda")
+
+    def decode_fp4(packed):
+        u = packed.view(torch.uint8)
+        out = torch.empty((u.shape[0], u.shape[1] * 2), device="cuda")
+        out[:, 0::2] = fp4_values[(u & 15).long()]
+        out[:, 1::2] = fp4_values[(u >> 4).long()]
+        return out
+
+    def scales(rows):
+        # Power-of-two UE4M3 scales (0.5, 1, 2) keep the float32 reference exact.
+        raw = torch.tensor([0x30, 0x38, 0x40], device="cuda", dtype=torch.uint8)[torch.randint(0, 3, (rows, K // 16), device="cuda")]
+        b = raw.to(torch.int64).reshape(rows, -1, 4)
+        words = (b[..., 0] | (b[..., 1] << 8) | (b[..., 2] << 16) | (b[..., 3] << 24)).to(torch.uint32)
+        values = torch.pow(2.0, ((raw.int() >> 3) & 15).float() - 7.0).repeat_interleave(16, 1)
+        return words.contiguous(), values
+
+    A = torch.randint(-128, 128, (M, K // 2), device="cuda", dtype=torch.int8)
+    B = torch.randint(-128, 128, (N, K // 2), device="cuda", dtype=torch.int8)
+    SFA, sfa = scales(M)
+    SFB, sfb = scales(N)
+    C = kernel(A, B, SFA, SFB)
+    ref = (decode_fp4(A) * sfa) @ (decode_fp4(B) * sfb).T
+    torch.testing.assert_close(C, ref, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     test_tiled_ws_skips_device_bound_tma_descriptor_base()
     test_tiled_ws_places_producer_in_first_warp_group()
@@ -933,3 +1076,4 @@ if __name__ == "__main__":
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()
+    test_tiled_ws_release_covers_moved_non_tma_copy()
