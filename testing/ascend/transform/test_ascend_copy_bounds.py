@@ -188,3 +188,24 @@ def test_mx_padding_rejects_an_incomplete_physical_scale_group():
     before, _ = _mx_operand_copy("k-contiguous", 96, k_alloc=96)
     with pytest.raises(tvm.error.InternalError, match="divisible by 64"):
         transform.AscendInsertOOBPadding()(before)
+
+
+@pytest.mark.parametrize("batch_begin", [0, 2, 3, 5])
+def test_batch_tail_fill_region(batch_begin):
+    before = _copy_module((3, 16, 32), (5, 16, 32), [batch_begin, 0, 0], [4, 16, 32], dst_min=[1, 0, 0], dst_extent=[4, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    valid_batches = max(3 - batch_begin, 0)
+    assert int(copy.args[0].args[2]) == valid_batches
+    assert int(copy.args[1].args[2]) == valid_batches
+    (fill,) = calls(after, "tl.tileop.fill")
+    assert [int(x) for x in fill.args[0].args[2:]] == [1, 16, 32]
+    loops = nodes(after, tirx.For)
+    first_batch = fill.args[0].args[0].indices[0]
+    if 4 - valid_batches > 1:
+        (loop,) = loops
+        assert int(loop.extent) == 4 - valid_batches
+        first_batch = tirx.stmt_functor.substitute(first_batch, {loop.loop_var: 0})
+    else:
+        assert not loops
+    assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches

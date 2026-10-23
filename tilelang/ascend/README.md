@@ -202,10 +202,12 @@ With the Ascend C target, `T.copy` can transfer a three-dimensional
 The source batch and row strides are preserved; destination batches are spaced
 by the complete physical matrix footprint, including layout padding.
 
-Source and destination batch counts must match, and the batch ranges must be
-provably in bounds. Matrix tails use the existing OOB clipping and L1 padding;
-padding is emitted separately for each batch. The destination must use a
-canonical matrix layout. This batched path is not supported by the PTO target.
+Requested source and destination batch counts must match. The source batch
+origin must be nonnegative; a source batch tail beyond the GM tensor is clipped
+and the corresponding destination matrices are filled with zero. The destination batch range must remain provably in bounds.
+Matrix tails use the existing OOB clipping and L1 padding; padding is emitted
+separately for each batch. The destination must use a canonical matrix layout.
+This batched path is not supported by the PTO target.
 
 ## Examples
 

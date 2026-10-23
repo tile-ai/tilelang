@@ -95,21 +95,19 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   std::vector<size_t> src_singleton_axes, dst_singleton_axes;
 
   if (dma_path == DMAPath::kGMToL1) {
-    bool batched =
-        op.src_range.size() == 3 && op.dst_range.size() == 3 &&
-        !analyzer->CanProveEqual(op.src_range[0]->extent, Integer(1));
+    bool batched = op.src_range.size() == 3 && op.dst_range.size() == 3;
     if (batched) {
       ICHECK(analyzer->CanProveEqual(op.src_range[0]->extent,
                                      op.dst_range[0]->extent))
           << "Batched GM->L1 copy requires matching batch counts.";
-      for (const auto &[buffer, range] :
-           {std::make_pair(op.src, op.src_range[0]),
-            std::make_pair(op.dst, op.dst_range[0])}) {
-        ICHECK(
-            analyzer->CanProve(range->min >= 0) &&
-            analyzer->CanProve(range->min + range->extent <= buffer->shape[0]))
-            << "Batched GM->L1 copy requires an in-bounds batch axis.";
-      }
+      ICHECK(analyzer->CanProve(op.src_range[0]->min >= 0))
+          << "Batched GM->L1 copy requires a nonnegative source batch origin.";
+      ICHECK(
+          analyzer->CanProve(op.dst_range[0]->min >= 0) &&
+          analyzer->CanProve(op.dst_range[0]->min + op.dst_range[0]->extent <=
+                             op.dst->shape[0]))
+          << "Batched GM->L1 copy requires an in-bounds destination batch "
+             "axis.";
     }
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling", batched);
@@ -138,6 +136,10 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     dst_singleton_axes =
         collect_other_axes(op.dst_range.size(), dst_row_axis, dst_inner_axis);
     if (batched) {
+      // Clamp the batch tail just like the matrix axes. Zero valid batches
+      // suppress the DMA; the padding pass still fills the missing matrices.
+      src_axes.push_back(0);
+      dst_axes.push_back(0);
       src_singleton_axes.clear();
       dst_singleton_axes.clear();
     }
