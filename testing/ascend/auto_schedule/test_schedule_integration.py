@@ -131,7 +131,7 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer"):
+            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer", "tl.AscendLowerTileOp"):
                 snapshots[info.name] = mod
 
     with tvm.transform.PassContext(instruments=[Capture()]):
@@ -145,6 +145,12 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     assert all(loop.annotations["tl.multi_buffer_counter_map"][b.data].same_as(counters[0]) for loop in owners)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     assert int(allocated_buffer(materialized, "l0a").shape[0]) == 2
+    lowered = tilelang.transform.LowerAccessPtr()(snapshots["tl.AscendLowerTileOp"])
+    physical_a = allocated_buffer(lowered, "l0a")
+    offsets = [call.args[2] for call in calls(lowered, "tirx.tvm_access_ptr") if call.args[1].same_as(physical_a.data)]
+    # Stale logical layout entries must not erase the automatic version axis
+    # while decoding flat DMA/MMAD pointers into physical fractal coordinates.
+    assert offsets and any(not tvm.arith.Analyzer().can_prove_equal(offset, 0) for offset in offsets)
     assert artifact.kernel_source and artifact.device_mod
 
 
@@ -548,6 +554,8 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     T.copy(ub, C[i, :, :])
                     progress += 1
 
+    # L0C copies attach frontend layout hints; scheduling consumes the
+    # normalized Buffer-keyed map produced by layout inference.
     resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
     assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)

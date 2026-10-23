@@ -42,8 +42,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
-def annotate_layout(layout_map: dict):
-    """Annotate the layout of the buffer."""
+def _normalize_layout_map(layout_map: dict):
     _layout_map = {}
     for buffer, layout in layout_map.items():
         if is_reducer(buffer):
@@ -57,13 +56,18 @@ def annotate_layout(layout_map: dict):
         elif is_fragment(buffer):
             assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
-            _layout_map[buffer.data] = layout
+            _layout_map[buffer] = layout
         elif isinstance(layout, Callable):
-            _layout_map[buffer.data] = Layout(buffer.shape, layout)
+            _layout_map[buffer] = Layout(buffer.shape, layout)
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return sblock_attr({"layout_map": _layout_map})
+    return _layout_map
+
+
+def annotate_layout(layout_map: dict):
+    """Annotate the layout of the buffer."""
+    return sblock_attr({"layout_map": {buffer.data: layout for buffer, layout in _normalize_layout_map(layout_map).items()}})
 
 
 def annotate_safe_value(safe_value_map: dict):

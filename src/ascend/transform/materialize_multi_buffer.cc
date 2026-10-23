@@ -354,30 +354,6 @@ Layout ExpandLayoutToBuffer(const Buffer &layout_buffer,
   return layout->Expand(leading_shape);
 }
 
-Layout FindLayoutForBuffer(const Map<Buffer, Layout> &layout_map,
-                           const Buffer &buffer) {
-  if (layout_map.count(buffer))
-    return layout_map[buffer];
-  for (const auto &[layout_buffer, layout] : layout_map) {
-    if (layout_buffer->data.same_as(buffer->data)) {
-      Layout expanded = ExpandLayoutToBuffer(layout_buffer, buffer, layout);
-      if (expanded.defined())
-        return expanded;
-    }
-  }
-  return Layout();
-}
-
-bool AddLayoutForBuffer(Map<Buffer, Layout> *layout_map, const Buffer &buffer) {
-  if (layout_map->count(buffer))
-    return false;
-  Layout layout = FindLayoutForBuffer(*layout_map, buffer);
-  if (!layout.defined())
-    return false;
-  layout_map->Set(buffer, layout);
-  return true;
-}
-
 class AllocationRewriter : public StmtMutator {
 public:
   explicit AllocationRewriter(VersionedBufferRegistry *buffers)
@@ -406,8 +382,16 @@ private:
     if (auto value = op->annotations.Get(attr::kLayoutMap)) {
       if (auto layout_map = value.value().as<Map<Buffer, Layout>>()) {
         Map<Buffer, Layout> rewritten_layouts = layout_map.value();
-        for (const Buffer &buffer : alloc_buffers)
-          layout_changed |= AddLayoutForBuffer(&rewritten_layouts, buffer);
+        // Expand each view from its own layout. Data-Var lookup is ambiguous
+        // when several canonical matrix views share a versioned allocation.
+        for (const auto &[buffer, layout] : layout_map.value()) {
+          Buffer expanded = buffers_->Resolve(buffer);
+          if (!expanded.same_as(buffer)) {
+            rewritten_layouts.Set(
+                expanded, ExpandLayoutToBuffer(buffer, expanded, layout));
+            layout_changed = true;
+          }
+        }
         if (layout_changed)
           annotations.Set(attr::kLayoutMap, rewritten_layouts);
       }

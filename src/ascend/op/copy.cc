@@ -423,11 +423,13 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
   Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
 
-  auto make_access_ptr = [&](const Buffer &buf, PrimExpr offset,
+  auto make_access_ptr = [&](const Buffer &buf, const Array<Range> &ranges,
                              PrimExpr extent, int rw_mask) -> PrimExpr {
-    return Call(
-        DataType::Handle(), builtin::tvm_access_ptr(),
-        {TypeAnnotation(buf->dtype), buf->data, offset, extent, I(rw_mask)});
+    Array<PrimExpr> indices;
+    for (const Range &range : ranges)
+      indices.push_back(range->min);
+    return Call(DataType::Handle(), tl::access_ptr(),
+                {BufferLoad(buf, indices), extent, I(rw_mask)});
   };
   auto region_elements = [&](const Array<Range> &ranges) {
     PrimExpr result = I(1);
@@ -442,10 +444,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       op.dst, dst_range, op.dst->dtype.bits() * op.dst->dtype.lanes());
   PrimExpr src_region_elements = region_elements(src_range);
   PrimExpr dst_region_elements = region_elements(dst_range);
-  PrimExpr src_ptr =
-      make_access_ptr(op.src, src_region.offset, src_region_elements, 1);
-  PrimExpr dst_ptr =
-      make_access_ptr(op.dst, dst_region.offset, dst_region_elements, 2);
+  PrimExpr src_ptr = make_access_ptr(op.src, src_range, src_region_elements, 1);
+  PrimExpr dst_ptr = make_access_ptr(op.dst, dst_range, dst_region_elements, 2);
 
   PrimExpr sid = I(0);
   PrimExpr zero = I(0);
@@ -464,9 +464,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
 
     PrimExpr plan_total_elems = plan.row_elems * plan.n_rows;
     PrimExpr plan_src_ptr =
-        make_access_ptr(op.src, plan.src_offset, plan_total_elems, 1);
+        make_access_ptr(op.src, src_range, plan_total_elems, 1);
     PrimExpr plan_dst_ptr =
-        make_access_ptr(op.dst, plan.dst_offset, plan_total_elems, 2);
+        make_access_ptr(op.dst, dst_range, plan_total_elems, 2);
     PrimExpr plan_total_bytes = plan_row_bytes * plan.n_rows;
 
     // Ascend GM->UB padding (data_select): an unaligned row is right-padded up

@@ -316,6 +316,11 @@ public:
       // Helper: propagate inferred layout to alias buffers (same data Var)
       auto propagate_alias = [&](const Buffer &src_buffer,
                                  const Layout &src_layout) {
+        // Fragment aliases participate in the thread-ownership solver.
+        // Memory layouts belong to individual views; fill missing layouts
+        // only after each view's own constraints have been inferred.
+        if (!src_layout.as<FragmentNode>())
+          return;
         if (!buffer_data_to_buffers_.count(src_buffer->data))
           return;
         const auto &siblings = buffer_data_to_buffers_[src_buffer->data];
@@ -623,45 +628,41 @@ public:
                      in_queue);
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-    // step 4: finalize alias layouts by Var
-    // For each storage var, if any buffer in the group has a layout,
-    // propagate (reshape if needed) to the rest to ensure completeness.
+    // step 4: fill unconstrained views only when all known interpretations of
+    // their storage agree. A shared data Var does not impose layout equality.
+    const LayoutMap inferred_layouts = layout_map;
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {
-      // Find a representative with existing layout
-      Optional<Buffer> rep;
-      Optional<Layout> rep_layout;
       for (const auto &buf : buffers) {
-        if (layout_map.count(buf)) {
-          rep = buf;
-          rep_layout = layout_map[buf];
-          break;
-        }
-      }
-      if (!rep_layout.defined())
-        continue;
-      for (const auto &buf : buffers) {
-        if (!layout_map.count(buf)) {
-          bool shapes_equal =
-              rep_layout.value()->InputShape().size() == buf->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
-                 ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
-                                           buf->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(
+        if (layout_map.count(buf))
+          continue;
+        Optional<Layout> inherited;
+        bool ambiguous = false;
+        for (const auto &source : buffers) {
+          Optional<Layout> known = inferred_layouts.Get(source);
+          if (!known.defined())
+            continue;
+          Layout candidate =
+              ShapesEqual(known.value()->InputShape(), buf->shape, &analyzer_)
+                  ? known.value()
+                  : known.value()->Reshape(
                         buf->shape, &analyzer_,
-                        Integer(GetElementStorageBits(rep.value()->dtype)),
+                        Integer(GetElementStorageBits(source->dtype)),
                         Integer(GetElementStorageBits(buf->dtype)));
-          layout_map.Set(buf, reshaped);
+          if (inherited.defined() &&
+              !inherited.value()->IsEqual(candidate.get())) {
+            ambiguous = true;
+            break;
+          }
+          inherited = candidate;
         }
+        ICHECK(!ambiguous || !accessed_buffers_.count(buf))
+            << "Ambiguous layout for buffer view " << buf->name << ": storage "
+            << var->name_hint
+            << " has distinct layouts. Annotate this view explicitly.";
+        // An unused backing Buffer only supplies allocation geometry. Any
+        // candidate suffices; storage normalization checks physical footprints.
+        if (inherited.defined())
+          layout_map.Set(buf, inherited.value());
       }
     }
 
@@ -869,6 +870,7 @@ private:
   }
 
   void addToUseList(const Buffer &buffer) {
+    accessed_buffers_.insert(buffer);
     // Fragment buffers and reducers (whose PartialFragment travels the same
     // use_list_ edges: commits notify users, shared buffers union free-mode
     // components) both register; anything else has no layout to solve.
@@ -1001,18 +1003,7 @@ private:
       // annotated layouts are available during InferLayout.
       // Must happen after visiting body so buffer_data_to_buffers_ is
       // populated.
-      if (pushed_region_scope && op->annotations.count(attr::kLayoutMap)) {
-        auto map = op->annotations.Get(attr::kLayoutMap)
-                       ->as<Map<Var, Layout>>()
-                       .value();
-        for (const auto &[var, layout] : map) {
-          if (buffer_data_to_buffers_.count(var)) {
-            for (const auto &buffer : buffer_data_to_buffers_[var]) {
-              annotated_layout_map_.Set(buffer, layout);
-            }
-          }
-        }
-      }
+      RecordLayoutAnnotations(GetRef<SBlock>(op));
       // Regions contribute nothing to the inference worklist themselves:
       // nested tile operators were already collected while visiting the
       // body, and the region block is consumed by codegen as-is.
@@ -1035,16 +1026,23 @@ private:
     // First, visit the block body to collect all buffers from
     // BufferLoad/BufferStore
     IRVisitorWithAnalyzer::VisitStmt_(op);
+    RecordLayoutAnnotations(GetRef<SBlock>(op));
+  }
 
+  void RecordLayoutAnnotations(const SBlock &block) {
     // After visiting, apply layouts to all collected buffers
-    if (op->annotations.count(attr::kLayoutMap)) {
-      // Check if the layout map is Map<Var, Layout>
-      auto map =
-          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
-      for (const auto &[var, layout] : map) {
+    if (block->annotations.count(attr::kLayoutMap)) {
+      auto map = block->annotations.Get(attr::kLayoutMap)
+                     ->cast<Map<ObjectRef, Layout>>();
+      for (const auto &[key, layout] : map) {
+        Optional<Buffer> annotated = key.as<Buffer>();
+        Var var =
+            annotated.defined() ? annotated.value()->data : Downcast<Var>(key);
         ICHECK(buffer_data_to_buffers_.count(var))
             << "buffer " << var << " is not found in the block";
-        const auto &buffers = buffer_data_to_buffers_[var];
+        Array<Buffer> buffers = annotated.defined()
+                                    ? Array<Buffer>{annotated.value()}
+                                    : buffer_data_to_buffers_[var];
         ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
         for (const auto &buffer : buffers) {
           if (!IsReducerV2Buffer(buffer)) {
@@ -1178,6 +1176,7 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
+    accessed_buffers_.insert(op->buffer);
     // Collect buffer from BufferLoad
     if (op->buffer.defined() && op->buffer->data.defined()) {
       if (buffer_data_to_buffers_.count(op->buffer->data)) {
@@ -1208,6 +1207,7 @@ private:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
+    accessed_buffers_.insert(op->buffer);
     // Collect buffer from BufferStore
     if (op->buffer.defined() && op->buffer->data.defined()) {
       if (buffer_data_to_buffers_.count(op->buffer->data)) {
@@ -1336,6 +1336,7 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> accessed_buffers_;
   // Map from Bind variable to its bound expression
   Map<Var, PrimExpr> bind_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;

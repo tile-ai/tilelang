@@ -347,6 +347,21 @@ when changing manual kernels. For capacity or launch failures, record the
 generated allocation sizes, buffer versions, VF mode, and compiler options.
 Check SDK reservations as well as user buffers before changing tile sizes.
 
+For Cube storage (L1, L0A, L0B, L0C), `T.view` and `T.reshape` aliases can have
+different canonical layouts inferred from their operations or supplied with
+`T.annotate_layout`. For example, a `(64, 128)` L0B allocation can have a
+`(128, 64)` view filled with `T.copy(..., transpose=True)` and consumed with
+`T.gemm(..., transpose_B=True)`. A same-shape view can instead use a different
+`MajorK`/`MajorMN` layout. Each view keeps its own address mapping while the
+shared `.data` keeps one allocation and version clock; `T.assume_conflict` is
+unnecessary for these aliases.
+
+These views require dense logical strides, zero base offset, the same accessed
+dtype, and equal padded physical sizes. They reinterpret storage without moving
+existing values: the producer must write the representation its consumer uses.
+Use `T.access_ptr(view[...], ...)` when passing a view to an intrinsic, so layout
+lowering can select its address mapping.
+
 `T.annotate_unlimit_memory("shared", "shared.l1")` inside a kernel removes the
 scheduler's capacity constraint for those pools. Other supported scopes are
 `shared.l0a`, `shared.l0b`, and `shared.l0c`. This is useful for investigating a
