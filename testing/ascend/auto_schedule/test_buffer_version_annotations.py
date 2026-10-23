@@ -76,7 +76,7 @@ def test_placement_requires_an_explicit_version_count(specification):
     def main(A: T.Tensor((4, 64), "float32"), C: T.Tensor((4, 64), "float32")):
         with T.Kernel(1):
             ub = T.alloc_shared((64,), "float32")
-            T.annotate_buffer_offsets({ub: 32})
+            T.annotate_buffer_addresses({ub: 32})
             if specification == "manual":
                 T.annotate_manual_multi_buffer({ub: 1})
             elif specification is not None:
@@ -98,7 +98,7 @@ def test_placement_rejects_unapplied_fixed_versions():
         with T.Kernel(1):
             ub = T.alloc_shared((64,), "float32")
             T.annotate_buffer_versions({ub: 2})
-            T.annotate_buffer_offsets({ub: 32})
+            T.annotate_buffer_addresses({ub: 32})
             T.copy(A, ub)
             T.copy(ub, C)
 

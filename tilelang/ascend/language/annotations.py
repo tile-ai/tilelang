@@ -7,7 +7,7 @@ _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shar
 
 __all__ = [
     "annotate_buffer_versions",
-    "annotate_buffer_offsets",
+    "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
 ]
@@ -27,8 +27,8 @@ _BUFFER_PLACEMENT_SCOPES = {
 }
 
 
-def annotate_buffer_offsets(buffer_offsets: dict):
-    """Place on-chip buffers at exact byte offsets within their memory pools.
+def annotate_buffer_addresses(buffer_addresses: dict):
+    """Place on-chip buffers at exact byte addresses within their memory pools.
 
     Supports UB, L1, L0A, L0B, L0C and SS in the Ascend scheduled pipeline.
     Each placed storage must also have an explicit positive version count in
@@ -36,7 +36,7 @@ def annotate_buffer_offsets(buffer_offsets: dict):
     A mode without a count, inferred versions, and manual multi-buffer metadata
     alone do not satisfy this requirement. Annotation order does not matter.
 
-    Offsets are non-negative Python integers, aligned to 32 bytes for UB/SS,
+    Addresses are non-negative Python integers, aligned to 32 bytes for UB/SS,
     512 for L1/L0A/L0B, and 1024 for L0C. A placement includes all physical
     versions and layout padding; views of one storage share the same base.
     Bound L0 scale-factor handles follow their data buffer's placement.
@@ -54,28 +54,28 @@ def annotate_buffer_offsets(buffer_offsets: dict):
     Example
     -------
     >>> T.annotate_buffer_versions({left: 2, accum: 1})
-    >>> T.annotate_buffer_offsets({left: 262144, accum: 1024})
+    >>> T.annotate_buffer_addresses({left: 262144, accum: 1024})
     """
-    if not buffer_offsets:
-        raise ValueError("annotate_buffer_offsets requires a non-empty placement map")
-    offsets = {}
-    for buffer, offset in buffer_offsets.items():
+    if not buffer_addresses:
+        raise ValueError("annotate_buffer_addresses requires a non-empty placement map")
+    addresses = {}
+    for buffer, address in buffer_addresses.items():
         scope = buffer.scope()
         if scope not in _BUFFER_PLACEMENT_SCOPES:
             raise ValueError(
-                f"annotate_buffer_offsets does not support storage scope {scope!r}; "
+                f"annotate_buffer_addresses does not support storage scope {scope!r}; "
                 "expected UB, L1, L0A, L0B, L0C or SS. Place bound L0 scale-factor handles through their data buffer."
             )
         alignment, capacity = _BUFFER_PLACEMENT_SCOPES[scope]
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or offset % alignment:
-            raise ValueError(f"{scope} byte offset must be a non-negative integer divisible by {alignment}, got {offset!r}")
-        if offset >= capacity:
-            raise ValueError(f"{scope} byte offset must be below the {capacity}-byte capacity, got {offset}")
+        if isinstance(address, bool) or not isinstance(address, int) or address < 0 or address % alignment:
+            raise ValueError(f"{scope} byte address must be a non-negative integer divisible by {alignment}, got {address!r}")
+        if address >= capacity:
+            raise ValueError(f"{scope} byte address must be below the {capacity}-byte capacity, got {address}")
         data = buffer.data
-        if data in offsets and int(offsets[data]) != offset:
-            raise ValueError(f"Aliases of one storage require the same byte offset: {buffer}")
-        offsets[data] = IntImm("int64", offset)
-    return sblock_attr({"tl.ascend_buffer_offsets": offsets})
+        if data in addresses and int(addresses[data]) != address:
+            raise ValueError(f"Aliases of one storage require the same byte address: {buffer}")
+        addresses[data] = IntImm("int64", address)
+    return sblock_attr({"tl.ascend_buffer_addresses": addresses})
 
 
 def annotate_buffer_versions(buffer_versions_map: dict):

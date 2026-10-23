@@ -19,7 +19,7 @@ from .allocate import (  # noqa: F401
 )
 from .annotations import (  # noqa: F401
     annotate_buffer_versions,
-    annotate_buffer_offsets,
+    annotate_buffer_addresses,
     annotate_manual_multi_buffer,
     annotate_unlimit_memory,
 )
@@ -112,7 +112,7 @@ _ASCEND_API_ALL = (
     "alloc_l1",
     "alloc_ss",
     "annotate_buffer_versions",
-    "annotate_buffer_offsets",
+    "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
     "assume_conflict",

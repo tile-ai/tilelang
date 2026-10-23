@@ -19,7 +19,7 @@ SCOPES = [
 ]
 
 
-def _allocation_program(buffers, offsets=None, *, aliases=True, aiv_storages=None, simt=False):
+def _allocation_program(buffers, addresses=None, *, aliases=True, aiv_storages=None, simt=False):
     # Input to the allocator already has physical versions and flattened sizes.
     # Frontend version-count validation belongs to AutoSchedule.
     stores = seq(*[tirx.BufferStore(buffer, tirx.const(index, buffer.dtype), [0]) for index, buffer in enumerate(buffers)])
@@ -31,8 +31,8 @@ def _allocation_program(buffers, offsets=None, *, aliases=True, aiv_storages=Non
         body = tirx.AttrStmt(
             {buffer.data: [other.data for other in buffers if other != buffer] for buffer in buffers}, "tl.buffer_alias_map", 1, body
         )
-    if offsets is not None:
-        body = tirx.AttrStmt(offsets, "tl.ascend_buffer_offsets", 1, body)
+    if addresses is not None:
+        body = tirx.AttrStmt(addresses, "tl.ascend_buffer_addresses", 1, body)
     if aiv_storages is not None:
         body = tirx.AttrStmt(aiv_storages, "tl.aiv_storage_map", 1, body)
     thread = tirx.IterVar(None, tirx.Var("bx", "int32"), tirx.IterVar.ThreadIndex, "blockIdx.x")
@@ -49,7 +49,7 @@ def _store_offsets(after):
 
 @pytest.mark.parametrize("scope,alignment,capacity", SCOPES)
 @pytest.mark.parametrize("disable_reuse", [False, True])
-def test_exact_plan_keeps_holes_and_physical_offsets(scope, alignment, capacity, disable_reuse):
+def test_exact_plan_keeps_holes_and_physical_addresses(scope, alignment, capacity, disable_reuse):
     a, b = _buffer("a", alignment, scope), _buffer("b", 2 * alignment, scope)
     before = _allocation_program([a, b], {a.data: 4 * alignment, b.data: 0})
     after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(before)
@@ -57,7 +57,7 @@ def test_exact_plan_keeps_holes_and_physical_offsets(scope, alignment, capacity,
     (allocation,) = nodes(after, tirx.AllocBuffer)
     assert allocation.buffer.dtype == "uint8"
     assert int(allocation.buffer.shape[0]) == 5 * alignment
-    assert not any(node.attr_key == "tl.ascend_buffer_offsets" for node in nodes(after, tirx.AttrStmt))
+    assert not any(node.attr_key == "tl.ascend_buffer_addresses" for node in nodes(after, tirx.AttrStmt))
 
 
 @pytest.mark.parametrize("scope,alignment,capacity", SCOPES)
@@ -82,16 +82,16 @@ def test_partial_plan_first_fits_unplaced_buffers_without_reuse(scope, alignment
 @pytest.mark.parametrize("case", ["overlap", "capacity", "unaligned"])
 def test_scope_specific_physical_constraints(scope, alignment, capacity, case):
     a, b = _buffer("a", 2 * alignment, scope), _buffer("b", alignment, scope)
-    offsets = {a.data: 0, b.data: alignment}
+    addresses = {a.data: 0, b.data: alignment}
     message = "overlap"
     if case == "capacity":
-        offsets = {a.data: capacity - alignment}
+        addresses = {a.data: capacity - alignment}
         message = "capacity"
     elif case == "unaligned":
-        offsets = {a.data: alignment // 2}
-        message = "aligned integer offsets"
+        addresses = {a.data: alignment // 2}
+        message = "aligned integer addresses"
     with pytest.raises(tvm.error.InternalError, match=message):
-        transform.MergeUBAllocations()(_allocation_program([a, b], offsets))
+        transform.MergeUBAllocations()(_allocation_program([a, b], addresses))
 
 
 @pytest.mark.parametrize(
@@ -99,8 +99,8 @@ def test_scope_specific_physical_constraints(scope, alignment, capacity, case):
     [
         ("unknown", "unknown allocation"),
         ("scope", "does not support storage scope"),
-        ("negative", "aligned integer offsets"),
-        ("boolean", "integer offsets"),
+        ("negative", "aligned integer addresses"),
+        ("boolean", "integer addresses"),
         ("overflow", "capacity"),
         ("dynamic", "positive constant"),
         ("empty", "must not be empty"),
@@ -116,18 +116,18 @@ def test_invalid_physical_plans_fail(case, message):
         a = _buffer("a", 2**62)
     elif case == "scope":
         a = _buffer("a", scope="local")
-    offsets = {a.data: 0, b.data: 1024}
+    addresses = {a.data: 0, b.data: 1024}
     if case == "unknown":
-        offsets[_buffer("unknown").data] = 2048
+        addresses[_buffer("unknown").data] = 2048
     elif case == "negative":
-        offsets[a.data] = -512
+        addresses[a.data] = -512
     elif case == "boolean":
-        offsets[a.data] = tirx.const(True, "bool")
+        addresses[a.data] = tirx.const(True, "bool")
     elif case == "empty":
-        offsets = {}
+        addresses = {}
     buffers = [a, b, a] if case == "duplicate" else [a, b]
     with pytest.raises(tvm.error.InternalError, match=message):
-        transform.MergeUBAllocations()(_allocation_program(buffers, offsets, aliases=case != "no-contract"))
+        transform.MergeUBAllocations()(_allocation_program(buffers, addresses, aliases=case != "no-contract"))
 
 
 def test_existing_dynamic_arena_is_rejected():
@@ -151,10 +151,10 @@ def test_ub_placement_accounts_for_simt_context(simt):
 @pytest.mark.parametrize("conflict", [None, "same-aiv", "common"])
 def test_ub_overlap_uses_physical_aiv_address_spaces(conflict):
     common, v0, v1 = [_buffer(name, 32, "shared.dyn") for name in ("common", "v0", "v1")]
-    offsets = {v0.data: 0, v1.data: 0}
+    addresses = {v0.data: 0, v1.data: 0}
     if conflict == "common":
-        offsets[common.data] = 0
-    before = _allocation_program([common, v0, v1], offsets, aiv_storages={v0.data: 0, v1.data: 0 if conflict == "same-aiv" else 1})
+        addresses[common.data] = 0
+    before = _allocation_program([common, v0, v1], addresses, aiv_storages={v0.data: 0, v1.data: 0 if conflict == "same-aiv" else 1})
     if conflict:
         with pytest.raises(tvm.error.InternalError, match="overlap"):
             transform.MergeUBAllocations()(before)
@@ -162,7 +162,7 @@ def test_ub_overlap_uses_physical_aiv_address_spaces(conflict):
         assert _store_offsets(transform.MergeUBAllocations()(before)) == [32, 0, 0]
 
 
-def test_different_pools_use_independent_offsets():
+def test_different_pools_use_independent_addresses():
     buffers = [_buffer(str(i), alignment, scope) for i, (scope, alignment, _) in enumerate(item.values for item in SCOPES)]
     before = _allocation_program(buffers, {buffer.data: 1024 for buffer in buffers})
     after = transform.MergeUBAllocations()(before)
@@ -170,23 +170,23 @@ def test_different_pools_use_independent_offsets():
     assert len(nodes(after, tirx.AllocBuffer)) == len(buffers)
 
 
-@pytest.mark.parametrize("offset", [True, -512, 1, 1.5, 524288, 2**64])
-def test_frontend_rejects_invalid_offsets(offset):
-    with pytest.raises(ValueError, match="byte offset"):
-        T.annotate_buffer_offsets({_buffer("a"): offset})
+@pytest.mark.parametrize("address", [True, -512, 1, 1.5, 524288, 2**64])
+def test_frontend_rejects_invalid_addresses(address):
+    with pytest.raises(ValueError, match="byte address"):
+        T.annotate_buffer_addresses({_buffer("a"): address})
 
 
 @pytest.mark.parametrize("scope", ["shared", "global", "local.fragment", "shared.l0a.sf"])
 def test_frontend_rejects_scopes_without_independent_placement(scope):
     with pytest.raises(ValueError, match="does not support storage scope"):
-        T.annotate_buffer_offsets({_buffer("a", scope=scope): 0})
+        T.annotate_buffer_addresses({_buffer("a", scope=scope): 0})
 
 
-def test_frontend_aliases_share_one_storage_offset():
+def test_frontend_aliases_share_one_storage_address():
     a = _buffer("a")
     view = tirx.decl_buffer((512,), "uint8", data=a.data, name="view", scope="shared.l1")
-    with pytest.raises(ValueError, match="same byte offset"):
-        T.annotate_buffer_offsets({a: 0, view: 512})
+    with pytest.raises(ValueError, match="same byte address"):
+        T.annotate_buffer_addresses({a: 0, view: 512})
 
 
 def test_absent_placement_preserves_existing_no_contract_behavior():

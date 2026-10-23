@@ -836,7 +836,7 @@ def test_scalar_snapshot_precedes_pipeline_update():
     torch.testing.assert_close(result.cpu(), 2 * (a.cumsum(0) - a), rtol=0, atol=0)
 
 
-def _placed_versioned_kernel(b_offset, unlimit=False, rows=16):
+def _placed_versioned_kernel(b_address, unlimit=False, rows=16):
     @T.prim_func
     def main(A: T.Tensor((4, rows, 16), "bfloat16"), B: T.Tensor((4, 16, 16), "bfloat16"), C: T.Tensor((4, rows, 16), "float32")):
         with T.Kernel(1):
@@ -847,7 +847,7 @@ def _placed_versioned_kernel(b_offset, unlimit=False, rows=16):
             bk = T.alloc_l0b((16, 16), "bfloat16")
             c = T.alloc_l0c((rows, 16), "float32")
             T.annotate_buffer_versions({a: 2, b: 2, aq: 2, bk: 2, c: 2})
-            T.annotate_buffer_offsets({a: 0, a_view: 0, b: b_offset, aq: 512, bk: 1024, c: 2048})
+            T.annotate_buffer_addresses({a: 0, a_view: 0, b: b_address, aq: 512, bk: 1024, c: 2048})
             if unlimit:
                 T.annotate_unlimit_memory("shared.l1")
             for i in T.Pipelined(4, num_stages=2, annotations={"enable_offset": True}):
@@ -863,7 +863,7 @@ def _placed_versioned_kernel(b_offset, unlimit=False, rows=16):
     return main
 
 
-def test_pipeline_preserves_offsets_across_versions_layout_remap_and_flatten():
+def test_pipeline_preserves_addresses_across_versions_layout_remap_and_flatten():
     snapshots = {}
 
     @tvm.ir.instrument.pass_instrument
@@ -879,7 +879,7 @@ def test_pipeline_preserves_offsets_across_versions_layout_remap_and_flatten():
     assert len(buffers) == 2 and all(int(buffer.shape[0]) == 2 for buffer in buffers)
     for stage in ("tl.LowerScheduledTIR", "tl.AscendLowerTileOp"):
         mod = snapshots[stage]
-        (placement,) = [node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.ascend_buffer_offsets"]
+        (placement,) = [node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.ascend_buffer_addresses"]
         storages = [
             buffer.data
             for block in nodes(mod, tirx.SBlock)
@@ -888,7 +888,7 @@ def test_pipeline_preserves_offsets_across_versions_layout_remap_and_flatten():
         ]
         assert len(placement.node) == 5
         assert all(any(key.same_as(storage) for storage in storages) for key in placement.node)
-        assert sorted(int(offset) for offset in placement.node.values()) == [0, 512, 1024, 2048, 262144]
+        assert sorted(int(address) for address in placement.node.values()) == [0, 512, 1024, 2048, 262144]
     merged = snapshots["tl.MergeUBAllocations"]
     allocations = [node for func in merged.functions.values() for node in nodes(func, tirx.AllocBuffer)]
     (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.l1.dyn"]
@@ -896,7 +896,9 @@ def test_pipeline_preserves_offsets_across_versions_layout_remap_and_flatten():
     for scope, expected_bytes in [("shared.l0a.dyn", 1536), ("shared.l0b.dyn", 2048), ("shared.l0c.dyn", 4096)]:
         (allocation,) = [node for node in allocations if node.buffer.scope() == scope]
         assert int(allocation.buffer.shape[0]) == expected_bytes
-    assert not any(node.attr_key == "tl.ascend_buffer_offsets" for func in merged.functions.values() for node in nodes(func, tirx.AttrStmt))
+    assert not any(
+        node.attr_key == "tl.ascend_buffer_addresses" for func in merged.functions.values() for node in nodes(func, tirx.AttrStmt)
+    )
     assert artifact.kernel_source and artifact.device_mod
 
 
@@ -908,7 +910,7 @@ def test_overlap_is_checked_after_automatic_versions_expand():
 
 def test_fractal_padding_is_included_in_the_physical_footprint():
     # Two 17x16 BF16 logical tiles take 1088 bytes, but padded 32x16 tiles
-    # take 2048. An offset of 1536 therefore overlaps only after padding.
+    # take 2048. An address of 1536 therefore overlaps only after padding.
     with pytest.raises(tvm.error.InternalError, match="Buffer placements overlap"):
         tilelang.lower(_placed_versioned_kernel(1536, rows=17), target="ascend")
 
@@ -928,14 +930,14 @@ def test_unscheduled_pipeline_rejects_placement_instead_of_dropping_it():
         tilelang.lower(_placed_versioned_kernel(262144), target="ascend")
 
 
-def _placed_ub_kernel(offset=64, versions=2, simt=False):
+def _placed_ub_kernel(address=64, versions=2, simt=False):
     @T.prim_func
     def main(A: T.Tensor((4, 64), "float32"), C: T.Tensor((4, 64), "float32")):
         with T.Kernel(1):
             ub = T.alloc_shared((64,), "float32")
             alias = T.view(ub, shape=(64,))
             # Placement may precede the version declaration and use an alias.
-            T.annotate_buffer_offsets({alias: offset})
+            T.annotate_buffer_addresses({alias: address})
             if versions == 1:
                 T.annotate_buffer_versions({ub: 1})
             else:
@@ -963,7 +965,7 @@ def test_ub_placement_survives_version_and_vf_lowering(versions, simt):
 
 def test_simt_context_limits_placement_after_full_lowering():
     with pytest.raises(tvm.error.InternalError, match="capacity of 221184 bytes"), tvm.target.Target("ascend"):
-        tilelang.lower(_placed_ub_kernel(offset=216 * 1024 - 256, simt=True), target="ascend")
+        tilelang.lower(_placed_ub_kernel(address=216 * 1024 - 256, simt=True), target="ascend")
 
 
 def _placed_ss_kernel():
@@ -973,7 +975,7 @@ def _placed_ss_kernel():
             words = T.alloc_ss((2,), "uint32")
             cube = T.alloc_l1((16, 16), "float16")
             T.annotate_buffer_versions({words: 2})
-            T.annotate_buffer_offsets({words: 96})
+            T.annotate_buffer_addresses({words: 96})
             T.copy(seed, cube)
             for i in T.Pipelined(4, num_stages=2, annotations={"enable_offset": True}):
                 with T.Stage(0):
@@ -989,5 +991,5 @@ def test_ss_placement_survives_cross_core_version_lowering():
     artifact = tilelang.lower(_placed_ss_kernel(), target="ascend")
     allocations = [node for func in artifact.device_mod.functions.values() for node in nodes(func, tirx.AllocBuffer)]
     (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.ss.dyn"]
-    assert int(allocation.buffer.shape[0]) == 128  # 96-byte offset + two 8-byte versions, rounded to 32.
+    assert int(allocation.buffer.shape[0]) == 128  # Start at byte 96; two 8-byte versions, rounded to 32.
     assert "volatile __ssbuf__ uint8_t" in artifact.kernel_source

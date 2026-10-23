@@ -23,8 +23,8 @@
  */
 
 #include "ascend/target_utils.h"
+#include "buffer_addresses.h"
 #include "buffer_alias.h"
-#include "buffer_offsets.h"
 #include "merge_ub_common.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -391,12 +391,12 @@ public:
     if (scope.size() > 4 && scope.substr(scope.size() - 4) == ".dyn" &&
         scope != "shared.dyn") {
       ICHECK(!scopes_.count(scope.substr(0, scope.size() - 4)))
-          << kBufferOffsets << " cannot coexist with an existing " << scope
+          << kBufferAddresses << " cannot coexist with an existing " << scope
           << " arena: " << op->buffer;
     }
     if (scopes_.count(scope)) {
       ICHECK(storages_.insert(op->buffer->data).second)
-          << kBufferOffsets
+          << kBufferAddresses
           << " requires one allocation per storage: " << op->buffer;
     }
     StmtVisitor::VisitStmt_(op);
@@ -414,7 +414,7 @@ private:
 // are disjoint. Private V0/V1 UB intervals occupy different physical memories.
 MemoryPlan BuildPlacedMemoryPlan(const AllocationMap &allocations,
                                  const AllocationOrder &allocation_order,
-                                 const BufferOffsets &offsets,
+                                 const BufferAddresses &addresses,
                                  const std::string &scope, int align_bytes,
                                  bool has_simt_vf,
                                  const AivStorageMap &aiv_storages) {
@@ -443,10 +443,10 @@ MemoryPlan BuildPlacedMemoryPlan(const AllocationMap &allocations,
   auto size_bytes = [&](const Var &storage) {
     auto allocation = allocations.find(storage.get());
     ICHECK(allocation != allocations.end())
-        << kBufferOffsets << " references unknown allocation " << storage;
+        << kBufferAddresses << " references unknown allocation " << storage;
     const Buffer &buffer = allocation->second->buffer;
     ICHECK(buffer->strides.empty() && is_zero(buffer->elem_offset))
-        << kBufferOffsets
+        << kBufferAddresses
         << " requires flattened dense allocations: " << buffer;
     int64_t elem_bits =
         static_cast<int64_t>(buffer->dtype.bits()) * buffer->dtype.lanes();
@@ -456,7 +456,7 @@ MemoryPlan BuildPlacedMemoryPlan(const AllocationMap &allocations,
     for (const PrimExpr &extent : buffer->shape) {
       const auto *constant = extent.as<IntImmNode>();
       ICHECK(constant && constant->value > 0)
-          << kBufferOffsets << " requires positive constant allocation "
+          << kBufferAddresses << " requires positive constant allocation "
           << "sizes; storage " << storage << " has extent " << extent;
       ICHECK_LE(constant->value, max_elements / elements)
           << "Allocation " << storage << " exceeds " << scope << " capacity of "
@@ -486,12 +486,12 @@ MemoryPlan BuildPlacedMemoryPlan(const AllocationMap &allocations,
     plan.byte_offsets[storage.get()] = IntImm(DataType::Int(32), begin);
     peak = std::max(peak, end);
   };
-  for (const auto &[storage, offset] : offsets)
-    reserve(storage, offset->value, size_bytes(storage));
+  for (const auto &[storage, address] : addresses)
+    reserve(storage, address->value, size_bytes(storage));
 
   for (const VarNode *node : allocation_order) {
     Var storage = GetRef<Var>(node);
-    if (offsets.count(storage))
+    if (addresses.count(storage))
       continue;
     int64_t bytes = size_bytes(storage);
     int64_t begin = 0;
@@ -523,14 +523,14 @@ public:
   bool FoundContract() const { return found_contract_; }
   const BufferAliasMap &Aliases() const { return aliases_; }
   const AivStorageMap &AivStorages() const { return aiv_storages_; }
-  const Optional<BufferOffsets> &Offsets() const { return offsets_; }
+  const Optional<BufferAddresses> &Addresses() const { return addresses_; }
 
 private:
   Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kBufferOffsets) {
-      ICHECK(!offsets_.has_value())
-          << "A PrimFunc must contain one " << kBufferOffsets << " contract";
-      offsets_ = ParseBufferOffsets(op->node);
+    if (op->attr_key == kBufferAddresses) {
+      ICHECK(!addresses_.has_value())
+          << "A PrimFunc must contain one " << kBufferAddresses << " contract";
+      addresses_ = ParseBufferAddresses(op->node);
       return VisitStmt(op->body);
     }
     if (op->attr_key == kAivStorageMap) {
@@ -563,7 +563,7 @@ private:
 
   BufferAliasMap aliases_;
   AivStorageMap aiv_storages_;
-  Optional<BufferOffsets> offsets_;
+  Optional<BufferAddresses> addresses_;
   bool found_contract_{false};
 };
 
@@ -572,8 +572,8 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
   BufferAliasContractExtractor extractor;
   stmt = extractor.Extract(stmt);
   if (!extractor.FoundContract()) {
-    ICHECK(!extractor.Offsets().has_value())
-        << kBufferOffsets << " requires the Ascend scheduled allocation "
+    ICHECK(!extractor.Addresses().has_value())
+        << kBufferAddresses << " requires the Ascend scheduled allocation "
         << "pipeline and its buffer-alias contract";
     return stmt;
   }
@@ -583,18 +583,18 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
   AivStorageMap aiv_storages = extractor.AivStorages();
   std::unordered_map<std::string, MemoryPlan> placed_plans;
   std::unordered_set<std::string> placed_scopes;
-  if (extractor.Offsets().has_value()) {
-    std::unordered_map<std::string, BufferOffsets> scope_offsets;
-    for (const auto &[storage, offset] : extractor.Offsets().value()) {
+  if (extractor.Addresses().has_value()) {
+    std::unordered_map<std::string, BufferAddresses> scope_addresses;
+    for (const auto &[storage, address] : extractor.Addresses().value()) {
       std::string scope = GetPtrStorageScope(storage);
       placed_scopes.insert(scope);
-      scope_offsets[scope].Set(storage, offset);
+      scope_addresses[scope].Set(storage, address);
     }
     BufferPlacementValidator validator(placed_scopes);
     validator(stmt);
     AllocateCollector collector;
     collector(stmt);
-    for (const auto &[scope, offsets] : scope_offsets) {
+    for (const auto &[scope, addresses] : scope_addresses) {
       const AllocationMap &allocations =
           scope == "shared.dyn" ? collector.dyn_shmem_allocs
                                 : collector.ascend_scope_allocs[scope];
@@ -602,9 +602,9 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
                                          ? collector.dyn_shmem_order
                                          : collector.ascend_scope_order[scope];
       placed_plans.emplace(
-          scope,
-          BuildPlacedMemoryPlan(allocations, order, offsets, scope, align_bytes,
-                                validator.HasSimtVF(), aiv_storages));
+          scope, BuildPlacedMemoryPlan(allocations, order, addresses, scope,
+                                       align_bytes, validator.HasSimtVF(),
+                                       aiv_storages));
     }
   }
   auto planner = [aliases = std::move(aliases), aiv_storages, disable_reuse,

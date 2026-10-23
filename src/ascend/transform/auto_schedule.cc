@@ -63,7 +63,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
-#include "ascend/transform/buffer_offsets.h"
+#include "ascend/transform/buffer_addresses.h"
 #include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
@@ -1448,21 +1448,22 @@ tvm::transform::Pass AutoSchedule() {
               context.root, context.outer_ctx, MakeAutoScheduleExtraInfo);
           BufferVersionMap buffer_version_overrides =
               scheduled_tir.metadata.buffer_versions;
-          BufferOffsets offsets;
-          if (auto value = context.root->annotations.Get(kBufferOffsets)) {
-            offsets = ParseBufferOffsets(value.value());
+          BufferAddresses addresses;
+          if (auto value = context.root->annotations.Get(kBufferAddresses)) {
+            addresses = ParseBufferAddresses(value.value());
             // Validate before AutoSchedule replaces frontend overrides with
             // inferred counts. A mode-only annotation does not fix storage
             // size.
-            for (const auto &[storage, offset] : offsets) {
+            for (const auto &[storage, address] : addresses) {
               auto versions = buffer_version_overrides.Get(storage);
               ICHECK(versions.has_value() && versions.value() > 0)
-                  << kBufferOffsets << " requires an explicit version count in "
+                  << kBufferAddresses
+                  << " requires an explicit version count in "
                   << "T.annotate_buffer_versions for storage " << storage;
             }
           }
           ScheduleSingleKernel(context.root->body, target, &scheduled_tir);
-          for (const auto &[storage, offset] : offsets) {
+          for (const auto &[storage, address] : addresses) {
             int requested = buffer_version_overrides.at(storage);
             int selected =
                 scheduled_tir.metadata.buffer_versions.Get(storage).value_or(1);
