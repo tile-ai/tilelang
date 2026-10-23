@@ -191,6 +191,7 @@ def ref_program(q, q_pe, kv, k_pe):
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """
+    output_dtype = q.dtype
     q = q.float()
     q_pe = q_pe.float()
     kv = kv.float()
@@ -216,7 +217,7 @@ def ref_program(q, q_pe, kv, k_pe):
 
     out = einsum(attention, kv, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
-    return out
+    return out.to(output_dtype)
 
 
 def main(
