@@ -20,7 +20,7 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `ascend` | Huawei Ascend NPUs. Use `execution_backend="pto"` to select PTO code generation. |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
 | `webgpu` | Browser / WebGPU runtimes. |
-| `c` | Emit plain C source for inspection or custom toolchains. |
+| `c` | CPU execution through generated C/C++ source and TVM-FFI, or source inspection. |
 
 To add options, pass a target config dictionary. For example:
 
@@ -200,3 +200,8 @@ prefer config dictionaries over CLI-style strings.
   running on. Try dropping the flag or switching to the correct compute capability.
 - When targeting multiple environments, use `auto` for convenience and override with an explicit config only when
   you need architecture-specific tuning.
+
+### CPU execution
+
+CPU targets use TVM-FFI. For C/C++ compilation without LLVM, use
+`target="c", target_host="c"`.

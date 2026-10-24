@@ -10,17 +10,13 @@ from .utils import (
     is_metal_target,
     is_cutedsl_target,
     match_declare_kernel,
-    match_declare_kernel_cpu,
     is_cuda_target,
     is_hip_target,
-    is_cpu_target,
     pythonic_expr,
     parse_function_call_args,
     parse_tma_descriptor_args,
 )
-import re
 import logging
-import textwrap
 from tvm.tirx.stmt_functor import post_order_visit
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
@@ -738,183 +734,6 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         return {"name": "stream=hipStreamDefault", "type": "hipStream_t"}
 
 
-class TLCPUSourceWrapper:
-    _TYPE_MAP = {
-        "float32": "float",
-        "float16": "half",
-        "int32": "int32_t",
-        "int8": "int8_t",
-        "uint8": "uint8_t",
-        "int16": "int16_t",
-        "uint16": "uint16_t",
-        "int64": "int64_t",
-        "uint64": "uint64_t",
-        "float64": "double",
-        "bool": "bool",
-        "uchar": "uchar",
-    }
-
-    # Use common init with error buffer and get_last_error for CPU backend as well
-    INIT_FUNC = PREDEF_INIT_FUNC.format("")
-
-    CALL_PREFIX = textwrap.dedent("""
-        #ifdef __cplusplus
-        extern "C"
-        #endif
-        int32_t call({}) {{
-          return {};
-        }}
-    """)
-
-    backend = "tl"
-    device_mod: IRModule | None = None
-    host_mod: IRModule | None = None
-    pass_configs: dict[str, Any] | None = None
-
-    def __init__(
-        self,
-        scheduled_ir_module: IRModule,
-        source: str,
-        target: Target,
-        device_mod: IRModule | None = None,
-        host_mod: IRModule | None = None,
-        pass_configs: dict[str, Any] | None = None,
-    ):
-        self.mod = scheduled_ir_module
-        self.target = target
-        self.source = source
-        self.device_mod = device_mod
-        self.host_mod = host_mod
-        self.pass_configs = pass_configs
-        self.function_names: str | None = None
-        self.dynamic_smem_buf: int | None = None
-        self.parse_source_information()
-        self.srcpath: str | None = None
-        self.libpath: str | None = None
-        self.lib_code: str | None = self.update_lib_code(source)
-
-    def _lookup_type(self, dtype: str | Any) -> str:
-        key = dtype if isinstance(dtype, str) else str(dtype)
-        result = self._TYPE_MAP.get(key)
-        assert result is not None, f"Unsupported dtype {dtype}"
-        return result
-
-    def create_call_func(self, code, function_informations):
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
-
-        function_args = []
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.name,
-                        "type": self._lookup_type(buffer.dtype) + "*",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
-            else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
-        # Format the function arguments for declaration
-        def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
-
-        def func_call_args(s, function_args):
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
-
-        _call_str = """"""
-
-        for function_name, _ in function_informations.items():
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel_cpu(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            call_args = ", ".join(func_call_args(declaration, function_args))
-            _call_str += f"{function_name}({call_args})"
-
-        # Wrap the kernel dispatch logic in an external C function
-        host_func = self.CALL_PREFIX.format(def_args, _call_str)
-        return host_func
-
-    def parse_source_information(self):
-        self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
-        assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
-        assert len(self.host_mod.functions) == 1, "Only support one function in host module."
-
-        function_names = []
-        for g_var, _ in self.device_mod.functions.items():
-            function_name = g_var.name_hint
-            function_names.append(function_name)
-
-        self.function_names = function_names
-
-    def get_dynamic_symbolic_set(self, prim_func):
-        # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: dict[str, str] = {}
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set[dim.name] = str(dim.dtype)
-        return list(dynamic_symbolic_set.items())
-
-    def get_cpu_init_func(self):
-        # Provide init() and get_last_error() for CPU backend
-        return self.INIT_FUNC
-
-    def update_lib_code(self, code: str):
-        # Update the library code with the given code string
-        self.lib_code = code
-        # Get the function names
-        function_names = self.function_names
-        # Get the CPU initialization function
-        init_func = self.get_cpu_init_func()
-
-        # Organize function information for code generation
-        function_informations = {}
-        for function_name in function_names:
-            function_informations[function_name] = {
-                "function_name": function_name,
-            }
-
-        # Create the call function wrapper for the CPU kernel
-        call_func = self.create_call_func(code, function_informations)
-        # Combine the source, initialization function, and call function to form the complete library code
-        lib_code = self.source + init_func + call_func
-        return lib_code
-
-    @property
-    def prim_func(self):
-        if len(self.mod.get_global_vars()) == 1:
-            return self.mod[self.mod.get_global_vars()[0]]
-        elif "main" in self.mod:
-            return self.mod["main"]
-        else:
-            for _, function in self.mod.functions_items():
-                attr = function.attrs
-                if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
-                    return function
-            raise ValueError("Cannot find primary function in the module.")
-
-
 class TLAscendSourceWrapper(TLCUDASourceWrapper):
     """Wrapper for Ascend backend kernel source.
 
@@ -1109,8 +928,6 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLHIPSourceWrapper
         elif is_ascend_target(self.target):
             wrapper_class = TLAscendSourceWrapper
-        elif is_cpu_target(self.target):
-            wrapper_class = TLCPUSourceWrapper
         elif is_metal_target(self.target):
             wrapper_class = TLMetalSourceWrapper
         else:

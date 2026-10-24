@@ -177,6 +177,9 @@ class JITKernel(Generic[_P, _T]):
             backend_context=backend_context,
         )
 
+        if str(execution_backend).lower() == "cython" and instance.execution_backend != "cython":
+            raise ValueError("CPU Cython cache artifacts cannot be loaded by TVM-FFI; recompile the kernel instead.")
+
         if instance.execution_backend == "tvm_ffi" and isinstance(func, PrimFunc):
             # The cached artifact was compiled with the ABI decision derived
             # from the same capability flag; re-stamp the loaded PrimFunc so
@@ -820,7 +823,10 @@ class JITKernel(Generic[_P, _T]):
             os.makedirs(dir_path, exist_ok=True)
 
         if runtime_module is not None:
-            runtime_module.export_library(kernel_file)
+            if self.target.kind.name == "c" and self.execution_backend == "tvm_ffi":
+                runtime_module.export_library(kernel_file, **self.adapter.get_compile_args())
+            else:
+                runtime_module.export_library(kernel_file)
         elif not (os.path.exists(kernel_file) and os.path.samefile(cached_library, kernel_file)):
             shutil.copyfile(cached_library, kernel_file)
         logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")

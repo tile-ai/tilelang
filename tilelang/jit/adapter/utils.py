@@ -74,16 +74,6 @@ def extract_python_func_declaration(source: str, func_name: str) -> str:
     raise ValueError(f"No function declaration found for {func_name}")
 
 
-def match_declare_kernel_cpu(source: str, annotation: str = "int32_t") -> int:
-    pattern = r"int32_t\s+\w+"
-    for line in source.split("\n"):
-        if annotation in line:
-            matched = re.findall(pattern, line)
-            if len(matched) >= 1:
-                return source.index(matched[0] + "(")
-    raise ValueError("No global kernel found in the source code")
-
-
 def is_cuda_target(target: Target) -> bool:
     return target.kind.name == "cuda"
 

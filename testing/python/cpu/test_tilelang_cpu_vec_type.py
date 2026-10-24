@@ -67,7 +67,7 @@ def test_vec_type_arith_compiles_and_executes_on_cpu():
         vec_arith,
         target="c",
         target_host="c",
-        execution_backend="cython",
+        execution_backend="tvm_ffi",
     )
 
     # Pin the input contract explicitly instead of relying on PyTorch's

@@ -9,6 +9,8 @@ class TVMFFIKernelCache(KernelCache):
 
     @staticmethod
     def _get_export_kwargs(kernel: JITKernel) -> dict:
+        if kernel.target.kind.name == "c":
+            return kernel.adapter.get_compile_args()
         artifact = getattr(kernel, "artifact", None)
         target_host = getattr(artifact, "target_host", None)
         target_host_kind = getattr(getattr(target_host, "kind", None), "name", None)

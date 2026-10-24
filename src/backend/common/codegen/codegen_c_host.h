@@ -67,6 +67,10 @@ public:
 
   void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
 
+  void PrintCallExtern(tvm::Type ret_type, String global_symbol,
+                       const Array<tvm::PrimExpr> &args, bool skip_first_arg,
+                       std::ostream &os) override;
+
   void GenerateForwardFunctionDeclarations(String global_symbol,
                                            const Array<tvm::Type> &arg_types,
                                            const tvm::Type &ret_type) override;

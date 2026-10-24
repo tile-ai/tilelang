@@ -30,6 +30,7 @@ class _TestAdapter(TVMFFIKernelAdapter):
 
 def _make_adapter():
     adapter = _TestAdapter.__new__(_TestAdapter)
+    adapter.target = tvm.target.Target("cuda")
     tir_param = object()
     adapter.params = [_FakeKernelParam()]
     adapter.result_idx = []
@@ -229,3 +230,18 @@ def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source()
 
     with pytest.raises(ValueError, match="does not match"):
         prepare_tvm_ffi_callee_allocated_outputs(attributed, [0])
+
+
+@pytest.mark.parametrize("target", ["c", "llvm"])
+def test_cpu_output_only_kernel_does_not_probe_accelerator(monkeypatch, target):
+    adapter, _ = _make_adapter()
+    adapter.target = tvm.target.Target(target)
+    adapter.result_idx = [0]
+
+    def unexpected_device_probe():
+        pytest.fail("CPU output allocation must not query the current accelerator.")
+
+    monkeypatch.setattr(adapter, "get_current_device_functor", unexpected_device_probe)
+    output = adapter._convert_torch_func()()
+    assert output.device == torch.device("cpu")
+    assert output.shape == (1,)

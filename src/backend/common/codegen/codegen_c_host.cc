@@ -68,7 +68,11 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenCHost::InitGlobalContext() {
+  // The runtime looks up this data symbol by its C ABI name, including when
+  // CPU source modules are compiled as C++ by clang-cl/MSVC.
+  decl_stream << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n";
   decl_stream << "void* " << symbol::tvm_ffi_library_ctx << " = NULL;\n";
+  decl_stream << "#ifdef __cplusplus\n}\n#endif\n";
 }
 
 void CodeGenCHost::DefineModuleName() {
@@ -108,6 +112,30 @@ void CodeGenCHost::AddFunction(const tvm::GlobalVar &gvar,
     }
     has_main_func_ = true;
   }
+}
+
+void CodeGenCHost::PrintCallExtern(tvm::Type ret_type, String global_symbol,
+                                   const Array<tvm::PrimExpr> &args,
+                                   bool skip_first_arg, std::ostream &os) {
+  os << global_symbol << "(";
+  for (size_t i = static_cast<size_t>(skip_first_arg); i < args.size(); ++i) {
+    if (i > static_cast<size_t>(skip_first_arg)) {
+      os << ", ";
+    }
+    // Packed tensor data is stored as void*, while the IR retains its typed
+    // pointer annotation. Match the forward declaration when compiling as C++.
+    tvm::Type arg_type = tvm::GetType(args[i]);
+    if (arg_type.as<tvm::PointerTypeNode>()) {
+      os << "(";
+      tvm::codegen::CodeGenSourceBase::PrintType(arg_type, os);
+      os << ")(";
+      PrintExpr(args[i], os);
+      os << ")";
+    } else {
+      PrintExpr(args[i], os);
+    }
+  }
+  os << ")";
 }
 
 void CodeGenCHost::GenerateForwardFunctionDeclarations(
@@ -395,6 +423,13 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
   } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
+  } else if (auto call_op = op->op.as<Op>();
+             call_op && op_attr_global_symbol_.count(call_op.value())) {
+    // Runtime operators use their declared C ABI. A buffer's pointer annotation
+    // does not determine the runtime function's parameter type.
+    tvm::codegen::CodeGenC::PrintCallExtern(
+        GetType(GetRef<PrimExpr>(op)), op_attr_global_symbol_[call_op.value()],
+        op->args, false, os);
   } else {
     tvm::codegen::CodeGenC::VisitExpr_(op, os);
   }

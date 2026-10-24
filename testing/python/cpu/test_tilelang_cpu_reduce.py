@@ -1,4 +1,4 @@
-"""CPU reduce op tests (target="c", execution_backend="cython").
+"""CPU reduce op tests (target="c", execution_backend="tvm_ffi").
 
 Covers the 8 reduce variants supported by src/cpu/op/reduce.cc on local
 buffers, which is the only path the frontend emits on CPU.
@@ -132,7 +132,7 @@ def _compile_c(func):
             out_idx=[2],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
 
@@ -187,7 +187,7 @@ def test_cpu_reduce_3d(op, dim):
             out_idx=[1],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
     A = _make_input((P, Q, R), dtype, op)

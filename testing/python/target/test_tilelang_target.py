@@ -115,9 +115,9 @@ def test_backend_module_resolves_execution_policy():
     c_target = Target("c")
     llvm_target = Target("llvm")
 
-    assert backend.allowed_execution_backends(c_target) == ("cython", "tvm_ffi")
+    assert backend.allowed_execution_backends(c_target) == ("tvm_ffi",)
     assert backend.allowed_execution_backends(llvm_target) == ("tvm_ffi",)
-    assert backend.resolve_execution_backend("auto", c_target).name == "cython"
+    assert backend.resolve_execution_backend("auto", c_target).name == "tvm_ffi"
     assert backend.resolve_execution_backend("auto", llvm_target).name == "tvm_ffi"
 
 
