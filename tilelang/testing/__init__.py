@@ -29,6 +29,7 @@ __all__ = [
     "requires_ascend",
     "requires_cuda_compute_version",
     "without_kernel_cache",
+    "default_target_is_cutedsl",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
@@ -81,6 +82,15 @@ def _check_is_cuda_or_cdna() -> bool:
         return target_is_cuda(target) or target_is_cdna(target)
     except (ValueError, RuntimeError):
         return False
+
+
+def default_target_is_cutedsl() -> bool:
+    """Whether TILELANG_DEFAULT_TARGET selects the CuTeDSL backend for unqualified compiles."""
+    from tilelang.env import env
+
+    target = env.get_default_target()
+    kind = target.get("kind") if isinstance(target, dict) else target
+    return str(kind).strip().lower() == "cutedsl"
 
 
 def ascend_backend_compiled() -> bool:
