@@ -31,7 +31,6 @@ from cutlass.cutlass_dsl import Constexpr, CuTeDSL, T, if_generate, dsl_user_op 
 
 from cutlass.experimental import primitives as prims
 import cutlass
-from cutlass._mlir import ir
 
 import cutlass._mlir.dialects.cute as _cute_ir
 import cutlass._mlir.dialects.cute_nvgpu as _cute_nvgpu_ir
@@ -103,29 +102,38 @@ def mbarrier_cp_async_arrive_noinc(mbar_ptr: Pointer, *, loc=None, ip=None) -> N
     prims.cp_async_mbarrier_arrive(mbar_ptr, noinc=True, loc=loc, ip=ip)
 
 
+def _cp_async_dst_ptr(dst):
+    if isinstance(dst, cute.Tensor):
+        return dst.iterator
+    if isinstance(dst, cute.Pointer):
+        return dst
+    raise ValueError(f"Invalid destination type: {type(dst)}")
+
+
+def _cp_async_src_ptr(src):
+    if isinstance(src, cute.Tensor):
+        return src.iterator
+    if isinstance(src, cute.Pointer):
+        return src
+    raise ValueError(f"Invalid source type: {type(src)}")
+
+
 def cp_async_gs(size, dst, src):
     assert size in [16, 8, 4]
     # use CG (cache global) to by pass L1 when loading contiguous 128B.
     mode = prims.LoadCacheModifier.CG if size == 16 else prims.LoadCacheModifier.CA
-    if isinstance(src, cute.Tensor):
-        src_ptr = src.iterator
-    elif isinstance(src, cute.Pointer):
-        src_ptr = src
-    else:
-        raise ValueError(f"Invalid source type: {type(src)}")
-    if isinstance(dst, cute.Tensor):
-        dst_ptr = dst.iterator
-    elif isinstance(dst, cute.Pointer):
-        dst_ptr = dst
-    else:
-        raise ValueError(f"Invalid destination type: {type(dst)}")
-    cp_async_shared_global(dst_ptr, src_ptr, size, mode)
+    cp_async_shared_global(_cp_async_dst_ptr(dst), _cp_async_src_ptr(src), size, mode)
 
 
 @cute.jit
 def cp_async_gs_conditional(size, dst, src, cond):
-    if cond:
-        cp_async_gs(size, dst, src)
+    # Same form as tl::cp_async_gs_conditional: the copy is always issued and the
+    # source size is ``cond ? size : 0``, so an excluded lane gets zeros in shared
+    # memory instead of keeping the previous pipeline stage.
+    assert size in [16, 8, 4]
+    mode = prims.LoadCacheModifier.CG if size == 16 else prims.LoadCacheModifier.CA
+    src_size = cutlass.select_(cond, Int32(size), Int32(0))
+    cp_async_shared_global(_cp_async_dst_ptr(dst), _cp_async_src_ptr(src), size, mode, src_size=src_size)
 
 
 @dsl_user_op
@@ -242,26 +250,20 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, _TMA_ARCHES, "arch")
     if not isinstance(crd, tuple):
-        if arch not in ("sm_90", "sm_90a"):
-            raise NotImplementedError("tma_store(size) path is only implemented for sm_90/sm_90a")
-        gmem_ptr = tma_desc.align(smem_ptr.alignment)
-        _cute_nvgpu_ir.arch_copy_SM90_bulk_copy_s2g(
-            dsmem_data_addr=smem_ptr.value,
-            gmem_data_addr=gmem_ptr.value,
-            size=ir.IntegerAttr.get(ir.IntegerType.get_signless(32), crd),
-            loc=loc,
-            ip=ip,
-        )
-    else:
-        tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
-        prims.cp_async_bulk_tensor_global_shared_cta(
-            tma_descriptor=tma_desc_ptr,
-            src_mem=smem_ptr,
-            coordinates=[Int32(i) for i in crd],
-            mode=prims.TMAStoreMode.TILE,
-            loc=loc,
-            ip=ip,
-        )
+        # A linear coordinate on a 1-D tensor: the descriptor already holds the
+        # base address, so use the tensor copy with one coordinate instead of a
+        # raw bulk copy (which would need an aligned global pointer, not a
+        # descriptor).
+        crd = (crd,)
+    tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
+    prims.cp_async_bulk_tensor_global_shared_cta(
+        tma_descriptor=tma_desc_ptr,
+        src_mem=smem_ptr,
+        coordinates=[Int32(i) for i in crd],
+        mode=prims.TMAStoreMode.TILE,
+        loc=loc,
+        ip=ip,
+    )
 
 
 @dsl_user_op

@@ -52,9 +52,21 @@ __all__ = [
     "warpgroup_reg_alloc",
     "warpgroup_reg_dealloc",
     "pack_half2",
+    "as_pointer",
 ]
 
 BYTES_PER_TENSORMAP = 128
+
+
+def as_pointer(value):
+    """Return the pointer behind *value*.
+
+    Generated CuTeDSL code passes buffer views (``cute.Tensor``) where the
+    pointer itself is meant, so unwrap ``.iterator`` when the value has one.
+    """
+    return value.iterator if hasattr(value, "iterator") else value
+
+
 BYTES_PER_POINTER = 8
 
 
@@ -160,6 +172,24 @@ def bitcast(value, target_dtype):
 
     @dsl_user_op
     def bitcast_impl(src_val, *, loc=None, ip=None):
+        if isinstance(src_val, TensorSSA):
+            src_ir = src_val.ir_value(loc=loc, ip=ip)
+            if src_val.dtype is tgt_wrapper:
+                return src_val
+            if src_val.dtype.width != tgt_wrapper.width:
+                raise NotImplementedError(f"vector bitcast from {src_val.dtype} to {tgt_wrapper} changes the element width")
+            src_elem_type = src_val.dtype.mlir_type
+            same_kind = (isinstance(src_elem_type, mlir_ir.IntegerType) and isinstance(tgt_mlir_type, mlir_ir.IntegerType)) or (
+                isinstance(src_elem_type, mlir_ir.FloatType) and isinstance(tgt_mlir_type, mlir_ir.FloatType)
+            )
+            if same_kind:
+                # MLIR integers are signless, so reinterpreting between
+                # same-width integer (or float) element types needs no IR op:
+                # only the Python dtype wrapper changes.
+                return TensorSSA(src_ir, src_val.shape, tgt_wrapper)
+            # Integer <-> float reinterpret must be a real vector bitcast.
+            res = llvm.bitcast(_recast_type(src_ir.type, tgt_mlir_type), src_ir, loc=loc, ip=ip)
+            return TensorSSA(res, src_val.shape, tgt_wrapper)
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
         result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
         return tgt_wrapper(result)

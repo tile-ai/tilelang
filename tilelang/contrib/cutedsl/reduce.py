@@ -176,7 +176,7 @@ def _warp_prefix_max_reverse(val, lane, active, MASK=0xFFFFFFFF):
 
 
 @cute.jit
-def _scan_line_sum(src_tensor, dst_tensor, base_offset, extent, stride, lane, reverse, MASK=0xFFFFFFFF):
+def _scan_line_sum(src_tensor, dst_tensor, src_offset, dst_offset, extent, src_stride, dst_stride, lane, reverse, MASK=0xFFFFFFFF):
     """Inclusive sum scan over one strided line using one warp."""
     WARP_SIZE = 32
     carry = src_tensor.element_type(0)
@@ -190,13 +190,13 @@ def _scan_line_sum(src_tensor, dst_tensor, base_offset, extent, stride, lane, re
             active = min(extent - base, WARP_SIZE)
             val = src_tensor.element_type(0)
             if lane < active:
-                val = src_tensor[base_offset + (base + lane) * stride]
+                val = src_tensor[src_offset + (base + lane) * src_stride]
 
             val = _warp_prefix_sum_reverse(val, lane, MASK)
             if has_carry and lane < active:
                 val = val + carry
             if lane < active:
-                dst_tensor[base_offset + (base + lane) * stride] = val
+                dst_tensor[dst_offset + (base + lane) * dst_stride] = val
 
             carry = __shfl_sync(MASK, val, 0)
             has_carry = True
@@ -206,20 +206,20 @@ def _scan_line_sum(src_tensor, dst_tensor, base_offset, extent, stride, lane, re
             active = min(extent - base, WARP_SIZE)
             val = src_tensor.element_type(0)
             if lane < active:
-                val = src_tensor[base_offset + (base + lane) * stride]
+                val = src_tensor[src_offset + (base + lane) * src_stride]
 
             val = _warp_prefix_sum_forward(val, lane, MASK)
             if has_carry and lane < active:
                 val = val + carry
             if lane < active:
-                dst_tensor[base_offset + (base + lane) * stride] = val
+                dst_tensor[dst_offset + (base + lane) * dst_stride] = val
 
             carry = __shfl_sync(MASK, val, active - 1)
             has_carry = True
 
 
 @cute.jit
-def _scan_line_max(src_tensor, dst_tensor, base_offset, extent, stride, lane, reverse, MASK=0xFFFFFFFF):
+def _scan_line_max(src_tensor, dst_tensor, src_offset, dst_offset, extent, src_stride, dst_stride, lane, reverse, MASK=0xFFFFFFFF):
     """Inclusive max scan over one strided line using one warp."""
     WARP_SIZE = 32
     carry = src_tensor.element_type(0)
@@ -233,13 +233,13 @@ def _scan_line_max(src_tensor, dst_tensor, base_offset, extent, stride, lane, re
             active = min(extent - base, WARP_SIZE)
             val = src_tensor.element_type(0)
             if lane < active:
-                val = src_tensor[base_offset + (base + lane) * stride]
+                val = src_tensor[src_offset + (base + lane) * src_stride]
 
             val = _warp_prefix_max_reverse(val, lane, active, MASK)
             if has_carry and lane < active:
                 val = max(val, carry)
             if lane < active:
-                dst_tensor[base_offset + (base + lane) * stride] = val
+                dst_tensor[dst_offset + (base + lane) * dst_stride] = val
 
             carry = __shfl_sync(MASK, val, 0)
             has_carry = True
@@ -249,13 +249,13 @@ def _scan_line_max(src_tensor, dst_tensor, base_offset, extent, stride, lane, re
             active = min(extent - base, WARP_SIZE)
             val = src_tensor.element_type(0)
             if lane < active:
-                val = src_tensor[base_offset + (base + lane) * stride]
+                val = src_tensor[src_offset + (base + lane) * src_stride]
 
             val = _warp_prefix_max_forward(val, lane, MASK)
             if has_carry and lane < active:
                 val = max(val, carry)
             if lane < active:
-                dst_tensor[base_offset + (base + lane) * stride] = val
+                dst_tensor[dst_offset + (base + lane) * dst_stride] = val
 
             carry = __shfl_sync(MASK, val, active - 1)
             has_carry = True
@@ -297,7 +297,7 @@ class CumSum1D:
         dst_tensor = cute.make_tensor(dst, (N,))
 
         if tidx < self.WARP_SIZE:
-            _scan_line_sum(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
+            _scan_line_sum(src_tensor, dst_tensor, 0, 0, N, 1, 1, lane, self.reverse, MASK)
 
 
 class CumSum2D:
@@ -327,7 +327,7 @@ class CumSum2D:
         self.TILE_H = threads // self.WARP_SIZE
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         """
         Perform 2D cumulative sum.
 
@@ -336,6 +336,8 @@ class CumSum2D:
             dst: Destination pointer
             H: Number of rows
             W: Number of columns (should be <= 32 for single-segment case)
+            src_stride: Row stride of src in elements
+            dst_stride: Row stride of dst in elements
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
@@ -344,21 +346,21 @@ class CumSum2D:
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        src_tensor = cute.make_tensor(src, (H * src_stride,))
+        dst_tensor = cute.make_tensor(dst, (H * dst_stride,))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 row = block * tile + item
                 if row < H:
-                    _scan_line_sum(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
+                    _scan_line_sum(src_tensor, dst_tensor, row * src_stride, row * dst_stride, W, 1, 1, lane, self.reverse, MASK)
         else:
             num_blocks = (W + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 col = block * tile + item
                 if col < W:
-                    _scan_line_sum(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
+                    _scan_line_sum(src_tensor, dst_tensor, col, col, H, src_stride, dst_stride, lane, self.reverse, MASK)
 
 
 class CumMax1D:
@@ -384,7 +386,7 @@ class CumMax1D:
         dst_tensor = cute.make_tensor(dst, (N,))
 
         if tidx < self.WARP_SIZE:
-            _scan_line_max(src_tensor, dst_tensor, 0, N, 1, lane, self.reverse, MASK)
+            _scan_line_max(src_tensor, dst_tensor, 0, 0, N, 1, 1, lane, self.reverse, MASK)
 
 
 class CumMax2D:
@@ -407,7 +409,7 @@ class CumMax2D:
         self.WARP_SIZE = 32
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         tidx = tidx - self.thread_offset
@@ -415,21 +417,21 @@ class CumMax2D:
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        src_tensor = cute.make_tensor(src, (H * src_stride,))
+        dst_tensor = cute.make_tensor(dst, (H * dst_stride,))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 row = block * tile + item
                 if row < H:
-                    _scan_line_max(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
+                    _scan_line_max(src_tensor, dst_tensor, row * src_stride, row * dst_stride, W, 1, 1, lane, self.reverse, MASK)
         else:
             num_blocks = (W + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 col = block * tile + item
                 if col < W:
-                    _scan_line_max(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
+                    _scan_line_max(src_tensor, dst_tensor, col, col, H, src_stride, dst_stride, lane, self.reverse, MASK)
 
 
 class NamedBarrier:

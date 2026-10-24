@@ -9,6 +9,7 @@ __all__ = [
     "AtomicAddRet",
     "AtomicAddx2",
     "AtomicAddx4",
+    "AtomicAddx4Ret",
     "AtomicMax",
     "AtomicMaxRet",
     "AtomicMin",
@@ -214,6 +215,43 @@ def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
+
+
+def AtomicAddx4Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 4 consecutive float32 elements.
+
+    Uses PTX atom.global.add.v4.f32 and returns the previous values of the four
+    lanes as a register tensor.
+
+    Args:
+        dst_ptr: Pointer to destination (4 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    vals = _load_from_src(src_values, 4)
+
+    res_type = llvm.StructType.get_literal([T.f32()] * 4)
+    prev = llvm.inline_asm(
+        res_type,
+        [
+            dst_ptr.llvm_ptr,
+            cutlass.Float32(vals[0]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[1]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[2]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[3]).ir_value(loc=loc, ip=ip),
+        ],
+        "atom.global.add.v4.f32 {$0,$1,$2,$3}, [$4], {$5,$6,$7,$8};",
+        "=f,=f,=f,=f,l,f,f,f,f",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+    out = cute.make_rmem_tensor((4,), cutlass.Float32)
+    for i in range(4):
+        out[i] = cutlass.Float32(llvm.extractvalue(T.f32(), prev, [i], loc=loc, ip=ip))
+    return out.load()
 
 
 # =============================================================================
