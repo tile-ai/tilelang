@@ -28,6 +28,7 @@ from cutlass._mlir import ir
 from cutlass._mlir.dialects import arith, llvm, vector
 from cutlass.base_dsl.typing import Float16, Float8E4M3FN, Float8E5M2, Numeric
 from cutlass.cute.tensor import TensorSSA
+from cutlass.cute.typing import Tensor
 
 _PTX_TYPE = {Float8E4M3FN: "e4m3x2", Float8E5M2: "e5m2x2"}
 _F16X2_OP = {
@@ -169,9 +170,33 @@ def _widen(value, fp8):
     return TensorSSA(result, value.shape, Float16)
 
 
-def fp8_binary(op, a, b):
+def _operand(value, lanes):
+    """Normalize one operand to a TensorSSA of ``lanes`` lanes (or keep a scalar).
+
+    The codegen keeps FP8 vectors that are not a whole number of 32-bit words
+    (e.g. ``float8x2``) in rmem tensors, and pads some of them to the next word,
+    so a tensor operand is loaded and cut back to the logical lane count.
+    """
+    if isinstance(value, Tensor):
+        value = value.load()
+    if lanes is None or not isinstance(value, TensorSSA):
+        return value
+    vec = value.ir_value()
+    if vec.type.shape[0] == lanes:
+        return value
+    elem = vec.type.element_type
+    sliced = vector.extract_strided_slice(ir.VectorType.get([lanes], elem), vec, [0], [lanes], [1])
+    return TensorSSA(sliced, (lanes,), value.dtype)
+
+
+def fp8_binary(op, a, b, lanes=None):
     """``a <op> b`` for FP8 operands: ``add``/``sub``/``mul``/``div``/``max``/``min``
-    return FP8; comparison operators (``<``, ``==``, ...) return Boolean."""
+    return FP8; comparison operators (``<``, ``==``, ...) return Boolean.
+
+    ``lanes`` is the logical vector width; it is needed when an operand is an
+    rmem tensor padded past that width."""
+    a = _operand(a, lanes)
+    b = _operand(b, lanes)
     if op in _COMPARE:
         fp8 = _fp8_type(a, b)
         return _COMPARE[op](_widen(a, fp8), _widen(b, fp8))

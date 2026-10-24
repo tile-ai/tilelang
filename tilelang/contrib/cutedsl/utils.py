@@ -179,15 +179,12 @@ def bitcast(value, target_dtype):
             if src_val.dtype.width != tgt_wrapper.width:
                 raise NotImplementedError(f"vector bitcast from {src_val.dtype} to {tgt_wrapper} changes the element width")
             src_elem_type = src_val.dtype.mlir_type
-            same_kind = (isinstance(src_elem_type, mlir_ir.IntegerType) and isinstance(tgt_mlir_type, mlir_ir.IntegerType)) or (
-                isinstance(src_elem_type, mlir_ir.FloatType) and isinstance(tgt_mlir_type, mlir_ir.FloatType)
-            )
-            if same_kind:
-                # MLIR integers are signless, so reinterpreting between
-                # same-width integer (or float) element types needs no IR op:
-                # only the Python dtype wrapper changes.
+            if src_elem_type == tgt_mlir_type:
+                # Same MLIR element type (int8 and uint8 are both signless i8),
+                # so only the Python wrapper changes.
                 return TensorSSA(src_ir, src_val.shape, tgt_wrapper)
-            # Integer <-> float reinterpret must be a real vector bitcast.
+            # Distinct element types -- int <-> float, or float16 vs bfloat16,
+            # which MLIR keeps apart -- must be a real vector bitcast.
             res = llvm.bitcast(_recast_type(src_ir.type, tgt_mlir_type), src_ir, loc=loc, ip=ip)
             return TensorSSA(res, src_val.shape, tgt_wrapper)
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val

@@ -3358,7 +3358,8 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
 }
 
 void CodeGenTileLangCuTeDSL::PrintVecHelperResult_(
-    DataType dtype, const std::string &call, std::ostream &os) { // NOLINT(*)
+    DataType dtype, const std::string &call, std::ostream &os,
+    bool keep_tensor) { // NOLINT(*)
   std::string sret = name_supply_->FreshName("_");
   PrintIndent();
   stream << sret << " = tl.make_rmem_tensor((" << dtype.lanes() << ",), ";
@@ -3366,7 +3367,7 @@ void CodeGenTileLangCuTeDSL::PrintVecHelperResult_(
   stream << ")\n";
   PrintIndent();
   stream << sret << ".store(" << call << ")\n";
-  os << sret << ".load()";
+  os << sret << (keep_tensor ? "" : ".load()");
 }
 
 void CodeGenTileLangCuTeDSL::PrintBinaryExpr_(const std::string &opstr,
@@ -3383,13 +3384,20 @@ void CodeGenTileLangCuTeDSL::PrintBinaryExpr_(const std::string &opstr,
       };
       std::string vlhs = print_operand(lhs);
       std::string vrhs = print_operand(rhs);
-      std::string call = "tl.fp8_binary(\"" + std::string(name) + "\", " +
-                         vlhs + ", " + vrhs + ")";
       if (dtype.is_scalar()) {
-        os << call;
-      } else {
-        PrintVecHelperResult_(dtype, call, os);
+        os << "tl.fp8_binary(\"" << name << "\", " << vlhs << ", " << vrhs
+           << ")";
+        return;
       }
+      std::string call = "tl.fp8_binary(\"" + std::string(name) + "\", " +
+                         vlhs + ", " + vrhs + ", " +
+                         std::to_string(dtype.lanes()) + ")";
+      // An FP8 vector that is not a whole number of 32-bit words stays in its
+      // rmem tensor, like the narrow load and cast paths: element access on
+      // the tensor works, MLIR extractelement on such a vector does not.
+      bool keep_tensor =
+          IsCuTeDSLFP8(dtype) && (dtype.bits() * dtype.lanes()) % 32 != 0;
+      PrintVecHelperResult_(dtype, call, os, keep_tensor);
       return;
     }
   }

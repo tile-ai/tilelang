@@ -10,6 +10,14 @@ import tilelang.testing
 _FP4_MAGNITUDES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 
+def _quantize_fp4(value):
+    """Round ``value`` to its FP4 E2M1 nibble: nearest, ties to the even index,
+    saturating at 6.0."""
+    magnitude = abs(float(value))
+    index = min(range(8), key=lambda i: (abs(_FP4_MAGNITUDES[i] - magnitude), i % 2))
+    return index | (0x8 if value < 0 else 0x0)
+
+
 def _require_cutedsl():
     """Skip when the CuTeDSL Python stack is unavailable."""
     try:
@@ -53,20 +61,22 @@ def test_cutedsl_fp4_cast_store_is_packed():
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_fp4_cast_values_are_fp4():
-    """Every stored nibble must decode to a representable FP4 E2M1 value."""
+    """Every stored nibble must be the FP4 rounding of its input element."""
     _require_cutedsl()
 
     values = torch.linspace(-6.0, 6.0, 256, dtype=torch.bfloat16, device="cuda")
     out = fp4_cast_store_kernel()(values)
 
-    decoded = []
+    nibbles = []
     for byte in out.view(torch.uint8).cpu().numpy().tolist():
-        for nibble in (byte & 0x0F, byte >> 4):
-            magnitude = _FP4_MAGNITUDES[nibble & 0x7]
-            decoded.append(-magnitude if nibble & 0x8 else magnitude)
+        nibbles.extend((byte & 0x0F, byte >> 4))
 
-    assert set(decoded) <= {m for m in _FP4_MAGNITUDES} | {-m for m in _FP4_MAGNITUDES}
-    assert min(decoded) < 0 < max(decoded)
+    # The packing order is element 2k in the low nibble of byte k; compare each
+    # element against its own rounding so a wrong order or a wrong conversion
+    # fails instead of merely producing representable values.
+    expected = [_quantize_fp4(value) for value in values.float().cpu().tolist()]
+    mismatches = [(i, got, want) for i, (got, want) in enumerate(zip(nibbles, expected, strict=True)) if got != want]
+    assert not mismatches, f"first FP4 mismatches (index, got, want): {mismatches[:8]}"
 
 
 if __name__ == "__main__":
