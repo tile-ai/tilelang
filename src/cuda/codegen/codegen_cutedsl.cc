@@ -410,6 +410,22 @@ static bool ContainsBufferLoad(const PrimExpr &expr) {
   return det.found;
 }
 
+static bool IsCuTeDSLFP8(DataType t) {
+  return t.is_float8_e4m3() || t.is_float8_e4m3fn() || t.is_float8_e5m2();
+}
+
+// CuTeDSL cannot lower arith ops on FP8 MLIR types, and no PTX instruction
+// computes on e4m3/e5m2 registers before sm_100a, so FP8 arithmetic and
+// comparisons go through tl.fp8_binary (packed f16x2 inline PTX).
+static const char *FP8BinaryOpName(const std::string &opstr) {
+  static const std::unordered_map<std::string, const char *> names = {
+      {"+", "add"},      {"-", "sub"},      {"*", "mul"}, {"tl.divf", "div"},
+      {"tl.min", "min"}, {"tl.max", "max"}, {"<", "<"},   {"<=", "<="},
+      {">", ">"},        {">=", ">="},      {"==", "=="}, {"!=", "!="}};
+  auto it = names.find(opstr);
+  return it == names.end() ? nullptr : it->second;
+}
+
 void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
                                         std::ostream &os) { // NOLINT(*)
   if (op->dtype.is_float4_e2m1fn()) {
@@ -440,6 +456,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (!op->dtype.is_scalar()) {
+    // Vector immediates appear when a scalar literal meets vectorized code;
+    // splat through a filled tensor so the value is a TensorSSA.
+    os << "tl.make_filled_tensor((" << op->dtype.lanes() << ",), "
+       << PrintExpr_(FloatImm(op->dtype.element_of(), op->value)) << ").load()";
+    return;
+  }
   switch (op->dtype.bits()) {
   case 64:
   case 32:
@@ -478,6 +501,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const FloatImmNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const IntImmNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (!op->dtype.is_scalar()) {
+    // Vector immediates appear when a scalar literal meets vectorized code;
+    // splat through a filled tensor so the value is a TensorSSA.
+    os << "tl.make_filled_tensor((" << op->dtype.lanes() << ",), "
+       << PrintExpr_(IntImm(op->dtype.element_of(), op->value)) << ").load()";
+    return;
+  }
   // CuTeDSL's tensor __setitem__ uses as_numeric() which converts bare
   // Python ints to Int32.  For non-int32 integer literals (e.g. int16, uint8),
   // wrap with the CuTeDSL type constructor so the value has the correct width.
@@ -707,7 +737,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const DivNode *op,
   if (op->dtype.is_int() || op->dtype.is_uint()) {
     PrintBinaryExpr_("//", op->dtype, op->a, op->b, os);
   } else {
-    if (enable_fastmath_) {
+    if (enable_fastmath_ && !IsCuTeDSLFP8(op->dtype)) {
       os << "tl.divf(" << PrintExpr_(op->a) << ", " << PrintExpr_(op->b)
          << ", fastmath=True)";
     } else {
@@ -1338,6 +1368,70 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << ", " << scaleA << ", " << scaleB << ", " << a_ref << " + "
            << A_offset << ", (" << b_desc << " + " << B_offset << "), " << c_ref
            << " + " << c_offset << ", " << scale_out << ")\n";
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_ss())) {
+    // Same argument layout as ptx_wgmma_ss, with the sparse metadata fragment
+    // (E) inserted after the B descriptor and a sparse selector immediate.
+    ICHECK_EQ(op->args.size(), 18U) << "ptx_wgmma_sp_ss expects 18 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = PrintExpr_(op->args[6]);
+    std::string A_offset = PrintExpr_(op->args[7]);
+    std::string e_ref = GetVarPtr_(op->args[8]);
+    std::string E_offset = PrintExpr_(op->args[9]);
+    std::string sparse_selector = PrintExpr_(op->args[10]);
+    std::string b_desc = PrintExpr_(op->args[11]);
+    std::string B_offset = PrintExpr_(op->args[12]);
+    std::string c_ref = GetVarPtr_(op->args[13]);
+    std::string c_offset = PrintExpr_(op->args[14]);
+    std::string scale_out = PrintExpr_(op->args[15]);
+    bool scale_in_a = Downcast<Bool>(op->args[16])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[17])->value;
+    std::string tnspA = a_is_k_major ? "False" : "True";
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_sp_ss(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspA
+           << ", " << tnspB << ", " << scaleA << ", " << scaleB << ", "
+           << sparse_selector << ", (" << a_desc << " + " << A_offset << "), ("
+           << b_desc << " + " << B_offset << "), " << c_ref << " + " << c_offset
+           << ", " << scale_out << ", " << e_ref << ", " << E_offset << ")\n";
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_rs())) {
+    ICHECK_EQ(op->args.size(), 17U) << "ptx_wgmma_sp_rs expects 17 args";
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    bool b_is_k_major = Downcast<Bool>(op->args[1])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[2])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string a_ref = GetVarPtr_(op->args[5]);
+    std::string A_offset = PrintExpr_(op->args[6]);
+    std::string e_ref = GetVarPtr_(op->args[7]);
+    std::string E_offset = PrintExpr_(op->args[8]);
+    std::string sparse_selector = PrintExpr_(op->args[9]);
+    std::string b_desc = PrintExpr_(op->args[10]);
+    std::string B_offset = PrintExpr_(op->args[11]);
+    std::string c_ref = GetVarPtr_(op->args[12]);
+    std::string c_offset = PrintExpr_(op->args[13]);
+    std::string scale_out = PrintExpr_(op->args[14]);
+    bool scale_in_a = Downcast<Bool>(op->args[15])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[16])->value;
+    std::string tnspB = b_is_k_major ? "False" : "True";
+    int scaleA = scale_in_a ? 1 : -1;
+    int scaleB = scale_in_b ? 1 : -1;
+    PrintIndent();
+    stream << "tl.wgmma_sp_rs(\"" << A_dtype << "\", \"" << B_dtype << "\", \""
+           << C_dtype << "\", " << m << ", " << n << ", " << k << ", " << tnspB
+           << ", " << scaleA << ", " << scaleB << ", " << sparse_selector
+           << ", " << a_ref << " + " << A_offset << ", (" << b_desc << " + "
+           << B_offset << "), " << c_ref << " + " << c_offset << ", "
+           << scale_out << ", " << e_ref << ", " << E_offset << ")\n";
   } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(op->args.size(), 15U)
         << "ptx_tcgen05_mma_ss expects 15 arguments";
@@ -1840,6 +1934,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // value
     os << "tl.AtomicAddx4(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
+    // atomic_addx4_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns the
+    // previous value of the four lanes
+    const std::string dst = PrintExpr_(op->args[0]);
+    const std::string src = PrintExpr_(op->args[1]);
+    std::string call = "tl.AtomicAddx4Ret(" + dst + ", " + src + ")";
+    PrintVecHelperResult_(op->dtype, call, os);
   } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "tl.AtomicLoad(" << PrintExpr_(op->args[0]) << ", "
@@ -1890,18 +1991,28 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // type conversion to match CUDA behavior.
     ICHECK_EQ(op->args.size(), 2U);
     DataType result_dtype = op->dtype;
-    std::string lhs = PrintExpr_(op->args[0]);
-    std::string rhs = PrintExpr_(op->args[1]);
-    PrintType(result_dtype, os);
-    os << "((" << lhs << " >> " << rhs << "))";
+    if (result_dtype.is_scalar()) {
+      PrintType(result_dtype, os);
+      os << "((" << PrintExpr_(op->args[0]) << " >> " << PrintExpr_(op->args[1])
+         << "))";
+    } else {
+      // CuTeDSL tensor shifts promote differently per element, so unpack the
+      // vector into per-lane shifts and store the narrowed result.
+      PrintVecBinaryOp_(">>", result_dtype, op->args[0], op->args[1], os);
+    }
   } else if (op->op.same_as(builtin::shift_left())) {
     // Same fix for shift_left
     ICHECK_EQ(op->args.size(), 2U);
     DataType result_dtype = op->dtype;
-    std::string lhs = PrintExpr_(op->args[0]);
-    std::string rhs = PrintExpr_(op->args[1]);
-    PrintType(result_dtype, os);
-    os << "((" << lhs << " << " << rhs << "))";
+    if (result_dtype.is_scalar()) {
+      PrintType(result_dtype, os);
+      os << "((" << PrintExpr_(op->args[0]) << " << " << PrintExpr_(op->args[1])
+         << "))";
+    } else {
+      // CuTeDSL tensor shifts promote differently per element, so unpack the
+      // vector into per-lane shifts and store the narrowed result.
+      PrintVecBinaryOp_("<<", result_dtype, op->args[0], op->args[1], os);
+    }
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
@@ -1962,6 +2073,35 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const LetNode *op,
   }
   bool removed = var_idmap_.erase(op->var.get());
   ICHECK(removed);
+}
+
+void CodeGenTileLangCuTeDSL::VisitExpr_(const RampNode *op,
+                                        std::ostream &os) { // NOLINT(*)
+  // A ramp is a vector value. The Python codegen prints it as a tuple literal,
+  // but CuTeDSL vector values are tensors: a tuple is rejected by tensor
+  // operators (e.g. `TensorSSA >> tuple`). Materialize the lanes into a
+  // register tensor instead.
+  const int lanes = op->dtype.lanes();
+  std::string base = PrintExpr_(op->base);
+  if (ContainsBufferLoad(op->base)) {
+    // The base is repeated once per lane; bind it once instead of reloading.
+    base = SSAGetID(base, op->base.dtype());
+  }
+  std::ostringstream stride;
+  PrintType(op->dtype.element_of(), stride);
+  stride << "(" << PrintExpr_(op->stride) << ")";
+  std::string sret = name_supply_->FreshName("_ramp");
+  PrintIndent();
+  stream << sret << " = tl.make_rmem_tensor((" << lanes << ",), ";
+  PrintType(op->dtype.element_of(), stream);
+  stream << ")\n";
+  for (int i = 0; i < lanes; ++i) {
+    std::ostringstream value;
+    PrintType(op->dtype.element_of(), value);
+    value << "((" << base << ") + " << stride.str() << " * " << i << ")";
+    PrintVecElemStore_(sret, op->dtype, i, value.str());
+  }
+  os << sret << ".load()";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const ShuffleNode *op,
@@ -2793,7 +2933,9 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
     stream << vid << " = 0\n";
   } else if (scope == "shared.dyn") {
     stream << vid << " = tl.make_tensor(tl.get_dyn_smem(";
-    PrintType(alloc_dtype, stream);
+    // Vector-typed buffers (e.g. u8x2 views of packed int4 weights) index
+    // through the element type; the vector width is expressed by the access.
+    PrintType(alloc_dtype.element_of(), stream);
     // there is no bound check for Tensor access, so just set shape to 1
     stream << ", alignment=1024), (1,))\n";
   } else {
@@ -2923,19 +3065,13 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
     break_emitted_in_seq_ = false;
 
     // Emit the for header (same logic as below, but always non-unrolled path
-    // since break loops use runtime conditions)
-    PrintIndent();
+    // since break loops use runtime conditions). Bounds are rendered before
+    // the header is written: hoisting Let expressions emit statements, and
+    // those must land above the loop rather than inside `range(...)`.
     std::string vid = AllocVarID(op->loop_var.get());
-    stream << "for " << vid << " in range(";
-    if (is_zero(op->min)) {
-      PrintExpr_(op->extent, stream);
-    } else {
-      PrintExpr_(op->min, stream);
-      stream << ", ";
-      PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
-      PrintExpr_(upper_bound, stream);
-    }
-    stream << "):\n";
+    std::string bounds = PrintLoopBounds_(op->min, op->extent);
+    PrintIndent();
+    stream << "for " << vid << " in range(" << bounds << "):\n";
 
     // Emit the body wrapped in guard check
     int for_scope = BeginScope();
@@ -2953,7 +3089,13 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
   }
 
   if (op->kind != tirx::ForKind::kUnrolled) {
-    CodeGenTileLangPY::VisitStmt_(op);
+    std::string vid = AllocVarID(op->loop_var.get());
+    std::string bounds = PrintLoopBounds_(op->min, op->extent);
+    PrintIndent();
+    stream << "for " << vid << " in range(" << bounds << "):\n";
+    int for_scope = BeginScope();
+    PrintStmt_(op->body);
+    EndScope(for_scope);
     return;
   }
 
@@ -2964,21 +3106,25 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
       it != unroll_factor_.end()) {
     unroll_factor = PrintExpr_(it->second);
   }
+  std::string bounds;
+  {
+    std::ostringstream bound_os;
+    if (!is_zero(start_expr)) {
+      bound_os << PrintExpr_(start_expr) << ", ";
+    }
+    bound_os << PrintExpr_(stop_expr);
+    bounds = bound_os.str();
+  }
   bool use_range_constexpr = unroll_factor.empty() &&
                              as_const_int(op->extent) != nullptr &&
                              *as_const_int(op->extent) <= LOOP_UNROLL_THRESHOLD;
-  PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
+  PrintIndent();
   stream << "for " << vid << " in cutlass.range";
   if (use_range_constexpr) {
     stream << "_constexpr";
   }
-  stream << "(";
-  if (!is_zero(start_expr)) {
-    PrintExpr_(start_expr, stream);
-    stream << ", ";
-  }
-  PrintExpr_(stop_expr, stream);
+  stream << "(" << bounds;
   if (!unroll_factor.empty()) {
     stream << ", unroll=" << unroll_factor;
   } else if (!use_range_constexpr) {
@@ -3115,6 +3261,20 @@ void CodeGenTileLangCuTeDSL::PrintVecElemStore_(const std::string &vec,
   stream << vec << "[" << i << "] = " << value << "\n";
 }
 
+std::string CodeGenTileLangCuTeDSL::PrintLoopBounds_(PrimExpr min,
+                                                     PrimExpr extent) {
+  // Rendering the bounds may hoist Let expressions, which emit statements.
+  // Build the bound text first so callers can write the loop header afterwards.
+  std::ostringstream os;
+  if (is_zero(min)) {
+    os << PrintExpr_(extent);
+  } else {
+    os << PrintExpr_(min) << ", "
+       << PrintExpr_(arith::Analyzer().Simplify(extent + min));
+  }
+  return os.str();
+}
+
 void CodeGenTileLangCuTeDSL::PrintVecStore_(const BufferNode *buffer,
                                             DataType t, PrimExpr base,
                                             const std::string &value) {
@@ -3197,10 +3357,42 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
   os << sret << ".load()";
 }
 
+void CodeGenTileLangCuTeDSL::PrintVecHelperResult_(
+    DataType dtype, const std::string &call, std::ostream &os) { // NOLINT(*)
+  std::string sret = name_supply_->FreshName("_");
+  PrintIndent();
+  stream << sret << " = tl.make_rmem_tensor((" << dtype.lanes() << ",), ";
+  PrintType(dtype.element_of(), stream);
+  stream << ")\n";
+  PrintIndent();
+  stream << sret << ".store(" << call << ")\n";
+  os << sret << ".load()";
+}
+
 void CodeGenTileLangCuTeDSL::PrintBinaryExpr_(const std::string &opstr,
                                               DataType dtype, PrimExpr lhs,
                                               PrimExpr rhs,
                                               std::ostream &os) { // NOLINT(*)
+  if (IsCuTeDSLFP8(lhs.dtype())) {
+    if (const char *name = FP8BinaryOpName(opstr)) {
+      auto print_operand = [this](const PrimExpr &expr) {
+        std::string value = PrintExpr_(expr);
+        return expr.dtype().is_scalar() || ContainsBufferLoad(expr)
+                   ? value
+                   : SSAGetID(value, expr.dtype());
+      };
+      std::string vlhs = print_operand(lhs);
+      std::string vrhs = print_operand(rhs);
+      std::string call = "tl.fp8_binary(\"" + std::string(name) + "\", " +
+                         vlhs + ", " + vrhs + ")";
+      if (dtype.is_scalar()) {
+        os << call;
+      } else {
+        PrintVecHelperResult_(dtype, call, os);
+      }
+      return;
+    }
+  }
   if (dtype.is_scalar()) {
     CodeGenTileLangPY::PrintBinaryExpr_(opstr, dtype, lhs, rhs, os);
   } else {
