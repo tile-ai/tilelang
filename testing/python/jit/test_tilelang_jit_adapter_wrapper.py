@@ -31,20 +31,21 @@ def _output_shape_program(dtype="float32"):
 
 @pytest.mark.parametrize("backend", ["cython", "pto", "nvrtc", "cutedsl", "tvm_ffi"])
 def test_adapter_allocates_expression_output(backend, monkeypatch):
-    from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
-    from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter, PTOKernelWrapper
-    from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
-    from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
-    from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+    if backend == "cython":
+        from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter as cls, CythonKernelWrapper as wrapper_cls
+    elif backend == "pto":
+        from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter as cls, PTOKernelWrapper as wrapper_cls
+    elif backend == "nvrtc":
+        from tilelang.jit.adapter.nvrtc import is_nvrtc_available
 
-    classes = dict(
-        cython=CythonKernelAdapter,
-        pto=PTOKernelAdapter,
-        nvrtc=NVRTCKernelAdapter,
-        cutedsl=CuTeDSLKernelAdapter,
-        tvm_ffi=TVMFFIKernelAdapter,
-    )
-    cls = classes[backend]
+        if not is_nvrtc_available:
+            pytest.skip("cuda-python is required to import the NVRTC adapter")
+        from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter as cls
+    elif backend == "cutedsl":
+        from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter as cls
+    else:
+        from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter as cls
+
     program = _output_shape_program()
     adapter = cls.__new__(cls)
     adapter.ir_module = tvm.IRModule({"main": program})
@@ -63,7 +64,6 @@ def test_adapter_allocates_expression_output(backend, monkeypatch):
     source = torch.empty_strided((7,), (5,))
     if backend in ("cython", "pto"):
         lib = SimpleNamespace(call=lambda *args: calls.append(args) or 0)
-        wrapper_cls = CythonKernelWrapper if backend == "cython" else PTOKernelWrapper
         wrapper = wrapper_cls([0], adapter.params, lib, lambda: torch.device("cpu"), lambda device: 0)
         wrapper.set_output_shape_resolver(adapter.output_shape_resolver)
         wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
