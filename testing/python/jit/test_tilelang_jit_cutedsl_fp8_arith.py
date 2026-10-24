@@ -88,7 +88,7 @@ def _assert_bitwise_equal(got, ref):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
-@pytest.mark.parametrize("vec", [1, 4, 8])
+@pytest.mark.parametrize("vec", [1, 2, 4, 8])
 @pytest.mark.parametrize("op", OPS)
 @pytest.mark.parametrize("dtype", list(DTYPES))
 def test_cutedsl_fp8_binary_exhaustive(dtype, op, vec):
@@ -112,7 +112,7 @@ def test_cutedsl_fp8_binary_exhaustive(dtype, op, vec):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
-@pytest.mark.parametrize("vec", [1, 4])
+@pytest.mark.parametrize("vec", [1, 2, 4])
 @pytest.mark.parametrize("dtype", list(DTYPES))
 def test_cutedsl_fp8_clamp_exhaustive(dtype, vec):
     _require_cutedsl()

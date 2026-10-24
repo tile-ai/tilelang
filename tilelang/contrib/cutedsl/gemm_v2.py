@@ -91,6 +91,8 @@ _PTX_DTYPE_MAP = {
     "float8_e5m2": "e5m2",
     "int8": "s8",
     "uint8": "u8",
+    "s32": "s32",
+    "int32": "s32",
 }
 
 # For WGMMA A/B operands, fp32 must be treated as tf32 on SM90
@@ -113,6 +115,25 @@ def _wgmma_num_c_regs(M, N, C_dtype):
     canonical = _PTX_DTYPE_MAP.get(C_dtype, C_dtype)
     elem_bits = _PTX_TO_CUTLASS_TYPE[canonical].width
     return M * N * elem_bits // (128 * 32)
+
+
+def _wgmma_tail(ptx_a, scale_a, scale_b, tnsp_a, tnsp_b):
+    """Trailing operands of ``wgmma.mma_async`` (dense or ``.sp``) after the
+    scale-d predicate ``p``.
+
+    Only the f16/bf16 grammars take transpose immediates; tf32 and fp8 take just
+    the two scale immediates, and the integer forms only ``p`` (see
+    ``cute/arch/mma_sm90_gmma.hpp``). Pass ``tnsp_a=None`` for the RS form, whose
+    register A is always K-major and has no trans-a operand.
+    """
+    if ptx_a in ("s8", "u8"):
+        return "p;"
+    if ptx_a not in ("f16", "bf16"):
+        return f"p, {scale_a}, {scale_b};"
+    tnsp_b_imm = 1 if tnsp_b else 0
+    if tnsp_a is None:
+        return f"p, {scale_a}, {scale_b}, {tnsp_b_imm};"
+    return f"p, {scale_a}, {scale_b}, {1 if tnsp_a else 0}, {tnsp_b_imm};"
 
 
 def _wgmma_ab_dtype(dtype_str):
@@ -212,12 +233,10 @@ def wgmma_rs(
     # Build PTX asm string
     d_regs_str = ", ".join(f"${i}" for i in range(num_c_regs))
     a_regs_str = ", ".join(f"${a_base + i}" for i in range(num_a_regs))
-    tnsp_b_imm = 1 if tnspB else 0
     # Embed scale_out as immediate in predicate setup
     scale_const = 1 if scale_out != 0 else 0
 
-    # TF32 WGMMA does not have a tnspB parameter (B is always K-major)
-    tail_args = f"p, {scaleA}, {scaleB};" if ptx_a == "tf32" else f"p, {scaleA}, {scaleB}, {tnsp_b_imm};"
+    tail_args = _wgmma_tail(ptx_a, scaleA, scaleB, None, tnspB)
 
     asm_str = (
         "{\n"
