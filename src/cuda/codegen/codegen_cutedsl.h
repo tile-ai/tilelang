@@ -77,9 +77,11 @@ protected:
                         PrimExpr rhs,
                         std::ostream &os) override; // NOLINT(*)
   // Binds a TensorSSA-valued helper call to an rmem tensor so stores see a
-  // `.load()` value instead of re-evaluating the call per lane.
+  // `.load()` value instead of re-evaluating the call per lane. With
+  // `keep_tensor` the rmem tensor itself is the result.
   void PrintVecHelperResult_(DataType dtype, const std::string &call,
-                             std::ostream &os); // NOLINT(*)
+                             std::ostream &os,
+                             bool keep_tensor = false); // NOLINT(*)
   void PrintBinaryIntrinsic_(const CallNode *op, const char *opstr,
                              std::ostream &os) override; // NOLINT(*)
 

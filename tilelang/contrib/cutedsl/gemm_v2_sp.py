@@ -24,7 +24,14 @@ from .gemm_v2 import (
     _PTX_DTYPE_MAP,
     _wgmma_ab_dtype,
     _wgmma_num_c_regs,
+    _wgmma_tail,
 )
+
+
+def _sparse_tail(ptx_a, num_a_regs, scale_a, scale_b, tnsp_a, tnsp_b):
+    """Trailing immediates of ``wgmma.mma_async.sp``: the dense grammar's
+    (``_wgmma_tail``), with the RS form selected by ``num_a_regs``."""
+    return _wgmma_tail(ptx_a, scale_a, scale_b, None if num_a_regs else tnsp_a, tnsp_b)
 
 
 def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tnsp_b, scale_a, scale_b, spsel, scale_out):
@@ -52,15 +59,7 @@ def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tn
     idx += 1
     e_operand = f"${idx}"
 
-    # Sparse register A is always K-major and TF32 sparse WGMMA only accepts
-    # K-major A, so trans-a is an operand only for the non-TF32 shared-shared
-    # form.
-    tnsp_a_imm = 1 if tnsp_a else 0
-    tnsp_b_imm = 1 if tnsp_b else 0
-    if ptx_a == "tf32" or num_a_regs:
-        tail = f"p, {scale_a}, {scale_b}, {tnsp_b_imm};"
-    else:
-        tail = f"p, {scale_a}, {scale_b}, {tnsp_a_imm}, {tnsp_b_imm};"
+    tail = _sparse_tail(ptx_a, num_a_regs, scale_a, scale_b, tnsp_a, tnsp_b)
 
     return (
         "{\n"
