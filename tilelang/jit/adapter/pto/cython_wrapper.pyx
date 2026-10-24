@@ -25,7 +25,7 @@ cdef class PTOKernelWrapper:
         object lib                     # Reference to the compiled library containing the kernel
         # Add new cache attributes
         list param_dtypes              # Cache for parameter dtypes
-        list param_shapes              # Cache for parameter shapes as native Python lists
+        object output_shape_resolver   # Resolves logical extents from runtime inputs
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the PTO adapter
 
@@ -40,20 +40,12 @@ cdef class PTOKernelWrapper:
         self.param_storage_metadata = [(-1, 1) for _ in params]
         self.dynamic_strides_map = {}
         self.scalar_param_vars = None
-        # Convert TVM shape arrays to native Python lists
-        self.param_shapes = []
         self.get_current_device = get_current_device
         self.get_current_stream = get_current_stream
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                else:
-                    native_shape.append(dim)
-            self.param_shapes.append(native_shape)
+
+    def set_output_shape_resolver(self, resolver):
+        self.output_shape_resolver = resolver
+        return self
 
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
@@ -318,19 +310,7 @@ cdef class PTOKernelWrapper:
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        for key in self.dynamic_symbolic_map:
-                            if str(s) == str(key):
-                                ref_id, ref_tensor_idx, ref_shape_idx, storage_scale = self.dynamic_symbolic_map[key]
-                                if ref_id == 0:
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx] * storage_scale)
-                                else:
-                                    shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * storage_scale)
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
+                shape = self.output_shape_resolver(i, tensor_list)
 
                 storage_dim, pack_factor = self.param_storage_metadata[i]
                 if pack_factor > 1 and storage_dim >= 0:

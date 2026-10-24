@@ -4,6 +4,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 from tilelang.engine.lower import extrac_params
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available
 
 if not is_nvrtc_available:
@@ -18,7 +19,7 @@ def _make_host_only_adapter(program, result_idx=None):
     adapter.params = extrac_params(program)
     adapter.result_idx = [] if result_idx is None else result_idx
     adapter.param_dtypes = [param.torch_dtype() for param in adapter.params]
-    adapter.param_shapes = [list(param.shape) for param in adapter.params]
+    adapter.output_shape_resolver = OutputShapeResolver(program, adapter.result_idx)
     adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
     adapter.target = "cuda"
     return adapter

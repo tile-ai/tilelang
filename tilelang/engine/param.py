@@ -21,7 +21,7 @@ class KernelParam:
     # including specialized types like float8_e4m3, float8_e5m2, custom quantized types, etc.
     # This avoids information loss when converting from TVM buffer types
     dtype: tvm.DataType  # Data type from buffer.dtype (supports all TVM types)
-    shape: list[int | Var]  # List of dimensions, can be integers or TVM variables
+    shape: list[int | PrimExpr]  # Static or symbolic dimensions
 
     @classmethod
     def from_buffer(cls, buffer: Buffer):
@@ -35,7 +35,7 @@ class KernelParam:
             KernelParam instance with dtype directly from buffer and shape
 
         Raises:
-            ValueError: If dimension type is not supported (not IntImm or Var)
+            ValueError: If dimension type is not supported (not an integer or PrimExpr)
         """
         # Use buffer.dtype directly (tvm.DataType) to preserve all type information
         # buffer.dtype is already a tvm.DataType object, no conversion needed

@@ -5,7 +5,6 @@ cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
-from tvm import tirx
 
 
 cdef class CythonKernelWrapper:
@@ -24,7 +23,7 @@ cdef class CythonKernelWrapper:
         object lib                     # Reference to the compiled library containing the kernel
         # Add new cache attributes
         list param_dtypes              # Cache for parameter dtypes
-        list param_shapes              # Cache for parameter shapes as native Python lists
+        object output_shape_resolver   # Resolves logical extents from runtime inputs
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the adapter (None = CUDA default)
 
@@ -36,20 +35,12 @@ cdef class CythonKernelWrapper:
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
-        # Convert TVM shape arrays to native Python lists
-        self.param_shapes = []
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
         self.get_current_stream = get_current_stream
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                else:
-                    native_shape.append(dim)
-            self.param_shapes.append(native_shape)
+
+    def set_output_shape_resolver(self, resolver):
+        self.output_shape_resolver = resolver
+        return self
 
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
@@ -210,19 +201,7 @@ cdef class CythonKernelWrapper:
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        for key in self.dynamic_symbolic_map:
-                            if str(s) == str(key):
-                                ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]
-                                if ref_id == 0:
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
-                                else:
-                                    shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * stride_scale)
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
+                shape = self.output_shape_resolver(i, tensor_list)
 
                 if device is None:
                     device = self._infer_output_device(inputs)
