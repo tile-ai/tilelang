@@ -27,6 +27,23 @@ from .gemm_v2 import (
 )
 
 
+def _sparse_tail(ptx_a, num_a_regs, scale_a, scale_b, tnsp_a, tnsp_b):
+    """Trailing immediates of ``wgmma.mma_async.sp`` for one dtype form.
+
+    Only the f16/bf16 grammars take transpose immediates; tf32, fp8 and the
+    integer forms carry just the two scale immediates (see
+    ``cute/arch/mma_sm90_gmma_sparse.hpp``). The RS form drops trans-a because
+    sparse register A is always K-major.
+    """
+    if ptx_a not in ("f16", "bf16"):
+        return f"p, {scale_a}, {scale_b};"
+    tnsp_a_imm = 1 if tnsp_a else 0
+    tnsp_b_imm = 1 if tnsp_b else 0
+    if num_a_regs:
+        return f"p, {scale_a}, {scale_b}, {tnsp_b_imm};"
+    return f"p, {scale_a}, {scale_b}, {tnsp_a_imm}, {tnsp_b_imm};"
+
+
 def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tnsp_b, scale_a, scale_b, spsel, scale_out):
     """Build the ``wgmma.mma_async.sp`` asm string.
 
@@ -52,15 +69,7 @@ def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tn
     idx += 1
     e_operand = f"${idx}"
 
-    # Sparse register A is always K-major and TF32 sparse WGMMA only accepts
-    # K-major A, so trans-a is an operand only for the non-TF32 shared-shared
-    # form.
-    tnsp_a_imm = 1 if tnsp_a else 0
-    tnsp_b_imm = 1 if tnsp_b else 0
-    if ptx_a == "tf32" or num_a_regs:
-        tail = f"p, {scale_a}, {scale_b}, {tnsp_b_imm};"
-    else:
-        tail = f"p, {scale_a}, {scale_b}, {tnsp_a_imm}, {tnsp_b_imm};"
+    tail = _sparse_tail(ptx_a, num_a_regs, scale_a, scale_b, tnsp_a, tnsp_b)
 
     return (
         "{\n"
