@@ -2894,6 +2894,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
+  } else if (op->op.same_as(tl::prefetch_l1())) {
+    need_copy_h_ = true;
+    std::ostringstream ss;
+    bool is_global = Downcast<IntImm>(op->args[1])->value != 0;
+    ss << "tl::prefetch_l1<" << (is_global ? "true" : "false") << ">";
+    print_extern_call_stmt(ss.str(), 0, 1);
+  } else if (op->op.same_as(tl::prefetchu_l1())) {
+    need_copy_h_ = true;
+    print_extern_call_stmt("tl::prefetchu_l1");
+  } else if (op->op.same_as(tl::prefetch_l2())) {
+    need_copy_h_ = true;
+    std::ostringstream ss;
+    auto priority = Downcast<IntImm>(op->args[1])->value;
+    bool is_global = Downcast<IntImm>(op->args[2])->value != 0;
+    ss << "tl::prefetch_l2<" << priority << ", "
+       << (is_global ? "true" : "false") << ">";
+    print_extern_call_stmt(ss.str(), 0, 2);
   } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
     need_copy_sm90_h_ = true;
     print_extern_call_stmt("tl::prefetch_tma_descriptor");
