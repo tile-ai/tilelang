@@ -1,4 +1,3 @@
-import os
 import pytest
 import tilelang.testing
 
@@ -6,7 +5,7 @@ import example_gqa_decode
 import example_mha_inference
 import example_gqa_decode_varlen_logits
 
-_is_cutedsl = os.environ.get("TILELANG_TARGET", "").lower() == "cutedsl"
+_is_cutedsl = tilelang.testing.default_target_is_cutedsl()
 
 
 @tilelang.testing.requires_cuda

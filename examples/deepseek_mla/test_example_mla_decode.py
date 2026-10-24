@@ -1,9 +1,8 @@
-import os
 import pytest
 import tilelang.testing
 import example_mla_decode
 
-_is_cutedsl = os.environ.get("TILELANG_TARGET", "").lower() == "cutedsl"
+_is_cutedsl = tilelang.testing.default_target_is_cutedsl()
 
 
 @tilelang.testing.requires_cuda
