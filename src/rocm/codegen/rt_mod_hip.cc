@@ -1,8 +1,5 @@
-#if defined(__linux__)
 #include "support/check.h"
-#include <sys/stat.h>
 #include <tvm/ir/cast.h>
-#endif
 
 #include <hip/hip_runtime.h>
 
