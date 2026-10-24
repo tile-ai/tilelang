@@ -172,8 +172,108 @@ def test_output_shape_preserves_symbol_identity():
     output = tir.decl_buffer((left + right,), "float32", name="C")
     func = tir.PrimFunc([left, right, output.data], tir.Evaluate(0), buffer_map={output.data: output})
     assert OutputShapeResolver(func, [2])(2, [3, 7, None]) == [10]
-    with pytest.raises(ValueError, match="ambiguous symbol name 'n'"):
-        OutputShapeResolver(func, [2], require_unique_names=True)
+
+
+@pytest.mark.parametrize("cooperative", [False, True])
+@pytest.mark.parametrize("cloned_parameters", [False, True])
+def test_cuda_host_wrapper_binds_lowered_arguments_by_identity(cooperative, cloned_parameters):
+    """Exercise Python host emission without CUDA lowering or a CUDA device."""
+    from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
+
+    tir = tvm.tirx
+    a = tir.decl_buffer((8,), "float32", name="A")
+    left, right = tir.Var("n", "int32"), tir.Var("n", "int32")
+    func = tir.PrimFunc([a.data, left, right], tir.Evaluate(0), buffer_map={a.data: a})
+    device_left, device_right = (tir.Var("renamed", "int32"), tir.Var("renamed", "int32")) if cloned_parameters else (left, right)
+    descriptor = tir.Var("tensor_map", "handle")
+    device = tir.PrimFunc([a.data, device_left, device_right, descriptor], tir.Evaluate(0))
+    wrapper = TLCUDASourceWrapper.__new__(TLCUDASourceWrapper)
+    wrapper.mod = tvm.IRModule({"main": func})
+    wrapper.device_mod = tvm.IRModule({"kernel": device, "second": device})
+    wrapper.tma_descriptor_args = {descriptor: [0, 0, 0, 0, a.data]}
+    wrapper.l2_persistent_map = {}
+    wrapper.use_cooperative_groups = {"kernel": cooperative, "second": cooperative}
+    wrapper.cluster_dims = {"kernel": None, "second": None}
+    descriptors = []
+
+    def capture_descriptors(names, variables):
+        descriptors.append((dict(names), dict(variables)))
+        return ""
+
+    wrapper.generate_tma_descriptor_args = capture_descriptors
+    info = dict(
+        block_info=[32, 1, 1], grid_info=[device_left, 1, 1], dynamic_smem_buf=None, function_params=[a.data, right, left, descriptor]
+    )
+    second_info = {**info, "function_params": [a.data, left, right, descriptor]}
+    source = wrapper.create_dispatch_func("", {"kernel": info, "second": second_info})
+    left_name, right_name = wrapper._argument_names[left], wrapper._argument_names[right]
+    assert left_name != right_name
+    assert f"dim3(({right_name}), 1, 1)" in source
+    assert f"dim3(({left_name}), 1, 1)" in source
+    if cooperative:
+        assert f" _tl_launch_kernel_1 = {right_name};" in source
+        assert f" _tl_launch_kernel_2 = {left_name};" in source
+        assert f" _tl_launch_second_1 = {left_name};" in source
+        assert f" _tl_launch_second_2 = {right_name};" in source
+    else:
+        assert f"cudaLaunchKernelEx(&config, kernel, A, {right_name}, {left_name}, tensor_map);" in source
+        assert f"cudaLaunchKernelEx(&config, second, A, {left_name}, {right_name}, tensor_map);" in source
+    assert descriptors[0][0] == {"tensor_map": "A"}
+    assert descriptors[0][1]["tensor_map"].same_as(descriptor)
+    info["function_params"] = [a.data, right, tir.Var("n", "int32"), descriptor]
+    with pytest.raises(ValueError, match="Cannot resolve host variable by identity"):
+        wrapper.create_dispatch_func("", {"kernel": info})
+
+
+@pytest.mark.parametrize("allocate", [True, False])
+def test_cython_same_name_shape_vars(allocate, tmp_path, monkeypatch):
+    import tilelang.cpu.language as T
+    from tilelang.cache import _resolve_cache_dispatch
+    from tilelang.env import env
+    from tilelang.jit import JITKernel
+    from tilelang.cache.kernel_cache import KernelCache
+
+    left, right = T.dynamic("n"), T.dynamic("n")
+
+    @T.prim_func
+    def main(C: T.Tensor((right,), "float32"), A: T.Tensor((left,), "float32"), B: T.Tensor((right,), "float32")):
+        with T.Kernel(1):
+            for i in T.serial(right):
+                C[i] = B[i] + A[0] + T.float32(left * 100 + right)
+
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path))
+    cache, _, _ = _resolve_cache_dispatch("c", None, "cython", False)
+    monkeypatch.setattr(cache, "_memory_cache", {})
+    outputs = [0] if allocate else None
+    if allocate:
+        # Entries under the legacy key must not be reused after the ABI change.
+        with monkeypatch.context() as legacy:
+            legacy.setattr(cache, "_get_base_key", KernelCache._get_base_key)
+            tilelang.compile(main, out_idx=outputs, target="c", execution_backend="cython")
+        cache._memory_cache.clear()
+    with monkeypatch.context() as fresh:
+
+        def reject_old_artifact(*args, **kwargs):
+            pytest.fail("The old launch ABI cache must be invalidated")
+
+        fresh.setattr(JITKernel, "from_database", reject_old_artifact)
+        kernel = tilelang.compile(main, out_idx=outputs, target="c", execution_backend="cython")
+    cache._memory_cache.clear()
+
+    def unexpected_compile(*args, **kwargs):
+        pytest.fail("The identity-preserving launcher must restore from disk")
+
+    monkeypatch.setattr(JITKernel, "_compile_and_create_adapter", unexpected_compile)
+    restored = tilelang.compile(main, out_idx=outputs, target="c", execution_backend="cython")
+    assert restored is not kernel
+    for compiled in (kernel, restored):
+        a, b = torch.arange(3, dtype=torch.float32), torch.arange(7, dtype=torch.float32)
+        if allocate:
+            result = compiled(a, b)
+        else:
+            result = torch.full((7,), -1.0)
+            compiled(result, a, b)
+        torch.testing.assert_close(result, b + 307, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("backend", ["cython", "tvm_ffi"])

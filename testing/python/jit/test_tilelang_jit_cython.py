@@ -7,10 +7,12 @@ import pytest
 
 
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
-def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
+@pytest.mark.parametrize("backend", ["cython", "pto"])
+def test_cython_dynamic_symbol_shared_by_shape_and_stride(present, backend):
     """Each non-null carrier must retain whether it supplies a shape or stride."""
     from tilelang.engine.param import KernelParam
     from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
+    from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter, PTOKernelWrapper
 
     size = tvm.tirx.Var("size", "int64")
     a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
@@ -18,7 +20,8 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     func = tvm.tirx.PrimFunc(
         [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
     )
-    adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
+    adapter_cls = CythonKernelAdapter if backend == "cython" else PTOKernelAdapter
+    adapter = adapter_cls.__new__(adapter_cls)
     adapter.ir_module = tvm.IRModule({"main": func})
     adapter.result_idx = []
     adapter.target = tvm.target.Target("c")
@@ -30,13 +33,14 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
 
     lib = CaptureLibrary()
     params = [KernelParam.from_buffer(buffer) for buffer in (a_buffer, b_buffer)]
-    wrapper = CythonKernelWrapper([], params, lib)
+    wrapper_cls = CythonKernelWrapper if backend == "cython" else PTOKernelWrapper
+    wrapper = wrapper_cls([], params, lib, lambda: torch.device("cpu"), lambda device: 0)
     wrapper.set_dynamic_symbolic_map(adapter._process_dynamic_symbolic())
     wrapper.set_dynamic_symbolic_sources(adapter._process_dynamic_symbolic_sources())
     wrapper.set_ptr_map(adapter._process_ptr_map())
     wrapper.set_buffer_dtype_map(adapter._process_buffer_dtype())
-    wrapper.set_buffer_device_map(adapter._process_buffer_device())
-    shapes, strides, contiguous = adapter._process_static_buffer_infos()
+    wrapper.set_buffer_device_map({})
+    shapes, strides, contiguous = adapter._process_static_buffer_infos()[:3]
     wrapper.set_static_shape_map(shapes)
     wrapper.set_static_strides_map(strides)
     wrapper.set_static_contiguous_list(contiguous)

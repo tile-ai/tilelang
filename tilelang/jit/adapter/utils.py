@@ -7,6 +7,84 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 
 
+def dynamic_symbolic_vars(func) -> list[tvm.tirx.Var]:
+    """Implicit shape/stride arguments in signature order, keyed by identity."""
+    seen = set(func.params)
+    result = []
+    for field in ("shape", "strides"):
+        for param in func.params:
+            if param in func.buffer_map:
+                for value in getattr(func.buffer_map[param], field):
+                    if isinstance(value, tvm.tirx.Var) and value not in seen:
+                        seen.add(value)
+                        result.append(value)
+    return result
+
+
+def host_arguments(func, lookup_type, pointer_type):
+    """Name the positional host ABI without conflating equal name hints.
+
+    Preserve ordinary names for readable generated code, and allocate a fresh
+    name for collisions with another argument or the wrapper's stream.
+    """
+    variables = list(func.params) + dynamic_symbolic_vars(func)
+    hints = {var.name for var in variables}
+    hints.update(buffer.data.name for buffer in func.buffer_map.values())
+    used = {"stream"}
+    arguments, names = [], {}
+
+    def append(var, kind, arg_type):
+        name = var.name
+        if name in used:
+            suffix = len(arguments)
+            name = f"_tl_arg_{suffix}"
+            while name in used or name in hints:
+                suffix += 1
+                name = f"_tl_arg_{suffix}"
+        used.add(name)
+        names[var] = name
+        arguments.append({"var": var, "name": name, "kind": kind, "type": arg_type})
+
+    for param in func.params:
+        if param in func.buffer_map:
+            buffer = func.buffer_map[param]
+            append(buffer.data, "pointer", pointer_type(buffer))
+            names[param] = names[buffer.data]
+        else:
+            append(param, "scalar", lookup_type(param.dtype))
+    for var in dynamic_symbolic_vars(func):
+        append(var, "scalar", lookup_type(var.dtype))
+    return arguments, names
+
+
+def kernel_call_arguments(host_func, kernel_name, param_count):
+    """Get positional device operands from the lowered host call."""
+    result = None
+
+    def visitor(node):
+        nonlocal result
+        if not isinstance(node, tvm.tirx.Call):
+            return
+        if isinstance(node.op, tvm.ir.GlobalVar) and node.op.name_hint == kernel_name:
+            if len(node.args) < param_count:
+                raise ValueError(f"Kernel {kernel_name} has too few host call arguments")
+            result = node.args[:param_count]
+        elif (
+            isinstance(node.op, tvm.ir.Op)
+            and node.op.name in ("tirx.tvm_call_packed", "tirx.call_extern")
+            and node.args
+            and node.args[0] == kernel_name
+        ):
+            if len(node.args) < 1 + param_count:
+                raise ValueError(f"Kernel {kernel_name} has too few host call arguments")
+            result = node.args[1 : 1 + param_count]
+
+    tvm.tirx.stmt_functor.post_order_visit(host_func.body, visitor)
+    if result is None:
+        raise ValueError(f"Cannot find host call for kernel {kernel_name}")
+    return result
+
+
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
     pattern = r"__global__\s+void\s+[__launch_bounds__\(\d+\)\s+]\w+"
     for line in source.split("\n"):
@@ -116,6 +194,7 @@ def pythonic_expr(
     func_name_map: dict[str, str] | None = None,
     expression_style: Literal["legacy", "python", "cxx"] = "legacy",
     var_name_map: dict[tvm.tirx.Var, str] | None = None,
+    strict_var_names: bool = False,
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -133,6 +212,7 @@ def pythonic_expr(
         expression_style: Controls conditional and logical operator spelling.
                           ``legacy`` preserves the historical output.
         var_name_map: Optional identity-based names for variables in generated wrappers.
+        strict_var_names: Reject variables missing from the identity map instead of using their name hints.
     Returns:
         A string representation of the expression.
     """
@@ -197,6 +277,8 @@ def pythonic_expr(
             return
 
         if isinstance(node, tvm.tirx.Var):
+            if strict_var_names and (var_name_map is None or node not in var_name_map):
+                raise ValueError(f"Cannot resolve host variable by identity: {node}")
             s, p = (
                 (var_name_map.get(node, node.name) if var_name_map is not None else node.name),
                 ATOMIC_PRECEDENCE,

@@ -16,6 +16,7 @@ from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.shape import OutputShapeResolver
+from tilelang.jit.adapter.utils import dynamic_symbolic_vars
 from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
 from .libgen import PTOLibraryGenerator
@@ -175,7 +176,6 @@ class PTOKernelAdapter(BaseKernelAdapter):
                 self.result_idx,
                 shape_scale=lambda buffer, dim: _storage_pack_factor(buffer.dtype) if dim == len(buffer.shape) - 1 else 1,
                 stride_scale=lambda buffer: _storage_pack_factor(buffer.dtype),
-                require_unique_names=True,
             )
         )
         self.runtime_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
@@ -229,12 +229,12 @@ class PTOKernelAdapter(BaseKernelAdapter):
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
-        return dynamic_symbolic_map
+        return {var: dynamic_symbolic_map[var] for var in dynamic_symbolic_vars(func)}
 
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int]]]:
+    def _process_dynamic_symbolic_sources(self) -> dict[tirx.Var, list[tuple[int, int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
 
-        For each dynamic symbol, maps to ALL buffers that carry it as (buffer_idx, dim_idx, storage_scale).
+        For each dynamic symbol, maps to ALL buffers that carry it as (kind, buffer_idx, dim_idx, storage_scale).
         This allows the Cython wrapper to find a non-None carrier when some buffers are None.
         """
 
@@ -244,23 +244,23 @@ class PTOKernelAdapter(BaseKernelAdapter):
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int]]] = {}
+        sources: dict[tirx.Var, list[tuple[int, int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 stride_scale = _storage_pack_factor(buffer.dtype)
                 for j, dim in enumerate(buffer.shape):
                     if isinstance(dim, tirx.Var) and dim not in params:
-                        key = str(dim)
+                        key = dim
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, shape_scale(buffer, j)))
+                        sources[key].append((0, i, j, shape_scale(buffer, j)))
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and stride not in params:
-                        key = str(stride)
+                        key = stride
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, stride_scale))
+                        sources[key].append((1, i, j, stride_scale))
         return sources
 
     def _process_scalar_param_vars(self) -> list[tirx.Var | None]:

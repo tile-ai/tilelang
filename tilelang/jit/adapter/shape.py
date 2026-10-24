@@ -22,7 +22,7 @@ class OutputShapeResolver:
     output is never used to infer its own shape.
     """
 
-    def __init__(self, func, result_idx, *, shape_scale=None, stride_scale=_stride_scale, require_unique_names=False):
+    def __init__(self, func, result_idx, *, shape_scale=None, stride_scale=_stride_scale):
         self.shapes = {}
         self.names = {}
         self.sources = {}
@@ -60,15 +60,6 @@ class OutputShapeResolver:
                     expr, lambda node, variables=variables: variables.append(node) if isinstance(node, tirx.Var) else None
                 )
                 self.variables[i, j] = variables
-                # Cython/PTO launch wrappers still use name-based ABIs. Do not
-                # turn their existing same-name failure into a successful but
-                # incorrectly bound launch when fixing output allocation.
-                if require_unique_names:
-                    for var in variables:
-                        if sum(key.name == var.name for key in self.sources) > 1:
-                            raise ValueError(
-                                f"Cannot resolve output {self.names[i]} dimension {j} ({expr}): ambiguous symbol name '{var.name}'"
-                            )
 
     def _resolve_var(self, var, values):
         for kind, index, dimension, scale in self.sources.get(var, ()):

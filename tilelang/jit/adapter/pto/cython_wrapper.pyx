@@ -10,7 +10,7 @@ cdef class PTOKernelWrapper:
     # Class attributes to store kernel configuration and library reference
     cdef:
         object dynamic_symbolic_map    # Maps dynamic dimensions to their corresponding tensor indices
-        object dynamic_symbolic_sources  # Maps dynamic var names to ALL buffer carriers for cascaded None resolution
+        object dynamic_symbolic_sources  # Maps dynamic Vars to ALL buffer carriers for cascaded None resolution
         object buffer_device_map       # Maps buffer variables to their corresponding devices
         object buffer_dtype_map        # Maps buffer variables to their corresponding dtypes
         object param_storage_metadata  # Per-parameter (packed_dim, pack_factor) metadata
@@ -156,13 +156,12 @@ cdef class PTOKernelWrapper:
         values = {}
         for var, (ref_id, buffer_idx, shape_idx, storage_scale) in self.dynamic_symbolic_map.items():
             # Cascaded resolution across all carrier buffers to handle None
-            var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(buffer_idx, shape_idx, storage_scale)])
+            sources = self.dynamic_symbolic_sources.get(var, [(ref_id, buffer_idx, shape_idx, storage_scale)])
             value = 0
-            for src_buf_idx, src_dim_idx, src_storage_scale in sources:
+            for src_ref_id, src_buf_idx, src_dim_idx, src_storage_scale in sources:
                 tensor = tensor_list[src_buf_idx]
                 if tensor is not None:
-                    if ref_id == 0:
+                    if src_ref_id == 0:
                         value = int(tensor.shape[src_dim_idx]) * src_storage_scale
                     else:
                         value = int(tensor.stride(src_dim_idx)) * src_storage_scale

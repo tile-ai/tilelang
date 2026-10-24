@@ -83,6 +83,9 @@ Notes
 - `T.symbolic(name, dtype)` is a deprecated alias of `T.dynamic` and will be removed in v0.1.15; prefer `T.dynamic`.
 - Under `@jit`, concrete sizes come from the actual tensor arguments at the first call.
 - Symbols in annotations do not need to be separate kernel arguments; TileLang binds them from argument shapes.
+- Each call to `T.dynamic("N")` creates a distinct symbol. Reuse the returned
+  variable when dimensions must be equal; matching name hints do not make two
+  symbols identical.
 
 Automatically allocated outputs (`out_idx` or `T.empty`) may use integer
 expressions such as `2 * N` or `T.ceildiv(N, 4)` in their dimensions. Each symbol

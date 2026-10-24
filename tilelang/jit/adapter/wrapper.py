@@ -9,19 +9,17 @@ from .utils import (
     is_ascend_target,
     is_metal_target,
     is_cutedsl_target,
-    match_declare_kernel,
-    match_declare_kernel_cpu,
     is_cuda_target,
     is_hip_target,
     is_cpu_target,
     pythonic_expr,
-    parse_function_call_args,
+    dynamic_symbolic_vars,
+    host_arguments,
+    kernel_call_arguments,
     parse_tma_descriptor_args,
 )
-import re
 import logging
 import textwrap
-from tvm.tirx.stmt_functor import post_order_visit
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -275,7 +273,8 @@ class TLCUDASourceWrapper:
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         # This wrapper generates C/CUDA source. C/C++ integer division uses '/',
         # and '//' is not a valid operator in C/C++.
-        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
+        names = getattr(self, "_argument_names", None)
+        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/", var_name_map=names, strict_var_names=names is not None)
 
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
@@ -286,33 +285,44 @@ class TLCUDASourceWrapper:
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
         return arg_name in self.prim_func.buffer_map
 
-    def create_dispatch_func(self, code, function_informations):
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+    def _collect_host_arguments(self):
+        arguments, self._argument_names = host_arguments(
+            self.prim_func, self._lookup_type, lambda buffer: self._lookup_type(buffer.dtype) + "* __restrict__"
+        )
+        return arguments
 
-        function_args = []
-
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        # QA(@lei): Why not use device_mod.params?
-        # device func lack buffer map (to convert buffer handle to buffer)
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": self._lookup_type(buffer.dtype) + "* __restrict__",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+    def _collect_kernel_call_args(self, parameters, desc_name_map, desc_name_var_map):
+        arguments = []
+        for expr in parameters:
+            if expr in self._argument_names:
+                arguments.append(self._argument_names[expr])
+            elif self.tma_descriptor_args is not None and expr in self.tma_descriptor_args:
+                name = expr.name
+                used = set(self._argument_names.values()) | {"stream"}
+                suffix = 0
+                while name in used:
+                    name = f"_tl_tma_{suffix}"
+                    suffix += 1
+                self._argument_names[expr] = name
+                desc_name_var_map[name] = expr
+                desc_name_map[name] = self._pythonic_expr(self.tma_descriptor_args[expr][4])
+                arguments.append(name)
+            elif str(expr.dtype) != "handle":
+                arguments.append(self._pythonic_expr(expr))
             else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+                raise ValueError(f"Cannot resolve kernel pointer argument by identity: {expr}")
+        return arguments
 
+    def _bind_kernel_scalars(self, function_name, parameters):
+        bindings = {
+            device: f"({self._pythonic_expr(host)})"
+            for device, host in zip(self.device_mod[function_name].params, parameters, strict=True)
+            if str(device.dtype) != "handle"
+        }
+        self._argument_names.update(bindings)
+
+    def create_dispatch_func(self, code, function_informations):
+        function_args = self._collect_host_arguments()
         function_args.append(self.get_stream_type())
 
         # Format the function arguments for declaration
@@ -335,14 +345,9 @@ class TLCUDASourceWrapper:
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
 
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = self.get_declaration(code[index:])
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
+            args_list = self._collect_kernel_call_args(function_params, desc_name_map, desc_name_var_map)
+            host_names = self._argument_names.copy()
+            self._bind_kernel_scalars(function_name, function_params)
 
             block_str = (
                 f"dim3({self._pythonic_expr(block_info[0])}, {self._pythonic_expr(block_info[1])}, {self._pythonic_expr(block_info[2])})"
@@ -350,16 +355,24 @@ class TLCUDASourceWrapper:
             grid_str = (
                 f"dim3({self._pythonic_expr(grid_info[0])}, {self._pythonic_expr(grid_info[1])}, {self._pythonic_expr(grid_info[2])})"
             )
+            # Device parameters can share identity with host Vars. Their local
+            # launch bindings must not change subsequent calls or descriptors.
+            self._argument_names = host_names
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
 
             if self.use_cooperative_groups[function_name]:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
-                assert len(function_params) == len(args_list), (
-                    f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
-                )
-                args_array = [f"(void*)&{arg}" for arg in args_list]
+                args_array = []
+                used_names = set(self._argument_names.values())
+                for index, (param, value) in enumerate(zip(self.device_mod[function_name].params, args_list, strict=True)):
+                    name = f"_tl_launch_{function_name}_{index}"
+                    while name in used_names:
+                        name += "_"
+                    used_names.add(name)
+                    arg_type = "auto" if str(param.dtype) == "handle" else self._lookup_type(param.dtype)
+                    kernel_launch_code += f"\t{arg_type} {name} = {value};\n"
+                    args_array.append(f"(void*)&{name}")
                 call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
                 kernel_launch_code += call_args
                 # Using cudaLaunchCooperativeKernel to launch the kernel
@@ -368,11 +381,6 @@ class TLCUDASourceWrapper:
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
             else:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
-                assert len(function_params) == len(args_list), (
-                    f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
-                )
-
                 call_args = ", ".join(args_list)
                 kernel_code = self.get_kernel_launch_code(
                     function_name, grid_str, block_str, smem_str, call_args, self.cluster_dims[function_name]
@@ -399,6 +407,10 @@ class TLCUDASourceWrapper:
             return ""
         init_l2_persistent_map = ""
         for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[function_name].items():
+            matches = [buffer.data for buffer in self.prim_func.buffer_map.values() if buffer.data.name == buffer_name]
+            if len(matches) != 1:
+                raise ValueError(f"Ambiguous L2 persistent buffer name: {buffer_name}")
+            argument_name = self._argument_names[matches[0]]
             # get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
 
@@ -408,7 +420,7 @@ class TLCUDASourceWrapper:
             except Exception:
                 # as size_in_bytes maybe a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
-            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
+            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(argument_name, float(hit_ratio), self._pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
@@ -538,31 +550,8 @@ class TLCUDASourceWrapper:
         self.function_names = function_names
 
     def get_dynamic_symbolic_set(self, prim_func):
-        # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: dict[str, str] = {}
-
-        def unique_push_back(name: str, dtype: str):
-            if name not in dynamic_symbolic_set:
-                dynamic_symbolic_set[name] = dtype
-            else:
-                assert dtype == dynamic_symbolic_set[name]
-
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var):
-                        unique_push_back(dim.name, str(dim.dtype))
-
-        # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for stride in buffer.strides:
-                    if isinstance(stride, tvm.tirx.Var):
-                        unique_push_back(stride.name, str(stride.dtype))
-
-        return list(dynamic_symbolic_set.items())
+        _, names = host_arguments(prim_func, self._lookup_type, lambda buffer: "void*")
+        return [(names[var], str(var.dtype)) for var in dynamic_symbolic_vars(prim_func)]
 
     def get_kernel_launch_code(self, function_name, grid_str, block_str, smem_str, call_args, cluster_dims):
         if cluster_dims is None:
@@ -599,22 +588,7 @@ class TLCUDASourceWrapper:
             assert function_name in self.device_mod, f"Function {function_name} not found in device module"
             device_func = self.device_mod[function_name]
             kernel_params_cnt = len(device_func.params)
-            function_params: list[str] = None
-
-            def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
-                nonlocal function_params
-                if isinstance(node, tvm.tirx.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
-                        return
-                    args = node.args
-                    if not args or args[0] != fn:
-                        return
-                    if len(args) < 1 + param_cnt:
-                        raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
-                    function_params = args[1 : 1 + param_cnt]
-
-            post_order_visit(self.host_func.body, visitor)
-            assert function_params is not None, "function_params should not be None"
+            function_params = kernel_call_arguments(self.host_func, function_name, kernel_params_cnt)
 
             function_informations[function_name] = {
                 "function_name": function_name,
@@ -800,58 +774,15 @@ class TLCPUSourceWrapper:
         return result
 
     def create_call_func(self, code, function_informations):
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
-
-        function_args = []
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.name,
-                        "type": self._lookup_type(buffer.dtype) + "*",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
-            else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
-        # Format the function arguments for declaration
-        def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
-
-        def func_call_args(s, function_args):
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
-
-        _call_str = """"""
-
-        for function_name, _ in function_informations.items():
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel_cpu(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            call_args = ", ".join(func_call_args(declaration, function_args))
-            _call_str += f"{function_name}({call_args})"
-
-        # Wrap the kernel dispatch logic in an external C function
-        host_func = self.CALL_PREFIX.format(def_args, _call_str)
-        return host_func
+        arguments, names = host_arguments(self.prim_func, self._lookup_type, lambda buffer: self._lookup_type(buffer.dtype) + "*")
+        def_args = ", ".join(f"{arg['type']} {arg['name']}" for arg in arguments)
+        host_func = next(iter(self.host_mod.functions.values()))
+        calls = []
+        for function_name in function_informations:
+            parameters = kernel_call_arguments(host_func, function_name, len(self.device_mod[function_name].params))
+            values = [pythonic_expr(expr, self._TYPE_MAP, var_name_map=names, strict_var_names=True) for expr in parameters]
+            calls.append(f"{function_name}({', '.join(values)})")
+        return self.CALL_PREFIX.format(def_args, ", ".join(calls))
 
     def parse_source_information(self):
         self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
@@ -866,15 +797,8 @@ class TLCPUSourceWrapper:
         self.function_names = function_names
 
     def get_dynamic_symbolic_set(self, prim_func):
-        # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: dict[str, str] = {}
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var) and dim not in prim_func.params and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set[dim.name] = str(dim.dtype)
-        return list(dynamic_symbolic_set.items())
+        _, names = host_arguments(prim_func, self._lookup_type, lambda buffer: "void*")
+        return [(names[var], str(var.dtype)) for var in dynamic_symbolic_vars(prim_func)]
 
     def get_cpu_init_func(self):
         # Provide init() and get_last_error() for CPU backend
@@ -965,25 +889,7 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
         Ascend uses ``<<<grid, smem, stream>>>`` (three arguments, no block
         dim) and ACL error checking instead of CUDA equivalents.
         """
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
-
-        function_args = []
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": self._lookup_type(buffer.dtype) + "* __restrict__",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
-            else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+        function_args = self._collect_host_arguments()
 
         stream_type = self.get_stream_type()
         if stream_type is not None:
@@ -997,22 +903,15 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
 
-            # Ascend kernel signature: __global__ __vector__ <ret> name(...)
-            # match_declare_kernel expects __global__ void, so find by name directly.
-            func_decl_pos = code.index(function_name + "(")
-            declaration = self.get_declaration(code[func_decl_pos:])
-            brace_pos = code.index("{", func_decl_pos)  # noqa: F841
-
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-
-            args_list = parse_function_call_args(declaration, function_args, function_params, {}, {})
-            assert len(function_params) == len(args_list), (
-                f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
-            )
+            args_list = self._collect_kernel_call_args(function_params, {}, {})
+            host_names = self._argument_names.copy()
+            self._bind_kernel_scalars(function_name, function_params)
             call_args = ", ".join(args_list)
             # Ascend triple-chevron: <<<grid, smem, stream>>> (no block dim)
             # Ascend bisheng expects grid as a single unsigned int, not dim3
             grid_dim = f"({self._pythonic_expr(grid_info[0])} * {self._pythonic_expr(grid_info[1])} * {self._pythonic_expr(grid_info[2])})"
+            self._argument_names = host_names
             stream_arg = "stream" if stream_type else "nullptr"
             kernel_launch_code += f"\t{function_name}<<<{grid_dim}, {smem_str}, {stream_arg}>>>({call_args});\n"
             kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'

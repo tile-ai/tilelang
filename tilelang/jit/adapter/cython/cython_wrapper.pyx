@@ -11,7 +11,7 @@ cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
     cdef:
         object dynamic_symbolic_map    # Maps dynamic dimensions to their corresponding tensor indices
-        object dynamic_symbolic_sources  # Maps dynamic var names to ALL buffer carriers for cascaded None resolution
+        object dynamic_symbolic_sources  # Maps dynamic Vars to ALL buffer carriers for cascaded None resolution
         object buffer_device_map       # Maps buffer variables to their corresponding devices
         object buffer_dtype_map        # Maps buffer variables to their corresponding dtypes
         object static_shape_map        # Maps buffer variables to their corresponding static shapes
@@ -264,8 +264,7 @@ cdef class CythonKernelWrapper:
         # Add dynamic dimension values to kernel arguments
         for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
             # Cascaded resolution across all carrier buffers to handle None
-            var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
+            sources = self.dynamic_symbolic_sources.get(var, [(ref_id, buffer_idx, shape_idx, stride_scale)])
             value = 0
             for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
                 tensor = tensor_list[src_buf_idx]
