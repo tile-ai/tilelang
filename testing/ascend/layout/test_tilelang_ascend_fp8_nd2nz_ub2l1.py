@@ -6,6 +6,7 @@ import tilelang
 import tilelang.testing
 from tilelang.ascend import language as T
 from tilelang import tvm
+from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
 
 pytest.importorskip("torch_npu")
 
@@ -114,3 +115,46 @@ def test_fp8_scatter_intrinsic_preserves_bits(cols, inside_vf):
     output = kernel(bits.view(torch.float8_e4m3fn).npu()).cpu().view(torch.uint8)
     unpacked = output.reshape(cols // 32, rows + 1, 32)[:, :rows, :].permute(1, 0, 2).reshape(rows, cols)
     torch.testing.assert_close(unpacked, bits, rtol=0, atol=0)
+
+
+def _make_prepacked_nz_kernel(compact):
+    rows, cols = 32, 128
+    storage_rows = rows + 1 if compact else rows
+    layout = make_ascend_compact_nz_layout if compact else make_ascend_nz_layout
+    dtype = "float8_e4m3fn"
+
+    @T.prim_func
+    def main(
+        packed: T.Tensor((storage_rows, cols), dtype), identity: T.Tensor((cols, cols), dtype), out: T.Tensor((rows, cols), "float32")
+    ):
+        with T.MixedKernel(1, sids=1):
+            nz = T.alloc_shared((storage_rows, cols), dtype)
+            a_l1 = T.alloc_l1((rows, cols), dtype)
+            b_l1 = T.alloc_l1((cols, cols), dtype)
+            acc = T.alloc_l0c((rows, cols), "float32")
+            T.annotate_layout({nz: layout(nz)})
+            T.copy(packed, nz)
+            T.copy(nz[:rows, :], a_l1)
+            T.copy(identity, b_l1)
+            T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+            T.copy(acc, out)
+
+    return main
+
+
+# Prepacked NZ bytes reach GEMM through post-copy without another scatter.
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("compact", [False, True])
+def test_fp8_prepacked_nz_ub_to_l1(compact):
+    rows, cols, c0 = 32, 128, 32
+    storage_rows = rows + 1 if compact else rows
+    x = (torch.arange(rows * cols).reshape(rows, cols) % 9 - 4).float()
+    packed = torch.zeros((cols // c0, storage_rows, c0))
+    packed[:, :rows, :] = x.reshape(rows, cols // c0, c0).permute(1, 0, 2)
+    kernel = tilelang.compile(_make_prepacked_nz_kernel(compact), target="ascend", out_idx=-1, execution_backend="tvm_ffi")
+    source = kernel.get_kernel_source()
+    assert "ascend_nd2nz_scatter<" not in source
+    assert "ascend_nd2nz_scatter_callee<" not in source
+    assert "asc_copy_ub2l1" in source
+    actual = kernel(packed.reshape(storage_rows, cols).to(torch.float8_e4m3fn).npu(), torch.eye(cols).to(torch.float8_e4m3fn).npu())
+    torch.testing.assert_close(actual.cpu(), x, rtol=0, atol=0)
