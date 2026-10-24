@@ -10,6 +10,7 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
@@ -59,18 +60,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # Cache parameter information during initialization
         self.param_dtypes = [param.torch_dtype() for param in params]
-        self.param_shapes = []
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    # Keep tirx.Var for dynamic dimensions
-                    native_shape.append(dim)
-                else:
-                    native_shape.append(dim)
-            self.param_shapes.append(native_shape)
+        self.output_shape_resolver = OutputShapeResolver(self.prim_func, self.result_idx, stride_scale=lambda buffer: 1)
 
         self.dynamic_symbolic_map, self.dynamic_symbolic_order = self._process_dynamic_symbolic()
 
@@ -138,18 +128,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # Cache parameter information during initialization
         adapter.param_dtypes = [param.torch_dtype() for param in params]
-        adapter.param_shapes = []
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    # Keep tirx.Var for dynamic dimensions
-                    native_shape.append(dim)
-                else:
-                    native_shape.append(dim)
-            adapter.param_shapes.append(native_shape)
+        adapter.output_shape_resolver = OutputShapeResolver(adapter.prim_func, adapter.result_idx, stride_scale=lambda buffer: 1)
 
         adapter.dynamic_symbolic_map, adapter.dynamic_symbolic_order = adapter._process_dynamic_symbolic()
 
@@ -242,7 +221,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         """Look up a tirx.Var in the dynamic symbolic map.
 
         Falls back to name-based lookup when object identity doesn't match
-        (can happen when param_shapes and prim_func come from different
+        (can happen when parameter metadata and prim_func come from different
         compilation stages).
         """
         if v in self.dynamic_symbolic_map:
@@ -449,13 +428,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
+                shape = self.output_shape_resolver(i, param_values)
                 tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
                 param_values[i] = tensor
             else:

@@ -84,6 +84,13 @@ Notes
 - Under `@jit`, concrete sizes come from the actual tensor arguments at the first call.
 - Symbols in annotations do not need to be separate kernel arguments; TileLang binds them from argument shapes.
 
+Automatically allocated outputs (`out_idx` or `T.empty`) may use integer
+expressions such as `2 * N` or `T.ceildiv(N, 4)` in their dimensions. Each symbol
+must be bound directly from an input shape, stride, or explicit integer scalar parameter,
+and each dimension must resolve to a nonnegative integer before allocation.
+Output-only symbols and dimensions that depend on tensor contents cannot be
+inferred by the Python runtime adapters.
+
 ## 2. Launching Work with `T.Kernel`
 
 `with T.Kernel(...)` declares a grid of tile programs. The positional

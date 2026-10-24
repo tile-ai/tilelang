@@ -22,6 +22,7 @@ from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.language.dtypes import dtype
 
 
@@ -227,26 +228,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         param_dtypes = [param.torch_dtype() for param in self.params]
-        # Convert TVM shape arrays to native Python lists
-        param_shapes = []
-
-        for param in self.params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                else:
-                    native_shape.append(dim)
-            tl_dtype = param.dtype
+        output_shape_resolver = OutputShapeResolver(self.prim_func, self.result_idx)
+        storage_scales = {}
+        for i in self.result_idx:
+            tl_dtype = self.params[i].dtype
             if tl_dtype.bits < 8:
-                storage_dtype: dtype = dtype(param.torch_dtype())
-                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
-            param_shapes.append(native_shape)
-
-        dynamic_symbolic_map = self.dynamic_symbolic_map
-        assert dynamic_symbolic_map is not None
+                storage_dtype = dtype(self.params[i].torch_dtype())
+                storage_scales[i] = (tl_dtype.bits * tl_dtype.lanes, storage_dtype.bits * storage_dtype.lanes)
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
@@ -293,41 +281,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = param_dtypes[i]
-                    shape = []
-                    # Now working with native Python list, no FFI calls needed
-                    for s in param_shapes[i]:
-                        if isinstance(s, tirx.Var):
-                            for key in dynamic_symbolic_map:
-                                if str(s) == str(key):
-                                    ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = dynamic_symbolic_map[key]
-                                    # ref_tensor_idx is a PrimFunc parameter index. `inputs` holds only
-                                    # the non-output parameters, so an output-before-input signature
-                                    # ([out, in, n]) would read the wrong slot or run off the end;
-                                    # `tensor_list` is sized and indexed by parameter position.
-                                    ref_tensor = tensor_list[ref_tensor_idx]
-                                    if ref_id == 2:
-                                        if ref_tensor is None:
-                                            param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
-                                            raise ValueError(
-                                                f"Cannot resolve symbolic dimension {s} of output parameter {param_name}: "
-                                                f"it is taken from scalar parameter {ref_tensor_idx}, which has not "
-                                                f"been supplied."
-                                            )
-                                        shape.append(ref_tensor)
-                                        continue
-                                    if ref_tensor is None:
-                                        param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
-                                        raise ValueError(
-                                            f"Cannot resolve symbolic dimension {s} of output parameter {param_name}: "
-                                            f"it is taken from parameter {ref_tensor_idx}, which is an output that has "
-                                            f"not been allocated yet."
-                                        )
-                                    if ref_id == 0:
-                                        shape.append(ref_tensor.shape[ref_shape_idx])
-                                    elif ref_id == 1:
-                                        shape.append(ref_tensor.stride()[ref_shape_idx] * stride_scale)
-                        else:  # Already converted to Python int during initialization
-                            shape.append(s)
+                    shape = output_shape_resolver(i, tensor_list)
+                    if i in storage_scales:
+                        logical_bits, storage_bits = storage_scales[i]
+                        shape[-1] = shape[-1] * logical_bits // storage_bits
 
                     if out_device is None:
                         if current_device_functor is None:

@@ -15,6 +15,7 @@ from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
 from .libgen import PTOLibraryGenerator
@@ -168,6 +169,15 @@ class PTOKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.runtime_wrapper = PTOKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.runtime_wrapper.set_output_shape_resolver(
+            OutputShapeResolver(
+                self.prim_func,
+                self.result_idx,
+                shape_scale=lambda buffer, dim: _storage_pack_factor(buffer.dtype) if dim == len(buffer.shape) - 1 else 1,
+                stride_scale=lambda buffer: _storage_pack_factor(buffer.dtype),
+                require_unique_names=True,
+            )
+        )
         self.runtime_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.runtime_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.runtime_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
