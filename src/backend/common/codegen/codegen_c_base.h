@@ -83,7 +83,17 @@ public:
     os << "((";
     PrintType(t, os);
     os << ")";
-    CodeGenC::VisitExpr(n, os);
+    // * and << can overflow int (65535 * 65535, negative << k); do them in
+    // uint32, where wrapping is defined.
+    const auto *mul = n.as<MulNode>();
+    const auto *call = n.as<CallNode>();
+    if (mul) {
+      PrintUInt32Op_(mul->a, " * ", mul->b, os);
+    } else if (call && call->op.same_as(tirx::builtin::shift_left())) {
+      PrintUInt32Op_(call->args[0], " << ", call->args[1], os);
+    } else {
+      CodeGenC::VisitExpr(n, os);
+    }
     os << ")";
   }
 
@@ -112,6 +122,15 @@ protected:
   std::ostringstream preamble_stream_;
 
 private:
+  void PrintUInt32Op_(const PrimExpr &a, const char *op, const PrimExpr &b,
+                      std::ostream &os) {
+    os << "((";
+    PrintType(DataType::UInt(32), os);
+    os << ")" << PrintExpr(a) << op << "(";
+    PrintType(DataType::UInt(32), os);
+    os << ")" << PrintExpr(b) << ")";
+  }
+
   void EmitSpanDirective_(const Span &span) {
     if (!span->source_name.defined() || span->line <= 0) {
       return;

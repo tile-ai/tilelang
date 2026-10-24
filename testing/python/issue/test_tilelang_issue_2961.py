@@ -10,6 +10,8 @@ import tilelang.language as T
 import tilelang.testing
 
 N = 64
+# uint16 b * b overflows int and int16 has negative b << k: both must be done unsigned.
+DTYPES = ["uint8", "int16", "uint16"]
 
 
 def _kernel(lang, dtype, **launch):
@@ -24,7 +26,7 @@ def _kernel(lang, dtype, **launch):
                 B[i * 5 + 0] = (b << k) >> k
                 B[i * 5 + 1] = (b + b) >> k
                 B[i * 5 + 2] = (b - lang.cast(100, dtype)) >> k
-                B[i * 5 + 3] = (b * lang.cast(1 << k, dtype)) >> k
+                B[i * 5 + 3] = (b * b) >> k
                 B[i * 5 + 4] = (~b) >> k
 
     return main
@@ -33,7 +35,7 @@ def _kernel(lang, dtype, **launch):
 def _reference(a):
     k = a.itemsize * 4
     with np.errstate(over="ignore"):
-        cols = [a << k, a + a, a - a.dtype.type(100), a * a.dtype.type(1 << k), ~a]
+        cols = [a << k, a + a, a - a.dtype.type(100), a * a, ~a]
     return np.stack([c >> k for c in cols], axis=1).reshape(-1)
 
 
@@ -42,14 +44,14 @@ def _input(dtype):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", ["uint8", "int16"])
+@pytest.mark.parametrize("dtype", DTYPES)
 def test_subword_int_ops_wrap_cuda(dtype):
     a = _input(dtype)
     kernel = tilelang.compile(_kernel(T, dtype, threads=1), out_idx=[1], target="cuda")
     np.testing.assert_array_equal(kernel(torch.from_numpy(a).cuda()).cpu().numpy(), _reference(a))
 
 
-@pytest.mark.parametrize("dtype", ["uint8", "int16"])
+@pytest.mark.parametrize("dtype", DTYPES)
 def test_subword_int_ops_wrap_c(dtype):
     a = _input(dtype)
     kernel = tilelang.compile(_kernel(TC, dtype), out_idx=[1], target="c", target_host="c", execution_backend="cython")
