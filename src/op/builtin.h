@@ -557,6 +557,19 @@ TVM_DLL const Op &atomic_min_elem_op();
 TVM_DLL const Op &atomic_min_ret_elem_op();
 
 /*!
+ * \brief Update a joint value/index accumulator through two local pointers.
+ * Arguments: value_ptr, index_ptr, candidate_value, candidate_index, is_max.
+ */
+TVM_DLL const Op &arg_reduce_update();
+
+/*!
+ * \brief Joint value/index all-reduce over a power-of-two thread group.
+ * Arguments: value_ptr, index_ptr, is_max, width, scale, thread_offset,
+ * participating_threads, and optional shared value/index workspace pointers.
+ */
+TVM_DLL const Op &arg_reduce_all();
+
+/*!
  * \brief tilelang intrinsic for warp reduction sum.
  */
 TVM_DLL const Op &warp_reduce_sum();

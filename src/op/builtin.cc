@@ -264,6 +264,16 @@ TIR_DEFINE_TL_BUILTIN(atomic_min_ret_elem_op)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(arg_reduce_update)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(arg_reduce_all)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(warp_reduce_sum)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
