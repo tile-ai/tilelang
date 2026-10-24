@@ -265,6 +265,18 @@ def copy(  # noqa: A001
     region excludes them (for example, ``T.copy(src, dst[:rows, :])``).
     Partial NZ-to-L1 copies derive both pitches from the complete layouts.
 
+    Automatic E4M3FN ND-to-NZ UB-to-L1 copy requirements:
+
+    1. Matching E4M3FN dtypes, an unannotated dense ND source, and a canonical
+       NZ L1 destination.
+    2. Complete contiguous source rows, static rows divisible by 16, and columns
+       divisible by 32. Each leading axis selects one matrix; regions fit their
+       allocations. The source base and destination column offset are 32-byte
+       aligned; the normalized L1 allocation height is static and divisible by 16.
+    3. Conversion normally uses ``(rows + 1) * cols`` scratch elements; a single
+       32-byte column group can skip scatter. Scatter loads full 256-byte vectors,
+       including partial tails, so the entire source read span must be valid.
+
     A copy whose destination is an MX scale-factor handle
     (:func:`tilelang.ascend.language.alloc_l0a_sf` /
     :func:`~tilelang.ascend.language.alloc_l0b_sf`) loads the per-block

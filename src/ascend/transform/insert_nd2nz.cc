@@ -33,18 +33,20 @@ using namespace tirx::transform;
 
 namespace {
 
-std::string Nd2NzDTypeName(DataType dtype) {
+std::string Nd2NzDTypeName(DataType dtype, bool allow_e4m3 = false) {
   if (dtype.is_bfloat16())
     return "bfloat16_t";
   if (dtype.is_float16())
     return "half";
   if (dtype.is_float() && dtype.bits() == 32)
     return "float";
+  if (allow_e4m3 && dtype.is_float8_e4m3fn())
+    return "fp8_e4_t";
   TVM_FFI_THROW(ValueError)
       << "Unsupported nd2nz dtype: " << dtype
-      << ". The UB scatter supports only float16/bfloat16/float32; add a "
-         "template specialization in src/tl_templates/ascend/nd2nz_copy.h "
-         "to extend it.";
+      << ". Supported types: float16/bfloat16/float32"
+      << (allow_e4m3 ? "/float8_e4m3fn" : "")
+      << ". E4M3 is enabled only for automatic ND UB->NZ L1 copies.";
   return "";
 }
 
@@ -189,9 +191,9 @@ private:
 
   std::pair<std::string, std::string>
   ValidateScatterTemplate(const Buffer &src, const Buffer &dst, int64_t rows,
-                          int64_t cols) const {
-    std::string src_dtype = Nd2NzDTypeName(src->dtype);
-    std::string dst_dtype = Nd2NzDTypeName(dst->dtype);
+                          int64_t cols, bool allow_e4m3 = false) const {
+    std::string src_dtype = Nd2NzDTypeName(src->dtype, allow_e4m3);
+    std::string dst_dtype = Nd2NzDTypeName(dst->dtype, allow_e4m3);
     if (rows % 16 != 0) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ scatter requires rows divisible by 16, got " << rows
@@ -393,7 +395,7 @@ private:
     PrimExpr dst_pitch = NZPitch(copy.dst, copy.dst_range);
     PrimExpr dst_ptr =
         NZPointer(copy.dst, copy.dst_range, dst_pitch, kAccessWrite);
-    std::string dst_dtype = Nd2NzDTypeName(copy.dst->dtype);
+    std::string dst_dtype = Nd2NzDTypeName(copy.dst->dtype, !IsNZBuffer(copy.src));
     auto make_post_copy = [&](PrimExpr source_ptr, PrimExpr src_pitch) {
       return Intrinsic(ascend_nd2nz_post_copy(),
                        {dst_ptr, source_ptr, rows, cols, src_pitch, dst_pitch,
@@ -426,10 +428,15 @@ private:
     PrimExpr src_ptr = MakeTLAccessPtr(copy.src, copy.src_range, kAccessRead);
     int64_t rows_i = RequireStaticInt(rows, "ND->NZ rows");
     int64_t cols_i = RequireStaticInt(cols, "ND->NZ cols");
+    if (copy.src->dtype.is_float8_e4m3fn() || copy.dst->dtype.is_float8_e4m3fn()) {
+      ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i, true);
+      if (RequireStaticInt(copy.dst->shape[dst_ndim - 2], "L1 rows") % 16 != 0)
+        TVM_FFI_THROW(ValueError) << "E4M3 NZ L1 rows must be divisible by 16";
+    }
     if (cols_i == AscendC0(copy.dst->dtype.bits()) && same_dtype)
       return make_post_copy(src_ptr, rows);
     auto [src_dtype, checked_dst_dtype] =
-        ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i);
+        ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i, true);
     // A fresh scratch buffer uses one extra row per C0 group. Existing NZ
     // buffers instead retain the pitch of their complete storage layout.
     PrimExpr scratch_pitch = rows + 1;

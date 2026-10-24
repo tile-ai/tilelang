@@ -13,12 +13,14 @@ namespace tvm::tl {
 
 inline int64_t Nd2NzElementBytes(const PrimExpr &expr) {
   const auto *dtype = expr.as<tirx::StringImmNode>();
+  if (dtype && dtype->value == "fp8_e4_t")
+    return 1;
   if (dtype && dtype->value == "float")
     return 4;
   if (dtype && (dtype->value == "half" || dtype->value == "bfloat16_t"))
     return 2;
   TVM_FFI_THROW(ValueError)
-      << "ND2NZ dtype must be half, bfloat16_t, or float, got " << expr;
+      << "ND2NZ dtype must be half, bfloat16_t, float, or fp8_e4_t, got " << expr;
   return 0;
 }
 

@@ -664,15 +664,23 @@ def test_nd2nz_scatter_keeps_partial_vector_tail_live(cols):
     assert (("a", "b") in _insert_sync_alias_pairs(mod["main"])) == (cols == 64)
 
 
-def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype,cols,can_alias",
+    [
+        ("float32", "bfloat16", 64, True),
+        ("float8_e4m3fn", "float8_e4m3fn", 256, True),
+        ("float8_e4m3fn", "float8_e4m3fn", 96, False),
+    ],
+)
+def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility(src_dtype, dst_dtype, cols, can_alias):
     from tilelang.layout import make_ascend_nz_layout
 
     @T.prim_func
-    def main(x: T.Tensor((16, 64), "float32"), out: T.Tensor((1,), "float32")):
+    def main(x: T.Tensor((16, cols), src_dtype), out: T.Tensor((1,), "float32")):
         with T.Kernel(1):
-            src = T.alloc_shared((16, 64), "float32")
+            src = T.alloc_shared((16, cols), src_dtype)
             other = T.alloc_shared((16, 64), "float32")
-            dst = T.alloc_l1((16, 64), "bfloat16")
+            dst = T.alloc_l1((16, cols), dst_dtype)
             T.annotate_layout({dst: make_ascend_nz_layout(dst)})
             with T.Stage(0):
                 T.copy(x, src)
@@ -684,7 +692,8 @@ def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
     mod = tvm.IRModule({"main": _infer_fractal_layouts(main)})
     with tvm.target.Target("ascend"):
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
-    assert ("dst", "src") in _insert_sync_alias_pairs(mod["main"])
+    # Full-vector FP8 reads permit reuse; uncovered tail reads remain conservative.
+    assert (("dst", "src") in _insert_sync_alias_pairs(mod["main"])) == can_alias
 
 
 def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
@@ -707,15 +716,15 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
     assert ("other", "src") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
 
 
-@pytest.mark.parametrize("dtype", ["float32", "float16"])
+@pytest.mark.parametrize("dtype", ["float32", "float16", "float8_e4m3fn"])
 @pytest.mark.parametrize("footprint", ["base", "short", "exact", "padded"])
 @pytest.mark.parametrize("src_pitch", [2, 64])
 def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint, src_pitch):
-    cols = 16 if dtype == "float32" else 32
+    cols = {"float32": 16, "float16": 32, "float8_e4m3fn": 64}[dtype]
     required = (src_pitch + 1) * (cols // 2)
     capacity = (src_pitch + 2) * (cols // 2)
     extent = {"base": 1, "short": required - 1, "exact": required, "padded": capacity}[footprint]
-    dtype_name = "float" if dtype == "float32" else "half"
+    dtype_name = {"float32": "float", "float16": "half", "float8_e4m3fn": "fp8_e4_t"}[dtype]
 
     @T.prim_func
     def main(out: T.Tensor((1,), dtype)):
@@ -732,14 +741,15 @@ def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint, 
                 with T.Task():
                     for i in T.serial(required - 1):
                         a[i] = T.cast(300, dtype)
-                T.ascend_nd2nz_post_copy(
+                T.call_intrin(
+                    "void", tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
                     T.access_ptr(dst[0], "w", extent=cols),
                     T.access_ptr(a[0], "r", extent=extent),
-                    1,
-                    cols,
-                    src_pitch=src_pitch,
-                    dst_pitch=1,
-                    dtype=dtype_name,
+                    T.int32(1),
+                    T.int32(cols),
+                    T.int32(src_pitch),
+                    T.int32(1),
+                    tvm.tirx.StringImm(dtype_name),
                 )
 
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
