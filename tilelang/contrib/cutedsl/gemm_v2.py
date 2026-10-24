@@ -16,7 +16,7 @@ from cutlass._mlir.dialects import nvvm, llvm
 from cutlass._mlir import ir
 from cutlass.cutlass_dsl import T, Constexpr
 import cutlass.cute.nvgpu.warpgroup as warpgroup
-from .utils import type_map
+from .utils import as_pointer, type_map
 
 
 class GmmaDescriptor:
@@ -41,7 +41,7 @@ def initialize_wgmma_descriptor(layout_type, leading_byte_offset, stride_byte_of
     #   Bits [32:45] = stride_byte_offset
     #   Bits [49:51] = base_offset (0)
     #   Bits [62:63] = layout_type
-    ptr_val = start_address.toint() >> 4
+    ptr_val = as_pointer(start_address).toint() >> 4
     # Low 32 bits: start_address[0:13] | leading[16:29]
     desc.desc[0] = cutlass.Int32(ptr_val) | cutlass.Int32(cutlass.Int32(leading_byte_offset) << 16)
     # High 32 bits: stride[0:13] | layout_type[30:31]

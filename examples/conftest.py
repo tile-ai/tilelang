@@ -36,13 +36,11 @@ else:
 # CuTeDSL backend: auto-mark known failures / unsupported tests
 # ---------------------------------------------------------------------------
 
-# Known failures when running with TILELANG_TARGET=cutedsl.
+# Known failures when running with TILELANG_DEFAULT_TARGET=cutedsl.
 # These are marked as xfail(strict=False) so unexpected passes are reported.
 CUTEDSL_KNOWN_FAILURES = {
     # Flaky — passes when run in isolation, fails under parallel execution
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
-    # CuTeDSL does not yet lower DeepSeek V4 FP4 act quant conversions.
-    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_act_quant",
 }
 
 
@@ -52,8 +50,10 @@ def _match_any(nodeid, patterns):
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
-    """When TILELANG_TARGET=cutedsl, annotate known-bad tests automatically."""
-    if os.environ.get("TILELANG_TARGET") != "cutedsl":
+    """When TILELANG_DEFAULT_TARGET selects CuTeDSL, annotate known-bad tests automatically."""
+    import tilelang.testing
+
+    if not tilelang.testing.default_target_is_cutedsl():
         return
 
     for item in items:

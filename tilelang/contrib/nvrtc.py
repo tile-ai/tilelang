@@ -71,9 +71,6 @@ def compile_cuda(
 
     code = "#include <tl_templates/cuda/nvrtc_std.h>\n" + code
 
-    if "cudaGridDependencySynchronize" in code or "cudaTriggerProgrammaticLaunchCompletion" in code:
-        code = '#include "cuda_device_runtime_api.h"\n' + code
-
     code_bytes = bytes(code, "utf-8")
     result, program = nvrtc.nvrtcCreateProgram(code_bytes, bytes(file_name, "utf-8"), 0, [], [])
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to create program: {result}"

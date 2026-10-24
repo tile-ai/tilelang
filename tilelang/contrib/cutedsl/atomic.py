@@ -9,6 +9,7 @@ __all__ = [
     "AtomicAddRet",
     "AtomicAddx2",
     "AtomicAddx4",
+    "AtomicAddx4Ret",
     "AtomicMax",
     "AtomicMaxRet",
     "AtomicMin",
@@ -21,7 +22,10 @@ import cutlass
 from cutlass import cute
 from cutlass._mlir.extras import types as T
 from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import CuTeDSL
 from cutlass.experimental import primitives as prims
+
+from .utils import bitcast
 
 # Type alias for numeric values
 Numeric = cutlass.Float32 | cutlass.Float16 | cutlass.Int32 | cutlass.Int64 | int | float
@@ -214,6 +218,87 @@ def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
+
+
+def _atomic_add_packed2_ret(dst_ptr: cute.Pointer, v0, v1, dtype, *, loc=None, ip=None):
+    """Packed two-element atomic add returning the previous values as i16 bits."""
+    is_f16 = dtype == cutlass.Float16
+    cast = cutlass.Float16 if is_f16 else cutlass.BFloat16
+    kind = "f16" if is_f16 else "bf16"
+    v0_i16 = llvm.bitcast(T.i16(), cast(v0).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    v1_i16 = llvm.bitcast(T.i16(), cast(v1).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    res_type = llvm.StructType.get_literal([T.i16()] * 2)
+    prev = llvm.inline_asm(
+        res_type,
+        [dst_ptr.llvm_ptr, v0_i16, v1_i16],
+        f"atom.add.noftz.v2.{kind} {{$0,$1}}, [$2], {{$3,$4}};",
+        "=h,=h,l,h,h",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return (
+        llvm.extractvalue(T.i16(), prev, [0], loc=loc, ip=ip),
+        llvm.extractvalue(T.i16(), prev, [1], loc=loc, ip=ip),
+    )
+
+
+def AtomicAddx4Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 4 consecutive elements, returning the previous values.
+
+    float32 uses one ``atom.global.add.v4.f32``. 16-bit types have no x4 atomic:
+    like the CUDA backend, the four elements are two packed per-pair atomics
+    (``atom.add.noftz.v2.f16`` / ``.v2.bf16``), which is why the whole x4
+    destination is never written as 16 bytes.
+
+    Args:
+        dst_ptr: Pointer to destination (4 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    if dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16):
+        if dst_ptr.dtype == cutlass.BFloat16:
+            arch = CuTeDSL._get_dsl().envar.arch
+            if arch in ("sm_80", "sm_86", "sm_87", "sm_89"):
+                raise NotImplementedError(f"packed bf16 atomics need sm_90 or newer, got {arch}")
+        vals = _load_from_src(src_values, 4)
+        prev_bits = cute.make_rmem_tensor((4,), cutlass.Int16)
+        for base, offset in ((0, 0), (2, 2)):
+            lo, hi = _atomic_add_packed2_ret(dst_ptr + offset, vals[base], vals[base + 1], dst_ptr.dtype, loc=loc, ip=ip)
+            prev_bits[base] = cutlass.Int16(lo)
+            prev_bits[base + 1] = cutlass.Int16(hi)
+        target = "float16" if dst_ptr.dtype == cutlass.Float16 else "bfloat16"
+        return bitcast(prev_bits.load(), target)
+
+    if dst_ptr.dtype != cutlass.Float32:
+        raise NotImplementedError(f"AtomicAddx4Ret does not support a {dst_ptr.dtype} destination")
+
+    vals = _load_from_src(src_values, 4)
+
+    res_type = llvm.StructType.get_literal([T.f32()] * 4)
+    prev = llvm.inline_asm(
+        res_type,
+        [
+            dst_ptr.llvm_ptr,
+            cutlass.Float32(vals[0]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[1]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[2]).ir_value(loc=loc, ip=ip),
+            cutlass.Float32(vals[3]).ir_value(loc=loc, ip=ip),
+        ],
+        "atom.global.add.v4.f32 {$0,$1,$2,$3}, [$4], {$5,$6,$7,$8};",
+        "=f,=f,=f,=f,l,f,f,f,f",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+    out = cute.make_rmem_tensor((4,), cutlass.Float32)
+    for i in range(4):
+        out[i] = cutlass.Float32(llvm.extractvalue(T.f32(), prev, [i], loc=loc, ip=ip))
+    return out.load()
 
 
 # =============================================================================

@@ -52,9 +52,21 @@ __all__ = [
     "warpgroup_reg_alloc",
     "warpgroup_reg_dealloc",
     "pack_half2",
+    "as_pointer",
 ]
 
 BYTES_PER_TENSORMAP = 128
+
+
+def as_pointer(value):
+    """Return the pointer behind *value*.
+
+    Generated CuTeDSL code passes buffer views (``cute.Tensor``) where the
+    pointer itself is meant, so unwrap ``.iterator`` when the value has one.
+    """
+    return value.iterator if hasattr(value, "iterator") else value
+
+
 BYTES_PER_POINTER = 8
 
 
@@ -160,6 +172,21 @@ def bitcast(value, target_dtype):
 
     @dsl_user_op
     def bitcast_impl(src_val, *, loc=None, ip=None):
+        if isinstance(src_val, TensorSSA):
+            src_ir = src_val.ir_value(loc=loc, ip=ip)
+            if src_val.dtype is tgt_wrapper:
+                return src_val
+            if src_val.dtype.width != tgt_wrapper.width:
+                raise NotImplementedError(f"vector bitcast from {src_val.dtype} to {tgt_wrapper} changes the element width")
+            src_elem_type = src_val.dtype.mlir_type
+            if src_elem_type == tgt_mlir_type:
+                # Same MLIR element type (int8 and uint8 are both signless i8),
+                # so only the Python wrapper changes.
+                return TensorSSA(src_ir, src_val.shape, tgt_wrapper)
+            # Distinct element types -- int <-> float, or float16 vs bfloat16,
+            # which MLIR keeps apart -- must be a real vector bitcast.
+            res = llvm.bitcast(_recast_type(src_ir.type, tgt_mlir_type), src_ir, loc=loc, ip=ip)
+            return TensorSSA(res, src_val.shape, tgt_wrapper)
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
         result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
         return tgt_wrapper(result)
@@ -202,8 +229,7 @@ def _f4e2m1_to_float32_tensor(value, *, loc=None, ip=None):
     f32_subnormal_abs = i32(0x3F000000)
 
     for idx in range(length):
-        pos = i32(idx)
-        nibble_i4 = vector.extractelement(vec_i4, position=pos, loc=loc, ip=ip)
+        nibble_i4 = vector.extract(vec_i4, [], [idx], loc=loc, ip=ip)
         nibble = arith.extui(Int32.mlir_type, nibble_i4, loc=loc, ip=ip)
 
         payload = arith.andi(nibble, payload_mask, loc=loc, ip=ip)
@@ -220,7 +246,7 @@ def _f4e2m1_to_float32_tensor(value, *, loc=None, ip=None):
         abs_bits = arith.select(is_zero, zero, nonzero_abs, loc=loc, ip=ip)
         bits = arith.ori(sign, abs_bits, loc=loc, ip=ip)
         f32 = llvm.bitcast(Float32.mlir_type, bits, loc=loc, ip=ip)
-        vec_dst = vector.insertelement(f32, vec_dst, position=pos, loc=loc, ip=ip)
+        vec_dst = vector.insert(f32, vec_dst, [], [idx], loc=loc, ip=ip)
 
     return TensorSSA(vec_dst, value.shape, Float32)
 
@@ -252,8 +278,7 @@ def _float32_to_f4e2m1_tensor(value, *, loc=None, ip=None):
     shift_sign = i32(28)
 
     for idx in range(length):
-        pos = i32(idx)
-        bits = vector.extractelement(vec_i32, position=pos, loc=loc, ip=ip)
+        bits = vector.extract(vec_i32, [], [idx], loc=loc, ip=ip)
         sign = arith.shrui(arith.andi(bits, sign_mask, loc=loc, ip=ip), shift_sign, loc=loc, ip=ip)
         abs_bits = arith.andi(bits, abs_mask, loc=loc, ip=ip)
         abs_val = llvm.bitcast(Float32.mlir_type, abs_bits, loc=loc, ip=ip)
@@ -270,7 +295,7 @@ def _float32_to_f4e2m1_tensor(value, *, loc=None, ip=None):
         payload = arith.select(is_nan, i32(7), payload, loc=loc, ip=ip)
 
         nibble = arith.trunci(Int4.mlir_type, arith.ori(sign, payload, loc=loc, ip=ip), loc=loc, ip=ip)
-        vec_i4 = vector.insertelement(nibble, vec_i4, position=pos, loc=loc, ip=ip)
+        vec_i4 = vector.insert(nibble, vec_i4, [], [idx], loc=loc, ip=ip)
 
     vec_f4_type = mlir_ir.VectorType.get([length], Float4E2M1FN.mlir_type, loc=loc)
     vec_f4 = builtin.unrealized_conversion_cast([vec_f4_type], [vec_i4], loc=loc, ip=ip)
