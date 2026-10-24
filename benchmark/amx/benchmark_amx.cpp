@@ -2,7 +2,7 @@
 // c++ -std=c++17 -O3 -mavx512f -mavx512bw -mavx512vbmi -mamx-tile \
 //   -mamx-bf16 -mamx-int8 -Isrc benchmark/amx/benchmark_amx.cpp \
 //   -o benchmark_amx
-// Add -fopenmp to benchmark the bf16-parallel operation.
+// Add -fopenmp to benchmark the bf16-parallel and int8-parallel operations.
 #include <tl_templates/cpu/gemm.h>
 
 #include <algorithm>
@@ -94,7 +94,8 @@ static bool run_bf16(const Shape &shape, bool validate = true,
   return true;
 }
 
-static bool run_int8(const Shape &shape, bool validate = true) {
+static bool run_int8(const Shape &shape, bool validate = true,
+                     bool parallel = false) {
   const int M = shape.m, N = shape.n, K = shape.k;
   tl::cpu::AlignedScratch<std::int8_t> a_storage, b_storage;
   tl::cpu::AlignedScratch<std::int32_t> actual_storage, expected_storage;
@@ -116,7 +117,11 @@ static bool run_int8(const Shape &shape, bool validate = true) {
               static_cast<std::int32_t>(a[i * K + k]) * b[k * N + j];
 
   const auto kernel = [&] {
-    tl_amx_int8_gemm_ss(a, b, actual, M, N, K, K, N, N, 0, 0, true, 0, 0);
+    if (parallel)
+      tl_amx_int8_gemm_ss_parallel(a, b, actual, M, N, K, K, N, N, 0, 0, true,
+                                   0, 0);
+    else
+      tl_amx_int8_gemm_ss(a, b, actual, M, N, K, K, N, N, 0, 0, true, 0, 0);
   };
   kernel();
   if (validate && !std::equal(actual, actual + M * N, expected)) {
@@ -126,7 +131,8 @@ static bool run_int8(const Shape &shape, bool validate = true) {
                  actual[index], expected[index]);
     return false;
   }
-  std::printf("INT8  %4dx%4dx%4d  %8.2f GOP/s\n", M, N, K,
+  std::printf("INT8%s %4dx%4dx%4d  %8.2f GOP/s\n",
+              parallel ? " parallel" : "         ", M, N, K,
               benchmark(kernel, 2.0 * M * N * K));
   return true;
 }
@@ -138,8 +144,8 @@ int main(int argc, char **argv) {
     const auto operation = std::string_view(argv[1]);
     if (operation == "bf16" || operation == "bf16-parallel")
       return run_bf16(shape, false, operation == "bf16-parallel") ? 0 : 1;
-    if (std::string_view(argv[1]) == "int8")
-      return run_int8(shape, false) ? 0 : 1;
+    if (operation == "int8" || operation == "int8-parallel")
+      return run_int8(shape, false, operation == "int8-parallel") ? 0 : 1;
   }
   const Shape shapes[] = {{16, 16, 32},     {32, 32, 64},    {64, 64, 64},
                           {64, 64, 256},    {128, 128, 128}, {256, 256, 256},

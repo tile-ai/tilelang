@@ -772,6 +772,49 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
   _tile_release();
 }
 
+inline void tl_amx_int8_gemm_parallel_impl(
+    const void *a_raw, const void *b_raw, void *c_raw, std::int32_t M,
+    std::int32_t N, std::int32_t K, std::int32_t lda, std::int32_t ldb,
+    std::int32_t ldc, std::int32_t trans_a, std::int32_t trans_b,
+    bool clear_accum, std::int32_t a_unsigned, std::int32_t b_unsigned) {
+#if defined(_OPENMP)
+  if (!omp_in_parallel() && !trans_a && !trans_b && M % 32 == 0 &&
+      N % 32 == 0 && K % 64 == 0) {
+    const int strip_count = N / 32;
+    const int m_block_count = M / 32;
+    const bool split_small_m =
+        M <= 256 && N <= 256 && omp_get_max_threads() > strip_count;
+    const bool split_wide_m = !split_small_m && M % 64 == 0 && M <= 256 &&
+                              (omp_get_max_threads() >= strip_count * 2 ||
+                               (omp_get_max_threads() >= 64 &&
+                                strip_count <= omp_get_max_threads() + 8));
+    const int m_task_count =
+        split_small_m ? m_block_count : (split_wide_m ? 2 : 1);
+    const int m_task_size = M / m_task_count;
+    const int task_count = strip_count * m_task_count;
+    const int thread_count = std::min(omp_get_max_threads(), task_count);
+    if (thread_count > 1) {
+      const auto *a = reinterpret_cast<const std::uint8_t *>(a_raw);
+      const auto *b = reinterpret_cast<const std::uint8_t *>(b_raw);
+      auto *c = reinterpret_cast<std::int32_t *>(c_raw);
+#pragma omp parallel for schedule(static) num_threads(thread_count)
+      for (int task = 0; task < task_count; ++task) {
+        const int strip = task % strip_count;
+        const int m_task = task / strip_count;
+        const int m0 = m_task * m_task_size;
+        const int n0 = strip * 32;
+        tl_amx_int8_gemm_impl(a + m0 * lda, b + n0, c + m0 * ldc + n0,
+                              m_task_size, 32, K, lda, ldb, ldc, 0, 0,
+                              clear_accum, a_unsigned, b_unsigned);
+      }
+      return;
+    }
+  }
+#endif
+  tl_amx_int8_gemm_impl(a_raw, b_raw, c_raw, M, N, K, lda, ldb, ldc, trans_a,
+                        trans_b, clear_accum, a_unsigned, b_unsigned);
+}
+
 #define TL_AMX_INT8_WRAPPER(SUFFIX, A_TYPE, B_TYPE, A_UNSIGNED, B_UNSIGNED)    \
   extern "C" inline void tl_amx_int8_gemm_##SUFFIX(                            \
       A_TYPE *a, B_TYPE *b, std::int32_t *c, std::int32_t M, std::int32_t N,   \
@@ -780,6 +823,15 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
       std::int32_t, std::int32_t) {                                            \
     tl_amx_int8_gemm_impl(a, b, c, M, N, K, lda, ldb, ldc, trans_a, trans_b,   \
                           clear_accum, A_UNSIGNED, B_UNSIGNED);                \
+  }                                                                            \
+  extern "C" inline void tl_amx_int8_gemm_##SUFFIX##_parallel(                 \
+      A_TYPE *a, B_TYPE *b, std::int32_t *c, std::int32_t M, std::int32_t N,   \
+      std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,    \
+      std::int32_t trans_a, std::int32_t trans_b, bool clear_accum,            \
+      std::int32_t, std::int32_t) {                                            \
+    tl_amx_int8_gemm_parallel_impl(a, b, c, M, N, K, lda, ldb, ldc, trans_a,   \
+                                   trans_b, clear_accum, A_UNSIGNED,           \
+                                   B_UNSIGNED);                                \
   }
 
 TL_AMX_INT8_WRAPPER(ss, std::int8_t, std::int8_t, 0, 0)

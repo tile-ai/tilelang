@@ -120,6 +120,20 @@ def test_amx_int8_codegen_and_tail_correctness(a_dtype, b_dtype):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("a_dtype,b_dtype", [(T.int8, T.int8), (T.uint8, T.uint8)])
+@pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
+def test_amx_int8_parallel_codegen_and_correctness(a_dtype, b_dtype):
+    kernel = _compile(_matmul(64, 128, 128, a_dtype, T.int32, b_dtype=b_dtype), parallel=True)
+    assert "_parallel" in kernel.get_kernel_source()
+    a_torch_dtype = torch.int8 if a_dtype == T.int8 else torch.uint8
+    b_torch_dtype = torch.int8 if b_dtype == T.int8 else torch.uint8
+    a = torch.randint(-7 if a_torch_dtype == torch.int8 else 0, 8, (64, 128), dtype=a_torch_dtype)
+    b = torch.randint(-7 if b_torch_dtype == torch.int8 else 0, 8, (128, 128), dtype=b_torch_dtype)
+    actual = kernel(a, b)
+    expected = a.to(torch.int32) @ b.to(torch.int32)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not host_has_amx(), reason="requires an AMX-capable compiler and host")
 def test_amx_target_falls_back_for_float32_gemm():
     kernel = _compile(_matmul(8, 8, 8, T.float32, T.float32))

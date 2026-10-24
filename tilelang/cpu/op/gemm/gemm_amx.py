@@ -95,7 +95,11 @@ class GemmAMXInt8(_GemmAMXBase):
     def helper_name(self) -> str:
         a_kind = "u" if str(self.a_dtype) == "uint8" else "s"
         b_kind = "u" if str(self.b_dtype) == "uint8" else "s"
-        return f"tl_amx_int8_gemm_{a_kind}{b_kind}"
+        helper_name = f"tl_amx_int8_gemm_{a_kind}{b_kind}"
+        pass_ctx = get_pass_context()
+        if pass_ctx and pass_ctx.config.get("tl.cpu_parallel", False):
+            helper_name += "_parallel"
+        return helper_name
 
     def _extra_args(self) -> tuple[int, ...]:
         return (int(str(self.a_dtype) == "uint8"), int(str(self.b_dtype) == "uint8"))
