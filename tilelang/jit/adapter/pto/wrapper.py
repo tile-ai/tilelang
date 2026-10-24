@@ -11,7 +11,7 @@ from tvm import IRModule
 from tvm.target import Target
 from tvm.tirx.stmt_functor import post_order_visit
 
-from tilelang.jit.adapter.utils import pythonic_expr
+from tilelang.jit.adapter.utils import pythonic_expr, dynamic_symbolic_vars, host_arguments
 from tilelang.jit.adapter.wrapper import PREDEF_INIT_FUNC, TLWrapper
 
 
@@ -358,87 +358,13 @@ class TLPTOSourceWrapper:
         return f"__gm__ {self._lookup_type(dtype)} *"
 
     def get_dynamic_symbolic_set(self, prim_func):
-        # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: dict[str, str] = {}
+        _, names = host_arguments(prim_func, self._lookup_type, lambda buffer: "void *")
+        return [(names[var], str(var.dtype)) for var in dynamic_symbolic_vars(prim_func)]
 
-        def unique_push_back(name: str, dtype: str):
-            if name not in dynamic_symbolic_set:
-                dynamic_symbolic_set[name] = dtype
-            else:
-                assert dtype == dynamic_symbolic_set[name]
-
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var):
-                        unique_push_back(dim.name, str(dim.dtype))
-
-        # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
-        for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for stride in buffer.strides:
-                    if isinstance(stride, tvm.tirx.Var):
-                        unique_push_back(stride.name, str(stride.dtype))
-
-        return list(dynamic_symbolic_set.items())
-
-    def _host_argument_infos(self, func) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(func)
-        host_args = []
-        arg_by_name = {}
-
-        def add_alias(alias: str, info: dict[str, Any]):
-            if alias in arg_by_name and arg_by_name[alias]["name"] != info["name"]:
-                raise RuntimeError(f"Duplicate PTO host argument name or alias: {alias}")
-            arg_by_name[alias] = info
-
-        for param in func.params:
-            if param in func.buffer_map:
-                buffer = func.buffer_map[param]
-                name = buffer.data.name
-                info = {
-                    "name": name,
-                    "host_type": "void *",
-                    "kind": "pointer",
-                }
-                host_args.append(info)
-                add_alias(name, info)
-                add_alias(param.name, info)
-                add_alias(buffer.name, info)
-            elif isinstance(param, tvm.tirx.Var):
-                name = param.name
-                c_type = self._lookup_type(param.dtype)
-                info = {
-                    "name": name,
-                    "host_type": c_type,
-                    "kind": "scalar",
-                }
-                host_args.append(info)
-                add_alias(name, info)
-            else:
-                raise RuntimeError(f"Unsupported PTO kernel parameter: {param}")
-
-        # Add dynamic symbols as integer arguments
-        existing_names = {arg["name"] for arg in host_args}
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym in existing_names:
-                continue
-            c_type = self._lookup_type(dyn_sym_dtype)
-            info = {
-                "name": dyn_sym,
-                "host_type": c_type,
-                "kind": "scalar",
-            }
-            host_args.append(info)
-            add_alias(dyn_sym, info)
-
-        if len({arg["name"] for arg in host_args}) != len(host_args):
-            names = [arg["name"] for arg in host_args]
-            raise RuntimeError(f"Duplicate PTO host argument names: {names}")
-
-        return host_args, arg_by_name
+    def _host_argument_infos(self, func):
+        arguments, names = host_arguments(func, self._lookup_type, lambda buffer: "void *")
+        by_name = {arg["name"]: arg for arg in arguments}
+        return arguments, {var: by_name[name] for var, name in names.items()}
 
     @staticmethod
     def _is_pointer_param(param: tvm.tirx.Var) -> bool:
@@ -447,7 +373,7 @@ class TLPTOSourceWrapper:
     def _render_scalar_expr(
         self,
         expr: tvm.tirx.PrimExpr | int,
-        host_arg_by_name: dict[str, dict[str, Any]],
+        host_arg_by_var: dict[tvm.tirx.Var, dict[str, Any]],
         context: str,
     ) -> str:
         if not isinstance(expr, tvm.tirx.PrimExpr):
@@ -479,7 +405,7 @@ class TLPTOSourceWrapper:
 
         def visitor(node):
             if isinstance(node, tvm.tirx.Var):
-                info = host_arg_by_name.get(node.name)
+                info = host_arg_by_var.get(node)
                 if info is None:
                     raise RuntimeError(f"{context} references unknown host variable `{node.name}`.")
                 if info["kind"] != "scalar":
@@ -499,7 +425,7 @@ class TLPTOSourceWrapper:
         self,
         call_site: _PTOKernelCallSite,
         index: int,
-        host_arg_by_name: dict[str, dict[str, Any]],
+        host_arg_by_var: dict[tvm.tirx.Var, dict[str, Any]],
     ) -> str:
         kernel = call_site.kernel
         expr = call_site.function_args[index]
@@ -509,18 +435,18 @@ class TLPTOSourceWrapper:
         if self._is_pointer_param(param):
             if not isinstance(expr, tvm.tirx.Var):
                 raise RuntimeError(f"{context} requires a direct host pointer variable, got `{expr}`.")
-            info = host_arg_by_name.get(expr.name)
+            info = host_arg_by_var.get(expr)
             if info is None or info["kind"] != "pointer":
                 raise RuntimeError(f"{context} cannot map host pointer variable `{expr.name}` to the exported call ABI.")
             return f"({prototype_type}){info['name']}"
 
-        rendered = self._render_scalar_expr(expr, host_arg_by_name, context)
+        rendered = self._render_scalar_expr(expr, host_arg_by_var, context)
         return f"({prototype_type})({rendered})"
 
     def _launch_metadata(
         self,
         call_site: _PTOKernelCallSite,
-        host_arg_by_name: dict[str, dict[str, Any]],
+        host_arg_by_var: dict[tvm.tirx.Var, dict[str, Any]],
     ) -> tuple[str, str]:
         kernel = call_site.kernel
         if kernel.launch_param_tags is None:
@@ -541,12 +467,12 @@ class TLPTOSourceWrapper:
         grid_exprs = []
         for tag in ("blockIdx.x", "blockIdx.y", "blockIdx.z"):
             expr = launch_values.get(tag, 1)
-            grid_exprs.append(self._render_scalar_expr(expr, host_arg_by_name, f"PTO kernel `{kernel.name}` grid `{tag}`"))
+            grid_exprs.append(self._render_scalar_expr(expr, host_arg_by_var, f"PTO kernel `{kernel.name}` grid `{tag}`"))
 
         dynamic_smem = launch_values.get("tirx.use_dyn_shared_memory", 0)
         dynamic_smem_str = self._render_scalar_expr(
             dynamic_smem,
-            host_arg_by_name,
+            host_arg_by_var,
             f"PTO kernel `{kernel.name}` dynamic shared memory",
         )
         return f"({grid_exprs[0]} * {grid_exprs[1]} * {grid_exprs[2]})", dynamic_smem_str
@@ -557,8 +483,8 @@ class TLPTOSourceWrapper:
         kernel_names: list[str],
         call_sites: list[_PTOKernelCallSite],
     ) -> str:
-        host_args, host_arg_by_name = self._host_argument_infos(func)
-        launch_params = [f"{arg['host_type']} {arg['name']}" for arg in host_args]
+        host_args, host_arg_by_var = self._host_argument_infos(func)
+        launch_params = [f"{arg['type']} {arg['name']}" for arg in host_args]
         launch_params.append("void *stream")
 
         prototypes = []
@@ -569,8 +495,8 @@ class TLPTOSourceWrapper:
 
         launches = []
         for call_site in call_sites:
-            grid_dim, dynamic_smem = self._launch_metadata(call_site, host_arg_by_name)
-            call_args = [self._render_call_arg(call_site, index, host_arg_by_name) for index in range(len(call_site.function_args))]
+            grid_dim, dynamic_smem = self._launch_metadata(call_site, host_arg_by_var)
+            call_args = [self._render_call_arg(call_site, index, host_arg_by_var) for index in range(len(call_site.function_args))]
             launches.append(f"  {call_site.kernel.name}<<<{grid_dim}, {dynamic_smem}, stream>>>({', '.join(call_args)});")
 
         prototype_source = "#ifndef AICORE\n#define AICORE [aicore]\n#endif\n" + "\n".join(prototypes)
