@@ -225,6 +225,7 @@ def _assert_owner_plan(call, *, address_index, owner, e, d, rw):
     base, pointer = _descriptor(call, address_index)
     assert base.buffer.same_as(owner), (base.buffer, owner)
     assert all(_constant(index) == 0 for index in base.indices)
+    assert str(pointer.args[1].dtype) == "int64", pointer.args[1]
     assert _constant(pointer.args[1]) == e
     assert _constant(pointer.args[2]) == rw
     assert _constant(call.args[address_index + 1]) == d
@@ -611,6 +612,39 @@ def test_indexed_uses_active_owner_descriptor():
     _assert_no_raw_address(body)
 
 
+def test_indexed_owner_extent_is_int64_and_preserves_source_types():
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+
+    # A small static capacity is int64; the source int32 shape/stride nodes
+    # and dtypes stay untouched.
+    shape32 = _int(64, "int32")
+    stride32 = _int(1, "int32")
+    small = tirx.decl_buffer((shape32,), "float32", name="small_owner", scope="shared", strides=(stride32,))
+    call = _vgather(_load(small, [_int(0)]), offsets=offsets, mask=mask)
+    (out,) = _vmi_calls(_run(_sblock(_evaluate(call), small)), "tl.vmi.vgather")
+    _, pointer = _assert_owner_plan(out, address_index=0, owner=small, e=64, d=0, rw=1)
+    assert isinstance(pointer.args[1], tirx.IntImm)
+    assert small.shape[0].same_as(shape32) and small.strides[0].same_as(stride32)
+    assert str(small.shape[0].dtype) == str(small.strides[0].dtype) == "int32"
+
+    # An int64 shape is already in the target domain.
+    n64 = tirx.Var("n64", "int64")
+    owner64 = tirx.decl_buffer((n64,), "float32", name="owner64", scope="shared")
+    call64 = _vgather(_load(owner64, [_int(0)]), offsets=offsets, mask=mask)
+    guarded = tirx.IfThenElse(n64 > _int(0, "int64"), _evaluate(call64), _evaluate(0))
+    (out64,) = _vmi_calls(_run(_sblock(guarded, owner64), params=[n64]), "tl.vmi.vgather")
+    _, pointer64 = _descriptor(out64, 0)
+    assert owner64.shape[0].same_as(n64) and pointer64.args[1].same_as(n64)
+
+    # Static capacity still uses the __int128 overflow check.
+    huge = _int(2**32, "int64")
+    overflowing = tirx.decl_buffer((huge, huge), "float32", name="overflowing", scope="shared")
+    call = _vgather(_load(overflowing, [_int(0), _int(0)]), offsets=offsets, mask=mask)
+    with pytest.raises(tvm.error.InternalError, match="overflows int64"):
+        _run(_sblock(_evaluate(call), overflowing))
+
+
 def test_indexed_owner_requirements():
     work = _buffer((512,), name="owner")
     offsets = _vec("offsets", "uint32")
@@ -757,7 +791,11 @@ def test_indexed_dynamic_owner_coverage():
     out = run_guarded(owner, [_int(0)])
     base, pointer = _descriptor(out, 0)
     assert base.buffer.same_as(owner)
-    assert tvm.ir.structural_equal(pointer.args[1], n)
+    # The source int32 Var is unchanged; the emitted capacity is widened.
+    assert owner.shape[0].same_as(n) and str(owner.shape[0].dtype) == "int32"
+    extent = pointer.args[1]
+    assert isinstance(extent, tirx.Cast) and extent.value.same_as(n)
+    assert str(extent.dtype) == "int64"
     assert _constant(pointer.args[2]) == 1 and _constant(out.args[1]) == 0
 
     # A dynamic outer axis is not skipped just because its node is a Var.  With
@@ -806,11 +844,11 @@ def test_indexed_offset_capacity_comparison_width():
         call = _vgather(_load(work, indices or [_int(0)]), offset, offsets=offsets, mask=mask)
         return _run(_sblock(_evaluate(call), work))
 
-    # A static int32 capacity must not be used to narrow D: wide int64 and
-    # uint32 offsets are compared in a value-preserving domain and rejected
-    # through the normal inside-owner diagnostic instead of throwing while
-    # constructing an out-of-range int32 literal.  The full width matrix stays
-    # in the frozen independent entry.
+    # The static owner capacity is int64 and must not be used to narrow D:
+    # wide int64 and uint32 offsets are compared in a value-preserving domain
+    # and rejected through the normal inside-owner diagnostic instead of
+    # throwing while constructing an out-of-range int32 literal.  The full
+    # width matrix stays in the frozen independent entry.
     for offset in (_int(2**32 + 64, "int64"), _int(2**32 - 1, "uint32")):
         with pytest.raises(tvm.error.InternalError, match="provably inside the owner"):
             run(offset)
@@ -939,6 +977,11 @@ def test_indexed_owner_capacity_stability():
     offsets = _vec("offsets", "uint32")
     mask = _mask("mask")
 
+    def run_shape(shape, name):
+        owner = tirx.decl_buffer((shape,), "float32", name=name, scope="shared")
+        body = _evaluate(_vgather(_load(owner, [_int(0)]), offsets=offsets, mask=mask))
+        return _run(_sblock(body, owner))
+
     # The allocation shape is evaluated when the owner is allocated.  Rebuilding
     # E at the gather would re-read index[0] after the store below, so the
     # descriptor would claim a capacity unrelated to the real allocation.
@@ -980,37 +1023,33 @@ def test_indexed_owner_capacity_stability():
     (out,) = _vmi_calls(body, "tl.vmi.vgather")
     base, descriptor = _descriptor(out, 0)
     assert base.buffer.same_as(saved_owner)
-    extent_nodes = []
-    tirx.stmt_functor.post_order_visit(descriptor.args[1], extent_nodes.append)
-    assert any(isinstance(node, tirx.Var) and node.same_as(saved) for node in extent_nodes)
-    assert not any(isinstance(node, (tirx.BufferLoad, tirx.Call)) for node in extent_nodes)
-    from tvm import arith
-
-    assert arith.Analyzer().simplify(descriptor.args[1]).same_as(saved), descriptor.args[1]
+    extent = descriptor.args[1]
+    assert isinstance(extent, tirx.Cast) and extent.value.same_as(saved), extent
+    assert str(extent.dtype) == "int64", extent
     assert _constant(out.args[1]) == 0
 
     # The raw shape is scanned before the analyzer folds it: a read that would
     # fold away (index[0] * 0) is still re-evaluated at the use point.
     foldable_shape = tirx.Mul(_load(index, [_int(0)]), _int(0)) + _int(64)
-    foldable_owner = tirx.decl_buffer((foldable_shape,), "float32", name="foldable_owner", scope="shared")
     with pytest.raises(
         tvm.error.InternalError,
         match=r"owner capacity is not a stable snapshot: shape dimension 0 .*scalar Var",
     ):
-        _run(
-            _sblock(
-                _evaluate(_vgather(_load(foldable_owner, [_int(0)]), offsets=offsets, mask=mask)),
-                foldable_owner,
-            )
-        )
+        run_shape(foldable_shape, "foldable_owner")
+
+    # Direct Calls are rejected conservatively, including pure calls; a scalar
+    # Var is the supported snapshot.
+    with pytest.raises(tvm.error.InternalError, match="executes a call"):
+        run_shape(tirx.call_pure_extern("int32", "capacity_value"), "call_owner")
 
     # A pure call is stable once its value is saved in a scalar Var: E must use
     # that Var instead of re-expanding the call at the gather.  A stable integer
-    # expression may also combine the saved Var with comparisons and Select.
+    # expression may also combine the saved Var with comparisons, Select, and
+    # FloorMod that are evaluated from the saved snapshot at the use point.
     capacity = tirx.Var("saved_capacity", "int32")
     capacity_owner = tirx.decl_buffer((capacity,), "float32", name="capacity_owner", scope="shared")
     stable_owner = tirx.decl_buffer(
-        (tirx.Select(capacity > 0, _int(32), _int(64)),),
+        (tirx.Select(capacity > 0, tirx.FloorMod(capacity, _int(64)) + _int(1), _int(64)),),
         "float32",
         name="stable_owner",
         scope="shared",
@@ -1053,13 +1092,17 @@ def test_indexed_owner_capacity_stability():
     capacity_out, stable_out = _vmi_calls(body, "tl.vmi.vgather")
     capacity_base, capacity_descriptor = _descriptor(capacity_out, 0)
     assert capacity_base.buffer.same_as(capacity_owner)
-    assert capacity_descriptor.args[1].same_as(capacity)
-    assert arith.Analyzer().simplify(capacity_descriptor.args[1]).same_as(capacity)
+    capacity_extent = capacity_descriptor.args[1]
+    assert isinstance(capacity_extent, tirx.Cast) and capacity_extent.value.same_as(capacity)
+    assert str(capacity_extent.dtype) == "int64"
     stable_base, stable_descriptor = _descriptor(stable_out, 0)
     assert stable_base.buffer.same_as(stable_owner)
+    stable_extent = stable_descriptor.args[1]
+    assert str(stable_extent.dtype) == "int64", stable_extent
     stable_nodes = []
-    tirx.stmt_functor.post_order_visit(stable_descriptor.args[1], stable_nodes.append)
+    tirx.stmt_functor.post_order_visit(stable_extent, stable_nodes.append)
     assert any(isinstance(node, tirx.Select) for node in stable_nodes)
+    assert any(isinstance(node, tirx.FloorMod) for node in stable_nodes)
     assert not any(isinstance(node, (tirx.BufferLoad, tirx.Call)) for node in stable_nodes)
 
 

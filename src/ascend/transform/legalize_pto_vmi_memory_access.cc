@@ -1473,7 +1473,6 @@ PrimExpr OwnerExtent(arith::Analyzer *analyzer, const Buffer &owner,
   int64_t max_extent = 1;
   int unbounded = 0;
   bool unbounded_uint = false;
-  bool needs_int64 = false;
 
   auto capacity_failure = [&](const std::string &detail) {
     Fail(op_name +
@@ -1495,9 +1494,6 @@ PrimExpr OwnerExtent(arith::Analyzer *analyzer, const Buffer &owner,
       }
       static_extent = CheckedMul(static_extent, length.value(), op_name, span);
       factor_bound = length.value();
-      if (shape.dtype().bits() > 32) {
-        needs_int64 = true;
-      }
     } else {
       all_static = false;
       if (!analyzer->CanProve(shape > 0)) {
@@ -1516,13 +1512,7 @@ PrimExpr OwnerExtent(arith::Analyzer *analyzer, const Buffer &owner,
                              " has no positive upper bound");
           }
           factor_bound = bound->max_value;
-          if (factor_bound > std::numeric_limits<int32_t>::max()) {
-            needs_int64 = true;
-          }
         }
-      }
-      if (shape.dtype().bits() > 32 || shape.dtype().is_uint()) {
-        needs_int64 = true;
       }
     }
     if (factor_bound > 1) {
@@ -1534,7 +1524,7 @@ PrimExpr OwnerExtent(arith::Analyzer *analyzer, const Buffer &owner,
     }
   }
   if (all_static) {
-    return IntConst(static_extent);
+    return IntImm(DataType::Int(64), static_extent);
   }
   if (unbounded > 0) {
     // A single unbounded factor is representable only when every other factor
@@ -1544,20 +1534,21 @@ PrimExpr OwnerExtent(arith::Analyzer *analyzer, const Buffer &owner,
           "a symbolic owner dimension has no finite upper bound, so the shape "
           "product cannot be proven representable in int64");
     }
-    needs_int64 = true;
-  }
-  if (max_extent > std::numeric_limits<int32_t>::max()) {
-    needs_int64 = true;
   }
 
-  DataType extent_dtype = needs_int64 ? DataType::Int(64) : DataType::Int(32);
-  PrimExpr extent = IntImm(extent_dtype, 1);
+  // The owner capacity is always emitted in int64, including small static
+  // capacities.  The source Buffer shape and stride expressions keep their
+  // original dtypes and evaluation semantics; each factor is widened before
+  // the new multiplication, so that multiplication does not run in the shape
+  // dtype.  Arithmetic already present inside a source shape still evaluates
+  // in its own dtype.
+  PrimExpr extent = IntImm(DataType::Int(64), 1);
   for (const PrimExpr &shape : owner->shape) {
-    PrimExpr factor = shape;
+    PrimExpr factor;
     if (analyzer->CanProveEqual(shape, IntConst(1))) {
-      factor = IntImm(extent_dtype, 1);
-    } else if (factor.dtype() != extent_dtype) {
-      factor = Cast(extent_dtype, factor);
+      factor = IntImm(DataType::Int(64), 1);
+    } else {
+      factor = WidenToInt64(shape);
     }
     extent = extent * factor;
   }
@@ -1598,6 +1589,34 @@ bool StableOwnerCapacityNode(const ObjectRef &node) {
          node.as<OrNode>() || node.as<NotNode>();
 }
 
+struct ExpressionStabilityScan {
+  bool has_load = false;
+  bool has_call = false;
+  std::string first_unstable_type;
+};
+
+// One traversal for the checks shared by address and capacity snapshots.
+// Each caller supplies its own admission set and keeps its own diagnostics;
+// sharing the walk must not merge those sets.  Post-order reaches a read or a
+// call only after its arguments, so collect the whole expression and let the
+// caller give reads and calls priority over an incidental leaf type from
+// inside them.  This pass conservatively rejects every direct Call in these
+// snapshots, including a pure call; it does not classify whether a particular
+// pure call would be evaluable at the use point.
+ExpressionStabilityScan
+ScanExpressionStability(const PrimExpr &expr,
+                        bool (*is_stable)(const ObjectRef &)) {
+  ExpressionStabilityScan scan;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    scan.has_load = scan.has_load || node.as<BufferLoadNode>() != nullptr;
+    scan.has_call = scan.has_call || node.as<CallNode>() != nullptr;
+    if (scan.first_unstable_type.empty() && !is_stable(node)) {
+      scan.first_unstable_type = node->GetTypeKey();
+    }
+  });
+  return scan;
+}
+
 // Inspect the allocation shape nodes as written, before OwnerExtent or any
 // other Analyzer simplification runs.  A shape such as `read * 0 + 64` folds
 // to a constant, but the physical capacity was still fixed by a mutable read
@@ -1608,31 +1627,20 @@ bool StableOwnerCapacityNode(const ObjectRef &node) {
 std::optional<std::string> OwnerCapacityStabilityReason(const Buffer &owner) {
   for (size_t dim = 0; dim < owner->shape.size(); ++dim) {
     const PrimExpr &shape = owner->shape[dim];
-    // The traversal is post-order, so a call is reached after its arguments
-    // (which may include StringImm or other non-stable leaves).  Collect the
-    // whole shape first and give the semantically relevant read/call reason
-    // priority over a leaf type from inside that call.
-    bool has_load = false;
-    bool has_call = false;
-    std::string unstable_type;
-    PostOrderVisit(shape, [&](const ObjectRef &node) {
-      has_load = has_load || node.as<BufferLoadNode>() != nullptr;
-      has_call = has_call || node.as<CallNode>() != nullptr;
-      if (unstable_type.empty() && !StableOwnerCapacityNode(node)) {
-        unstable_type = node->GetTypeKey();
-      }
-    });
+    ExpressionStabilityScan scan =
+        ScanExpressionStability(shape, StableOwnerCapacityNode);
     std::string reason;
-    if (has_load) {
+    if (scan.has_load) {
       reason = "the shape re-reads a buffer at the use point; save the shape "
                "value in a scalar Var before allocating the owner";
-    } else if (has_call) {
+    } else if (scan.has_call) {
       reason =
           "the shape executes a call at the use point; save the shape value "
           "in a scalar Var before allocating the owner";
-    } else if (!unstable_type.empty()) {
+    } else if (!scan.first_unstable_type.empty()) {
       std::ostringstream oss;
-      oss << "the shape contains a non-stable node of type " << unstable_type
+      oss << "the shape contains a non-stable node of type "
+          << scan.first_unstable_type
           << "; save the shape value in a scalar Var before allocating the "
              "owner";
       reason = oss.str();
@@ -1651,29 +1659,6 @@ std::optional<std::string> OwnerCapacityStabilityReason(const Buffer &owner) {
 void CheckIndexedAddressSnapshot(const AccessAddress &address,
                                  const std::string &op_name, const Span &span) {
   std::string reason;
-  auto scan = [&](const PrimExpr &expr) {
-    if (!expr.defined() || !reason.empty()) {
-      return;
-    }
-    PostOrderVisit(expr, [&](const ObjectRef &node) {
-      if (!reason.empty()) {
-        return;
-      }
-      if (node.as<BufferLoadNode>()) {
-        reason = "the coordinates re-read a buffer at the use point; save the "
-                 "scalar value in a variable before binding the pointer";
-      } else if (node.as<CallNode>()) {
-        reason =
-            "the coordinates execute a call at the use point; save the scalar "
-            "value in a variable before binding the pointer";
-      } else if (!StableIndexedAddressNode(node)) {
-        std::ostringstream oss;
-        oss << "the coordinates contain a non-stable node of type "
-            << node->GetTypeKey();
-        reason = oss.str();
-      }
-    });
-  };
   // The rebuild copies the linear source offset into the new D, not the raw
   // start/stride metadata lists.  OffsetOf folds zero-index dimensions and
   // materializes implicit row-major strides from the source shape exactly
@@ -1686,7 +1671,21 @@ void CheckIndexedAddressSnapshot(const AccessAddress &address,
         "the source address has multiple linear components; axis separators "
         "are not supported";
   } else {
-    scan(source_offsets[0]);
+    ExpressionStabilityScan stability =
+        ScanExpressionStability(source_offsets[0], StableIndexedAddressNode);
+    if (stability.has_load) {
+      reason = "the coordinates re-read a buffer at the use point; save the "
+               "scalar value in a variable before binding the pointer";
+    } else if (stability.has_call) {
+      reason =
+          "the coordinates execute a call at the use point; save the scalar "
+          "value in a variable before binding the pointer";
+    } else if (!stability.first_unstable_type.empty()) {
+      std::ostringstream oss;
+      oss << "the coordinates contain a non-stable node of type "
+          << stability.first_unstable_type;
+      reason = oss.str();
+    }
   }
   if (!reason.empty()) {
     Fail(op_name +
@@ -2120,41 +2119,27 @@ private:
                "provably non-negative and inside the owner",
            span);
     }
-    // Compare D against the owner capacity in a common integer domain that
-    // preserves both values.  The capacity may be int64 to keep the shape
-    // product expressible, while D keeps its original width and expression;
-    // narrowing a wide D can wrap, or abort while the analyzer builds an
-    // out-of-range literal, before any proof is attempted.  Only widen here,
-    // and widen an unsigned 64-bit value only after its range is proven to fit
-    // in the signed 64-bit comparison domain.
+    // Compare D against the int64 owner capacity in a signed domain that
+    // preserves D.  D keeps its original expression and dtype in the emitted
+    // instruction; only this comparison widens it.  Narrowing a wide D can
+    // wrap, or abort while the analyzer builds an out-of-range literal, before
+    // any proof is attempted.  Widen an unsigned 64-bit D only after its range
+    // is proven to fit the signed 64-bit domain.
     PrimExpr capacity_offset = instruction_offset;
-    PrimExpr capacity_extent = owner.extent;
-    bool capacity_comparable = true;
-    if (capacity_offset.dtype() != capacity_extent.dtype()) {
-      auto representable_in_int64 = [&](const PrimExpr &value) {
-        const DataType dtype = value.dtype();
-        if (!dtype.is_uint() || dtype.bits() < 64) {
-          return true;
-        }
-        return analyzer_->const_int_bound(value)->max_value !=
-               arith::ConstIntBound::kPosInf;
-      };
-      capacity_comparable = representable_in_int64(capacity_offset) &&
-                            representable_in_int64(capacity_extent);
-      if (capacity_comparable) {
-        capacity_offset = Cast(DataType::Int(64), capacity_offset);
-        capacity_extent = Cast(DataType::Int(64), capacity_extent);
-      }
+    const bool offset_comparable =
+        RepresentableInInt64(analyzer_, capacity_offset);
+    if (offset_comparable) {
+      capacity_offset = WidenToInt64(capacity_offset);
     }
-    if (!capacity_comparable ||
-        !analyzer_->CanProve(capacity_offset < capacity_extent)) {
+    if (!offset_comparable ||
+        !analyzer_->CanProve(capacity_offset < owner.extent)) {
       std::ostringstream oss;
       oss << op_name
           << " requires the instruction base offset D = S - O + offset to be "
              "provably inside the owner (D < whole-owner element capacity)";
-      if (!capacity_comparable) {
-        oss << "; D or the capacity has an unsigned 64-bit range that cannot "
-               "be compared without losing integer precision";
+      if (!offset_comparable) {
+        oss << "; D has an unsigned 64-bit range that cannot be compared with "
+               "the int64 capacity without losing integer precision";
       }
       Fail(oss.str(), span);
     }
