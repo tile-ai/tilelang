@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
-#include <vector>
 
 struct Shape {
   int m, n, k;
@@ -50,8 +49,14 @@ static double benchmark(Function &&function, double operations) {
 
 static bool run_bf16(const Shape &shape, bool validate = true) {
   const int M = shape.m, N = shape.n, K = shape.k;
-  std::vector<std::uint16_t> a(M * K), b(K * N);
-  std::vector<float> actual(M * N), expected(M * N);
+  tl::cpu::AlignedScratch<std::uint16_t> a_storage, b_storage;
+  tl::cpu::AlignedScratch<float> actual_storage, expected_storage;
+  auto *a = a_storage.Resize(M * K);
+  auto *b = b_storage.Resize(K * N);
+  auto *actual = actual_storage.Resize(M * N);
+  auto *expected = expected_storage.Resize(M * N);
+  std::fill_n(actual, M * N, 0.0f);
+  std::fill_n(expected, M * N, 0.0f);
   for (int i = 0; i < M * K; ++i)
     a[i] = to_bf16(static_cast<float>((i % 17) - 8) / 16.0f);
   for (int i = 0; i < K * N; ++i)
@@ -64,9 +69,8 @@ static bool run_bf16(const Shape &shape, bool validate = true) {
               from_bf16(a[i * K + k]) * from_bf16(b[k * N + j]);
 
   const auto kernel = [&] {
-    tl_amx_bf16_gemm(reinterpret_cast<float *>(a.data()),
-                     reinterpret_cast<float *>(b.data()), actual.data(), M, N,
-                     K, K, N, N, 0, 0, true);
+    tl_amx_bf16_gemm(reinterpret_cast<float *>(a), reinterpret_cast<float *>(b),
+                     actual, M, N, K, K, N, N, 0, 0, true);
   };
   kernel();
   for (int i = 0; validate && i < M * N; ++i) {
@@ -83,8 +87,14 @@ static bool run_bf16(const Shape &shape, bool validate = true) {
 
 static bool run_int8(const Shape &shape, bool validate = true) {
   const int M = shape.m, N = shape.n, K = shape.k;
-  std::vector<std::int8_t> a(M * K), b(K * N);
-  std::vector<std::int32_t> actual(M * N), expected(M * N);
+  tl::cpu::AlignedScratch<std::int8_t> a_storage, b_storage;
+  tl::cpu::AlignedScratch<std::int32_t> actual_storage, expected_storage;
+  auto *a = a_storage.Resize(M * K);
+  auto *b = b_storage.Resize(K * N);
+  auto *actual = actual_storage.Resize(M * N);
+  auto *expected = expected_storage.Resize(M * N);
+  std::fill_n(actual, M * N, 0);
+  std::fill_n(expected, M * N, 0);
   for (int i = 0; i < M * K; ++i)
     a[i] = static_cast<std::int8_t>((i % 15) - 7);
   for (int i = 0; i < K * N; ++i)
@@ -97,14 +107,12 @@ static bool run_int8(const Shape &shape, bool validate = true) {
               static_cast<std::int32_t>(a[i * K + k]) * b[k * N + j];
 
   const auto kernel = [&] {
-    tl_amx_int8_gemm_ss(a.data(), b.data(), actual.data(), M, N, K, K, N, N, 0,
-                        0, true, 0, 0);
+    tl_amx_int8_gemm_ss(a, b, actual, M, N, K, K, N, N, 0, 0, true, 0, 0);
   };
   kernel();
-  if (validate && actual != expected) {
-    const auto mismatch =
-        std::mismatch(actual.begin(), actual.end(), expected.begin());
-    const auto index = mismatch.first - actual.begin();
+  if (validate && !std::equal(actual, actual + M * N, expected)) {
+    const auto mismatch = std::mismatch(actual, actual + M * N, expected);
+    const auto index = mismatch.first - actual;
     std::fprintf(stderr, "INT8 mismatch at %td: got=%d ref=%d\n", index,
                  actual[index], expected[index]);
     return false;

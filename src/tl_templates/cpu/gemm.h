@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 
 #if defined(__linux__) && defined(__x86_64__)
 #include <asm/prctl.h>
@@ -29,6 +28,30 @@ struct alignas(64) AMXTileConfig {
   std::uint8_t reserved2[8];
 };
 static_assert(sizeof(AMXTileConfig) == 64, "invalid AMX tile config size");
+
+template <typename T> class AlignedScratch {
+public:
+  AlignedScratch() = default;
+  AlignedScratch(const AlignedScratch &) = delete;
+  AlignedScratch &operator=(const AlignedScratch &) = delete;
+  ~AlignedScratch() { std::free(data_); }
+
+  T *Resize(std::size_t count) {
+    if (count > capacity_) {
+      std::free(data_);
+      const std::size_t bytes = (count * sizeof(T) + 63) & ~std::size_t(63);
+      data_ = static_cast<T *>(std::aligned_alloc(64, bytes));
+      if (!data_)
+        std::abort();
+      capacity_ = bytes / sizeof(T);
+    }
+    return data_;
+  }
+
+private:
+  T *data_{nullptr};
+  std::size_t capacity_{0};
+};
 
 inline void EnsureAMXPermission() {
 #if defined(__linux__)
@@ -109,18 +132,20 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
   const auto interleave_bf16 = _mm512_load_si512(interleave_bf16_indices);
   if (!trans_a && !trans_b && M % 32 == 0 && N % 32 == 0 && K % 32 == 0) {
     constexpr int n_block = 1024;
-    static thread_local std::vector<std::uint32_t> packed_b_block;
-    packed_b_block.resize(static_cast<std::size_t>(n_block / 32) * k_blocks *
-                          2 * 16 * 16);
-    static thread_local std::vector<std::uint16_t> packed_a;
+    static thread_local tl::cpu::AlignedScratch<std::uint32_t>
+        packed_b_block_scratch;
+    auto *packed_b_block = packed_b_block_scratch.Resize(
+        static_cast<std::size_t>(n_block / 32) * k_blocks * 2 * 16 * 16);
+    static thread_local tl::cpu::AlignedScratch<std::uint16_t> packed_a_scratch;
+    std::uint16_t *packed_a = nullptr;
     const bool pack_a = N >= 128;
     if (pack_a) {
-      packed_a.resize(static_cast<std::size_t>(M) * K);
+      packed_a = packed_a_scratch.Resize(static_cast<std::size_t>(M) * K);
       for (int mt = 0; mt < M / 16; ++mt) {
         for (int kb_index = 0; kb_index < k_blocks; ++kb_index) {
           const int k0 = kb_index * 32;
           auto *panel =
-              packed_a.data() +
+              packed_a +
               (static_cast<std::size_t>(mt) * k_blocks + kb_index) * 16 * 32;
           for (int i = 0; i < 16; ++i)
             _mm512_storeu_si512(
@@ -140,7 +165,7 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
           for (int pair = 0; pair < n_pairs; ++pair) {
             const int n0 = n_block_base + pair * 32;
             auto *panel0 =
-                packed_b_block.data() +
+                packed_b_block +
                 (static_cast<std::size_t>(pair) * k_blocks + kb_index) * 2 *
                     16 * 16;
             auto *panel1 = panel0 + 16 * 16;
@@ -176,13 +201,13 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
           }
           for (int kb_index = 0; kb_index < k_blocks; ++kb_index) {
             const auto *panel0 =
-                packed_b_block.data() +
+                packed_b_block +
                 (static_cast<std::size_t>(pair) * k_blocks + kb_index) * 2 *
                     16 * 16;
             const auto *panel1 = panel0 + 16 * 16;
             if (pack_a) {
               const auto *a_panel0 =
-                  packed_a.data() +
+                  packed_a +
                   (static_cast<std::size_t>(m0 / 16) * k_blocks + kb_index) *
                       16 * 32;
               const auto *a_panel1 =
@@ -196,10 +221,10 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
                           lda * sizeof(std::uint16_t));
             }
             _tile_loadd(6, panel0, 64);
-            _tile_loadd(7, panel1, 64);
             _tile_dpbf16ps(0, 4, 6);
-            _tile_dpbf16ps(1, 4, 7);
             _tile_dpbf16ps(2, 5, 6);
+            _tile_loadd(7, panel1, 64);
+            _tile_dpbf16ps(1, 4, 7);
             _tile_dpbf16ps(3, 5, 7);
           }
           _tile_stored(0, c + m0 * ldc + n0, ldc * sizeof(float));
@@ -212,8 +237,9 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
     _tile_release();
     return;
   }
-  static thread_local std::vector<std::uint32_t> packed_b;
-  packed_b.resize(static_cast<std::size_t>(n_tiles) * k_blocks * 16 * 16);
+  static thread_local tl::cpu::AlignedScratch<std::uint32_t> packed_b_scratch;
+  auto *packed_b = packed_b_scratch.Resize(static_cast<std::size_t>(n_tiles) *
+                                           k_blocks * 16 * 16);
   int first_generic_nt = 0;
   if (!trans_b && K % 32 == 0) {
     const int paired_tiles = (N / 32) * 2;
@@ -222,7 +248,7 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
       for (int kb_index = 0; kb_index < k_blocks; ++kb_index) {
         const int k0 = kb_index * 32;
         auto *panel0 =
-            packed_b.data() +
+            packed_b +
             (static_cast<std::size_t>(nt) * k_blocks + kb_index) * 16 * 16;
         auto *panel1 = panel0 + static_cast<std::size_t>(k_blocks) * 16 * 16;
         for (int kp = 0; kp < 16; ++kp) {
@@ -252,7 +278,7 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
       const int k0 = kb_index * 32;
       const int kb = K - k0 < 32 ? K - k0 : 32;
       auto *panel =
-          packed_b.data() +
+          packed_b +
           (static_cast<std::size_t>(nt) * k_blocks + kb_index) * 16 * 16;
       if (!trans_b && nb == 16 && kb == 32) {
         for (int kp = 0; kp < 16; ++kp) {
@@ -353,12 +379,12 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
         const int kb_index = k0 / 32;
         const int nt = n0 / 16;
         const auto *b_panel0 =
-            packed_b.data() +
+            packed_b +
             (static_cast<std::size_t>(nt) * k_blocks + kb_index) * 16 * 16;
         _tile_loadd(6, b_panel0, 64);
         if (safe_nb1) {
           const auto *b_panel1 =
-              packed_b.data() +
+              packed_b +
               (static_cast<std::size_t>(nt + 1) * k_blocks + kb_index) * 16 *
                   16;
           _tile_loadd(7, b_panel1, 64);
@@ -418,18 +444,20 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
   } while (false)
   if (!trans_a && !trans_b && M % 32 == 0 && N % 32 == 0 && K % 64 == 0) {
     constexpr int n_block = 1024;
-    static thread_local std::vector<std::uint32_t> packed_b_block;
-    packed_b_block.resize(static_cast<std::size_t>(n_block / 32) * k_blocks *
-                          2 * 16 * 16);
-    static thread_local std::vector<std::uint8_t> packed_a;
+    static thread_local tl::cpu::AlignedScratch<std::uint32_t>
+        packed_b_block_scratch;
+    auto *packed_b_block = packed_b_block_scratch.Resize(
+        static_cast<std::size_t>(n_block / 32) * k_blocks * 2 * 16 * 16);
+    static thread_local tl::cpu::AlignedScratch<std::uint8_t> packed_a_scratch;
+    std::uint8_t *packed_a = nullptr;
     const bool pack_a = N >= 128;
     if (pack_a) {
-      packed_a.resize(static_cast<std::size_t>(M) * K);
+      packed_a = packed_a_scratch.Resize(static_cast<std::size_t>(M) * K);
       for (int mt = 0; mt < M / 16; ++mt) {
         for (int kb_index = 0; kb_index < k_blocks; ++kb_index) {
           const int k0 = kb_index * 64;
           auto *panel =
-              packed_a.data() +
+              packed_a +
               (static_cast<std::size_t>(mt) * k_blocks + kb_index) * 16 * 64;
           for (int i = 0; i < 16; ++i)
             _mm512_storeu_si512(
@@ -449,7 +477,7 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
           for (int pair = 0; pair < n_pairs; ++pair) {
             const int n0 = n_block_base + pair * 32;
             auto *panel0 =
-                packed_b_block.data() +
+                packed_b_block +
                 (static_cast<std::size_t>(pair) * k_blocks + kb_index) * 2 *
                     16 * 16;
             auto *panel1 = panel0 + 16 * 16;
@@ -502,13 +530,13 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
           }
           for (int kb_index = 0; kb_index < k_blocks; ++kb_index) {
             const auto *panel0 =
-                packed_b_block.data() +
+                packed_b_block +
                 (static_cast<std::size_t>(pair) * k_blocks + kb_index) * 2 *
                     16 * 16;
             const auto *panel1 = panel0 + 16 * 16;
             if (pack_a) {
               const auto *a_panel0 =
-                  packed_a.data() +
+                  packed_a +
                   (static_cast<std::size_t>(m0 / 16) * k_blocks + kb_index) *
                       16 * 64;
               const auto *a_panel1 =
@@ -539,8 +567,9 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
 #undef TL_AMX_INT8_DOT
     return;
   }
-  static thread_local std::vector<std::uint32_t> packed_b;
-  packed_b.resize(static_cast<std::size_t>(n_tiles) * k_blocks * 16 * 16);
+  static thread_local tl::cpu::AlignedScratch<std::uint32_t> packed_b_scratch;
+  auto *packed_b = packed_b_scratch.Resize(static_cast<std::size_t>(n_tiles) *
+                                           k_blocks * 16 * 16);
   for (int nt = 0; nt < n_tiles; ++nt) {
     const int n_base = nt * 16;
     const int nb = N - n_base < 16 ? N - n_base : 16;
@@ -548,7 +577,7 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
       const int k0 = kb_index * 64;
       const int kb = K - k0 < 64 ? K - k0 : 64;
       auto *panel =
-          packed_b.data() +
+          packed_b +
           (static_cast<std::size_t>(nt) * k_blocks + kb_index) * 16 * 16;
       if (!trans_b && nb == 16 && kb == 64) {
         for (int kp = 0; kp < 16; ++kp) {
@@ -652,12 +681,12 @@ inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
         const int kb_index = k0 / 64;
         const int nt = n0 / 16;
         const auto *b_panel0 =
-            packed_b.data() +
+            packed_b +
             (static_cast<std::size_t>(nt) * k_blocks + kb_index) * 16 * 16;
         _tile_loadd(6, b_panel0, 64);
         if (safe_nb1) {
           const auto *b_panel1 =
-              packed_b.data() +
+              packed_b +
               (static_cast<std::size_t>(nt + 1) * k_blocks + kb_index) * 16 *
                   16;
           _tile_loadd(7, b_panel1, 64);
