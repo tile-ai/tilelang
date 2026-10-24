@@ -742,7 +742,8 @@ def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint, 
                     for i in T.serial(required - 1):
                         a[i] = T.cast(300, dtype)
                 T.call_intrin(
-                    "void", tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
+                    "void",
+                    tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
                     T.access_ptr(dst[0], "w", extent=cols),
                     T.access_ptr(a[0], "r", extent=extent),
                     T.int32(1),

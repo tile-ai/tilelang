@@ -277,6 +277,10 @@ def copy(  # noqa: A001
        32-byte column group can skip scatter. Scatter loads full 256-byte vectors,
        including partial tails, so the entire source read span must be valid.
 
+    E4M3FN NZ-to-NZ UB-to-L1 copies also accept prepacked Compact NZ or canonical
+    NZ sources. Matching dtypes and the existing NZ region/pitch checks apply;
+    this path performs post-copy directly without allocating scatter scratch.
+
     A copy whose destination is an MX scale-factor handle
     (:func:`tilelang.ascend.language.alloc_l0a_sf` /
     :func:`~tilelang.ascend.language.alloc_l0b_sf`) loads the per-block

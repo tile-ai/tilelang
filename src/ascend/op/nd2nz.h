@@ -20,7 +20,8 @@ inline int64_t Nd2NzElementBytes(const PrimExpr &expr) {
   if (dtype && (dtype->value == "half" || dtype->value == "bfloat16_t"))
     return 2;
   TVM_FFI_THROW(ValueError)
-      << "ND2NZ dtype must be half, bfloat16_t, float, or fp8_e4_t, got " << expr;
+      << "ND2NZ dtype must be half, bfloat16_t, float, or fp8_e4_t, got "
+      << expr;
   return 0;
 }
 
