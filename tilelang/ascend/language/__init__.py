@@ -66,6 +66,7 @@ from .tile_schedule import (  # noqa: F401
 from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Vector, VectorFrame  # noqa: F401
 
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
+from . import vmi as vmi  # noqa: F401 (exposed as T.vmi.*)
 
 # Scalar reciprocal sqrt is a frontend composition of common math ops.
 from .math import rsqrt  # noqa: F401
@@ -126,6 +127,7 @@ _ASCEND_API_ALL = (
     "rng_rand_float",
     "rsqrt",
     "simd",
+    "vmi",
     "unroll",
 )
 

@@ -70,8 +70,49 @@ def UnrollLoopSkipVF():
     This pre-AutoSchedule pass only materializes ``T.unroll(..., explicit=True)``
     loops. Non-explicit unroll hints, serial loops, and all VF block interiors
     are preserved for their later lowering stages.
+
+    Each cloned block rebuilds its ``tl.vmi.alloc_kind`` map from its own
+    cloned allocations.  Marker-carrying functions must run
+    ``NormalizePTOAllocMarkers`` first; a map that names allocations the
+    cloned block does not own is rejected with a diagnostic.  Functions
+    without markers need no extra preparation.
     """
     return _ffi_api.UnrollLoopSkipVF()  # type: ignore
+
+
+def NormalizePTOAllocMarkers():
+    """Rebuild VMI allocation markers on the allocations that own them.
+
+    Each SBlock's ``tl.vmi.alloc_kind`` map is rebuilt from the allocations
+    the block itself holds, and each marked statement allocation carries its
+    kind string directly.  Allocations, buffer data variables and numerics
+    stay untouched; entries whose allocation no longer exists are dropped.
+    Run it after binding the Ascend PTO target and before
+    ``UnrollLoopSkipVF``.  Functions without a PTO target pass through
+    unchanged.
+    """
+    return _ffi_api.NormalizePTOAllocMarkers()  # type: ignore
+
+
+def LegalizePTOVMIMemoryAccess():
+    """Build and verify the explicit VMI memory descriptor before scheduling.
+
+    Every ordinary ``T.vmi.vload`` / ``T.vmi.vstore`` address (a scalar-origin
+    ``BufferLoad``) is replaced with ``tl.access_ptr(BufferLoad, extent,
+    rw_mask)`` plus a rewritten instruction scalar offset.  The pass proves,
+    in one shared acceptance exit, that the descriptor preserves the source
+    address, contains the complete physical access envelope and covers the
+    declared extent under the existing logical pointer-region analysis.  An
+    ordinary caller-written explicit descriptor is preserved and only verified;
+    there is no whole-allocation fallback for an ordinary access.  Indexed
+    ``vgather`` / ``vgatherb`` / ``vscatter`` addresses, including one reached
+    through a direct handle binding, are instead rebuilt as an owner-origin
+    descriptor with capacity ``prod(owner.shape)`` after the owner identity,
+    layout, capacity, stable-coverage and bound-address snapshot proofs.
+    Functions without a PTO target pass through unchanged; the pass is a no-op
+    on IR without VMI accesses.
+    """
+    return _ffi_api.LegalizePTOVMIMemoryAccess()  # type: ignore
 
 
 def AutoSchedule():
@@ -132,6 +173,50 @@ def NormalizeAscendFractalStorage():
 def AscendSimdVFLowerParallel():
     """Lower T.Parallel inside SIMD_VF blocks to MicroAPI register-level vector ops."""
     return _ffi_api.AscendSimdVFLowerParallel()  # type: ignore
+
+
+def VerifyParallelToPTO():
+    """Read-only verification of the PTO Parallel input contract.
+
+    Runs on the PTO target only: SIMD_VF blocks whose T.Parallel units fall
+    outside the supported mapping contract are rejected, while functions
+    without a PTO target pass through unchanged.
+    """
+    return _ffi_api.VerifyParallelToPTO()  # type: ignore
+
+
+def LegalizeParallelToPTO():
+    """Placeholder for the PTO Parallel legalization stage.
+
+    Only the registration exists for now, so that the formal PTO pipeline
+    order is fixed; the safe scalar If/Select/Min/Max rewrites are left to
+    a later change. The placeholder preserves the input IR and rejects
+    nothing.
+    """
+    return _ffi_api.LegalizeParallelToPTO()  # type: ignore
+
+
+def VerifyPTOCodegenLegality():
+    """Verify PTO requirements before code generation without modifying IR.
+
+    Consumes the final device TIR after LowerDeviceKernelLaunch and the final
+    layout and UB rewrites. Currently checks destination alignment for
+    default/continuous explicit-mask VMI stores of b8/b16/b32 data: 32 bytes
+    for ordinary stores, or natural element alignment for recognized 1PT
+    writeback. Bool data is excluded. Shapes, layouts, masks and addresses are
+    unchanged. Functions without a PTO target pass through unchanged.
+    """
+    return _ffi_api.VerifyPTOCodegenLegality()  # type: ignore
+
+
+def VectorizeParallelToPTO():
+    """Rewrite verified T.Parallel loops inside PTO SIMD_VF blocks into
+    logical VMI code.
+
+    Runs on the PTO target only; functions without a PTO target pass
+    through unchanged.
+    """
+    return _ffi_api.VectorizeParallelToPTO()  # type: ignore
 
 
 def AscendThreadSync(storage_scope: str):
@@ -245,6 +330,8 @@ __all__ = [
     "NormalizeBufferVersion",
     "NormalizeControlFlowForSchedule",
     "NormalizeConflictHints",
+    "LegalizeParallelToPTO",
+    "LegalizePTOVMIMemoryAccess",
     "PrepareMultiBuffer",
     "ResolveCore",
     "RewriteAscendBufferVersionLayout",
@@ -252,5 +339,9 @@ __all__ = [
     "RestoreWhileLoops",
     "RewriteFp4ToFp4x2",
     "RewriteFlagToBuf",
+    "NormalizePTOAllocMarkers",
     "UnrollLoopSkipVF",
+    "VectorizeParallelToPTO",
+    "VerifyParallelToPTO",
+    "VerifyPTOCodegenLegality",
 ]

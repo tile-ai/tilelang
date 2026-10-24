@@ -13,6 +13,9 @@ namespace tvm {
 namespace tl {
 
 bool TargetIsAscend(Target target);
+// Whether the target selects PTO codegen within the Ascend architecture
+// ("ascend" kind + "pto" in target keys). Mirrors Python target_is_pto.
+bool TargetIsPTO(Target target);
 bool IsAscendVectorizableFP8(DataType dtype);
 
 } // namespace tl

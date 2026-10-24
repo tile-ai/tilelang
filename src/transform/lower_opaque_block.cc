@@ -31,10 +31,12 @@
 #include <tvm/tirx/transform.h>
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include "../op/builtin.h"
 #include "common/attr.h"
+#include "common/vmi_alloc.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -68,7 +70,37 @@ public:
   }
 
 private:
-  Stmt MaterializeAllocations(const Array<Buffer> &alloc_buffers, Stmt body) {
+  // Decode a block's own `tl.vmi.alloc_kind` map.  Every key must
+  // identity-match one of the block's alloc_buffers; a key that does not
+  // means the caller should run NormalizePTOAllocMarkers before lowering
+  // marker-carrying functions.  Each matching allocation is checked against
+  // the contract of its kind; unmarked allocations gain no check.
+  static vmi::AllocKindMap GetBlockVmiAllocKinds(const SBlock &block) {
+    auto annotation = block->annotations.find(tl::attr::kVmiAllocKind);
+    if (annotation == block->annotations.end()) {
+      return {};
+    }
+    vmi::AllocKindMap kinds;
+    vmi::CollectAllocKindMap((*annotation).second, &kinds, "LowerOpaqueBlock");
+    for (const auto &[data, kind] : kinds) {
+      bool owned = false;
+      for (const Buffer &buffer : block->alloc_buffers) {
+        if (buffer->data.same_as(data)) {
+          vmi::ValidateAllocation(buffer.get(), kind, "LowerOpaqueBlock");
+          owned = true;
+        }
+      }
+      ICHECK(owned)
+          << "LowerOpaqueBlock found `" << tl::attr::kVmiAllocKind
+          << "` entry for allocation `" << data->name_hint
+          << "` on a block that does not own it; run NormalizePTOAllocMarkers "
+             "before lowering marker-carrying functions";
+    }
+    return kinds;
+  }
+
+  Stmt MaterializeAllocations(const Array<Buffer> &alloc_buffers, Stmt body,
+                              const vmi::AllocKindMap &local_kinds) {
     for (size_t i = alloc_buffers.size(); i > 0; --i) {
       const Buffer &buffer = alloc_buffers[i - 1];
       Array<PrimExpr> allocation_shape = GetBufferAllocationShape(buffer);
@@ -88,6 +120,10 @@ private:
       if (init_it != local_var_init_map_.end()) {
         const PrimExpr &init = (*init_it).second;
         allocate_annotations.Set(tl::attr::kLocalVarInit, init);
+      }
+      auto alloc_kind = local_kinds.find(buffer->data);
+      if (alloc_kind != local_kinds.end()) {
+        allocate_annotations.Set(tl::attr::kVmiAllocKind, alloc_kind->second);
       }
       // Use AllocBuffer with annotations; buffer already carries shape info
       Buffer alloc_buf(buffer->data, buffer->dtype, allocation_shape,
@@ -111,6 +147,10 @@ private:
     inside_realize_ = true;
     SBlock new_block = Downcast<SBlock>(this->VisitStmt(op->block));
     inside_realize_ = prev_inside_realize;
+    // Decode the realized block's own marker map before anything else: every
+    // key is checked against this block's allocations even when it holds
+    // none, so a map left on the wrong block is rejected here.
+    vmi::AllocKindMap local_kinds = GetBlockVmiAllocKinds(new_block);
     PrimExpr predicate = this->VisitExpr(op->predicate);
     // Step 2. Transform the `predicate` to if-then-else
     Stmt body = new_block->body;
@@ -124,7 +164,8 @@ private:
                       new_block->alloc_buffers);
 
     // Step 4. Lower allocations
-    body = MaterializeAllocations(new_block->alloc_buffers, std::move(body));
+    body = MaterializeAllocations(new_block->alloc_buffers, std::move(body),
+                                  local_kinds);
     // Step 5. Materialize a lexical scope boundary only for blocks that were
     // explicitly marked by an earlier semantic lowering pass (for example
     // gemm/gemm_sp). We intentionally avoid re-inferring this from the
@@ -146,15 +187,33 @@ private:
     inside_realize_ = false;
     SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
     inside_realize_ = was_inside_realize;
+    // Decode the block's own marker map before any early return, so a map
+    // that names allocations this block does not own is rejected even when
+    // the block holds no allocation itself.
+    vmi::AllocKindMap local_kinds = GetBlockVmiAllocKinds(block);
     if (block->annotations.count("stmt_group")) {
       return block->body;
     }
-    if (!inside_realize_ && !block->alloc_buffers.empty()) {
-      Stmt new_body = MaterializeAllocations(block->alloc_buffers, block->body);
+    if (inside_realize_) {
+      // The enclosing SBlockRealize materializes this block's allocations
+      // and consumes its marker map itself; keep both for its handler.
+      return block;
+    }
+    if (!block->alloc_buffers.empty()) {
+      Stmt new_body = MaterializeAllocations(block->alloc_buffers, block->body,
+                                             local_kinds);
       auto n = block.CopyOnWrite();
       n->body = std::move(new_body);
       n->alloc_buffers = ffi::Array<Buffer>();
-      return block;
+    }
+    // The allocation carries the kind after materialization; the block map
+    // has been consumed and must not survive as a second authority.
+    if (block->annotations.find(tl::attr::kVmiAllocKind) !=
+        block->annotations.end()) {
+      Map<String, Any> annotations = block->annotations;
+      annotations.erase(tl::attr::kVmiAllocKind);
+      auto n = block.CopyOnWrite();
+      n->annotations = std::move(annotations);
     }
     return block;
   }
