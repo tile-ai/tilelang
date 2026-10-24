@@ -715,7 +715,10 @@ private:
     if (op->attr_key == "tl.assume") {
       PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
       auto n = CopyOnWrite(op);
-      n->node = std::move(condition);
+      // Preserve the predicate for passes with a different analyzer context.
+      if (!is_one(condition)) {
+        n->node = std::move(condition);
+      }
       return Parent::VisitStmt_(n.get());
     }
     return Parent::VisitStmt_(op);
