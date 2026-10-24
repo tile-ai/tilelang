@@ -65,6 +65,28 @@ public:
     CodeGenC::VisitStmt(n);
   }
 
+  // C promotes 8/16-bit operands to int; cast scalar sub-word + - * << ~
+  // results back to their dtype so chained ops wrap like TIR (issue #2961).
+  void VisitExpr(const PrimExpr &n, std::ostream &os) final {
+    DataType t = n.dtype();
+    bool wrap = t.lanes() == 1 && (t.is_int() || t.is_uint()) &&
+                (t.bits() == 8 || t.bits() == 16);
+    if (wrap && !n.as<AddNode>() && !n.as<SubNode>() && !n.as<MulNode>()) {
+      const auto *call = n.as<CallNode>();
+      wrap = call && (call->op.same_as(tirx::builtin::shift_left()) ||
+                      call->op.same_as(tirx::builtin::bitwise_not()));
+    }
+    if (!wrap) {
+      CodeGenC::VisitExpr(n, os);
+      return;
+    }
+    os << "((";
+    PrintType(t, os);
+    os << ")";
+    CodeGenC::VisitExpr(n, os);
+    os << ")";
+  }
+
   // Called by AddFunction between the signature and the body; anchors the
   // function entry to the PrimFunc's own span.
   void PreFunctionBody(const PrimFunc &f) override {
