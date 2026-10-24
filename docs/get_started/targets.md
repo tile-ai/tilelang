@@ -209,6 +209,7 @@ target choice so compiled kernels remain portable and cache keys describe the
 required instruction set:
 
 ```python
+import tilelang
 from tilelang.cpu import amx_target
 
 target = amx_target()

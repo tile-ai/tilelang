@@ -457,6 +457,30 @@ extern "C" inline void tl_amx_bf16_gemm_parallel(
                    trans_b, clear_accum);
 }
 
+extern "C" inline void tl_amx_bf16_gemm_offset(
+    float *a_raw, float *b_raw, float *c_raw, std::int32_t M, std::int32_t N,
+    std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,
+    std::int32_t a_offset, std::int32_t b_offset, std::int32_t c_offset,
+    std::int32_t trans_a, std::int32_t trans_b, bool clear_accum) {
+  auto *a = reinterpret_cast<std::uint16_t *>(a_raw) + a_offset;
+  auto *b = reinterpret_cast<std::uint16_t *>(b_raw) + b_offset;
+  tl_amx_bf16_gemm(reinterpret_cast<float *>(a), reinterpret_cast<float *>(b),
+                   c_raw + c_offset, M, N, K, lda, ldb, ldc, trans_a, trans_b,
+                   clear_accum);
+}
+
+extern "C" inline void tl_amx_bf16_gemm_parallel_offset(
+    float *a_raw, float *b_raw, float *c_raw, std::int32_t M, std::int32_t N,
+    std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,
+    std::int32_t a_offset, std::int32_t b_offset, std::int32_t c_offset,
+    std::int32_t trans_a, std::int32_t trans_b, bool clear_accum) {
+  auto *a = reinterpret_cast<std::uint16_t *>(a_raw) + a_offset;
+  auto *b = reinterpret_cast<std::uint16_t *>(b_raw) + b_offset;
+  tl_amx_bf16_gemm_parallel(reinterpret_cast<float *>(a),
+                            reinterpret_cast<float *>(b), c_raw + c_offset, M,
+                            N, K, lda, ldb, ldc, trans_a, trans_b, clear_accum);
+}
+
 inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,
                                   void *c_raw, std::int32_t M, std::int32_t N,
                                   std::int32_t K, std::int32_t lda,
@@ -832,6 +856,26 @@ inline void tl_amx_int8_gemm_parallel_impl(
     tl_amx_int8_gemm_parallel_impl(a, b, c, M, N, K, lda, ldb, ldc, trans_a,   \
                                    trans_b, clear_accum, A_UNSIGNED,           \
                                    B_UNSIGNED);                                \
+  }                                                                            \
+  extern "C" inline void tl_amx_int8_gemm_##SUFFIX##_offset(                   \
+      A_TYPE *a, B_TYPE *b, std::int32_t *c, std::int32_t M, std::int32_t N,   \
+      std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,    \
+      std::int32_t a_offset, std::int32_t b_offset, std::int32_t c_offset,     \
+      std::int32_t trans_a, std::int32_t trans_b, bool clear_accum,            \
+      std::int32_t, std::int32_t) {                                            \
+    tl_amx_int8_gemm_impl(a + a_offset, b + b_offset, c + c_offset, M, N, K,   \
+                          lda, ldb, ldc, trans_a, trans_b, clear_accum,        \
+                          A_UNSIGNED, B_UNSIGNED);                             \
+  }                                                                            \
+  extern "C" inline void tl_amx_int8_gemm_##SUFFIX##_parallel_offset(          \
+      A_TYPE *a, B_TYPE *b, std::int32_t *c, std::int32_t M, std::int32_t N,   \
+      std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,    \
+      std::int32_t a_offset, std::int32_t b_offset, std::int32_t c_offset,     \
+      std::int32_t trans_a, std::int32_t trans_b, bool clear_accum,            \
+      std::int32_t, std::int32_t) {                                            \
+    tl_amx_int8_gemm_parallel_impl(a + a_offset, b + b_offset, c + c_offset,   \
+                                   M, N, K, lda, ldb, ldc, trans_a, trans_b,   \
+                                   clear_accum, A_UNSIGNED, B_UNSIGNED);       \
   }
 
 TL_AMX_INT8_WRAPPER(ss, std::int8_t, std::int8_t, 0, 0)

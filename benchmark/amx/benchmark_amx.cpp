@@ -6,17 +6,34 @@
 #include <tl_templates/cpu/gemm.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string_view>
 
 struct Shape {
   int m, n, k;
 };
+
+static bool parse_positive_int(std::string_view text, int &value) {
+  const auto result =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  return result.ec == std::errc{} && result.ptr == text.data() + text.size() &&
+         value > 0;
+}
+
+static bool valid_shape(const Shape &shape) {
+  const auto product_fits = [](int lhs, int rhs) {
+    return lhs <= std::numeric_limits<int>::max() / rhs;
+  };
+  return product_fits(shape.m, shape.k) && product_fits(shape.k, shape.n) &&
+         product_fits(shape.m, shape.n);
+}
 
 static std::uint16_t to_bf16(float value) {
   std::uint32_t bits;
@@ -139,8 +156,14 @@ static bool run_int8(const Shape &shape, bool validate = true,
 
 int main(int argc, char **argv) {
   if (argc == 5) {
-    const Shape shape = {std::atoi(argv[2]), std::atoi(argv[3]),
-                         std::atoi(argv[4])};
+    Shape shape;
+    if (!parse_positive_int(argv[2], shape.m) ||
+        !parse_positive_int(argv[3], shape.n) ||
+        !parse_positive_int(argv[4], shape.k) || !valid_shape(shape)) {
+      std::fprintf(stderr, "M, N, and K must be positive integers whose "
+                           "pairwise products fit in int\n");
+      return 2;
+    }
     const auto operation = std::string_view(argv[1]);
     if (operation == "bf16" || operation == "bf16-parallel")
       return run_bf16(shape, false, operation == "bf16-parallel") ? 0 : 1;

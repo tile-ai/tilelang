@@ -1,8 +1,11 @@
-"""oneDNN BF16 and INT8 reference for ``benchmark_amx.cpp``.
+"""oneDNN BF16 and INT8 throughput comparison for ``benchmark_amx.cpp``.
 
 PyTorch's CPU BF16 matmul dispatches to oneDNN on AMX-capable Intel CPUs.  Run
 this script under ``taskset`` with one hardware thread per physical core so
 that placement and ``--threads`` match the C++ helper benchmark.
+
+The PyTorch BF16 operation stores BF16 output, whereas TileLang stores the FP32
+accumulator. This script compares throughput rather than output contracts.
 """
 
 from __future__ import annotations
@@ -53,7 +56,8 @@ def main() -> None:
     for m, n, k in shapes:
         a = torch.randn((m, k), dtype=torch.bfloat16)
         b = torch.randn((k, n), dtype=torch.bfloat16)
-        rate = measure(lambda a=a, b=b: torch.mm(a, b), 2 * m * n * k)
+        out = torch.empty((m, n), dtype=torch.bfloat16)
+        rate = measure(lambda a=a, b=b, out=out: torch.mm(a, b, out=out), 2 * m * n * k)
         print(f"BF16 {m:4d}x{n:4d}x{k:4d}  {rate:8.2f} GFLOP/s")
 
     if not hasattr(torch, "_int_mm"):
@@ -61,8 +65,9 @@ def main() -> None:
     for m, n, k in shapes:
         a = torch.randint(-8, 8, (m, k), dtype=torch.int8)
         b = torch.randint(-8, 8, (k, n), dtype=torch.int8)
+        out = torch.empty((m, n), dtype=torch.int32)
         try:
-            rate = measure(lambda a=a, b=b: torch._int_mm(a, b), 2 * m * n * k)
+            rate = measure(lambda a=a, b=b, out=out: torch._int_mm(a, b, out=out), 2 * m * n * k)
         except RuntimeError as error:
             print(f"INT8 reference unavailable: {error}")
             break

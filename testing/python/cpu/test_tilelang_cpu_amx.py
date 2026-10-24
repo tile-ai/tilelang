@@ -45,6 +45,13 @@ def _compile(func, *, parallel=False):
     )
 
 
+def _full_range_int8(shape, dtype):
+    info = torch.iinfo(dtype)
+    values = torch.randint(info.min, info.max + 1, shape, dtype=dtype)
+    values.view(-1)[:2] = torch.tensor((info.min, info.max), dtype=dtype)
+    return values
+
+
 @T.prim_func
 def _blocked_bf16_matmul(
     A: T.Tensor((16, 64), T.bfloat16),
@@ -106,32 +113,90 @@ def test_amx_bf16_transpose(trans_A, trans_B):
     tilelang.testing.torch_assert_close(actual, expected, atol=1e-4, rtol=1e-4)
 
 
-@pytest.mark.parametrize("a_dtype,b_dtype", [(T.int8, T.int8), (T.uint8, T.uint8)])
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    [(T.int8, T.int8), (T.uint8, T.uint8)],
+)
 @pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
 def test_amx_int8_codegen_and_tail_correctness(a_dtype, b_dtype):
     kernel = _compile(_matmul(17, 19, 67, a_dtype, T.int32, b_dtype=b_dtype))
     assert "tl_amx_int8_gemm" in kernel.get_kernel_source()
     a_torch_dtype = torch.int8 if a_dtype == T.int8 else torch.uint8
     b_torch_dtype = torch.int8 if b_dtype == T.int8 else torch.uint8
-    a = torch.randint(-7 if a_torch_dtype == torch.int8 else 0, 8, (17, 67), dtype=a_torch_dtype)
-    b = torch.randint(-7 if b_torch_dtype == torch.int8 else 0, 8, (67, 19), dtype=b_torch_dtype)
+    a = _full_range_int8((17, 67), a_torch_dtype)
+    b = _full_range_int8((67, 19), b_torch_dtype)
     actual = kernel(a, b)
     expected = a.to(torch.int32) @ b.to(torch.int32)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("a_dtype,b_dtype", [(T.int8, T.int8), (T.uint8, T.uint8)])
+@pytest.mark.parametrize(
+    "a_dtype,b_dtype",
+    [(T.int8, T.int8), (T.uint8, T.uint8)],
+)
 @pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
 def test_amx_int8_parallel_codegen_and_correctness(a_dtype, b_dtype):
     kernel = _compile(_matmul(64, 128, 128, a_dtype, T.int32, b_dtype=b_dtype), parallel=True)
     assert "_parallel" in kernel.get_kernel_source()
     a_torch_dtype = torch.int8 if a_dtype == T.int8 else torch.uint8
     b_torch_dtype = torch.int8 if b_dtype == T.int8 else torch.uint8
-    a = torch.randint(-7 if a_torch_dtype == torch.int8 else 0, 8, (64, 128), dtype=a_torch_dtype)
-    b = torch.randint(-7 if b_torch_dtype == torch.int8 else 0, 8, (128, 128), dtype=b_torch_dtype)
+    a = _full_range_int8((64, 128), a_torch_dtype)
+    b = _full_range_int8((128, 128), b_torch_dtype)
     actual = kernel(a, b)
     expected = a.to(torch.int32) @ b.to(torch.int32)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
+def test_amx_bf16_sliced_regions_use_physical_strides():
+    @T.prim_func
+    def main(
+        A: T.Tensor((17, 67), T.bfloat16),
+        B: T.Tensor((67, 19), T.bfloat16),
+        C: T.Tensor((17, 19), T.float32),
+    ):
+        with T.Kernel(1) as _:
+            A_local = T.alloc_local((19, 71), T.bfloat16)
+            B_local = T.alloc_local((69, 23), T.bfloat16)
+            C_local = T.alloc_local((19, 23), T.float32)
+            T.copy(A, A_local[1:18, 2:69])
+            T.copy(B, B_local[1:68, 2:21])
+            T.clear(C_local)
+            T.gemm(A_local[1:18, 2:69], B_local[1:68, 2:21], C_local[1:18, 2:21])
+            T.copy(C_local[1:18, 2:21], C)
+
+    kernel = _compile(main)
+    a = torch.randn((17, 67), dtype=torch.bfloat16)
+    b = torch.randn((67, 19), dtype=torch.bfloat16)
+    actual = kernel(a, b)
+    expected = a.float() @ b.float()
+    tilelang.testing.torch_assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
+def test_amx_bf16_rank3_singleton_regions():
+    @T.prim_func
+    def main(
+        A: T.Tensor((17, 67), T.bfloat16),
+        B: T.Tensor((67, 19), T.bfloat16),
+        C: T.Tensor((17, 19), T.float32),
+    ):
+        with T.Kernel(1) as _:
+            A_local = T.alloc_local((1, 19, 71), T.bfloat16)
+            B_local = T.alloc_local((1, 69, 23), T.bfloat16)
+            C_local = T.alloc_local((1, 19, 23), T.float32)
+            T.copy(A, A_local[0, 1:18, 2:69])
+            T.copy(B, B_local[0, 1:68, 2:21])
+            T.clear(C_local)
+            T.gemm(A_local[0:1, 1:18, 2:69], B_local[0:1, 1:68, 2:21], C_local[0:1, 1:18, 2:21])
+            T.copy(C_local[0, 1:18, 2:21], C)
+
+    kernel = _compile(main)
+    a = torch.randn((17, 67), dtype=torch.bfloat16)
+    b = torch.randn((67, 19), dtype=torch.bfloat16)
+    actual = kernel(a, b)
+    expected = a.float() @ b.float()
+    tilelang.testing.torch_assert_close(actual, expected, atol=1e-4, rtol=1e-4)
 
 
 @pytest.mark.skipif(not host_has_amx(), reason="requires an AMX-capable compiler and host")
