@@ -65,6 +65,38 @@ public:
     CodeGenC::VisitStmt(n);
   }
 
+  // C promotes 8/16-bit operands to int; cast scalar sub-word + - * << ~
+  // results back to their dtype so chained ops wrap like TIR (issue #2961).
+  void VisitExpr(const PrimExpr &n, std::ostream &os) final {
+    DataType t = n.dtype();
+    bool wrap = t.lanes() == 1 && (t.is_int() || t.is_uint()) &&
+                (t.bits() == 8 || t.bits() == 16);
+    if (wrap && !n.as<AddNode>() && !n.as<SubNode>() && !n.as<MulNode>()) {
+      const auto *call = n.as<CallNode>();
+      wrap = call && (call->op.same_as(tirx::builtin::shift_left()) ||
+                      call->op.same_as(tirx::builtin::bitwise_not()));
+    }
+    if (!wrap) {
+      CodeGenC::VisitExpr(n, os);
+      return;
+    }
+    os << "((";
+    PrintType(t, os);
+    os << ")";
+    // * and << can overflow int (65535 * 65535, negative << k); do them in
+    // uint32, where wrapping is defined.
+    const auto *mul = n.as<MulNode>();
+    const auto *call = n.as<CallNode>();
+    if (mul) {
+      PrintUInt32Op_(mul->a, " * ", mul->b, os);
+    } else if (call && call->op.same_as(tirx::builtin::shift_left())) {
+      PrintUInt32Op_(call->args[0], " << ", call->args[1], os);
+    } else {
+      CodeGenC::VisitExpr(n, os);
+    }
+    os << ")";
+  }
+
   // Called by AddFunction between the signature and the body; anchors the
   // function entry to the PrimFunc's own span.
   void PreFunctionBody(const PrimFunc &f) override {
@@ -90,6 +122,15 @@ protected:
   std::ostringstream preamble_stream_;
 
 private:
+  void PrintUInt32Op_(const PrimExpr &a, const char *op, const PrimExpr &b,
+                      std::ostream &os) {
+    os << "((";
+    PrintType(DataType::UInt(32), os);
+    os << ")" << PrintExpr(a) << op << "(";
+    PrintType(DataType::UInt(32), os);
+    os << ")" << PrintExpr(b) << ")";
+  }
+
   void EmitSpanDirective_(const Span &span) {
     if (!span->source_name.defined() || span->line <= 0) {
       return;
