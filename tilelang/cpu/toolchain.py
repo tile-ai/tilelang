@@ -33,15 +33,31 @@ def get_compile_flags(target: Target, pass_configs: dict[str, Any] | None, *, ex
     LLVM uses TVM's thread pool, so OpenMP flags only apply to the C target.
     Disabled parallelization leaves the serial compile command unchanged.
     """
-    if target.kind.name != "c" or not pass_configs or not pass_configs.get(PassConfigKey.TL_CPU_PARALLEL, False):
+    if target.kind.name != "c":
         return []
+    flags: list[str] = []
+    if "amx" in {str(key) for key in target.keys}:
+        flags += [
+            "-O3",
+            "-mavx512f",
+            "-mavx512bw",
+            "-mavx512vbmi",
+            "-mamx-tile",
+            "-mamx-bf16",
+            "-mamx-int8",
+        ]
+    if not pass_configs or not pass_configs.get(PassConfigKey.TL_CPU_PARALLEL, False):
+        return flags
     if sys.platform == "win32" and execution_backend == "tvm_ffi":
         warnings.warn(
             "tl.cpu_parallel: OpenMP flag injection for the tvm_ffi backend is not supported on Windows yet; compiling serially.",
             stacklevel=2,
         )
-        return []
-    return get_openmp_compile_flags()
+        return flags
+    openmp_flags = get_openmp_compile_flags()
+    if flags:
+        openmp_flags = [flag for flag in openmp_flags if not flag.startswith("-O")]
+    return flags + [flag for flag in openmp_flags if flag not in flags]
 
 
 class _LibompLocation:

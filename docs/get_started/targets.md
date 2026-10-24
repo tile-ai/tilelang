@@ -200,3 +200,34 @@ prefer config dictionaries over CLI-style strings.
   running on. Try dropping the flag or switching to the correct compute capability.
 - When targeting multiple environments, use `auto` for convenience and override with an explicit config only when
   you need architecture-specific tuning.
+
+## Intel AMX
+
+TileLang can lower CPU `T.gemm` operations to Intel Advanced Matrix
+Extensions (AMX) through the C source backend. AMX lowering is an explicit
+target choice so compiled kernels remain portable and cache keys describe the
+required instruction set:
+
+```python
+from tilelang.cpu import amx_target
+
+target = amx_target()
+kernel = tilelang.compile(
+    func,
+    target=target,
+    target_host=target,
+    execution_backend="cython",
+)
+```
+
+The backend supports BF16 inputs with FP32 accumulation and signed or unsigned
+INT8 inputs with INT32 accumulation. Matrix sizes do not need to be multiples
+of the AMX tile dimensions, and `trans_A` and `trans_B` are supported. Other
+input and accumulator combinations continue through the CPU scalar GEMM path.
+
+The build host needs a recent C++ compiler that accepts the AMX flags and
+`-mavx512vbmi`; set `CXX` when the system compiler is too old. At runtime,
+Linux must expose `amx_tile`, `amx_bf16`, `amx_int8`, and `avx512_vbmi` CPU
+flags. `tilelang.cpu.host_has_amx()` provides a convenient capability check.
+AMX lowering currently requires `target="c"`; the LLVM CPU target continues
+to use its existing lowering.
