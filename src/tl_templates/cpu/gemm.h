@@ -15,6 +15,11 @@
     defined(__x86_64__)
 #include <immintrin.h>
 
+#if defined(_OPENMP)
+extern "C" int omp_get_max_threads(void);
+extern "C" int omp_in_parallel(void);
+#endif
+
 namespace tl {
 namespace cpu {
 
@@ -409,6 +414,47 @@ tl_amx_bf16_gemm(float *a_raw, float *b_raw, float *c_raw, std::int32_t M,
     }
   }
   _tile_release();
+}
+
+extern "C" inline void tl_amx_bf16_gemm_parallel(
+    float *a_raw, float *b_raw, float *c_raw, std::int32_t M, std::int32_t N,
+    std::int32_t K, std::int32_t lda, std::int32_t ldb, std::int32_t ldc,
+    std::int32_t trans_a, std::int32_t trans_b, bool clear_accum) {
+#if defined(_OPENMP)
+  // Divide the output into 32-column strips. Each strip owns its B packing and
+  // output cache lines, while all workers share the read-only A matrix. This
+  // avoids the redundant B packing and output reductions caused by K or M
+  // partitioning. Small and irregular calls retain the serial implementation.
+  if (!omp_in_parallel() && !trans_a && !trans_b && M % 32 == 0 &&
+      N % 32 == 0 && K % 32 == 0) {
+    const int strip_count = N / 32;
+    const int m_block_count = M / 32;
+    const bool split_m =
+        M <= 256 && N <= 256 && omp_get_max_threads() > strip_count;
+    const int task_count = strip_count * (split_m ? m_block_count : 1);
+    const int thread_count = std::min(omp_get_max_threads(), task_count);
+    if (thread_count > 1) {
+      const auto *a = reinterpret_cast<const std::uint16_t *>(a_raw);
+      const auto *b = reinterpret_cast<const std::uint16_t *>(b_raw);
+#pragma omp parallel for schedule(static) num_threads(thread_count)
+      for (int task = 0; task < task_count; ++task) {
+        const int strip = task % strip_count;
+        const int m_block = split_m ? task / strip_count : 0;
+        const int m0 = m_block * 32;
+        const int n0 = strip * 32;
+        tl_amx_bf16_gemm(
+            reinterpret_cast<float *>(
+                const_cast<std::uint16_t *>(a + m0 * lda)),
+            reinterpret_cast<float *>(const_cast<std::uint16_t *>(b + n0)),
+            c_raw + m0 * ldc + n0, split_m ? 32 : M, 32, K, lda, ldb, ldc, 0, 0,
+            clear_accum);
+      }
+      return;
+    }
+  }
+#endif
+  tl_amx_bf16_gemm(a_raw, b_raw, c_raw, M, N, K, lda, ldb, ldc, trans_a,
+                   trans_b, clear_accum);
 }
 
 inline void tl_amx_int8_gemm_impl(const void *a_raw, const void *b_raw,

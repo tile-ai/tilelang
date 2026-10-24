@@ -1,12 +1,13 @@
-"""Single-core oneDNN reference for ``benchmark_amx.cpp``.
+"""oneDNN BF16 and INT8 reference for ``benchmark_amx.cpp``.
 
 PyTorch's CPU BF16 matmul dispatches to oneDNN on AMX-capable Intel CPUs.  Run
-this script under ``taskset -c <physical-core>`` so that thread placement and
-the thread count match the C++ helper benchmark.
+this script under ``taskset`` with one hardware thread per physical core so
+that placement and ``--threads`` match the C++ helper benchmark.
 """
 
 from __future__ import annotations
 
+import argparse
 import time
 
 import torch
@@ -39,9 +40,17 @@ def measure(function, operations: int) -> float:
 
 
 def main() -> None:
-    torch.set_num_threads(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--shape", nargs=3, type=int, action="append", metavar=("M", "N", "K"))
+    args = parser.parse_args()
+    if args.threads <= 0:
+        parser.error("--threads must be positive")
+
+    torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
-    for m, n, k in SHAPES:
+    shapes = tuple(map(tuple, args.shape)) if args.shape else SHAPES
+    for m, n, k in shapes:
         a = torch.randn((m, k), dtype=torch.bfloat16)
         b = torch.randn((k, n), dtype=torch.bfloat16)
         rate = measure(lambda a=a, b=b: torch.mm(a, b), 2 * m * n * k)
@@ -49,7 +58,7 @@ def main() -> None:
 
     if not hasattr(torch, "_int_mm"):
         return
-    for m, n, k in SHAPES:
+    for m, n, k in shapes:
         a = torch.randint(-8, 8, (m, k), dtype=torch.int8)
         b = torch.randint(-8, 8, (k, n), dtype=torch.int8)
         try:

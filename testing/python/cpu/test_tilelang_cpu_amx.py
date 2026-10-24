@@ -33,7 +33,7 @@ def _matmul(M, N, K, a_dtype, accum_dtype, trans_A=False, trans_B=False, b_dtype
     return main
 
 
-def _compile(func):
+def _compile(func, *, parallel=False):
     target = amx_target()
     return tilelang.compile(
         func,
@@ -41,6 +41,7 @@ def _compile(func):
         target=target,
         target_host=target,
         execution_backend="cython",
+        pass_configs={"tl.cpu_parallel": parallel},
     )
 
 
@@ -68,6 +69,17 @@ def test_amx_bf16_codegen_and_tail_correctness():
     assert "tl_amx_bf16_gemm" in kernel.get_kernel_source()
     a = torch.randn((17, 67), dtype=torch.bfloat16)
     b = torch.randn((67, 19), dtype=torch.bfloat16)
+    actual = kernel(a, b)
+    expected = a.float() @ b.float()
+    tilelang.testing.torch_assert_close(actual, expected, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
+def test_amx_bf16_parallel_codegen_and_correctness():
+    kernel = _compile(_matmul(64, 128, 96, T.bfloat16, T.float32), parallel=True)
+    assert "tl_amx_bf16_gemm_parallel" in kernel.get_kernel_source()
+    a = torch.randn((64, 96), dtype=torch.bfloat16)
+    b = torch.randn((96, 128), dtype=torch.bfloat16)
     actual = kernel(a, b)
     expected = a.float() @ b.float()
     tilelang.testing.torch_assert_close(actual, expected, atol=1e-4, rtol=1e-4)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tilelang import language as T
+from tilelang.transform import get_pass_context
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tvm import tirx
 from tvm.ir import Range
@@ -79,7 +80,12 @@ class _GemmAMXBase(GemmBase):
 class GemmAMXBF16(_GemmAMXBase):
     """Intel AMX BF16 GEMM with FP32 accumulation."""
 
-    helper_name = "tl_amx_bf16_gemm"
+    @property
+    def helper_name(self) -> str:
+        pass_ctx = get_pass_context()
+        if pass_ctx and pass_ctx.config.get("tl.cpu_parallel", False):
+            return "tl_amx_bf16_gemm_parallel"
+        return "tl_amx_bf16_gemm"
 
 
 class GemmAMXInt8(_GemmAMXBase):

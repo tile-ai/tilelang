@@ -2,6 +2,7 @@
 // c++ -std=c++17 -O3 -mavx512f -mavx512bw -mavx512vbmi -mamx-tile \
 //   -mamx-bf16 -mamx-int8 -Isrc benchmark/amx/benchmark_amx.cpp \
 //   -o benchmark_amx
+// Add -fopenmp to benchmark the bf16-parallel operation.
 #include <tl_templates/cpu/gemm.h>
 
 #include <algorithm>
@@ -47,7 +48,8 @@ static double benchmark(Function &&function, double operations) {
   return operations * iterations / seconds / 1e9;
 }
 
-static bool run_bf16(const Shape &shape, bool validate = true) {
+static bool run_bf16(const Shape &shape, bool validate = true,
+                     bool parallel = false) {
   const int M = shape.m, N = shape.n, K = shape.k;
   tl::cpu::AlignedScratch<std::uint16_t> a_storage, b_storage;
   tl::cpu::AlignedScratch<float> actual_storage, expected_storage;
@@ -69,8 +71,14 @@ static bool run_bf16(const Shape &shape, bool validate = true) {
               from_bf16(a[i * K + k]) * from_bf16(b[k * N + j]);
 
   const auto kernel = [&] {
-    tl_amx_bf16_gemm(reinterpret_cast<float *>(a), reinterpret_cast<float *>(b),
-                     actual, M, N, K, K, N, N, 0, 0, true);
+    if (parallel)
+      tl_amx_bf16_gemm_parallel(reinterpret_cast<float *>(a),
+                                reinterpret_cast<float *>(b), actual, M, N, K,
+                                K, N, N, 0, 0, true);
+    else
+      tl_amx_bf16_gemm(reinterpret_cast<float *>(a),
+                       reinterpret_cast<float *>(b), actual, M, N, K, K, N, N,
+                       0, 0, true);
   };
   kernel();
   for (int i = 0; validate && i < M * N; ++i) {
@@ -80,7 +88,8 @@ static bool run_bf16(const Shape &shape, bool validate = true) {
       return false;
     }
   }
-  std::printf("BF16 %4dx%4dx%4d  %8.2f GFLOP/s\n", M, N, K,
+  std::printf("BF16%s %4dx%4dx%4d  %8.2f GFLOP/s\n",
+              parallel ? " parallel" : "         ", M, N, K,
               benchmark(kernel, 2.0 * M * N * K));
   return true;
 }
@@ -126,8 +135,9 @@ int main(int argc, char **argv) {
   if (argc == 5) {
     const Shape shape = {std::atoi(argv[2]), std::atoi(argv[3]),
                          std::atoi(argv[4])};
-    if (std::string_view(argv[1]) == "bf16")
-      return run_bf16(shape, false) ? 0 : 1;
+    const auto operation = std::string_view(argv[1]);
+    if (operation == "bf16" || operation == "bf16-parallel")
+      return run_bf16(shape, false, operation == "bf16-parallel") ? 0 : 1;
     if (std::string_view(argv[1]) == "int8")
       return run_int8(shape, false) ? 0 : 1;
   }
