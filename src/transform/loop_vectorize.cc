@@ -1058,6 +1058,17 @@ private:
     if (is_independent) {
       return {buffer_vec_size, /*requires_scalarization=*/false};
     }
+    // An aligned element offset does not imply an aligned base pointer.
+    // Scalar broadcasts and register accesses do not require vector alignment.
+    if (!is_invariant && !IsLocalBuffer(buffer, /*allow_var=*/true) &&
+        !IsFragmentBuffer(buffer)) {
+      int64_t alignment_bits = int64_t{buffer->data_alignment} * 8;
+      int64_t element_bits = buffer->dtype.bits() * buffer->dtype.lanes();
+      while (buffer_vec_size > 1 &&
+             alignment_bits % (element_bits * buffer_vec_size) != 0) {
+        buffer_vec_size /= 2;
+      }
+    }
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
            !IndicesCanVectorize(elem_offset, inner_for_->loop_var,
