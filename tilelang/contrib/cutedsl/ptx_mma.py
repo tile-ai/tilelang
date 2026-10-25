@@ -18,8 +18,11 @@ Supported dense configurations (from mma.h):
 - TF32: m16n8k4, m16n8k8 -> f32 accumulator
 - FP64: m8n8k4 -> f64 accumulator
 
-Sparse (mma.sp) variants mirror the dense ones with halved A registers,
-an extra metadata register, and a sparse_selector literal.
+Sparse variants mirror the dense ones with halved A registers, an extra
+metadata register, and a sparse_selector literal. Like
+``tl_templates/cuda/instruction/mma_sp.h`` they cover f16/bf16/tf32, s8/u8 and
+FP8 (e4m3/e5m2, sm_89+), and emit ``mma.sp::ordered_metadata``, which PTX
+recommends over plain ``mma.sp`` for performance.
 """
 
 __all__ = [
@@ -150,7 +153,7 @@ def _make_ptx_mma(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
 
 
 def _make_ptx_mma_sp(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
-    """Factory to create a @dsl_user_op for ``mma.sp.sync.aligned``.
+    """Factory to create a @dsl_user_op for ``mma.sp::ordered_metadata.sync.aligned``.
 
     Args:
         ptx_shape: PTX shape, e.g. "m16n8k32"
@@ -172,7 +175,7 @@ def _make_ptx_mma_sp(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
     c_regs = ", ".join(f"${n_c + n_a + n_b + i}" for i in range(n_c))
     meta_reg = f"${n_c + n_a + n_b + n_c}"
     ptx_template = (
-        f"mma.sp.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes}"
+        f"mma.sp::ordered_metadata.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes}"
         f" {{{{{d_regs}}}}}, {{{{{a_regs}}}}}, {{{{{b_regs}}}}}, {{{{{c_regs}}}}}, {meta_reg}, 0x{{sparse_selector}};"
     )
 
@@ -290,6 +293,13 @@ ptx_mma_sp_m16n8k16_bf16_bf16_f32 = _make_ptx_mma_sp("m16n8k16", "f32.bf16.bf16.
 # INT8
 ptx_mma_sp_m16n8k64_s8_s8_s32 = _make_ptx_mma_sp("m16n8k64", "s32.s8.s8.s32", 4, 4, 4, "i32")
 ptx_mma_sp_m16n8k32_s8_s8_s32 = _make_ptx_mma_sp("m16n8k32", "s32.s8.s8.s32", 2, 2, 4, "i32")
+# UINT8
+ptx_mma_sp_m16n8k64_u8_u8_s32 = _make_ptx_mma_sp("m16n8k64", "s32.u8.u8.s32", 4, 4, 4, "i32")
+ptx_mma_sp_m16n8k32_u8_u8_s32 = _make_ptx_mma_sp("m16n8k32", "s32.u8.u8.s32", 2, 2, 4, "i32")
+# FP8 (SM89+), f32 accumulator only; the sparse selector must be 0
+_PTX_MMA_SP_FP8 = {
+    (a, b): _make_ptx_mma_sp("m16n8k64", f"f32.{a}.{b}.f32", 4, 4, 4, "f32") for a in ("e4m3", "e5m2") for b in ("e4m3", "e5m2")
+}
 # TF32
 ptx_mma_sp_m16n8k16_tf32_tf32_f32 = _make_ptx_mma_sp("m16n8k16", "f32.tf32.tf32.f32", 2, 2, 4, "f32")
 ptx_mma_sp_m16n8k8_tf32_tf32_f32 = _make_ptx_mma_sp("m16n8k8", "f32.tf32.tf32.f32", 1, 1, 4, "f32")
@@ -378,6 +388,15 @@ def ptx_mma(
 # =============================================================================
 
 
+_FP8_SP_NAMES = {
+    "e4m3": "e4m3",
+    "float8_e4m3": "e4m3",
+    "float8_e4m3fn": "e4m3",
+    "e5m2": "e5m2",
+    "float8_e5m2": "e5m2",
+}
+
+
 def ptx_mma_sp(
     shape: str,
     a_layout: str,
@@ -422,6 +441,8 @@ def ptx_mma_sp(
             return ptx_mma_sp_m16n8k32_bf16_bf16_f32(*_args)
         elif a_dtype in ["int8", "s8"]:
             return ptx_mma_sp_m16n8k32_s8_s8_s32(*_args)
+        elif a_dtype in ["uint8", "u8"]:
+            return ptx_mma_sp_m16n8k32_u8_u8_s32(*_args)
 
     elif shape == "m16n8k16":
         if a_dtype in ["fp16", "f16", "float16"]:
@@ -437,6 +458,11 @@ def ptx_mma_sp(
     elif shape == "m16n8k64":
         if a_dtype in ["int8", "s8"]:
             return ptx_mma_sp_m16n8k64_s8_s8_s32(*_args)
+        if a_dtype in ["uint8", "u8"]:
+            return ptx_mma_sp_m16n8k64_u8_u8_s32(*_args)
+        fp8_pair = (_FP8_SP_NAMES.get(a_dtype), _FP8_SP_NAMES.get(b_dtype))
+        if fp8_pair in _PTX_MMA_SP_FP8 and c_dtype in ["fp32", "f32", "float32"]:
+            return _PTX_MMA_SP_FP8[fp8_pair](*_args)
 
     elif shape == "m16n8k8" and a_dtype in ["tf32", "tensorfloat32", "fp32", "f32", "float32"]:
         return ptx_mma_sp_m16n8k8_tf32_tf32_f32(*_args)
