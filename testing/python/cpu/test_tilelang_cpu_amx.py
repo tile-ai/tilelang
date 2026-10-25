@@ -115,7 +115,12 @@ def test_amx_bf16_transpose(trans_A, trans_B):
 
 @pytest.mark.parametrize(
     "a_dtype,b_dtype",
-    [(T.int8, T.int8), (T.uint8, T.uint8)],
+    [
+        (T.int8, T.int8),
+        (T.uint8, T.uint8),
+        (T.int8, T.uint8),
+        (T.uint8, T.int8),
+    ],
 )
 @pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
 def test_amx_int8_codegen_and_tail_correctness(a_dtype, b_dtype):
@@ -132,7 +137,12 @@ def test_amx_int8_codegen_and_tail_correctness(a_dtype, b_dtype):
 
 @pytest.mark.parametrize(
     "a_dtype,b_dtype",
-    [(T.int8, T.int8), (T.uint8, T.uint8)],
+    [
+        (T.int8, T.int8),
+        (T.uint8, T.uint8),
+        (T.int8, T.uint8),
+        (T.uint8, T.int8),
+    ],
 )
 @pytest.mark.skipif(not host_has_amx(), reason="requires Intel AMX BF16 and INT8")
 def test_amx_int8_parallel_codegen_and_correctness(a_dtype, b_dtype):

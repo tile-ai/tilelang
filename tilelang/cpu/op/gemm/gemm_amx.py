@@ -118,6 +118,12 @@ class GemmAMXBF16(_GemmAMXBase):
 class GemmAMXInt8(_GemmAMXBase):
     """Intel AMX INT8 GEMM with INT32 accumulation."""
 
+    def __post_init__(self) -> None:
+        a_dtype = str(self.A.dtype)
+        b_dtype = str(self.B.dtype)
+        if a_dtype not in ("int8", "uint8") or b_dtype not in ("int8", "uint8"):
+            raise ValueError(f"AMX INT8 GEMM requires int8 or uint8 operands, got A={a_dtype}, B={b_dtype}")
+
     @property
     def helper_name(self) -> str:
         a_kind = "u" if str(self.a_dtype) == "uint8" else "s"
