@@ -13,7 +13,7 @@ def test_builtin_backend_modules_are_explicit():
         "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
         "cutedsl": (("cuda",), ["cutedsl"]),
         "rocm": (("hip",), ["tvm_ffi", "cython"]),
-        "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),
+        "cpu": (("c", "llvm"), ["tvm_ffi"]),
         "metal": (("metal",), ["torch", "tvm_ffi"]),
         "webgpu": (("webgpu",), ["tvm_ffi"]),
         "ascend": (("ascend",), ["tvm_ffi", "cython"]),

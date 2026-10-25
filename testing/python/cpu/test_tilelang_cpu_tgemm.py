@@ -55,7 +55,7 @@ def ref_matmul(A, B, trans_A, trans_B):
 def run_gemm_compile(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False, dtype=T.float32):
     func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, dtype=dtype)
     with tvm.target.Target("c"):
-        kernel = tilelang.compile(func, out_idx=[2], target="c", target_host="c", execution_backend="cython")
+        kernel = tilelang.compile(func, out_idx=[2], target="c", target_host="c", execution_backend="tvm_ffi")
 
     torch_dtype = torch.__getattribute__(dtype)
     A_shape = (K, M) if trans_A else (M, K)

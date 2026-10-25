@@ -1,4 +1,4 @@
-"""CPU atomic op tests (target="c", execution_backend="cython").
+"""CPU atomic op tests (target="c", execution_backend="tvm_ffi").
 
 Two lowering paths are covered:
 - tile-region: T.atomic_add/atomic_max/atomic_min on buffers/regions, lowered
@@ -27,7 +27,7 @@ def _compile_c(func, out_idx):
             out_idx=out_idx,
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
 

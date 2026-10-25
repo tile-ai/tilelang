@@ -34,7 +34,7 @@ def test_cpu_transpose_swaps_only_the_final_two_axes(src_shape):
             out_idx=[1],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
     src = torch.arange(math.prod(src_shape), dtype=torch.float32).reshape(src_shape)
@@ -66,7 +66,7 @@ def test_cpu_transpose_maps_destination_boundary_predicate():
             out_idx=[1],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
     src = torch.arange(math.prod(src_shape), dtype=torch.float32).reshape(src_shape)
@@ -99,7 +99,7 @@ def test_cpu_transpose_guards_out_of_bounds_singleton_destination():
             out_idx=[1],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
     src = torch.arange(math.prod(src_shape), dtype=torch.float32).reshape(src_shape)
@@ -130,7 +130,7 @@ def test_cpu_transpose_guards_out_of_bounds_singleton_source():
             out_idx=[1],
             target="c",
             target_host="c",
-            execution_backend="cython",
+            execution_backend="tvm_ffi",
         )
 
     src = torch.arange(math.prod(src_shape), dtype=torch.float32).reshape(src_shape)

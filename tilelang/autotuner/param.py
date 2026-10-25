@@ -196,13 +196,13 @@ class AutotuneResult:
                 os.remove(temp_path)
 
     @staticmethod
-    def _safe_write_executable(executable: Executable, path: str):
+    def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
         """Atomically export one runtime executable to disk."""
         directory, filename = os.path.split(path)
         stem, suffix = os.path.splitext(filename)
         temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
         try:
-            executable.export_library(temp_path)
+            executable.export_library(temp_path, **(export_kwargs or {}))
             # Flush exported data before the rename publishes the file.
             with open(temp_path, "rb+") as temp_file:
                 os.fsync(temp_file.fileno())
@@ -275,7 +275,8 @@ class AutotuneResult:
                 executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                self._safe_write_executable(executable, kernel_lib_path)
+                export_kwargs = kernel.adapter.get_compile_args() if kernel.target.kind.name == "c" else None
+                self._safe_write_executable(executable, kernel_lib_path, export_kwargs=export_kwargs)
         elif kernel.execution_backend == "cutedsl":
             # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
             src_lib_path = kernel.adapter.libpath

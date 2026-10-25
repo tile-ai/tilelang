@@ -16,7 +16,7 @@ from tvm.relax import TensorType
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
-from tilelang.jit.adapter.utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target, is_metal_target
+from tilelang.jit.adapter.utils import is_ascend_target, is_cuda_target, is_hip_target, is_metal_target
 from tilelang.backend.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 
@@ -414,8 +414,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
             device = torch.device("cuda")
         elif is_ascend_target(self.target):
             device = torch.device("npu")
-        elif is_cpu_target(self.target):
-            device = torch.device("cpu")
         elif is_metal_target(self.target):
             device = torch.device("mps")
         else:
