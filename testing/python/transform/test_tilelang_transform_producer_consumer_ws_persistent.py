@@ -742,5 +742,187 @@ def test_ws_declined_while_kernel_matches_reference():
         torch.testing.assert_close(kernel(A, B, n), ref * n, rtol=1e-2, atol=1e-2)
 
 
+def prelude_before_outer_serial():
+    """A fill that runs once before the outer loop, overridden by every
+    iteration's own clear (issue #3663)."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 128), T.float16),
+        B: T.Tensor((64, 128), T.float16),
+        C: T.Tensor((128, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            T.fill(C_l, 7)
+            for p in T.serial(2):
+                T.clear(C_l)
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, k * 32], A_s)
+                    T.copy(B[0, k * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+                T.copy(C_l, C[p * 64, 0])
+
+    return main
+
+
+def prelude_before_nested_serial():
+    """Each level's prelude must run once per iteration of its own loop: the
+    accumulator is cleared per ``q`` and accumulates across ``p``."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 128), T.float16),
+        B: T.Tensor((64, 128), T.float16),
+        C: T.Tensor((256, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            T.fill(C_l, 7)
+            for q in T.serial(2):
+                T.clear(C_l)
+                for p in T.serial(2):
+                    for k in T.Pipelined(4, num_stages=2):
+                        T.copy(A[0, k * 32], A_s)
+                        T.copy(B[0, k * 32], B_s)
+                        T.gemm(A_s, B_s, C_l, transpose_B=True)
+                    T.copy(C_l, C[(q * 2 + p) * 64, 0])
+
+    return main
+
+
+def prelude_before_guarded_pipeline():
+    """A prelude in front of a condition must still run when the condition
+    skips the pipelined loop.
+
+    Register reallocation stays off: ptxas cannot allocate registers for a
+    consumer statement after the condition once setmaxnreg runs inside it
+    (#3664).
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 128), T.float16),
+        B: T.Tensor((64, 128), T.float16),
+        C: T.Tensor((64, 64), T.float32),
+        n: T.int32,
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            T.disable_warp_group_reg_alloc()
+            T.fill(C_l, 7)
+            if n > 0:
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, k * 32], A_s)
+                    T.copy(B[0, k * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+            T.copy(C_l, C[0, 0])
+
+    return main
+
+
+def producer_prelude_before_outer_serial():
+    """A producer-only local defined before the outer loop."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 160), T.float16),
+        B: T.Tensor((64, 160), T.float16),
+        C: T.Tensor((128, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            k_off = T.alloc_local((1,), T.int32)
+            k_off[0] = 1
+            for p in T.serial(2):
+                T.clear(C_l)
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, (k + k_off[0]) * 32], A_s)
+                    T.copy(B[0, (k + k_off[0]) * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+                T.copy(C_l, C[p * 64, 0])
+
+    return main
+
+
+def _compile_ws(func):
+    assert "tl_tiled_ws_applied" in _apply_ws_pass(func)["main"].script()
+    return tilelang.compile(
+        func,
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+
+
+def _prelude_inputs(K=128):
+    import torch
+
+    torch.manual_seed(0)
+    A = torch.randn(64, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(64, K, dtype=torch.float16, device="cuda")
+    return A, B, A.float() @ B.float().T
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_keeps_prelude_outside_outer_loop():
+    script = _apply_ws_pass(prelude_before_outer_serial())["main"].script()
+    assert "tl_tiled_ws_applied" in script
+    fill = script.index("T.fill(T.region(C_l[0, 0], 2, 64, 64), 7)")
+    assert fill < script.index("for p in range(2)")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_prelude_before_outer_loop_runs_once():
+    import torch
+
+    kernel = _compile_ws(prelude_before_outer_serial())
+    A, B, ref = _prelude_inputs()
+    torch_ref = ref.repeat(2, 1)
+    torch.testing.assert_close(kernel(A, B), torch_ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_prelude_of_each_nested_loop_level():
+    import torch
+
+    kernel = _compile_ws(prelude_before_nested_serial())
+    A, B, ref = _prelude_inputs()
+    torch_ref = torch.cat([ref, 2 * ref, ref, 2 * ref])
+    torch.testing.assert_close(kernel(A, B), torch_ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_prelude_before_condition_runs_when_loop_is_skipped():
+    import torch
+
+    kernel = _compile_ws(prelude_before_guarded_pipeline())
+    A, B, ref = _prelude_inputs()
+    for n in (0, 1):
+        torch.testing.assert_close(kernel(A, B, n), ref * n + 7, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_producer_prelude_before_outer_loop():
+    import torch
+
+    kernel = _compile_ws(producer_prelude_before_outer_serial())
+    A, B, _ = _prelude_inputs(K=160)
+    ref = A[:, 32:].float() @ B[:, 32:].float().T
+    torch.testing.assert_close(kernel(A, B), ref.repeat(2, 1), rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
