@@ -17,6 +17,7 @@ def test_manual_check_preserves_print_options(raises):
         expected_format = str(probe)
 
         def check(actual, expected):
+            """Observe caller formatting and optionally raise after validation."""
             torch.testing.assert_close(actual[0], expected[0])
             observed.append(str(probe))
             if raises:
