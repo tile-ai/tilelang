@@ -5,7 +5,7 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tirx, arith
+from tilelang._compat.tvm import tirx, arith
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -27,7 +27,7 @@ def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         Union[tirx.Buffer, tirx.Var]: The legalized argument
     """
     if isinstance(arg, tirx.Var) and T.has_let_value(arg):
-        return T.get_let_value(arg).buffer
+        return T.get_let_value(arg).source
     return arg
 
 
@@ -96,7 +96,7 @@ def _gemm_dense_slots(
             f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
         mbar = to_buffer_region(mbar, access_type="rw")
-    C_coords = [r.min for r in C_region.region[-2:]]
+    C_coords = [r.begin for r in C_region.region[-2:]]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
     B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))

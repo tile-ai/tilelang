@@ -1,12 +1,14 @@
 from __future__ import annotations
+
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
 import logging
 import weakref
 from typing import Any
 from collections.abc import Callable
 
 import torch
-from tvm import tirx
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
@@ -189,7 +191,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int]] = {}
         dynamic_symbolic_order: list[tirx.Var] = []
         self._dynamic_symbolic_candidates_map: dict[tirx.Var, list[tuple[int, int, int]]] = {}
@@ -230,9 +232,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if param not in buffer_map:
                 continue
             buffer = buffer_map[param]
-            if buffer.strides is None:
-                continue
-            for j, stride in enumerate(buffer.strides):
+            for j, stride in enumerate(tensor_strides(buffer)):
                 if isinstance(stride, tirx.Var):
                     unique_push_back(stride, (1, i, j))
 
@@ -468,7 +468,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            if str(self.target).startswith("cuda") and torch.cuda.is_available():
+            if self.target.kind.name == "cuda" and torch.cuda.is_available():
                 stream = torch.cuda.current_stream().cuda_stream
             else:
                 stream = 0

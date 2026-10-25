@@ -7,9 +7,11 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.ascend.language import simd as ascend_simd
 from tilelang.engine.lower import lower
-from tvm import tirx
-from tvm.script.ir_builder import IRBuilder
-from tvm.tirx import Call
+from tilelang._compat import tirx
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx import ir
+from tvm_tirx.ir import Call
+from tvm_tirx.tirx.script import ir_builder as builder_api
 from testing.ascend._ir import calls
 
 
@@ -25,8 +27,8 @@ def test_ascend_simd_pair_supports_heterogeneous_dtypes():
     assert tuple(map(str, pair.dtype)) == ("boolx256", "int32x64")
 
     carry, result = pair
-    assert str(carry.dtype) == "boolx256"
-    assert str(result.dtype) == "int32x64"
+    assert str(carry.ty.dtype) == "boolx256"
+    assert str(result.ty.dtype) == "int32x64"
     assert _op_name(carry) == "tl.simd.pair_get"
     assert _op_name(result) == "tl.simd.pair_get"
     assert carry.args[0].same_as(carrier)
@@ -145,7 +147,7 @@ def test_ascend_simd_vaddc_codegen(dtype):
 
     def collect_pair_get(node):
         if isinstance(node, Call) and _op_name(node) == "tl.simd.pair_get":
-            pair_get_dtypes.append(str(node.dtype))
+            pair_get_dtypes.append(str(node.ty.dtype))
 
     tirx.stmt_functor.post_order_visit(func.body, collect_pair_get)
     assert sorted(pair_get_dtypes) == ["boolx256", f"{dtype}x64"]
@@ -245,21 +247,23 @@ def test_ascend_simd_vsstb_threads_pointer_state():
     pointer_stores = []
 
     def visit(node):
-        if isinstance(node, tirx.BufferStore) and node.buffer.scope() == "local.var" and node.buffer.dtype == "handle":
+        if isinstance(node, ir.TensorStore) and node.dest.ty.dtype == ir.PrimType("uint64"):
             pointer_stores.append(node)
 
     tirx.stmt_functor.post_order_visit(func.body, visit)
     assert len(pointer_stores) == 3
-    pointer = pointer_stores[0].buffer
+    pointer = pointer_stores[0].dest
     for store in pointer_stores:
-        assert store.buffer.same_as(pointer)
+        assert store.dest.same_as(pointer)
 
     for store in pointer_stores[1:]:
-        update = store.value
+        assert store.value.ty == ir.PrimType("uint64")
+        assert _op_name(store.value) == "tirx.reinterpret"
+        update = store.value.args[0]
         assert isinstance(update, Call)
         assert _op_name(update) == "tl.simd.vsstb"
-        assert update.dtype == "handle"
-        assert update.args[1].dtype == "handle"
+        assert isinstance(update.ty, ir.PtrType)
+        assert isinstance(update.args[1].ty, ir.PtrType)
         assert str(update.args[4]) == '"POST_UPDATE"'
 
     source = lower(func, target="ascend").kernel_source
@@ -332,10 +336,10 @@ def test_vld_postupdate_rejects_invalid_pointer_and_increment():
     buf = tirx.decl_buffer((128,), "uint16", scope="shared")
     with pytest.raises(ValueError, match="mutable pointer"):
         ascend_simd.vld(buf[0], post_inc=128)
-    untyped = tirx.decl_buffer((1,), "handle", scope="local.var")[0]
-    with pytest.raises(ValueError, match="declared with make_ubuf_ptr"):
-        ascend_simd.vld(untyped, post_inc=128)
-    with IRBuilder(), T.sblock("root"):
+    with IRBuilder(), builder_api.scope():
+        untyped = T.alloc_var("uint64")[0]
+        with pytest.raises(ValueError, match="mutable pointer from make_ubuf_ptr"):
+            ascend_simd.vld(untyped, post_inc=128)
         ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint16")[0]
         with pytest.raises(ValueError, match="must match dtype"):
             ascend_simd.vld(ptr, "BRC_B8", post_inc=1)
@@ -352,7 +356,7 @@ def test_vld_postupdate_rejects_invalid_pointer_and_increment():
 
 @pytest.mark.parametrize("dist", ["US_B32", "DS_B32", "E2B", "E2B_B8", "UNPK4_B16", "UNKNOWN_B16", None])
 def test_vld_postupdate_rejects_unknown_distribution(dist):
-    with IRBuilder(), T.sblock("root"):
+    with IRBuilder(), builder_api.scope():
         buf = T.alloc_shared((128,), "uint16")
         ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint16")[0]
         with pytest.raises(ValueError, match="Unsupported vld post-update distribution"):

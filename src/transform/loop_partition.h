@@ -26,7 +26,7 @@
 #define TVM_TL_LOOP_PARTITION_H_
 
 #include "support/check.h"
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt.h>
 
 #include "../layout/layout.h"
@@ -37,17 +37,18 @@ namespace tl {
 
 using namespace tirx;
 
-For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout,
-                  bool require_padding_guard = false);
+TILELANG_DLL For PartitionLoop(For op, PrimExpr thread_index,
+                               sym::Analyzer analyzer,
+                               const Fragment &loop_layout,
+                               bool require_padding_guard = false);
 
-Fragment PlanLoopPartition(const For &op, size_t num_thread,
-                           int vectorize_size);
+TILELANG_DLL Fragment PlanLoopPartition(const For &op, size_t num_thread,
+                                        int vectorize_size);
 
-Fragment PlanLoopPartition(const For &op, int vectorize_size,
-                           const Range &thread_range);
+TILELANG_DLL Fragment PlanLoopPartition(const For &op, int vectorize_size,
+                                        const Range &thread_range);
 
-For PragmaUnrollLoop(For stmt);
+TILELANG_DLL For PragmaUnrollLoop(For stmt);
 
 /*!
  * \brief Lower a parallel loop by partitioning and vectorizing it.
@@ -68,11 +69,12 @@ For PragmaUnrollLoop(For stmt);
  *        buffers. (default true)
  * \return The lowered statement.
  */
-Stmt LowerParallelLoop(
-    For loop, const Fragment &loop_layout, PrimExpr thread_index,
-    arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
-    ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-    bool parallel_loop = true, bool require_padding_guard = false);
+TILELANG_DLL Stmt
+LowerParallelLoop(For loop, const Fragment &loop_layout, PrimExpr thread_index,
+                  sym::Analyzer analyzer, const LayoutMap &layout_map = {},
+                  ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
+                  bool parallel_loop = true, bool require_padding_guard = false,
+                  bool enable_vectorize = true);
 
 } // namespace tl
 } // namespace tvm

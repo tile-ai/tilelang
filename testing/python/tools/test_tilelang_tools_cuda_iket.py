@@ -224,11 +224,15 @@ def test_event_metadata_changes_kernel_cache_identity():
 
 
 @tilelang.testing.requires_cuda
-def test_independently_built_primfuncs_get_module_wide_event_ids():
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_independently_built_primfuncs_get_module_wide_event_ids(reverse_order):
     first = _make_mark_kernel("module_first").with_attr("global_symbol", "first")
     iket.reset()
     second = _make_mark_kernel("module_second").with_attr("global_symbol", "second")
-    module = tvm.IRModule({"first": first, "second": second})
+    functions = [("first", first), ("second", second)]
+    if reverse_order:
+        functions.reverse()
+    module = tvm.IRModule(dict(functions))
 
     with iket.session():
         source = _lower_cuda_source(module)

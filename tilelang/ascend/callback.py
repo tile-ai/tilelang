@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import tvm_ffi
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 __all__ = ["register_ascend_postproc", "register_ascend_postproc_callback"]
 

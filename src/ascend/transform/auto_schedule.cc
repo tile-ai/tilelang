@@ -38,18 +38,17 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
+#include "transform/common/storage_size.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -66,10 +65,7 @@
 #include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
-#include "runtime/thread_storage_scope.h"
 #include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-#include "transform/common/collector.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
@@ -83,27 +79,27 @@ namespace {
 // AutoSchedule target resource limits.
 
 // Check whether a kernel body contains any SIMT_VF blocks. SIMT_VF
-// (asc_vf_call) reserves 32 KB of the physical 248 KB Unified Buffer for
+// (asc_vf_call) reserves 32 KB of the physical 248 KB Unified TensorVar for
 // thread context, so the usable shared memory depends on its presence.
-class SimtVFDetector : public tirx::StmtVisitor {
+class SimtVFDetector : public AnalysisVisitor {
 public:
   bool found = false;
 
-  void VisitStmt_(const tirx::SBlockNode *op) override {
-    if (op->name_hint == "SIMT_VF") {
+  void VisitStmt_(const RegionStmtNode *op) override {
+    if (KernelRegionName(op) == "SIMT_VF") {
       found = true;
     }
-    tirx::StmtVisitor::VisitStmt_(op);
+    AnalysisVisitor::VisitStmt_(op);
   }
 };
 
-inline bool HasSimtVF(const tirx::Stmt &stmt) {
-  SimtVFDetector detector;
-  detector(stmt);
-  return detector.found;
+inline bool HasSimtVF(const Stmt &stmt) {
+  auto detector = ffi::make_object<SimtVFDetector>();
+  detector->Visit(stmt);
+  return detector->found;
 }
 
-inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
+inline int64_t GetSharedMemoryLimit(const Stmt &kernel_body) {
   constexpr int64_t kPhysicalUnifiedBufferSize = 248 * 1024;
   constexpr int64_t kSimtVFThreadContextSize = 32 * 1024;
   return HasSimtVF(kernel_body)
@@ -189,7 +185,8 @@ private:
   };
 
   static LetDependencyClosure
-  CollectLetDependencyClosure_(const std::vector<IRStructure *> &nodes);
+  CollectLetDependencyClosure_(const std::vector<IRStructure *> &nodes,
+                               bool cloneable_only = true);
 
 public:
   // Recursive scheduling function
@@ -387,7 +384,7 @@ bool HasResourceDependency(const IRStructure *a, const IRStructure *b,
 
 ScheduleBuilder::LetDependencyClosure
 ScheduleBuilder::CollectLetDependencyClosure_(
-    const std::vector<IRStructure *> &nodes) {
+    const std::vector<IRStructure *> &nodes, bool cloneable_only) {
   LetDependencyClosure result;
   result.is_declaration.resize(nodes.size(), false);
   result.dependencies.resize(nodes.size());
@@ -396,11 +393,25 @@ ScheduleBuilder::CollectLetDependencyClosure_(
       declaration_by_var;
   for (size_t i = 0; i < nodes.size(); ++i) {
     const IRStructure *node = nodes[i];
-    if (!node || !node->IsTask())
+    if (!node)
+      continue;
+    if (!cloneable_only) {
+      for (const Var &variable : node->GetWriteVars()) {
+        result.is_declaration[i] = true;
+        declaration_by_var[variable] = i;
+      }
+      continue;
+    }
+    if (!node->IsTask())
       continue;
     const auto *task = static_cast<const TaskNode *>(node);
     if (ffi::Optional<Bind> bind = GetFlatTaskBind(task->stmt);
-        bind.defined()) {
+        bind.has_value()) {
+      if (const auto *call = bind.value()->value.as<CallNode>();
+          call && call->op.same_as(tirx::alloc_tensor_op()))
+        continue;
+      if (SideEffect(bind.value()->value) > CallEffectKind::kReadState)
+        continue;
       result.is_declaration[i] = true;
       declaration_by_var[bind.value()->var] = i;
     }
@@ -580,7 +591,7 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
       }
     }
 
-    // Buffer-region data dependencies
+    // TensorVar-region data dependencies
     auto deps = AnalyzeDependencies(
         nodes, /*loop=*/nullptr, manual_buffer_versions_, multi_buffer_owners_,
         &dependency_cache_, root_conflict_hints_);
@@ -741,7 +752,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   auto num_stages = 1;
   auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
   if (num_stages_val.has_value()) {
-    num_stages = num_stages_val.value().cast<IntImm>()->value;
+    num_stages = GetIntAnnotation(num_stages_val.value()).value();
   }
 
   // When false, the Z3 loop scheduler keeps each resource's tasks within a
@@ -803,11 +814,11 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     resource_flags.push_back(NodeResourceMask(node));
   }
 
-  // Keep one representative Buffer per storage for shape/scope accounting.
+  // Keep one representative TensorVar per storage for shape/scope accounting.
   // Version variables and dependency distances are keyed directly by storage.
   struct StorageResource {
     Var storage;
-    Buffer representative;
+    TensorVar representative;
   };
   std::vector<int64_t> storage_sizes;
   std::vector<StorageResource> storage_resources;
@@ -830,41 +841,34 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   }
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>
       annotated_storage_versions;
-  auto get_buffer_size = [](const Buffer &buffer) -> int64_t {
-    // Bits-based: dtype.bits()*lanes()/8 truncates sub-byte dtypes to 0
-    // (fp4 -> 0). Accumulate elements, then ceil(elements*bits/8).
-    int64_t elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
-    PrimExpr elems = IntImm(DataType::Int(64), 1);
-    for (const auto &dim : buffer->shape) {
-      elems *= dim;
-    }
-    PrimExpr size = FloorDiv(elems * IntImm(DataType::Int(64), elem_bits) +
-                                 IntImm(DataType::Int(64), 7),
-                             IntImm(DataType::Int(64), 8));
-    arith::Analyzer analyzer;
-    auto size_val = analyzer.Simplify(size);
-    if (const auto *int_imm = size_val.as<IntImmNode>()) {
-      return int_imm->value;
-    }
-    return 0;
+  auto get_buffer_size = [](const TensorVar &buffer) -> int64_t {
+    sym::Analyzer analyzer;
+    auto size =
+        GetConstInt(analyzer->Simplify(GetBufferStorageSizeBytes(buffer)));
+    return size.value_or(0);
   };
   auto enumerate_buffers = [&](auto &&visit) {
     for (const auto &r : ctrl->GetReadRegions())
-      visit(r->buffer);
+      visit(r->source.as_or_throw<TensorVar>());
     for (const auto &r : ctrl->GetWriteRegions())
-      visit(r->buffer);
+      visit(r->source.as_or_throw<TensorVar>());
   };
-  enumerate_buffers([&](const Buffer &buffer) {
+  enumerate_buffers([&](const TensorVar &buffer) {
     if (!IsAscendOnChipBuffer(buffer)) {
       return; // Only consider on-chip buffers for multi-buffer
     }
-    if (seen_storages.insert(buffer->data).second)
-      storage_resources.push_back({buffer->data, buffer});
+    Var storage = ctrl->StorageOf(buffer);
+    TensorVar allocation = buffer;
+    if (const auto *analysis = ctrl->GetStorageAnalysis())
+      if (auto declared = analysis->allocations.Get(storage))
+        allocation = declared.value();
+    if (seen_storages.insert(storage).second)
+      storage_resources.push_back({storage, allocation});
   });
 
   for (const StorageResource &resource : storage_resources) {
     const Var &storage = resource.storage;
-    const Buffer &buffer = resource.representative;
+    const TensorVar &buffer = resource.representative;
     std::string scope;
     if (IsL1Buffer(buffer)) {
       scope = "shared.l1";
@@ -881,7 +885,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     }
     if (scope == "shared") {
       if (auto sid = aiv_storages_.Get(storage))
-        scope += ".aiv" + std::to_string(sid.value()->value);
+        scope += ".aiv" + std::to_string(sid.value());
     }
     int group_id = scope_to_group.at(scope);
     std::vector<int> groups{group_id};
@@ -984,7 +988,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     }
   }
 
-  // Buffer-region data dependencies
+  // TensorVar-region data dependencies
   auto deps = AnalyzeDependencies(nodes, ctrl, manual_buffer_versions_,
                                   multi_buffer_owners_, &dependency_cache_,
                                   root_conflict_hints_);
@@ -1060,6 +1064,41 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // iteration.
   if (enable_offset) {
     LetDependencyClosure let_closure = CollectLetDependencyClosure_(nodes);
+    LetDependencyClosure all_definitions =
+        CollectLetDependencyClosure_(nodes, false);
+    for (size_t consumer = 0; consumer < nodes.size(); ++consumer) {
+      for (size_t producer : all_definitions.dependencies[consumer]) {
+        if (producer == consumer || let_closure.is_declaration[producer])
+          continue;
+        TVM_FFI_CHECK(!manual_schedule ||
+                          manual_stages[producer] == manual_stages[consumer],
+                      ValueError)
+            << "A non-recomputable SSA value cannot cross pipeline stages; "
+               "keep its definition and transitive consumers in the same "
+               "T.Stage";
+        stage_order_deps.emplace_back(producer, consumer);
+        stage_order_deps.emplace_back(consumer, producer);
+      }
+    }
+    for (size_t producer = 0; producer < nodes.size(); ++producer) {
+      if (!nodes[producer]->IsTask())
+        continue;
+      auto *task = static_cast<TaskNode *>(nodes[producer]);
+      auto binding = GetFlatTaskBind(task->stmt);
+      if (!binding)
+        continue;
+      const auto *call = binding.value()->value.as<CallNode>();
+      if (!call || !call->op.same_as(tirx::alloc_tensor_op()))
+        continue;
+      Var storage =
+          task->StorageOf(binding.value()->var.as_or_throw<TensorVar>());
+      for (size_t consumer = 0; consumer < nodes.size(); ++consumer) {
+        if (consumer != producer && nodes[consumer]->TouchesStorage(storage)) {
+          stage_order_deps.emplace_back(producer, consumer);
+          stage_order_deps.emplace_back(consumer, producer);
+        }
+      }
+    }
     // Collect WAR consumers per Let node
     std::vector<std::set<size_t>> let_war_consumers(n);
     for (const auto &dep : deps) {
@@ -1252,12 +1291,13 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       ICHECK(let_closure.is_declaration[d]);
       auto *decl_task = static_cast<TaskNode *>(ctrl->children[d].get());
       ffi::Optional<Bind> decl_bind = GetFlatTaskBind(decl_task->stmt);
-      ICHECK(decl_bind.defined());
-      auto new_var = decl_bind.value()->var.copy_with_suffix("");
+      ICHECK(decl_bind.has_value());
+      auto new_var =
+          decl_bind.value()->var.CopyWithName(decl_bind.value()->var->name);
       auto cloned_task = std::static_pointer_cast<TaskNode>(decl_task->Clone());
       cloned_task->stmt = ReplaceFlatTaskBind(
           decl_task->stmt,
-          Bind(new_var, decl_bind.value()->value, decl_bind.value()->span));
+          Bind(new_var, decl_bind.value()->value, decl_bind.value()->loc));
       cloned_task->SetReadVars(decl_task->GetReadVars());
       auto write_vars = decl_task->GetWriteVars();
       for (auto &v : write_vars) {
@@ -1358,7 +1398,7 @@ static void WarnOnUnappliedBufferVersionOverrides(
     if (num_versions > 1 && !selected_buffer_versions.count(buffer_var)) {
       LOG(WARNING) << "Ascend AutoSchedule did not enable multi-buffering for "
                       "buffer \""
-                   << buffer_var->name_hint
+                   << buffer_var->name
                    << "\" although T.annotate_buffer_versions requested "
                    << num_versions
                    << " versions. The buffer must be eligible in a scheduled "
@@ -1394,7 +1434,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetStorageGroups(groups);
   int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
-  if (auto value = metadata.kernel_root->annotations.Get(kAivStorageMap)) {
+  if (auto value = metadata.kernel_root->attrs->dict.Get(kAivStorageMap)) {
     unit_builder.SetAivStorages(value.value().cast<AivStorageMap>());
     unit_builder.SetMemoryLimit("shared.aiv0", shared_mem_limit);
     unit_builder.SetMemoryLimit("shared.aiv1", shared_mem_limit);
@@ -1422,7 +1462,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
     auto requested = metadata.buffer_versions.Get(data);
     ICHECK(!requested.has_value() || requested.value() <= 1 ||
            unit_builder.GetSelectedBufferVersions().count(data))
-        << "Bound L0 data/SF group " << data->name_hint
+        << "Bound L0 data/SF group " << data->name
         << " has no common multi-buffer owner. Load scales and data under a "
            "common owner, or request one version for the group.";
   }
@@ -1435,12 +1475,13 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
 // markers for the downstream scheduled-TIR passes.
 tvm::transform::Pass AutoSchedule() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func =
+      [](tirx::Function func, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     // Get target from PrimFunc attribute for GemmInst determination
     auto target_opt = func->GetAttr<Target>(tvm::attr::kTarget);
-    Target target;
-    if (target_opt.defined()) {
+    Target target{ffi::UnsafeInit{}};
+    if (target_opt.has_value()) {
       target = target_opt.value();
     }
     return RewriteTilelangKernels(
@@ -1457,7 +1498,7 @@ tvm::transform::Pass AutoSchedule() {
         });
   };
 
-  return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
+  return CreateFunctionPass(pass_func, 0, "tl.AutoSchedule");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

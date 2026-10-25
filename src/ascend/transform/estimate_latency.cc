@@ -33,11 +33,10 @@
 #include <tvm/ffi/extra/base.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -47,6 +46,7 @@
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
 #include "./estimate_latency.h"
+#include "./native_visitor.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
@@ -94,26 +94,26 @@ using Hf32ModeMap =
 // Keep branch conditions in the state: MaterializeScheduleUnits can split a
 // guarded mode setter and GEMM into separate, identically guarded tasks.
 // Loop backedges join possible modes; an ambiguous mode uses the FP32 cost.
-class Hf32ModeAnalyzer : public StmtExprVisitor {
+class Hf32ModeAnalyzer : public AnalysisVisitor {
 public:
   static constexpr uint8_t kDisabled = 1;
   static constexpr uint8_t kEnabled = 2;
 
   static Hf32ModeMap Analyze(const Stmt &body) {
-    Hf32ModeAnalyzer analyzer;
-    analyzer(body);
-    return std::move(analyzer.modes_);
+    auto analyzer = ffi::make_object<Hf32ModeAnalyzer>();
+    analyzer->Visit(body);
+    return std::move(analyzer->modes_);
   }
 
 private:
   static PrimExpr Mode(uint8_t modes) {
-    return IntImm(DataType::Int(32), modes);
+    return MakeConst(PrimType::Int(32), modes);
   }
 
   uint8_t PossibleModes() {
-    if (analyzer_.CanProve(state_ == kDisabled))
+    if (analyzer_->CanProve(state_ == kDisabled))
       return kDisabled;
-    if (analyzer_.CanProve(state_ == kEnabled))
+    if (analyzer_->CanProve(state_ == kEnabled))
       return kEnabled;
     return kDisabled | kEnabled;
   }
@@ -122,57 +122,60 @@ private:
     if (op->op.same_as(tl::ascend_set_hf32_mode())) {
       ICHECK_EQ(op->args.size(), 1);
       const auto *mode = op->args[0].as<IntImmNode>();
-      ICHECK(mode && mode->value >= 0 && mode->value <= 2)
+      ICHECK(mode && mode->value.as<int64_t>() >= 0 &&
+             mode->value.as<int64_t>() <= 2)
           << "HF32 mode must be a constant in {0, 1, 2}";
-      state_ = Mode(mode->value == 0 ? kDisabled : kEnabled);
+      state_ = Mode(mode->value.as<int64_t>() == 0 ? kDisabled : kEnabled);
     } else if (op->op.same_as(Op::Get("tl.tileop.gemm")) ||
                op->op.same_as(Op::Get("tl.tileop.gemm_blockscaled"))) {
       modes_[GetRef<Call>(op)] |= PossibleModes();
     }
-    StmtExprVisitor::VisitExpr_(op);
+    AnalysisVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BindNode *op) final {
     VisitExpr(op->value);
-    if (op->var.dtype().is_scalar() && !op->var.dtype().is_handle()) {
+    if (auto variable = op->var.as<PrimVar>();
+        variable && variable->ty().IsScalar()) {
       // A normalized condition is a snapshot. Distinct mutable reads must
       // not become equal merely because their expressions look the same.
-      analyzer_.Bind(op->var, FreshenMutableReads()(op->value),
-                     /*allow_override=*/true);
+      analyzer_->Bind(variable.value(),
+                      FreshenMutableReads()(op->value.as_or_throw<PrimExpr>()),
+                      /*allow_override=*/true);
     }
   }
 
   void VisitConditional(const PrimExpr &condition, const Stmt &then_case,
-                        const Optional<Stmt> &else_case = std::nullopt) {
+                        const Optional<SeqStmt> &else_case = std::nullopt) {
     VisitExpr(condition);
-    PrimExpr guard = analyzer_.Simplify(FreshenMutableReads()(condition));
-    if (analyzer_.CanProve(guard)) {
+    PrimExpr guard = analyzer_->Simplify(FreshenMutableReads()(condition));
+    if (analyzer_->CanProve(guard)) {
       VisitStmt(then_case);
       return;
     }
-    if (analyzer_.CanProve(Not(guard))) {
+    if (analyzer_->CanProve(logical_not(guard))) {
       if (else_case)
         VisitStmt(else_case.value());
       return;
     }
     PrimExpr incoming = state_;
-    PrimExpr then_out;
+    PrimExpr then_out{ffi::UnsafeInit{}};
     {
-      With<arith::ConstraintContext> context(&analyzer_, guard);
-      state_ = analyzer_.Simplify(incoming);
+      With<sym::ConstraintContext> context(analyzer_, guard);
+      state_ = analyzer_->Simplify(incoming);
       VisitStmt(then_case);
       then_out = state_;
     }
     {
-      With<arith::ConstraintContext> context(&analyzer_, Not(guard));
-      state_ = analyzer_.Simplify(incoming);
+      With<sym::ConstraintContext> context(analyzer_, logical_not(guard));
+      state_ = analyzer_->Simplify(incoming);
       if (else_case)
         VisitStmt(else_case.value());
     }
-    state_ = analyzer_.Simplify(Select(guard, then_out, state_));
+    state_ = analyzer_->Simplify(if_then_else(guard, then_out, state_));
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
+  void VisitStmt_(const IfNode *op) final {
     VisitConditional(op->condition, op->then_case, op->else_case);
   }
 
@@ -198,13 +201,13 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
-    if (analyzer_.CanProve(op->extent <= 0))
+    if (analyzer_->CanProve(ScheduleLoopTripCount(op) <= 0))
       return;
-    if (analyzer_.CanProve(op->extent == 1)) {
+    if (analyzer_->CanProve(ScheduleLoopTripCount(op) == 1)) {
       VisitStmt(op->body);
       return;
     }
-    AnalyzeLoop(op->body, analyzer_.CanProve(op->extent > 0));
+    AnalyzeLoop(op->body, analyzer_->CanProve(ScheduleLoopTripCount(op) > 0));
   }
 
   void VisitStmt_(const WhileNode *op) final {
@@ -212,20 +215,22 @@ private:
     AnalyzeLoop(op->body, false);
   }
 
-  void VisitStmt_(const SBlockNode *op) final {
-    if (op->init) {
-      uint8_t incoming = PossibleModes();
-      VisitStmt(op->init.value());
-      state_ = Mode(PossibleModes() | incoming);
+  void VisitStmt_(const RegionStmtNode *op) final {
+    if (auto condition = op->attrs.GetAttr<PrimExpr>(kScheduleCondition))
+      VisitConditional(condition.value(), op->body);
+    else
+      VisitStmt(op->body);
+    if (auto values = op->attrs.GetAttr<ffi::Array<Expr>>(kScheduleYield)) {
+      for (size_t index = 0; index < values->size(); ++index) {
+        auto variable = op->result_vars[index].as<PrimVar>();
+        auto value = (*values)[index].as<PrimExpr>();
+        if (variable && value)
+          analyzer_->Bind(variable.value(), value.value(), true);
+      }
     }
-    VisitStmt(op->body);
   }
 
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    VisitConditional(op->predicate, op->block);
-  }
-
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_;
   PrimExpr state_{Mode(kDisabled)};
   Hf32ModeMap modes_;
 };
@@ -238,7 +243,7 @@ struct TaskCostFeatures {
     int64_t m;
     int64_t n;
     int64_t k;
-    DataType input_dtype;
+    PrimType input_dtype;
     bool hf32;
     bool blockscaled;
   };
@@ -359,24 +364,23 @@ private:
   // Read `tl.vf_latency` annotation from SIMT_VF / SIMD_VF blocks within
   // the task. Returns 0 when no annotation is present.
   static int64_t ReadVFLatencyFromBlocks(const TaskNode *task) {
-    struct VFLatencyReader : public StmtVisitor {
-      void VisitStmt_(const SBlockNode *op) override {
-        if (op->name_hint == "SIMT_VF" || op->name_hint == "SIMD_VF") {
-          auto it = op->annotations.find("tl.vf_latency");
-          if (it != op->annotations.end()) {
-            if (auto *imm = (*it).second.as<IntImmNode>()) {
-              latency = std::max(latency, imm->value);
-            }
+    struct VFLatencyReader : public AnalysisVisitor {
+      void VisitStmt_(const RegionStmtNode *op) override {
+        auto name = KernelRegionName(op);
+        if (name == "SIMT_VF" || name == "SIMD_VF") {
+          if (auto value = op->attrs->dict.Get("tl.vf_latency")) {
+            if (auto immediate = GetIntAnnotation(value.value()))
+              latency = std::max(latency, *immediate);
           }
         }
-        StmtVisitor::VisitStmt_(op);
+        AnalysisVisitor::VisitStmt_(op);
       }
       int64_t latency{0};
     };
 
-    VFLatencyReader reader;
-    reader(task->stmt);
-    return reader.latency;
+    auto reader = ffi::make_object<VFLatencyReader>();
+    reader->Visit(task->stmt);
+    return reader->latency;
   }
 
   // Classification of (scope -> scope) for an MTE-style copy. Matches the
@@ -694,7 +698,7 @@ private:
   // transpose groups. Full FP32 on A5 has K parallelism 1; HF32 has 8.
   int64_t CubeOperations(const TaskCostFeatures::CubeShape &shape) const {
     int64_t k_group = 256 / shape.input_dtype.bits();
-    if (shape.input_dtype.is_float() && shape.input_dtype.bits() == 32)
+    if (shape.input_dtype.MatchesElementType(kDLFloat, 32))
       k_group = shape.hf32 ? 8 : 1;
     auto align = [](int64_t extent, int64_t group) {
       return ((extent + group - 1) / group) * group;
@@ -710,26 +714,30 @@ private:
   }
 
   // Throughput in operations/cycle, matching the rounded operation count.
-  int64_t CubeThroughputFor(DataType dtype, bool hf32 = false,
+  int64_t CubeThroughputFor(PrimType dtype, bool hf32 = false,
                             bool blockscaled = false) const {
-    if (blockscaled && dtype.is_float4_e2m1fn())
+    if (blockscaled && dtype.MatchesCode(kDLFloat4_e2m1fn))
       return params_.cube_throughput_mxfp4;
-    if (dtype.is_float16())
+    if (dtype.MatchesElementType(kDLFloat, 16))
       return params_.cube_throughput_fp16 ? params_.cube_throughput_fp16
                                           : params_.cube_fallback_throughput;
-    if (dtype.is_bfloat16())
+    if (dtype.MatchesElementType(kDLBfloat, 16))
       return params_.cube_throughput_bf16 ? params_.cube_throughput_bf16
                                           : params_.cube_fallback_throughput;
-    if (dtype.is_float() && dtype.bits() == 32) {
+    if (dtype.MatchesElementType(kDLFloat, 32)) {
       int64_t throughput =
           hf32 ? params_.cube_throughput_hf32 : params_.cube_throughput_fp32;
       ICHECK_GT(throughput, 0) << "FP32/HF32 Cube throughput must be positive";
       return throughput;
     }
-    if (dtype.is_float8() || (dtype.is_float() && dtype.bits() == 8))
+    if (dtype.bits() == 8 &&
+        dtype.MatchesCode(kDLFloat, kDLFloat8_e3m4, kDLFloat8_e4m3,
+                          kDLFloat8_e4m3b11fnuz, kDLFloat8_e4m3fn,
+                          kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                          kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu))
       return params_.cube_throughput_fp8 ? params_.cube_throughput_fp8
                                          : params_.cube_fallback_throughput;
-    if (dtype.is_int() && dtype.bits() == 8)
+    if (dtype.MatchesElementType(kDLInt, 8))
       return params_.cube_throughput_int8 ? params_.cube_throughput_int8
                                           : params_.cube_fallback_throughput;
     return params_.cube_fallback_throughput;
@@ -737,7 +745,7 @@ private:
 
   // Ascend latency / II estimation entry point.
   void EstimateAscend(TaskNode *task, const TaskCostFeatures &cost_features,
-                      arith::Analyzer *analyzer) {
+                      sym::Analyzer analyzer) {
     uint16_t pipe_mask = task->GetPipeMask();
     bool has_mte1 = pipe_mask & static_cast<uint16_t>(ResourcePipe::kMTE1);
     bool has_mte2 = pipe_mask & static_cast<uint16_t>(ResourcePipe::kMTE2);
@@ -840,9 +848,9 @@ private:
         add_memory_access(path, completion_latency, ii_bytes, ii_bandwidth);
       }
     } else {
-      auto visit_region = [&](const BufferRegion &region, bool is_read) {
-        const Buffer &buffer = region->buffer;
-        String scope = buffer.scope();
+      auto visit_region = [&](const TensorRegion &region, bool is_read) {
+        TensorVar buffer = region->source.as_or_throw<TensorVar>();
+        String scope = buffer.scope().name();
         AscendPath path = ClassifyRegion(scope, pipe_mask, is_read);
         int64_t bytes = CalculateAccessBytes(region, analyzer);
         if (IsAivMtePath(path)) {
@@ -880,14 +888,14 @@ private:
         vector_latency = measured_vf_latency;
       } else {
         // Op-count path (TIR visitor).
-        OperationCounter counter(&params_);
-        counter(task->stmt);
-        int64_t op_count_latency = counter.GetEstimatedLatency();
+        auto counter = ffi::make_object<OperationCounter>(&params_);
+        counter->Visit(task->stmt);
+        int64_t op_count_latency = counter->GetEstimatedLatency();
 
         // Bandwidth-bound path: total bytes the VALU consumes / valu_bandwidth.
         int64_t valu_bytes = 0;
         for (const auto &r : task->GetReadRegions()) {
-          String scope = r->buffer.scope();
+          String scope = r->source.as_or_throw<TensorVar>().scope().name();
           if (scope == "local" || scope == "local.fragment" ||
               scope == "shared" || scope == "shared.dyn") {
             valu_bytes += CalculateAccessBytes(r, analyzer);
@@ -915,7 +923,7 @@ private:
                                                  shape.blockscaled);
           if (shape.blockscaled) {
             base_latency = std::max(base_latency, params_.cube_mx_base_latency);
-          } else if (shape.input_dtype.is_float() &&
+          } else if (shape.input_dtype.MatchesCode(kDLFloat) &&
                      shape.input_dtype.bits() == 32) {
             base_latency =
                 std::max(base_latency, params_.cube_fp32_base_latency);
@@ -928,7 +936,7 @@ private:
         // Single unit mad fallback.
         int64_t unit_ops =
             params_.cube_unit_m * params_.cube_unit_k * params_.cube_unit_n;
-        int64_t throughput = CubeThroughputFor(DataType::Float(16));
+        int64_t throughput = CubeThroughputFor(PrimType::Float(16));
         matmul_latency =
             params_.cube_base_latency + safe_div_ceil(unit_ops, throughput);
       }
@@ -995,7 +1003,7 @@ private:
   }
 
   // VALU operation counter.
-  class OperationCounter : public StmtExprVisitor {
+  class OperationCounter : public AnalysisVisitor {
   public:
     // Loop dimension information
     struct LoopDimension {
@@ -1037,8 +1045,8 @@ private:
 
     // Analyze which loop variables are contained in an expression
     std::unordered_set<const VarNode *>
-    AnalyzeContainedLoopVars(const PrimExpr &expr) {
-      class VarCollector : public ExprVisitor {
+    AnalyzeContainedLoopVars(const Expr &expr) {
+      class VarCollector : public AnalysisVisitor {
       public:
         const std::unordered_map<const VarNode *, int> &var_to_depth;
         std::unordered_set<const VarNode *> collected_vars;
@@ -1051,13 +1059,13 @@ private:
           if (var_to_depth.count(op)) {
             collected_vars.insert(op);
           }
-          ExprVisitor::VisitExpr_(op);
+          AnalysisVisitor::VisitExpr_(op);
         }
       };
 
-      VarCollector collector(var_to_depth);
-      collector(expr);
-      return collector.collected_vars;
+      auto collector = ffi::make_object<VarCollector>(var_to_depth);
+      collector->Visit(expr);
+      return collector->collected_vars;
     }
 
     // Calculate effective parallel factor based on contained loop variables
@@ -1088,119 +1096,119 @@ private:
       return effective_factor;
     }
 
-    void VisitExpr_(const AddNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const AddNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->add_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const SubNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const SubNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->sub_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const MulNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const MulNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mul_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const DivNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const DivNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->div_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const ModNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const ModNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mod_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const FloorDivNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const FloorDivNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->div_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const FloorModNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const FloorModNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mod_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const LTNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const LTNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const LENode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const LENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const GTNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const GTNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const GENode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const GENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const EQNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const EQNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const NENode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const NENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const AndNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const AndNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const OrNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const OrNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const NotNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const NotNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const MinNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const MinNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->min_max_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
-    void VisitExpr_(const MaxNode *op) final {
+    ffi::Optional<ffi::VisitInterrupt> Visit_(const MaxNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->min_max_throughput, contained_vars);
-      StmtExprVisitor::VisitExpr_(op);
+      return tirx::StmtExprVisitor::Visit_(op);
     }
 
     int64_t EstimateNd2NzScatterLatency(const CallNode *op) const {
       // InsertNd2Nz validates this template contract before EstimateLatency.
       ICHECK_EQ(op->args.size(), 6U);
-      const int64_t *rows = as_const_int(op->args[2]);
-      const int64_t *cols = as_const_int(op->args[3]);
+      auto rows = GetConstInt(op->args[2]);
+      auto cols = GetConstInt(op->args[3]);
       const auto *dst_dtype = op->args[4].as<StringImmNode>();
       const auto *src_dtype = op->args[5].as<StringImmNode>();
       ICHECK(rows && cols && src_dtype && dst_dtype)
@@ -1256,13 +1264,14 @@ private:
             CheckedSerialTaskAdd(total_latency, cycles, "ND->NZ task latency");
         return;
       }
-      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
+      auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<Expr>(op));
 
       // Check for special math functions by name
       if (op->op.as<OpNode>()) {
         auto op_node = op->op.as<OpNode>();
         std::string op_name = op_node->name;
-
+        if (auto separator = op_name.rfind('.'); separator != std::string::npos)
+          op_name = op_name.substr(separator + 1);
         // Check for special math functions
         if (op_name == "exp2" || op_name == "log2" || op_name == "exp" ||
             op_name == "log" || op_name == "sin" || op_name == "cos" ||
@@ -1283,33 +1292,13 @@ private:
         update_operation(params->default_operation_throughput, contained_vars);
       }
       // Visit arguments
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(op);
     }
 
     void VisitStmt_(const ForNode *op) final {
-      // Calculate trip count for the loop
-      int64_t trip_count = 1;
-      PrimExpr loop_extent = op->extent;
-      PrimExpr loop_step = op->step.has_value() ? op->step.value()
-                                                : IntImm(DataType::Int(32), 1);
-
-      // Try to get constant values
-      if (const int64_t *extent_ptr = as_const_int(loop_extent)) {
-        if (const int64_t *step_ptr = as_const_int(loop_step)) {
-          int64_t extent = *extent_ptr;
-          int64_t step = *step_ptr;
-          if (step > 0) {
-            // ceil(extent / step) = (extent + step - 1) / step
-            trip_count = (extent + step - 1) / step;
-          } else {
-            trip_count = extent; // Invalid step, use extent
-          }
-        } else {
-          trip_count = 100; // Non-constant step, use default
-        }
-      } else {
-        trip_count = 100; // Non-constant extent, use default
-      }
+      int64_t trip_count = GetSerialTripCount(GetRef<For>(op));
+      if (trip_count == 0)
+        return;
 
       // Create loop dimension information
       LoopDimension loop_dim{.trip_count = trip_count,
@@ -1317,47 +1306,47 @@ private:
 
       // Push loop onto stack and update mapping
       loop_stack.push_back(loop_dim);
-      var_to_depth[op->loop_var.get()] = loop_dim.depth;
+      var_to_depth[op->var.get()] = loop_dim.depth;
 
       // Visit loop body
-      StmtExprVisitor::VisitStmt_(op);
+      AnalysisVisitor::VisitStmt_(op);
 
       // Pop loop from stack
-      var_to_depth.erase(op->loop_var.get());
+      var_to_depth.erase(op->var.get());
       loop_stack.pop_back();
     }
 
     void VisitStmt_(const EvaluateNode *op) final {
       if (op->value.defined()) {
-        StmtExprVisitor::VisitExpr(op->value);
+        AnalysisVisitor::VisitExpr(op->value);
       }
     }
 
-    void VisitStmt_(const BufferStoreNode *op) final {
+    void VisitStmt_(const TensorStoreNode *op) final {
       // Count operations in indices
       for (const auto &index : op->indices) {
-        StmtExprVisitor::VisitExpr(index);
+        AnalysisVisitor::VisitExpr(index);
       }
       // Count operations in value
-      StmtExprVisitor::VisitExpr(op->value);
+      AnalysisVisitor::VisitExpr(op->value);
     }
 
     void VisitStmt_(const SeqStmtNode *op) final {
       for (const auto &child : op->seq) {
-        StmtExprVisitor::VisitStmt(child);
+        AnalysisVisitor::VisitStmt(child);
       }
     }
 
-    void VisitStmt_(const AttrStmtNode *op) final {
-      StmtExprVisitor::VisitStmt(op->body);
+    void VisitStmt_(const RegionStmtNode *op) final {
+      AnalysisVisitor::VisitStmt(op->body);
     }
 
     void VisitStmt_(const BindNode *op) final {
       // Let binding: the value expression is evaluated once
-      StmtExprVisitor::VisitExpr(op->value);
+      AnalysisVisitor::VisitExpr(op->value);
     }
 
-    void VisitStmt_(const IfThenElseNode *op) final {
+    void VisitStmt_(const IfNode *op) final {
       VisitExpr(op->condition);
 
       // For if-then-else branches, we need to take the maximum latency of both
@@ -1365,13 +1354,13 @@ private:
       int64_t old_latency = total_latency;
 
       // Count latency in then branch
-      StmtExprVisitor::VisitStmt(op->then_case);
+      AnalysisVisitor::VisitStmt(op->then_case);
       int64_t then_latency = total_latency;
 
       // Restore latency and count else branch
       total_latency = old_latency;
       if (op->else_case) {
-        StmtExprVisitor::VisitStmt(op->else_case.value());
+        AnalysisVisitor::VisitStmt(op->else_case.value());
       }
       int64_t else_latency = total_latency;
 
@@ -1379,37 +1368,35 @@ private:
       total_latency = old_latency + std::max(then_latency - old_latency,
                                              else_latency - old_latency);
     }
-
-    void VisitStmt_(const SBlockNode *op) final {
-      StmtExprVisitor::VisitStmt(op->body);
-    }
   };
 
   // Helper function to calculate total bytes accessed in a region.
-  int64_t CalculateAccessBytes(const BufferRegion &region,
-                               arith::Analyzer *analyzer) {
+  int64_t CalculateAccessBytes(const TensorRegion &region,
+                               sym::Analyzer analyzer) {
     RegionElementUpperBound estimate = EstimateRegionElementUpperBound(
-        region->buffer, region->region, analyzer);
-    return ElementsToBytes(estimate.elements, DataType(region->buffer->dtype));
+        region->source.as_or_throw<TensorVar>(), region->region, analyzer);
+    return ElementsToBytes(estimate.elements,
+                           region->source.as_or_throw<TensorVar>().dtype());
   }
 };
 
-class CostFeatureAnalyzer : public StmtExprVisitor {
+class CostFeatureAnalyzer : public AnalysisVisitor {
 public:
   static TaskCostFeatures Analyze(const Stmt &stmt,
-                                  arith::Analyzer *arith_analyzer,
+                                  sym::Analyzer arith_analyzer,
                                   const Hf32ModeMap &hf32_modes) {
-    ICHECK(arith_analyzer != nullptr);
-    CostFeatureAnalyzer analyzer(arith_analyzer, hf32_modes);
-    analyzer(stmt);
-    return analyzer.features_;
+    auto analyzer =
+        ffi::make_object<CostFeatureAnalyzer>(arith_analyzer, hf32_modes);
+    analyzer->Visit(stmt);
+    return analyzer->features_;
   }
 
-private:
-  CostFeatureAnalyzer(arith::Analyzer *arith_analyzer,
+public:
+  CostFeatureAnalyzer(sym::Analyzer arith_analyzer,
                       const Hf32ModeMap &hf32_modes)
       : arith_analyzer_(arith_analyzer), hf32_modes_(hf32_modes) {}
 
+private:
   static int64_t SafeHalf(int64_t value) {
     if (value <= 0)
       return 0;
@@ -1438,7 +1425,7 @@ private:
     result.reserve(ranges.size());
     for (size_t i = 0; i < ranges.size(); ++i) {
       result.push_back(static_cast<int>(i) == axis
-                           ? Range::FromMinExtent(ranges[i]->min, extent)
+                           ? Range::FromMinExtent(ranges[i]->begin, extent)
                            : ranges[i]);
     }
     return result;
@@ -1448,8 +1435,8 @@ private:
     Array<Range> src_ranges = copy->src_range;
     Array<Range> dst_ranges = copy->dst_range;
     if (src_ranges.empty() || dst_ranges.empty() ||
-        src_ranges.size() != copy->src->shape.size() ||
-        dst_ranges.size() != copy->dst->shape.size()) {
+        src_ranges.size() != copy->src.shape().size() ||
+        dst_ranges.size() != copy->dst.shape().size()) {
       return {};
     }
 
@@ -1472,8 +1459,8 @@ private:
       }
     }
 
-    int src_bits = copy->src->dtype.bits() * copy->src->dtype.lanes();
-    int dst_bits = copy->dst->dtype.bits() * copy->dst->dtype.lanes();
+    int src_bits = copy->src.dtype().bits() * copy->src.dtype().lanes();
+    int dst_bits = copy->dst.dtype().bits() * copy->dst.dtype().lanes();
     StridedLayout src_layout =
         StridedLayout::FromBufferRange(copy->src, src_ranges, src_bits)
             .Coalesce(arith_analyzer_);
@@ -1517,34 +1504,34 @@ private:
     if (src_row_elements <= 0 || dst_row_elements <= 0)
       return {kind, 0};
     int64_t src_row_bytes =
-        ElementsToBytes(src_row_elements, DataType(copy->src->dtype));
+        ElementsToBytes(src_row_elements, copy->src.dtype());
     int64_t dst_row_bytes =
-        ElementsToBytes(dst_row_elements, DataType(copy->dst->dtype));
+        ElementsToBytes(dst_row_elements, copy->dst.dtype());
     return {kind, std::min(src_row_bytes, dst_row_bytes)};
   }
 
   int64_t EstimateExprUpperBound(const PrimExpr &expr) const {
-    if (const int64_t *value = as_const_int(expr))
+    if (auto value = GetConstInt(expr))
       return std::max<int64_t>(*value, 0);
-    arith::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
+    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
     if (bound->max_value >= 0 &&
-        bound->max_value != arith::ConstIntBound::kPosInf) {
+        bound->max_value != sym::ConstIntBound::kPosInf) {
       return bound->max_value;
     }
     return 1;
   }
 
   int64_t EstimateExprPositiveLowerBound(const PrimExpr &expr) const {
-    if (const int64_t *value = as_const_int(expr))
+    if (auto value = GetConstInt(expr))
       return std::max<int64_t>(*value, 0);
-    arith::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
+    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
     return bound->min_value > 0 ? bound->min_value : 0;
   }
 
   int64_t EstimateGemmExtent(const PrimExpr &extent, int64_t fallback) const {
-    arith::ConstIntBound bound = arith_analyzer_->const_int_bound(extent);
+    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(extent);
     if (bound->max_value >= 0 &&
-        bound->max_value != arith::ConstIntBound::kPosInf)
+        bound->max_value != sym::ConstIntBound::kPosInf)
       return std::min(fallback, bound->max_value);
     return fallback;
   }
@@ -1574,7 +1561,7 @@ private:
       } else if (dst_estimate.reliable) {
         elements = dst_elements;
       }
-      return ElementsToBytes(elements, DataType(copy->dst->dtype));
+      return ElementsToBytes(elements, copy->dst.dtype());
     }
 
     int64_t elements = src_estimate.elements;
@@ -1588,7 +1575,7 @@ private:
       }
     }
 
-    return ElementsToBytes(elements, DataType(copy->dst->dtype));
+    return ElementsToBytes(elements, copy->dst.dtype());
   }
 
   void RecordNd2NzPostCopy(const CallNode *op) {
@@ -1597,8 +1584,8 @@ private:
     const auto *dtype = op->args[5].as<StringImmNode>();
     ICHECK(dtype) << "tl.ascend_nd2nz_post_copy dtype must be a StringImm";
     int64_t element_bytes = dtype->value == "float" ? 4 : 2;
-    int64_t rows = EstimateExprUpperBound(op->args[2]);
-    int64_t cols = EstimateExprUpperBound(op->args[3]);
+    int64_t rows = EstimateExprUpperBound(op->args[2].as_or_throw<PrimExpr>());
+    int64_t cols = EstimateExprUpperBound(op->args[3].as_or_throw<PrimExpr>());
     int64_t bytes = SafeMultiply(SafeMultiply(rows, cols), element_bytes);
 
     features_.copy_infos.push_back({String("shared.dyn"), String("shared.l1"),
@@ -1613,25 +1600,26 @@ private:
     static const auto gemm_blockscaled_op =
         Op::Get("tl.tileop.gemm_blockscaled");
     if (IsAscendCopyCall(op)) {
-      AscendCopy copy_obj(op->args, op->annotations);
+      AscendCopy copy_obj(op->args, AscendCallAnnotations(op));
       const AscendCopyNode *copy = copy_obj.get();
       MteGeometry geometry = InferMteGeometry(copy);
-      features_.copy_infos.push_back({copy->src.scope(), copy->dst.scope(),
-                                      CalculateCopyBytes(copy),
-                                      copy->dual_dst_ctl, geometry.kind,
-                                      geometry.contiguous_bytes_lower_bound,
-                                      /*is_nd2nz_post_copy=*/false});
+      features_.copy_infos.push_back(
+          {copy->src.scope().name(), copy->dst.scope().name(),
+           CalculateCopyBytes(copy), copy->dual_dst_ctl, geometry.kind,
+           geometry.contiguous_bytes_lower_bound,
+           /*is_nd2nz_post_copy=*/false});
     } else if (op->op.same_as(tl::ascend_nd2nz_post_copy())) {
       RecordNd2NzPostCopy(op);
     } else if (op->op.same_as(gemm_op) || op->op.same_as(gemm_blockscaled_op)) {
-      int64_t m = op->args[5].as<IntImmNode>()->value;
-      int64_t n = op->args[6].as<IntImmNode>()->value;
-      int64_t k = op->args[7].as<IntImmNode>()->value;
+      int64_t m = GetConstInt(op->args[5]).value();
+      int64_t n = GetConstInt(op->args[6]).value();
+      int64_t k = GetConstInt(op->args[7]).value();
       // Both spellings share the leading 13 dense slots. Keep the MX identity
       // so its compute cost does not fall back to the dense GEMM model.
       bool blockscaled = op->op.same_as(gemm_blockscaled_op);
-      Gemm gemm = blockscaled ? GemmBlockScaled(op->args, op->annotations)
-                              : Gemm(op->args, op->annotations);
+      Gemm gemm = blockscaled
+                      ? GemmBlockScaled(op->args, AscendCallAnnotations(op))
+                      : Gemm(op->args, AscendCallAnnotations(op));
       if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
         // The serialized ints are static tile metadata. A dynamic L0 tail
         // may have a tighter region bound than its padded allocation.
@@ -1647,16 +1635,20 @@ private:
                   mode->second == Hf32ModeAnalyzer::kEnabled;
       if (m > 0 && n > 0 && k > 0)
         features_.cube_shapes.push_back(
-            {m, n, k, gemm->a_->dtype, hf32, blockscaled});
+            {m, n, k, gemm->a_.dtype(), hf32, blockscaled});
     }
-    StmtExprVisitor::VisitExpr_(op);
+    AnalysisVisitor::VisitExpr_(op);
   }
 
   // Resource analysis treats blocks as atomic scheduler operations. Preserve
   // the same boundary for cost features; VF cost is modeled from the block.
-  void VisitStmt_(const SBlockNode *) final {}
+  void VisitStmt_(const RegionStmtNode *op) final {
+    auto name = KernelRegionName(op);
+    if (name != "SIMT_VF" && name != "SIMD_VF")
+      VisitStmt(op->body);
+  }
 
-  arith::Analyzer *arith_analyzer_;
+  sym::Analyzer arith_analyzer_;
   const Hf32ModeMap &hf32_modes_;
   TaskCostFeatures features_;
 };
@@ -1781,7 +1773,7 @@ public:
                         const CandidateCostMap &candidate_costs,
                         const ConstrSet &outer_ctx) {
     PhaseAnalyzer analyzer(candidate_costs);
-    outer_ctx.Populate(analyzer.arith_analyzer_);
+    auto constraints = outer_ctx.Populate(analyzer.arith_analyzer_);
     PhaseSummary summary = analyzer.AnalyzeStmt(stmt);
     ICHECK_EQ(summary.candidate_markers, candidate_costs.size())
         << "Failed to match every T.Task marker while estimating "
@@ -1808,7 +1800,7 @@ private:
   }
 
   size_t CountWaitMarkers(const Stmt &stmt) const {
-    class Counter : public StmtExprVisitor {
+    class Counter : public AnalysisVisitor {
     public:
       size_t count{0};
 
@@ -1816,11 +1808,12 @@ private:
       void VisitExpr_(const CallNode *op) final {
         if (op->op.same_as(tl::ascend_cross_core_wait_flag()))
           ++count;
-        StmtExprVisitor::VisitExpr_(op);
+        AnalysisVisitor::VisitExpr_(op);
       }
-    } counter;
-    counter(stmt);
-    return counter.count;
+    };
+    auto counter = ffi::make_object<Counter>();
+    counter->Visit(stmt);
+    return counter->count;
   }
 
   PhaseSummary AnalyzeStmt(const Stmt &stmt) const {
@@ -1832,8 +1825,8 @@ private:
         AppendSummary(&result, AnalyzeStmt(child));
       return result;
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (attr->attr_key == tl::attr::kAscendTask) {
+    if (const auto *attr = stmt.as<RegionStmtNode>()) {
+      if (ScheduleMarkerKey(attr) == tl::attr::kAscendTask) {
         Stmt marker = GetRef<Stmt>(attr);
         auto it = candidate_costs_.find(marker);
         if (it != candidate_costs_.end()) {
@@ -1856,19 +1849,20 @@ private:
       return {};
     }
     if (const auto *loop = stmt.as<ForNode>()) {
-      ICHECK(loop->kind == ForKind::kSerial || loop->kind == ForKind::kUnrolled)
+      ICHECK(loop->kind == ForKind::kDefault ||
+             loop->kind == ForKind::kUnrolled)
           << "Control flow selecting T.Task candidates must use a "
              "serial or unrolled loop";
       return RepeatSummary(
           AnalyzeStmt(loop->body),
-          GetSerialTripCount(GetRef<For>(loop), &arith_analyzer_));
+          GetSerialTripCount(GetRef<For>(loop), arith_analyzer_));
     }
     if (const auto *while_loop = stmt.as<WhileNode>()) {
       // Match ControlNode::GetTripCount's dynamic-loop fallback.
       return RepeatSummary(AnalyzeStmt(while_loop->body),
                            kDynamicSerialTripCountFallback);
     }
-    if (const auto *branch = stmt.as<IfThenElseNode>()) {
+    if (const auto *branch = stmt.as<IfNode>()) {
       PhaseSummary then_summary = AnalyzeStmt(branch->then_case);
       PhaseSummary else_summary = branch->else_case
                                       ? AnalyzeStmt(branch->else_case.value())
@@ -1884,40 +1878,31 @@ private:
           then_summary.boundary_markers + else_summary.boundary_markers;
       return result;
     }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      PhaseSummary result;
-      if (block->init)
-        AppendSummary(&result, AnalyzeStmt(block->init.value()));
-      AppendSummary(&result, AnalyzeStmt(block->body));
-      return result;
-    }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>())
-      return AnalyzeStmt(realize->block);
     return {};
   }
 
   const CandidateCostMap &candidate_costs_;
-  mutable arith::Analyzer arith_analyzer_;
+  mutable sym::Analyzer arith_analyzer_;
 };
 
 bool IsComposedLatencyStmt(const Stmt &stmt) {
-  if (stmt.as<SeqStmtNode>() || stmt.as<AttrStmtNode>() ||
-      stmt.as<IfThenElseNode>() || stmt.as<WhileNode>()) {
+  if (stmt.as<SeqStmtNode>() || stmt.as<RegionStmtNode>() ||
+      stmt.as<IfNode>() || stmt.as<WhileNode>()) {
     return true;
   }
   if (const auto *loop = stmt.as<ForNode>()) {
-    return loop->kind == ForKind::kSerial || loop->kind == ForKind::kUnrolled;
+    return loop->kind == ForKind::kDefault || loop->kind == ForKind::kUnrolled;
   }
   return false;
 }
 
 void TaskCostEstimator::Estimate(TaskNode *task) {
   ICHECK(task != nullptr);
-  arith::Analyzer analyzer;
-  task->outer_ctx.Populate(analyzer);
+  sym::Analyzer analyzer;
+  auto constraints = task->outer_ctx.Populate(analyzer);
   TaskCostFeatures cost_features =
-      CostFeatureAnalyzer::Analyze(task->stmt, &analyzer, hf32_modes_);
-  EstimateAscend(task, cost_features, &analyzer);
+      CostFeatureAnalyzer::Analyze(task->stmt, analyzer, hf32_modes_);
+  EstimateAscend(task, cost_features, analyzer);
 }
 
 void TaskCostEstimator::EstimateComposedTask(TaskNode *task) {
@@ -1973,30 +1958,33 @@ TaskCostEstimator::EstimateStmtCost(const Stmt &stmt,
     ConstrSet child_ctx = outer_ctx;
     for (const Stmt &child : seq->seq) {
       result = add_cost(result, EstimateStmtCost(child, child_ctx));
-      if (const auto *bind = child.as<BindNode>())
-        child_ctx.AddConstr(bind->var, bind->value);
+      if (auto bind = GetFlatTaskBind(child)) {
+        auto variable = bind.value()->var.as<PrimVar>();
+        auto value = bind.value()->value.as<PrimExpr>();
+        if (variable && value)
+          child_ctx.AddConstr(variable.value(), value.value());
+      }
     }
     return result;
   }
-  if (const auto *attr = stmt.as<AttrStmtNode>()) {
+  if (const auto *attr = stmt.as<RegionStmtNode>()) {
     ConstrSet body_ctx = outer_ctx;
-    if (attr->attr_key == tirx::attr::tilelang_assume) {
-      if (const auto *expr = attr->node.as<PrimExprNode>())
-        body_ctx.AddConstr(GetRef<PrimExpr>(expr), /*is_assume=*/true);
-    }
+    if (auto assumption = attr->attrs.GetAttr<PrimExpr>("tilelang_assume"))
+      body_ctx.AddConstr(assumption.value(), true);
+    if (auto condition = attr->attrs.GetAttr<PrimExpr>(kScheduleCondition))
+      body_ctx.AddConstr(condition.value());
     return EstimateStmtCost(attr->body, body_ctx);
   }
   if (const auto *loop = stmt.as<ForNode>()) {
-    if (loop->kind != ForKind::kSerial && loop->kind != ForKind::kUnrolled)
+    if (loop->kind != ForKind::kDefault && loop->kind != ForKind::kUnrolled)
       return EstimateLeafTaskCost(stmt, outer_ctx);
 
-    arith::Analyzer analyzer;
-    outer_ctx.Populate(analyzer);
-    int64_t trip_count = GetSerialTripCount(GetRef<For>(loop), &analyzer);
+    sym::Analyzer analyzer;
+    auto constraints = outer_ctx.Populate(analyzer);
+    int64_t trip_count = GetSerialTripCount(GetRef<For>(loop), analyzer);
     ConstrSet body_ctx = outer_ctx;
-    body_ctx.AddConstr(loop->loop_var,
-                       Range::FromMinExtent(loop->min, loop->extent));
-    body_ctx.AddConstr(loop->extent > 0);
+    body_ctx.AddConstr(loop->var, ScheduleLoopRange(loop));
+    body_ctx.AddConstr(ScheduleLoopTripCount(loop) > 0);
     return multiply_cost(EstimateStmtCost(loop->body, body_ctx), trip_count);
   }
   if (const auto *while_loop = stmt.as<WhileNode>()) {
@@ -2005,14 +1993,14 @@ TaskCostEstimator::EstimateStmtCost(const Stmt &stmt,
     return multiply_cost(EstimateStmtCost(while_loop->body, body_ctx),
                          kDynamicSerialTripCountFallback);
   }
-  if (const auto *branch = stmt.as<IfThenElseNode>()) {
+  if (const auto *branch = stmt.as<IfNode>()) {
     ConstrSet then_ctx = outer_ctx;
     then_ctx.AddConstr(branch->condition);
     SerialTaskCost then_cost = EstimateStmtCost(branch->then_case, then_ctx);
     SerialTaskCost else_cost;
     if (branch->else_case) {
       ConstrSet else_ctx = outer_ctx;
-      else_ctx.AddConstr(Not(branch->condition));
+      else_ctx.AddConstr(logical_not(branch->condition));
       else_cost = EstimateStmtCost(branch->else_case.value(), else_ctx);
     }
     return {std::max(then_cost.latency, else_cost.latency),
@@ -2055,18 +2043,20 @@ using TaskCostMap =
 
 class TaskCostCollector : public TaskAwareConstrVisitor {
 public:
+  using Result = ffi::Optional<ffi::VisitInterrupt>;
   static TaskCostMap Collect(const Stmt &body, const ConstrSet &outer_ctx) {
-    TaskCostCollector collector(body, outer_ctx);
-    collector(body);
-    return std::move(collector.costs_);
+    auto collector = ffi::make_object<TaskCostCollector>(body, outer_ctx);
+    collector->Visit(body);
+    return std::move(collector->costs_);
   }
 
-private:
+public:
   TaskCostCollector(const Stmt &body, const ConstrSet &outer_ctx)
       : estimator_(Hf32ModeAnalyzer::Analyze(body)) {
     constr_stack_ = outer_ctx.constrs_;
   }
 
+private:
   bool InScheduleBody() const { return schedule_body_depth_ > 0; }
 
   std::shared_ptr<TaskNode> NewTask(const Stmt &stmt) const {
@@ -2085,11 +2075,12 @@ private:
     costs_[key] = cost;
   }
 
-  void EstimateMarkedTask(const AttrStmtNode *op) {
-    TaskMetadata metadata = ParseTaskMetadata(op->node);
+  void EstimateMarkedTask(const RegionStmtNode *op) {
+    TaskMetadata metadata = ParseTaskMetadata(ScheduleMarkerPayload(op));
     // Projected tasks describe one AIV's traffic; a collective task
     // describes the same operation on both AIVs.
-    auto attributes = task_metadata_detail::CopyTaskMetadata(op->node);
+    auto attributes =
+        task_metadata_detail::CopyTaskMetadata(ScheduleMarkerPayload(op));
     estimator_.SetAivLanes(attributes.count("subcore") ? 1 : 2);
     auto task = NewTask(op->body);
     ApplyTaskResourceUsage(AnalyzeTaskResourceUsage(op->body), task.get());
@@ -2101,15 +2092,15 @@ private:
       per_core_task_candidates_.push_back({marker, task});
   }
 
-  void EstimatePerCoreTask(const AttrStmtNode *op) {
+  void EstimatePerCoreTask(const RegionStmtNode *op) {
     ICHECK_EQ(per_core_task_depth_, 0)
         << "Nested T.PerCoreTask regions are not supported";
-    TaskMetadata metadata = ParseTaskMetadata(op->node);
+    TaskMetadata metadata = ParseTaskMetadata(ScheduleMarkerPayload(op));
 
     std::vector<PerCoreTaskCandidate> saved_candidates;
     saved_candidates.swap(per_core_task_candidates_);
     ++per_core_task_depth_;
-    VisitStmt(op->body);
+    Visit(op->body);
     --per_core_task_depth_;
     std::vector<PerCoreTaskCandidate> candidates;
     candidates.swap(per_core_task_candidates_);
@@ -2146,71 +2137,73 @@ private:
     RecordCost(GetRef<Stmt>(op), task, metadata);
   }
 
-  void VisitStmt_(const ForNode *op) final {
+  Result Visit_(const ForNode *op) final {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
-    if (op->kind == ForKind::kSerial || op->kind == ForKind::kUnrolled) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+    if (op->kind == ForKind::kDefault || op->kind == ForKind::kUnrolled) {
+      return ConstrVisitor::Visit_(op);
     }
     FatalUnmarkedTask("EstimateLatency", "parallel loop",
                       "MaterializeScheduleUnits");
+    return std::nullopt;
   }
 
-  void VisitStmt_(const EvaluateNode *op) final {
+  Result Visit_(const EvaluateNode *op) final {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
     FatalUnmarkedTask("EstimateLatency", "Evaluate",
                       "MaterializeScheduleUnits");
+    return std::nullopt;
   }
 
-  void VisitStmt_(const BufferStoreNode *op) final {
+  Result Visit_(const TensorStoreNode *op) final {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
     FatalUnmarkedTask("EstimateLatency", "BufferStore",
                       "MaterializeScheduleUnits");
+    return std::nullopt;
   }
 
-  void VisitStmt_(const BindNode *op) final {
+  Result Visit_(const BindNode *op) final {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
     FatalUnmarkedTask("EstimateLatency", "Bind", "MaterializeScheduleUnits");
+    return std::nullopt;
   }
 
-  void VisitStmt_(const WhileNode *op) final {
+  Result Visit_(const WhileNode *op) final {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
     FatalUnmarkedTask("EstimateLatency", "While", "MaterializeScheduleUnits");
+    return std::nullopt;
   }
 
-  void VisitStmt_(const SBlockNode *op) final {
-    FatalUnmarkedTask("EstimateLatency", "block", "MaterializeScheduleUnits");
+  Result Visit_(const RegionStmtNode *op) final {
+    if (auto condition = op->attrs.GetAttr<PrimExpr>(kScheduleCondition)) {
+      auto guard = MakeGuard(condition.value());
+      return VisitScheduleRegion(op);
+    }
+    return VisitScheduleRegion(op);
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
+  Result VisitScheduleRegion(const RegionStmtNode *op) {
     if (!InScheduleBody()) {
-      ConstrVisitor::VisitStmt_(op);
-      return;
+      return ConstrVisitor::Visit_(op);
     }
-    if (op->attr_key == tl::attr::kAscendTask) {
+    if (ScheduleMarkerKey(op) == tl::attr::kAscendTask) {
       EstimateMarkedTask(op);
-      return;
+      return std::nullopt;
     }
-    if (op->attr_key == tl::attr::kAscendPerCoreTask) {
+    if (ScheduleMarkerKey(op) == tl::attr::kAscendPerCoreTask) {
       EstimatePerCoreTask(op);
-      return;
+      return std::nullopt;
     }
-    ConstrVisitor::VisitStmt_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
   TaskCostEstimator estimator_;
@@ -2220,29 +2213,26 @@ private:
   std::vector<PerCoreTaskCandidate> per_core_task_candidates_;
 };
 
-class TaskAnnotationRewriter : public StmtMutator {
+class TaskAnnotationRewriter : public tirx::StmtExprMutator {
 public:
   explicit TaskAnnotationRewriter(const TaskCostMap &costs) : costs_(costs) {}
 
-  Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
-
 private:
-  Stmt VisitStmt(const Stmt &stmt) final {
-    auto it = costs_.find(stmt);
-    if (it == costs_.end())
-      return StmtMutator::VisitStmt(stmt);
-
-    const auto *attr = stmt.as<AttrStmtNode>();
-    ICHECK(attr && (attr->attr_key == tl::attr::kAscendTask ||
-                    attr->attr_key == tl::attr::kAscendPerCoreTask));
-    Stmt body = attr->body;
-    if (attr->attr_key == tl::attr::kAscendPerCoreTask)
-      body = VisitStmt(body);
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *region,
+                                 ffi::InplaceMode mode) final {
+    auto found = costs_.find(GetRef<Stmt>(region));
+    if (found == costs_.end())
+      return StmtExprMutator::Mutate_(region, mode);
+    RegionStmt result = GetRef<RegionStmt>(region);
+    if (ScheduleMarkerKey(region) == tl::attr::kAscendPerCoreTask)
+      result.CopyOnWrite()->body =
+          Mutate(region->body).ValueOrUnchanged(region->body);
     TaskMetadata metadata;
-    metadata.latency = it->second.latency;
-    metadata.ii = it->second.ii;
-    return AttrStmt(MergeTaskMetadata(metadata, attr->node), attr->attr_key,
-                    attr->value, std::move(body), attr->span);
+    metadata.latency = found->second.latency;
+    metadata.ii = found->second.ii;
+    return WithSchedulePayload(
+        result.get(),
+        MergeTaskMetadata(metadata, ScheduleMarkerPayload(region)));
   }
 
   const TaskCostMap &costs_;
@@ -2252,25 +2242,27 @@ Stmt RunEstimateLatency(const Stmt &body, const ConstrSet &outer_ctx) {
   TaskCostMap costs = TaskCostCollector::Collect(body, outer_ctx);
   ICHECK(!costs.empty()) << "EstimateLatency found no schedulable tasks inside "
                             "tilelang_root";
-  TaskAnnotationRewriter rewriter(costs);
-  return rewriter.Rewrite(body);
+  auto rewriter = ffi::make_object<TaskAnnotationRewriter>(costs);
+  return rewriter->Mutate(body).ValueOrUnchanged(body);
 }
 
 } // namespace
 
 tvm::transform::Pass EstimateLatency() {
-  auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
+  auto pass_func =
+      [](tirx::Function func, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     return RewriteTilelangKernels(
         std::move(func), "EstimateLatency",
         [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
+          RegionStmt root = context.root;
           root.CopyOnWrite()->body =
-              RunEstimateLatency(root->body, context.outer_ctx);
+              SeqStmt(RunEstimateLatency(root->body, context.outer_ctx));
           return root;
         },
         /*require_kernel=*/false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.EstimateLatency", {});
+  return CreateFunctionPass(pass_func, 0, "tl.EstimateLatency");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

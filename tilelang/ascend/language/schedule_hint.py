@@ -1,9 +1,9 @@
 """Auto-schedule semantic hints, including buffer conflict declarations."""
 
 from tilelang.utils.language import to_tile_region
-from tvm import tirx
-from tvm.tirx import Buffer, IntImm, StringImm, call_intrin, op
-from tvm.tirx.script.builder.ir import attr
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import Buffer, IntImm, StringImm, call_intrin, op
+from tilelang._compat.builder import attr
 
 __all__ = ["assume_conflict", "assume_no_conflict", "PerCoreTask", "Stage", "Task"]
 
@@ -59,7 +59,7 @@ def PerCoreTask():
     ...         with T.Task():
     ...             T.copy(res, C[...])
     """
-    return attr(tirx.const(0, "int32"), "tl.ascend_per_core_task", tirx.const(1, "int32"))
+    return attr(None, "tl.ascend_per_core_task", {})
 
 
 def Task(latency: int | None = None, ii: int | None = None):
@@ -112,7 +112,7 @@ def Task(latency: int | None = None, ii: int | None = None):
         annotations["latency"] = IntImm("int64", latency)
     if ii is not None:
         annotations["ii"] = IntImm("int64", ii)
-    return attr(annotations, "tl.ascend_task", tirx.const(1, "int32"))
+    return attr(None, "tl.ascend_task", annotations)
 
 
 def Stage(stage: int):
@@ -155,7 +155,7 @@ def Stage(stage: int):
     """
     if isinstance(stage, bool) or not isinstance(stage, int) or stage < 0:
         raise ValueError(f"Stage must be a non-negative integer, got {stage!r}")
-    return attr(IntImm("int64", stage), "tl.ascend_stage", tirx.const(1, "int32"))
+    return attr(None, "tl.ascend_stage", IntImm("int64", stage))
 
 
 def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
@@ -177,7 +177,7 @@ def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
     # `tl.region` Call so Simplify rewrites its bounds in lockstep with the real
     # access rather than freezing symbolic vars inside a BufferRegion object.
     def operand(x):
-        return x.data if isinstance(x, Buffer) else to_tile_region(x, "rw")
+        return x if isinstance(x, Buffer) else to_tile_region(x, "rw")
 
     a_op = operand(a)
     b_op = operand(b) if b is not None else a_op

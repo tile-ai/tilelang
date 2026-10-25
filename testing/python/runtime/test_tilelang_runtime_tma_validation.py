@@ -37,7 +37,7 @@ def _get_tma_create_tiled():
 def test_tma_runtime_validation_surfaces_invalid_argument_constraints():
     create_tiled = _get_tma_create_tiled()
 
-    with pytest.raises(tvm.error.InternalError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         create_tiled(
             ctypes.c_void_p(0x10),
             7,
@@ -67,7 +67,11 @@ def test_tma_runtime_validation_surfaces_invalid_argument_constraints():
 
 
 @tilelang.testing.requires_cuda
-def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_host_codegen_aligns_native_tensor_map_storage():
+    import torch
+    from tvm_tirx import runtime
+
     m, k = 16, 256
     block_m, block_k = 4, 128
     threads = 32
@@ -79,7 +83,7 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
     ):
         with T.Kernel(T.ceildiv(m, block_m), T.ceildiv(k, block_k), threads=threads) as (pid_m, pid_k):
             x_shared = T.alloc_shared((block_m, block_k), dtype=T.float16)
-            mbar = T.alloc_barrier(1)
+            mbar = T.alloc_barrier(threads)
             T.tma_copy(
                 x[
                     pid_m * block_m : (pid_m + 1) * block_m,
@@ -100,13 +104,18 @@ def test_tma_host_codegen_aligns_tvm_ffi_stack_alloca_for_descriptor():
 
     kernel = _compile_tvm_ffi(
         tma_copy_2d_desc,
+        target={"kind": "cuda", "arch": f"sm_{runtime.cuda(0).compute_version.replace('.', '')}"},
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
 
     source = kernel.get_host_source()
-    assert "__tvm_tensormap_create_tiled_packed" in source
-    assert re.search(r"TL_ALIGN\(128\) TVMFFIAny stack(_\d+)?\[", source)
-    assert not re.search(r"TL_ALIGN\(64\) TVMFFIAny stack(_\d+)?\[", source)
+    assert "runtime.cuTensorMapEncodeTiled" in source
+    assert re.search(r"uint64_t data\[16\];.*aligned\(64\).*TVMTensorMap", source)
+    assert re.search(r"TVMTensorMap stack_\d+\[1\];", source)
+    values = torch.arange(m * k, dtype=torch.float32, device="cuda").reshape(m, k).to(torch.float16)
+    output = torch.empty_like(values)
+    kernel(values, output)
+    torch.testing.assert_close(output, values, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

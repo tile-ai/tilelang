@@ -79,3 +79,8 @@ def get_available_cpu_count() -> int:
     except AttributeError:
         cpu_count = os.cpu_count()
     return max(1, cpu_count or 1)
+
+
+def get_num_sms(device_id: int = 0) -> int:
+    """Return the hardware multiprocessor count without importing scheduling passes."""
+    return torch.cuda.get_device_properties(device_id).multi_processor_count

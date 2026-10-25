@@ -2,11 +2,14 @@
 """Logical TMEM buffers share physical tcgen05.alloc calls when that saves columns."""
 
 import pytest
+import operator
+from tvm_tirx.ir import prim
 
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang._compat.stmt_functor import ir_transform
 from tilelang.testing.ir import collect_calls, collect_nodes
 
 
@@ -17,7 +20,47 @@ def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(TARGET)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
-    return tl.cuda.transform.LowerSharedTmem()(mod)
+    mod = tl.cuda.transform.LowerSharedTmem()(mod)
+    assert tvm.tirx.analysis.check_well_formed(mod)
+    tvm.ir.assert_structural_equal(mod, tvm.ir.load_json(tvm.ir.save_json(mod)))
+    return mod
+
+
+def _expand_address(body, expression):
+    definitions = {
+        store.dest: store.value for store in collect_nodes(body, tvm.ir.TensorStore) if store.dest.name.startswith("tmem_address_")
+    }
+    return ir_transform(expression, None, lambda node: definitions.get(node.source) if isinstance(node, tvm.ir.TensorLoad) else None)
+
+
+def _address_offset(expression, stage=0):
+    if isinstance(expression, tvm.ir.IntImm):
+        return int(expression)
+    if isinstance(expression, tvm.ir.TensorLoad):
+        if expression.source.name.startswith("tmem_address_"):
+            return 0
+        assert expression.source.name == "stage"
+        return stage
+    if isinstance(expression, prim.Cast):
+        dtype = expression.ty.dtype
+        value = _address_offset(expression.value, stage) % (1 << dtype.bits)
+        if str(dtype).startswith("int") and value >= 1 << (dtype.bits - 1):
+            value -= 1 << dtype.bits
+        return value
+    operations = {
+        prim.Add: operator.add,
+        prim.Sub: operator.sub,
+        prim.Mul: operator.mul,
+        prim.FloorDiv: operator.floordiv,
+        prim.FloorMod: operator.mod,
+        prim.LShift: operator.lshift,
+        prim.RShift: operator.rshift,
+        prim.BitwiseOr: operator.or_,
+        prim.BitwiseAnd: operator.and_,
+    }
+    operation = operations.get(type(expression))
+    assert operation is not None, f"Unexpected TMEM address component: {expression}"
+    return operation(_address_offset(expression.a, stage), _address_offset(expression.b, stage))
 
 
 def _num_cols_allocated(body):
@@ -35,11 +78,13 @@ def _tmem_addresses(body):
     addresses = []
 
     for node in collect_nodes(body, tvm.tirx.Evaluate):
-        value = node.value
-        if isinstance(value, tvm.tirx.BufferLoad):
-            addresses.append((value.buffer.name, 0))
-        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.BufferLoad):
-            addresses.append((value.a.buffer.name, int(value.b)))
+        if not tvm.ir.is_prim_expr(node.value):
+            continue
+        value = _expand_address(body, node.value)
+        bases = [load.source for load in collect_nodes(value, tvm.ir.TensorLoad) if load.source.name.startswith("tmem_address_")]
+        if bases:
+            assert len(bases) == 1
+            addresses.append((bases[0].name.removeprefix("tmem_address_"), _address_offset(value)))
 
     return addresses
 
@@ -184,14 +229,14 @@ def test_explicit_deallocate_keeps_its_own_allocation():
     @T.prim_func
     def func():
         with T.Kernel(1, threads=128):
-            C_tmem = T.alloc_tmem([128, 384], T.float32)
+            C_tmem = T.alloc_tmem([128, 192], T.float32)
             SF_tmem = T.alloc_tmem([128, 4], "uint32")
             T.evaluate(C_tmem[0, 0])
             T.evaluate(SF_tmem[0, 0])
             T.deallocate_tmem(SF_tmem)
 
     body = _apply(func)["main"].body
-    assert _num_cols_allocated(body) == [512, 32]
+    assert _num_cols_allocated(body) == [256, 32]
     assert _tmem_addresses(body) == [("C_tmem", 0), ("SF_tmem", 0)]
 
 
@@ -216,7 +261,9 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
 
     dynamic_address = [node.value for node in collect_nodes(body, tvm.tirx.Evaluate) if not isinstance(node.value, tvm.tirx.Call)]
     assert len(dynamic_address) == 1
-    assert 384 in _int_imms(dynamic_address[0])
+    expanded = _expand_address(body, dynamic_address[0])
+    for stage_value in [0, 1]:
+        assert _address_offset(expanded, stage_value) == 384 + stage_value * 4
 
 
 @tilelang.testing.requires_cuda
@@ -234,8 +281,8 @@ def test_block_over_the_column_budget_is_reported():
             T.evaluate(second_tmem[0, 0])
 
     with pytest.raises(
-        tvm.error.InternalError,
-        match=r"allocates 1024 TMEM columns across 2 tcgen05.alloc calls, but a CTA only has 512",
+        ValueError,
+        match=r"lexical scope requires 1024 TMEM columns, exceeding 512",
     ):
         _apply(func)
 

@@ -6,7 +6,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
-from tvm import tirx
+from tilelang._compat import tirx
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -20,11 +20,11 @@ def _apply(func):
 
 
 def _collect_storage_syncs(stmt):
-    return collect_calls(stmt, op="tirx.tvm_storage_sync")
+    return collect_calls(stmt, op="tirx.gpu_storage_sync")
 
 
 def _collect_init_barrier_calls(stmt):
-    return collect_calls(stmt, op="tirx.ptx_init_barrier_thread_count")
+    return collect_calls(stmt, op="tl.mbarrier_init")
 
 
 def _collect_fence_barrier_init(stmt):
@@ -35,11 +35,14 @@ def _collect_shuffle_elect(stmt):
     return collect_calls(stmt, op="tl.tl_shuffle_elect")
 
 
-def _collect_barrier_blocks(stmt):
+def _collect_barrier_allocations(stmt):
     return [
-        block
-        for block in collect_nodes(stmt, tvm.tirx.SBlock)
-        if any(buf.scope() in ("shared.barrier", "shared.cluster_barrier") for buf in block.alloc_buffers)
+        binding
+        for binding in collect_nodes(stmt, tvm.ir.Bind)
+        if isinstance(binding.var.ty, tirx.TensorType)
+        and binding.var.ty.scope.name in ("shared.barrier", "shared.cluster_barrier")
+        and isinstance(binding.value, tvm.ir.Call)
+        and binding.value.op.name == "tirx.alloc_tensor"
     ]
 
 
@@ -152,9 +155,9 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
         mod = tl.transform.IfStmtBinding()(mod)
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
 
-        barrier_blocks = _collect_barrier_blocks(mod["main"].body)
-        assert len(barrier_blocks) == 1
-        assert "barrier_init" in barrier_blocks[0].annotations
+        barrier_allocations = _collect_barrier_allocations(mod["main"].body)
+        assert len(barrier_allocations) == 1
+        assert "barrier_init" in barrier_allocations[0].value.attrs
 
         mod = tl.cuda.transform.LowerSharedBarrier()(mod)
 

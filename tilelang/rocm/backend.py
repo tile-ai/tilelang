@@ -29,11 +29,11 @@ def tilelang_callback_hip_compile(code, target):
 BACKEND = register_backend(
     BackendModule(
         name="rocm",
-        target_kinds=("hip",),
-        pipelines={"hip": PassPipeline("hip", pipeline.ROCMPassPipelineBody)},
+        target_kinds=("rocm",),
+        pipelines={"rocm": PassPipeline("rocm", pipeline.ROCMPassPipelineBody)},
         device_codegens={
-            "hip": DeviceCodegen(
-                "hip",
+            "rocm": DeviceCodegen(
+                "rocm",
                 build=codegen.build_hip,
                 build_without_compile=codegen.build_hip_without_compile,
             )

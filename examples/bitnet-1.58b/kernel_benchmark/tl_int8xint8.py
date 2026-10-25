@@ -1,9 +1,9 @@
 import torch
 import torch.backends
 from bitblas import tvm as tvm
-from tvm import DataType
-from tvm import tl as TL
-import tvm.tl.language as T
+from tvm_ffi import dtype as DataType
+import tilelang as TL
+import tilelang.language as T
 from bitblas.tl.utils import get_swizzle_layout
 from bitblas.tl.mma_macro_generator import (
     TensorCoreIntrinEmitter,

@@ -2,7 +2,8 @@ import numpy as np
 
 import tilelang
 from tilelang import tvm as tvm
-from tvm.ir import IRModule
+from tvm_tirx.ir import IRModule
+from tvm_tirx import tirx
 import tilelang.testing
 import tilelang.language as T
 
@@ -43,7 +44,7 @@ def test_merge_if_preserves_re_evaluation_of_buffer_condition():
 
     original_module = IRModule.from_expr(main)
     transformed = tilelang.transform.MergeIfStmt()(original_module)
-    executable = tvm.compile(transformed["main"], target="c").jit(options=["-std=c++17"])
+    executable = tirx.compile(transformed["main"], target="c").jit(options=["-std=c++20"])
 
     values = tvm.runtime.tensor(np.array([1, 7], dtype="int32"))
     executable(values)
@@ -61,7 +62,7 @@ def test_if_stmt_binding_and_merge_if_preserve_single_evaluation():
     transformed = IRModule.from_expr(main)
     transformed = tilelang.transform.IfStmtBinding()(transformed)
     transformed = tilelang.transform.MergeIfStmt()(transformed)
-    executable = tvm.compile(transformed["main"], target="c").jit(options=["-std=c++17"])
+    executable = tirx.compile(transformed["main"], target="c").jit(options=["-std=c++20"])
 
     values = tvm.runtime.tensor(np.array([1, 7], dtype="int32"))
     executable(values)

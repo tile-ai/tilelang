@@ -175,6 +175,7 @@ def make_input(n: int, torch_dtype: torch.dtype, value_kind: str) -> torch.Tenso
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+@tilelang.testing.requires_ascend
 def test_simdvf_cast(case):
     name, in_tl_dtype, out_tl_dtype, in_torch_dtype, out_torch_dtype, value_kind = case
 

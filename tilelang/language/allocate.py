@@ -19,16 +19,16 @@ from __future__ import annotations
 from typing import overload, Literal
 from tilelang._typing import DType, ShapeType
 from tilelang import tvm as tvm
-from tvm.script import tirx as T
-from tvm.tirx import PrimExpr
-from tvm.tirx.script.builder.ir import sblock_attr
-from tvm.tirx.buffer import Buffer
-from tvm.tirx.expr import FloatImm, IntImm
+from tilelang._compat import builder as T
+from tilelang._compat.tirx import PrimExpr
+from tilelang._compat.tirx import Buffer
+from tilelang._compat.tirx import FloatImm, IntImm
 
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor, ptr as _ptr_sentinel
+from .frame import register_mutable_scalar
 
 
 def _with_span(buffer: Buffer) -> Buffer:
@@ -61,7 +61,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
         # lei: This is a hack to handle bool type.
         # Because tilelang's merge smem pass cannot merge bool type currently.
         scope = "shared"
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
@@ -75,7 +75,7 @@ def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
@@ -89,7 +89,7 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 @overload
@@ -151,15 +151,12 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if dtype is _ptr_sentinel:
         dtype = _dtypes.int64
 
-    buffer = _with_span(T.sblock_alloc_buffer([1], dtype, scope=parsed_scope))
+    storage_scope = "local" if parsed_scope == "local.var" else parsed_scope
+    buffer = _with_span(T.alloc_buffer([1], dtype, scope=storage_scope))
+    register_mutable_scalar(buffer)
+    if parsed_init is None and parsed_scope == "local.var":
+        parsed_init = 0
     if parsed_init is not None:
-        # Always use T.buffer_store for reliable initialisation across all
-        # backends.  The sblock_attr("tl.local_var_init") path feeds into the
-        # flatten_buffer transform which does not reliably emit initialiser
-        # code on some backends (e.g. HIP codegen silently drops the
-        # annotation for integer/float literals, leaving the scalar
-        # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
-        # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float)):
             parsed_init = tvm.tirx.const(parsed_init, dtype=tl_dtype(dtype))
         elif isinstance(parsed_init, (IntImm, FloatImm)):
@@ -188,7 +185,7 @@ def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
         T.Buffer: A TVM buffer object allocated in global memory
     """
 
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
@@ -215,11 +212,10 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier"))
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
-    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    arrive_count_exprs = [IntImm("int32", count) for count in arrive_count]
+    buffer = _with_span(
+        T.alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier", annotations={"barrier_init": arrive_count_exprs})
+    )
 
     return buffer
 
@@ -242,11 +238,12 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier"))
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
-    arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    arrive_count_exprs = [IntImm("int32", count) for count in arrive_count]
+    buffer = _with_span(
+        T.alloc_buffer(
+            (len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier", annotations={"barrier_init": arrive_count_exprs}
+        )
+    )
 
     return buffer
 
@@ -286,7 +283,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     # dimensions (for example a software-pipeline stage) that repeat the
     # accumulator along TMEM columns.
     assert len(shape) >= 2, "shape must be a 2D or higher tensor for TMEM allocation"
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
+    return _with_span(T.alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
 ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
@@ -344,12 +341,12 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
             stacklevel=2,
         )
         assert replication in ["all", "none"]
-        reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-        sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+        reducer = _with_span(
+            T.alloc_buffer(shape, dtype, scope="local.fragment", annotations={"tl.reducer_op": op, "tl.reducer_legacy": replication})
+        )
         return reducer
 
-    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
-    sblock_attr({"reducer_info_v2": {reducer.data: {"op": op}}})
+    reducer = _with_span(T.alloc_buffer(shape, dtype, scope="local.reducer", annotations={"tl.reducer_op": op}))
 
     return reducer
 
@@ -373,7 +370,7 @@ def alloc_descriptor(
     scope = "local.descriptor." + kind
     # Buffer naming via `name` is not supported by this TVM builder signature;
     # keep parameter for forward-compat, but do not pass it.
-    return _with_span(T.sblock_alloc_buffer([1], dtype, scope=scope))
+    return _with_span(T.alloc_buffer([1], dtype, scope=scope))
 
 
 def alloc_wgmma_desc(dtype: DType = _dtypes.uint64) -> Buffer:

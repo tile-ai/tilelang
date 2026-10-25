@@ -139,7 +139,7 @@ _REDUCER_IDENTITY = {
 _REDUCER_COMBINE = {
     "sum": lambda a, b: a + b,
     "max": scalar.max,
-    "min": scalar.min,
+    "min": scalar.begin,
 }
 
 _REDUCER_REDUX = {

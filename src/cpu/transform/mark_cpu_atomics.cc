@@ -12,10 +12,10 @@
  * serial RMW into a data race.
  */
 
+#include "compat/visit.h"
 #include "cpu/op/builtin.h"
 #include "support/check.h"
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -48,14 +48,15 @@ bool HasAtomicCall(const Stmt &body) {
 } // namespace
 
 tvm::transform::Pass MarkCPUAtomics() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
-    if (HasAtomicCall(func->body)) {
-      return WithAttr(std::move(func), attr::kCPUHadAtomics, Bool(true));
+  auto pass_func =
+      [](tirx::Function func, const IRModule &mod,
+         const tvm::transform::PassContext &ctx) -> Optional<tirx::Function> {
+    if (func->body && HasAtomicCall(func->body.value())) {
+      return WithAttr(std::move(func), attr::kCPUHadAtomics, true);
     }
     return func;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MarkCPUAtomics", {});
+  return CreateFunctionPass(pass_func, 0, "tl.MarkCPUAtomics");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

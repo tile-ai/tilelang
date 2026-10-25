@@ -17,11 +17,10 @@ from tilelang.layout import Layout
 
 N = 128
 
-REJECT_MATCH = r"shared buffer `[^`]*`.*must be injective.*both map to physical coordinates"
+REJECT_MATCH = r"Invalid layout for tensor `[^`]*`.*logical coordinates.*both map to physical coordinates"
 
 
 def _roundtrip_kernel(fwd):
-
     @T.prim_func
     def main(A: T.Tensor((N,), "int32"), Out: T.Tensor((N,), "int32")):
         with T.Kernel(1, threads=N):

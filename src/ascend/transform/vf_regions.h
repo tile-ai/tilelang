@@ -2,7 +2,7 @@
  * \file tl/ascend/transform/vf_regions.h
  * \brief VF region helpers shared by the Ascend lowering passes.
  *
- * SIMT_VF and SIMD_VF are opaque SBlock regions that survive to codegen.
+ * SIMT_VF and SIMD_VF are native regions that survive to codegen.
  * AscendLayoutInference / AscendLowerTileOp visit their bodies without the
  * generic block bookkeeping, and SIMT_VF additionally carries its own lane
  * scope: nested tile operators lower and infer against the region's
@@ -12,7 +12,7 @@
 #ifndef TVM_TL_ASCEND_TRANSFORM_VF_REGIONS_H_
 #define TVM_TL_ASCEND_TRANSFORM_VF_REGIONS_H_
 
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt.h>
 
 #include <optional>
@@ -28,9 +28,13 @@ namespace ascend {
  *  use the innermost region's thread var and bounds instead of the kernel's.
  */
 struct RegionThreadScope {
-  tirx::IterVar thread_var;
+  PrimVar thread_var;
   Range thread_bounds;
 };
+
+inline ffi::String VFRegionName(const RegionStmtNode *region) {
+  return region->attrs.GetAttr<ffi::String>("name_hint").value_or("");
+}
 
 inline bool IsVFRegion(const std::string &name_hint) {
   return name_hint == "SIMT_VF" || name_hint == "SIMD_VF";
@@ -39,27 +43,30 @@ inline bool IsVFRegion(const std::string &name_hint) {
 /*! \brief The region-local scope of a VF block: SIMT_VF returns its lane
  *  scope, SIMD_VF (scalar CCE code) keeps the enclosing scope.
  *
- *  The synthetic Var is replaced by the real bound IterVar when the visiting
- *  pass reaches the region's leading thread_extent AttrStmt.
+ *  The returned variable is the actual lexical thread parameter.
  */
-inline std::optional<std::pair<tirx::IterVar, Range>>
-VFRegionScope(const tirx::SBlockNode *op) {
+inline std::optional<std::pair<PrimVar, Range>>
+VFRegionScope(const RegionStmtNode *op) {
   using namespace tirx;
-  if (op->name_hint != "SIMT_VF") {
+  if (VFRegionName(op) != "SIMT_VF") {
     return std::nullopt;
   }
-  const auto *attr = op->body.as<AttrStmtNode>();
-  ICHECK(attr && attr->attr_key == tirx::attr::thread_extent)
-      << "SIMT_VF block body must start with thread_extent AttrStmt";
-  const auto *iv = attr->node.as<IterVarNode>();
-  ICHECK(iv && iv->thread_tag == "threadIdx.x")
-      << "SIMT_VF block body must bind threadIdx.x first";
-  PrimExpr threads = attr->value;
-  DataType dtype = threads.dtype();
-  IterVar active_thread_var = IterVar(
-      Range::FromMinExtent(make_zero(dtype), threads), Var("simtvf_tx", dtype),
-      IterVarType::kThreadIndex, "threadIdx.x");
-  return std::make_pair(active_thread_var, active_thread_var->dom);
+  SeqStmt body = op->body;
+  while (body->seq.size() == 1) {
+    const auto *region = body->seq[0].as<RegionStmtNode>();
+    if (!region || !region->op.same_as(launch_thread_op()))
+      break;
+    if (region->args[0].as_or_throw<StringImm>()->value == "threadIdx.x") {
+      auto variable = region->body_params[0].as_or_throw<PrimVar>();
+      auto extent = region->args[1].as_or_throw<PrimExpr>();
+      return std::make_pair(
+          variable, Range::FromMinExtent(IntImm(extent.ty(), 0), extent));
+    }
+    body = region->body;
+  }
+  TVM_FFI_THROW(ValueError)
+      << "SIMT_VF must bind a lexical threadIdx.x parameter";
+  TVM_FFI_UNREACHABLE();
 }
 
 } // namespace ascend

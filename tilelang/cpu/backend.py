@@ -16,7 +16,7 @@ BACKEND = register_backend(
             "llvm": PassPipeline("llvm", pipeline.CPUPassPipelineBody),
         },
         device_codegens={
-            "c": DeviceCodegen("c", build_without_compile=codegen.build_c),
+            "c": DeviceCodegen("c", build=codegen.build_c, build_without_compile=codegen.build_c),
             "llvm": DeviceCodegen(
                 "llvm",
                 build=codegen.build_llvm,

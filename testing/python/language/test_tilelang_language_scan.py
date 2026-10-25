@@ -4,6 +4,8 @@ import tilelang.testing
 import tilelang as tl
 import torch
 import tilelang.language as T
+from tvm_tirx import ir
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _torch_cummax(chunk, dim, reverse):
@@ -61,11 +63,14 @@ def test_fragment_scan_annotations_preserved():
             T.cumsum(sum_frag, annotations={"test.scan": "cumsum"})
             T.cummax(max_frag, annotations={"test.scan": "cummax"})
 
-    lines = scan.script().splitlines()
-    cumsum_line = next(line for line in lines if "T.cumsum(" in line)
-    cummax_line = next(line for line in lines if "T.cummax(" in line)
-    assert 'test.scan="cumsum"' in cumsum_line
-    assert 'test.scan="cummax"' in cummax_line
+    annotations = {}
+
+    def collect(node):
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name in ("tl.tileop.cumsum", "tl.tileop.cummax"):
+            annotations[node.op.name] = node.attrs["test.scan"]
+
+    post_order_visit(scan.body, collect)
+    assert annotations == {"tl.tileop.cumsum": "cumsum", "tl.tileop.cummax": "cummax"}
 
 
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
@@ -545,7 +550,6 @@ def test_cummax_fragment_1d():
 
 
 def cumsum_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
-
     @T.prim_func
     def cumsum_strided(
         A: T.Tensor((M, N), dtype),
@@ -580,7 +584,6 @@ def run_cumsum_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
 
 
 def cummax_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
-
     @T.prim_func
     def cummax_strided(
         A: T.Tensor((M, N), dtype),
@@ -615,7 +618,6 @@ def run_cummax_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
 
 
 def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, threads=256):
-
     @T.prim_func
     def scan_strided_out_of_place(
         A: T.Tensor((M, N), dtype),

@@ -20,7 +20,7 @@ from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def _set_cache_dirs(monkeypatch, tmp_path):

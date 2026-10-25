@@ -122,13 +122,14 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // synchronization pass.
 // Copy normalization makes instruction transfer regions explicit before
 // scheduling. Compare those regions directly, including for conflict hints.
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        const ConstrSet &b_ctx, const BufferRegion &b_region,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
+                        const ConstrSet &b_ctx, const TensorRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners = 0,
                         const ConflictHintList &root_conflicts = {},
                         Optional<PrimExpr> a_pitch = std::nullopt,
-                        Optional<PrimExpr> b_pitch = std::nullopt);
+                        Optional<PrimExpr> b_pitch = std::nullopt,
+                        const StorageAliasAnalysis *storage_analysis = nullptr);
 
 } // namespace ascend
 } // namespace tl

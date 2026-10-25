@@ -5,16 +5,14 @@ from __future__ import annotations
 from tilelang.layout import make_ascend_sf_layout, try_extract_fractal_layout
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
-from tvm import tirx
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 from tilelang.ascend import language as T
 
 from .gemm_mad import (
     _ASCEND_DTYPE_MAP,
-    _compute_extent,
-    _compute_flat_offset_excluding_last,
     _find_layout,
     _make_access_ptr,
     _to_int32,
@@ -47,8 +45,8 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         # addressing is fixed by the ISA to the bound data tile's address,
         # so they carry no layout.
         for sf_region in (self.SFARegion, self.SFBRegion):
-            if sf_region.buffer.scope() == "shared.l1":
-                layouts[sf_region.buffer] = make_ascend_sf_layout(sf_region.buffer)
+            if sf_region.source.scope().name == "shared.l1":
+                layouts[sf_region.source] = make_ascend_sf_layout(sf_region.source)
         return layouts
 
     def lower(
@@ -74,9 +72,9 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         # the scaling is implicit in the hardware MX slots, so no SF pointer
         # is passed here.
         m, n, k = self._l0_operation_extents()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
-        a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1)
-        b_ptr = _make_access_ptr(self.BRegion.buffer, self.BRegion, 1)
+        c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
+        a_ptr = _make_access_ptr(self.ARegion.source, self.ARegion, 1)
+        b_ptr = _make_access_ptr(self.BRegion.source, self.BRegion, 1)
         call = tirx.call_intrin(
             "void",
             tirx.op.Op.get("tl.ascend_mad_mx"),
@@ -100,43 +98,19 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
 
     def _lower_l1_blockscaled(self):
         tile_k_sub = self._compute_tile_k_sub()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
+        c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
 
-        a_buf = self.ARegion.buffer
-        b_buf = self.BRegion.buffer
-        a_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(a_buf.dtype),
-            a_buf.data,
-            _compute_flat_offset_excluding_last(a_buf, self.ARegion),
-            _compute_extent(self.ARegion),
-            tirx.IntImm("int32", 1),
-        )
-        b_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(b_buf.dtype),
-            b_buf.data,
-            _compute_flat_offset_excluding_last(b_buf, self.BRegion),
-            _compute_extent(self.BRegion),
-            tirx.IntImm("int32", 1),
-        )
+        a_buf = self.ARegion.source
+        b_buf = self.BRegion.source
+        a_ptr = _make_access_ptr(a_buf, self.ARegion, 1, exclude_last=True)
+        b_ptr = _make_access_ptr(b_buf, self.BRegion, 1, exclude_last=True)
 
         sfa_region = self.SFARegion
         sfb_region = self.SFBRegion
-        sfa_buf = sfa_region.buffer
-        sfb_buf = sfb_region.buffer
-        sfa_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfa_buf.dtype),
-            sfa_buf.data,
-            _compute_flat_offset_excluding_last(sfa_buf, sfa_region),
-            _compute_extent(sfa_region),
-            tirx.IntImm("int32", 1),
-        )
-        sfb_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfb_buf.dtype),
-            sfb_buf.data,
-            _compute_flat_offset_excluding_last(sfb_buf, sfb_region),
-            _compute_extent(sfb_region),
-            tirx.IntImm("int32", 1),
-        )
+        sfa_buf = sfa_region.source
+        sfb_buf = sfb_region.source
+        sfa_ptr = _make_access_ptr(sfa_buf, sfa_region, 1, exclude_last=True)
+        sfb_ptr = _make_access_ptr(sfb_buf, sfb_region, 1, exclude_last=True)
 
         input_dtype = self._input_dtype()
         in_dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)
@@ -162,7 +136,7 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         assert sfa_info is not None and sfa_info.kind == 2, f"gemm_blockscaled SFA buffer {sfa_buf.name} must carry an Ascend SF_K layout"
         assert sfa_info.c0_axis == 1, f"gemm_blockscaled SFA buffer {sfa_buf.name}: SF K axis must be col, got c0_axis={sfa_info.c0_axis}"
         sf_nz_stride = sfa_info.outer1
-        sf_k_offset = _to_int32(sfa_region.region[-1].min // sfa_info.c0)
+        sf_k_offset = _to_int32(sfa_region.region[-1].begin // sfa_info.c0)
 
         call = tirx.call_intrin(
             "void",

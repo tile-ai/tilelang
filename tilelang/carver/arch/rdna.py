@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import tvm
-from tvm.target import Target
+import tilelang._compat.tvm as tvm
+from tvm_tirx.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
 from tilelang.rocm.target import target_get_mcpu, target_get_rdna_generation

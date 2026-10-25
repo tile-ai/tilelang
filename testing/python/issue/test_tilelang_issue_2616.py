@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tvm_tirx import ir
 
 
 @tilelang.jit
@@ -84,15 +85,16 @@ def _check_nonzero_min_nested_guards_staging(target, device):
 
     def bind_loop(node):
         if isinstance(node, tvm.tirx.For):
-            analyzer.bind(node.loop_var, tvm.ir.Range.from_min_extent(node.min, node.extent))
+            analyzer.bind(node.var, ir.Range(node.begin, node.end))
 
     tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, bind_loop)
     buffers = {}
 
     def check_staging(node):
-        if isinstance(node, (tvm.tirx.BufferLoad, tvm.tirx.BufferStore)) and "_local_cast" in node.buffer.name:
-            buffers[node.buffer.name.split("_local_cast")[0]] = [int(dim) for dim in node.buffer.shape]
-            for index, extent in zip(node.indices, node.buffer.shape, strict=True):
+        tensor = node.source if isinstance(node, ir.TensorLoad) else node.dest if isinstance(node, ir.TensorStore) else None
+        if tensor is not None and "_local_cast" in tensor.name:
+            buffers[tensor.name.split("_local_cast")[0]] = [int(dim) for dim in tensor.shape]
+            for index, extent in zip(node.indices, tensor.shape, strict=True):
                 assert analyzer.can_prove(index >= 0)
                 assert analyzer.can_prove(index < extent)
 

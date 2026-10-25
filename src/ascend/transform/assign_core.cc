@@ -34,7 +34,6 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -57,7 +56,7 @@ using ffi::GetRef;
 
 namespace {
 
-static CoreMask GetCrossCorePipeCoreMask(const PrimExpr &pipe_arg) {
+static CoreMask GetCrossCorePipeCoreMask(const Expr &pipe_arg) {
   switch (task_analysis_detail::SpecialRegisterForCrossCorePipe(pipe_arg)) {
   case SpecialRegister::kPipeVector:
   case SpecialRegister::kPipeMTE3:
@@ -88,20 +87,21 @@ static Optional<Call> GetCrossCoreCall(const Call &call) {
 }
 
 static std::vector<Call> CollectCrossCoreCalls(const TaskNode *task) {
-  class Collector : public StmtExprVisitor {
+  class Collector : public AnalysisVisitor {
   public:
     std::vector<Call> calls;
 
   private:
     void VisitExpr_(const CallNode *op) final {
       Call call = GetRef<Call>(op);
-      if (GetCrossCoreCall(call).defined())
+      if (GetCrossCoreCall(call).has_value())
         calls.push_back(call);
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(op);
     }
-  } collector;
-  collector(task->stmt);
-  return collector.calls;
+  };
+  auto collector = ffi::make_object<Collector>();
+  collector->Visit(task->stmt);
+  return collector->calls;
 }
 
 using CrossCoreCallMap = std::unordered_map<TaskNode *, std::vector<Call>>;
@@ -153,7 +153,8 @@ static void AssignCrossCoreTasksInList(
       task_capability &= availability.GetTaskReadCoreMask(control->task.get());
     }
     for (const Call &call : cross_core_calls.at(task)) {
-      CrossCorePlacement &placement = placement_for(task)[call->args[2]];
+      CrossCorePlacement &placement =
+          placement_for(task)[call->args[2].as_or_throw<PrimExpr>()];
       CoreMask pipe_core = GetCrossCorePipeCoreMask(call->args[1]);
       if (pipe_core == kCoreVector)
         pipe_core = vector_mask;
@@ -168,7 +169,7 @@ static void AssignCrossCoreTasksInList(
   std::unordered_map<TaskNode *, CoreMask> task_core_masks;
   for (TaskNode *task : scoped_tasks) {
     for (const Call &call : cross_core_calls.at(task)) {
-      const PrimExpr &flag_id = call->args[2];
+      PrimExpr flag_id = call->args[2].as_or_throw<PrimExpr>();
       const CrossCorePlacement &placement = placement_for(task).at(flag_id);
       CoreMask core_mask = placement.pipe_core_mask;
       CoreMask capability = placement.candidate_core_mask;
@@ -262,7 +263,7 @@ class CoreMaskAssigner {
 public:
   static void Assign(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const std::vector<TaskNode *> &all_tasks,
-                     const ffi::Optional<Var> &outer_sid,
+                     const ffi::Optional<PrimVar> &outer_sid,
                      int num_aiv_subcores) {
     CoreMaskAssigner assigner(root, all_tasks, outer_sid, num_aiv_subcores);
     assigner.Run();
@@ -271,7 +272,8 @@ public:
 private:
   CoreMaskAssigner(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
-                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
+                   const ffi::Optional<PrimVar> &outer_sid,
+                   int num_aiv_subcores)
       : root_(root), all_tasks_(all_tasks), availability_(all_tasks),
         vector_mask_(VectorCoreMask(num_aiv_subcores)) {
     if (outer_sid.has_value())
@@ -293,12 +295,14 @@ private:
   static CoreMask GetScalarMemoryMask(const TaskNode *task) {
     bool touches_vector_memory = false;
     bool touches_cube_memory = false;
-    auto scan = [&](const std::vector<BufferRegion> &regions) {
-      for (const BufferRegion &region : regions) {
-        if (IsSharedBuffer(region->buffer)) {
+    auto scan = [&](const std::vector<TensorRegion> &regions) {
+      for (const TensorRegion &region : regions) {
+        if (IsSharedBuffer(region->source.as_or_throw<TensorVar>())) {
           touches_vector_memory = true;
-        } else if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
-                   IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer)) {
+        } else if (IsL1Buffer(region->source.as_or_throw<TensorVar>()) ||
+                   IsL0ABuffer(region->source.as_or_throw<TensorVar>()) ||
+                   IsL0BBuffer(region->source.as_or_throw<TensorVar>()) ||
+                   IsL0CBuffer(region->source.as_or_throw<TensorVar>())) {
           touches_cube_memory = true;
         }
       }
@@ -320,10 +324,10 @@ private:
 
   static CoreMask GetMte2Mask(const TaskNode *task) {
     CoreMask result = kCoreUnassigned;
-    for (const BufferRegion &region : task->GetWriteRegions()) {
-      if (IsL1Buffer(region->buffer))
+    for (const TensorRegion &region : task->GetWriteRegions()) {
+      if (IsL1Buffer(region->source.as_or_throw<TensorVar>()))
         result |= kCoreCube;
-      else if (IsSharedBuffer(region->buffer))
+      else if (IsSharedBuffer(region->source.as_or_throw<TensorVar>()))
         result |= kCoreVector;
     }
     return result == kCoreUnassigned ? kCoreVector : result;
@@ -395,7 +399,7 @@ private:
 };
 
 void AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
-                     const ffi::Optional<Var> &outer_sid,
+                     const ffi::Optional<PrimVar> &outer_sid,
                      int num_aiv_subcores) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
@@ -406,12 +410,13 @@ void AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
 
 tvm::transform::Pass AssignCore() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func =
+      [](tirx::Function func, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     return RewriteTilelangKernels(
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
+          RegionStmt root = context.root;
           if (context.outer_sid.has_value())
             root = SubcoreProjector::Rewrite(root, context.outer_ctx,
                                              context.outer_sid.value());
@@ -422,7 +427,7 @@ tvm::transform::Pass AssignCore() {
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AssignCore", {});
+  return CreateFunctionPass(pass_func, 0, "tl.AssignCore");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

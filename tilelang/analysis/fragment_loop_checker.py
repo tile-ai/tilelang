@@ -1,8 +1,8 @@
 from __future__ import annotations
-from tvm import tirx
-from tvm.tirx import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
-from tvm.tirx.transform import prim_func_pass
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
+from tvm_tirx.tirx.transform import function_pass as prim_func_pass
+from tilelang._compat.stmt_functor import post_order_visit
 
 from tilelang.utils.language import is_fragment
 
@@ -17,7 +17,7 @@ class _LoopVarUseAnalyzer(PyStmtExprVisitor):
         self.used = False
 
     def visit_var_(self, op: Var) -> None:
-        if op == self.var:
+        if op.same_as(self.var):
             self.used = True
         # Don't recursively visit children to avoid infinite recursion
 
@@ -36,7 +36,8 @@ def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
     buffer_accesses = []
 
     def visit_buffer_access(node):
-        if isinstance(node, (BufferLoad, BufferStore)) and is_fragment(node.buffer):
+        buffer = node.source if isinstance(node, BufferLoad) else node.dest if isinstance(node, BufferStore) else None
+        if buffer is not None and is_fragment(buffer):
             buffer_accesses.append(node)
 
     post_order_visit(statement, visit_buffer_access)
@@ -76,20 +77,20 @@ class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
 
             for loop in self.loop_stack:
                 # symbolic
-                if loop.kind == ForKind.PARALLEL and not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
+                if loop.kind == ForKind.PARALLEL and not all(isinstance(bound, IntImm) for bound in (loop.begin, loop.end, loop.step)):
                     loops_with_symbolic_ranges.append(loop)
 
             for buffer_access in buffer_accesses:
                 indices = buffer_access.indices
                 # Check 1
                 for loop in loops_with_symbolic_ranges:
-                    analyzer = _LoopVarUseAnalyzer(loop.loop_var)
+                    analyzer = _LoopVarUseAnalyzer(loop.var)
                     for index in indices:
                         analyzer.visit_expr(index)
                     if analyzer.used:
                         raise ValueError(
                             "[Tilelang Semantic Check] "
-                            f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
+                            f"Loop variable {loop.var} in a T.Parallel loop with symbolic range ({loop.begin}, {loop.end}, {loop.step}) is used to index "
                             "a fragment buffer, which is not allowed in Tilelang."
                         )
 

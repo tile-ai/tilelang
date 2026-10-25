@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+from tilelang._compat.tirx import expr_dtype
+
 import ctypes
 from collections.abc import Callable
 from typing import Any
 
 import torch
-from tvm import arith, tirx
-from tvm.target import Target
+from tilelang._compat.tvm import arith, tirx
+from tvm_tirx.target import Target
 from tilelang_pto_wrapper import PTOKernelWrapper
 
 from tilelang import tvm
@@ -66,7 +69,9 @@ def _storage_pack_factor(dtype: tvm.DataType) -> int:
 
 
 def _accepted_storage_dtypes(dtype: tvm.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
-    torch_dtype = dtype.as_torch()
+    from tilelang.language.dtypes import dtype as tl_dtype
+
+    torch_dtype = tl_dtype(dtype).as_torch()
     if _storage_pack_factor(dtype) > 1 and torch_dtype != torch.int8:
         return (torch_dtype, torch.int8)
     return torch_dtype
@@ -196,7 +201,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
 
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         dynamic_symbolic_map = {}
         # Inputs are visited first. An output's shape is resolved from these entries
         # while that output is being allocated, so a dimension mentioned by both an
@@ -216,7 +221,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 stride_scale = _storage_pack_factor(buffer.dtype)
-                for j, stride in enumerate(buffer.strides):
+                for j, stride in enumerate(tensor_strides(buffer)):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
@@ -233,7 +238,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
 
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         sources: dict[str, list[tuple[int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
@@ -245,7 +250,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
                         if key not in sources:
                             sources[key] = []
                         sources[key].append((i, j, shape_scale(buffer, j)))
-                for j, stride in enumerate(buffer.strides):
+                for j, stride in enumerate(tensor_strides(buffer)):
                     if isinstance(stride, tirx.Var) and stride not in params:
                         key = str(stride)
                         if key not in sources:
@@ -261,10 +266,10 @@ class PTOKernelAdapter(BaseKernelAdapter):
         values directly at launch.
         """
         func = self.prim_func
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         scalar_param_vars: list[tirx.Var | None] = []
         for param in func.params:
-            if param not in buffer_map and param.dtype != "handle":
+            if param not in buffer_map and expr_dtype(param) != "handle":
                 scalar_param_vars.append(param)
             else:
                 scalar_param_vars.append(None)
@@ -277,7 +282,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         buffer_dtype_map = {}
         for i, param in enumerate(params):
             if param in buffer_map:
@@ -313,7 +318,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         params = func.params
         ptr_map = {}
         for i, param in enumerate(params):
-            if param.dtype == "handle":
+            if expr_dtype(param) == "handle":
                 ptr_map[i] = param.name
         return ptr_map
 
@@ -331,7 +336,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         static_shape_map = {}
         static_strides_map = {}
         dynamic_strides_map = {}
@@ -358,7 +363,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
                         static_shape.append((j, -1))  # -1 for symbolic
                     else:
                         raise ValueError(f"Unsupported shape type: {type(s)}")
-                for j, s in enumerate(buffer.strides):
+                for j, s in enumerate(tensor_strides(buffer)):
                     if j != innermost_dim and packing_factor > 1 and is_symbolic_expr(s):
                         dynamic_strides.append((j, s, packing_factor))
                     if j == innermost_dim and packing_factor > 1 and (not isinstance(s, tirx.IntImm) or s.value != 1):
@@ -374,7 +379,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
                             stride //= packing_factor
                         static_strides.append((j, stride))
                 is_contiguous, prod = True, 1
-                for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
+                for dim, stride in reversed(list(zip(buffer.shape, tensor_strides(buffer)))):
                     if not (prim_expr_equal(stride, prod) or analyzer.can_prove_equal(stride, prod)):
                         is_contiguous = False
                         break
@@ -390,7 +395,11 @@ class PTOKernelAdapter(BaseKernelAdapter):
     def _process_buffer_device(self) -> dict[str, tuple[int, torch.device]]:
         device = torch.device("npu")
         func = self.prim_func
-        return {func.buffer_map[param].name: (i, device) for i, param in enumerate(func.params) if param in func.buffer_map}
+        return {
+            tensor_parameter_map(func)[param].name: (i, device)
+            for i, param in enumerate(func.params)
+            if param in tensor_parameter_map(func)
+        }
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled PTO kernel.

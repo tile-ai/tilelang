@@ -21,35 +21,38 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
 
 Constr ParseConstr(const Array<ObjectRef> &spec) {
-  ICHECK(!spec.empty()) << "ConstrSetsProve: empty entry spec";
+  TVM_FFI_ICHECK(!spec.empty()) << "ConstrSetsProve: empty entry spec";
   const auto *kind_imm = spec[0].as<StringImmNode>();
-  ICHECK(kind_imm != nullptr)
+  TVM_FFI_ICHECK(kind_imm != nullptr)
       << "ConstrSetsProve: entry kind must be a StringImm";
   const std::string kind = kind_imm->value;
   if (kind == "pred" || kind == "assume") {
-    ICHECK_EQ(spec.size(), 2U)
+    TVM_FFI_ICHECK_EQ(spec.size(), 2U)
         << "ConstrSetsProve: [\"" << kind << "\", PrimExpr] expects 2 fields";
-    return Constr(Downcast<PrimExpr>(spec[1]), /*is_assume=*/kind == "assume");
+    return Constr(spec[1].as_or_throw<PrimExpr>(),
+                  /*is_assume=*/kind == "assume");
   }
   if (kind == "bind") {
-    ICHECK_EQ(spec.size(), 3U)
+    TVM_FFI_ICHECK_EQ(spec.size(), 3U)
         << "ConstrSetsProve: [\"bind\", Var, PrimExpr] expects 3 fields";
-    return Constr(Downcast<Var>(spec[1]), Downcast<PrimExpr>(spec[2]));
+    return Constr(spec[1].as_or_throw<PrimVar>(),
+                  spec[2].as_or_throw<PrimExpr>());
   }
   if (kind == "range") {
-    ICHECK_EQ(spec.size(), 4U)
+    TVM_FFI_ICHECK_EQ(spec.size(), 4U)
         << "ConstrSetsProve: [\"range\", Var, min, extent] expects 4 fields";
-    return Constr(Downcast<Var>(spec[1]),
-                  Range::FromMinExtent(Downcast<PrimExpr>(spec[2]),
-                                       Downcast<PrimExpr>(spec[3])));
+    return Constr(spec[1].as_or_throw<PrimVar>(),
+                  Range::FromMinExtent(spec[2].as_or_throw<PrimExpr>(),
+                                       spec[3].as_or_throw<PrimExpr>()));
   }
-  LOG(FATAL) << "ConstrSetsProve: unknown entry kind '" << kind
-             << "' (expected pred/assume/bind/range)";
+  TVM_FFI_THROW(ValueError) << "ConstrSetsProve: unknown entry kind '" << kind
+                            << "' (expected pred/assume/bind/range)";
   return Constr();
 }
 

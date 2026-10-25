@@ -10,9 +10,9 @@ from tilelang.layout import (
 )
 from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
@@ -68,7 +68,7 @@ class GemmSPWGMMA(GemmSPBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
-            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def lower(
         self,
@@ -80,7 +80,7 @@ class GemmSPWGMMA(GemmSPBase):
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
-        local_thread_var = thread_index - thread_bounds.min
+        local_thread_var = thread_index - thread_bounds.begin
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_SP_INST_WGMMA_SP)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -146,7 +146,7 @@ class GemmSPWGMMA(GemmSPBase):
                 mma_emitter.wgmma_rs(A_region, E_region, B_region, C_region, clear_accum, wg_wait)
 
             return _Simplify(_gemm_rsr, inline_let=True)
-        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

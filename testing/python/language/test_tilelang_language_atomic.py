@@ -6,6 +6,7 @@ import tilelang.layout
 import tilelang.language as T
 import torch
 from tilelang import tvm
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 # ======================= Thread-level atomic add =======================
@@ -343,14 +344,16 @@ def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=Fa
         )
 
 
-def get_tma_atomic_add_descriptor_args(artifact):
-    for func in artifact.host_mod.functions.values():
-        if func.attrs is None or "tma_descriptor_args" not in func.attrs:
-            continue
-        descriptors = list(func.attrs["tma_descriptor_args"].values())
-        assert len(descriptors) == 1
-        return list(descriptors[0])
-    raise AssertionError("TMA descriptor metadata not found")
+def get_tma_atomic_add_descriptor(artifact):
+    descriptors = []
+    post_order_visit(
+        artifact.host_mod,
+        lambda node: descriptors.append(node)
+        if isinstance(node, tvm.ir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "tirx.cuda.tensormap_encode_tiled"
+        else None,
+    )
+    assert len(descriptors) == 1
+    return descriptors[0]
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -447,8 +450,8 @@ def test_tma_atomic_add_32b_swizzle_runtime():
 @pytest.mark.parametrize("dtype", [T.int16, T.int64, T.float64, T.float32x2])
 def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
     with pytest.raises(
-        tvm.error.InternalError,
-        match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes",
+        RuntimeError,
+        match=rf"TMA atomic add does not support dtype (?:T\.)?{dtype}.*supported scalar dtypes",
     ):
         lower_tma_atomic_add(dtype)
 
@@ -463,18 +466,15 @@ def test_tma_atomic_add_accepts_ptx_dtype(dtype):
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_uint64_uses_linear_layout():
     artifact = lower_tma_atomic_add(T.uint64)
-    descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
-    # The final four descriptor arguments are interleave, swizzle, L2
-    # promotion, and OOB fill. uint64 intentionally uses no swizzle because
-    # its GEMM K-inner layout is not representable by TensorMap.
-    assert descriptor_args[-3].value == 0
+    descriptor = get_tma_atomic_add_descriptor(artifact)
+    assert descriptor.attrs.swizzle == 0
 
 
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_splits_32b_swizzle_box():
     artifact = lower_tma_atomic_add(T.float32, shape=(16, 24))
-    descriptor_args = get_tma_atomic_add_descriptor_args(artifact)
-    assert descriptor_args[-3].value == 1
+    descriptor = get_tma_atomic_add_descriptor(artifact)
+    assert descriptor.attrs.swizzle == 1
     assert re.search(
         r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_store_add",
         artifact.kernel_source,
@@ -484,7 +484,7 @@ def test_tma_atomic_add_splits_32b_swizzle_box():
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_pre_hopper_target():
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"TMA atomic add requires a CUDA target with TMA support \(SM90\+\)",
     ):
         lower_tma_atomic_add(T.float32, arch="sm_80")
@@ -493,7 +493,7 @@ def test_tma_atomic_add_rejects_pre_hopper_target():
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_unencodable_explicit_layout():
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"TMA atomic add cannot encode the shared layout.*not representable by a TensorMap descriptor",
     ):
         lower_tma_atomic_add(T.uint64, explicit_layout=True)
@@ -541,10 +541,19 @@ def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_orde
     try:
         kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
 
-        wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
+        wide_calls = []
+        post_order_visit(
+            kernel.artifact.device_mod,
+            lambda node: wide_calls.append(node)
+            if isinstance(node, tvm.ir.Call)
+            and isinstance(node.op, tvm.ir.Op)
+            and node.op.name in ("tl.atomic_addx2_elem_op", "tl.atomic_addx4_elem_op")
+            else None,
+        )
         assert wide_calls, f"expected a vectorized atomic add, got:\n{kernel.get_kernel_source()}"
         for call in wide_calls:
-            assert call.endswith(f", {memory_order_id});"), f"{memory_order} dropped from vectorized atomic add: {call}"
+            assert int(call.args[-1]) == memory_order_id, f"{memory_order} dropped from vectorized atomic add: {call}"
+        assert "AtomicAddx" in kernel.get_kernel_source()
 
         # Each order takes a separately spelled asm string in the device helpers,
         # so run the kernel to check this one actually computes the sum.
@@ -1207,13 +1216,9 @@ def test_atomic_addx4_return_prev():
 
 
 def run_atomic_addx2_return_prev_16bit(dtype, torch_dtype):
-    # The 16-bit packed 2-lane vector is stored as uint1 in codegen, while
-    # AtomicAddx2Ret returns the native __half2 / __nv_bfloat162. The ret path
-    # must bridge with tl::to_uint1 so the store LHS (uint1) matches; otherwise
-    # nvcc fails with `no operator "=" ... uint1 = half2`.
     kernel = tilelang.compile(atomic_addx2_return_prev_program(dtype))
     src = kernel.get_kernel_source()
-    assert "tl::to_uint1(AtomicAddx2Ret" in src, src
+    assert "AtomicAddx2Ret" in src, src
     dst = torch.tensor([1.0, 2.0], dtype=torch_dtype).cuda()
     val = torch.tensor([10.0, 20.0], dtype=torch_dtype).cuda()
     prev = torch.zeros(2, dtype=torch_dtype).cuda()

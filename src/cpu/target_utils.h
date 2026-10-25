@@ -8,10 +8,12 @@
 
 #include <tvm/target/target.h>
 
+#include "support/base.h"
+
 namespace tvm {
 namespace tl {
 
-bool TargetIsCPU(Target target);
+TILELANG_DLL bool TargetIsCPU(Target target);
 
 } // namespace tl
 } // namespace tvm

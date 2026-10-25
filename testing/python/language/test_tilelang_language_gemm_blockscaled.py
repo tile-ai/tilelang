@@ -13,8 +13,8 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.tvm import tirx
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _gemm_calls(func) -> list[tirx.Call]:
@@ -29,7 +29,7 @@ def _gemm_calls(func) -> list[tirx.Call]:
 
 
 def _annotations(call: tirx.Call) -> dict:
-    return {str(k): v for k, v in call.annotations.items()}
+    return {str(k): v for k, v in call.attrs.dict.items()}
 
 
 def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_scope="shared.tmem", use_2cta=False, **kwargs):
@@ -56,7 +56,7 @@ def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_sco
         sf_b_granularity_k=sf_granularity,
         **kwargs,
     )
-    return call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    return call.op.get_attr("TLOpBuilder")(call.args, call.attrs.dict)
 
 
 @tilelang.testing.requires_cuda
@@ -83,7 +83,7 @@ def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, ex
     impl_class = op._get_implementation_class(inst, target)
     assert issubclass(impl_class, GemmBlockScaledMixin), impl_class
     impl = impl_class(op)
-    assert impl.SFARegion.buffer.name == "SFA" and impl.SFBRegion.buffer.name == "SFB"
+    assert impl.SFARegion.source.name == "SFA" and impl.SFBRegion.source.name == "SFB"
     assert (impl.sf_a_granularity_k, impl.sf_b_granularity_k) == ((128, 128) if c_scope == "shared.tmem" else (16, 16))
 
 
@@ -192,14 +192,14 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.attrs.dict)
     assert isinstance(op, GemmBlockScaled)
     assert isinstance(op, Gemm)
     assert op.is_blockscaled
     # Inherited dense fields and the block-scaled fields both resolve.
     assert (int(op.m), int(op.n), int(op.k)) == (128, 128, 128)
-    assert op.sfaRegion.buffer.name == "sfa"
-    assert op.sfbRegion.buffer.name == "sfb"
+    assert op.sfaRegion.source.name == "sfa"
+    assert op.sfbRegion.source.name == "sfb"
     assert int(op.sfKStart) == 256
     assert op.transB and not op.transA
 
@@ -207,9 +207,9 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
     # and a short call is rejected up front instead of indexing out of range.
     dense_builder = tvm.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 16"):
-        dense_builder(call.args, call.annotations)
+        dense_builder(call.args, call.attrs.dict)
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 12"):
-        dense_builder(call.args[:12], call.annotations)
+        dense_builder(call.args[:12], call.attrs.dict)
 
 
 def test_gemm_blockscaled_records_use_2cta_and_sf_layout():
@@ -308,8 +308,8 @@ def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
     op = call.op.get_attr("TLOpBuilder")(call.args, annotations)
     assert isinstance(op, GemmBlockScaled)
     assert op.isTcgen05
-    assert op.sfaRegion.buffer.name == "sfa"
-    assert op.sfbRegion.buffer.name == "sfb"
+    assert op.sfaRegion.source.name == "sfa"
+    assert op.sfbRegion.source.name == "sfb"
 
 
 @tilelang.testing.requires_cuda
@@ -336,7 +336,7 @@ def test_blockscaled_gemm_without_mbar_requires_explicit_async(gemm_api):
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.attrs.dict)
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
     with target:
         layouts = op.infer_layout(target, 128)
@@ -385,7 +385,7 @@ def test_gemm_blockscaled_waits_implicitly_like_gemm(gemm_api):
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.attrs.dict)
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
     loop_phase = tirx.Var("loop_phase", "int32")
     with target:

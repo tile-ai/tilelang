@@ -8,17 +8,19 @@
 
 #include <tvm/target/target.h>
 
+#include "support/base.h"
+
 namespace tvm {
 namespace tl {
 
-bool TargetIsRocm(Target target);
-bool TargetIsCDNA(Target target);
-bool TargetIsRDNA(Target target);
-bool TargetIsGfx950(Target target);
+TILELANG_DLL bool TargetIsRocm(Target target);
+TILELANG_DLL bool TargetIsCDNA(Target target);
+TILELANG_DLL bool TargetIsRDNA(Target target);
+TILELANG_DLL bool TargetIsGfx950(Target target);
 
-bool TargetRocmHasAsyncCopy(Target target);
-int TargetRocmGetWarpSize(Target target);
-int TargetGetRDNAGeneration(Target target);
+TILELANG_DLL bool TargetRocmHasAsyncCopy(Target target);
+TILELANG_DLL int TargetRocmGetWarpSize(Target target);
+TILELANG_DLL int TargetGetRDNAGeneration(Target target);
 
 } // namespace tl
 } // namespace tvm

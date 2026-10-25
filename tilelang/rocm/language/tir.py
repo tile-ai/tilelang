@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tvm.tirx.op as _tvm_op
+import tilelang._compat.tirx as _tvm_op
 
 from tilelang.language.tir.exports import ROCM_ONLY_TIR_EXPORTS, SHARED_LEGACY_TIR_EXPORTS
 from tilelang.language.tir.ir import _dtype_forward

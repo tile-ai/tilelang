@@ -11,7 +11,8 @@ from tilelang.language.copy_op import (
 )
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region
-from tvm import arith, tirx
+from tilelang._compat.tvm import arith, tirx
+from tilelang._compat.tirx import expr_dtype
 
 __all__ = ["copy", "dual_copy"]
 
@@ -21,7 +22,7 @@ def _get_shape(buf: BufferLikeType) -> list:
     if isinstance(buf, tirx.Buffer):
         return list(buf.shape)
     if isinstance(buf, tirx.BufferLoad):
-        return list(buf.buffer.shape)
+        return list(buf.source.shape)
     if isinstance(buf, tirx.BufferRegion):
         return [r.extent for r in buf.region]
     raise TypeError(f"Cannot get shape from {type(buf)}")
@@ -32,7 +33,7 @@ def _get_allocation_shape(buf: BufferLikeType) -> list:
     if isinstance(buf, tirx.Buffer):
         return list(buf.shape)
     if isinstance(buf, (tirx.BufferLoad, tirx.BufferRegion)):
-        return list(buf.buffer.shape)
+        return list(buf.source.shape)
     raise TypeError(f"Cannot get allocation shape from {type(buf)}")
 
 
@@ -43,7 +44,7 @@ def _is_half(full_dim, half_dim) -> bool:
         half_val = half_dim if isinstance(half_dim, int) else half_dim.value
         return half_val * 2 == full_val
     try:
-        from tvm.ir import structural_equal
+        from tvm_tirx.ir import structural_equal
 
         return structural_equal(half_dim * 2, full_dim)
     except Exception:
@@ -141,9 +142,9 @@ def dual_copy(
     # WARNING: dav-950 does NOT support quant_pre (type conversion) with
     # fixpipe (cc->ub) dual-destination copies. If src and dst dtypes differ, the hardware may
     # silently produce incorrect results.
-    src_dtype = src_region.buffer.dtype
-    dst_dtype = dst_region.buffer.dtype
-    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c":
+    src_dtype = src_region.source.dtype
+    dst_dtype = dst_region.source.dtype
+    if src_dtype != dst_dtype and src_region.source.scope().name == "shared.l0c":
         raise ValueError(
             f"dual_copy: src dtype ({src_dtype}) != dst dtype ({dst_dtype}). "
             "Type conversion during cc->ub dual-destination copy is NOT supported on dav-950. "
@@ -330,17 +331,17 @@ def copy(  # noqa: A001
         value = ann["l0_pitch"]
         if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
-        if isinstance(value, tirx.PrimExpr) and not str(value.dtype).startswith(("int", "uint")):
+        if isinstance(value, tirx.PrimExpr) and not str(expr_dtype(value)).startswith(("int", "uint")):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
         if isinstance(value, (int, tirx.IntImm)) and int(value) <= 0:
             raise ValueError("Ascend T.copy l0_pitch must be positive")
-        src_buf = src if isinstance(src, tirx.Buffer) else src.buffer
-        dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.buffer
+        src_buf = src if isinstance(src, tirx.Buffer) else src.source
+        dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.source
         if not (
-            src_buf.scope() in ("shared.l1", "shared.l1.dyn")
-            and dst_buf.scope() in ("shared.l0a", "shared.l0a.dyn", "shared.l0b", "shared.l0b.dyn")
-            or src_buf.scope() in ("shared.l0c", "shared.l0c.dyn")
-            and dst_buf.scope() in ("shared", "shared.dyn", "global")
+            src_buf.scope().name in ("shared.l1", "shared.l1.dyn")
+            and dst_buf.scope().name in ("shared.l0a", "shared.l0a.dyn", "shared.l0b", "shared.l0b.dyn")
+            or src_buf.scope().name in ("shared.l0c", "shared.l0c.dyn")
+            and dst_buf.scope().name in ("shared", "shared.dyn", "global")
         ):
             raise ValueError("Ascend T.copy l0_pitch is supported only for L1→L0A/L0B and L0C→UB/GM")
 
@@ -365,7 +366,7 @@ def copy(  # noqa: A001
             "reuse a pad value already set via T.ascend_set_copy_pad_value()."
         )
     if pad_value is not None:
-        import tvm.script.ir_builder.tir as tb_tir
+        from tvm_tirx.tirx.script import ir_builder as tb_tir
         from tilelang.ascend.language.dma import ascend_set_copy_pad_value
 
         # Emit SetPadValue as a leading TIR statement (not folded into the copy
@@ -375,13 +376,12 @@ def copy(  # noqa: A001
         # (which runs after AutoSchedule) would leave the two unsynchronized and
         # the copy would read a stale pad register. The copy itself then just
         # reuses the register via data_select. dst is a
-        # Buffer/BufferRegion/BufferLoad; all but a raw Buffer expose .buffer.
         if not isinstance(dst, (tirx.Buffer, tirx.BufferRegion, tirx.BufferLoad)):
             raise TypeError(
                 "T.copy: pad_value requires dst to be a Buffer, BufferRegion, or "
                 f"BufferLoad so the pad fill dtype can be derived, got {type(dst)}."
             )
-        dst_buf = dst.buffer if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
+        dst_buf = dst.source if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
         tb_tir.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(dst_buf.dtype)))
         ann["data_select"] = tirx.IntImm("int32", 1)
     if data_select and "data_select" not in ann:
@@ -402,6 +402,6 @@ def copy(  # noqa: A001
             "handle",
             tirx.op.Op.get("tl.tileop.ascend_copy"),
             *ret.args,
-            annotations=ret.annotations,
+            annotations=dict(ret.attrs.dict) if ret.attrs is not None else None,
         )
     return ret

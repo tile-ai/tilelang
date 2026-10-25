@@ -89,6 +89,26 @@ def test_silent_for_the_pipelined_clear_accum_idiom(capfd):
 # ------------------------------------------------------------ general cases
 
 
+@pytest.mark.parametrize(
+    "begin,clear_iteration,guarded,expected_warning",
+    [(0, 0, False, False), (3, 3, False, False), (0, 1, False, True), (3, 0, False, True), (0, 0, True, True)],
+)
+def test_dynamic_clear_requires_proven_first_iteration_initialization(capfd, begin, clear_iteration, guarded, expected_warning):
+    @T.prim_func
+    def kernel(left: T.Tensor((16, 16), "float32"), right: T.Tensor((16, 16), "float32"), output: T.Tensor((16, 16), "float32")):
+        with T.Kernel(1, threads=32):
+            accumulator = T.alloc_fragment((16, 16), "float32")
+            for iteration in T.serial(begin, begin + 3):
+                if guarded:
+                    if iteration > begin:
+                        T.gemm(left, right, accumulator, clear_accum=iteration == clear_iteration)
+                else:
+                    T.gemm(left, right, accumulator, clear_accum=iteration == clear_iteration)
+            T.copy(accumulator, output)
+
+    assert (MESSAGE in _verify(kernel, capfd)) == expected_warning
+
+
 def _extern_filled_kernel():
     """A shared buffer whose contents come from an opaque extern call."""
 
@@ -352,7 +372,7 @@ def test_aggregates_multiple_uninitialized_buffers(capfd):
 
     assert err.count(MESSAGE) == 1
     assert "2 buffer(s)" in err
-    assert "[1]" in err and "[2]" in err
+    assert "`s`" in err and "`t`" in err
 
 
 def test_reports_each_buffer_once_however_many_reads(capfd):

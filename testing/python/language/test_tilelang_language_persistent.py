@@ -5,7 +5,8 @@ import pytest
 import tilelang.language as language
 import tilelang.testing
 from tilelang import tvm
-from tvm.script.ir_builder import IRBuilder
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx import ir
 
 
 def _make_persistent(domain, wave_size, **options):
@@ -16,19 +17,16 @@ def _make_persistent(domain, wave_size, **options):
         for coordinate in coordinates:
             language.evaluate(coordinate)
 
-    bindings = {}
     loops = []
 
     def collect(statement):
-        if isinstance(statement, tvm.tirx.Bind):
-            bindings[statement.var] = statement.value
-        elif isinstance(statement, tvm.tirx.For):
+        if isinstance(statement, tvm.tirx.For):
             loops.append(statement)
 
     tvm.tirx.stmt_functor.post_order_visit(builder.get(), collect)
     assert len(loops) == 1
     loop = loops[0]
-    return loop, worker, tvm.tirx.stmt_functor.substitute(loop.body, bindings)
+    return loop, worker, loop.body
 
 
 def _trace_persistent(loop, worker, body, wave_size, parameters):
@@ -42,6 +40,11 @@ def _trace_persistent(loop, worker, body, wave_size, parameters):
     def execute(statement, values, coordinates):
         if isinstance(statement, tvm.tirx.SeqStmt):
             return any(execute(child, values, coordinates) for child in statement.seq)
+        if isinstance(statement, ir.Bind):
+            values[statement.var] = evaluate(statement.value, values)
+            return False
+        if isinstance(statement, ir.Break):
+            return True
         if isinstance(statement, tvm.tirx.IfThenElse):
             branch = statement.then_case if evaluate(statement.condition, values) else statement.else_case
             return execute(branch, values, coordinates) if branch is not None else False
@@ -54,8 +57,8 @@ def _trace_persistent(loop, worker, body, wave_size, parameters):
 
     events = []
     for worker_index in range(wave_size):
-        for wave_index in range(evaluate(loop.extent, parameters)):
-            values = {**parameters, worker: worker_index, loop.loop_var: wave_index}
+        for wave_index in range(evaluate(loop.begin, parameters), evaluate(loop.end, parameters), evaluate(loop.step, parameters)):
+            values = {**parameters, worker: worker_index, loop.var: wave_index}
             coordinates = []
             if execute(body, values, coordinates):
                 assert not coordinates
@@ -107,12 +110,14 @@ def test_persistent_guards_body_without_loop_break(wave_size):
     _, _, body = _make_persistent([2, 3, 10], workers, group_size=3, num_stages=2)
 
     def check_no_loop_break(node):
+        assert not isinstance(node, ir.Break)
         if isinstance(node, tvm.tirx.Call):
             assert node.op.name != "tl.loop_break"
 
     tvm.tirx.stmt_functor.post_order_visit(body, check_no_loop_break)
-    assert isinstance(body, tvm.tirx.IfThenElse)
-    assert body.else_case is None
+    guards = [statement for statement in body.seq if isinstance(statement, ir.If)]
+    assert len(guards) == 1
+    assert guards[0].else_case is None
 
 
 @pytest.mark.parametrize("domain", [(2, 4), (3, 10), (2, 3, 10)])

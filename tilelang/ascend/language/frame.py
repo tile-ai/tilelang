@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from tilelang import _ffi_api
-from tvm.ffi import register_object
-from tvm.tirx.script.builder.frame import TIRFrame
+from tvm_ffi import register_object
+from tvm_tirx import ir
+from tvm_tirx.script.ir_builder.frame import StmtFrame
 
 __all__ = [
     "Cube",
@@ -20,7 +21,7 @@ __all__ = [
 
 
 @register_object("tl.CubeFrame")
-class CubeFrame(TIRFrame):
+class CubeFrame(StmtFrame):
     """Frame for Cube (AIC) execution region."""
 
     pass
@@ -32,7 +33,7 @@ def Cube() -> CubeFrame:
 
 
 @register_object("tl.VectorFrame")
-class VectorFrame(TIRFrame):
+class VectorFrame(StmtFrame):
     """Frame for Vector (AIV) execution region.
 
     In Mix mode, provides a subblock ID variable via ``as`` binding::
@@ -79,7 +80,7 @@ def _next_vf_source_index(kind: str) -> int:
 
 
 @register_object("tl.SimtVFFrame")
-class SimtVFFrame(TIRFrame):
+class SimtVFFrame(StmtFrame):
     """Frame for SimtVF (SIMT Vector Fixed) region.
 
     The C++ frame generates the ``SIMT_VF`` block and its thread-extent
@@ -138,12 +139,12 @@ def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFr
 
     source_index = _next_vf_source_index("simtvf")
     return _ffi_api.SimtVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        normalized, int(latency), source_index
+        [ir.const(extent, "int32") for extent in normalized], int(latency), source_index
     )
 
 
 @register_object("tl.SimdVFFrame")
-class SimdVFFrame(TIRFrame):
+class SimdVFFrame(StmtFrame):
     """Frame for SimdVF (SIMD Vector Fragment) region.
 
     This is a register-level SIMD region without thread dimensions. The C++

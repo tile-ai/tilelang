@@ -1,655 +1,323 @@
-"""
-Decouple type cast vectorization constraints.
+"""Decouple vectorized computation from mixed-precision memory transfers.
 
-When a vectorized loop has mixed-precision operations between local and memory
-buffers, the vectorization length would be constrained by the GCD of all
-involved dtypes.
-
-This pass decouples the constraints by inserting a local buffer as an
-intermediate stage, allowing optimal vectorization for both computation and
-memory access.
-
-Mixed-precision is detected by the presence of Cast nodes in the loop body.
-
-Two cases are handled:
-
-Case 1: local → memory (store to memory with mixed types)
----------------------------------------------------------
-Before:
-    for vec in T.vectorized(16):
-        b[vec] = T.cast(a_frag[vec], "float4_e2m1fn")
-
-After:
-    for vec in T.vectorized(16):
-        cast_buf[vec] = T.cast(a_frag[vec], "float4_e2m1fn")  # compute
-    for vec_copy in T.vectorized(16):
-        b[vec_copy] = cast_buf[vec_copy]                      # copy to memory
-
-Case 2: memory → local (load from memory with different dtype)
---------------------------------------------------------------
-Before:
-    for vec in T.vectorized(16):
-        a_frag[vec] = T.cast(b[vec], "float32")
-
-After:
-    for vec_copy in T.vectorized(16):
-        cast_buf[vec_copy] = b[vec_copy]                      # copy from memory
-    for vec in T.vectorized(16):
-        a_frag[vec] = T.cast(cast_buf[vec], "float32")        # compute
-
-The staging cast buffers together with the transformed loops are wrapped in
-an opaque block annotated with `lexical_alloc_scope`, so their allocations
-stay lexically scoped to the use site (see LowerOpaqueBlock / StorageRewrite)
-instead of being hoisted to the kernel entry.
+Staging values live in native local TensorTypes. Their allocation Binds and
+copy/compute loops share a native lexical region, so StorageRewrite retains
+the allocation boundary instead of moving temporary storage to kernel entry.
 """
 
 from __future__ import annotations
 
-from tvm import ir as tvm_ir
-from tvm import tirx
-from tvm.ir import Op
-from tvm.tirx import (
-    AllocBuffer,
-    Buffer,
-    BufferLoad,
-    BufferStore,
-    Call,
-    Cast,
-    For,
-    ForKind,
-    IfThenElse,
-    IntImm,
-    Bind,
-    Evaluate,
-    PrimFunc,
-    PyStmtExprVisitor,
-    SBlock,
-    SBlockRealize,
-    SeqStmt,
-    Stmt,
-    Var,
-)
-from tvm.tirx.stmt_functor import post_order_visit, substitute
-from tvm.tirx.transform import prim_func_pass
+import tvm_ffi
+from tvm_tirx import ir, sym, tirx
+from tvm_tirx.ir.prim import if_then_else
+from tvm_tirx.tirx.transform import function_pass
 
-# Cache the Op for if_then_else to avoid repeated lookups
-_IF_THEN_ELSE_OP = Op.get("tirx.if_then_else")
-
-from tilelang.ir import get_stmt_span, stamp_stmt_spans
-from tilelang.utils.language import (
-    is_fragment,
-    is_global,
-    is_local,
-    is_local_var,
-    is_shared,
-)
+from tilelang._compat.functor import PyStmtExprMutator, PyStmtExprVisitor
+from tilelang._compat.stmt_functor import post_order_visit, substitute
+from tilelang._compat.tensor import TensorView
 
 
-def is_local_buffer(buffer: Buffer) -> bool:
-    """Check if a buffer is local/register-level."""
-    if buffer is None:
-        return False
-    return is_local(buffer) or is_fragment(buffer) or is_local_var(buffer)
+def is_local_buffer(tensor: ir.Expr) -> bool:
+    return isinstance(tensor.ty, tirx.TensorType) and tensor.ty.scope.name.startswith("local")
 
 
-def is_global_or_shared_buffer(buffer: Buffer) -> bool:
-    """Check if a buffer is a global or shared buffer."""
-    if buffer is None:
-        return False
-    return is_global(buffer) or is_shared(buffer)
+def is_global_or_shared_buffer(tensor: ir.Expr) -> bool:
+    return isinstance(tensor.ty, tirx.TensorType) and tensor.ty.scope.name.split(".", 1)[0] in ("global", "shared")
 
 
-# ---------------------------------------------------------------------------
-# Mixed-precision detection: check for Cast nodes in the statement tree
-# ---------------------------------------------------------------------------
-
-
-@tirx.functor.visitor
 class _CastFinder(PyStmtExprVisitor):
-    """Find Cast nodes in a statement, skipping BufferLoad/BufferStore indices.
-
-    A Cast that only appears inside an index expression is not a mixed-precision
-    compute — it's just an index-type conversion — so it should not trigger the
-    decoupling transformation.
-    """
-
     def __init__(self):
         super().__init__()
         self.found = False
 
-    def visit_cast_(self, op: Cast) -> None:
+    def visit_cast_(self, expression):
         self.found = True
-        self.visit_expr(op.value)
 
-    def visit_buffer_store_(self, op: BufferStore) -> None:
-        self.visit_expr(op.value)
+    def visit_tensor_store_(self, statement):
+        self.visit_expr(statement.value)
 
-    def visit_buffer_load_(self, op: BufferLoad) -> None:
-        pass
+    def visit_tensor_load_(self, expression):
+        return None
 
 
-def _has_cast(stmt: Stmt) -> bool:
-    """Check if a statement tree contains any Cast node outside of indices."""
+def _has_cast(statement: ir.Stmt) -> bool:
     finder = _CastFinder()
-    finder.visit_stmt(stmt)
+    finder.visit_stmt(statement)
     return finder.found
 
 
-def _expr_depends_on_var(expr: tirx.PrimExpr, var: Var) -> bool:
-    """Check if an expression references the given Var."""
+def _expr_depends_on_var(expression: ir.Expr, variable: ir.Var) -> bool:
     found = False
 
-    def visitor(node) -> None:
+    def visit(node):
         nonlocal found
-        if isinstance(node, Var) and node.same_as(var):
+        if isinstance(node, ir.Var) and node.same_as(variable):
             found = True
 
-    post_order_visit(expr, visitor)
+    post_order_visit(expression, visit)
     return found
 
 
-# ---------------------------------------------------------------------------
-# Collection: gather all shared/global BufferStores and BufferLoads
-# ---------------------------------------------------------------------------
+def _is_conditional_call(expression: ir.Call) -> bool:
+    return isinstance(expression.op, ir.Op) and expression.op.name == "prim.if_then_else"
 
 
-@tirx.functor.visitor
 class MemoryAccessCollector(PyStmtExprVisitor):
-    """Collect shared/global BufferStore and BufferLoad nodes.
+    """Collect memory transfers on the unconditional value path, not indices."""
 
-    Skips indices traversal so that index expressions (which may contain
-    BufferLoads to index buffers) do not pollute the result.
-
-    BufferLoads in if_then_else conditions are skipped because conditions
-    don't participate in the type-cast compute path.
-
-    BufferLoads whose indices do not depend on ``loop_var`` are skipped
-    because they are scalar accesses (e.g. ``b[0]``) that should remain
-    in the compute loop as broadcasts.
-    """
-
-    def __init__(self, loop_var: Var):
+    def __init__(self, loop_var: ir.Var):
         super().__init__()
         self.loop_var = loop_var
-        self.stores: list[BufferStore] = []
-        self.loads: list[BufferLoad] = []
+        self.stores = []
+        self.loads = []
 
-    def visit_buffer_store_(self, op: BufferStore) -> None:
-        if is_global_or_shared_buffer(op.buffer):
-            self.stores.append(op)
-        # Visit value but skip indices
-        self.visit_expr(op.value)
+    def visit_tensor_store_(self, statement):
+        if is_global_or_shared_buffer(statement.dest):
+            self.stores.append(statement)
+        self.visit_expr(statement.value)
 
-    def visit_buffer_load_(self, op: BufferLoad) -> None:
-        # Skip loads whose indices do not depend on loop_var (scalar access).
-        # Collect ALL qualifying loads (even from the same buffer with different
-        # indices, e.g. a[i] and a[i+32]) so each gets its own cast buffer.
-        if is_global_or_shared_buffer(op.buffer) and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
-            self.loads.append(op)
-        # Skip indices traversal
+    def visit_tensor_load_(self, expression):
+        if is_global_or_shared_buffer(expression.source) and any(
+            _expr_depends_on_var(index, self.loop_var) for index in expression.indices
+        ):
+            self.loads.append(expression)
 
-    def visit_call_(self, op: Call) -> None:
-        if op.op.same_as(_IF_THEN_ELSE_OP):
-            # Skip condition (args[0]), only visit true/false values
-            self.visit_expr(op.args[1])
-            self.visit_expr(op.args[2])
-        else:
-            for arg in op.args:
-                self.visit_expr(arg)
+    def visit_call_(self, expression):
+        if not _is_conditional_call(expression):
+            for argument in expression.args:
+                self.visit_expr(argument)
 
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-
-BindEnv = dict[Var, tirx.PrimExpr]
-
-
-def _substitute_bind_env(node, env: BindEnv):
-    """Apply the current flat-Bind environment to a statement or expression."""
-    result = node
-    for var, replacement in env.items():
-        result = substitute(result, {var: replacement})
-    return result
-
-
-def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
-    """Inline flat Bind statements according to sequential dominance.
-
-    ``Bind`` no longer has a body. A bind in ``SeqStmt`` dominates only later
-    sibling statements, while binds inside a branch or nested loop do not escape
-    that scope. This normalization exposes hidden BufferLoad/Cast nodes to the
-    decoupling analysis without treating Bind as a tree-shaped LetStmt.
-    """
-    if isinstance(stmt, Bind):
-        env[stmt.var] = _substitute_bind_env(stmt.value, env)
-        return None
-
-    if isinstance(stmt, SeqStmt):
-        local_env = dict(env)
-        result: list[Stmt] = []
-        for child in stmt.seq:
-            normalized = _normalize_flat_binds(child, local_env)
-            if normalized is not None:
-                result.append(normalized)
-        if not result:
-            return None
-        normalized = SeqStmt(result) if len(result) > 1 else result[0]
-        stamp_stmt_spans(normalized, get_stmt_span(stmt))
-        return normalized
-
-    if isinstance(stmt, IfThenElse):
-        condition = _substitute_bind_env(stmt.condition, env)
-        then_case = _normalize_flat_binds(stmt.then_case, dict(env))
-        else_case = _normalize_flat_binds(stmt.else_case, dict(env)) if stmt.else_case else None
-        normalized_else = None
-        if stmt.else_case:
-            normalized_else = else_case if else_case is not None else Evaluate(0)
-        normalized_if = IfThenElse(
-            condition,
-            then_case if then_case is not None else Evaluate(0),
-            normalized_else,
-        )
-        stamp_stmt_spans(normalized_if, get_stmt_span(stmt))
-        return normalized_if
-
-    if isinstance(stmt, For):
-        body = _normalize_flat_binds(stmt.body, dict(env))
-        new_for = For(
-            stmt.loop_var,
-            _substitute_bind_env(stmt.min, env),
-            _substitute_bind_env(stmt.extent, env),
-            stmt.kind,
-            body if body is not None else Evaluate(0),
-            stmt.thread_binding,
-            stmt.annotations,
-            _substitute_bind_env(stmt.step, env),
-        )
-        stamp_stmt_spans(new_for, get_stmt_span(stmt))
-        return new_for
-
-    result = _substitute_bind_env(stmt, env)
-    # `substitute` rebuilds any node referencing a bind var, dropping its span.
-    stamp_stmt_spans(result, get_stmt_span(stmt))
-    return result
-
-
-def normalize_flat_binds(stmt: Stmt) -> Stmt:
-    """Return ``stmt`` with dominating flat Bind values substituted into uses."""
-    normalized = _normalize_flat_binds(stmt, {})
-    return normalized if normalized is not None else stmt
-
-
-def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
-    """Combine leading guards without evaluating an inner guard eagerly."""
-    condition: tirx.PrimExpr | None = None
-    while isinstance(stmt, IfThenElse) and stmt.else_case is None:
-        condition = stmt.condition if condition is None else tirx.if_then_else(condition, stmt.condition, tirx.const(False, "bool"))
-        stmt = stmt.then_case
-    return condition, stmt
-
-
-def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
-    """Only repeat guards that cannot observe or modify mutable state."""
-    if condition is None:
+def _can_repeat_expression(expression: ir.Expr | None, *, allow_loads=False) -> bool:
+    if expression is None:
         return True
-    pure = True
+    repeatable = True
 
     def visit(node):
-        nonlocal pure
-        if isinstance(node, BufferLoad):
-            pure = False
-        elif isinstance(node, Call):
-            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
-            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
-                pure = False
+        nonlocal repeatable
+        if isinstance(node, ir.TensorLoad) and not allow_loads:
+            repeatable = False
+        elif isinstance(node, ir.Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, ir.Op) else None
+            if effect is None or int(effect) > ir.CallEffectKind.Pure:
+                repeatable = False
 
-    post_order_visit(condition, visit)
-    return pure
-
-
-# Cast entry: (original buffer, original indices, cast buffer)
-# Each unique (buffer, indices) pair gets its own entry, so that accesses
-# like a[i] and a[i+32] from the same buffer are handled correctly.
-CastEntry = tuple[Buffer, list[tirx.PrimExpr], Buffer]
+    post_order_visit(expression, visit)
+    return repeatable
 
 
-def _buf_indices_match(
-    buf_a: Buffer,
-    indices_a: list[tirx.PrimExpr],
-    buf_b: Buffer,
-    indices_b: list[tirx.PrimExpr],
-) -> bool:
-    """Check if two (buffer, indices) pairs refer to the same access pattern."""
-    if not buf_a.same_as(buf_b):
-        return False
-    if len(indices_a) != len(indices_b):
-        return False
-    return all(tvm_ir.structural_equal(a, b) for a, b in zip(indices_a, indices_b))
+def _normalize_flat_binds(statement: ir.Stmt, environment: dict[ir.Var, ir.Expr]) -> ir.Stmt | None:
+    if isinstance(statement, ir.Bind):
+        value = substitute(statement.value, environment)
+        if isinstance(statement.var.ty, ir.PrimType) and _can_repeat_expression(value, allow_loads=True):
+            environment[statement.var] = value
+            return None
+        return ir.Bind(statement.var, value, loc=statement.loc)
+    if isinstance(statement, ir.SeqStmt):
+        local_environment = dict(environment)
+        normalized = []
+        for child in statement.seq:
+            result = _normalize_flat_binds(child, local_environment)
+            if result is not None:
+                normalized.append(result)
+        return ir.SeqStmt(normalized, loc=statement.loc)
+    if isinstance(statement, ir.If):
+        then_case = _normalize_flat_binds(statement.then_case, dict(environment))
+        else_case = None
+        if statement.else_case is not None:
+            else_case = _normalize_flat_binds(statement.else_case, dict(environment))
+        return ir.If(substitute(statement.condition, environment), then_case, else_case, loc=statement.loc)
+    return substitute(statement, environment)
 
 
-def _find_cast_entry(
-    entries: list[CastEntry],
-    buffer: Buffer,
-    indices: list[tirx.PrimExpr],
-) -> Buffer | None:
-    """Find the cast buffer for a given (buffer, indices) pair, or None."""
-    for orig_buf, orig_indices, cast_buf in entries:
-        if _buf_indices_match(orig_buf, orig_indices, buffer, indices):
-            return cast_buf
+def normalize_flat_binds(statement: ir.Stmt) -> ir.Stmt:
+    """Inline scalar definitions with sequential dominance, preserving effects."""
+    normalized = _normalize_flat_binds(statement, {})
+    return normalized if normalized is not None else statement
+
+
+def _single_statement(statement: ir.Stmt) -> ir.Stmt:
+    while isinstance(statement, ir.SeqStmt) and len(statement.seq) == 1:
+        statement = statement.seq[0]
+    return statement
+
+
+def extract_if_condition(statement: ir.Stmt) -> tuple[ir.Expr | None, ir.Stmt]:
+    condition = None
+    statement = _single_statement(statement)
+    while isinstance(statement, ir.If) and statement.else_case is None:
+        condition = statement.condition if condition is None else if_then_else(condition, statement.condition, ir.const(False))
+        statement = _single_statement(statement.then_case)
+    return condition, statement
+
+
+CastEntry = tuple[ir.Expr, list[ir.Expr], ir.Var]
+
+
+def _buf_indices_match(first_tensor, first_indices, second_tensor, second_indices):
+    return (
+        first_tensor.same_as(second_tensor)
+        and len(first_indices) == len(second_indices)
+        and all(tvm_ffi.structural_equal(first, second) for first, second in zip(first_indices, second_indices))
+    )
+
+
+def _find_cast_entry(entries: list[CastEntry], tensor: ir.Expr, indices: list[ir.Expr]) -> ir.Var | None:
+    for original_tensor, original_indices, temporary in entries:
+        if _buf_indices_match(original_tensor, original_indices, tensor, indices):
+            return temporary
     return None
 
 
-# ---------------------------------------------------------------------------
-# Mutator
-# ---------------------------------------------------------------------------
-
-
-@tirx.functor.mutator
-class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
-    """Mutator that decouples type cast vectorization constraints.
-
-    This mutator transforms vectorized loops that have mixed-precision
-    operations (detected by the presence of Cast nodes) by inserting local
-    cache buffers as intermediate stages.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._var_counter = 0
-
-    def _make_unique_name(self, base: str) -> str:
-        """Generate a unique name with incrementing counter."""
-        name = f"{base}"
-        if self._var_counter > 0:
-            name += f"_{self._var_counter}"
-        self._var_counter += 1
-        return name
-
-    def _make_for(self, original: For, new_body: Stmt) -> For:
-        """Create a new For node with updated body, preserving other attributes."""
-        new_for = For(
-            original.loop_var,
-            original.min,
-            original.extent,
-            original.kind,
-            new_body,
-            original.thread_binding,
-            original.annotations,
-            original.step,
-        )
-        stamp_stmt_spans(new_for, get_stmt_span(original))
-        return new_for
-
-    # ----- entry point for each For loop -----
-
-    def visit_for_(self, op: For) -> Stmt:
-        """Visit For nodes, transforming vectorized loops with mixed-type stores."""
-        # Recursively visit body to handle nested loops
-        new_body = self.visit_stmt(op.body)
-
-        # Only transform unit-step vectorized loops with static positive extent.
-        if op.kind != ForKind.VECTORIZED:
-            return self._make_for(op, new_body) if new_body is not op.body else op
-        if not isinstance(op.extent, IntImm) or op.extent.value <= 0:
-            return self._make_for(op, new_body) if new_body is not op.body else op
-        if op.step is not None and (not isinstance(op.step, IntImm) or op.step.value != 1):
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Normalize flat Bind statements before all analysis. Bind is a
-        # sequential SSA definition, not a tree-shaped LetStmt with a body.
-        normalized_body = normalize_flat_binds(new_body)
-
-        # Check if the normalized body has any Cast nodes.
-        if not _has_cast(normalized_body):
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Decoupling splits a single BufferStore value edge. Only leading
-        # guards can apply to every generated copy stage; compound statements
-        # and opaque Evaluate intrinsics have no such common store edge.
-        condition, root_stmt = extract_if_condition(normalized_body)
-        # Copy-in, compute, and copy-out each evaluate the guard. A memory
-        # read or effectful call need not return the same value at each stage.
-        if not isinstance(root_stmt, BufferStore) or not _can_repeat_condition(condition):
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        # Collect all shared/global stores and loads
-        collector = MemoryAccessCollector(op.loop_var)
-        collector.visit_stmt(normalized_body)
-
-        if not collector.stores and not collector.loads:
-            # Cast exists but no memory access → nothing to decouple
-            return self._make_for(op, new_body) if new_body is not op.body else op
-
-        extent = op.extent
-
-        # Create cast entries for stores and loads
-        store_entries = self._create_cast_entries(collector.stores, extent)
-        # For loads, skip those already covered by a store entry (read-modify-write)
-        # by matching (buffer, indices). Loads with different indices from the same
-        # buffer still get their own cast buffer.
-        uncovered_loads = [ld for ld in collector.loads if _find_cast_entry(store_entries, ld.buffer, list(ld.indices)) is None]
-        load_entries = self._create_cast_entries(uncovered_loads, extent)
-
-        # Build copy-from-memory loops (before compute)
-        # For read-modify-write, reuse the store-side cast buffer for copy-from.
-        rmw_entries = [
-            entry
-            for entry in store_entries
-            if any(_buf_indices_match(entry[0], entry[1], ld.buffer, list(ld.indices)) for ld in collector.loads)
-        ]
-        copy_from_loops = self._create_copy_loops(
-            op,
-            load_entries + rmw_entries,
-            direction="from_memory",
-            condition=condition,
-        )
-
-        # Build compute loop: replace stores and loads in the normalized body
-        # so that indices match what the collector saw (Bind vars are expanded).
-        # For RMW (a load whose (buffer, indices) matches a store entry), the load
-        # must be rewritten to the *same* cast buffer the store writes to, so we
-        # feed both store and load entries into the load-replacement table.
-        load_replacement_entries = store_entries + load_entries
-        compute_body = normalized_body
-        if store_entries or load_entries:
-            compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var - op.min)
-        compute_loop = self._make_vectorized_loop(op, compute_body)
-
-        # Build copy-to-memory loops (after compute)
-        copy_to_loops = self._create_copy_loops(
-            op,
-            store_entries,
-            direction="to_memory",
-            condition=condition,
-        )
-
-        # Combine: copy-from → compute → copy-to
-        all_stmts = copy_from_loops + [compute_loop] + copy_to_loops
-        result: Stmt = SeqStmt(all_stmts) if len(all_stmts) > 1 else all_stmts[0]
-
-        # Wrap with buffer declarations and allocations
-        result = self._wrap_with_allocations(result, store_entries + load_entries)
-
-        # The replacement subtree inherits the original loop's span. Nodes
-        # already stamped above (compute loop, normalized body) keep their own
-        # spans; the staging copies and the alloc-scope wrapper get stamped too.
-        stamp_stmt_spans(result, get_stmt_span(op))
-        return result
-
-    # ----- helpers -----
-
-    def _create_cast_entries(self, accesses: list[BufferStore | BufferLoad], extent: tirx.PrimExpr) -> list[CastEntry]:
-        """Create local cast buffers for memory accesses.
-
-        Each unique (buffer, indices) pair gets its own cast buffer.
-        """
-        entries: list[CastEntry] = []
-
-        for access in accesses:
-            indices = list(access.indices)
-            if _find_cast_entry(entries, access.buffer, indices) is not None:
-                continue
-
-            cache_name = self._make_unique_name(f"{access.buffer.name}_local_cast")
-            cast_buffer = tirx.decl_buffer(
-                shape=(extent,),
-                dtype=access.buffer.dtype,
-                name=cache_name,
-                scope="local",
-            )
-            entries.append((access.buffer, indices, cast_buffer))
-
-        return entries
-
-    def _make_vectorized_loop(self, original: For, body: Stmt) -> For:
-        """Create a vectorized For loop based on the original."""
-        new_for = For(
-            original.loop_var,
-            original.min,
-            original.extent,
-            ForKind.VECTORIZED,
-            body,
-            original.thread_binding,
-            original.annotations,
-            original.step,
-        )
-        stamp_stmt_spans(new_for, get_stmt_span(original))
-        return new_for
-
-    def _create_copy_loops(
-        self,
-        op: For,
-        entries: list[CastEntry],
-        direction: str,
-        condition: tirx.PrimExpr | None = None,
-    ) -> list[For]:
-        """Create vectorized copy loops between memory and cast buffers.
-
-        direction: "to_memory" (cast → memory) or "from_memory" (memory → cast).
-        """
-        copy_loops: list[For] = []
-
-        for orig_buffer, orig_indices, cast_buffer in entries:
-            # vectorized loop only has one iteration variable,
-            # so we use the same name for the copy variable
-            copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
-
-            # Substitute loop_var with copy_var in original indices
-            new_indices = [substitute(idx, {op.loop_var: copy_var}) for idx in orig_indices]
-            ordinal = copy_var - op.min
-
-            if direction == "to_memory":
-                copy_store: Stmt = BufferStore(
-                    orig_buffer,
-                    BufferLoad(cast_buffer, [ordinal]),
-                    new_indices,
-                )
-            else:
-                copy_store = BufferStore(
-                    cast_buffer,
-                    BufferLoad(orig_buffer, new_indices),
-                    [ordinal],
-                )
-
-            # Wrap with condition if present
-            if condition is not None:
-                new_condition = substitute(condition, {op.loop_var: copy_var})
-                copy_store = IfThenElse(new_condition, copy_store, None)
-
-            copy_loop = For(
-                copy_var,
-                op.min,
-                op.extent,
-                ForKind.VECTORIZED,
-                copy_store,
-                op.thread_binding,
-                op.annotations,
-                op.step,
-            )
-            copy_loops.append(copy_loop)
-
-        return copy_loops
-
-    def _wrap_with_allocations(self, body: Stmt, entries: list[CastEntry]) -> Stmt:
-        """Wrap statement with buffer allocations inside a lexical alloc scope.
-
-        The cast buffers are tiny per-site staging arrays. Placing them in an
-        opaque block annotated with `lexical_alloc_scope` makes LowerOpaqueBlock
-        materialize a scope boundary, so StorageRewrite keeps the allocations
-        next to their use site instead of hoisting them to the kernel entry,
-        and codegen emits a `{ ... }` scope with the declarations inside.
-        """
-        if not entries:
-            return body
-        alloc_stmts: list[Stmt] = [AllocBuffer(cast_buffer) for _, _, cast_buffer in entries]
-        alloc_stmts.append(body)
-        block = SBlock(
-            iter_vars=[],
-            reads=[],
-            writes=[],
-            name_hint="decoupled_cast",
-            body=SeqStmt(alloc_stmts),
-            annotations={"lexical_alloc_scope": 1},
-        )
-        return SBlockRealize([], True, block)
-
-    def _replace_access(self, stmt: Stmt, store_entries: list[CastEntry], load_entries: list[CastEntry], ordinal: tirx.PrimExpr) -> Stmt:
-        """Replace memory accesses with cast buffer accesses."""
-        replacer = AccessReplacer(store_entries, load_entries, ordinal)
-        return replacer.visit_stmt(stmt)
-
-
-@tirx.functor.mutator
-class AccessReplacer(tirx.PyStmtExprMutator):
-    """Mutator to replace memory BufferStores/BufferLoads with cast buffer accesses.
-
-    Matches by both buffer and indices (structural equality) so that accesses
-    like a[i] and a[i+32] from the same buffer map to different cast buffers.
-    """
-
-    def __init__(self, store_entries: list[CastEntry], load_entries: list[CastEntry], ordinal: tirx.PrimExpr):
+class AccessReplacer(PyStmtExprMutator):
+    def __init__(self, store_entries, load_entries, ordinal):
         super().__init__()
         self.store_entries = store_entries
         self.load_entries = load_entries
         self.ordinal = ordinal
 
-    def visit_buffer_store_(self, op: BufferStore) -> Stmt:
-        new_value = self.visit_expr(op.value)
-        cast_buf = _find_cast_entry(self.store_entries, op.buffer, list(op.indices))
-        if cast_buf is not None:
-            return BufferStore(cast_buf, new_value, [self.ordinal])
-        if new_value is not op.value:
-            return BufferStore(op.buffer, new_value, list(op.indices))
-        return op
+    def visit_tensor_store_(self, statement):
+        value = self.visit_expr(statement.value)
+        temporary = _find_cast_entry(self.store_entries, statement.dest, statement.indices)
+        if temporary is not None:
+            return ir.TensorStore(temporary, [self.ordinal], value, loc=statement.loc)
+        return ir.TensorStore(statement.dest, statement.indices, value, loc=statement.loc)
 
-    def visit_buffer_load_(self, op: BufferLoad) -> tirx.PrimExpr:
-        cast_buf = _find_cast_entry(self.load_entries, op.buffer, list(op.indices))
-        if cast_buf is not None:
-            return BufferLoad(cast_buf, [self.ordinal])
-        return op
+    def visit_tensor_load_(self, expression):
+        temporary = _find_cast_entry(self.load_entries, expression.source, expression.indices)
+        if temporary is not None:
+            return ir.TensorLoad(temporary, [self.ordinal], loc=expression.loc)
+        return expression
+
+    def visit_call_(self, expression):
+        if _is_conditional_call(expression):
+            return expression
+        return super().visit_call_(expression)
+
+
+class DecoupleTypeCastMutator(PyStmtExprMutator):
+    def __init__(self):
+        super().__init__()
+        self._var_counter = 0
+        self._analyzer = sym.Analyzer()
+
+    def _make_unique_name(self, base):
+        name = f"{base}_{self._var_counter}" if self._var_counter else base
+        self._var_counter += 1
+        return name
+
+    @staticmethod
+    def _make_for(original, body):
+        if body.same_as(original.body):
+            return original
+        return ir.For(
+            original.var,
+            original.begin,
+            original.end,
+            original.step,
+            original.kind,
+            body,
+            original.annotations,
+            loc=original.loc,
+        )
+
+    def visit_for_(self, statement):
+        body = self.visit_stmt(statement.body)
+        unchanged = self._make_for(statement, body)
+        if statement.kind != ir.ForKind.VECTORIZED or not isinstance(statement.step, ir.IntImm) or int(statement.step) != 1:
+            return unchanged
+        extent = self._analyzer.simplify(statement.end - statement.begin)
+        if not isinstance(extent, ir.IntImm) or int(extent) <= 0:
+            return unchanged
+        normalized = normalize_flat_binds(body)
+        if not _has_cast(normalized):
+            return unchanged
+        condition, root = extract_if_condition(normalized)
+        if not isinstance(root, ir.TensorStore) or not _can_repeat_expression(condition):
+            return unchanged
+
+        collector = MemoryAccessCollector(statement.var)
+        collector.visit_stmt(root)
+        if not collector.stores and not collector.loads:
+            return unchanged
+
+        store_entries = self._create_cast_entries(collector.stores, extent, statement.loc)
+        uncovered_loads = [load for load in collector.loads if _find_cast_entry(store_entries, load.source, load.indices) is None]
+        load_entries = self._create_cast_entries(uncovered_loads, extent, statement.loc)
+        read_modify_write = [
+            entry
+            for entry in store_entries
+            if any(_buf_indices_match(entry[0], entry[1], load.source, load.indices) for load in collector.loads)
+        ]
+        copy_from = self._create_copy_loops(statement, load_entries + read_modify_write, to_memory=False, condition=condition)
+        compute_body = AccessReplacer(store_entries, load_entries + read_modify_write, statement.var - statement.begin).visit_stmt(
+            normalized
+        )
+        compute = self._make_for(statement, compute_body)
+        copy_to = self._create_copy_loops(statement, store_entries, to_memory=True, condition=condition)
+        definitions = [TensorView(temporary).allocate(loc=statement.loc) for _, _, temporary in store_entries + load_entries]
+        return ir.RegionStmt(
+            "tirx.scope",
+            [],
+            [],
+            None,
+            ir.SeqStmt([*definitions, *copy_from, compute, *copy_to], loc=statement.loc),
+            loc=statement.loc,
+        )
+
+    def _create_cast_entries(self, accesses, extent, loc):
+        entries = []
+        for access in accesses:
+            tensor = access.dest if isinstance(access, ir.TensorStore) else access.source
+            indices = list(access.indices)
+            if _find_cast_entry(entries, tensor, indices) is not None:
+                continue
+            name = tensor.name if isinstance(tensor, ir.Var) else "tensor"
+            temporary = TensorView.create(
+                self._make_unique_name(f"{name}_local_cast"),
+                [extent],
+                tensor.ty.dtype,
+                scope="local",
+                loc=loc,
+            ).tensor
+            entries.append((tensor, indices, temporary))
+        return entries
+
+    @staticmethod
+    def _create_copy_loops(original, entries, *, to_memory, condition):
+        loops = []
+        for tensor, indices, temporary in entries:
+            variable = ir.Var(f"{original.var.name}_copy", original.var.ty, loc=original.loc)
+            new_indices = [substitute(index, {original.var: variable}) for index in indices]
+            ordinal = variable - original.begin
+            if to_memory:
+                body = ir.TensorStore(tensor, new_indices, ir.TensorLoad(temporary, [ordinal], loc=original.loc), loc=original.loc)
+            else:
+                body = ir.TensorStore(temporary, [ordinal], ir.TensorLoad(tensor, new_indices, loc=original.loc), loc=original.loc)
+            if condition is not None:
+                body = ir.If(substitute(condition, {original.var: variable}), body, None, loc=original.loc)
+            loops.append(
+                ir.For(
+                    variable,
+                    original.begin,
+                    original.end,
+                    original.step,
+                    ir.ForKind.VECTORIZED,
+                    body,
+                    original.annotations,
+                    loc=original.loc,
+                )
+            )
+        return loops
 
 
 def DecoupleTypeCast():
-    """Create a TVM pass that decouples type cast vectorization constraints.
+    """Split mixed-precision vector loops before native vector/storage lowering."""
 
-    This pass inserts a local buffer as an intermediate stage for vectorized
-    loops where the body contains Cast nodes (mixed-precision operations).
+    def pass_fn(function, mod, ctx):
+        if function.body is None:
+            return function
+        body = DecoupleTypeCastMutator().visit_stmt(function.body)
+        return function.with_body(body, loc=function.loc)
 
-    This allows optimal vectorization for both computation and memory access.
-
-    Note:
-        This pass must be applied before VectorizeLoop and StorageRewrite passes,
-        while the IR still uses BufferLoad/BufferStore (not tvm_access_ptr).
-
-    Returns:
-        A TVM PrimFunc pass.
-    """
-
-    def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        mutator = DecoupleTypeCastMutator()
-        new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body, span=func.span)
-
-    return prim_func_pass(pass_fn, opt_level=0, name="tl.DecoupleTypeCast")
+    return function_pass(pass_fn, opt_level=0, name="tl.DecoupleTypeCast")

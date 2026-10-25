@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import expr_dtype
 
 
 def _to_int32(v):
@@ -41,16 +42,14 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     dtype : str, optional
         Copy element dtype (one of int8/uint8/int16/uint16/float16/bfloat16/
         int32/uint32/float32). Required when ``value`` is a Python literal;
-        for a typed PrimExpr it defaults to ``value.dtype``.
+        for a typed PrimExpr it defaults to ``value.ty.dtype``.
 
     Example
     -------
     >>> T.ascend_set_copy_pad_value(0.0, dtype="float32")
     """
-    if dtype is None:
-        inferred = getattr(value, "dtype", None)
-        if isinstance(inferred, str):
-            dtype = inferred
+    if dtype is None and isinstance(value, tirx.PrimExpr):
+        dtype = str(expr_dtype(value))
     if dtype is None:
         raise ValueError('ascend_set_copy_pad_value requires dtype for Python literals; use dtype="float32" or pass a typed PrimExpr.')
     if dtype not in _PAD_VALUE_SUPPORTED_DTYPES:
@@ -63,7 +62,7 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
 
 def ascend_nd2nz_post_copy(dst, src, rows, cols, full_rows, dst_dtype: str) -> None:
     """Ascend ND->NZ post-copy from UB scratch to L1 with NZ pointer correction."""
-    from tvm.tirx import BufferLoad
+    from tilelang._compat.tirx import BufferLoad
     from tilelang.language.builtin import access_ptr
 
     if isinstance(dst, BufferLoad):

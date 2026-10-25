@@ -6,14 +6,16 @@
 #ifndef TVM_TL_ASCEND_TARGET_UTILS_H_
 #define TVM_TL_ASCEND_TARGET_UTILS_H_
 
-#include <tvm/runtime/data_type.h>
+#include <tvm/ir/type.h>
 #include <tvm/target/target.h>
+
+#include "support/base.h"
 
 namespace tvm {
 namespace tl {
 
-bool TargetIsAscend(Target target);
-bool IsAscendVectorizableFP8(DataType dtype);
+TILELANG_DLL bool TargetIsAscend(Target target);
+TILELANG_DLL bool IsAscendVectorizableFP8(PrimType dtype);
 
 } // namespace tl
 } // namespace tvm

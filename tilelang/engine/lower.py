@@ -6,9 +6,9 @@ from collections.abc import Callable
 from contextlib import nullcontext
 import tilelang.transform
 from tilelang import tvm as tvm
-from tvm import tirx
-from tvm.ir import CallingConv
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx.ir import CallingConv
+from tvm_tirx.target import Target
 from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.module import BackendContext, create_backend_context
@@ -55,8 +55,8 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tirx.PrimFunc], bool]:
 def extrac_params(func: tirx.PrimFunc) -> list[KernelParam]:
     tensor_types = []
     for var in func.params:
-        if var in func.buffer_map:
-            tensor_types.append(KernelParam.from_buffer(func.buffer_map[var]))
+        if isinstance(var, tirx.Buffer):
+            tensor_types.append(KernelParam.from_buffer(var))
         else:
             tensor_types.append(KernelParam.from_var(var))
     return tensor_types
@@ -80,7 +80,6 @@ def host_codegen(
     host_mod = tirx.transform.FP8StorageLegalize()(host_mod)
     host_mod = tirx.transform.BF16StorageLegalize()(host_mod)
     host_mod = tirx.transform.LowerTVMBuiltin()(host_mod)
-    host_mod = tirx.transform.LowerCustomDatatypes()(host_mod)
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
@@ -91,7 +90,7 @@ def host_codegen(
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.Simplify()(device_mod)
+    device_mod = tirx.transform.StmtSimplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
     return device_mod
 
@@ -187,18 +186,37 @@ def _lower_with_context_impl(
         runtime_only=runtime_only,
     )
 
-    codegen_mod = device_codegen(device_mod, context) if enable_device_compile else device_codegen_without_compile(device_mod, context)
-    kernel_source = codegen_mod.inspect_source()
+    if enable_host_codegen and target.kind.name == "c" and target_host.kind.name == "c":
+        combined = tvm.IRModule({**dict(host_mod.functions), **dict(device_mod.functions)}, attrs=host_mod.attrs)
+        runtime_mod = host_codegen(_prepare_device_codegen_mod(combined), context)
+        return CompiledArtifact(
+            host_mod,
+            device_mod,
+            params,
+            runtime_mod.inspect_source(),
+            rt_mod=runtime_mod,
+            target=target,
+            target_host=target_host,
+        )
+
+    codegen_mod = None
+    kernel_source = ""
+    if device_mod.functions:
+        codegen_mod = device_codegen(device_mod, context) if enable_device_compile else device_codegen_without_compile(device_mod, context)
+        kernel_source = codegen_mod.inspect_source()
 
     if enable_host_codegen:
-        host_mod = host_codegen(host_mod, context)
-        host_mod.import_module(codegen_mod)
+        runtime_mod = host_codegen(host_mod, context)
+        if codegen_mod is not None:
+            runtime_mod.import_module(codegen_mod)
+        elif context.module.name == "cpu":
+            kernel_source = runtime_mod.inspect_source()
         return CompiledArtifact(
             host_mod,
             device_mod,
             params,
             kernel_source,
-            rt_mod=host_mod,
+            rt_mod=runtime_mod,
             target=target,
             target_host=target_host,
         )

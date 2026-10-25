@@ -160,8 +160,8 @@ GPU and set it in the target config or use the corresponding target tag—for ex
 | `sm_90a` | `nvidia/nvidia-h100` (DPX profile) |
 | `sm_100a` | `nvidia/nvidia-b100` |
 
-Refer to NVIDIA’s [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) page or the TVM source
-(`3rdparty/tvm/src/target/tag.cc`) for the latest mapping between devices and compute capabilities.
+Refer to NVIDIA’s [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) page or the standalone TIRx source
+(`python/tvm_tirx/backend/cuda/target_tags.py` in the dependency checkout) for the mapping between devices and compute capabilities.
 
 ## Creating targets programmatically
 

@@ -18,7 +18,6 @@ N = 1024
 
 
 def _make_data_integrity_kernel():
-
     @tilelang.jit(
         pass_configs={
             PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True,
@@ -49,7 +48,6 @@ def _make_data_integrity_kernel():
 
 
 def _make_no_overlap_kernel(disable_reuse: bool):
-
     @tilelang.jit(
         pass_configs={
             PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: disable_reuse,
@@ -128,10 +126,10 @@ def test_disable_reuse_no_overlap():
         """Extract merged shared-memory offsets from generated code."""
         # Alias-preserving lowering emits:
         #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
-        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
+        alias_pattern = r"\b\w+\s*=\s*[^;\n]*\(\(char\*\)merged_shared_dyn_ptr\)\s*\+\s*(?:\(int64_t\))?(\d+)"
         # Direct merged-buffer lowering emits access patterns such as:
         #   buf_dyn_shmem)[1024])
-        direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
+        direct_pattern = r"merged_shared_dyn_ptr\)\[(\d+)\]"
         offsets = {int(m) for m in re.findall(alias_pattern, src)}
         offsets.update(int(m) for m in re.findall(direct_pattern, src))
         return sorted(offsets)

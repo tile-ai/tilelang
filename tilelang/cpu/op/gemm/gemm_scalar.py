@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang import language as T
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 
 
 GEMM_INST_SCALAR = "cpu.scalar"
@@ -25,21 +25,21 @@ class GemmScalar(GemmBase):
         mbar_phase_expr: tirx.PrimExpr | None = None,
     ):
         M, N, K = self.M, self.N, self.K
-        A_buf = self.ARegion.buffer
-        B_buf = self.BRegion.buffer
-        C_buf = self.CRegion.buffer
+        A_buf = self.ARegion.source
+        B_buf = self.BRegion.source
+        C_buf = self.CRegion.source
         trans_A = self.trans_A
         trans_B = self.trans_B
         clear_accum = self.clear_accum
         accum_dtype = self.accum_dtype
 
         # Region offsets for strided gemm (e.g. T.gemm(A[0:64, :], B, C))
-        a0 = self.ARegion.region[0].min
-        a1 = self.ARegion.region[1].min
-        b0 = self.BRegion.region[0].min
-        b1 = self.BRegion.region[1].min
-        c0 = self.CRegion.region[0].min
-        c1 = self.CRegion.region[1].min
+        a0 = self.ARegion.region[0].begin
+        a1 = self.ARegion.region[1].begin
+        b0 = self.BRegion.region[0].begin
+        b1 = self.BRegion.region[1].begin
+        c0 = self.CRegion.region[0].begin
+        c1 = self.CRegion.region[1].begin
 
         @T.prim_func
         def _gemm_scalar() -> None:

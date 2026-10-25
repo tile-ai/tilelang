@@ -1,672 +1,535 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+#include "common/assume.h"
+#include "common/attr.h"
+#include "compat/expr.h"
+#include "compat/visit.h"
+#include "cuda/runtime.h"
+#include "op/builtin.h"
 
-/*!
- * \file split_host_device.cc
- * \brief Split device function from host.
- */
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/global_var_supply.h>
-#include <tvm/ir/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/target/target.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
 
-#include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include "../op/builtin.h"
-#include "common/assume.h"
-#include "common/attr.h"
-#include "tir/analysis/var_use_def_analysis.h"
-#include <tvm/tirx/stmt.h>
+namespace tvm::tl {
 
-namespace tvm {
-namespace tl {
-using namespace ffi;
-using namespace tirx;
+tvm::transform::Pass AnnotateDeviceRegions();
 
-// This pass traverses the AST, splits the target function into host and device
-// parts, and preserves assumptions on every side that can evaluate them.
+namespace {
 
-// 1. Traverse AST and collect all optimizer assumptions into host_assumes_.
-// 2. Until the first AttrStmtNode with tvm::attr::kTarget.
-// 3. Call SplitDeviceFunc, which will create a new device function and replace
-//    the original body with a call to that function. Host-evaluable runtime
-//    checks found in the device body are attached to that host-side call.
-class HostDeviceSplitter : public tirx::StmtMutator {
+using VariableSet = std::unordered_set<const VarNode *>;
+
+bool IsHostEvaluable(const PrimExpr &condition, const VariableSet &parameters) {
+  bool valid = condition.ty() == PrimType::Bool();
+  PostOrderVisit(condition, [&](const ffi::ObjectRef &object) {
+    if (const auto *variable = object.as<VarNode>()) {
+      valid &= variable->ty.as<PrimTypeNode>() && parameters.count(variable);
+    } else if (object.as<CallNode>() || object.as<TensorLoadNode>()) {
+      valid = false;
+    }
+  });
+  return valid;
+}
+
+AssertStmt MakeRuntimeCheck(const RegionStmtNode *node) {
+  auto condition =
+      node->attrs.GetAttr<PrimExpr>(attr::kAssumeRequiresRuntimeCheck).value();
+  auto message = node->attrs.GetAttr<ffi::String>("tl.assume_message")
+                     .value_or("Assumption failed");
+  return AssertStmt(condition, StringImm("RuntimeError"), {StringImm(message)},
+                    node->loc);
+}
+
+class DeviceBoundaryCollector : public tirx::StmtExprMutator {
 public:
-  explicit HostDeviceSplitter(IRModule *device_mod,
-                              std::function<GlobalVar()> var_supply)
-      : device_mod_(device_mod), var_supply_(std::move(var_supply)) {}
+  explicit DeviceBoundaryCollector(const VariableSet &parameters)
+      : parameters_(parameters) {}
 
-  void SetNonRestrictParams(const Array<tirx::Var> &params) {
-    for (auto param : params) {
-      non_restrict_params_.push_back(param);
-    }
-  }
-
-  void SetClusterDims(Array<Integer> cluster_dims) {
-    cluster_dims_ = std::move(cluster_dims);
-  }
-
-  void SetSmemAlignmentMap(Map<String, IntImm> smem_alignment_map) {
-    smem_alignment_map_ = std::move(smem_alignment_map);
-  }
-
-  void SetHostFuncSignature(const tirx::PrimFunc &func) {
-    host_buffer_map_ = func->buffer_map;
-  }
-
-  void SetSourceSpan(const Span &span) { source_span_ = span; }
-
-  tirx::Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
-    if (op->attr_key == tvm::attr::kTarget) {
-      found_device_region_ = true;
-      auto device_target = op->node.as<tvm::Target>().value().WithoutHost();
-      return SplitDeviceFunc(op->body, device_target);
-    } else if (op->attr_key == tirx::attr::tilelang_assume) {
-      // NOTE(chaofan): the assumes collected here must be in host-side.
-      //    This is because when the collector reaches the split region,
-      //    it will start to split and return. For safety, we add a check here.
-      ICHECK(!found_device_region_)
-          << "Assumes collection should not be in device region.";
-      // We first push back the outside assume, then visit the child.
-      // So when moving assumes to device side, we need to do the building
-      // process in a reverse order.
-      host_assumes_.push_back(GetRef<tirx::AttrStmt>(op));
-    }
-    return tirx::StmtMutator::VisitStmt_(op);
-  }
-
-  tirx::Stmt VisitStmt_(const tirx::EvaluateNode *op) final {
-    auto stmt = GetRef<tirx::Stmt>(op);
-    // There should be no assume in evaluate form after InjectAssumes.
-    ICHECK(!IsAssumeInEvaluateForm(stmt))
-        << "Unexpected assume in evaluate form. Please run InjectAssumes pass "
-           "first.";
-    return tirx::StmtMutator::VisitStmt_(op);
-  }
-
-  tirx::Stmt ForceSplit(tirx::Stmt body, tvm::Target device_target) {
-    return SplitDeviceFunc(std::move(body), std::move(device_target));
-  }
-
-  bool found_device_region() const { return found_device_region_; }
+  ffi::Array<Stmt> runtime_checks;
+  ffi::Map<ffi::String, ffi::Any> function_attrs;
+  ffi::Optional<Call> l2_window;
 
 private:
-  struct RuntimeCheckInfo {
-    PrimExpr condition;
-    StringImm message;
-    Span span;
-  };
-
-  class HostEvaluableConditionChecker : public tirx::StmtExprVisitor {
-  public:
-    explicit HostEvaluableConditionChecker(const Array<tirx::Var> &params) {
-      for (const tirx::Var &param : params) {
-        if (!param->dtype.is_handle()) {
-          params_.insert(param);
-        }
-      }
+  ffi::UnchangedOr<Stmt> Mutate_(const EvaluateNode *node,
+                                 ffi::InplaceMode mode) final {
+    const auto *call = node->value.as<CallNode>();
+    const auto *operation = call ? call->op.as<OpNode>() : nullptr;
+    if (!operation || operation->name != "tl.l2_persistent_hint") {
+      return StmtExprMutator::Mutate_(node, mode);
     }
-
-    bool Check(const PrimExpr &condition) {
-      if (!condition->dtype.is_bool() || condition->dtype.lanes() != 1) {
-        return false;
-      }
-      VisitExpr(condition);
-      return is_host_evaluable_;
+    TVM_FFI_CHECK(conditional_depth_ == 0, ValueError)
+        << "L2 persistence must be configured unconditionally at kernel entry";
+    auto tensor = call->args[0].as_or_throw<tirx::TensorVar>();
+    for (const Var &variable : UndefinedVars(call->args)) {
+      TVM_FFI_CHECK(parameters_.count(variable.get()), ValueError)
+          << "L2 persistence must reference host-visible global storage and "
+             "shapes";
     }
-
-  private:
-    void VisitExpr_(const tirx::VarNode *op) final {
-      if (!params_.count(GetRef<tirx::Var>(op))) {
-        is_host_evaluable_ = false;
-      }
-    }
-
-    void VisitExpr_(const tirx::BufferLoadNode *op) final {
-      is_host_evaluable_ = false;
-    }
-
-    void VisitExpr_(const tirx::CallNode *op) final {
-      // Device intrinsics and memory-dependent calls cannot be evaluated by
-      // the host launcher. Keep this deliberately conservative; ordinary
-      // shape constraints use arithmetic expression nodes rather than calls.
-      is_host_evaluable_ = false;
-    }
-
-    std::unordered_set<tirx::Var, ObjectPtrHash, ObjectPtrEqual> params_;
-    bool is_host_evaluable_{true};
-  };
-
-  class DeviceRuntimeCheckCollector : public tirx::StmtVisitor {
-  public:
-    static std::vector<RuntimeCheckInfo>
-    Collect(const Stmt &body, const Array<tirx::Var> &params) {
-      DeviceRuntimeCheckCollector collector(params);
-      collector(body);
-      return collector.runtime_checks_;
-    }
-
-  private:
-    explicit DeviceRuntimeCheckCollector(const Array<tirx::Var> &params)
-        : params_(params) {}
-
-    void VisitStmt_(const tirx::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck &&
-          conditional_scope_depth_ == 0) {
-        PrimExpr condition = Downcast<PrimExpr>(op->node);
-        HostEvaluableConditionChecker checker(params_);
-        if (checker.Check(condition)) {
-          StringImm message = [&]() {
-            if (const auto *string_imm = op->value.as<StringImmNode>()) {
-              return GetRef<StringImm>(string_imm);
-            }
-            std::ostringstream os;
-            os << "Assume: " << condition;
-            return StringImm(os.str());
-          }();
-          runtime_checks_.push_back({condition, message, op->span});
-        }
-      }
-      tirx::StmtVisitor::VisitStmt_(op);
-    }
-
-    void VisitStmt_(const tirx::IfThenElseNode *op) final {
-      ++conditional_scope_depth_;
-      tirx::StmtVisitor::VisitStmt_(op);
-      --conditional_scope_depth_;
-    }
-
-    void VisitStmt_(const tirx::ForNode *op) final {
-      ++conditional_scope_depth_;
-      tirx::StmtVisitor::VisitStmt_(op);
-      --conditional_scope_depth_;
-    }
-
-    void VisitStmt_(const tirx::WhileNode *op) final {
-      ++conditional_scope_depth_;
-      tirx::StmtVisitor::VisitStmt_(op);
-      --conditional_scope_depth_;
-    }
-
-    Array<tirx::Var> params_;
-    std::vector<RuntimeCheckInfo> runtime_checks_;
-    int conditional_scope_depth_{0};
-  };
-
-  class RuntimeCheckMarkerRemover : public tirx::StmtMutator {
-  public:
-    static Stmt Remove(Stmt body) {
-      RuntimeCheckMarkerRemover remover;
-      return remover(std::move(body));
-    }
-
-  private:
-    Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kAssumeRequiresRuntimeCheck) {
-        return VisitStmt(op->body);
-      }
-      return tirx::StmtMutator::VisitStmt_(op);
-    }
-  };
-
-  bool found_device_region_{false};
-  Map<tirx::Var, tirx::Buffer> host_buffer_map_;
-  Array<tirx::Var> non_restrict_params_;
-  Optional<Array<Integer>> cluster_dims_{std::nullopt};
-  // Per-buffer shared-memory alignment requirements (kSmemAlignmentMap)
-  // propagated from the host PrimFunc onto each split device kernel.
-  Map<String, IntImm> smem_alignment_map_;
-  Optional<String> code_block_source_{std::nullopt};
-  Optional<String> code_block_entry_name_{std::nullopt};
-
-  static void SortDeviceParams(std::vector<tirx::Var> *params) {
-    std::sort(params->begin(), params->end(),
-              [](const tirx::Var &a, const tirx::Var &b) {
-                auto sort_key = [](const tirx::Var &var) {
-                  return std::tuple{
-                      !var->dtype.is_handle(),
-                      var->name_hint,
-                  };
-                };
-                return sort_key(a) < sort_key(b);
-              });
-  }
-
-  std::tuple<Array<tirx::Var>, Array<tirx::Buffer>>
-  CollectSourceKernelSignature() const {
-    std::vector<tirx::Var> params;
-    std::unordered_set<std::string> seen_vars;
-
-    auto push = [&](const tirx::Var &var) {
-      if (var.defined() && seen_vars.insert(var->name_hint).second) {
-        params.push_back(var);
-      }
-    };
-
-    Array<tirx::Buffer> buffers_to_declare;
-    for (const auto &kv : host_buffer_map_) {
-      const tirx::Buffer &buf = kv.second;
-      push(buf->data);
-      buffers_to_declare.push_back(buf);
-      for (const PrimExpr &dim : buf->shape) {
-        if (const auto *var = dim.as<tirx::VarNode>()) {
-          push(GetRef<tirx::Var>(var));
-        }
-      }
-      for (const PrimExpr &stride : buf->strides) {
-        if (const auto *var = stride.as<tirx::VarNode>()) {
-          push(GetRef<tirx::Var>(var));
-        }
-      }
-      if (const auto *var = buf->elem_offset.as<tirx::VarNode>()) {
-        push(GetRef<tirx::Var>(var));
-      }
-    }
-
-    SortDeviceParams(&params);
-    return {Array<tirx::Var>(params.begin(), params.end()), buffers_to_declare};
-  }
-
-  class SourceKernelAttrExtractor : public tirx::StmtMutator {
-  public:
-    static Stmt Extract(Stmt body, Optional<String> *code_block_source,
-                        Optional<String> *code_block_entry_name) {
-      SourceKernelAttrExtractor extractor(code_block_source,
-                                          code_block_entry_name);
-      return extractor(std::move(body));
-    }
-
-  private:
-    explicit SourceKernelAttrExtractor(Optional<String> *code_block_source,
-                                       Optional<String> *code_block_entry_name)
-        : code_block_source_(code_block_source),
-          code_block_entry_name_(code_block_entry_name) {}
-
-    Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
-      if (op->attr_key == tl::attr::kCodeBlockSource) {
-        if (auto str = op->value.as<StringImmNode>()) {
-          *code_block_source_ = str->value;
-        } else {
-          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockSource
-                     << "` AttrStmt to carry a StringImm value, but got "
-                     << op->value->GetTypeKey();
-        }
-        return VisitStmt(op->body);
-      }
-
-      if (op->attr_key == tl::attr::kCodeBlockEntryName) {
-        if (auto str = op->value.as<StringImmNode>()) {
-          *code_block_entry_name_ = str->value;
-        } else {
-          LOG(FATAL) << "Expected `" << tl::attr::kCodeBlockEntryName
-                     << "` AttrStmt to carry a StringImm value, but got "
-                     << op->value->GetTypeKey();
-        }
-        return VisitStmt(op->body);
-      }
-
-      return tirx::StmtMutator::VisitStmt_(op);
-    }
-
-    Optional<String> *code_block_source_;
-    Optional<String> *code_block_entry_name_;
-  };
-
-  class BufferUseRemapper : public tirx::StmtExprMutator {
-  public:
-    explicit BufferUseRemapper(Map<tirx::Buffer, tirx::Buffer> buffer_remap)
-        : explicit_buffer_remap_(std::move(buffer_remap)) {}
-
-  private:
-    tirx::Buffer VisitBufferUse(const tirx::Buffer &buffer) final {
-      if (auto it = explicit_buffer_remap_.find(buffer);
-          it != explicit_buffer_remap_.end()) {
-        return (*it).second;
-      }
-      return tirx::StmtExprMutator::VisitBufferUse(buffer);
-    }
-
-    Map<tirx::Buffer, tirx::Buffer> explicit_buffer_remap_;
-  };
-
-  // Wrap body with assumes, substituting variables in assumes with the
-  // corresponding variables in the device body based on name_hint matching.
-  // This substitution is necessary because host-side assume variables may be
-  // different Var objects from device-side parameters, even if they have the
-  // same name. We always perform substitution to ensure ConvertSSA sees
-  // consistent variable references.
-  Stmt wrapBodyWithHostSideAssumes(
-      Stmt body,
-      const std::unordered_map<std::string, tirx::Var> &name_to_var) {
-    // Build substitution map: assume_var -> body_var
-    // Always substitute if we find a matching name, regardless of whether
-    // it's the same object. This ensures ConvertSSA treats them as the same
-    // variable.
-    auto substitute_func =
-        [&name_to_var](const tirx::Var &var) -> Optional<PrimExpr> {
-      auto it = name_to_var.find(var->name_hint);
-      if (it != name_to_var.end()) {
-        return it->second;
-      }
-      return Optional<PrimExpr>();
-    };
-
-    for (auto it = host_assumes_.rbegin(); it != host_assumes_.rend(); ++it) {
-      // Substitute variables in the assume condition
-      PrimExpr original_node = Downcast<PrimExpr>((*it)->node);
-      PrimExpr substituted_node =
-          tirx::Substitute(original_node, substitute_func);
-      body = AttrStmt(substituted_node, tirx::attr::tilelang_assume,
-                      (*it)->value, body);
-    }
-    return body;
-  }
-
-  static Stmt WrapBodyWithRuntimeChecks(
-      Stmt body, const std::vector<RuntimeCheckInfo> &runtime_checks) {
-    for (auto it = runtime_checks.rbegin(); it != runtime_checks.rend(); ++it) {
-      body = AttrStmt(it->condition, tirx::attr::tilelang_assume, it->message,
-                      std::move(body), it->span);
-      body = AttrStmt(it->condition, tl::attr::kAssumeRequiresRuntimeCheck,
-                      it->message, std::move(body), it->span);
-    }
-    return body;
-  }
-
-  tirx::Stmt SplitDeviceFunc(tirx::Stmt body, tvm::Target device_target) {
-    code_block_source_ = std::nullopt;
-    code_block_entry_name_ = std::nullopt;
-    body = SourceKernelAttrExtractor::Extract(
-        std::move(body), &code_block_source_, &code_block_entry_name_);
-
-    // Normal kernels infer device parameters from use-def of the device body.
-    // Source kernels have no meaningful DSL body, so their device signature
-    // must be reconstructed explicitly from the host PrimFunc signature and
-    // buffer metadata.
-    auto [old_params, buffers_to_declare] =
-        [&]() -> std::tuple<Array<tirx::Var>, Array<tirx::Buffer>> {
-      if (code_block_source_) {
-        return CollectSourceKernelSignature();
-      }
-
-      tirx::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
-                                      /*visit_thread_extent=*/true);
-      use_def(body);
-
-      std::vector<tirx::Var> params{use_def.undefined_.begin(),
-                                    use_def.undefined_.end()};
-      SortDeviceParams(&params);
-      return {Array<tirx::Var>(params.begin(), params.end()),
-              use_def.undefined_buffers_};
-    }();
-
-    // Runtime-check markers written inside a device region are otherwise
-    // removed from the host function when the region is replaced by a kernel
-    // launch. Preserve checks that the host can evaluate from scalar kernel
-    // parameters so MakePackedAPI can turn them into runtime assertions.
-    // Checks involving thread/block variables, local bindings, buffer loads,
-    // calls, or conditional scopes remain device-only optimizer assumptions.
-    std::vector<RuntimeCheckInfo> host_runtime_checks =
-        DeviceRuntimeCheckCollector::Collect(body, old_params);
-
-    // Runtime checks execute in the host launcher. Their paired tl.assume
-    // attributes remain in the device body as optimizer facts.
-    body = RuntimeCheckMarkerRemover::Remove(std::move(body));
-
-    // Create new parameter variables for the device function to avoid sharing
-    // Var objects with the host function. This prevents ConvertSSA from
-    // incorrectly renaming variables when it processes multiple functions.
-    Array<tirx::Var> params;
-    Map<tirx::Var, PrimExpr> var_remap;
-    std::unordered_map<std::string, tirx::Var> name_to_var;
-    for (const auto &old_var : old_params) {
-      tirx::Var new_var(old_var->name_hint, old_var->type_annotation);
-      params.push_back(new_var);
-      var_remap.Set(old_var, new_var);
-      name_to_var[old_var->name_hint] = new_var;
-    }
-
-    // Substitute old variables with new ones in the body
-    body = tirx::Substitute(body, var_remap);
-
-    // Also remap buffers to use new variables
-    Array<tirx::Buffer> new_buffers_to_declare;
-    Map<tirx::Buffer, tirx::Buffer> buffer_remap;
-    for (const auto &buf : buffers_to_declare) {
-      auto new_shape = buf->shape.Map(
-          [&](const PrimExpr &e) { return tirx::Substitute(e, var_remap); });
-      auto new_strides = buf->strides.Map(
-          [&](const PrimExpr &e) { return tirx::Substitute(e, var_remap); });
-      auto new_elem_offset = tirx::Substitute(buf->elem_offset, var_remap);
-      auto new_data = var_remap.count(buf->data)
-                          ? Downcast<tirx::Var>(var_remap[buf->data])
-                          : buf->data;
-      tirx::Buffer new_buf(new_data, buf->dtype, new_shape, new_strides,
-                           new_elem_offset, buf->name, buf->data_alignment,
-                           buf->offset_factor, buf->buffer_type,
-                           buf->axis_separators, buf->span);
-      buffer_remap.Set(buf, new_buf);
-      new_buffers_to_declare.push_back(new_buf);
-    }
-    body = BufferUseRemapper(buffer_remap)(std::move(body));
-    buffers_to_declare = new_buffers_to_declare;
-
-    // CodeGenCPU is used for some device-side targets, such as
-    // "ext_dev", and expects to be able to return a int32_t status
-    // code.
-
-    bool can_propagate_errors = [&]() {
-      // Target kinds whose kernel ABI cannot return a status code override
-      // the device-type heuristic through this attribute.
-      if (auto status_return =
-              device_target->GetAttr<Bool>("supports_kernel_status_return")) {
-        return static_cast<bool>(status_return.value());
-      }
-      auto kind = device_target->GetTargetDeviceType();
-      return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
-    }();
-    IntImm success(DataType::Int(32), 0);
-    Type kernel_ret_type;
-    if (can_propagate_errors) {
-      kernel_ret_type = PrimType(DataType::Int(32));
-      body = tirx::SeqStmt::Flatten(body, tirx::Evaluate(ret(success)));
+    TVM_FFI_CHECK(tensor.scope().name() == "global", ValueError)
+        << "L2 persistence requires global tensor storage";
+    if (l2_window) {
+      TVM_FFI_CHECK(
+          l2_window.value()->args[0].same_as(tensor) &&
+              ffi::StructuralEqual()(l2_window.value()->args[1], call->args[1]),
+          ValueError)
+          << "One CUDA kernel launch supports one L2 access-policy window";
     } else {
-      kernel_ret_type = VoidType();
+      l2_window = ffi::GetRef<Call>(call);
     }
-
-    // Declare necessary buffers for the device side.
-    for (tirx::Buffer buf : buffers_to_declare) {
-      body = tirx::SeqStmt({tirx::DeclBuffer(buf), std::move(body)});
-    }
-
-    // Copy assumes from host-side to device-side, with variable substitution.
-    // This must be done after DeclBuffer so that assumes are at the outermost
-    // level of the function body. This ensures ConvertSSA correctly identifies
-    // that assume variables refer to function parameters.
-    body = wrapBodyWithHostSideAssumes(body, name_to_var);
-
-    // Remap non_restrict_params to use new parameter variables
-    Array<tirx::Var> remapped_non_restrict_params;
-    for (const auto &old_var : non_restrict_params_) {
-      if (var_remap.count(old_var)) {
-        remapped_non_restrict_params.push_back(
-            Downcast<tirx::Var>(var_remap[old_var]));
-      } else {
-        remapped_non_restrict_params.push_back(old_var);
-      }
-    }
-
-    tirx::PrimFunc device_func(params, body, kernel_ret_type);
-    if (source_span_.defined()) {
-      device_func.CopyOnWrite()->span = source_span_;
-    }
-    Map<String, Any> device_attrs = {
-        {tvm::attr::kTarget, device_target},
-        {tirx::attr::kNoAlias, true},
-        {tirx::attr::kIsGlobalFunc, true},
-        {tl::attr::kNonRestrictParams, remapped_non_restrict_params}};
-    if (cluster_dims_.defined()) {
-      device_attrs.Set("cluster_dims", cluster_dims_.value());
-    }
-    if (!smem_alignment_map_.empty()) {
-      device_attrs.Set(tl::kSmemAlignmentMap, smem_alignment_map_);
-    }
-    if (code_block_source_) {
-      device_attrs.Set(tl::attr::kCodeBlockSource, code_block_source_.value());
-    }
-    device_func = WithAttrs(std::move(device_func), device_attrs);
-
-    GlobalVar kernel_symbol_global = var_supply_();
-    if (code_block_entry_name_) {
-      kernel_symbol_global = GlobalVar(code_block_entry_name_.value());
-    }
-
-    (*device_mod_)->Add(kernel_symbol_global, device_func);
-    // Use old_params as call arguments (host-side variables)
-    Array<PrimExpr> args =
-        old_params.Map([](const tirx::Var &var) -> PrimExpr { return var; });
-
-    Stmt host_call;
-    if (can_propagate_errors) {
-      tirx::Var kernel_error_code("kernel_error_code", success->dtype);
-      tirx::Call kernel_call(success->dtype, kernel_symbol_global, args);
-      tirx::Stmt assert_success = tirx::AssertStmt(
-          kernel_error_code == success, tirx::StringImm("RuntimeError"),
-          Array<tirx::StringImm>(
-              {tirx::StringImm("Error executing compute kernel")}));
-      host_call = tirx::SeqStmt(
-          {tirx::Bind(kernel_error_code, kernel_call), assert_success});
-    } else {
-      host_call = tirx::Evaluate(
-          tirx::Call(DataType::Void(), kernel_symbol_global, args));
-    }
-    return WrapBodyWithRuntimeChecks(std::move(host_call), host_runtime_checks);
+    return SeqStmt({});
   }
 
-  // target ir module
-  IRModule *device_mod_;
-  // Generate new GlobalVar for the kernel
-  std::function<GlobalVar()> var_supply_;
-  // Source span of the host PrimFunc, carried onto split device kernels.
-  Span source_span_;
-  // Collect assumes in host side
-  Array<tirx::AttrStmt> host_assumes_;
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    ++conditional_depth_;
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    --conditional_depth_;
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
+                                 ffi::InplaceMode mode) final {
+    ++conditional_depth_;
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    --conditional_depth_;
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
+                                 ffi::InplaceMode mode) final {
+    ++conditional_depth_;
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    --conditional_depth_;
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    auto attributes = node->attrs->dict;
+    if (auto dimensions = attributes.Get("cluster_dims")) {
+      if (auto previous = function_attrs.Get("cluster_dims")) {
+        TVM_FFI_CHECK(
+            ffi::StructuralEqual()(previous.value(), dimensions.value()),
+            ValueError)
+            << "Conflicting cluster_dims annotations in one kernel";
+      }
+      function_attrs.Set("cluster_dims", dimensions.value());
+      attributes.erase("cluster_dims");
+    }
+    if (auto condition =
+            node->attrs.GetAttr<PrimExpr>(attr::kAssumeRequiresRuntimeCheck)) {
+      if (conditional_depth_ == 0 &&
+          IsHostEvaluable(condition.value(), parameters_)) {
+        runtime_checks.push_back(MakeRuntimeCheck(node));
+      }
+      attributes.erase(attr::kAssumeRequiresRuntimeCheck);
+      attributes.erase("tl.assume_message");
+    }
+    for (const char *key :
+         {attr::kCodeBlockSource, attr::kCodeBlockEntryName}) {
+      if (auto value = attributes.Get(key)) {
+        auto source = value.value().cast<ffi::String>();
+        if (auto previous = function_attrs.Get(key)) {
+          TVM_FFI_CHECK(previous.value().cast<ffi::String>() == source,
+                        ValueError)
+              << "Conflicting " << key << " annotations in one kernel";
+        }
+        function_attrs.Set(key, source);
+        attributes.erase(key);
+      }
+    }
+    SeqStmt body = Mutate(node->body, mode).ValueOrUnchanged(node->body);
+    return RegionStmt(node->op, node->args, node->body_params,
+                      DictAttrs(attributes), body, node->result_vars,
+                      node->loc);
+  }
+
+  const VariableSet &parameters_;
+  int conditional_depth_{0};
 };
 
-tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
-                               std::function<GlobalVar()> var_supply) {
-  HostDeviceSplitter splitter(device_mod, std::move(var_supply));
-  splitter.SetHostFuncSignature(func);
-  splitter.SetSourceSpan(func->span);
-  // Propagate non-restrict parameter list from host func to device kernels
-  if (auto opt =
-          func->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
-    splitter.SetNonRestrictParams(opt.value());
-    // Remove the attribute from host-side PrimFunc; it only matters for device
-    // codegen.
-    func = tvm::WithoutAttr(std::move(func), tl::attr::kNonRestrictParams);
-  }
-  // Propagate cluster_dims from host func to device kernel.
-  // LowerOpaqueBlock sets this attr on the pre-split kernel; after splitting
-  // it must live on the device side so the codegen can emit a cluster launch.
-  if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
-    splitter.SetClusterDims(opt.value());
-    func = tvm::WithoutAttr(std::move(func), "cluster_dims");
-  }
-  // Propagate per-buffer shared-memory alignment requirements collected by
-  // LowerTileOp onto the device kernel, where MergeSharedMemoryAllocations
-  // consumes them.
-  if (auto opt = func->GetAttr<Map<String, IntImm>>(tl::kSmemAlignmentMap)) {
-    splitter.SetSmemAlignmentMap(opt.value());
-    func = tvm::WithoutAttr(std::move(func), tl::kSmemAlignmentMap);
+class SourceKernelSignatureRewriter : public tirx::StmtExprMutator {
+public:
+  SourceKernelSignatureRewriter(ffi::String entry, ffi::Array<Expr> arguments)
+      : entry_(std::move(entry)), arguments_(std::move(arguments)) {}
+
+private:
+  ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->op.same_as(tirx::call_extern_op()) && !node->args.empty()) {
+      if (auto name = node->args[0].as<StringImm>();
+          name && name.value()->value == entry_) {
+        ffi::Array<Expr> arguments{StringImm(entry_)};
+        for (const Expr &argument : arguments_)
+          arguments.push_back(argument);
+        return Call(node->ty, node->op, arguments, node->attrs, node->ty_args,
+                    node->loc);
+      }
+    }
+    return StmtExprMutator::Mutate_(node, mode);
   }
 
-  if (auto body = splitter(func->body); !body.same_as(func->body)) {
-    func.CopyOnWrite()->body = body;
-  } else if (!splitter.found_device_region()) {
-    if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
-      auto device_target = target.value().WithoutHost();
-      if (device_target.defined() &&
-          func->HasNonzeroAttr(tirx::attr::kIsEntryFunc) &&
-          tirx::is_no_op(func->body)) {
-        if (auto forced = splitter.ForceSplit(func->body, device_target);
-            !forced.same_as(func->body)) {
-          func.CopyOnWrite()->body = forced;
-        }
+  ffi::String entry_;
+  ffi::Array<Expr> arguments_;
+};
+
+class HostBoundaryPreparer : public tirx::StmtExprMutator {
+public:
+  explicit HostBoundaryPreparer(const tirx::Function &function) {
+    for (const Var &parameter : function->params) {
+      parameters_.insert(parameter.get());
+      if (auto tensor = parameter.as<tirx::TensorVar>())
+        source_arguments_.push_back(tensor.value().data());
+      else
+        source_arguments_.push_back(parameter);
+      for (const Var &variable : UndefinedVars(parameter->ty))
+        parameters_.insert(variable.get());
+    }
+    for (const Var &variable : UndefinedVars(function->params)) {
+      parameters_.insert(variable.get());
+      source_arguments_.push_back(variable);
+    }
+    function_attrs_.Set("tirx.noalias",
+                        function->GetAttr<bool>("tirx.noalias").value_or(true));
+    auto launch_params = function->GetAttr(tirx::attr::kKernelLaunchParams)
+                             .value_or(ffi::Array<ffi::String>{});
+    if (function->GetAttr<bool>("use_cooperative_groups").value_or(false)) {
+      bool present = false;
+      for (const auto &parameter : launch_params)
+        present |= parameter == "tirx.use_cooperative_launch";
+      if (!present)
+        launch_params.push_back("tirx.use_cooperative_launch");
+    }
+    if (function->GetAttr<bool>(attr::kHasGridSync).value_or(false)) {
+      function_attrs_.Set("tirx.noalias", false);
+      function_attrs_.Set(attr::kHasGridSync, true);
+      bool present = false;
+      for (const auto &parameter : launch_params)
+        present |= parameter == "tirx.use_programtic_dependent_launch";
+      if (!present)
+        launch_params.push_back("tirx.use_programtic_dependent_launch");
+    }
+    if (!launch_params.empty())
+      function_attrs_.Set("tirx.kernel_launch_params", launch_params);
+    for (const char *key :
+         {"cluster_dims", kSmemAlignmentMap, attr::kCodeBlockSource,
+          attr::kCodeBlockEntryName}) {
+      if (auto value = function->attrs->dict.Get(key)) {
+        function_attrs_.Set(key, value.value());
       }
     }
   }
-  return func;
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    auto previous = host_assumptions_;
+    auto previous_parameters = parameters_;
+    ffi::Array<Stmt> body;
+    for (const Stmt &statement : node->seq) {
+      body.push_back(Mutate(statement, mode).ValueOrUnchanged(statement));
+      if (const auto *binding = statement.as<BindNode>()) {
+        parameters_.insert(binding->var.get());
+      }
+      if (auto condition = GetAssumeExprInEvaluateForm(statement)) {
+        if (IsHostEvaluable(condition.value(), parameters_)) {
+          host_assumptions_.push_back(statement);
+        }
+      }
+    }
+    host_assumptions_ = std::move(previous);
+    parameters_ = std::move(previous_parameters);
+    return SeqStmt(body, node->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    auto previous_parameters = parameters_;
+    parameters_.insert(node->var.get());
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    parameters_ = std::move(previous_parameters);
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->op->name == "tirx.device_scope") {
+      auto collector = ffi::make_object<DeviceBoundaryCollector>(parameters_);
+      SeqStmt body =
+          collector->Mutate(node->body, mode).ValueOrUnchanged(node->body);
+      VariableSet captures;
+      for (const Var &variable : UndefinedVars(body)) {
+        captures.insert(variable.get());
+      }
+      ffi::Array<Stmt> assumptions;
+      for (const Stmt &assumption : host_assumptions_) {
+        bool captured = true;
+        for (const Var &variable : UndefinedVars(assumption)) {
+          captured &= captures.count(variable.get());
+        }
+        if (captured)
+          assumptions.push_back(assumption);
+      }
+      assumptions.push_back(body);
+      auto attributes = node->attrs->dict;
+      auto function_attrs = function_attrs_;
+      if (auto existing = node->attrs.GetAttr<DictAttrs>("function_attrs")) {
+        for (const auto &[key, value] : existing.value()->dict)
+          function_attrs.Set(key, value);
+      }
+      for (const auto &[key, value] : collector->function_attrs)
+        function_attrs.Set(key, value);
+      if (auto entry = function_attrs.Get(attr::kCodeBlockEntryName)) {
+        auto signature = ffi::make_object<SourceKernelSignatureRewriter>(
+            entry.value().cast<ffi::String>(), source_arguments_);
+        assumptions.Set(assumptions.size() - 1,
+                        signature->Mutate(body).ValueOrUnchanged(body));
+      }
+      attributes.Set("function_attrs", DictAttrs(function_attrs));
+      auto statements = collector->runtime_checks;
+      ffi::Optional<Var> l2_stream;
+      if (collector->l2_window) {
+        auto target = node->attrs.GetAttr<Target>("target");
+        TVM_FFI_CHECK(target && target.value()->kind->name == "cuda",
+                      ValueError)
+            << "L2 persistence requires a CUDA device boundary";
+        const auto &window = collector->l2_window.value();
+        auto tensor = window->args[0].as_or_throw<tirx::TensorVar>();
+        PrimExpr elements = IntImm::Int64(1);
+        if (tensor.ty()->layout) {
+          elements =
+              prim::cast(tensor.ty()->layout.value().GetSpan(ffi::String("m")),
+                         PrimType::Int(64));
+        } else {
+          for (const PrimExpr &extent : tensor.shape()) {
+            elements = elements * prim::cast(extent, PrimType::Int(64));
+          }
+        }
+        int bits = tensor.dtype().bits() * tensor.dtype().lanes();
+        PrimExpr bytes =
+            prim::FloorDiv(elements * IntImm::Int64(bits) + IntImm::Int64(7),
+                           IntImm::Int64(8));
+        l2_stream = Var("l2_stream", PtrType::VoidPtrType());
+        statements.push_back(
+            Bind(l2_stream.value(),
+                 Call(PtrType::VoidPtrType(), tirx::call_packed_op(),
+                      {StringImm("runtime.get_cuda_stream")})));
+        Expr pointer = Call(std::nullopt, tirx::tensor_data_ptr_op(), {tensor});
+        statements.push_back(Evaluate(
+            Call(PrimType::Int(32), tirx::call_packed_op(),
+                 {StringImm(tvm_cuda_stream_set_access_policy_window), pointer,
+                  bytes, window->args[1], l2_stream.value()})));
+      }
+      statements.push_back(RegionStmt(
+          node->op, node->args, node->body_params, DictAttrs(attributes),
+          SeqStmt(assumptions), node->result_vars, node->loc));
+      if (l2_stream) {
+        statements.push_back(Evaluate(
+            Call(PrimType::Int(32), tirx::call_packed_op(),
+                 {StringImm(tvm_cuda_stream_reset_access_policy_window),
+                  l2_stream.value()})));
+      }
+      return SeqStmt(statements, node->loc);
+    }
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto result =
+        StmtExprMutator::Mutate_(node, mode).ValueOrUnchanged(original);
+    if (node->attrs->dict.count(attr::kAssumeRequiresRuntimeCheck)) {
+      auto region = result.as_or_throw<RegionStmt>();
+      auto attributes = region->attrs->dict;
+      attributes.erase(attr::kAssumeRequiresRuntimeCheck);
+      attributes.erase("tl.assume_message");
+      region.CopyOnWrite()->attrs = DictAttrs(attributes);
+      return SeqStmt({MakeRuntimeCheck(node), region}, node->loc);
+    }
+    return result;
+  }
+
+  VariableSet parameters_;
+  ffi::Array<Expr> source_arguments_;
+  ffi::Map<ffi::String, ffi::Any> function_attrs_;
+  ffi::Array<Stmt> host_assumptions_;
+};
+
+VariableSet ParameterSet(const tirx::Function &function, const char *key) {
+  VariableSet result;
+  if (auto annotation = function->GetAttr<ffi::Array<IntImm>>(key)) {
+    for (const IntImm &value : annotation.value()) {
+      auto index = value->value.as<int64_t>();
+      TVM_FFI_CHECK(index && *index >= 0 &&
+                        *index < static_cast<int64_t>(function->params.size()),
+                    ValueError)
+          << "Invalid " << key;
+      result.insert(function->params[*index].get());
+    }
+  }
+  return result;
 }
+
+class SourceKernelSymbolRewriter : public tirx::StmtExprMutator {
+public:
+  explicit SourceKernelSymbolRewriter(
+      ffi::Map<GlobalVar, GlobalVar> replacements)
+      : replacements_(std::move(replacements)) {}
+
+private:
+  ffi::UnchangedOr<Expr> Mutate_(const GlobalVarNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (auto replacement = replacements_.Get(ffi::GetRef<GlobalVar>(node)))
+      return replacement.value();
+    return StmtExprMutator::Mutate_(node, mode);
+  }
+
+  ffi::Map<GlobalVar, GlobalVar> replacements_;
+};
+
+IRModule NameSourceKernels(IRModule module) {
+  std::unordered_set<std::string> names;
+  ffi::Map<GlobalVar, GlobalVar> replacements;
+  for (const auto &[global, base] : module->functions) {
+    auto function = base.as<tirx::Function>();
+    ffi::String name = global->name_hint;
+    if (function) {
+      if (auto entry = function.value()->GetAttr<ffi::String>(
+              attr::kCodeBlockEntryName)) {
+        if (function.value()
+                ->GetAttr<bool>("tirx.is_global_func")
+                .value_or(false))
+          name = entry.value();
+      }
+    }
+    TVM_FFI_CHECK(names.insert(std::string(name)).second, ValueError)
+        << "Duplicate external kernel symbol: " << name;
+    if (name != global->name_hint)
+      replacements.Set(global, GlobalVar(name, global->loc));
+  }
+  if (replacements.empty())
+    return module;
+  auto rewriter = ffi::make_object<SourceKernelSymbolRewriter>(replacements);
+  ffi::Map<GlobalVar, BaseFunc> functions;
+  for (const auto &[global, base] : module->functions) {
+    BaseFunc updated = base;
+    if (auto function = base.as<tirx::Function>()) {
+      auto rewritten = function.value();
+      if (rewritten->body) {
+        auto body = rewritten->body.value();
+        rewritten.CopyOnWrite()->body =
+            rewriter->Mutate(body).ValueOrUnchanged(body);
+      }
+      updated = rewritten;
+    }
+    functions.Set(replacements.Get(global).value_or(global), updated);
+  }
+  return IRModule(functions, module->attrs, module->global_infos);
+}
+
+void PropagateParameterMetadata(
+    const tirx::Function &host, const IRModule &module,
+    const std::unordered_set<const GlobalVarNode *> &originals,
+    IRModule updates) {
+  auto non_restrict = ParameterSet(host, "tl.non_restrict_param_indices");
+  auto read_only = ParameterSet(host, "tl.readonly_param_indices");
+  std::unordered_map<const VarNode *, VariableSet> origins;
+  for (const Var &parameter : host->params)
+    origins[parameter.get()] = {parameter.get()};
+  auto roots = [&](const Expr &expression) {
+    VariableSet result;
+    for (const Var &variable : UndefinedVars(expression)) {
+      if (!variable->ty.as<PtrTypeNode>() &&
+          !variable->ty.as<tirx::TensorTypeNode>())
+        continue;
+      if (auto found = origins.find(variable.get()); found != origins.end()) {
+        result.insert(found->second.begin(), found->second.end());
+      }
+    }
+    return result;
+  };
+  if (!host->body)
+    return;
+  PostOrderVisit(host->body.value(), [&](const ffi::ObjectRef &object) {
+    if (const auto *bind = object.as<BindNode>()) {
+      origins[bind->var.get()] = roots(bind->value);
+    }
+    const auto *call = object.as<CallNode>();
+    const auto *symbol = call ? call->op.as<GlobalVarNode>() : nullptr;
+    if (!symbol || originals.count(symbol))
+      return;
+    GlobalVar global = ffi::GetRef<GlobalVar>(symbol);
+    auto function = module->Lookup(global).as_or_throw<tirx::Function>();
+    TVM_FFI_CHECK_EQ(call->args.size(), function->params.size(), ValueError);
+    ffi::Array<IntImm> non_restrict_indices;
+    ffi::Array<IntImm> readonly_indices;
+    for (size_t index = 0; index < call->args.size(); ++index) {
+      auto parameters = roots(call->args[index]);
+      bool may_alias = false;
+      bool immutable = !parameters.empty();
+      for (const auto *parameter : parameters) {
+        may_alias |= non_restrict.count(parameter);
+        immutable &= read_only.count(parameter);
+      }
+      if (may_alias)
+        non_restrict_indices.push_back(IntImm::Int32(index));
+      if (immutable)
+        readonly_indices.push_back(IntImm::Int32(index));
+    }
+    function = WithAttr(std::move(function), "tl.non_restrict_param_indices",
+                        non_restrict_indices);
+    function = WithAttr(std::move(function), "tl.readonly_param_indices",
+                        readonly_indices);
+    if (!non_restrict_indices.empty()) {
+      function = WithAttr(std::move(function), "tirx.noalias", false);
+    }
+    updates->Add(global, function, true);
+  });
+}
+
+} // namespace
 
 namespace transform {
 
 tvm::transform::Pass SplitHostDevice() {
-  auto pass_func = [](IRModule mod, tvm::transform::PassContext ctx) {
-    tvm::GlobalVarSupply global_var_supply(mod);
-
-    IRModule device_mod = IRModule(Map<GlobalVar, BaseFunc>({}));
-    IRModule updates = IRModule(Map<GlobalVar, BaseFunc>({}));
-
-    for (const auto &[gvar, base_func] : mod->functions) {
-      if (auto opt = base_func.as<tirx::PrimFunc>()) {
-        tirx::PrimFunc func = opt.value();
-
-        auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
-        auto name_prefix = global_symbol.value_or(gvar->name_hint);
-        auto kernel_name = name_prefix + "_kernel";
-        auto var_supply = [&global_var_supply, &kernel_name]() -> GlobalVar {
-          return global_var_supply->FreshGlobal(kernel_name, false);
-        };
-
-        func = ::tvm::tl::SplitHostDevice(std::move(func), &device_mod,
-                                          var_supply);
-        if (!func.same_as(base_func)) {
-          updates->Add(gvar, func);
+  auto prepare = tirx::transform::CreateFunctionPass(
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+        if (function->body) {
+          auto preparer = ffi::make_object<HostBoundaryPreparer>(function);
+          SeqStmt body = function->body.value();
+          function.CopyOnWrite()->body =
+              preparer->Mutate(body).ValueOrUnchanged(body);
+        }
+        return function;
+      },
+      0, "tl.PrepareHostDeviceBoundary");
+  auto pass = [prepare](IRModule module, tvm::transform::PassContext) {
+    std::unordered_set<const GlobalVarNode *> original_functions;
+    for (const auto &[global, function] : module->functions)
+      original_functions.insert(global.get());
+    module = AnnotateDeviceRegions()(module);
+    module = prepare(module);
+    module = tirx::transform::OutlineDeviceRegions()(module);
+    module = NameSourceKernels(module);
+    IRModule updates;
+    for (const auto &[global, function] : module->functions) {
+      if (original_functions.count(global.get())) {
+        if (auto host = function.as<tirx::Function>()) {
+          PropagateParameterMetadata(host.value(), module, original_functions,
+                                     updates);
         }
       }
     }
-    mod->Update(updates);
-    mod->Update(device_mod);
-    return tirx::transform::ConvertSSA()(mod);
+    module.CopyOnWrite()->Update(updates);
+    return module;
   };
-
-  return tvm::transform::CreateModulePass(pass_func, 0, "tl.SplitHostDevice",
-                                          {});
+  return tvm::transform::CreateModulePass(pass, 0, "tl.SplitHostDevice");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.SplitHostDevice", SplitHostDevice);
+  ffi::reflection::GlobalDef().def("tl.transform.SplitHostDevice",
+                                   SplitHostDevice);
 }
 
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

@@ -50,7 +50,7 @@ def test_symbolic_noninjective_shared_layout_rejected():
             for i, j in T.Parallel(16, n):
                 A[i, j] = shared[i, j]
 
-    with pytest.raises(ValueError, match="must be injective"):
+    with pytest.raises(ValueError, match="injectivity could not be proven"):
         tilelang.compile(kernel)
 
 

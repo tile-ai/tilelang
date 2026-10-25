@@ -8,166 +8,179 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../../../3rdparty/tvm/src/tirx/transform/ir_utils.h"
+#include <unordered_map>
+#include <unordered_set>
+
 #include "ascend/op/builtin.h"
+#include "compat/visit.h"
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
 
-/*!
- * \brief Check whether a Var points to a global-memory buffer.
- */
-bool IsGlobalBufferVar(const Var &var) {
-  std::string scope = GetPtrStorageScope(var);
-  return scope == "global";
-}
+struct GlobalWrites {
+  std::unordered_map<const VarNode *, const VarNode *> aliases;
+  std::unordered_set<const VarNode *> written;
 
-/*!
- * \brief Collect the set of global-buffer data Vars that have writes.
- *
- * Walks the PrimFunc body and records:
- *  - BufferStore to a global buffer
- *  - MTE copy ops (ascend_copy_ubuf_to_gm / ascend_copy_matrix_cc_to_gm)
- *    whose destination is a global buffer.
- */
-std::unordered_set<const VarNode *>
-CollectGlobalWriteBufferVars(const PrimFunc &f) {
-  std::unordered_set<const VarNode *> write_vars;
-
-  PostOrderVisit(f->body, [&](const ObjectRef &n) {
-    if (const auto *store = n.as<BufferStoreNode>()) {
-      if (IsGlobalBufferVar(store->buffer->data)) {
-        write_vars.insert(store->buffer->data.get());
+  const VarNode *Root(const Expr &expression) const {
+    Expr current = expression;
+    while (true) {
+      if (auto load = current.as<TensorLoadNode>()) {
+        current = load->source;
+      } else if (auto call = current.as<CallNode>();
+                 call && !call->args.empty() &&
+                 (call->op.same_as(tirx::tensor_data_ptr_op()) ||
+                  call->op.same_as(tirx::ptr_byte_offset_op()) ||
+                  call->op.same_as(tirx::reinterpret_op()) ||
+                  call->op.same_as(tirx::decl_tensor_op()) ||
+                  call->op.same_as(tirx::address_of_op()) ||
+                  call->op.same_as(access_ptr()))) {
+        current = call->args[0];
+      } else {
+        break;
       }
     }
-    if (const auto *call = n.as<CallNode>()) {
-      if (!call->op.same_as(ascend_copy_ubuf_to_gm()) &&
-          !call->op.same_as(ascend_copy_matrix_cc_to_gm())) {
-        return;
-      }
-      // First arg is tvm_access_ptr(TypeAnnotation, data_var, offset, ...)
-      if (call->args.empty())
-        return;
-      const auto *access_ptr = call->args[0].as<CallNode>();
-      if (!access_ptr || !access_ptr->op.same_as(builtin::tvm_access_ptr())) {
-        return;
-      }
-      if (access_ptr->args.size() < 2)
-        return;
-      const auto *data_var = access_ptr->args[1].as<VarNode>();
-      if (!data_var)
-        return;
-      if (IsGlobalBufferVar(GetRef<Var>(data_var))) {
-        write_vars.insert(data_var);
-      }
-    }
-  });
-
-  return write_vars;
-}
-
-} // namespace
-
-class ScalarDcacheBypassRewriter : public StmtExprMutator {
-public:
-  explicit ScalarDcacheBypassRewriter(
-      std::unordered_set<const VarNode *> bypass_vars)
-      : bypass_vars_(std::move(bypass_vars)) {}
-
-  static PrimFunc Rewrite(PrimFunc f) {
-    auto write_vars = CollectGlobalWriteBufferVars(f);
-    if (write_vars.empty()) {
-      // No global buffers have writes → nothing to do.
-      return f;
-    }
-    ScalarDcacheBypassRewriter rewriter(std::move(write_vars));
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+    auto variable = current.as<VarNode>();
+    auto found = aliases.find(variable);
+    return found == aliases.end() ? variable : found->second;
   }
 
-private:
-  std::unordered_set<const VarNode *> bypass_vars_;
-  bool inside_vf_{false};
-
-  bool ShouldBypass(const Buffer &buffer) const {
-    if (inside_vf_)
+  bool IsGlobal(const VarNode *variable) const {
+    if (!variable)
       return false;
-    if (!IsGlobalBufferVar(buffer->data))
-      return false;
-    return bypass_vars_.count(buffer->data.get()) > 0;
+    if (auto tensor = variable->ty.as<tirx::TensorTypeNode>())
+      return tensor->scope.name() == "global";
+    if (auto pointer = variable->ty.as<PtrTypeNode>())
+      return pointer->scope.name() == "global";
+    return false;
   }
 
-  PrimExpr MakeAddressOf(PrimExpr load) const {
-    return Call(DataType::Handle(), tirx::builtin::address_of(), {load});
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    bool is_vf = (op->name_hint == "SIMT_VF" || op->name_hint == "SIMD_VF");
-    if (is_vf)
-      inside_vf_ = true;
-    Stmt ret = StmtExprMutator::VisitStmt_(op);
-    if (is_vf)
-      inside_vf_ = false;
-    return ret;
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    if (op->indices.size() == 1 && op->dtype.is_scalar() &&
-        ShouldBypass(op->buffer)) {
-      ICHECK(!op->predicate.defined())
-          << "ScalarDcacheBypass: predicated buffer load not implemented";
-      // Replace with: ascend_read_gm_bypass_dcache(address_of(BufferLoad))
-      return Call(op->dtype, ascend_read_gm_bypass_dcache(),
-                  {MakeAddressOf(GetRef<PrimExpr>(op))});
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    if (op->indices.size() == 1 && op->buffer->dtype.is_scalar() &&
-        ShouldBypass(op->buffer)) {
-      ICHECK(!op->predicate.defined())
-          << "ScalarDcacheBypass: predicated buffer store not implemented";
-      ICHECK(op->value.dtype().is_scalar())
-          << "ScalarDcacheBypass: vector-valued buffer store not implemented";
-      // Replace with:
-      //   Evaluate(ascend_write_gm_bypass_dcache(address_of(BufferLoad),
-      //                                           value))
-      auto addr =
-          MakeAddressOf(BufferLoad(op->buffer, op->indices, op->predicate));
-      auto call = Call(DataType::Void(), ascend_write_gm_bypass_dcache(),
-                       {addr, VisitExpr(op->value)});
-      return Evaluate(call);
-    }
-    return StmtExprMutator::VisitStmt_(op);
+  void Collect(const SeqStmt &body) {
+    PostOrderVisit(body, [&](const ffi::ObjectRef &object) {
+      if (auto binding = object.as<BindNode>()) {
+        if (binding->var->ty.as<tirx::TensorTypeNode>() ||
+            binding->var->ty.as<PtrTypeNode>()) {
+          if (auto root = Root(binding->value))
+            aliases[binding->var.get()] = root;
+        }
+      }
+      if (auto store = object.as<TensorStoreNode>()) {
+        auto root = Root(store->dest);
+        if (IsGlobal(root))
+          written.insert(root);
+      }
+      if (auto call = object.as<CallNode>();
+          call && !call->args.empty() &&
+          (call->op.same_as(ascend_copy_ubuf_to_gm()) ||
+           call->op.same_as(ascend_copy_matrix_cc_to_gm()))) {
+        auto root = Root(call->args[0]);
+        if (IsGlobal(root))
+          written.insert(root);
+      }
+    });
   }
 };
 
-using namespace tirx::transform;
+class ScalarDcacheBypassRewriter : public tirx::StmtExprMutator {
+public:
+  explicit ScalarDcacheBypassRewriter(GlobalWrites writes)
+      : writes_(std::move(writes)) {}
+
+protected:
+  ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (!node->args.empty() && (node->op.same_as(access_ptr()) ||
+                                node->op.same_as(tirx::address_of_op()))) {
+      if (const auto *load = node->args[0].as<TensorLoadNode>()) {
+        ffi::Array<Expr> arguments;
+        arguments.push_back(StmtExprMutator::Mutate_(load, mode)
+                                .ValueOrUnchanged(ffi::GetRef<PrimExpr>(load)));
+        for (size_t index = 1; index < node->args.size(); ++index) {
+          arguments.push_back(
+              Mutate(node->args[index]).ValueOrUnchanged(node->args[index]));
+        }
+        auto result = ffi::GetRef<Call>(node);
+        result.CopyOnWrite()->args = arguments;
+        return result;
+      }
+    }
+    return StmtExprMutator::Mutate_(node, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    bool previous = inside_vf_;
+    auto name = node->attrs.GetAttr<ffi::String>("name_hint").value_or("");
+    inside_vf_ = inside_vf_ || name == "SIMT_VF" || name == "SIMD_VF";
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    inside_vf_ = previous;
+    return result;
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr original = ffi::GetRef<PrimExpr>(node);
+    auto value =
+        StmtExprMutator::Mutate_(node, mode).ValueOrUnchanged(original);
+    auto load = value.as_or_throw<TensorLoad>();
+    if (load->indices.size() != 1 || !load.ty().IsScalar() ||
+        !ShouldBypass(load->source))
+      return value;
+    Call address(std::nullopt, tirx::address_of_op(), {load});
+    return Call(load.ty(), ascend_read_gm_bypass_dcache(), {address})
+        .as_or_throw<PrimExpr>();
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto store = StmtExprMutator::Mutate_(node, mode)
+                     .ValueOrUnchanged(original)
+                     .as_or_throw<TensorStore>();
+    if (store->indices.size() != 1 || !store->value.ty().IsScalar() ||
+        !ShouldBypass(store->dest))
+      return store;
+    TensorLoad destination(store->dest, store->indices, store->loc);
+    Call address(std::nullopt, tirx::address_of_op(), {destination});
+    return Evaluate(Call(PrimType::Void(), ascend_write_gm_bypass_dcache(),
+                         {address, store->value}),
+                    store->loc);
+  }
+
+private:
+  bool ShouldBypass(const Expr &tensor) const {
+    return !inside_vf_ && writes_.written.count(writes_.Root(tensor));
+  }
+  GlobalWrites writes_;
+  bool inside_vf_{false};
+};
+} // namespace
 
 tvm::transform::Pass MarkScalarDcacheBypass() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return ScalarDcacheBypassRewriter::Rewrite(f);
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (!function->body)
+      return function;
+    GlobalWrites writes;
+    writes.Collect(function->body.value());
+    if (writes.written.empty())
+      return function;
+    auto rewriter =
+        ffi::make_object<ScalarDcacheBypassRewriter>(std::move(writes));
+    SeqStmt original = function->body.value();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MarkScalarDcacheBypass", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.MarkScalarDcacheBypass");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MarkScalarDcacheBypass",
-                        MarkScalarDcacheBypass);
+  ffi::reflection::GlobalDef().def("tl.transform.MarkScalarDcacheBypass",
+                                   MarkScalarDcacheBypass);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

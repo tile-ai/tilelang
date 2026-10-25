@@ -7,10 +7,6 @@
 #include "./atomic_add.h"
 #include "support/check.h"
 #include "utils.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
 
 #include "builtin.h"
 
@@ -75,32 +71,9 @@ void RegisterAtomicAddImpl(AtomicAddImpl impl) {
  * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args,
-                     ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
-  ICHECK(args.size() >= 2)
-      << "AtomicAdd expects at least 2 arguments (src, dst), got "
-      << args.size();
-  ffi::ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
-  std::vector<AccessRegion> access_regions;
-
-  if (IsBufferLikeExpr(args[0])) {
-    auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
-    node->src_range = src_access.region->region;
-    access_regions.push_back(std::move(src_access));
-  } else {
-    node->src_value = args[0];
-  }
-
-  auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
-  dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
-  node->dst_range = dst_access.region->region;
-  access_regions.push_back(std::move(dst_access));
-  node->SetAccessRegions(std::move(access_regions));
-
-  // Copy annotations from the Call node
-  node->annotations = annotations;
+AtomicAdd::AtomicAdd(ffi::Array<Expr> args, BlockAnnotations annotations) {
+  auto node = ffi::make_object<AtomicAddNode>(ffi::UnsafeInit{});
+  node->Initialize(args, std::move(annotations));
   data_ = std::move(node);
 }
 
@@ -116,7 +89,7 @@ AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args,
 TileOperator AtomicAddNode::Clone() const {
   auto op = tvm::ffi::make_object<AtomicAddNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = par_op_->Clone().as_or_throw<ParallelOp>();
   }
   return AtomicAdd(op);
 }
@@ -130,15 +103,12 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 Stmt AtomicAddNode::Lower(const LowerArgs &lower_args,
-                          arith::Analyzer *analyzer) const {
+                          sym::Analyzer analyzer) const {
   return ResolveAtomicAddImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
 
-TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd, 2)
 
 TVM_FFI_STATIC_INIT_BLOCK() { AtomicAddNode::RegisterReflection(); }
 

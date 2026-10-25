@@ -1,389 +1,226 @@
-/*!
- * \file annotate_warp_group_reg_alloc.cc
- * \brief Annotate warp group reg alloc for warp specialization
- */
+#include "compat/expr.h"
+#include "compat/visit.h"
+#include "cuda/op/builtin.h"
+#include "op/utils.h"
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
 
-#include "cuda/op/builtin.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
+#include <array>
 #include <functional>
-#include <unordered_set>
-#include <vector>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-template <typename F>
-Stmt RewriteWarpSpecializationBody(const Stmt &stmt, F &&rewrite_if,
-                                   bool *rewrote) {
-  if (*rewrote) {
-    return stmt;
-  }
-
-  if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-    *rewrote = true;
-    return rewrite_if(GetRef<IfThenElse>(if_node));
-  }
-
-  if (const auto *seq = stmt.as<SeqStmtNode>()) {
-    Array<Stmt> new_seq;
-    bool changed = false;
-    for (const auto &sub_stmt : seq->seq) {
-      Stmt rewritten =
-          RewriteWarpSpecializationBody(sub_stmt, rewrite_if, rewrote);
-      changed = changed || !rewritten.same_as(sub_stmt);
-      new_seq.push_back(rewritten);
-    }
-    if (!changed) {
-      return stmt;
-    }
-    return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
-  }
-
-  if (const auto *attr = stmt.as<AttrStmtNode>()) {
-    Stmt new_body =
-        RewriteWarpSpecializationBody(attr->body, rewrite_if, rewrote);
-    if (new_body.same_as(attr->body)) {
-      return stmt;
-    }
-    return AttrStmt(attr->node, attr->attr_key, attr->value, new_body);
-  }
-
-  if (stmt.as<BindNode>()) {
-    return stmt;
-  }
-
-  if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-    const SBlock &block = realize->block;
-    Stmt new_body =
-        RewriteWarpSpecializationBody(block->body, rewrite_if, rewrote);
-    if (new_body.same_as(block->body)) {
-      return stmt;
-    }
-    SBlock new_block(block->iter_vars, block->reads, block->writes,
-                     block->name_hint, new_body, block->init,
-                     block->alloc_buffers, block->match_buffers,
-                     block->annotations);
-    return SBlockRealize(realize->iter_values, realize->predicate, new_block);
-  }
-
-  if (const auto *block = stmt.as<SBlockNode>()) {
-    Stmt new_body =
-        RewriteWarpSpecializationBody(block->body, rewrite_if, rewrote);
-    if (new_body.same_as(block->body)) {
-      return stmt;
-    }
-    return SBlock(block->iter_vars, block->reads, block->writes,
-                  block->name_hint, new_body, block->init, block->alloc_buffers,
-                  block->match_buffers, block->annotations);
-  }
-
-  return stmt;
+bool HasMarker(const RegionStmtNode *region, const char *name) {
+  return region->attrs->dict.count(name) != 0;
 }
 
+class RegisterHints : public StmtExprVisitor {
+public:
+  std::array<int64_t, 2> counts{0, 0};
+  bool disabled = false;
+  bool custom = false;
+
+private:
+  Optional<VisitInterrupt> Visit_(const RegionStmtNode *node) final {
+    custom |= HasMarker(node, attr::kCustomWarpSpecialization);
+    return StmtExprVisitor::Visit_(node);
+  }
+
+  Optional<VisitInterrupt> Visit_(const CallNode *node) final {
+    if (node->op.same_as(no_set_max_nreg()))
+      disabled = true;
+    for (size_t index = 0; index < counts.size(); ++index) {
+      const Op &operation = index == 0 ? annotate_producer_reg_dealloc()
+                                       : annotate_consumer_reg_alloc();
+      if (!node->op.same_as(operation))
+        continue;
+      auto count = GetConstInt(node->args[0].as_or_throw<PrimExpr>());
+      TVM_FFI_CHECK(count && *count >= 24 && *count <= 240 && *count % 8 == 0,
+                    ValueError)
+          << "Warpgroup register hint must be a multiple of 8 between 24 and "
+             "240";
+      counts[index] = *count;
+    }
+    return StmtExprVisitor::Visit_(node);
+  }
+};
+
+bool HasSIMTCopy(const Stmt &statement) {
+  bool found = false;
+  PostOrderVisit(statement, [&](const ObjectRef &object) {
+    if (const auto *store = object.as<TensorStoreNode>()) {
+      if (auto tensor = store->dest.as<TensorVar>())
+        found |= !IsGlobalBuffer(*tensor);
+    }
+    if (const auto *call = object.as<CallNode>()) {
+      if (auto operation = call->op.as<Op>()) {
+        found |= operation.value()->name == "tl.ptx_cp_async" ||
+                 operation.value()->name == "tirx.s_tir.cp_async_raw";
+      }
+    }
+  });
+  return found;
+}
+
+Stmt RewriteFirstBranch(const Stmt &statement,
+                        const std::function<Stmt(const IfNode *)> &rewrite,
+                        bool *rewritten) {
+  if (*rewritten)
+    return statement;
+  if (const auto *branch = statement.as<IfNode>()) {
+    *rewritten = true;
+    return rewrite(branch);
+  }
+  if (const auto *sequence = statement.as<SeqStmtNode>()) {
+    Array<Stmt> statements;
+    for (const Stmt &child : sequence->seq) {
+      statements.push_back(RewriteFirstBranch(child, rewrite, rewritten));
+    }
+    return *rewritten ? Stmt(SeqStmt(statements, sequence->loc)) : statement;
+  }
+  if (const auto *region = statement.as<RegionStmtNode>();
+      region &&
+      (region->op.same_as(scope_op()) || region->op->name == "tl.scope")) {
+    Stmt body = RewriteFirstBranch(region->body, rewrite, rewritten);
+    if (*rewritten) {
+      RegionStmt result = GetRef<RegionStmt>(region);
+      result.CopyOnWrite()->body = SeqStmt(body);
+      return result;
+    }
+  }
+  return statement;
+}
+
+Stmt ReconfigureRegisters(int64_t count, bool increase) {
+  return Evaluate(Call(PrimType::Void(), set_max_nreg(),
+                       {IntImm::Int32(count), IntImm::Int32(increase)}));
+}
+
+class RegisterInjector : public StmtExprMutator {
+public:
+  explicit RegisterInjector(const RegisterHints &hints)
+      : counts_(hints.counts), disabled_(hints.disabled) {}
+
+private:
+  UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
+    if (const auto *call = node->value.as<CallNode>();
+        call && (call->op.same_as(annotate_producer_reg_dealloc()) ||
+                 call->op.same_as(annotate_consumer_reg_alloc()) ||
+                 call->op.same_as(no_set_max_nreg()))) {
+      return SeqStmt({});
+    }
+    return StmtExprMutator::Mutate_(node, mode);
+  }
+
+  Stmt RewriteBranch(const IfNode *branch) const {
+    if (disabled_)
+      return GetRef<Stmt>(branch);
+    bool explicit_hints = counts_[0] != 0 || counts_[1] != 0;
+    if (!explicit_hints && HasSIMTCopy(branch->then_case))
+      return GetRef<Stmt>(branch);
+    int64_t producer_registers = counts_[0] ? counts_[0] : 24;
+    int64_t consumer_registers = counts_[1] ? counts_[1] : 240;
+    Optional<int64_t> producer_threads;
+    if (const auto *condition = branch->condition.as<LTNode>();
+        condition && thread_ && condition->a.same_as(*thread_)) {
+      producer_threads = GetConstInt(condition->b);
+    }
+    if (!explicit_hints) {
+      if (!producer_threads || !thread_extent_ || *producer_threads <= 0 ||
+          *producer_threads % 128 || *thread_extent_ % 128 ||
+          *thread_extent_ <= *producer_threads) {
+        return GetRef<Stmt>(branch);
+      }
+      int64_t producers = *producer_threads / 128;
+      int64_t consumers = (*thread_extent_ - *producer_threads) / 128;
+      if (producers == 1 && consumers <= 2) {
+        consumer_registers = 240;
+      } else if (producers == 2 && consumers == 2) {
+        consumer_registers = 224;
+      } else if (producers == 1 && consumers == 3) {
+        consumer_registers = 160;
+      } else {
+        LOG(WARNING)
+            << "AnnotateWarpGroupRegAlloc: unsupported warpgroup split; "
+               "skipping automatic register reallocation";
+        return GetRef<Stmt>(branch);
+      }
+    }
+    if (producer_threads && thread_extent_ && branch->else_case) {
+      TVM_FFI_CHECK(*producer_threads * producer_registers +
+                            (*thread_extent_ - *producer_threads) *
+                                consumer_registers <=
+                        64512,
+                    ValueError)
+          << "Warp-specialized register hints exceed the CTA register budget";
+    }
+    SeqStmt producer(
+        {ReconfigureRegisters(producer_registers, false), branch->then_case});
+    Optional<SeqStmt> consumer;
+    if (branch->else_case) {
+      consumer = SeqStmt(
+          {ReconfigureRegisters(consumer_registers, true), *branch->else_case});
+    }
+    return If(branch->condition, producer, consumer, branch->loc);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                            InplaceMode mode) final {
+    auto previous_thread = thread_;
+    auto previous_extent = thread_extent_;
+    if (node->op.same_as(launch_thread_op()) &&
+        node->args[0].as_or_throw<StringImm>()->value == "threadIdx.x") {
+      thread_ = node->body_params[0].as_or_throw<PrimVar>();
+      thread_extent_ = GetConstInt(node->args[1].as_or_throw<PrimExpr>());
+    }
+    RegionStmt result = StmtExprMutator::Mutate_(node, mode)
+                            .ValueOrUnchanged(GetRef<Stmt>(node))
+                            .as_or_throw<RegionStmt>();
+    if (HasMarker(node, attr::kWarpSpecializationScope)) {
+      bool rewritten = false;
+      Stmt body = RewriteFirstBranch(
+          result->body,
+          [this](const IfNode *branch) { return RewriteBranch(branch); },
+          &rewritten);
+      result.CopyOnWrite()->body = SeqStmt(body);
+    }
+    thread_ = previous_thread;
+    thread_extent_ = previous_extent;
+    return result;
+  }
+
+  std::array<int64_t, 2> counts_;
+  bool disabled_;
+  Optional<PrimVar> thread_;
+  Optional<int64_t> thread_extent_;
+};
 } // namespace
 
-class SetMaxNRegCollector : public StmtExprVisitor {
-public:
-  struct Result {
-    Array<IntImm> nreg;
-    bool preserve_explicit_set_max_nreg{false};
-  };
-
-  static Result Collect(const PrimFunc &f) {
-    SetMaxNRegCollector collector;
-    collector(f->body);
-    if (collector.warp_specialized_) {
-      return {Array<IntImm>({}), true};
-    }
-    Array<IntImm> nreg = collector.has_no_set_max_nreg_
-                             ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                                              IntImm(DataType::Int(32), -1)})
-                             : collector.nreg_;
-    return {nreg, false};
-  }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg())) {
-        return;
-      } else if (call->op.same_as(annotate_producer_reg_dealloc())) {
-        auto reg_hint = call->args[0].as<IntImmNode>()->value;
-        ICHECK(reg_hint <= 240 && reg_hint >= 24)
-            << "Invalid reg hint: " << reg_hint;
-        nreg_.Set(0, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(annotate_consumer_reg_alloc())) {
-        auto reg_hint = call->args[0].as<IntImmNode>()->value;
-        ICHECK(reg_hint <= 240 && reg_hint >= 24)
-            << "Invalid reg hint: " << reg_hint;
-        nreg_.Set(1, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(no_set_max_nreg())) {
-        has_no_set_max_nreg_ = true;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kCustomWarpSpecialization) {
-      warp_specialized_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
-                      IntImm(DataType::Int(32), 0)};
-  bool has_no_set_max_nreg_ = false;
-  bool warp_specialized_ = false;
-};
-
-class SimtCopyDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const Stmt &stmt) {
-    SimtCopyDetector detector;
-    detector.VisitStmt(stmt);
-    return detector.has_simt_copy_;
-  }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        has_simt_copy_ = true;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    auto scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-    if (scope.to_string() != "global") {
-      has_simt_copy_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool has_simt_copy_{false};
-};
-
-class SetMaxNRegInjector : public StmtExprMutator {
-public:
-  static PrimFunc Inject(PrimFunc f) {
-    auto T = SetMaxNRegInjector();
-    SetMaxNRegCollector::Result result = SetMaxNRegCollector::Collect(f);
-    T.nreg_ = result.nreg;
-    T.preserve_explicit_set_max_nreg_ = result.preserve_explicit_set_max_nreg;
-    if (T.nreg_.empty()) {
-      return f;
-    }
-    f.CopyOnWrite()->body = T(f->body);
-    return f;
-  }
-
-private:
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (!preserve_explicit_set_max_nreg_ &&
-          call->op.same_as(set_max_nreg())) {
-        return StmtExprMutator::VisitStmt_(op);
-      }
-      if (call->op.same_as(annotate_producer_reg_dealloc()) ||
-          call->op.same_as(annotate_consumer_reg_alloc()) ||
-          call->op.same_as(no_set_max_nreg())) {
-        // Remove annotations after they have been consumed by this pass.
-        return Evaluate(0);
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent &&
-        Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
-      thread_iv_ = Downcast<IterVar>(op->node);
-      need_update_thread_extent_ = false;
-      AttrStmt attr_stmt = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
-      if (need_update_thread_extent_) {
-        thread_iv_.CopyOnWrite()->dom = {0, updated_thread_extent_.value()};
-        attr_stmt.CopyOnWrite()->node = thread_iv_;
-        attr_stmt.CopyOnWrite()->value = updated_thread_extent_.value();
-      }
-      thread_iv_ = {};
-      return attr_stmt;
-    } else if (op->attr_key == attr::kWarpSpecializationScope) {
-      bool rewrote_ws_body = false;
-      auto rewrite_if = [&](const IfThenElse &if_then_else) -> Stmt {
-        auto producer_body = if_then_else->then_case;
-        Optional<Stmt> consumer_body = if_then_else->else_case;
-        // In some degenerate warp-specialized patterns (e.g., producer-only),
-        // the consumer body may be absent. Handle gracefully by only
-        // annotating the producer side when consumer is missing.
-
-        auto dec_reg = nreg_[0].as<IntImmNode>()->value;
-        auto inc_reg = nreg_[1].as<IntImmNode>()->value;
-
-        auto inc_reg_stmt = Evaluate(0);
-        auto dec_reg_stmt = Evaluate(0);
-
-        // Default hints stay conservative: skip auto-injection when producer
-        // contains SIMT copy-like statements. Explicit user hints should still
-        // be honored even in that case.
-        bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
-        bool has_explicit_hints = dec_reg != 0 || inc_reg != 0;
-
-        if (dec_reg != -1 && inc_reg != -1 &&
-            (has_explicit_hints || !has_simt_copy)) {
-          int final_dec_reg = has_explicit_hints ? dec_reg : 24;
-          int final_inc_reg = has_explicit_hints ? inc_reg : 240;
-          bool inject_set_max_nreg = true;
-
-          // The hard-coded 24/240 default pair only fits the canonical
-          // 1-producer + 2-consumer warpgroup layout (<=384 threads):
-          //   128*24 + 256*240 = 64512 max regs/SM.
-          // Wider warp-specialized layouts over-subscribe the register file
-          // and the consumer's setmaxnreg.inc deadlocks. When no explicit
-          // hint is given, derive the producer/consumer split from the
-          // warp-specialization guard and pick a consumer request so that
-          // producer_threads*dec + consumer_threads*inc <= 64512; only a
-          // handful of layouts have a known-good pair, any other layout falls
-          // back to no register reallocation at all.
-          if (!has_explicit_hints) {
-            int producer_threads = -1;
-            int total_threads = -1;
-            if (const auto *lt = if_then_else->condition.as<LTNode>()) {
-              if (const auto *imm = lt->b.as<IntImmNode>()) {
-                producer_threads = static_cast<int>(imm->value);
-              }
-            }
-            if (thread_iv_.defined()) {
-              if (const auto *imm = thread_iv_->dom->extent.as<IntImmNode>()) {
-                total_threads = static_cast<int>(imm->value);
-              }
-            }
-            int producer_wg =
-                producer_threads > 0 ? producer_threads / 128 : -1;
-            int consumer_wg = (total_threads > producer_threads)
-                                  ? (total_threads - producer_threads) / 128
-                                  : -1;
-            if (producer_wg == 1 && consumer_wg <= 2) {
-              // 1P + 1C (128 threads): 128*24 + 128*240 = 32256 <= 64512.
-              // 1P + 2C (384 threads): 128*24 + 256*240 = 64512.
-              // Original pair is good.
-            } else if (producer_wg == 2 && consumer_wg == 2) {
-              // 2P + 2C (512 threads): 256*24 + 256*224 = 63488 <= 64512.
-              final_inc_reg = 224;
-              LOG(WARNING)
-                  << "AnnotateWarpGroupRegAlloc: 2-producer + 2-consumer "
-                     "warp-specialized layout (512 threads) cannot use the "
-                     "default consumer register allocation of 240; lowering "
-                     "to 24/224 to fit the 64512 max regs/SM. This may reduce "
-                     "occupancy/performance — consider an explicit "
-                     "T.annotate_consumer_reg_alloc() hint or a different "
-                     "warpgroup layout.";
-            } else if (producer_wg == 1 && consumer_wg == 3) {
-              // 1P + 3C (512 threads): 128*24 + 384*160 = 64512.
-              final_inc_reg = 160;
-              LOG(WARNING)
-                  << "AnnotateWarpGroupRegAlloc: 1-producer + 3-consumer "
-                     "warp-specialized layout (512 threads) cannot use the "
-                     "default consumer register allocation of 240; lowering "
-                     "to 24/160 to fit the 64512 max regs/SM. This may reduce "
-                     "occupancy/performance — consider an explicit "
-                     "T.annotate_consumer_reg_alloc() hint or a different "
-                     "warpgroup layout.";
-            } else {
-              // Unknown / unsupported layout: skip register reallocation
-              // entirely rather than risk over-subscribing the register file.
-              inject_set_max_nreg = false;
-              LOG(WARNING)
-                  << "AnnotateWarpGroupRegAlloc: unsupported warp-specialized "
-                     "warpgroup layout (producer="
-                  << producer_threads << ", total=" << total_threads
-                  << " threads); skipping setmaxnreg register reallocation to "
-                     "avoid register-file over-subscription. This may reduce "
-                     "occupancy/performance — consider an explicit "
-                     "T.annotate_producer_reg_dealloc()/"
-                     "T.annotate_consumer_reg_alloc() hint.";
-            }
-          }
-          if (inject_set_max_nreg) {
-            dec_reg_stmt =
-                Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                              {IntImm(DataType::Int(32), final_dec_reg),
-                               IntImm(DataType::Int(32), 0)}));
-            inc_reg_stmt =
-                Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                              {IntImm(DataType::Int(32), final_inc_reg),
-                               IntImm(DataType::Int(32), 1)}));
-          }
-        }
-
-        Array<Stmt> producer_stmts;
-        producer_stmts.push_back(dec_reg_stmt);
-        producer_stmts.push_back(producer_body);
-        auto new_producer_body = SeqStmt(producer_stmts);
-
-        if (consumer_body.defined()) {
-          Array<Stmt> consumer_stmts;
-          consumer_stmts.push_back(inc_reg_stmt);
-          consumer_stmts.push_back(consumer_body.value());
-          auto new_consumer_body = SeqStmt(consumer_stmts);
-          return IfThenElse(if_then_else->condition, new_producer_body,
-                            new_consumer_body);
-        }
-
-        return IfThenElse(if_then_else->condition, new_producer_body);
-      };
-
-      Stmt new_body =
-          RewriteWarpSpecializationBody(op->body, rewrite_if, &rewrote_ws_body);
-      if (!rewrote_ws_body) {
-        return StmtExprMutator::VisitStmt_(op);
-      }
-      return AttrStmt(op->node, op->attr_key, op->value, new_body);
-    } else {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-  }
-
-  Array<IntImm> nreg_;
-  bool preserve_explicit_set_max_nreg_{false};
-  IterVar thread_iv_;
-  Optional<PrimExpr> updated_thread_extent_;
-  bool need_update_thread_extent_ = false;
-};
-
-using namespace tirx::transform;
-
 tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
-  auto pass_func = [](PrimFunc f, const IRModule &m,
-                      const PassContext &ctx) -> PrimFunc {
-    return SetMaxNRegInjector::Inject(std::move(f));
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateWarpGroupRegAlloc", {});
+  return tirx::transform::CreateFunctionPass(
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext) -> Optional<tirx::Function> {
+        if (!function->body)
+          return function;
+        auto hints = make_object<RegisterHints>();
+        hints->Visit(*function->body);
+        if (hints->custom)
+          return function;
+        auto injector = make_object<RegisterInjector>(*hints);
+        SeqStmt body = *function->body;
+        function.CopyOnWrite()->body =
+            injector->Mutate(body).ValueOrUnchanged(body);
+        return function;
+      },
+      0, "tl.cuda.AnnotateWarpGroupRegAlloc");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.AnnotateWarpGroupRegAlloc",
-                        AnnotateWarpGroupRegAlloc);
+  reflection::GlobalDef().def("tl.cuda.transform.AnnotateWarpGroupRegAlloc",
+                              AnnotateWarpGroupRegAlloc);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

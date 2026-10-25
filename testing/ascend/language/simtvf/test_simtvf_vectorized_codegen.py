@@ -251,11 +251,15 @@ def test_local_var_vector_initializer_is_emitted_before_declaration():
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    value_declaration = re.search(r"uint4 value = (\w+);", source)
+    value_declaration = re.search(r"uint4 (\w+)\[1\];", source)
     assert value_declaration is not None
-    initializer_store = source.find("((half2*)(&(" + value_declaration.group(1))
-    assert initializer_store != -1
-    assert initializer_store < value_declaration.start()
+    value = value_declaration[1]
+    initializer = re.search(rf"{value}\[0\] = (\w+);", source)
+    assert initializer is not None
+    lane_stores = list(re.finditer(rf"\(\(half2\*\)\(&\({initializer[1]}\)\)\)\[\d\]\.[xy] = half\(0x0p\+0f", source))
+    assert len(lane_stores) == 8
+    assert value_declaration.end() < lane_stores[0].start() < lane_stores[-1].end() < initializer.start()
+    assert source.index(f"= {value}[0];") > initializer.end()
 
 
 @pytest.mark.parametrize("dtype,carrier", [("bfloat16", "bfloat16x2_t"), ("float16", "half2")])

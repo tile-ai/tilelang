@@ -4,27 +4,14 @@ from __future__ import annotations
 from collections import deque
 import os
 from typing import Any
-from tvm import tirx
-from tvm.tirx import Var
-from tvm.tirx.script.builder import evaluate as T_evaluate
-from tvm.tirx.script.builder.frame import TIRFrame
-from tvm.tirx.script.builder.frame import SBlockFrame
-from tvm.ffi import register_object
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import Var
+from tvm_tirx.tirx.script.ir_builder import evaluate as T_evaluate
+from tvm_tirx.script.ir_builder.frame import StmtFrame as TIRFrame
+from tvm_ffi import register_object
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
 import threading
-
-# Ensure single-dimension kernel bindings can be unpacked like iterables.
-# especially for issue https://github.com/tile-ai/tilelang/issues/830
-if not hasattr(Var, "__iter__"):
-
-    def _var_iter(self):
-        yield self
-
-    Var.__iter__ = _var_iter  # type: ignore[attr-defined]
-
-if not hasattr(Var, "__len__"):
-    Var.__len__ = lambda self: 1  # type: ignore[attr-defined]
 
 
 class FrameStack:
@@ -172,9 +159,6 @@ class KernelLaunchFrame(TIRFrame):
         super().__enter__()
         _get_current_stack().push(self)
 
-        last_block_frame = self.frames[-1]
-        assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
-
         return _normalize_bindings(list(self.grid_vars))
 
     def __exit__(self, ptype, value, trace):
@@ -275,7 +259,7 @@ class KernelLaunchFrame(TIRFrame):
         Returns the launch annotation ``key`` recorded by T.Kernel (e.g. ``cluster_dims``),
         or ``default`` when it was not given.
         """
-        annotations = self.frames[-1].annotations
+        annotations = self.frames[-1].attrs
         if annotations is None or key not in annotations:
             return default
         return annotations[key]
@@ -316,7 +300,7 @@ class KernelLaunchFrame(TIRFrame):
         cluster_dim = self.get_cluster_dims()[dim]
         if cluster_dim == 1:
             return block
-        return tirx.floordiv(block, tirx.IntImm(block.dtype, cluster_dim))
+        return tirx.floordiv(block, tirx.IntImm(block.ty, cluster_dim))
 
     def get_cluster_ids(self) -> list[Var | tirx.PrimExpr]:
         """

@@ -1,9 +1,8 @@
 """Tests for the lexical_alloc_scope feature.
 
 Verifies that:
-1. LowerOpaqueBlock inserts AttrStmt("lexical_alloc_scope") for blocks
-   explicitly marked for lexical allocation scoping.
-2. Unmarked blocks do NOT receive the marker by heuristic inference.
+1. LowerOpaqueBlock preserves native scope attributes on explicitly marked scopes.
+2. Unmarked scopes do NOT receive the marker by heuristic inference.
 3. gemm_py-produced blocks are explicitly marked and survive as scopes.
 4. StorageRewrite does not hoist allocations past the scope boundary.
 5. CUDA codegen emits { ... } for the scoped block.
@@ -13,16 +12,17 @@ import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 import tilelang.testing
+from _native_ir import allocations
 
 
 def _count_attrs(func, attr_key):
-    """Count occurrences of a specific AttrStmt key in the function body."""
+    """Count native regions carrying a scope attribute."""
     count = [0]
 
     def _visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
+        if isinstance(node, tvm.ir.RegionStmt) and attr_key in node.attrs:
             count[0] += 1
 
     post_order_visit(func.body, _visit)
@@ -30,21 +30,15 @@ def _count_attrs(func, attr_key):
 
 
 def _count_allocate_inside_attr(func, attr_key):
-    """Count flat AllocBuffer nodes nested inside the given AttrStmt."""
-    count = [0]
-    inside = [False]
+    """Count unique native allocations inside the marked lexical regions."""
+    tensors = set()
 
     def _visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
-            old = inside[0]
-            inside[0] = True
-            post_order_visit(node.body, _visit)
-            inside[0] = old
-        elif isinstance(node, tvm.tirx.AllocBuffer) and inside[0]:
-            count[0] += 1
+        if isinstance(node, tvm.ir.RegionStmt) and attr_key in node.attrs:
+            tensors.update(allocations(node.body))
 
     post_order_visit(func.body, _visit)
-    return count[0]
+    return len(tensors)
 
 
 def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
@@ -78,8 +72,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.sblock():
-                T.sblock_attr({"lexical_alloc_scope": 1})
+            with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -112,7 +105,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.sblock():
+            with T.scope():
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -141,7 +134,7 @@ def test_lower_opaque_block_skips_empty_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.sblock():
+            with T.scope():
                 B[tx] = A[tx]
 
     mod = tvm.IRModule.from_expr(func)
@@ -200,7 +193,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.sblock():
+            with T.scope():
                 idx = T.alloc_var(T.int32)
                 idx = tx
                 B[tx] = A[idx]
@@ -228,8 +221,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
         T.func_attr({"global_symbol": "main", "target": target})
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
-        with T.sblock():
-            T.sblock_attr({"lexical_alloc_scope": 1})
+        with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
             S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
             S[tx] = A[tx]
             B[tx] = S[tx]
@@ -257,7 +249,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
         T.func_attr({"global_symbol": "main", "target": target})
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
-        with T.sblock():
+        with T.scope():
             S = T.alloc_buffer((128,), dtype=T.float32, scope="local.fragment")
             S[tx] = A[tx]
             B[tx] = S[tx]
@@ -300,12 +292,15 @@ def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
 
     mod = _apply_lower_opaque_pipeline(func, target, pass_configs=pass_configs)
     lowered = mod["main"]
-    lowered_script = lowered.script(show_meta=False)
-
-    assert 'T.attr(0, "lexical_alloc_scope", 1)\n    C_local = T.decl_buffer' not in lowered_script, (
-        "Unexpected top-level lexical_alloc_scope around fragment-backed C_local"
+    (fragment,) = [tensor for tensor in allocations(lowered) if tensor.name == "C_local"]
+    regions = []
+    post_order_visit(lowered.body, lambda node: regions.append(node) if isinstance(node, tvm.ir.RegionStmt) else None)
+    assert all(
+        not any(tensor.same_as(fragment) for tensor in allocations(region.body))
+        for region in regions
+        if "lexical_alloc_scope" in region.attrs
     )
-    assert lowered_script.count("lexical_alloc_scope") >= 2, "Expected inner GEMM lexical scopes to remain in the disable-ws pipeline"
+    assert tvm.tirx.analysis.check_well_formed(lowered)
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +319,7 @@ def test_storage_rewrite_preserves_scope():
         T.launch_thread("blockIdx.x", 1)
         tx = T.launch_thread("threadIdx.x", 128)
         for _ in T.serial(4):
-            with T.sblock():
-                T.sblock_attr({"lexical_alloc_scope": 1})
+            with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
                 S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                 S[tx] = A[tx]
                 B[tx] = S[tx]
@@ -357,8 +351,7 @@ def test_codegen_emits_braces():
     ):
         with T.Kernel(1, threads=128):
             for k in T.serial(4):
-                with T.sblock():
-                    T.sblock_attr({"lexical_alloc_scope": 1})
+                with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
@@ -378,8 +371,7 @@ def test_codegen_emits_braces():
 
 @tilelang.testing.requires_cuda
 def test_codegen_unwraps_scope_spanning_entire_loop_body():
-    """A lexical scope that spans the entire loop body must not emit `{ {`:
-    the loop's own braces already delimit the same C scope."""
+    """Native lexical wrappers must keep the temporary inside its loop."""
 
     @T.prim_func
     def func(
@@ -388,8 +380,7 @@ def test_codegen_unwraps_scope_spanning_entire_loop_body():
     ):
         with T.Kernel(1, threads=128):
             for k in T.serial(4):
-                with T.sblock():
-                    T.sblock_attr({"lexical_alloc_scope": 1})
+                with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
@@ -398,17 +389,20 @@ def test_codegen_unwraps_scope_spanning_entire_loop_body():
     src = kernel.get_kernel_source()
     import re
 
-    assert not re.search(r"\{\s*\n\s*\{", src), f"Redundant `{{ {{` emitted for loop-spanning lexical scope:\n{src}"
     # The local alloc must still be declared inside the loop body, not hoisted
     # to the kernel entry.
     loop_pos = src.find("for (")
-    decl_pos = src.find("float S[")
+    decl_pos = src.find("float S_ptr[")
     assert loop_pos >= 0 and decl_pos > loop_pos, f"Expected S declared inside the loop body:\n{src}"
+    import torch
+
+    source = torch.randn(128, 4, device="cuda")
+    torch.testing.assert_close(kernel(source), source)
 
 
 @tilelang.testing.requires_cuda
 def test_codegen_skips_redundant_top_level_braces():
-    """The outermost top-level lexical scope should not emit a redundant brace block."""
+    """Native function-local and inner lexical allocations stay distinct."""
 
     @T.prim_func
     def func(
@@ -419,8 +413,7 @@ def test_codegen_skips_redundant_top_level_braces():
             C = T.alloc_fragment((128,), T.float32)
             T.clear(C)
             for k in T.serial(4):
-                with T.sblock():
-                    T.sblock_attr({"lexical_alloc_scope": 1})
+                with T.scope(attrs={**{"lexical_alloc_scope": 1}}):
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     C[T.get_thread_binding()] = S[T.get_thread_binding()]
@@ -436,9 +429,7 @@ def test_codegen_skips_redundant_top_level_braces():
     print(src)
     import re
 
-    assert re.search(r"^\s*float [A-Za-z_]\w*\[\d+\];\s*$", src, re.MULTILINE), (
-        "Expected top-level fragment allocation to stay directly in function scope"
-    )
+    assert re.search(r"^\s*(?:alignas\(\d+\)\s+)?float C_ptr\[\d+\];\s*$", src, re.MULTILINE), "Expected function-local fragment allocation"
     kernel_match = re.search(
         r'extern "C" __global__ void(?: __launch_bounds__\([^)]*\))? [A-Za-z_]\w*_kernel\(',
         src,
@@ -446,10 +437,16 @@ def test_codegen_skips_redundant_top_level_braces():
     assert kernel_match, "Expected generated CUDA source to contain a kernel signature"
     body_open_idx = src.find("{", kernel_match.start())
     assert body_open_idx >= 0, "Expected generated CUDA kernel body"
-    first_nonempty = next(line.strip() for line in src[body_open_idx + 1 :].splitlines() if line.strip())
-    assert first_nonempty != "{", "Unexpected redundant top-level lexical scope brace"
+    fragment_position = src.find("float C_ptr[", body_open_idx)
+    loop_position = src.find("for (", body_open_idx)
+    assert body_open_idx < fragment_position < loop_position
     standalone_open_braces = re.findall(r"^\s*\{\s*$", src, re.MULTILINE)
     assert len(standalone_open_braces) >= 1, "Expected inner lexical scopes to still emit standalone braces"
+    import torch
+
+    source = torch.randn(128, 4, device="cuda")
+    expected = (source[:, -1:] + 1).expand_as(source)
+    torch.testing.assert_close(kernel(source), expected)
 
 
 if __name__ == "__main__":

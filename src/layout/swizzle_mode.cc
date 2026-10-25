@@ -13,20 +13,16 @@
 namespace tvm {
 namespace tl {
 
-// Register the enum type and its variants. Declaration order fixes the dense
-// ordinals (0..3), which equal the CU_TENSOR_MAP_SWIZZLE_* values.
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   // EnumObj subclasses have no __ffi_init__; allocate via init(false).
   refl::ObjectDef<SwizzleModeObj>(
       refl::init(false)); // NOLINT(bugprone-unused-raii)
-  refl::TypeAttrDef<SwizzleModeObj>().def(
-      refl::type_attr::kConvert,
-      &refl::details::FFIConvertFromAnyViewToObjectRef<SwizzleMode>);
-  refl::EnumDef<SwizzleModeObj>("NONE");         // ordinal 0
-  refl::EnumDef<SwizzleModeObj>("SWIZZLE_32B");  // ordinal 1
-  refl::EnumDef<SwizzleModeObj>("SWIZZLE_64B");  // ordinal 2
-  refl::EnumDef<SwizzleModeObj>("SWIZZLE_128B"); // ordinal 3
+  refl::TypeAttrDef<SwizzleModeObj>().def_convert<SwizzleMode>();
+  refl::EnumDef<SwizzleModeObj>("NONE");
+  refl::EnumDef<SwizzleModeObj>("SWIZZLE_32B");
+  refl::EnumDef<SwizzleModeObj>("SWIZZLE_64B");
+  refl::EnumDef<SwizzleModeObj>("SWIZZLE_128B");
 }
 
 // Projection helpers exposed to Python so the descriptor-field encodings live

@@ -21,198 +21,136 @@
  * \file unroll_loop_skip_vf.cc
  * \brief Explicitly unroll requested loops outside Ascend VF blocks.
  */
-#include "support/check.h"
-
-#include <tvm/arith/analyzer.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
 
 #include <limits>
-#include <utility>
 
-#include "tir/transforms/ir_utils.h"
+#include "compat/expr.h"
+#include "op/builtin.h"
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
 
-// Renames Var and Buffer definitions in each unrolled body copy so every
-// iteration gets a fresh SSA identity.
-class UnrolledBodyDefFreshener : public StmtExprMutator {
+class TargetedControlDetector : public tirx::StmtExprVisitor {
 public:
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
-    auto it = var_remap_.find(var);
-    if (it != var_remap_.end()) {
-      return (*it).second;
+  bool found{false};
+
+protected:
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const ForNode *) final {
+    return std::nullopt;
+  }
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const WhileNode *) final {
+    return std::nullopt;
+  }
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const BreakNode *) final {
+    found = true;
+    return std::nullopt;
+  }
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const ContinueNode *) final {
+    found = true;
+    return std::nullopt;
+  }
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallNode *node) final {
+    if (node->op.same_as(loop_break()))
+      found = true;
+    return StmtExprVisitor::Visit_(node);
+  }
+};
+
+class ExplicitLoopUnroller : public tirx::StmtExprMutator {
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    auto name = node->attrs.GetAttr<ffi::String>("name_hint").value_or("");
+    if (name == "SIMD_VF" || name == "SIMT_VF" ||
+        node->attrs->dict.count("tl.simdvf_scope") ||
+        node->attrs->dict.count("tl.simtvf_scope")) {
+      return ffi::Unchanged{};
     }
-    return var;
+    return StmtExprMutator::Mutate_(node, mode);
   }
 
-  Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
-    Var data;
-    if (alloc_data) {
-      data = FreshVar(buffer->data);
-    } else {
-      PrimExpr remapped_data = VisitExpr(buffer->data);
-      ICHECK(remapped_data.as<VarNode>())
-          << "Buffer data must remain a Var after freshening definitions";
-      data = Downcast<Var>(remapped_data);
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto loop = StmtExprMutator::Mutate_(node, mode)
+                    .ValueOrUnchanged(original)
+                    .as_or_throw<For>();
+    auto request = loop->annotations.Get("pragma_unroll_explicit");
+    if (loop->kind != ForKind::kUnrolled || !request)
+      return loop;
+    auto explicit_unroll = GetIntAnnotation(*request);
+    TVM_FFI_CHECK(explicit_unroll &&
+                      (*explicit_unroll == 0 || *explicit_unroll == 1),
+                  ValueError)
+        << "pragma_unroll_explicit must be a boolean";
+    if (!*explicit_unroll)
+      return loop;
+    auto step = GetConstInt(analyzer_->Simplify(loop->step));
+    auto distance = GetConstInt(analyzer_->Simplify(loop->end - loop->begin));
+    TVM_FFI_CHECK(step && *step != 0 && distance, ValueError)
+        << "T.unroll(..., explicit=True) requires a constant trip count and "
+           "nonzero step";
+    TVM_FFI_CHECK(SideEffect(loop->begin) == CallEffectKind::kPure &&
+                      SideEffect(loop->end) == CallEffectKind::kPure,
+                  ValueError)
+        << "Explicit unrolling requires loop bounds without mutable reads";
+    int64_t count = 0;
+    if ((*step > 0 && *distance > 0) || (*step < 0 && *distance < 0)) {
+      uint64_t magnitude = *distance > 0 ? uint64_t(*distance)
+                                         : uint64_t(0) - uint64_t(*distance);
+      uint64_t stride =
+          *step > 0 ? uint64_t(*step) : uint64_t(0) - uint64_t(*step);
+      uint64_t trips = 1 + (magnitude - 1) / stride;
+      TVM_FFI_CHECK(trips <= std::numeric_limits<int>::max(), ValueError)
+          << "Explicit unroll trip count is too large";
+      count = static_cast<int64_t>(trips);
     }
-
-    auto visit_expr = [this](const PrimExpr &expr) {
-      return this->VisitExpr(expr);
-    };
-    Buffer new_buffer = buffer;
-    auto writer = new_buffer.CopyOnWrite();
-    writer->data = std::move(data);
-    writer->shape = buffer->shape.Map(visit_expr);
-    writer->strides = buffer->strides.Map(visit_expr);
-    writer->elem_offset = visit_expr(buffer->elem_offset);
-    buffer_remap_.Set(buffer, new_buffer);
-    return new_buffer;
+    auto control = ffi::make_object<TargetedControlDetector>();
+    control->Visit(loop->body);
+    TVM_FFI_CHECK(!control->found, ValueError)
+        << "Explicit unrolling cannot expand break or continue targeting the "
+           "loop";
+    ffi::Array<Stmt> expanded;
+    for (int64_t iteration = 0; iteration < count; ++iteration) {
+      PrimExpr index = analyzer_->Simplify(
+          loop->begin + MakeConst(loop->var.ty(), iteration) * loop->step);
+      Stmt body = Substitute(loop->body,
+                             ffi::Map<PrimVar, PrimExpr>{{loop->var, index}});
+      auto renewed = tirx::RenewDef(tirx::Function({}, SeqStmt(body)));
+      expanded.push_back(RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(),
+                                    renewed->body.value(), {}, loop->loc));
+    }
+    return SeqStmt(expanded, loop->loc);
   }
 
 private:
-  Var FreshVar(const Var &var) {
-    Var new_var = Var(make_object<VarNode>(*var.get()));
-    var_remap_.Set(var, new_var);
-    return new_var;
-  }
-
-  Map<Var, Var> var_remap_;
+  sym::Analyzer analyzer_;
 };
-
-class ExplicitLoopUnroller : public StmtExprMutator {
-public:
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    // VF bodies are consumed by their dedicated lowering.  Returning the block
-    // itself also preserves explicit unroll loops nested anywhere in the body.
-    if (op->name_hint == "SIMD_VF" || op->name_hint == "SIMT_VF") {
-      return GetRef<Stmt>(op);
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Keep the scope-marker check as a fallback for already-normalized IR in
-    // which a VF marker is present without its named SBlock wrapper.
-    if (op->attr_key == "tl.simdvf_scope" ||
-        op->attr_key == "tl.simtvf_scope") {
-      return GetRef<Stmt>(op);
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Process nested loops first so every explicit request outside a VF block
-    // is materialized, including requests nested under a preserved loop.
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    const auto *loop = stmt.as<ForNode>();
-    ICHECK(loop != nullptr);
-    if (!IsExplicitUnroll(loop)) {
-      return stmt;
-    }
-    return Unroll(loop);
-  }
-
-private:
-  static bool IsExplicitUnroll(const ForNode *op) {
-    if (op->kind != ForKind::kUnrolled) {
-      return false;
-    }
-    auto it = op->annotations.find(tirx::attr::pragma_unroll_explicit);
-    if (it == op->annotations.end()) {
-      return false;
-    }
-    if (auto explicit_unroll = (*it).second.as<bool>()) {
-      return explicit_unroll.value();
-    }
-    if (auto explicit_unroll = (*it).second.as<Bool>()) {
-      return explicit_unroll.value();
-    }
-    if (auto explicit_unroll = (*it).second.as<IntImm>()) {
-      ICHECK(explicit_unroll.value()->value == 0 ||
-             explicit_unroll.value()->value == 1)
-          << "pragma_unroll_explicit must be a boolean";
-      return explicit_unroll.value()->value != 0;
-    }
-    ICHECK(false) << "pragma_unroll_explicit must be a boolean";
-    return false;
-  }
-
-  int GetExtent(const ForNode *op) {
-    PrimExpr extent = analyzer_.Simplify(op->extent);
-    const auto *value = extent.as<IntImmNode>();
-    ICHECK(value != nullptr)
-        << "T.unroll(..., explicit=True) requires a constant loop extent";
-    ICHECK_GE(value->value, 0)
-        << "T.unroll(..., explicit=True) requires a non-negative loop extent";
-    ICHECK_LE(value->value, std::numeric_limits<int>::max())
-        << "T.unroll(..., explicit=True) loop extent is too large";
-    return static_cast<int>(value->value);
-  }
-
-  Stmt Unroll(const ForNode *op) {
-    int extent = GetExtent(op);
-    if (extent == 0) {
-      return Evaluate(0);
-    }
-
-    Map<Var, PrimExpr> substitutions;
-    Array<Stmt> unrolled;
-    for (int i = 0; i < extent; ++i) {
-      PrimExpr iteration;
-      if (op->step.defined() && !is_one(op->step.value())) {
-        iteration =
-            op->min + make_const(op->loop_var.dtype(), i) * op->step.value();
-      } else {
-        iteration = op->min + make_const(op->loop_var.dtype(), i);
-      }
-      substitutions.Set(op->loop_var, iteration);
-      Stmt body = Substitute(op->body, substitutions);
-      body = UnrolledBodyDefFreshener()(std::move(body));
-      unrolled.push_back(body);
-    }
-    return SeqStmt::Flatten(unrolled);
-  }
-
-  arith::Analyzer analyzer_;
-};
-
-Stmt UnrollLoopSkipVF(Stmt stmt) {
-  Stmt result = ExplicitLoopUnroller()(stmt);
-  return result.same_as(stmt) ? result : ConvertSSA(result);
-}
 
 } // namespace
 
 namespace transform {
-
-using namespace tirx::transform;
-
-Pass UnrollLoopSkipVF() {
-  auto pass_func = [](PrimFunc func, const IRModule &, PassContext) {
-    auto *node = func.CopyOnWrite();
-    node->body = tl::UnrollLoopSkipVF(func->body);
-    return func;
+tvm::transform::Pass UnrollLoopSkipVF() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (!function->body)
+      return function;
+    auto rewriter = ffi::make_object<ExplicitLoopUnroller>();
+    SeqStmt original = function->body.value();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.UnrollLoopSkipVF", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.UnrollLoopSkipVF");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.UnrollLoopSkipVF", UnrollLoopSkipVF);
+  ffi::reflection::GlobalDef().def("tl.transform.UnrollLoopSkipVF",
+                                   UnrollLoopSkipVF);
 }
-
 } // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

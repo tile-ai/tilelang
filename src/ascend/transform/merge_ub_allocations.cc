@@ -24,6 +24,7 @@
 
 #include "buffer_alias.h"
 #include "merge_ub_common.h"
+#include "transform/common/attr.h"
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/function.h>
@@ -284,7 +285,7 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
       tail.push_back(std::move(var));
   }
   std::sort(tail.begin(), tail.end(), [](const Var &lhs, const Var &rhs) {
-    return lhs->name_hint < rhs->name_hint;
+    return lhs->name < rhs->name;
   });
   ordered_vars.insert(ordered_vars.end(), tail.begin(), tail.end());
 
@@ -295,16 +296,21 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
   std::vector<Var> dynamic;
   for (size_t index = 0; index < ordered_vars.size(); ++index) {
     const Var &var = ordered_vars[index];
-    const AllocBufferNode *alloc = allocations.at(var.get());
-    std::optional<int64_t> elements =
-        GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
-    if (!elements.has_value()) {
+    const BindNode *alloc = allocations.at(var.get());
+    sym::Analyzer analyzer;
+    PrimExpr bytes =
+        analyzer->Simplify(GetBufferSizeBytes(alloc, PrimType::Int(64)));
+    const auto *constant_bytes = bytes.as<IntImmNode>();
+    if (!constant_bytes) {
       dynamic.push_back(var);
       continue;
     }
-    int elem_bits = alloc->buffer->dtype.bits() * alloc->buffer->dtype.lanes();
-    size_t size =
-        static_cast<size_t>(PackedBytesFromElems(elements.value(), elem_bits));
+    TVM_FFI_CHECK(constant_bytes->value >= 0, ValueError)
+        << "Ascend allocation size cannot be negative";
+    auto byte_count = constant_bytes->value.as<int64_t>();
+    TVM_FFI_CHECK(byte_count, ValueError)
+        << "Ascend allocation size overflows int64";
+    size_t size = byte_count.value();
     constant.push_back({var, size,
                         std::max(align_bytes, AscendScopeAlignBytes(alloc)),
                         index});
@@ -324,8 +330,8 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
           ICHECK(can_alias(constant[clique.members[i]].storage,
                            constant[clique.members[j]].storage))
               << "Buffer-reuse clique contains incompatible storages "
-              << constant[clique.members[i]].storage->name_hint << " and "
-              << constant[clique.members[j]].storage->name_hint;
+              << constant[clique.members[i]].storage->name << " and "
+              << constant[clique.members[j]].storage->name;
         }
       }
     }
@@ -335,19 +341,19 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
       ICHECK_LT(static_cast<size_t>(clique),
                 partition.layout.byte_offsets.size());
       size_t offset = partition.layout.byte_offsets[clique];
-      plan.byte_offsets[constant[vertex].storage.get()] =
-          make_const(DataType::Int(32), static_cast<int64_t>(offset));
+      plan.byte_offsets.insert_or_assign(constant[vertex].storage.get(),
+                                         IntImm::Int64(offset));
     }
     arena_top = partition.layout.total_size;
   }
 
-  DataType offset_dtype = DataType::Int(64);
-  PrimExpr cursor = make_const(offset_dtype, static_cast<int64_t>(arena_top));
+  PrimType offset_dtype = PrimType::Int(64);
+  PrimExpr cursor = IntImm(offset_dtype, static_cast<int64_t>(arena_top));
   for (const Var &var : dynamic) {
-    const AllocBufferNode *alloc = allocations.at(var.get());
+    const BindNode *alloc = allocations.at(var.get());
     int alignment = std::max(align_bytes, AscendScopeAlignBytes(alloc));
     cursor = AlignPrimExpr(cursor, alignment);
-    plan.byte_offsets[var.get()] = cursor;
+    plan.byte_offsets.insert_or_assign(var.get(), cursor);
     cursor = cursor + GetBufferSizeBytes(alloc, offset_dtype);
   }
   plan.total_size = AlignPrimExpr(cursor, align_bytes);
@@ -364,49 +370,68 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
                  << " size=" << clique.size
                  << " alignment=" << clique.alignment;
       for (size_t member : clique.members)
-        LOG(DEBUG) << "      " << constant[member].storage->name_hint;
+        LOG(DEBUG) << "      " << constant[member].storage->name;
     }
     for (const auto &[var, offset] : plan.byte_offsets)
-      LOG(DEBUG) << "    " << var->name_hint << " offset=" << offset;
+      LOG(DEBUG) << "    " << var->name << " offset=" << offset;
   }
   return plan;
 }
 
-class BufferAliasContractExtractor : public StmtMutator {
+class BufferAliasContractExtractor : public ascend::NativeMutator {
 public:
-  Stmt Extract(const Stmt &stmt) { return VisitStmt(stmt); }
   bool FoundContract() const { return found_contract_; }
   const BufferAliasMap &Aliases() const { return aliases_; }
   const AivStorageMap &AivStorages() const { return aiv_storages_; }
 
+  DictAttrs Extract(const DictAttrs &annotations) {
+    auto attrs = annotations->dict;
+    if (auto annotation = attrs.Get(kAivStorageMap)) {
+      for (const auto &[storage, value] : annotation->cast<Map<Var, Any>>()) {
+        auto sid = GetIntAnnotation(value);
+        TVM_FFI_CHECK(sid && (*sid == 0 || *sid == 1), ValueError)
+            << "AIV storage ID must be zero or one";
+        auto existing = aiv_storages_.Get(storage);
+        TVM_FFI_CHECK(!existing || existing.value() == *sid, ValueError)
+            << "Conflicting AIV storage IDs";
+        aiv_storages_.Set(storage, static_cast<int>(*sid));
+      }
+      attrs.erase(kAivStorageMap);
+    }
+    if (auto annotation = attrs.Get(kBufferAliasMap)) {
+      BufferAliasMap local = annotation->cast<BufferAliasMap>();
+      ValidateBufferAliasMap(local);
+      for (const auto &[storage, compatible] : local) {
+        TVM_FFI_CHECK(!aliases_.count(storage), ValueError)
+            << "A function contains multiple buffer-alias contracts for "
+               "storage "
+            << storage;
+        AddBufferAliasStorage(&aliases_, storage);
+      }
+      for (const auto &[storage, compatible] : local)
+        for (const Var &other : compatible)
+          if (!HasBufferAlias(aliases_, storage, other))
+            AddBufferAlias(&aliases_, storage, other);
+      found_contract_ = true;
+      attrs.erase(kBufferAliasMap);
+    }
+    return DictAttrs(attrs);
+  }
+
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kAivStorageMap) {
-      for (const auto &[storage, sid] : op->node.cast<AivStorageMap>()) {
-        ICHECK(sid->value == 0 || sid->value == 1);
-        aiv_storages_.Set(storage, sid);
-      }
-      return VisitStmt(op->body);
-    }
-    if (op->attr_key != kBufferAliasMap)
-      return StmtMutator::VisitStmt_(op);
-    BufferAliasMap local = op->node.cast<BufferAliasMap>();
-    ValidateBufferAliasMap(local);
-    for (const auto &[storage, _] : local) {
-      ICHECK(!aliases_.count(storage))
-          << "A PrimFunc contains multiple buffer-alias contracts for "
-             "storage "
-          << storage;
-      AddBufferAliasStorage(&aliases_, storage);
-    }
-    for (const auto &[storage, compatible] : local) {
-      for (const Var &other : compatible) {
-        if (!HasBufferAlias(aliases_, storage, other))
-          AddBufferAlias(&aliases_, storage, other);
-      }
-    }
-    found_contract_ = true;
-    return VisitStmt(op->body);
+  Stmt VisitStmt_(const ForNode *node) final {
+    DictAttrs attrs = Extract(DictAttrs(node->annotations));
+    auto loop = ascend::NativeMutator::VisitStmt_(node).as_or_throw<For>();
+    loop.CopyOnWrite()->annotations = attrs->dict;
+    return loop;
+  }
+
+  Stmt VisitStmt_(const RegionStmtNode *node) final {
+    DictAttrs attrs = Extract(node->attrs);
+    auto region =
+        ascend::NativeMutator::VisitStmt_(node).as_or_throw<RegionStmt>();
+    region.CopyOnWrite()->attrs = std::move(attrs);
+    return region;
   }
 
   BufferAliasMap aliases_;
@@ -414,22 +439,27 @@ private:
   bool found_contract_{false};
 };
 
-Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
-                        bool disable_reuse) {
-  BufferAliasContractExtractor extractor;
-  stmt = extractor.Extract(stmt);
-  if (!extractor.FoundContract())
-    return stmt;
-  BufferAliasMap aliases = extractor.Aliases();
+tirx::Function MergeUBAllocations(tirx::Function function, int align_bytes,
+                                  bool verbose, bool disable_reuse) {
+  auto extractor = make_object<BufferAliasContractExtractor>();
+  DictAttrs attrs = extractor->Extract(function->attrs);
+  SeqStmt body =
+      extractor->VisitStmt(function->body.value()).as_or_throw<SeqStmt>();
+  bool has_contract = extractor->FoundContract();
+  if (has_contract) {
+    function.CopyOnWrite()->attrs = std::move(attrs);
+    function.CopyOnWrite()->body = std::move(body);
+  }
+  BufferAliasMap aliases = extractor->Aliases();
   ValidateBufferAliasMap(aliases);
 
-  AivStorageMap aiv_storages = extractor.AivStorages();
+  AivStorageMap aiv_storages = extractor->AivStorages();
   auto planner = [aliases = std::move(aliases), aiv_storages, disable_reuse](
                      const Stmt &, const AllocationMap &allocations,
                      const AllocationOrder &allocation_order,
                      const std::string &scope, int alignment, bool debug) {
     auto plan = [&](const AllocationMap &group, const AllocationOrder &order) {
-      return disable_reuse ? BuildSequentialPlan(group, alignment)
+      return disable_reuse ? BuildSequentialPlan(group, alignment, order)
                            : BuildAliasMemoryPlan(group, order, alignment,
                                                   debug, aliases);
     };
@@ -442,7 +472,7 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
     std::array<AllocationOrder, 3> orders;
     for (const auto &[storage, allocation] : allocations) {
       auto sid = aiv_storages.Get(GetRef<Var>(storage));
-      int group = sid.has_value() ? static_cast<int>(sid.value()->value) : 2;
+      int group = sid.has_value() ? sid.value() : 2;
       groups[group].emplace(storage, allocation);
     }
     for (const auto *storage : allocation_order) {
@@ -452,18 +482,20 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
     }
     MemoryPlan result = plan(groups[2], orders[2]);
     PrimExpr prefix = AlignPrimExpr(result.total_size, alignment);
-    PrimExpr private_size = make_zero(prefix.dtype());
+    PrimExpr private_size = IntImm(prefix.ty(), 0);
     for (int sid = 0; sid < 2; ++sid) {
       MemoryPlan local = plan(groups[sid], orders[sid]);
       for (const auto &[storage, offset] : local.byte_offsets)
-        result.byte_offsets[storage] = prefix + cast(prefix.dtype(), offset);
-      private_size = max(private_size, cast(prefix.dtype(), local.total_size));
+        result.byte_offsets.insert_or_assign(
+            storage, prefix + prim::cast(offset, prefix.ty()));
+      private_size =
+          tvm::max(private_size, prim::cast(local.total_size, prefix.ty()));
     }
     result.total_size = prefix + private_size;
     return result;
   };
-  return merge_ub::MergeAllocations(std::move(stmt), align_bytes, verbose,
-                                    false, planner);
+  return merge_ub::MergeAllocations(std::move(function), align_bytes, verbose,
+                                    planner, !has_contract);
 }
 
 } // namespace
@@ -472,19 +504,24 @@ using namespace tirx::transform;
 
 namespace transform {
 
-Pass MergeUBAllocations(int align_bytes = 16, bool disable_reuse = false) {
-  auto pass_func = [align_bytes, disable_reuse](PrimFunc func, const IRModule &,
-                                                PassContext context) {
+tvm::transform::Pass MergeUBAllocations(int align_bytes = 16,
+                                        bool disable_reuse = false) {
+  TVM_FFI_CHECK(align_bytes > 0 && align_bytes <= (1 << 27) &&
+                    (align_bytes & (align_bytes - 1)) == 0,
+                ValueError)
+      << "Ascend arena alignment must be a positive power of two";
+  auto pass_func = [align_bytes,
+                    disable_reuse](tirx::Function function, const IRModule &,
+                                   const tvm::transform::PassContext &context) {
+    if (!function->body)
+      return function;
     bool verbose =
-        context
-            ->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
-            .value();
-    PrimFuncNode *writer = func.CopyOnWrite();
-    writer->body = tl::MergeUBAllocations(std::move(writer->body), align_bytes,
-                                          verbose, disable_reuse);
-    return func;
+        context->GetConfig<bool>("tl.debug_merge_shared_memory_allocations")
+            .value_or(false);
+    return tl::MergeUBAllocations(std::move(function), align_bytes, verbose,
+                                  disable_reuse);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MergeUBAllocations", {});
+  return CreateFunctionPass(pass_func, 0, "tl.MergeUBAllocations");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -8,8 +8,8 @@
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "op/utils.h"
-#include <tvm/arith/analyzer.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 
 #include <optional>
 
@@ -29,38 +29,39 @@ bool MatchCudaFillTarget(Target target) {
   return TargetIsCuda(target) || TargetIsCuTeDSL(target);
 }
 
-bool IsZeroFillValue(const PrimExpr &value, arith::Analyzer *analyzer) {
+bool IsZeroFillValue(const PrimExpr &value, sym::Analyzer analyzer) {
   if (const auto *broadcast = value.as<BroadcastNode>()) {
     return IsZeroFillValue(broadcast->value, analyzer);
   }
-  return analyzer->CanProveEqual(value, make_zero(value.dtype()));
+  return IsZeroBitPattern(analyzer->Simplify(value));
 }
 
-std::optional<PrimExpr> FullRegionElements(const Buffer &buffer,
+std::optional<PrimExpr> FullRegionElements(const TensorVar &buffer,
                                            const Array<Range> &region,
-                                           arith::Analyzer *analyzer) {
-  ICHECK_EQ(buffer->shape.size(), region.size());
-  PrimExpr elements = make_const(DataType::Int(64), 1);
+                                           sym::Analyzer analyzer) {
+  ICHECK_EQ(buffer.shape().size(), region.size());
+  PrimExpr elements = MakeConst(PrimType::Int(64), 1);
   for (size_t i = 0; i < region.size(); ++i) {
-    if (!analyzer->CanProveEqual(region[i]->min, 0) ||
-        !analyzer->CanProveEqual(region[i]->extent, buffer->shape[i])) {
+    if (!analyzer->CanProveEqual(region[i]->begin, 0) ||
+        !analyzer->CanProveEqual(region[i]->extent, buffer.shape()[i])) {
       return std::nullopt;
     }
-    elements = elements * cast(DataType::Int(64), region[i]->extent);
+    elements = elements * Cast(PrimType::Int(64), region[i]->extent);
   }
   return elements;
 }
 
 std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
                                                const LowerArgs &lower_args,
-                                               arith::Analyzer *analyzer) {
+                                               sym::Analyzer analyzer) {
   if (!CanUseStBulkShared(lower_args.target)) {
     return std::nullopt;
   }
   if (!IsSharedBuffer(op.dst) || !IsZeroFillValue(op.value, analyzer)) {
     return std::nullopt;
   }
-  if (!op.dst->strides.empty()) {
+  if (!op.dst.ty()->HasDefaultLayout(analyzer) ||
+      op.dst.ty()->data_alignment < 8) {
     return std::nullopt;
   }
 
@@ -69,12 +70,12 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
     return std::nullopt;
   }
 
-  int bits = op.dst->dtype.bits() * op.dst->dtype.lanes();
+  int bits = op.dst.dtype().bits() * op.dst.dtype().lanes();
   if (bits % 8 != 0) {
     return std::nullopt;
   }
   PrimExpr bytes = analyzer->Simplify(elements.value() *
-                                      IntImm(DataType::Int(64), bits / 8));
+                                      IntImm(PrimType::Int(64), bits / 8));
   auto bytes_imm = bytes.as<IntImmNode>();
   if (bytes_imm == nullptr || bytes_imm->value % 8 != 0) {
     return std::nullopt;
@@ -82,25 +83,19 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
 
   // Emit the destination as a write access_ptr so ThreadSync records the
   // st.bulk as a shared write and inserts the required barrier.
-  PrimExpr dst_access_ptr =
-      Call(DataType::Handle(), builtin::tvm_access_ptr(),
-           {TypeAnnotation(op.dst->dtype), op.dst->data,
-            make_const(DataType::Int(32), 0),
-            cast(DataType::Int(32), elements.value()),
-            IntImm(DataType::Int(32), /*rw_mask=write*/ 2)});
-  PrimExpr bulk_store =
-      Call(DataType::Handle(), ptx_st_bulk_shared(),
-           {dst_access_ptr, bytes, make_const(DataType::UInt(64), 0)});
+  Expr dst_access_ptr =
+      MakeAccessPtrFromRegion(NormalizeToBufferRegion(op.dst), kAccessWrite);
+  Expr bulk_store =
+      Call(TupleType(ffi::Array<Type>{}), ptx_st_bulk_shared(),
+           {dst_access_ptr, bytes, MakeConst(PrimType::UInt(64), 0)});
   Stmt body = Evaluate(bulk_store);
-  if (lower_args.thread_index.defined() && lower_args.thread_bounds.defined()) {
-    body = IfThenElse(
-        EQ(lower_args.thread_index, lower_args.thread_bounds->min), body);
-  }
+  body = If(EQ(lower_args.thread_index, lower_args.thread_bounds->begin),
+            SeqStmt(body));
   return body;
 }
 
 Stmt LowerCudaFill(const FillNode &op, const LowerArgs &lower_args,
-                   arith::Analyzer *analyzer) {
+                   sym::Analyzer analyzer) {
   if (auto bulk_fill = TryLowerSharedBulkZeroFill(op, lower_args, analyzer)) {
     return bulk_fill.value();
   }

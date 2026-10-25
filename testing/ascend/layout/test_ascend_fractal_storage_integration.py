@@ -5,8 +5,9 @@ import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
-from testing.ascend._ir import allocated_buffer, calls, nodes, statements
+from tilelang._compat import tirx
+from tilelang._compat.tensor import tensor_strides
+from testing.ascend._ir import allocated_buffer, allocated_buffers, calls, nodes, statements
 
 
 def test_padded_alias_storage_sets_the_physical_version_pitch():
@@ -23,7 +24,7 @@ def test_padded_alias_storage_sets_the_physical_version_pitch():
 
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @tvm.ir.transform.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in {"tl.MaterializeMultiBuffer", "tl.FlattenBuffer"}:
@@ -31,13 +32,13 @@ def test_padded_alias_storage_sets_the_physical_version_pitch():
 
     with tvm.transform.PassContext(instruments=[Capture()]):
         tilelang.lower(main, target="ascend")
-    assert int(allocated_buffer(snapshots["tl.MaterializeMultiBuffer"], "storage").strides[0]) == 256
+    assert int(tensor_strides(allocated_buffer(snapshots["tl.MaterializeMultiBuffer"], "storage"))[0]) == 256
     flat = snapshots["tl.FlattenBuffer"]
-    (allocation,) = [node.buffer for node in nodes(flat, tirx.AllocBuffer) if node.buffer.scope() == "shared.l1"]
+    (allocation,) = [tensor for tensor in allocated_buffers(flat) if str(tensor.scope()) == "shared.l1"]
     assert int(allocation.shape[0]) == 512
-    pointers = [call for call in calls(flat, "tirx.tvm_access_ptr") if call.args[1].type_annotation.storage_scope == "shared.l1"]
+    pointers = [call.args[0] for call in calls(flat, "tirx.address_of") if call.args[0].source.same_as(allocation)]
     assert len(pointers) == 2
-    tvm.ir.assert_structural_equal(pointers[0].args[2], pointers[1].args[2])
+    tvm.ir.assert_structural_equal(pointers[0].indices, pointers[1].indices)
 
 
 def test_dynamic_fixpipe_padding_survives_full_lowering():
@@ -58,7 +59,7 @@ def test_dynamic_fixpipe_padding_survives_full_lowering():
 
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @tvm.ir.transform.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name == "tl.AscendLowerTileOp":
@@ -78,10 +79,7 @@ def test_dynamic_fixpipe_padding_survives_full_lowering():
         assert bool(analyzer.simplify(tirx.stmt_functor.substitute(guard, substitute))) == (value > 0)
 
 
-@pytest.mark.parametrize("use_alias", [False, True])
-def test_full_logical_tile_padding_npu(use_alias):
-    import torch
-
+def _full_logical_tile_padding_program(use_alias):
     @T.prim_func
     def main(A: T.Tensor((31, 128), "bfloat16"), B: T.Tensor((16, 64), "bfloat16"), C: T.Tensor((31, 16), "float32")):
         with T.Kernel(1):
@@ -105,7 +103,33 @@ def test_full_logical_tile_padding_npu(use_alias):
             T.gemm(a_l0, b_l0, accum, transpose_B=True, clear_accum=True)
             T.copy(accum, C)
 
-    kernel = tilelang.compile(main, out_idx=-1)
+    return main
+
+
+@pytest.mark.parametrize("use_alias", [False, True])
+def test_full_logical_tile_padding_codegen(use_alias):
+    snapshots = {}
+
+    @tvm.ir.transform.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendLowerTileOp":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_full_logical_tile_padding_program(use_alias), target="ascend")
+    assert artifact.kernel_source
+    lowered = snapshots["tl.AscendLowerTileOp"]
+    assert len(calls(lowered, "tl.ascend_mad")) == 1
+    assert calls(lowered, "tl.ascend_copy_gm_to_cbuf")
+
+
+@pytest.mark.parametrize("use_alias", [False, True])
+@tilelang.testing.requires_ascend
+def test_full_logical_tile_padding_npu(use_alias):
+    import torch
+
+    kernel = tilelang.compile(_full_logical_tile_padding_program(use_alias), target="ascend", out_idx=-1)
     torch.manual_seed(42)
     a = torch.randn((31, 128), device="npu", dtype=torch.bfloat16)
     b = torch.randn((16, 64), device="npu", dtype=torch.bfloat16)
@@ -114,6 +138,7 @@ def test_full_logical_tile_padding_npu(use_alias):
     torch.testing.assert_close(actual, a[:, 112:128].float() @ b[:, :16].float().T, atol=1e-3, rtol=1e-3)
 
 
+@tilelang.testing.requires_ascend
 def test_short_k_slice_does_not_consume_neighboring_gm_values_npu():
     import torch
 

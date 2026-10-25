@@ -67,7 +67,7 @@ class CuTeDSLKernelCache(KernelCache):
     @override
     def _get_required_files(self, cache_path: str) -> list[str]:
         """Return the CuTeDSL cache files required for a runnable reload."""
-        return super()._get_required_files(cache_path) + [os.path.join(cache_path, self.launcher_lib_path)]
+        return super()._get_required_files(cache_path)
 
     @override
     def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):

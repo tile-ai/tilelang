@@ -2,11 +2,12 @@ import torch
 import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 import tilelang.language as T
 from tilelang import JITKernel
 from tilelang.transform.simplify import apply_simplify
 from typing import Optional
+from tvm_tirx import ir, tirx
 
 tilelang.testing.set_random_seed(0)
 
@@ -46,6 +47,7 @@ def gemv_simt(
 
     dp4a_size = 4
     use_dp4a = in_dtype == T.int8 and accum_dtype == T.int32
+    combine = ir.LambdaExpr([accum_dtype, accum_dtype], lambda left, right: left + right)
 
     @T.prim_func
     def main(
@@ -88,21 +90,16 @@ def gemv_simt(
                     for ki in T.serial(micro_size_k):
                         accum_res[0] += A_local[ki].astype(accum_dtype) * B_local[ki].astype(accum_dtype)
 
-            with T.attr(
-                T.comm_reducer(lambda x, y: x + y, [T.cast(0, accum_dtype)]),
-                "reduce_scope",
-                T.reinterpret(T.uint64(0), dtype="handle"),
-            ):
-                T.evaluate(
-                    T.tvm_thread_allreduce(
-                        T.uint32(1),
-                        accum_res[0],
-                        True,
-                        reduced_accum_res[0],
-                        kr,
-                        dtype="handle",
-                    )
+            T.evaluate(
+                tirx.gpu_thread_allreduce(
+                    combine,
+                    T.cast(0, accum_dtype),
+                    accum_res[0],
+                    True,
+                    reduced_accum_res[0],
+                    kr,
                 )
+            )
             if kr == 0:
                 if with_bias:
                     C[by, bx * n_partition + ni] = reduced_accum_res[0] + Bias[bx * n_partition + ni]

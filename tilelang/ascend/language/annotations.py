@@ -1,8 +1,8 @@
 """Ascend auto-schedule annotations: multi-buffer version control and memory
 capacity overrides consumed by the Z3 scheduler."""
 
-from tvm.tirx import IntImm
-from tvm.tirx.script.builder.ir import sblock_attr
+from tilelang._compat.tirx import IntImm
+from tilelang._compat.builder import scope_attr, storage_identity
 
 _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
 
@@ -81,7 +81,7 @@ def annotate_buffer_versions(buffer_versions_map: dict):
             has_num_versions = True
             has_mode = False
 
-        data = buffer.data
+        data = storage_identity(buffer)
         if has_num_versions:
             if not isinstance(num_versions, int) or num_versions < 1:
                 raise ValueError(f"num_versions must be a positive integer, got {num_versions} for buffer {buffer}")
@@ -101,7 +101,7 @@ def annotate_buffer_versions(buffer_versions_map: dict):
         annotations["tl.buffer_versions_map"] = versions
     if modes:
         annotations["tl.buffer_version_mode"] = modes
-    return sblock_attr(annotations)
+    return scope_attr(annotations)
 
 
 def annotate_manual_multi_buffer(*items):
@@ -149,7 +149,7 @@ def annotate_manual_multi_buffer(*items):
     for item in items:
         if isinstance(item, dict):
             for buffer, num_versions in item.items():
-                _buffer_versions_map[buffer.data] = _as_count(num_versions, buffer)
+                _buffer_versions_map[storage_identity(buffer)] = _as_count(num_versions, buffer)
             continue
         buffer = item
         shape0 = buffer.shape[0]
@@ -158,8 +158,8 @@ def annotate_manual_multi_buffer(*items):
                 f"annotate_manual_multi_buffer needs a constant leading (version) dimension "
                 f"to infer N for buffer {buffer}; pass {{buffer: N}} to specify it explicitly"
             )
-        _buffer_versions_map[buffer.data] = _as_count(shape0, buffer)
-    return sblock_attr({"tl.manual_multi_buffer": _buffer_versions_map})
+        _buffer_versions_map[storage_identity(buffer)] = _as_count(shape0, buffer)
+    return scope_attr({"tl.manual_multi_buffer": _buffer_versions_map})
 
 
 def annotate_unlimit_memory(*scopes: str):
@@ -185,4 +185,4 @@ def annotate_unlimit_memory(*scopes: str):
     for scope in scopes:
         if scope not in valid:
             raise ValueError(f"Invalid memory scope {scope!r}, must be one of {valid}")
-    return sblock_attr({"tl.unlimit_memory_scopes": list(scopes)})
+    return scope_attr({"tl.unlimit_memory_scopes": list(scopes)})

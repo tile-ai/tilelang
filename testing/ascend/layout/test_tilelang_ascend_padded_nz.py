@@ -3,8 +3,9 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
-from tvm import tirx
+from tilelang._compat import tirx
 from tilelang.layout import make_ascend_compact_nz_layout
 
 ROWS, COLS, C0 = 16, 128, 16
@@ -52,6 +53,7 @@ def test_compact_nz_layout_keeps_stages_tightly_packed():
 
 
 @pytest.mark.parametrize("mode", ["inserted", "explicit", "prepacked"])
+@tilelang.testing.requires_ascend
 def test_nz_copy_preserves_logical_elements(mode):
     identity = torch.eye(COLS, dtype=torch.bfloat16, device="npu")
     x = torch.arange(ROWS * 2 * COLS, device="npu").reshape(ROWS * 2, COLS).to(torch.bfloat16)

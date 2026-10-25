@@ -8,7 +8,7 @@ from tilelang.contrib import nvcc
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import target_is_cuda
 from tilelang.rocm.target import target_is_cdna, target_is_gfx950
-from tvm.testing.utils import Feature, requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
+from .features import Feature, requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 from .perf_regression import process_func, regression
@@ -56,22 +56,10 @@ def _check_is_cuda_or_cdna() -> bool:
 
 
 def ascend_backend_compiled() -> bool:
-    """Whether this build includes the Ascend backend (USE_ASCEND).
+    """Whether the native Ascend scheduling pass is present in this build."""
+    import tvm_ffi
 
-    The Ascend sources are gated behind USE_ASCEND, so a CUDA-only build has no
-    Ascend tile ops and no Ascend pass-config options. The pass-config key is the
-    cheapest reliable probe: it is registered from src/ascend.
-    """
-    try:
-        import tvm
-
-        from tilelang.transform import PassConfigKey
-
-        with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True}):
-            pass
-        return True
-    except Exception:
-        return False
+    return tvm_ffi.get_global_func("tl.transform.AutoSchedule", allow_missing=True) is not None
 
 
 def _ascend_device_available() -> bool:

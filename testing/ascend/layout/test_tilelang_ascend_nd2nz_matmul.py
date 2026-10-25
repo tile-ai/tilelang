@@ -74,6 +74,7 @@ def _to_torch_dtype(dt: str):
         (32, 128, "bfloat16", "float32"),
     ],
 )
+@tilelang.testing.requires_ascend
 def test_nd2nz_matmul(M, N, src_dtype, mul_dtype, num_aiv):
     torch.manual_seed(42)
 

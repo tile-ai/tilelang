@@ -51,18 +51,22 @@ def lower_to_metal(dtype: str) -> str:
     return artifact.kernel_source or ""
 
 
-def test_metal_bf16_vectorized_copy_uses_packed_uint_type():
+def test_metal_bf16_vectorized_copy_preserves_all_lanes():
     src = lower_to_metal("bfloat16")
 
     assert "simdgroup_bfloat8x8" in src
     assert "*(threadgroup bfloat*)" not in src
-    assert "*(threadgroup uint4*)" in src
+    assert "*(threadgroup bfloat4*)" in src
+    assert "simdgroup_float8x8 C_local[32]" in src
+    assert "simdgroup_store(C_local[" in src
 
 
-def test_metal_fp16_vectorized_copy_still_uses_packed_uint_type():
+def test_metal_fp16_vectorized_copy_preserves_all_lanes():
     src = lower_to_metal("float16")
 
-    assert "*(threadgroup uint4*)" in src
+    assert "*(threadgroup half4*)" in src
+    assert "simdgroup_float8x8 C_local[32]" in src
+    assert "simdgroup_store(C_local[" in src
 
 
 if __name__ == "__main__":

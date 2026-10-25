@@ -36,7 +36,7 @@ def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False
 
 def _estimate_gemm_cost(*args, **kwargs):
     mod = _bind_target(_make_gemm_cost_program(*args, **kwargs))
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(launch_dim_tags=["cthread"])(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = ascend_transform.EstimateLatency()(_materialize_schedule_units(mod))
     metadata = _collect_task_metadata(mod)
@@ -344,7 +344,7 @@ def _make_unit_axis_fixpipe_dual_program():
 
 def _estimate_copy_metadata(program, rewrite_dual_copy=False):
     mod = _bind_target(program)
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(launch_dim_tags=["cthread"])(mod)
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
@@ -352,7 +352,7 @@ def _estimate_copy_metadata(program, rewrite_dual_copy=False):
         mod = ascend_transform.RewriteDualCopy()(mod)
     mod = _materialize_schedule_units(mod)
     mod = ascend_transform.EstimateLatency()(mod)
-    metadata = _collect_task_metadata(mod)
+    metadata = _collect_task_metadata(mod, include_allocations=False)
     return list(zip(metadata["latency"], metadata["ii"]))
 
 
@@ -360,8 +360,8 @@ def test_estimate_latency_annotates_all_materialized_tasks():
     mod = ascend_transform.EstimateLatency()(_materialize_schedule_units(_bind_target(_make_program())))
     metadata = _collect_task_metadata(mod)
 
-    assert len(metadata["latency"]) == 2
-    assert len(metadata["ii"]) == 2
+    assert len(metadata["latency"]) == 3
+    assert len(metadata["ii"]) == 3
     assert all(latency >= 0 for latency in metadata["latency"])
     assert all(ii > 0 for ii in metadata["ii"])
     assert _collect_schedule_units(mod)
@@ -514,7 +514,7 @@ def test_task_cost_arguments_are_validated():
         _make_program(ii=0)
     with pytest.raises(ValueError, match="greater than or equal to ii"):
         _make_program(latency=1, ii=2)
-    with pytest.raises(tvm.error.InternalError, match="greater than or equal to ii"):
+    with pytest.raises(RuntimeError, match="greater than or equal to ii"):
         ascend_transform.EstimateLatency()(_materialize_schedule_units(_bind_target(_make_program(latency=0))))
 
 

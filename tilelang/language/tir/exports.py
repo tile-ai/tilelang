@@ -10,6 +10,7 @@ CUDA_ONLY_TIR_EXPORTS = frozenset(
         "ptx_mma",
         "ptx_mma_block_scale",
         "ptx_mma_sp",
+        "ptx_legacy",
         "ptx_tcgen05_mma_blockscaled_ss",
         "ptx_tcgen05_mma_ss",
         "ptx_tcgen05_mma_ts",

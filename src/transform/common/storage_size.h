@@ -1,72 +1,55 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_STORAGE_SIZE_H_
 #define TVM_TL_TRANSFORM_COMMON_STORAGE_SIZE_H_
 
-#include <tvm/tirx/buffer.h>
+#include "compat/expr.h"
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 
 #include <cstdint>
+#include <limits>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
 
-/*! \brief Return whether a dtype uses packed four-bit buffer storage. */
-inline bool IsPacked4BitStorage(DataType dtype) {
-  return dtype.is_float4_e2m1fn() ||
-         (dtype.bits() == 4 && (dtype.is_int() || dtype.is_uint()));
+inline bool IsPacked4BitStorage(PrimType type) {
+  return type.bits() == 4 &&
+         type.MatchesCode(kDLFloat4_e2m1fn, kDLInt, kDLUInt);
 }
 
-/*! \brief Return the physical storage bytes for a constant element count. */
-inline int64_t GetBufferStorageSizeBytes(int64_t num_elements, DataType dtype) {
-  if (IsPacked4BitStorage(dtype)) {
-    int64_t total_bits = num_elements * dtype.bits() * dtype.lanes();
-    return (total_bits + 7) / 8;
-  }
-  return num_elements * dtype.bytes() * dtype.lanes();
+inline PrimExpr GetBufferStorageSizeBytes(const PrimExpr &elements,
+                                          PrimType type) {
+  TVM_FFI_CHECK(!type.IsScalableVector(), ValueError)
+      << "Shared allocations require fixed-width elements";
+  PrimExpr count = Cast(PrimType::Int(64), elements);
+  int64_t bits = static_cast<int64_t>(type.bits()) * type.lanes();
+  if (IsPacked4BitStorage(type))
+    return FloorDiv(count * IntImm::Int64(bits) + 7, IntImm::Int64(8));
+  return count * IntImm::Int64(type.StorageBytes());
 }
 
-/*! \brief Return the physical storage bytes for a symbolic element count. */
-inline PrimExpr GetBufferStorageSizeBytes(const PrimExpr &num_elements,
-                                          DataType dtype) {
-  DataType index_dtype = num_elements.dtype();
-  if (IsPacked4BitStorage(dtype)) {
-    int64_t storage_bits = static_cast<int64_t>(dtype.bits()) * dtype.lanes();
-    PrimExpr total_bits =
-        num_elements * tirx::make_const(index_dtype, storage_bits);
-    return ceildiv(total_bits, tirx::make_const(index_dtype, 8));
-  }
-  int64_t storage_bytes = static_cast<int64_t>(dtype.bytes()) * dtype.lanes();
-  return num_elements * tirx::make_const(index_dtype, storage_bytes);
+inline int64_t GetBufferStorageSizeBytes(int64_t elements, PrimType type) {
+  TVM_FFI_CHECK(elements >= 0, ValueError) << "Storage size cannot be negative";
+  int64_t bits = static_cast<int64_t>(type.bits()) * type.lanes();
+  int64_t scale = IsPacked4BitStorage(type) ? bits : type.StorageBytes();
+  TVM_FFI_CHECK(scale > 0 &&
+                    elements <=
+                        (std::numeric_limits<int64_t>::max() - 7) / scale,
+                ValueError)
+      << "Storage size overflows int64";
+  return IsPacked4BitStorage(type) ? (elements * bits + 7) / 8
+                                   : elements * scale;
 }
 
-/*!
- * \brief Return the physical storage bytes required by a compact buffer.
- *
- * DataType::bytes() rounds each scalar lane up to one byte.  Packed FP4 and
- * four-bit integer buffers are exceptions because their buffer ABI stores two
- * logical scalar values per byte.
- */
-inline PrimExpr GetBufferStorageSizeBytes(const tirx::Buffer &buffer) {
-  DataType index_dtype = DataType::Int(32);
-  if (!buffer->shape.empty()) {
-    index_dtype = buffer->shape[0].dtype();
+inline PrimExpr GetBufferStorageSizeBytes(const tirx::TensorVar &tensor) {
+  PrimExpr elements = IntImm::Int64(1);
+  if (auto layout = tensor.ty()->layout) {
+    elements =
+        Cast(PrimType::Int(64), layout.value().GetSpan(ffi::String("m")));
+  } else {
+    for (const PrimExpr &extent : tensor.shape())
+      elements = elements * Cast(PrimType::Int(64), extent);
   }
-  if (!index_dtype.is_int() && !index_dtype.is_uint()) {
-    index_dtype = DataType::Int(32);
-  }
-
-  PrimExpr num_elements = tirx::make_const(index_dtype, 1);
-  for (const PrimExpr &extent : buffer->shape) {
-    PrimExpr typed_extent = extent;
-    if (typed_extent.dtype() != index_dtype) {
-      typed_extent = tirx::Cast(index_dtype, typed_extent);
-    }
-    num_elements = num_elements * typed_extent;
-  }
-  return GetBufferStorageSizeBytes(num_elements, buffer->dtype);
+  return GetBufferStorageSizeBytes(elements, tensor.dtype());
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl
 
-#endif // TVM_TL_TRANSFORM_COMMON_STORAGE_SIZE_H_
+#endif

@@ -13,10 +13,10 @@ namespace tl {
 
 // Metal cooperative tensor operations.
 
-TVM_DLL const Op &cooperative_tensor_fill();
-TVM_DLL const Op &cooperative_tensor_load();
-TVM_DLL const Op &cooperative_tensor_store();
-TVM_DLL const Op &cooperative_tensor_multiply_accumulate();
+TILELANG_DLL const Op &cooperative_tensor_fill();
+TILELANG_DLL const Op &cooperative_tensor_load();
+TILELANG_DLL const Op &cooperative_tensor_store();
+TILELANG_DLL const Op &cooperative_tensor_multiply_accumulate();
 
 } // namespace tl
 } // namespace tvm

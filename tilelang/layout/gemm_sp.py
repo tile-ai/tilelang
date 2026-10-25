@@ -2,11 +2,10 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
-import tvm
-import tilelang.language.common as T
+from .layout import Layout
+from ._utils import BufferLikeType, as_tensor_view
 import warnings
 
-from tilelang.contrib import nvcc
 from math import prod
 
 
@@ -18,7 +17,7 @@ def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     return res
 
 
-def make_cutlass_metadata_layout_sm90(buffer: tvm.tirx.Buffer, mma_dtype: str, block_k: int):
+def make_cutlass_metadata_layout_sm90(buffer: BufferLikeType, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
 
     Args:
@@ -27,24 +26,25 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tirx.Buffer, mma_dtype: str, b
         block_k: tiling size along K dim, different block_ks results in different layout atom.
     """
 
+    buffer = as_tensor_view(buffer)
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
         warnings.warn(f"block_k {block_k} is too large, set to 128 for {mma_dtype}.", stacklevel=2)
     if mma_dtype not in [
-        T.float16,
-        T.bfloat16,
-        T.float32,
-        T.int8,
-        T.float8_e4m3,
-        T.float8_e4m3fn,
-        T.float8_e4m3fnuz,
-        T.float8_e5m2,
-        T.float8_e5m2fnuz,
+        "float16",
+        "bfloat16",
+        "float32",
+        "int8",
+        "float8_e4m3",
+        "float8_e4m3fn",
+        "float8_e4m3fnuz",
+        "float8_e5m2",
+        "float8_e5m2fnuz",
     ]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
-    if buffer.dtype not in [T.uint8, T.int8]:
+    if buffer.dtype not in ["uint8", "int8"]:
         raise ValueError(f"metadata should be 8 bit, got {buffer.dtype}")
 
     bits_map = {
@@ -115,20 +115,21 @@ def make_cutlass_metadata_layout_sm90(buffer: tvm.tirx.Buffer, mma_dtype: str, b
         k_offset = sum(k_decomposed[k] * stride_k[k] for k in range(len(k_decomposed)))
         return i_offset + k_offset
 
-    return T.Layout(shape, transform)
+    return Layout(shape, transform)
 
 
-def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
+def make_cutlass_metadata_layout_sm8x(buffer: BufferLikeType, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
         ref: https://github.com/pytorch/pytorch/blob/d0c24b392cbb7b213d22e42c52c6c2d1ac2da1bd/torch/sparse/_semi_structured_conversions.py#L5
     Args:
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
 
-    if mma_dtype in [T.float16, T.bfloat16] and buffer.dtype not in [T.uint16, T.int16]:
+    buffer = as_tensor_view(buffer)
+    if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
 
-    if mma_dtype in ["float8_e4m3", "float8_e5m2", T.int8, T.uint8] and buffer.dtype not in [T.uint32, T.int32]:
+    if mma_dtype in ["float8_e4m3", "float8_e5m2", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
         raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
 
     m, k = buffer.shape
@@ -144,10 +145,12 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
         offset = (j // 2) * m * 2 + i * 2 + (j % 2)
         return offset // k, offset % k
 
-    return T.Layout(buffer.shape, ColumnMajorInterleaved)
+    return Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_cutlass_metadata_layout(buffer: tvm.tirx.Buffer, mma_dtype: str = T.float16, arch: str | None = None, **extra_args):
+def make_cutlass_metadata_layout(buffer: BufferLikeType, mma_dtype: str = "float16", arch: str | None = None, **extra_args):
+    from tilelang.contrib import nvcc
+
     if arch is None:
         arch = nvcc.get_target_compute_version()
 

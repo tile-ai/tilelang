@@ -7,9 +7,9 @@ from tilelang.rocm.intrinsics.mfma_macro_generator import (
 )
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -62,7 +62,7 @@ class GemmMFMA(GemmBase):
                 self.C: mfma_emitter.make_mfma_store_layout(self.C),
             }
         else:
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def lower(
         self,
@@ -108,9 +108,9 @@ class GemmMFMA(GemmBase):
         B_region = self.BRegion
         C_region = self.CRegion
 
-        A_buf = A_region.buffer
-        B_buf = B_region.buffer
-        C_buf = C_region.buffer
+        A_buf = A_region.source
+        B_buf = B_region.source
+        C_buf = C_region.source
 
         clear_accum = self.clear_accum
 
@@ -233,7 +233,7 @@ class GemmMFMA(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         else:
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

@@ -111,9 +111,7 @@ def _make_ts_gemm_kernel(M, N, K):
             T.annotate_layout({a_shared: make_mma_swizzle_layout(a_shared)})
             T.copy(A, a_shared)
             T.copy(B, b_shared)
-            with T.sblock():
-                T.reads()
-                T.writes()
+            with T.scope():
                 a_tmem = T.alloc_tmem((M, K), T.bfloat16)
                 c_tmem = T.alloc_tmem((M, N), T.float32)
                 a_frag = T.alloc_fragment((M, K), T.bfloat16)

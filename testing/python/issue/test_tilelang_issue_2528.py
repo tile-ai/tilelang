@@ -1,3 +1,5 @@
+import re
+
 import torch
 
 import tilelang
@@ -33,7 +35,7 @@ def test_pipeline_versioned_1d_copy_uses_linear_bulk():
         code = kernel.get_kernel_source()
         assert "tl::tma_load" in code
         assert "CUtensorMap" not in code
-        assert ".arrive_and_expect_tx(64)" in code
+        assert re.search(r"tl::mbarrier_expect_tx\([^;\n]+,\s*64\);", code)
 
         output = torch.empty(chunk_size, device="cuda", dtype=torch.float32)
         kernel(source, output)

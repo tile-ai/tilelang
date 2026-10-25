@@ -6,10 +6,10 @@ from tilelang import language as T
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import retrieve_ptr
-from tvm import tirx
-from tvm.arith import Analyzer
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx.sym import Analyzer
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 from .gemm_tcgen05 import GemmTCGEN5
 
@@ -35,7 +35,7 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
     def _validate_operands(self) -> None:
         if not self.is_gemm_ss():
             raise ValueError(
-                f"Block-scaled TCGEN5MMA supports shared-memory A/B operands only, got A scope {self.A.scope()}, B scope {self.B.scope()}"
+                f"Block-scaled TCGEN5MMA supports shared-memory A/B operands only, got A scope {self.A.scope().name}, B scope {self.B.scope().name}"
             )
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -71,8 +71,8 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
         B_shared = self.BRegion
         C_local = self.CRegion
         clear_accum = self.clear_accum
-        SFA_tmem = self.SFARegion.buffer
-        SFB_tmem = self.SFBRegion.buffer
+        SFA_tmem = self.SFARegion.source
+        SFB_tmem = self.SFBRegion.source
         sf_k_start = self.sf_k_start
         sf_a_granularity_k = self.sf_a_granularity_k
         sf_b_granularity_k = self.sf_b_granularity_k
@@ -89,7 +89,7 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
 
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
-            if cluster_cond and thread_index // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_index // 32 == thread_bounds.begin // warp_size:
                 mma_emitter.tcgen05mma_blockscaled(
                     A_shared,
                     B_shared,

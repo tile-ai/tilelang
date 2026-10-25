@@ -19,7 +19,7 @@ namespace tl {
  *
  * uint32x2 ds_read_tr16_b64(smem_access_ptr)
  */
-TVM_DLL const Op &ds_read_tr16_b64();
+TILELANG_DLL const Op &ds_read_tr16_b64();
 
 /*!
  * \brief tilelang intrinsic for gfx950 LDS transpose read, 64-bit, 8-element.
@@ -29,7 +29,7 @@ TVM_DLL const Op &ds_read_tr16_b64();
  *
  * uint32x2 ds_read_tr8_b64(smem_access_ptr)
  */
-TVM_DLL const Op &ds_read_tr8_b64();
+TILELANG_DLL const Op &ds_read_tr8_b64();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.
@@ -40,7 +40,7 @@ TVM_DLL const Op &ds_read_tr8_b64();
  *               Var multiplicand_b, Expr b_index,
  *               Var accumulator, Expr c_index);
  */
-TVM_DLL const Op &tvm_mfma();
+TILELANG_DLL const Op &tvm_mfma();
 
 /*!
  * \brief tvm intrinsic for storing the result of AMD MFMA into a destination
@@ -53,7 +53,7 @@ TVM_DLL const Op &tvm_mfma();
  * void tvm_mfma_store(IntImm m, IntImm n, Var dst_ptr, Var src_ptr, Expr
  * src_offset, Var dst_stride);
  */
-TVM_DLL const Op &tvm_mfma_store();
+TILELANG_DLL const Op &tvm_mfma_store();
 
 /*!
  * \brief tvm intrinsic for amd rdna matrix core instructions.
@@ -64,7 +64,7 @@ TVM_DLL const Op &tvm_mfma_store();
  *               Var multiplicand_b, Expr b_index,
  *               Var accumulator, Expr c_index);
  */
-TVM_DLL const Op &tvm_rdna_wmma();
+TILELANG_DLL const Op &tvm_rdna_wmma();
 
 /*!
  * \brief tvm intrinsic for storing the result of AMD RDNA WMMA into a
@@ -77,7 +77,7 @@ TVM_DLL const Op &tvm_rdna_wmma();
  * void tvm_rdna_wmma_store(IntImm m, IntImm n, Var dst_ptr, Var src_ptr, Expr
  * src_offset, Var dst_stride);
  */
-TVM_DLL const Op &tvm_rdna_wmma_store();
+TILELANG_DLL const Op &tvm_rdna_wmma_store();
 
 } // namespace tl
 } // namespace tvm

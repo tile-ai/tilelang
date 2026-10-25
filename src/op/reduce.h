@@ -56,7 +56,7 @@ class ReduceType : public ObjectRef {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef,
                                              ReduceTypeNode);
-  TVM_DLL ReduceType(std::string type) {
+  TILELANG_DLL ReduceType(std::string type) {
     auto node = make_object<ReduceTypeNode>();
     if (type == "sum") {
       node->type = int(ReduceTypeEnum::kSum);
@@ -84,9 +84,12 @@ public:
 /// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
 public:
-  tirx::Buffer src, dst; ///< Source and destination buffers
+  explicit ReduceOpNode(ffi::UnsafeInit tag)
+      : src(tag), dst(tag), srcRegion_(tag), dstRegion_(tag) {}
+
+  tirx::TensorVar src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
-  BufferRegion srcRegion_, dstRegion_;
+  TensorRegion srcRegion_, dstRegion_;
   int dim;         ///< Dimension to reduce along
   ReduceType type; ///< Type of reduction operation
   bool clear;      ///< Whether to clear destination before reduction
@@ -98,11 +101,11 @@ public:
                    ///< elements. batch must evenly divide the
                    ///< per-thread output element count N derived from
                    ///< the fragment layout.
-  bool nan_propagate{false}; ///< For fp16/bf16 max/min/absmax: propagate NaN
-                             ///< (use __hmax_nan/__hmin_nan) instead of the
-                             ///< default __hmax/__hmin which return the
-                             ///< non-NaN operand.
-  Map<String, ObjectRef> annotations; ///< Backend-specific lowering controls.
+  bool nan_propagate{false};    ///< For fp16/bf16 max/min/absmax: propagate NaN
+                                ///< (use __hmax_nan/__hmin_nan) instead of the
+                                ///< default __hmax/__hmin which return the
+                                ///< non-NaN operand.
+  BlockAnnotations annotations; ///< Backend-specific lowering controls.
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
                                     TileOperatorNode);
@@ -124,7 +127,7 @@ public:
 
   /// Lower the operator to TIR statements
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
@@ -140,7 +143,7 @@ struct ReduceImpl {
   ReduceTargetPredicate match_target;
 
   Stmt (*lower)(const ReduceOpNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterReduceImpl(ReduceImpl impl);
@@ -150,9 +153,8 @@ class ReduceOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator,
                                              ReduceOpNode);
-  TVM_DLL
-  ReduceOp(Array<PrimExpr> args,
-           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL
+  ReduceOp(Array<Expr> args, BlockAnnotations annotations = BlockAnnotations());
   static const Op &Get();
 };
 

@@ -10,7 +10,7 @@ from typing import Any
 from collections.abc import Callable
 
 from tilelang import tvm
-from tvm.tirx import PrimFunc
+from tilelang._compat.tirx import PrimFunc
 
 from tilelang.autotuner.param import CompileArgs
 from tilelang.backend.module import create_backend_context
@@ -48,7 +48,7 @@ def compile_grouped_unit_tvm_ffi(
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
-            base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+            base_pass_instruments.append(tvm.ir.transform.instrument.DumpIR(dump_dir=dump_ir_path))
 
         unit_results: list[CompileUnitResult] = []
         lowered_items: list[dict[str, Any]] = []
@@ -101,6 +101,7 @@ def compile_grouped_unit_tvm_ffi(
                         "config_arg": config_arg,
                         "program": program,
                         "host_rt_mod": host_rt_mod,
+                        "host_mod": host_mod,
                         "device_mod": device_mod,
                         "params": params,
                         "target": normalized_target,
@@ -154,7 +155,7 @@ def compile_grouped_unit_tvm_ffi(
                     host_rt_mod.import_module(grouped_device_rt_mod)
 
                     artifact = CompiledArtifact(
-                        host_mod=host_rt_mod,
+                        host_mod=item["host_mod"],
                         device_mod=item["device_mod"],
                         params=item["params"],
                         kernel_source=grouped_kernel_source,

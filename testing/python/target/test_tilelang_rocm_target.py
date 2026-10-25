@@ -3,7 +3,7 @@ import pytest
 
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.backend.target import determine_target
 from tilelang.rocm.target import (
@@ -18,7 +18,7 @@ from tilelang.rocm.target import (
 
 
 def _hip_target(mcpu: str) -> Target:
-    return Target({"kind": "hip", "mcpu": mcpu})
+    return Target({"kind": "rocm", "mcpu": mcpu})
 
 
 def test_normalize_rocm_arch_strips_feature_suffix():
@@ -49,9 +49,10 @@ def test_determine_target_adds_known_gfx12_thread_warp_size():
     assert int(target.attrs["thread_warp_size"]) == 32
 
 
-def test_determine_target_rejects_legacy_option_string():
-    with pytest.raises(AssertionError, match="Pass target options as a dict"):
-        determine_target("hip -mcpu=gfx1151", return_object=True)
+def test_determine_target_normalizes_legacy_option_string():
+    target = determine_target("hip -mcpu=gfx1151", return_object=True)
+    assert target.kind.name == "rocm"
+    assert target_get_mcpu(target) == "gfx1151"
 
 
 def test_auto_target_uses_registered_detector_order_for_rocm():
@@ -62,7 +63,7 @@ def test_auto_target_uses_registered_detector_order_for_rocm():
         target_registry._TARGET_DETECTORS.clear()
         target_registry.register_target_detector(
             "unit-hip",
-            lambda: Target({"kind": "hip", "mcpu": "gfx1151"}),
+            lambda: Target({"kind": "rocm", "mcpu": "gfx1151"}),
             override=True,
         )
         target_registry.register_target_detector(
@@ -72,7 +73,7 @@ def test_auto_target_uses_registered_detector_order_for_rocm():
         )
 
         target = determine_target("auto", return_object=True)
-        assert target.kind.name == "hip"
+        assert target.kind.name == "rocm"
         assert target_get_mcpu(target) == "gfx1151"
         assert int(target.attrs["thread_warp_size"]) == 32
     finally:

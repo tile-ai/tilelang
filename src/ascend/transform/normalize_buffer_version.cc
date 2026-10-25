@@ -25,82 +25,61 @@
 #include "buffer_version.h"
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/attrs.h>
-#include <tvm/ir/cast.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "support/check.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tirx::transform;
-
+namespace tvm::tl {
 namespace {
-
-class BufferVersionNormalizer : public StmtMutator {
-public:
-  static PrimFunc Rewrite(PrimFunc func) {
-    ICHECK(!func->attrs.defined() ||
-           !func->attrs->dict.count(tl::attr::kBufferVersion))
-        << "'" << tl::attr::kBufferVersion
-        << "' is compiler-internal and must not be provided by the frontend";
-
-    BufferVersionNormalizer normalizer;
-    PrimFuncNode *writer = func.CopyOnWrite();
-    writer->body = normalizer(std::move(writer->body));
-    return func;
-  }
-
-private:
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-    ICHECK(!block->annotations.count(tl::attr::kBufferVersion))
-        << "'" << tl::attr::kBufferVersion
-        << "' is compiler-internal and must not be provided by the frontend";
-
-    auto staged = block->annotations.Get(kManualMultiBuffer);
-    if (!staged.has_value()) {
-      return block;
+class BufferVersionNormalizer : public tirx::StmtExprMutator {
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto region = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(original)
+                      .as_or_throw<RegionStmt>();
+    TVM_FFI_CHECK(!region->attrs->dict.count(attr::kBufferVersion), ValueError)
+        << attr::kBufferVersion
+        << " is compiler-internal and must not be provided by the frontend";
+    auto staged = region->attrs->dict.Get(kManualMultiBuffer);
+    if (!staged)
+      return region;
+    auto versions = staged->cast<BufferVersionMap>();
+    for (const auto &[storage, count] : versions) {
+      TVM_FFI_CHECK(count > 0, ValueError)
+          << "Manual buffer version counts must be positive: " << storage;
     }
-
-    ffi::Map<ffi::String, ffi::Any> annotations = block->annotations;
+    auto annotations = region->attrs->dict;
     annotations.erase(kManualMultiBuffer);
-
-    BufferVersionMap staged_versions = staged.value().cast<BufferVersionMap>();
-    for (const auto &[_, version] : staged_versions) {
-      ICHECK_GT(version, 0) << "'" << kManualMultiBuffer
-                            << "' values must be positive version counts";
-    }
-
-    SBlockNode *writer = block.CopyOnWrite();
-    writer->annotations = std::move(annotations);
-    if (!staged_versions.empty()) {
-      writer->body =
-          AttrStmt(std::move(staged_versions), tl::attr::kBufferVersion,
-                   Integer(1), std::move(writer->body));
-    }
-    return block;
+    if (!versions.empty())
+      annotations.Set(attr::kBufferVersion, versions);
+    region.CopyOnWrite()->attrs = DictAttrs(annotations);
+    return region;
   }
 };
-
 } // namespace
 
 tvm::transform::Pass NormalizeBufferVersion() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) {
-    return BufferVersionNormalizer::Rewrite(std::move(func));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    TVM_FFI_CHECK(!function->attrs->dict.count(attr::kBufferVersion),
+                  ValueError)
+        << attr::kBufferVersion
+        << " is compiler-internal and must not be provided by the frontend";
+    if (!function->body)
+      return function;
+    auto rewriter = ffi::make_object<BufferVersionNormalizer>();
+    SeqStmt original = function->body.value();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.NormalizeBufferVersion", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.NormalizeBufferVersion");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.NormalizeBufferVersion",
-                        NormalizeBufferVersion);
+  ffi::reflection::GlobalDef().def("tl.transform.NormalizeBufferVersion",
+                                   NormalizeBufferVersion);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

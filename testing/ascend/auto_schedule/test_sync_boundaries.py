@@ -1,10 +1,12 @@
 """Synchronization across optional loops and unequal guard/epoch domains."""
 
+from tvm_ffi import structural_equal
 import pytest
+from tvm_tirx import ir
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import copy, kernel, seq, statements
+from tilelang._compat import tirx
+from testing.ascend._ir import copy, kernel, seq, simd_scope, statements
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -23,24 +25,24 @@ def test_acquire_dominates_possibly_empty_consumer_loop(counter_mode):
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     epoch = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
     i, j, count = (tirx.Var(name, "int32") for name in ("i", "j", "count"))
-    child = tirx.For(j, 0, count, tirx.ForKind.SERIAL, unit(copy(ub, c, dst_indices=[i, 0], dst_shape=[1, 64])))
+    child = tirx.For(j, 0, count, 1, tirx.ForKind.DEFAULT, unit(copy(ub, c, dst_indices=[i, 0], dst_shape=[1, 64])))
     tasks = [unit(copy(a, ub, src_indices=[i, 0], src_shape=[1, 64])), unit(child, core=None)]
-    annotations = {"multi_buffer_eligible": [ub.data], "tl.storage_epoch_guard_map": {ub.data: tirx.const(True, "bool")}}
+    annotations = {"multi_buffer_eligible": [ub], "tl.storage_epoch_guard_map": {ub: tirx.const(True, "bool")}}
     if counter_mode:
-        annotations["tl.multi_buffer_counter_map"] = {ub.data: epoch}
+        annotations["tl.multi_buffer_counter_map"] = {ub: epoch}
         tasks.append(unit(tirx.BufferStore(epoch, epoch[0] + 1, [0])))
-    owner = unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, seq(*tasks), annotations=annotations), core=None)
+    owner = unit(tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, seq(*tasks), annotations=annotations), core=None)
     body = seq(unit(tirx.BufferStore(epoch, 0, [0])), owner) if counter_mode else owner
     before = kernel(
-        body, buffers=[ub] + ([epoch] if counter_mode else []), params=[a, c, count], annotations={"tl.buffer_versions_map": {ub.data: 2}}
+        body, buffers=[ub] + ([epoch] if counter_mode else []), params=[a, c, count], annotations={"tl.buffer_versions_map": {ub: 2}}
     )
     after = transform.InsertSync()(before)
     waits = list(_flag_sites(after, "wait", "MTE2_MTE3"))
     assert waits
     # Even count=0 must consume the producer's token. An acquire inside j
     # would leave an unmatched notification and corrupt the next ring reuse.
-    assert all(not any(isinstance(parent, tirx.For) and parent.loop_var.same_as(j) for parent in parents) for _, parents in waits)
-    assert all(any(isinstance(parent, tirx.For) and parent.loop_var.same_as(i) for parent in parents) for _, parents in waits)
+    assert all(not any(isinstance(parent, tirx.For) and parent.var.same_as(j) for parent in parents) for _, parents in waits)
+    assert all(any(isinstance(parent, tirx.For) and parent.var.same_as(i) for parent in parents) for _, parents in waits)
 
 
 @pytest.mark.parametrize(
@@ -59,25 +61,25 @@ def test_missing_counter_channel_keeps_lexical_handshake(nested, second_stage, v
         # SIMD work and scalar work have no common counter channel. A VF
         # marker is sufficient for pipe analysis; no SIMD lowering is needed.
         if index == 0:
-            write = tirx.SBlock([], [], [], "SIMD_VF", write)
+            write = simd_scope(write)
         body = seq(unit(write), unit(tirx.BufferStore(epoch, epoch[0] + 1, [0])))
         annotations = {
-            "multi_buffer_eligible": [ub.data],
-            "tl.multi_buffer_counter_map": {ub.data: epoch},
-            "tl.storage_epoch_guard_map": {ub.data: tirx.const(True, "bool")},
+            "multi_buffer_eligible": [ub],
+            "tl.multi_buffer_counter_map": {ub: epoch},
+            "tl.storage_epoch_guard_map": {ub: tirx.const(True, "bool")},
         }
         owners.append(
-            unit(tirx.For(i, 0, 1, tirx.ForKind.SERIAL, body, annotations=annotations), core=None, stage=second_stage if index else 0)
+            unit(tirx.For(i, 0, 1, 1, tirx.ForKind.DEFAULT, body, annotations=annotations), core=None, stage=second_stage if index else 0)
         )
     body = seq(*owners)
     if nested:
         outer = tirx.Var("outer", "int32")
-        body = unit(tirx.For(outer, 0, 3, tirx.ForKind.SERIAL, body), core=None)
+        body = unit(tirx.For(outer, 0, 3, 1, tirx.ForKind.DEFAULT, body), core=None)
     before = kernel(
-        seq(unit(tirx.BufferStore(epoch, 0, [0])), body), buffers=[ub, epoch], annotations={"tl.buffer_versions_map": {ub.data: versions}}
+        seq(unit(tirx.BufferStore(epoch, 0, [0])), body), buffers=[ub, epoch], annotations={"tl.buffer_versions_map": {ub: versions}}
     )
     if second_stage:
-        with pytest.raises(tvm.error.InternalError, match="owner exclusion at logical distance") as error:
+        with pytest.raises(RuntimeError, match="owner exclusion at logical distance") as error:
             transform.InsertSync()(before)
         message = str(error.value)
         assert f"logical distance {-second_stage} (paired distance {1 + second_stage})" in message
@@ -112,9 +114,9 @@ def test_narrow_child_handshake_cannot_replace_wider_parent_dependency():
     def store(offset, guard):
         return unit(copy(ub, c, src_indices=[offset], src_shape=[64], dst_indices=[i, offset], dst_shape=[1, 64]), guard=guard)
 
-    child = tirx.For(j, 0, 1, tirx.ForKind.SERIAL, seq(load(64, p), store(64, p)), annotations={"tl.storage_epoch_guard_map": {ub.data: p}})
+    child = tirx.For(j, 0, 1, 1, tirx.ForKind.DEFAULT, seq(load(64, p), store(64, p)), annotations={"tl.storage_epoch_guard_map": {ub: p}})
     body = seq(load(0, q), unit(child, core=None), store(0, q))
-    loop = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"tl.storage_epoch_guard_map": {ub.data: tirx.Or(p, q)}})
+    loop = tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body, annotations={"tl.storage_epoch_guard_map": {ub: tirx.Or(p, q)}})
     before = kernel(unit(loop, core=None), buffers=[ub], params=[a, c, p, q])
     after = transform.InsertSync()(before)
     # Evaluate the structural guards for p=False,q=True: a parent handshake
@@ -122,7 +124,7 @@ def test_narrow_child_handshake_cannot_replace_wider_parent_dependency():
     for operation in ("set", "wait"):
         covering = []
         for call, parents in _flag_sites(after, operation, "MTE2_MTE3"):
-            if any(isinstance(parent, tirx.For) and parent.loop_var.same_as(j) for parent in parents):
+            if any(isinstance(parent, tirx.For) and parent.var.same_as(j) for parent in parents):
                 continue
             guards = [parent.condition for parent in parents if isinstance(parent, tirx.IfThenElse)]
             active = tirx.all(*guards) if guards else tirx.const(True, "bool")
@@ -141,35 +143,35 @@ def test_branch_switch_acquires_previous_iteration_before_nested_overwrite():
     phase = tirx.Var("phase", "bool")
 
     def protocol(row, guard=None):
-        compute = tirx.SBlock([], [], [], "SIMD_VF", tirx.BufferStore(out, ub[0], [0]))
+        compute = simd_scope(tirx.BufferStore(out, ub[0], [0]))
         return seq(
             unit(copy(a, ub, src_indices=[row, 0], src_shape=[1, 64]), guard=guard),
             unit(compute, guard=guard),
             unit(copy(out, c, dst_indices=[row, 0], dst_shape=[1, 64]), guard=guard),
         )
 
-    child = tirx.For(j, 0, 2, tirx.ForKind.SERIAL, protocol(j))
+    child = tirx.For(j, 0, 2, 1, tirx.ForKind.DEFAULT, protocol(j))
     # The later execution phase occurs first in source order. A wait placed
     # only in the else branch cannot protect the transition into the child.
     body = seq(unit(tirx.Bind(phase, i >= 2)), unit(child, core=None, guard=phase), protocol(i, tirx.Not(phase)))
-    before = kernel(unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body), core=None), buffers=[ub, out], params=[a, c])
+    before = kernel(unit(tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body), core=None), buffers=[ub, out], params=[a, c])
     after = transform.InsertSync()(before)
     ordered = list(statements(after))
-    child_position = next(index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, tirx.For) and stmt.loop_var.same_as(j))
+    child_position = next(index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, tirx.For) and stmt.var.same_as(j))
     waits = []
     for call, parents in _flag_sites(after, "wait", "V_MTE2"):
-        if any(isinstance(parent, tirx.For) and parent.loop_var.same_as(j) for parent in parents):
+        if any(isinstance(parent, tirx.For) and parent.var.same_as(j) for parent in parents):
             continue
         position = next(index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, tirx.Evaluate) and stmt.value.same_as(call))
-        if position < child_position and any(isinstance(parent, tirx.For) and parent.loop_var.same_as(i) for parent in parents):
+        if position < child_position and any(isinstance(parent, tirx.For) and parent.var.same_as(i) for parent in parents):
             waits.append(call)
     assert waits, "The cross-iteration acquire must dominate the nested overwrite"
     compute_position = max(
-        index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, tirx.SBlock) and stmt.name_hint == "SIMD_VF"
+        index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, ir.RegionStmt) and stmt.attrs.get("name_hint") == "SIMD_VF"
     )
     releases = []
     for call, parents in _flag_sites(after, "set", "V_MTE2"):
         position = next(index for index, (stmt, _) in enumerate(ordered) if isinstance(stmt, tirx.Evaluate) and stmt.value.same_as(call))
-        if position > compute_position and any(isinstance(parent, tirx.For) and parent.loop_var.same_as(i) for parent in parents):
+        if position > compute_position and any(isinstance(parent, tirx.For) and parent.var.same_as(i) for parent in parents):
             releases.append(call)
-    assert any(tvm.ir.structural_equal(wait.args[1], release.args[1]) for wait in waits for release in releases)
+    assert any(structural_equal(wait.args[1], release.args[1]) for wait in waits for release in releases)

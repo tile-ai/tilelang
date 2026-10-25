@@ -1,11 +1,12 @@
 import pytest
+from tvm_tirx import ir
 
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 @T.prim_func
@@ -78,7 +79,7 @@ def test_legalize_simd_merging_marks_destination_read_write():
 
     assert len(merging_calls) == 1
     call = merging_calls[0]
-    assert call.dtype == tvm.DataType("")
+    assert call.ty == ir.PrimType("void")
     assert len(call.args) == 5
     destination = call.args[0]
     assert isinstance(destination, tirx.Call)
@@ -87,7 +88,7 @@ def test_legalize_simd_merging_marks_destination_read_write():
     assert destination.args[2].value == 3
     destination_load = destination.args[0]
     assert isinstance(destination_load, tirx.BufferLoad)
-    assert destination_load.buffer.name == "dst"
+    assert destination_load.source.name == "dst"
 
 
 def _inplace_vadds(dtype, mode):
@@ -129,7 +130,7 @@ def test_simd_vadds_inplace_destination(dtype, mode):
 
 
 def test_simd_merging_requires_mutable_destination():
-    with pytest.raises(tvm.error.InternalError, match="read-modify-write"):
+    with pytest.raises(ValueError, match="assignment to a mutable SIMD register"):
         transform.LegalizeSimdMerging()(_as_module(merging_without_mutable_destination))
 
 

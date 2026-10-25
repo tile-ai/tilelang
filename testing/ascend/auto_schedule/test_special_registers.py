@@ -3,13 +3,30 @@
 from unittest.mock import patch
 
 import pytest
+from tvm_tirx import ir
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
 from tilelang.ascend.transform import z3_scheduler
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import calls, copy, kernel, nodes, seq, task_core_masks
 from testing.ascend.auto_schedule._scheduled_ir import unit
+
+
+def _root_children(module):
+    root = next(region for region in nodes(module, ir.RegionStmt) if region.attrs.get("name_hint") == "tilelang_root")
+    return [child for child in root.body.seq if not calls(child, "tirx.alloc_tensor")]
+
+
+def _task_body(statement):
+    while isinstance(statement, (ir.RegionStmt, ir.SeqStmt)):
+        if isinstance(statement, ir.RegionStmt):
+            statement = statement.body
+        elif len(statement.seq) == 1:
+            statement = statement.seq[0]
+        else:
+            break
+    return statement
 
 
 def test_nested_pipe_wait_orders_the_following_pipe_user():
@@ -17,13 +34,13 @@ def test_nested_pipe_wait_orders_the_following_pipe_user():
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     i = tirx.Var("i", "int32")
     wait = tirx.Evaluate(T.ascend_sync_inter_wait("PIPE_MTE2", 3))
-    loop = tirx.For(i, 0, 2, tirx.ForKind.SERIAL, unit(wait, core=0, cost=(1, 1)))
+    loop = ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, unit(wait, core=0, cost=(1, 1)))
     before = kernel(seq(unit(loop, core=None), unit(copy(a, ub), core=0, cost=(1, 1))), buffers=[ub], params=[a])
     after = transform.AutoSchedule()(before)
     # This order is a dependency on the pipe register, not a scheduler tie-break.
     operations = [call.op.name for call in calls(after, "tl.ascend_cross_core_wait_flag") + calls(after, "tl.tileop.ascend_copy")]
     assert len(operations) == 2
-    children = after["main"].body.block.body.seq
+    children = _root_children(after)
     assert calls(children[0], "tl.ascend_cross_core_wait_flag")
     assert calls(children[1], "tl.tileop.ascend_copy")
 
@@ -33,7 +50,7 @@ def test_nested_pad_writer_follows_the_reader_core():
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     i = tirx.Var("i", "int32")
     writer = unit(tirx.Evaluate(T.ascend_set_copy_pad_value(-1.0, dtype="float32")), core=7)
-    loop = unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, writer), core=None)
+    loop = unit(ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, writer), core=None)
     reader = unit(copy(a, ub, annotations={"data_select": tirx.IntImm("int32", 1)}))
     before = kernel(seq(loop, reader), buffers=[ub], params=[a])
     after = transform.ResolveCore()(before)
@@ -53,17 +70,18 @@ def test_projected_special_register_writers_keep_their_subcore(operation):
     reader = copy(a, ub, annotations={"data_select": tirx.IntImm("int32", 1)}) if operation == "padding" else copy(ub, a)
     body = seq(*(unit(tirx.Evaluate(setter), core=0, guard=sid == index) for index, setter in enumerate(setters)), unit(reader, core=0))
     before = kernel(body, buffers=[ub], params=[a])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    before = tvm.IRModule(
+        {"main": before["main"].with_body(ir.RegionStmt("tl.launch_grid", ["cthread", 2], [sid], {}, before["main"].body))}
+    )
     assigned = transform.AssignCore()(before)
     for mod, masks in ((assigned, {0: 3, 1: 6}), (transform.ResolveCore()(assigned), {0: 1, 1: 4})):
         writers = [
             task
-            for task in nodes(mod, tirx.AttrStmt)
-            if task.attr_key == "tl.ascend_task" and any(calls(task, setter.op.name) for setter in setters)
+            for task in nodes(mod, ir.RegionStmt)
+            if "tl.ascend_task" in task.attrs and any(calls(task, setter.op.name) for setter in setters)
         ]
         assert len(writers) == 2
-        assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in writers} == masks
+        assert {int(task.attrs["tl.ascend_task"]["subcore"]): int(task.attrs["tl.ascend_task"]["core_mask"]) for task in writers} == masks
 
 
 @pytest.mark.parametrize("operation", ["atomic", "loop-break"])
@@ -80,7 +98,7 @@ def test_shared_special_register_writer_covers_both_cores(operation):
     )
     if operation == "loop-break":
         i = tirx.Var("i", "int32")
-        body = unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, body), core=None)
+        body = unit(ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, body), core=None)
     before = kernel(body, buffers=[ub, accum], params=[out, exit_loop])
     after = transform.ResolveCore()(before)
     assert task_core_masks(after, writer.op.name) == {7}
@@ -100,7 +118,7 @@ def _cube_mode_program(mode):
     # Explicit scheduled IR: operand producers are outside this pass's contract.
     body = seq(
         unit(tirx.Evaluate(setters[0]), core=7, cost=(1, 1)),
-        unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, readers[0]), core=None),
+        unit(ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, readers[0]), core=None),
         unit(tirx.Evaluate(setters[1]), core=7, cost=(1, 1)),
         readers[1],
     )
@@ -111,7 +129,7 @@ def _cube_mode_program(mode):
 def test_cube_mode_changes_order_nested_and_following_gemms(mode):
     before, setter = _cube_mode_program(mode)
     after = transform.AutoSchedule()(before)
-    children = after["main"].body.block.body.seq
+    children = _root_children(after)
     assert len(children) == 4
     assert calls(children[0], setter)
     assert calls(children[1], "tl.tileop.gemm")
@@ -145,7 +163,7 @@ def test_cube_mode_schedule_preserves_iteration_order(mode, enable_offset, start
     ]
     # Explicit input to AutoSchedule; operand producers are outside this pass.
     body = seq(*(unit(op, core=0, stage=-1, cost=(1, 1) if index % 2 == 0 else (64, 32)) for index, op in enumerate(operations)))
-    loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"num_stages": 2, "enable_offset": enable_offset})
+    loop = ir.For(tirx.Var("i", "int32"), 0, 3, 1, ir.ForKind.DEFAULT, body, annotations={"num_stages": 2, "enable_offset": enable_offset})
     before = kernel(unit(loop, core=None, stage=-1), buffers=[a, b, *outputs])
     # Fix the solver output to exercise result reconstruction independently of
     # Z3's choice among valid schedules. At II=152, the stage-1 GEMM_c1 and
@@ -154,25 +172,25 @@ def test_cube_mode_schedule_preserves_iteration_order(mode, enable_offset, start
     # so the solver's buffer_versions result is empty.
     with patch.object(z3_scheduler, "z3_schedule_loop_python", return_value=(start_times, [], ii)):
         after = transform.AutoSchedule()(before)
-    children = after["main"].body.block.body.body.body.seq
-    assert [int(child.node["stage"]) for child in children] == stages
+    children = nodes(after, ir.For)[0].body.seq
+    assert [int(child.attrs["tl.schedule_unit"]["stage"]) for child in children] == stages
     for child, index in zip(children, order):
-        tvm.ir.assert_structural_equal(child.body.body, operations[index])
+        tvm.ir.assert_structural_equal(_task_body(child), operations[index])
 
 
 def test_manual_stages_break_scalar_pipe_ties_by_iteration():
     operations = [tirx.Evaluate(T.set_hf32_mode("nearest_even")), tirx.Evaluate(T.set_mmad_direction("n"))]
     body = seq(*(unit(op, core=0, stage=stage, cost=(1, 1)) for stage, op in enumerate(operations)))
-    loop = tirx.For(tirx.Var("i", "int32"), 0, 3, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
+    loop = ir.For(tirx.Var("i", "int32"), 0, 3, 1, ir.ForKind.DEFAULT, body, annotations={"enable_offset": True})
     before = kernel(unit(loop, core=None, stage=-1))
     # These independent setters share PIPE_Scalar, which has no resource
     # exclusion. The real solver chooses II=1, forcing equal issue phases.
     # The earlier logical iteration takes precedence over per-pipe source order.
     after = transform.AutoSchedule()(before)
-    children = after["main"].body.block.body.body.body.seq
-    assert [int(child.node["stage"]) for child in children] == [1, 0]
+    children = nodes(after, ir.For)[0].body.seq
+    assert [int(child.attrs["tl.schedule_unit"]["stage"]) for child in children] == [1, 0]
     for child, op in zip(children, reversed(operations)):
-        tvm.ir.assert_structural_equal(child.body.body, op)
+        tvm.ir.assert_structural_equal(_task_body(child), op)
 
 
 @pytest.mark.parametrize("mode", ["hf32", "mmad-direction"])

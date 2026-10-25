@@ -5,8 +5,8 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType
 from tilelang.language.common import alloc_shared, copy, macro
 from tilelang.language.utils import _normalize_annotations
-from tilelang.utils.language import _get_buffer, is_fragment, retrieve_shape, to_tile_region
-from tvm import tirx
+from tilelang.utils.language import _get_buffer, is_fragment, prim_expr_equal, retrieve_shape, to_tile_region
+from tilelang._compat.tvm import tirx
 
 _CUMSUM_OP_KEY = "tl.tileop.cumsum"
 _CUMMAX_OP_KEY = "tl.tileop.cummax"
@@ -78,7 +78,7 @@ def _prepare_scan_args(src: BufferLikeType, dst: BufferLikeType | None, dim: int
         if len(dst_shape) != len(shape):
             raise ValueError(f"{op_name} dst shape {dst_shape} must match src shape {shape} (rank mismatch)")
         for i in range(len(shape)):
-            if not tirx.analysis.expr_deep_equal(dst_shape[i], shape[i]):
+            if not prim_expr_equal(dst_shape[i], shape[i]):
                 raise ValueError(f"{op_name} dst shape {dst_shape} must match src shape {shape} (dim {i} mismatch)")
 
     return dst, dim
@@ -95,7 +95,7 @@ def cumsum(
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
-    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope().name == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
 
     Supports Buffer, BufferRegion, and BufferLoad inputs, allowing operations on buffer slices/regions.
 
@@ -183,7 +183,7 @@ def cummax(
     Compute the cumulative maximum of `src` along `dim`, writing results to `dst`.
 
     Negative `dim` indices are normalized (Python-style). If `dst` is None,
-    the operation is performed in-place into `src`. When `src.scope()` is
+    the operation is performed in-place into `src`. When `src.scope().name` is
     "local.fragment", this delegates to `cummax_fragment`; otherwise it emits
     the `tl.cummax` intrinsic.
     """

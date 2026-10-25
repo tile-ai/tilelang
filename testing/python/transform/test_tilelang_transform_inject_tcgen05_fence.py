@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -47,7 +47,7 @@ def _tcgen05_ld_call(tmem_ref, local_buf):
         False,
         tmem_ref,
         0,
-        T.tvm_access_ptr(T.type_annotation(T.float32), local_buf.data, 0, 128, 2),
+        T.access_ptr(local_buf, 2, offset=0, extent=128),
     )
 
 
@@ -58,18 +58,18 @@ def test_storage_sync_is_wrapped_with_tcgen05_fences():
     @T.prim_func
     def before():
         with T.Kernel(1):
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
-            T.tvm_storage_sync("shared")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
+            T.gpu_storage_sync("shared")
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     @T.prim_func
     def after():
         with T.Kernel(1):
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.tcgen05_before_thread_sync()
-            T.tvm_storage_sync("shared")
+            T.gpu_storage_sync("shared")
             T.tcgen05_after_thread_sync()
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
@@ -117,11 +117,11 @@ def test_blockscaled_issue_without_arrive_gets_handoff_fences():
     @T.prim_func
     def before():
         with T.Kernel(1):
-            barrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            desc = T.decl_buffer((1,), T.uint64, scope="local")
-            c = T.decl_buffer((128, 128), T.float32, scope="shared.tmem")
-            sfa = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
-            sfb = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
+            barrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            desc = T.alloc_buffer((1,), T.uint64, scope="local")
+            c = T.alloc_buffer((128, 128), T.float32, scope="shared.tmem")
+            sfa = T.alloc_buffer((128, 4), T.uint32, scope="shared.tmem")
+            sfb = T.alloc_buffer((128, 4), T.uint32, scope="shared.tmem")
             T.mbarrier_wait_parity(barrier[0], 0)
             T.ptx_tcgen05_mma_blockscaled_ss("e4m3", desc.data, 0, desc.data, 0, c.data, 0, 0, 1, sfa.data, 0, sfb.data, 0)
             T.ptx_arrive_barrier(barrier[0])
@@ -134,7 +134,7 @@ def test_blockscaled_issue_without_arrive_gets_handoff_fences():
     assert calls.index("tl.mbarrier_wait_parity") < calls.index("tl.tcgen05_after_thread_sync")
     assert calls.index("tl.tcgen05_after_thread_sync") < calls.index("tl.ptx_tcgen05_mma_blockscaled_ss")
     assert calls.index("tl.ptx_tcgen05_mma_blockscaled_ss") < calls.index("tl.tcgen05_before_thread_sync")
-    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tirx.ptx_arrive_barrier")
+    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tirx.ptx.mbarrier_arrive_nocount")
 
 
 @tilelang.testing.requires_cuda
@@ -195,9 +195,9 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
     @T.prim_func
     def before():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
             T.ptx_arrive_barrier(mbarrier[0])
@@ -205,9 +205,9 @@ def test_wait_and_arrive_are_rewritten_only_at_tmem_handoffs():
     @T.prim_func
     def after():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
@@ -224,9 +224,9 @@ def test_wait_and_arrive_scan_across_neutral_statements():
     @T.prim_func
     def before():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.call_extern("handle", "generic_op")
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
@@ -236,9 +236,9 @@ def test_wait_and_arrive_scan_across_neutral_statements():
     @T.prim_func
     def after():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
             T.call_extern("handle", "generic_op")
@@ -257,9 +257,9 @@ def test_sync_boundary_stops_wait_lookahead():
     @T.prim_func
     def func():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.call_extern("handle", "generic_op")
             T.ptx_arrive_barrier(mbarrier[0])
@@ -276,9 +276,9 @@ def test_existing_manual_fences_are_not_duplicated():
     @T.prim_func
     def func():
         with T.Kernel(1):
-            mbarrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
+            mbarrier = T.alloc_buffer((1,), T.uint64, scope="shared.barrier")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
             T.mbarrier_wait_parity(mbarrier[0], 0)
             T.tcgen05_after_thread_sync()
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
@@ -298,9 +298,9 @@ def test_non_sm100_targets_are_left_untouched():
     @T.prim_func
     def func():
         with T.Kernel(1):
-            C_tmem = T.decl_buffer((1,), T.uint32, scope="shared")
-            C_local = T.decl_buffer((128,), T.float32, scope="local")
-            T.tvm_storage_sync("shared")
+            C_tmem = T.alloc_buffer((1,), T.uint32, scope="shared")
+            C_local = T.alloc_buffer((128,), T.float32, scope="local")
+            T.gpu_storage_sync("shared")
             T.evaluate(_tcgen05_ld_call(C_tmem[0], C_local))
 
     mod = _apply(func, sm90_target)

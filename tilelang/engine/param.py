@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import torch
+import tvm_ffi
 from tilelang import tvm as tvm
-from tvm.tirx import Buffer, IntImm, Var, PrimExpr
+from tilelang._compat.tirx import Buffer, IntImm, Var, PrimExpr, expr_dtype
 import tilelang.language as T
 
 
@@ -64,7 +65,7 @@ class KernelParam:
         """
         # Use var.dtype directly (tvm.DataType) to preserve all type information
         # var.dtype is already a tvm.DataType object, no conversion needed
-        dtype = var.dtype
+        dtype = expr_dtype(var)
         return cls(dtype, [])
 
     def is_scalar(self) -> bool:
@@ -174,15 +175,16 @@ def dump_kernel_params(params: list[KernelParam]) -> str:
     The result contains only IR node data and can be loaded without executing
     any code, unlike a pickle.
     """
-    records = [{"dtype": str(param.dtype), "shape": list(param.shape)} for param in params]
-    return tvm.ir.save_json(tvm.runtime.convert(records))
+    records = [{"dtype": tvm.ir.PrimType(param.dtype), "shape": list(param.shape)} for param in params]
+    return tvm.ir.save_json(tvm_ffi.convert(records))
 
 
 def load_kernel_params(text: str) -> list[KernelParam]:
     """Reconstruct kernel parameters written by :func:`dump_kernel_params`."""
     params = []
     for record in tvm.ir.load_json(text):
-        dtype = tvm.DataType(str(record["dtype"]))
+        stored_dtype = record["dtype"]
+        dtype = stored_dtype.dtype if isinstance(stored_dtype, tvm.ir.PrimType) else tvm.DataType(str(stored_dtype))
         shape = [dim if isinstance(dim, PrimExpr) else int(dim) for dim in record["shape"]]
         params.append(KernelParam(dtype, shape))
     return params

@@ -31,6 +31,7 @@ from cutlass.cutlass_dsl import Constexpr, CuTeDSL, T, if_generate, dsl_user_op 
 
 from cutlass.experimental import primitives as prims
 import cutlass
+from cutlass.base_dsl import Arch
 from cutlass._mlir import ir
 
 import cutlass._mlir.dialects.cute as _cute_ir
@@ -40,7 +41,7 @@ import cutlass.cute as cute
 from cutlass.cute.typing import Int, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
-_TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a", "sm_121", "sm_121a"]
+_TMA_ARCHES = [architecture.name for architecture in Arch if architecture.value[0] >= 9]
 
 
 class _MbarrierPointerAdapter:
@@ -242,8 +243,6 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, _TMA_ARCHES, "arch")
     if not isinstance(crd, tuple):
-        if arch not in ("sm_90", "sm_90a"):
-            raise NotImplementedError("tma_store(size) path is only implemented for sm_90/sm_90a")
         gmem_ptr = tma_desc.align(smem_ptr.alignment)
         _cute_nvgpu_ir.arch_copy_SM90_bulk_copy_s2g(
             dsmem_data_addr=smem_ptr.value,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import re
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang._typing import DType
 from tilelang.utils import deprecated

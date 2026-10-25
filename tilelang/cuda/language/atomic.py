@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm.tirx import Buffer, PrimExpr
+from tilelang._compat.tirx import Buffer, PrimExpr
 
 from tilelang.language.atomic import atomic_add as _common_atomic_add
 

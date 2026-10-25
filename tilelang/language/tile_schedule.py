@@ -20,7 +20,7 @@ uniform runtime arithmetic. The store-free ``coord`` may use a compile-time
 from __future__ import annotations
 
 import tilelang.language as T
-from tilelang.carver.arch import driver
+from tilelang.utils import device as driver
 from tilelang.language.meta import meta_class
 
 

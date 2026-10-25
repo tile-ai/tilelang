@@ -5,10 +5,10 @@
 
 from typing import TypeAlias
 
-from tvm import ir
-from tvm import tirx
+from tilelang._compat.tvm import ir
+from tilelang._compat.tvm import tirx
 
-from tvm.tirx import BufferLoad, BufferRegion
+from tilelang._compat.tirx import BufferLoad, BufferRegion
 from tilelang.dtypes import dtype
 
 # Barrier can only be a Buffer, a BufferLoad

@@ -229,7 +229,7 @@ def instrument_current_pass_context() -> Generator[None, None, None]:
         yield
         return
 
-    from tvm.ir.transform import PassContext
+    from tvm_tirx.ir.transform import PassContext
 
     pass_context = PassContext.current()
     previous = list(pass_context.instruments)

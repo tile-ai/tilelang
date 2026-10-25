@@ -10,7 +10,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 OPS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt, "le": operator.le, "gt": operator.gt, "ge": operator.ge}
@@ -38,10 +38,10 @@ def _source(dtype, lanes, op, broadcast=False):
 @pytest.mark.parametrize("broadcast", [False, True])
 def test_packed_comparison_codegen(dtype, lanes, op, broadcast):
     source = _source(dtype, lanes, op, broadcast)
-    intrinsic = f"__h{'neu' if op == 'ne' else op}2_mask"
-    assert source.count(intrinsic + "(") == lanes // 2
-    native = "__half2" if dtype == "float16" else "__nv_bfloat162"
-    assert f"tl::from_uint1<{native}>" in source
+    suffix = "neu" if op == "ne" else "(?:gt|lt)" if op == "gt" else "(?:ge|le)" if op == "ge" else op
+    assert len(re.findall(rf"__h{suffix}2_mask\(", source)) == lanes // 2
+    native = "half2" if dtype == "float16" else "nv_bfloat162"
+    assert f"reinterpret_cast<const {native}*>" in source
     assert "CUDART_VERSION >= 12000" in source
     assert "#else" in source  # Older CUDA / pre-SM90 BF16 keeps scalar lowering.
     assert source.count(" & 1u)") == lanes

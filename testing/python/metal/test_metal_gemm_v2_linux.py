@@ -5,6 +5,7 @@ down to Metal shader source code with simdgroup matrix operations,
 without requiring a Metal runtime or macOS.
 """
 
+from tvm_ffi import structural_equal
 import pytest
 
 import tilelang
@@ -283,7 +284,7 @@ def test_metal_gemm_validates_explicit_buffer_strides():
 
     *_, stride = MPSIntrinEmitter._parse_buffer_nd(padded_buffer)
 
-    assert tvm.ir.structural_equal(stride, tvm.tirx.IntImm("int32", 32))
+    assert structural_equal(stride, tvm.tirx.IntImm("int32", 32))
 
     noncontiguous_buffer = tvm.tirx.decl_buffer(
         (16, 16),

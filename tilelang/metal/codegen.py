@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tvm import IRModule
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
 
 from tilelang.backend.device_codegen import global_func_device_codegen
 

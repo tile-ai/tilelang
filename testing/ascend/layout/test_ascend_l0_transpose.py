@@ -3,6 +3,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
 
 
@@ -35,6 +36,7 @@ def _l0_explicit_transpose_kernel(M, K, N, dtype="bfloat16", mn_region=None, k_r
 
 
 @pytest.mark.parametrize("dtype,mn_region", [("bfloat16", 24), ("float32", 25)])
+@tilelang.testing.requires_ascend
 def test_transpose_partial_fractal_correctness(dtype, mn_region):
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU unavailable")

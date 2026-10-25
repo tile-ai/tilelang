@@ -3,6 +3,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 
 
@@ -14,6 +15,7 @@ import tilelang.ascend.language as T
         pytest.param("float32", False, 2, 1, id="fp32-sub-k-accumulation"),
     ],
 )
+@tilelang.testing.requires_ascend
 def test_l1_sub_k_regions_accumulate_in_l0(dtype, transpose, k_tiles, stages):
     m, n, tile_k = 16, 32, 32
     k = k_tiles * tile_k

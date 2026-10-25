@@ -8,12 +8,14 @@
 
 #include <tvm/target/target.h>
 
+#include "support/base.h"
+
 namespace tvm {
 namespace tl {
 
-bool TargetIsMetal(Target target);
-int TargetMetalGetWarpSize(Target target);
-bool TargetMetalSupportsMetal4(Target target);
+TILELANG_DLL bool TargetIsMetal(Target target);
+TILELANG_DLL int TargetMetalGetWarpSize(Target target);
+TILELANG_DLL bool TargetMetalSupportsMetal4(Target target);
 
 } // namespace tl
 } // namespace tvm

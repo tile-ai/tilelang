@@ -29,6 +29,7 @@
 #include <optional>
 
 #include "../core_mask.h"
+#include "schedule_scope.h"
 #include "support/check.h"
 
 namespace tvm {
@@ -65,25 +66,25 @@ CopyTaskMetadata(const ffi::Any &existing) {
   return result;
 }
 
-inline const IntImmNode *
-RequireConstantTaskMetadataInt(const ffi::Any &value_any,
-                               const ffi::String &key) {
-  PrimExpr value_expr = value_any.cast<PrimExpr>();
-  const auto *value = value_expr.as<IntImmNode>();
-  ICHECK(value != nullptr) << "T.Task " << key
-                           << " must be a constant integer, got " << value_expr;
-  return value;
+inline int64_t RequireConstantTaskMetadataInt(const ffi::Any &value,
+                                              const ffi::String &key) {
+  auto integer = GetIntAnnotation(value);
+  TVM_FFI_CHECK(integer.has_value(), ValueError)
+      << "T.Task " << key << " must be a constant integer";
+  return *integer;
 }
 
 } // namespace task_metadata_detail
 
 inline std::optional<int> GetTaskSubcore(const Stmt &stmt) {
-  const auto *marker = stmt.as<AttrStmtNode>();
-  if (!marker)
+  const auto *marker = SingleScheduleStatement(stmt).as<RegionStmtNode>();
+  if (!marker || ScheduleMarkerKey(marker).empty())
     return std::nullopt;
-  auto metadata = task_metadata_detail::CopyTaskMetadata(marker->node);
+  auto metadata =
+      task_metadata_detail::CopyTaskMetadata(ScheduleMarkerPayload(marker));
   if (auto value = metadata.Get("subcore")) {
-    int sid = static_cast<int>(value.value().cast<Integer>()->value);
+    int64_t sid = task_metadata_detail::RequireConstantTaskMetadataInt(
+        value.value(), "subcore");
     ICHECK(sid == 0 || sid == 1);
     return sid;
   }
@@ -101,22 +102,22 @@ inline TaskMetadata ParseTaskMetadata(const ffi::Any &node) {
     ffi::String key = key_any.cast<ffi::String>();
     if (key != "latency" && key != "ii" && key != "core_mask")
       continue;
-    const auto *value =
+    int64_t value =
         task_metadata_detail::RequireConstantTaskMetadataInt(value_any, key);
     if (key == "latency") {
-      ICHECK_GE(value->value, 0) << "T.Task latency must be non-negative";
-      result.latency = value->value;
+      ICHECK_GE(value, 0) << "T.Task latency must be non-negative";
+      result.latency = value;
     } else if (key == "ii") {
-      ICHECK_GT(value->value, 0) << "T.Task ii must be positive";
-      result.ii = value->value;
+      ICHECK_GT(value, 0) << "T.Task ii must be positive";
+      result.ii = value;
     } else {
-      ICHECK_GT(value->value, 0)
+      ICHECK_GT(value, 0)
           << "T.Task core_mask must select at least one Ascend core";
-      ICHECK_LE(value->value, static_cast<int64_t>(kCoreAll))
+      ICHECK_LE(value, static_cast<int64_t>(kCoreAll))
           << "T.Task core_mask exceeds the supported AIV/AIC mask";
-      CoreMask core_mask = static_cast<CoreMask>(value->value);
+      CoreMask core_mask = static_cast<CoreMask>(value);
       ICHECK(IsValidCoreMask(core_mask))
-          << "T.Task has invalid core_mask " << value->value;
+          << "T.Task has invalid core_mask " << value;
       result.core_mask = core_mask;
     }
   }
@@ -131,17 +132,17 @@ inline ffi::Any MergeTaskMetadata(const TaskMetadata &metadata,
       task_metadata_detail::CopyTaskMetadata(existing);
   if (metadata.latency.has_value()) {
     ICHECK_GE(metadata.latency.value(), 0);
-    result.Set("latency", IntImm(DataType::Int(64), metadata.latency.value()));
+    result.Set("latency", IntImm(PrimType::Int(64), metadata.latency.value()));
   }
   if (metadata.ii.has_value()) {
     ICHECK_GT(metadata.ii.value(), 0);
-    result.Set("ii", IntImm(DataType::Int(64), metadata.ii.value()));
+    result.Set("ii", IntImm(PrimType::Int(64), metadata.ii.value()));
   }
   if (metadata.core_mask.has_value()) {
     ICHECK_NE(metadata.core_mask.value(), kCoreUnassigned);
     ICHECK(IsValidCoreMask(metadata.core_mask.value()));
     result.Set("core_mask",
-               IntImm(DataType::Int(64), metadata.core_mask.value()));
+               IntImm(PrimType::Int(64), metadata.core_mask.value()));
   }
   return result;
 }

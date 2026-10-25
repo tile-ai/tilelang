@@ -58,7 +58,7 @@ def _simple_program():
 
 def _noop_pass():
     """Return a Simplify pass (typically a no-op on the simple test program)."""
-    return tvm.tirx.transform.Simplify()
+    return tvm.tirx.transform.StmtSimplify()
 
 
 def test_env_default_off():
@@ -454,7 +454,7 @@ def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
 
     @tvm.transform.module_pass(opt_level=0, name="test.Outer")
     def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.Simplify()(mod)
+        return tvm.tirx.transform.StmtSimplify()(mod)
 
     program = _simple_program()
     mod = tvm.IRModule({"main": program})
@@ -464,8 +464,8 @@ def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
     with tvm.transform.PassContext(instruments=[instrument]):
         outer_pass(mod)
 
-    records = [record for record in trace.records if record.name in ("Outer", "Simplify")]
-    assert [record.name for record in records] == ["Outer", "Simplify"]
+    records = [record for record in trace.records if record.name in ("Outer", "StmtSimplify")]
+    assert [record.name for record in records] == ["Outer", "StmtSimplify"]
     assert [(record.depth, record.parent_index) for record in records] == [(0, None), (1, records[0].index)]
 
     assert trace.run_dir is not None
@@ -739,6 +739,7 @@ def test_import_time_activation(tmp_path):
     env = dict(os.environ)
     env["TL_LOWER_TRACE"] = "1"
     env["TL_LOWER_TRACE_DIR"] = str(tmp_path)
+    env["SKIP_LOADING_TILELANG_SO"] = "0"
 
     code = (
         "import tilelang\n"

@@ -8,9 +8,9 @@ from tilelang.cuda.intrinsics.macro.mma_sm70_macro_generator import (
 )
 from tilelang.utils.language import is_full_region
 from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -50,7 +50,7 @@ class GemmMMASm70(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def lower(
         self,
@@ -62,7 +62,7 @@ class GemmMMASm70(GemmBase):
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
-        local_thread_var = thread_index - thread_bounds.min
+        local_thread_var = thread_index - thread_bounds.begin
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -93,8 +93,8 @@ class GemmMMASm70(GemmBase):
         B_region = self.BRegion
         C_region = self.CRegion
 
-        A_buf = A_region.buffer
-        C_buf = C_region.buffer
+        A_buf = A_region.source
+        C_buf = C_region.source
 
         clear_accum = self.clear_accum
 
@@ -165,4 +165,4 @@ class GemmMMASm70(GemmBase):
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
         else:
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")

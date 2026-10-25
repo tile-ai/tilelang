@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+
 import ast
 from dataclasses import dataclass
 from typing import Any
 
 from tilelang import tvm
-from tvm import IRModule
-from tvm.target import Target
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
+from tilelang._compat.stmt_functor import post_order_visit
 
 from tilelang.jit.adapter.utils import pythonic_expr
 from tilelang.jit.adapter.wrapper import PREDEF_INIT_FUNC, TLWrapper
@@ -99,7 +101,7 @@ class _PTOHostCallCollector(tvm.tirx.functor.PyStmtExprVisitor):
             self._visit_control_flow_body(op.else_case)
 
     def visit_for_(self, op: tvm.tirx.For) -> None:
-        self.visit_expr(op.min)
+        self.visit_expr(op.begin)
         self.visit_expr(op.extent)
         self._visit_control_flow_body(op.body)
 
@@ -368,17 +370,17 @@ class TLPTOSourceWrapper:
                 assert dtype == dynamic_symbolic_set[name]
 
         for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
+            if param in tensor_parameter_map(prim_func):
+                buffer = tensor_parameter_map(prim_func)[param]
                 for dim in buffer.shape:
                     if isinstance(dim, tvm.tirx.Var):
                         unique_push_back(dim.name, str(dim.dtype))
 
         # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
         for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for stride in buffer.strides:
+            if param in tensor_parameter_map(prim_func):
+                buffer = tensor_parameter_map(prim_func)[param]
+                for stride in tensor_strides(buffer):
                     if isinstance(stride, tvm.tirx.Var):
                         unique_push_back(stride.name, str(stride.dtype))
 
@@ -395,8 +397,8 @@ class TLPTOSourceWrapper:
             arg_by_name[alias] = info
 
         for param in func.params:
-            if param in func.buffer_map:
-                buffer = func.buffer_map[param]
+            if param in tensor_parameter_map(func):
+                buffer = tensor_parameter_map(func)[param]
                 name = buffer.data.name
                 info = {
                     "name": name,

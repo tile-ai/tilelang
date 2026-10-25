@@ -1,3 +1,5 @@
+from _native_ir import flat_access_ptr
+from tilelang._compat.builder import scope_attr
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -45,10 +47,7 @@ def test_inject_set_max_nreg():
         by = T.launch_thread("blockIdx.y", 8)
         v = T.launch_thread("threadIdx.x", 128)
 
-        with T.sblock(""):
-            T.reads(A[by * 64, 0:512], B[0:512, bx * 64])
-            T.writes()
-
+        with T.scope(attrs={"name_hint": ""}):
             # Add set_max_nreg hints
             T.annotate_producer_reg_dealloc(24)  # Producer: decrease to 24
             T.annotate_consumer_reg_alloc(240)  # Consumer: increase to 240
@@ -58,7 +57,7 @@ def test_inject_set_max_nreg():
             C_local = T.alloc_buffer((32,), scope="local")
 
             mbars = T.alloc_barrier([128, 128, 128, 128, 128, 128])
-            T.attr([128, 128], "kWarpSpecializationScope", 0)
+            scope_attr({"kWarpSpecializationScope": [128, 128]})
 
             if v >= 128:
                 # Producer branch - should have set_max_nreg(24, 0)
@@ -68,7 +67,7 @@ def test_inject_set_max_nreg():
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2, 2, 0),
                             mbars[k % 3],
-                            T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 2),
+                            flat_access_ptr(A_shared, k % 3 * 2048, 2048, 2),
                             k * 32,
                             by * 64,
                         )
@@ -80,9 +79,9 @@ def test_inject_set_max_nreg():
                     T.call_extern(
                         "handle",
                         "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                        T.tvm_access_ptr(T.type_annotation(T.float16), A_shared.data, k % 3 * 2048, 2048, 1),
-                        T.tvm_access_ptr(T.type_annotation(T.float16), B_shared.data, k % 3 * 2048, 2048, 1),
-                        T.tvm_access_ptr(T.type_annotation(T.float32), C_local.data, 0, 32, 3),
+                        flat_access_ptr(A_shared, k % 3 * 2048, 2048, 1),
+                        flat_access_ptr(B_shared, k % 3 * 2048, 2048, 1),
+                        flat_access_ptr(C_local, 0, 32, 3),
                     )
                     T.ptx_arrive_barrier(mbars[k % 3 + 3])
 
@@ -104,12 +103,9 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
         bx = T.launch_thread("blockIdx.x", 8)
         v = T.launch_thread("threadIdx.x", 256)
 
-        with T.sblock(""):
-            T.reads(A[bx * 64, 0:64])
-            T.writes(B[bx * 64, 0:64])
-
+        with T.scope(attrs={"name_hint": ""}):
             A_shared = T.alloc_buffer((128,), T.float16, scope="shared")
-            T.attr([128, 128], "kWarpSpecializationScope", 0)
+            scope_attr({"kWarpSpecializationScope": [128, 128]})
 
             if v >= 128:
                 T.set_max_nreg(80, 0)
@@ -137,15 +133,12 @@ def test_inject_set_max_nreg_no_set_max_nreg():
         bx = T.launch_thread("blockIdx.x", 8)
         v = T.launch_thread("threadIdx.x", 128)
 
-        with T.sblock(""):
-            T.reads(A[bx * 64, 0:64])
-            T.writes()
-
+        with T.scope(attrs={"name_hint": ""}):
             # Add no_set_max_nreg to disable register hinting
             T.disable_warp_group_reg_alloc()
 
             mbars = T.alloc_barrier([128, 128])  # noqa: F841
-            T.attr([128, 128], "kWarpSpecializationScope", 0)
+            scope_attr({"kWarpSpecializationScope": [128, 128]})
 
             if v >= 128:
                 # Producer branch - should not have set_max_nreg calls
@@ -204,15 +197,17 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
     finally:
         tl.enable_cache()
 
-    producer_branch = src.index("if (((int)threadIdx.x) < 128) {")
-    consumer_branch = src.index("} else {", producer_branch)
-    reg_dealloc = src.index("tl::warpgroup_reg_dealloc<40>();")
-    reg_alloc = src.index("tl::warpgroup_reg_alloc<232>();")
-
-    assert "warpgroup_reg_dealloc" not in src[:producer_branch]
-    assert "warpgroup_reg_alloc" not in src[:producer_branch]
-    assert producer_branch < reg_dealloc < consumer_branch
-    assert consumer_branch < reg_alloc
+    consumer_branch = src.index("if (((int)threadIdx.x) < 128) {")
+    producer_branch = src.index("if ((128 <= ((int)threadIdx.x)) && (((int)threadIdx.x) < 160)) {")
+    idle_branch = src.index("if (160 <=", producer_branch)
+    allocate = "tvm_builtin_ptx_setmaxnreg_inc_sync_aligned_u32_232();"
+    deallocate = "tvm_builtin_ptx_setmaxnreg_dec_sync_aligned_u32_40();"
+    assert src.count(allocate) == 1
+    assert src.count(deallocate) == 2
+    first_deallocation = src.index(deallocate)
+    second_deallocation = src.index(deallocate, first_deallocation + 1)
+    assert consumer_branch < src.index(allocate) < producer_branch
+    assert producer_branch < first_deallocation < idle_branch < second_deallocation
 
 
 if __name__ == "__main__":

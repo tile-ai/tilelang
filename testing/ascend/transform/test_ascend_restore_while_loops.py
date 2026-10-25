@@ -1,82 +1,90 @@
 from tilelang import tvm
 from tilelang.ascend import transform
+from tilelang._compat import tirx
+from tvm_tirx import ir
 
 
 def _restore(body, loop_var, output=None):
     if output is None:
-        output = body.buffer
-    synthetic_loop = tvm.tirx.For(
+        output = body.dest
+    synthetic_loop = ir.For(
         loop_var,
         3,
-        8,
-        tvm.tirx.ForKind.SERIAL,
+        11,
+        1,
+        ir.ForKind.DEFAULT,
         body,
         annotations={"synthetic_while": 1},
     )
-    func = tvm.tirx.PrimFunc(
-        [output.data],
+    func = tirx.PrimFunc(
+        [output],
         synthetic_loop,
-        buffer_map={output.data: output},
+        ret_type=ir.TupleType([]),
     ).with_attr("global_symbol", "main")
     return transform.RestoreWhileLoops()(tvm.IRModule.from_expr(func))["main"].body
 
 
 def test_restore_while_loops_preserves_residual_loop_var_with_counter():
-    output = tvm.tirx.decl_buffer((16,), "int32", name="output")
-    loop_var = tvm.tirx.Var("synthetic", "int32")
+    output = tirx.decl_buffer((16,), "int32", name="output")
+    loop_var = ir.Var("synthetic", "int32")
     body = _restore(
-        tvm.tirx.BufferStore(output, loop_var, [loop_var]),
+        ir.TensorStore(output, [loop_var], loop_var),
         loop_var,
     )
 
-    assert isinstance(body, tvm.tirx.SeqStmt)
+    assert isinstance(body, ir.SeqStmt)
     allocation, initialize, loop = body.seq
-    assert isinstance(allocation, tvm.tirx.AllocBuffer)
-    assert isinstance(initialize, tvm.tirx.BufferStore)
+    assert isinstance(allocation, ir.Bind)
+    assert allocation.value.op.name == "tirx.alloc_tensor"
+    assert isinstance(initialize, ir.TensorStore)
     assert initialize.value.value == 3
-    assert isinstance(loop, tvm.tirx.While)
+    assert isinstance(loop, ir.While)
 
     restored_store, increment = loop.body.seq
-    assert isinstance(restored_store.value, tvm.tirx.BufferLoad)
-    assert restored_store.value.buffer.same_as(allocation.buffer)
-    assert isinstance(restored_store.indices[0], tvm.tirx.BufferLoad)
-    assert restored_store.indices[0].buffer.same_as(allocation.buffer)
-    assert isinstance(increment, tvm.tirx.BufferStore)
-    assert increment.buffer.same_as(allocation.buffer)
+    assert isinstance(restored_store.value, ir.TensorLoad)
+    assert restored_store.value.source.same_as(allocation.var)
+    assert isinstance(restored_store.indices[0], ir.TensorLoad)
+    assert restored_store.indices[0].source.same_as(allocation.var)
+    assert isinstance(increment, ir.TensorStore)
+    assert increment.dest.same_as(allocation.var)
 
 
 def test_restore_while_loops_avoids_counter_when_loop_var_is_dead():
-    output = tvm.tirx.decl_buffer((1,), "int32", name="output")
-    loop_var = tvm.tirx.Var("synthetic", "int32")
+    output = tirx.decl_buffer((1,), "int32", name="output")
+    loop_var = ir.Var("synthetic", "int32")
     body = _restore(
-        tvm.tirx.BufferStore(output, 7, [0]),
+        ir.TensorStore(output, [0], 7),
         loop_var,
     )
 
-    assert isinstance(body, tvm.tirx.While)
-    assert isinstance(body.body, tvm.tirx.BufferStore)
+    (loop,) = body.seq
+    assert isinstance(loop, ir.While)
+    assert isinstance(loop.body.seq[0], ir.TensorStore)
 
 
 def test_restore_while_loops_avoids_counter_after_version_index_simplification():
-    output = tvm.tirx.decl_buffer((2,), "int32", name="output")
-    loop_var = tvm.tirx.Var("synthetic", "int32")
-    inner_var = tvm.tirx.Var("inner", "int32")
-    version_index = tvm.tirx.indexmod(loop_var * 4 + inner_var, 2)
-    scheduled_body = tvm.tirx.For(
+    output = tirx.decl_buffer((2,), "int32", name="output")
+    loop_var = ir.Var("synthetic", "int32")
+    inner_var = ir.Var("inner", "int32")
+    version_index = (loop_var * 4 + inner_var) % 2
+    scheduled_body = ir.For(
         inner_var,
         0,
         4,
-        tvm.tirx.ForKind.SERIAL,
-        tvm.tirx.BufferStore(output, 7, [version_index]),
+        1,
+        ir.ForKind.DEFAULT,
+        ir.TensorStore(output, [version_index], 7),
     )
 
     body = _restore(scheduled_body, loop_var, output)
 
-    assert isinstance(body, tvm.tirx.While)
-    assert isinstance(body.body, tvm.tirx.For)
-    restored_store = body.body.body
-    assert isinstance(restored_store, tvm.tirx.BufferStore)
-    tvm.ir.assert_structural_equal(restored_store.indices[0], tvm.tirx.indexmod(inner_var, 2))
+    (loop,) = body.seq
+    assert isinstance(loop, ir.While)
+    (inner,) = loop.body.seq
+    assert isinstance(inner, ir.For)
+    restored_store = inner.body.seq[0]
+    assert isinstance(restored_store, ir.TensorStore)
+    tvm.ir.assert_structural_equal(restored_store.indices[0], inner_var % 2)
 
 
 if __name__ == "__main__":

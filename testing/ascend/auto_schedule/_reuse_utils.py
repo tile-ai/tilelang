@@ -1,6 +1,7 @@
 """Shared buffer-reuse fixtures and alias-map inspection."""
 
 import tilelang.ascend.language as T
+from tvm_tirx import ir
 from tilelang.ascend import transform
 from tilelang import tvm
 from testing.ascend._ir import schedule, nodes
@@ -36,8 +37,8 @@ def _insert_sync_alias_pairs(program, *, disable_reuse=False) -> set[tuple[str, 
         before = schedule(program, through="ResolveCore", auto_schedule=False)
         mod = transform.InsertSync()(before)
     pairs = set()
-    for block in nodes(mod, tvm.tirx.SBlock):
-        for storage, compatible in block.annotations.get("tl.buffer_alias_map", {}).items():
+    for region in nodes(mod, ir.RegionStmt):
+        for storage, compatible in region.attrs.get("tl.buffer_alias_map", {}).items():
             for other in compatible:
                 pairs.add(tuple(sorted((storage.name, other.name))))
     return pairs

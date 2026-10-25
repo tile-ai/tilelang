@@ -3,7 +3,7 @@
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-from tvm import tirx
+from tvm_tirx import ir, tirx
 from testing.ascend._ir import nodes
 
 
@@ -17,10 +17,15 @@ def test_buffer_version_annotations_use_storage_identity():
             inferred = T.alloc_shared((64,), "float32")
             T.annotate_buffer_versions({fixed: 2, alias: "counter", explicit: (3, "counter"), inferred: "iteration"})
 
-    root = next(block for block in nodes(main, tirx.SBlock) if block.name_hint == "tilelang_root")
-    storages = {buffer.name: buffer.data for buffer in root.alloc_buffers}
-    versions = root.annotations["tl.buffer_versions_map"]
-    modes = root.annotations["tl.buffer_version_mode"]
+    assert tirx.analysis.check_well_formed(main)
+    root = next(region for region in nodes(main, ir.RegionStmt) if "tl.buffer_versions_map" in region.attrs)
+    storages = {
+        binding.var.name: binding.var
+        for binding in nodes(main, ir.Bind)
+        if isinstance(binding.value, ir.Call) and binding.value.op.name == "tirx.alloc_tensor"
+    }
+    versions = root.attrs["tl.buffer_versions_map"]
+    modes = root.attrs["tl.buffer_version_mode"]
     assert len(versions) == 2
     assert int(versions[storages["fixed"]]) == 2
     assert int(versions[storages["explicit"]]) == 3

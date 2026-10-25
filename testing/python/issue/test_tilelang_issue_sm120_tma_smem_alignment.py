@@ -22,8 +22,8 @@ The test has two parts:
 
 1. **Generated TIR check** (host-independent). Lowers the buggy-arena
    kernel for explicit `{"kind": "cuda", "arch": "sm_{90,100,120}"}` targets and asserts
-   every `tl.tma_load` destination `tirx.tvm_access_ptr` byte offset is
-   provably 128-byte aligned. Runs on any host.
+   every `tl.tma_load` destination resolves through native tensor bindings
+   to a provably 128-byte-aligned allocation and byte offset.
 
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
    for the host arch and asserts it doesn't raise
@@ -33,6 +33,7 @@ The test has two parts:
 """
 
 import torch
+from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.testing
@@ -80,8 +81,8 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
             T.clear(c_local)
 
             for k in T.Pipelined(T.ceildiv(K, BK), num_stages=2):
-                T.copy(a[bx * BM : (bx + 1) * BM, k * BK : (k + 1) * BK], s_a)
-                T.copy(b[k * BK : (k + 1) * BK, by * BN : (by + 1) * BN], s_b)
+                T.copy(a[bx * BM : (bx + 1) * BM, k * BK : (k + 1) * BK], s_a, prefer_instruction="tma")
+                T.copy(b[k * BK : (k + 1) * BK, by * BN : (by + 1) * BN], s_b, prefer_instruction="tma")
                 T.gemm(s_a, s_b, c_local)
                 # Touch the scalar *inside* the loop so its lifetime
                 # overlaps the TMA-loaded `s_a` / `s_b` tiles. Without
@@ -140,9 +141,34 @@ def _collect_tma_loads(mod):
     return loads
 
 
-def _byte_offset(access_ptr):
-    dtype = access_ptr.args[0].dtype
-    return access_ptr.args[2] * dtype.bytes * dtype.lanes
+def _pointer_origin(expression, definitions):
+    if isinstance(expression, ir.Var):
+        definition = definitions.get(expression)
+        if definition is not None and _is_op_call(definition, "tirx.alloc_tensor"):
+            return expression, ir.const(0, "int64")
+        assert definition is not None, f"Unresolved shared-memory pointer: {expression}"
+        return _pointer_origin(definition, definitions)
+    assert isinstance(expression, ir.Call) and isinstance(expression.op, ir.Op)
+    if expression.op.name in ("tirx.decl_tensor", "tirx.tensor_data_ptr", "tirx.reinterpret"):
+        return _pointer_origin(expression.args[0], definitions)
+    if expression.op.name == "tirx.ptr_byte_offset":
+        allocation, offset = _pointer_origin(expression.args[0], definitions)
+        return allocation, offset + expression.args[1]
+    if expression.op.name == "tirx.address_of":
+        load = expression.args[0]
+        assert isinstance(load, ir.TensorLoad)
+        tensor_type = load.source.ty
+        assert isinstance(tensor_type, tirx.TensorType)
+        allocation, offset = _pointer_origin(load.source, definitions)
+        if tensor_type.layout is not None:
+            index = tensor_type.layout.apply(*load.indices, shape=tensor_type.shape)["m"]
+        else:
+            index = ir.const(0, "int64")
+            for coordinate, extent in zip(load.indices, tensor_type.shape):
+                index = index * extent + coordinate
+        dtype = tensor_type.dtype.dtype
+        return allocation, offset + index * ((dtype.bits * dtype.lanes + 7) // 8)
+    raise AssertionError(f"Unsupported native TMA pointer expression: {expression}")
 
 
 def _assert_tma_destinations_128_aligned(arch: str, mod):
@@ -150,16 +176,23 @@ def _assert_tma_destinations_128_aligned(arch: str, mod):
     assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
     analyzer = tvm.arith.Analyzer()
+    definitions = {}
+    for function in mod.functions.values():
+        tvm.tirx.stmt_functor.post_order_visit(
+            function, lambda node: definitions.update({node.var: node.value}) if isinstance(node, ir.Bind) else None
+        )
+    nonzero_merged_destination = False
     for load in loads:
         assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"
-        access_ptr = load.args[2]
-        assert _is_op_call(access_ptr, "tirx.tvm_access_ptr"), (
-            f"[{arch}] expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
-        )
-        byte_offset = analyzer.simplify(_byte_offset(access_ptr))
+        allocation, byte_offset = _pointer_origin(load.args[2], definitions)
+        assert allocation.ty.scope.name in ("shared", "shared.dyn")
+        assert int(allocation.ty.data_alignment) >= 128
+        byte_offset = analyzer.simplify(byte_offset)
         assert analyzer.can_prove(byte_offset % 128 == 0), (
-            f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
+            f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. destination={load.args[2]}"
         )
+        nonzero_merged_destination |= "merged_shared" in allocation.name and analyzer.can_prove(byte_offset >= 128)
+    assert nonzero_merged_destination, "The regression must exercise a nonzero TMA offset in the merged shared arena"
 
 
 @tilelang.testing.requires_cuda

@@ -7,7 +7,7 @@ import sys
 import tempfile
 from typing import Any
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
@@ -118,6 +118,13 @@ class LibraryGenerator:
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
+            from tvm_ffi import libinfo as ffi_libinfo
+
+            command += ["-I" + path for path in ffi_libinfo.include_paths()]
+            ffi_library = ffi_libinfo.find_libtvm_ffi()
+            command += [ffi_library]
+            if sys.platform != "win32":
+                command += ["-Xlinker", "-rpath", "-Xlinker", os.path.dirname(ffi_library)]
 
         elif is_hip_target(target):
             from tilelang.rocm.target import target_get_mcpu
@@ -173,10 +180,17 @@ class LibraryGenerator:
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
 
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
+            from tvm_ffi import libinfo as ffi_libinfo
+            from tvm_tirx import libinfo as tirx_libinfo
+
+            command = [get_cplus_compiler(), "-std=c++20", "-fPIC", "-shared", src.name]
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
+                "-I" + tirx_libinfo.find_include_path(),
             ]
+            command += ["-I" + path for path in ffi_libinfo.include_paths()]
+            for library in (tirx_libinfo.find_libtvm_runtime(), ffi_libinfo.find_libtvm_ffi()):
+                command += [library, "-Wl,-rpath," + os.path.dirname(library)]
             command += get_compile_flags(target, self.pass_configs, execution_backend="cython")
         else:
             raise ValueError(f"Unsupported target: {target}")
@@ -191,15 +205,14 @@ class LibraryGenerator:
 
         src.write(self.lib_code)
         src.flush()
-        if sys.platform == "win32":
-            src.close()
+        src.close()
 
         # On Windows, two concerns matter for parallel autotune:
         # 1. nvcc needs MSVC's host compiler env (cl.exe, INCLUDE, LIB).
         # 2. Concurrent subprocesses sharing the parent's console handle can
         #    deadlock when their output interleaves with tqdm progress bars.
         # Pipe stdio + isolate stdin to make the launch self-contained.
-        run_kwargs: dict[str, Any] = {"timeout": timeout}
+        run_kwargs: dict[str, Any] = {"timeout": timeout, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
         if sys.platform == "win32":
             from tilelang.contrib.nvcc import get_nvcc_subprocess_env
 

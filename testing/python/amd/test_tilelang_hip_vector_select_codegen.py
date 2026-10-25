@@ -3,7 +3,21 @@ import tilelang
 import tilelang.testing
 
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
+from tvm_tirx import ir, tirx as native_tirx
+
+
+def _make_device_function(parameters, body):
+    pointers = []
+    bindings = []
+    for parameter in parameters:
+        if native_tirx.is_tensor_var(parameter):
+            pointer = ir.Var(parameter.name, ir.PtrType(parameter.dtype))
+            pointers.append(pointer)
+            bindings.append(ir.Bind(parameter, ir.Call("tirx.decl_tensor", [pointer], ty_args=[parameter.ty])))
+        else:
+            pointers.append(parameter)
+    return native_tirx.Function(pointers, ir.SeqStmt([*bindings, body]))
 
 
 def _build_vector_select_source(
@@ -41,22 +55,17 @@ def _build_vector_select_source(
     if wrap_input_in_reinterpret:
         input_vector = tirx.reinterpret(f"int32x{lanes}", input_vector)
     if wrap_input_in_abs:
-        input_vector = tirx.Call(f"bfloat16x{lanes}", tvm.ir.Op.get("tl.abs2"), [input_vector])
+        input_vector = ir.Call("tl.abs2", [input_vector], ty=f"bfloat16x{lanes}")
     if wrap_input_in_packed_call:
         bias = tirx.Broadcast(tirx.const(1, "float32"), lanes)
-        input_vector = tirx.Call(f"float32x{lanes}", tvm.ir.Op.get("tl.add2"), [input_vector, bias])
+        input_vector = ir.Call("tl.add2", [input_vector, bias], ty=f"float32x{lanes}")
     mask_zero = tirx.Broadcast(tirx.const(0, "float32"), lanes)
     result_zero = tirx.Broadcast(tirx.const(0, output_dtype), lanes)
     selected = tirx.Select(mask_vector > mask_zero, input_vector, result_zero)
     body = tirx.BufferStore(output_buffer, selected, [ramp])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
+    func = _make_device_function(
+        [mask_buffer, input_buffer, output_buffer],
         body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
     )
     func = func.with_attr("global_symbol", "vector_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
@@ -78,13 +87,9 @@ def _build_vector_select_with_vector_argument_source():
     zero = tirx.Broadcast(tirx.const(0, "float32"), lanes)
     selected = tirx.Select(mask_vector > zero, value, zero)
     body = tirx.BufferStore(output_buffer, selected, [ramp])
-    func = tirx.PrimFunc(
-        [value, mask_buffer.data, output_buffer.data],
+    func = _make_device_function(
+        [value, mask_buffer, output_buffer],
         body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            output_buffer.data: output_buffer,
-        },
     )
     func = func.with_attr("global_symbol", "vector_select_argument")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
@@ -110,14 +115,9 @@ def _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, re
     result_zero = tirx.Broadcast(tirx.const(0, result_dtype), result_lanes)
     selected = tirx.Select(mask_vector > mask_zero, reinterpreted, result_zero)
     body = tirx.BufferStore(output_buffer, selected, [mask_ramp])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
+    func = _make_device_function(
+        [mask_buffer, input_buffer, output_buffer],
         body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
     )
     func = func.with_attr("global_symbol", "lane_changing_reinterpret_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
@@ -142,7 +142,7 @@ def _make_narrow_vector_select_module(dtype, lanes):
         on_true,
         on_false,
     )
-    func = tirx.PrimFunc([on_true, on_false], tirx.Evaluate(selected))
+    func = _make_device_function([on_true, on_false], tirx.Evaluate(selected))
     func = func.with_attr("global_symbol", "narrow_vector_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     return tvm.IRModule({"narrow_vector_select": func})
@@ -167,14 +167,9 @@ def _build_scalar_select_source():
         zero,
     )
     body = tirx.BufferStore(output_buffer, selected, [0])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
+    func = _make_device_function(
+        [mask_buffer, input_buffer, output_buffer],
         body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
     )
     func = func.with_attr("global_symbol", "scalar_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
@@ -198,7 +193,7 @@ def test_scalar_select_uses_base_ternary_path():
     source = _build_scalar_select_source()
 
     assignments = [line for line in source.splitlines() if "?" in line and "=" in line]
-    assert assignments == ["  output[0] = ((mask[0] > 0.000000e+00f) ? input[0] : 0.000000e+00f);"]
+    assert assignments == ["  output[0] = ((0.000000e+00f < mask[0]) ? input[0] : 0.000000e+00f);"]
 
 
 def test_eight_lane_select_keeps_masked_loads_in_ternary_branches():

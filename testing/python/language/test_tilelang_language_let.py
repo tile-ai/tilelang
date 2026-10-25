@@ -1,16 +1,17 @@
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang import language as T
+from tvm_tirx import ir
+from tvm_tirx.ir import prim
 
 
 @tilelang.jit
 def test_kernel(
     A: T.Tensor((16, 16), dtype=T.float32),
 ):
-    for _blockIdx in T.thread_binding(1, thread="blockIdx.x"):
-        for _threadIdx in T.thread_binding(128, thread="threadIdx.x"):
-            b = A[0, 0:4]
-            A[0, 4:8] = b
+    with T.Kernel(1, threads=128):
+        b = ir.TensorLoad(A, [0, prim.Ramp(0, 1, 4)])
+        T.buffer_store(A, b, [0, prim.Ramp(4, 1, 4)])
 
 
 @tilelang.testing.requires_cuda
@@ -52,8 +53,14 @@ def producer_bind_kernel(A: T.Tensor((64,), T.float16), B: T.Tensor((64,), T.flo
 
 @tilelang.testing.requires_cuda
 def test_producer_bind_kernel():
+    import torch
+
     kernel_source = producer_bind_kernel.get_kernel_source()
     assert "tl::tma_load" in kernel_source
+    source = torch.arange(64, dtype=torch.float16, device="cuda")
+    output = torch.full_like(source, -1)
+    producer_bind_kernel(source, output)
+    torch.testing.assert_close(output, source, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

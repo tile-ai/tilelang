@@ -39,6 +39,7 @@
 #include "./auto_schedule/multi_buffer.h"
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
+#include "compat/visit.h"
 
 namespace tvm {
 namespace tl {
@@ -75,7 +76,7 @@ public:
   static void Resolve(const std::vector<std::shared_ptr<IRStructure>> &root,
                       const std::vector<TaskNode *> &all_tasks,
                       const MultiBufferPlan &plan,
-                      const ffi::Optional<Var> &outer_sid,
+                      const ffi::Optional<PrimVar> &outer_sid,
                       int num_aiv_subcores) {
     CoreMaskResolver resolver(root, all_tasks, plan, outer_sid,
                               num_aiv_subcores);
@@ -128,7 +129,8 @@ private:
   CoreMaskResolver(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
                    const MultiBufferPlan &plan,
-                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
+                   const ffi::Optional<PrimVar> &outer_sid,
+                   int num_aiv_subcores)
       : root_(root), all_tasks_(all_tasks), plan_(plan),
         epoch_domains_(root, plan), availability_(all_tasks),
         active_core_mask_(kCoreCube | VectorCoreMask(num_aiv_subcores)) {
@@ -170,11 +172,16 @@ private:
     // consumers' domains. In particular, an unused binding placed on Cube as
     // a fallback and a break's own condition must not seed shared Cube work.
     bool external_effect = false;
-    PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
-      if (const auto *store = node.as<BufferStoreNode>())
-        external_effect |=
-            !IsRegisterRegion(BufferRegion::FullRegion(store->buffer));
+    tl::PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
+      if (const auto *store = node.as<TensorStoreNode>()) {
+        ffi::String scope = store->dest.as_or_throw<TensorVar>().scope().name();
+        external_effect |= scope != "local" && scope != "local.var" &&
+                           scope != "local.fragment";
+      }
       if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tirx::alloc_tensor_op()) ||
+            call->op.same_as(tirx::decl_tensor_op()))
+          return;
         Call expression = ffi::GetRef<Call>(call);
         Stmt statement = Evaluate(expression);
         external_effect |=
@@ -254,6 +261,12 @@ private:
     }
   }
 
+  Var StorageOf(const TensorRegion &region) const {
+    auto tensor = region->source.as_or_throw<TensorVar>();
+    return all_tasks_.empty() ? static_cast<Var>(tensor)
+                              : all_tasks_.front()->StorageOf(tensor);
+  }
+
   bool AddDemand(DemandMap *demands, const Var &value, CoreDemand demand) {
     if (demand.cores == kCoreUnassigned)
       return false;
@@ -266,9 +279,9 @@ private:
     bool changed = false;
     for (const Var &var : task->GetReadVars())
       changed |= AddDemand(&var_demand_, var, demand);
-    for (const BufferRegion &region : task->GetReadRegions()) {
+    for (const TensorRegion &region : task->GetReadRegions()) {
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
+        changed |= AddDemand(&register_demand_, StorageOf(region), demand);
     }
     return changed;
   }
@@ -279,9 +292,9 @@ private:
     bool changed = false;
     for (const Var &var : accesses.read_vars)
       changed |= AddDemand(&var_demand_, var, demand);
-    for (const BufferRegion &region : accesses.read_regions) {
+    for (const TensorRegion &region : accesses.read_regions) {
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
+        changed |= AddDemand(&register_demand_, StorageOf(region), demand);
     }
     return changed;
   }
@@ -314,10 +327,10 @@ private:
       if (it != var_demand_.end())
         demand.Merge(it->second);
     }
-    for (const BufferRegion &region : task->GetWriteRegions()) {
+    for (const TensorRegion &region : task->GetWriteRegions()) {
       if (!IsRegisterRegion(region))
         continue;
-      auto it = register_demand_.find(region->buffer->data);
+      auto it = register_demand_.find(StorageOf(region));
       if (it != register_demand_.end())
         demand.Merge(it->second);
     }
@@ -467,7 +480,7 @@ private:
     // MaterializeMultiBuffer will add one counter load for each returned
     // group, so its writers must exist on every core that executes this task.
     for (const MultiBufferInfo *info : it->second)
-      changed |= AddDemand(&register_demand_, info->counter->data, demand);
+      changed |= AddDemand(&register_demand_, info->counter, demand);
     return changed;
   }
 
@@ -496,7 +509,7 @@ private:
       return it->second;
     };
     auto add_task_guard = [&](TaskNode *task, const PrimExpr &guard) {
-      if (is_one(guard))
+      if ((GetConstInt(guard) == 1))
         return;
       size_t guard_index = intern_guard(guard);
       std::vector<size_t> &task_guards = task_epoch_guards_[task];
@@ -532,9 +545,10 @@ private:
     for (TaskNode *task : all_tasks_) {
       std::vector<const MultiBufferInfo *> groups;
       std::unordered_set<int> seen_groups;
-      auto append = [&](const std::vector<BufferRegion> &regions) {
-        for (const BufferRegion &region : regions) {
-          const MultiBufferInfo *info = plan_.Find(region->buffer);
+      auto append = [&](const std::vector<TensorRegion> &regions) {
+        for (const TensorRegion &region : regions) {
+          const MultiBufferInfo *info = plan_.Find(
+              task->StorageOf(region->source.as_or_throw<TensorVar>()));
           if (info == nullptr || !info->UsesCounter() ||
               IsMultiBufferBroadcastFill(task, info->storage) ||
               !seen_groups.insert(info->counter_group_id).second) {
@@ -542,7 +556,7 @@ private:
           }
           ICHECK(info->FindOwner(task) != nullptr)
               << "Counter-versioned task is outside every owner for storage "
-              << info->storage->name_hint;
+              << info->storage->name;
           groups.push_back(info);
         }
       };
@@ -618,7 +632,7 @@ private:
 
 void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
                       const BufferVersionMap &buffer_versions,
-                      const ffi::Optional<Var> &outer_sid,
+                      const ffi::Optional<PrimVar> &outer_sid,
                       const L0StorageGroups &groups, int num_aiv_subcores) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
@@ -632,8 +646,9 @@ void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
 
 tvm::transform::Pass ResolveCore() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func =
+      [](tirx::Function func, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     return RewriteTilelangKernels(
         std::move(func), "ResolveCore",
         [](const TilelangKernelContext &context) {
@@ -647,7 +662,7 @@ tvm::transform::Pass ResolveCore() {
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ResolveCore", {});
+  return CreateFunctionPass(pass_func, 0, "tl.ResolveCore");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

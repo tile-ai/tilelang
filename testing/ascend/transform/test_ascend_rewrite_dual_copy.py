@@ -1,10 +1,11 @@
 """Dual-copy rewriting splits software regions and preserves hardware copies."""
 
 import pytest
+from tvm_tirx import ir
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import calls, nodes
+from tilelang._compat import tirx
+from testing.ascend._ir import calls, nodes, kernel
 
 
 def _copy(src_scope, dst_scope, src_shape, dst_shape, *, split=1, double=False):
@@ -12,22 +13,38 @@ def _copy(src_scope, dst_scope, src_shape, dst_shape, *, split=1, double=False):
     dst = tirx.decl_buffer(dst_shape, "float32", name="dst", scope=dst_scope)
 
     def region(buffer, mask):
-        return tirx.Call("handle", tvm.ir.Op.get("tl.region"), [buffer[tuple(0 for _ in buffer.shape)], mask, *buffer.shape])
+        return ir.TensorRegion(buffer, [ir.Range(0, extent) for extent in buffer.shape], ir.TensorRegionType())
 
     annotations = {"dual_dst_ctl": tirx.IntImm("int32", split), "unit_flag_ctrl": tirx.IntImm("int32", 3)}
     if double:
         annotations["double"] = tirx.IntImm("int32", 1)
-    return tirx.Evaluate(tirx.Call("handle", tvm.ir.Op.get("tl.tileop.ascend_copy"), [region(src, 1), region(dst, 2)], annotations))
+    return ir.Evaluate(ir.Call("tl.tileop.ascend_copy", [region(src, 1), region(dst, 2)], attrs=annotations))
 
 
 def _module(body):
-    return tvm.IRModule({"main": tirx.PrimFunc([], body)})
+    tensors = {region.source for region in nodes(body, ir.TensorRegion)}
+    return kernel(
+        body,
+        buffers=[tensor for tensor in tensors if tensor.scope().name != "global"],
+        params=[tensor for tensor in tensors if tensor.scope().name == "global"],
+    )
 
 
 def _cthread(body, extent=2):
     sid = tirx.Var("sid", "int32")
-    thread = tirx.IterVar(tvm.ir.Range(0, extent), sid, tirx.IterVar.ThreadIndex, "cthread")
-    return tirx.AttrStmt(thread, "thread_extent", extent, body)
+    return ir.RegionStmt("tl.launch_grid", ["cthread", extent], [sid], {}, body)
+
+
+def _region(expression):
+    if isinstance(expression, ir.TensorRegion):
+        return expression
+    assert expression.op.name == "tl.region"
+    load = expression.args[0]
+    return ir.TensorRegion(
+        load.source,
+        [ir.Range.from_min_extent(index, extent) for index, extent in zip(load.indices, expression.args[2:], strict=True)],
+        ir.TensorRegionType(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -44,28 +61,29 @@ def _cthread(body, extent=2):
 @pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual-vector"])
 def test_software_copy_splits_the_full_region(src_scope, dst_scope, src_shape, dst_shape, double, split, axis, manual):
     body = _cthread(_copy(src_scope, dst_scope, src_shape, dst_shape, split=split, double=double))
-    sid = body.node.var
+    sid = body.body_params[0]
     if manual:
-        body = tirx.SBlock([], [], [], "VECTOR", body)
+        body = ir.RegionStmt("tl.scope", [], [], {"name_hint": "VECTOR"}, body)
     before = _module(body)
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": not manual}):
         after = transform.RewriteDualCopy()(before)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     full, half = (copy.args[1], copy.args[0]) if double else (copy.args[0], copy.args[1])
-    extent = half.args[axis + 2]
+    full, half = _region(full), _region(half)
+    extent = half.region[axis].extent
     expected_index = sid * extent
-    tvm.ir.assert_structural_equal(full.args[0].indices[axis], expected_index)
-    tvm.ir.assert_structural_equal(full.args[axis + 2], extent)
-    assert all(int(index) == 0 for dimension, index in enumerate(full.args[0].indices) if dimension != axis)
-    assert not any(key in copy.annotations for key in ("double", "dual_dst_ctl", "unit_flag_ctrl"))
+    tvm.ir.assert_structural_equal(full.region[axis].begin, expected_index)
+    tvm.ir.assert_structural_equal(full.region[axis].extent, extent)
+    assert all(int(region.begin) == 0 for dimension, region in enumerate(full.region) if dimension != axis)
+    assert not any(key in copy.attrs for key in ("double", "dual_dst_ctl", "unit_flag_ctrl"))
 
 
 def test_automatic_copy_synthesizes_one_subcore_scope():
     copy = _copy("global", "shared.dyn", (128,), (64,))
-    root = tirx.SBlockRealize([], True, tirx.SBlock([], [], [], "tilelang_root", tirx.SeqStmt([copy, copy])))
+    root = ir.SeqStmt([copy, copy])
     after = transform.RewriteDualCopy()(_module(root))
-    scopes = [node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "thread_extent"]
-    assert len(scopes) == 1 and int(scopes[0].value) == 2
+    scopes = [node for node in nodes(after, ir.RegionStmt) if node.op.name == "tl.launch_grid" and str(node.args[0].value) == "cthread"]
+    assert len(scopes) == 1 and int(scopes[0].args[1]) == 2
     assert len(calls(scopes[0].body, "tl.tileop.ascend_copy")) == 2
 
 

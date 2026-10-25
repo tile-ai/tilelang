@@ -6,7 +6,8 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm import IRModule, arith, tirx
+from tilelang._compat.tvm import IRModule, arith, tirx
+from tvm_tirx import ir
 
 
 def stores(func):
@@ -40,7 +41,7 @@ def forbid_device_iteration(monkeypatch):
         pytest.fail("Device values must be rejected before acquiring a Python iterator")
 
     monkeypatch.setattr(tirx.Buffer, "__iter__", unexpected_iteration, raising=False)
-    monkeypatch.setattr(tirx.Var, "__iter__", unexpected_iteration)
+    monkeypatch.setattr(tirx.Var, "__iter__", unexpected_iteration, raising=False)
 
 
 def test_comprehensions(check_kernel):
@@ -125,9 +126,8 @@ def test_dynamic_serial(loop, check_kernel):
 
     loops = []
     tirx.stmt_functor.post_order_visit(main.body, lambda node: loops.append(node) if isinstance(node, tirx.For) else None)
-    loops = [loop for loop in loops if loop.thread_binding is None]
     assert len(loops) == 1
-    assert loops[0].extent.same_as(main.buffer_map[main.params[0]].shape[0])
+    assert loops[0].end.same_as(main.params[0].shape[0])
     for size in [1, 7, 33]:
         check_kernel(main, list(range(size)))
 
@@ -289,7 +289,6 @@ def test_serial_inside_python_loop(check_kernel):
 
     loops = []
     tirx.stmt_functor.post_order_visit(main.body, lambda node: loops.append(node) if isinstance(node, tirx.For) else None)
-    loops = [loop for loop in loops if loop.thread_binding is None]
     assert len(loops) == 2
     assert all("break" in loop.script() for loop in loops)
     check_kernel(main, [1, 1, -9999, 1])
@@ -376,7 +375,7 @@ def test_symbolic_comprehension_elements(check_kernel):
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
     results = stores(inlined)
     assert len(results) == 3
-    a = inlined.buffer_map[inlined.params[0]]
+    a = inlined.params[0]
     analyzer = arith.Analyzer()
     assert all(analyzer.can_prove_equal(store.value, a[0] + 3 * i) for i, store in enumerate(results))
     for value in [-7, 13]:
@@ -395,7 +394,7 @@ def test_comprehensions_accept_shape_and_buffer_containers(check_kernel):
                 C[i] = value
 
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
-    a, b = (inlined.buffer_map[p] for p in inlined.params[:2])
+    a, b = inlined.params[:2]
     expected = [a.shape[0], a[0], b[0]]
     results = stores(inlined)
     assert len(results) == len(expected)
@@ -440,7 +439,7 @@ def test_comprehension_unwraps_mutable_values(check_kernel):
 
     initialization, output = stores(main)
     assert int(initialization.value) == 3
-    assert arith.Analyzer().can_prove_equal(output.value, initialization.buffer[0] + 1)
+    assert arith.Analyzer().can_prove_equal(output.value, initialization.dest[0] + 1)
     check_kernel(main, [4])
 
 
@@ -455,7 +454,7 @@ def test_python_loop_preserves_value_scope(stop_early, check_kernel):
                     break
             B[0] = value
 
-    defined = [buffer.data for buffer in main.buffer_map.values()]
+    defined = list(main.params)
     assert not tirx.analysis.undefined_vars(main.body, defined)
     check_kernel(main, [8 if stop_early else 14], [7, 13])
 
@@ -487,8 +486,6 @@ def test_device_loop_control_inside_python_loop(loop, control):
 
 @pytest.mark.usefixtures("forbid_device_iteration")
 def test_tir_var_is_not_a_loop_iterable():
-    # Var has an __iter__ shim for single-binding unpacking; a bare symbolic
-    # extent in a for header must not silently expand once with `i` aliased to it.
     n = T.dynamic("n")
 
     with pytest.raises(TypeError, match="not iterable"):
@@ -553,7 +550,8 @@ def test_python_container_construction(consumer, args, kwargs, check_kernel):
         main.body,
         lambda node: (
             device_nodes.append(node)
-            if isinstance(node, tirx.AllocBuffer) or (isinstance(node, tirx.For) and node.thread_binding is None)
+            if isinstance(node, ir.For)
+            or (isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == "tirx.alloc_tensor")
             else None
         ),
     )
@@ -630,7 +628,7 @@ def test_enumerate_rejects_device_loop_source(use_buffer):
 def test_zip_strict_preserves_errors_and_builder_state(form, check_kernel):
     from tilelang.language.eager.builder import Builder
     from tilelang.language.kernel import KernelLaunchFrame
-    from tvm.script.ir_builder import IRBuilder
+    from tvm_tirx.script.ir_builder import IRBuilder
 
     def make_main(mismatched):
         @T.prim_func
@@ -657,7 +655,7 @@ def test_zip_strict_preserves_errors_and_builder_state(form, check_kernel):
     main = make_main(False)
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
     (output,) = stores(inlined)
-    assert arith.Analyzer().can_prove_equal(output.value, output.buffer[0] + 4)
+    assert arith.Analyzer().can_prove_equal(output.value, output.dest[0] + 4)
     check_kernel(main, [11], initial=[7])
 
 

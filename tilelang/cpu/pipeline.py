@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tvm import IRModule, s_tir, tirx
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule, tirx
+from tvm_tirx.target import Target
 
 import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
@@ -74,22 +74,21 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # this is the point TVM's default pipeline runs it.
     mod = tirx.transform.BF16ComputeLegalize()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
-    mod = s_tir.transform.HoistIfThenElse()(mod)
+    mod = tirx.transform.HoistIf()(mod)
 
     if cpu_parallel:
         mod = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
-    mod = s_tir.transform.InferFragment()(mod)
     # CPU thread bindings are serial, so LowerThreadAllreduce is unnecessary.
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

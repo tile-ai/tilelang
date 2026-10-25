@@ -9,7 +9,7 @@ consults.
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.cuda.language.random import (
     rng_init as _common_rng_init,

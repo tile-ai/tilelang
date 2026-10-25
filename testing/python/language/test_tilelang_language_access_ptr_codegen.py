@@ -1,13 +1,18 @@
+import re
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 import pytest
-from tilelang import tvm
+
+
+def copy_widths(source):
+    return {int(width) for width in re.findall(r'"(?: @p )?cp\.async\.(?:ca|cg)\.shared\.global [\s\S]*?"n"\((\d+)\)', source)}
 
 
 @tilelang.testing.requires_cuda
 def test_access_ptr_cp_async_codegen():
-    """Smoke-test codegen for T.access_ptr -> tl.access_ptr -> tvm_access_ptr -> cp.async."""
+    """Check typed native access pointers lower to the requested cp.async width."""
 
     @T.prim_func
     def main(
@@ -28,7 +33,7 @@ def test_access_ptr_cp_async_codegen():
     src = kernel.get_kernel_source()
     print("=== access_ptr cp.async codegen ===")
     print(src)
-    assert "cp_async_gs<16>" in src, "Expected cp_async_gs<16> in generated CUDA source"
+    assert copy_widths(src) == {16}
 
 
 @tilelang.testing.requires_cuda
@@ -56,8 +61,7 @@ def test_vectorized_cp_async_num_elems_codegen():
     src = kernel.get_kernel_source()
     print("=== vectorized cp.async codegen ===")
     print(src)
-    assert "cp_async_gs<8>" in src, "Expected vectorized cp.async to fold 4 x fp16 elems into cp_async_gs<8>"
-    assert "cp_async_gs<2>" not in src, "Did not expect scalar cp.async width in generated CUDA source"
+    assert copy_widths(src) == {8}
 
 
 @tilelang.testing.requires_cuda
@@ -85,7 +89,7 @@ def test_vectorized_int4_cp_async_num_elems_codegen():
     src = kernel.get_kernel_source()
     print("=== vectorized int4 cp.async codegen ===")
     print(src)
-    assert "cp_async_gs<16>" in src, "Expected 32 x int4 elems to fold into cp_async_gs<16>"
+    assert copy_widths(src) == {16}
 
 
 @tilelang.testing.requires_cuda
@@ -106,9 +110,9 @@ def test_async_copy_tileop_lowers_to_cp_async():
     src = kernel.get_kernel_source()
     print("=== async_copy -> cp.async codegen ===")
     print(src)
-    assert "cp_async_gs<8>" in src, "Expected T.async_copy to lower to cp_async_gs<8>"
-    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
-    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+    assert copy_widths(src) == {8}
+    assert "cp.async.commit_group;" in src
+    assert "cp.async.wait_group" not in src
 
 
 @tilelang.testing.requires_cuda
@@ -129,7 +133,7 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
             T.copy(S1, B[0:4])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match="T\\.async_copy only supports global->shared/shared\\.dyn copies",
     ):
         tilelang.compile(main, out_idx=[1], target="cuda")
@@ -160,7 +164,7 @@ def test_parallel_simt_copy_respects_enable_async_copy_config():
     src = kernel.get_kernel_source()
     print("=== Parallel SIMT copy (async disabled) codegen ===")
     print(src)
-    assert "cp_async_gs<" not in src, "Did not expect cp_async_gs when async copy is disabled"
+    assert not copy_widths(src)
 
 
 @tilelang.testing.requires_cuda
@@ -188,9 +192,11 @@ def test_async_copy_oob_lowers_to_predicated_cp_async_without_wait():
     src = kernel.get_kernel_source()
     print("=== OOB async_copy -> predicated cp.async codegen ===")
     print(src)
-    assert "cp_async_gs_conditional<" in src, "Expected predicated cp.async (zero-fill) in generated CUDA source"
-    assert "tl::cp_async_commit" in src, "Expected async_copy lowering to emit commit"
-    assert "tl::cp_async_wait<0>" not in src, "Did not expect async_copy lowering to auto-emit wait"
+    assert copy_widths(src)
+    assert "@p cp.async." in src
+    assert "@!p st.shared." in src
+    assert "cp.async.commit_group;" in src
+    assert "cp.async.wait_group" not in src
 
 
 if __name__ == "__main__":

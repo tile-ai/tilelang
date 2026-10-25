@@ -3,8 +3,8 @@
 import pytest
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import copy, kernel, nodes, seq, statements
+from tilelang._compat import tirx
+from testing.ascend._ir import copy, guard_conditions, kernel, nodes, seq, statements
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -32,29 +32,26 @@ def test_guard_equivalence_preserves_storage_epochs(relation, share_clock):
         unit(copy(a, y), guard=second),
         unit(copy(y, c), guard=second),
     )
-    loop = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data, y.data]})
+    loop = tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body, annotations={"multi_buffer_eligible": [x, y]})
     before = kernel(
         unit(loop, core=None),
         buffers=[x, y],
         params=[a, c, pred, p, q],
-        annotations={"tl.buffer_versions_map": {x.data: 2, y.data: 3}, "tl.buffer_version_mode": {x.data: "counter", y.data: "counter"}},
+        annotations={"tl.buffer_versions_map": {x: 2, y: 3}, "tl.buffer_version_mode": {x: "counter", y: "counter"}},
     )
     after = transform.PrepareMultiBuffer()(before)
     (owner,) = nodes(after, tirx.For)
     clocks = owner.annotations["tl.multi_buffer_counter_map"]
-    assert clocks[x.data].same_as(clocks[y.data]) == share_clock
+    assert clocks[x].same_as(clocks[y]) == share_clock
     for storage, clock in clocks.items():
         updates = [
             (stmt, parents)
             for stmt, parents in statements(after)
-            if isinstance(stmt, tirx.BufferStore) and stmt.buffer.same_as(clock) and not isinstance(stmt.value, tirx.IntImm)
+            if isinstance(stmt, tirx.BufferStore) and stmt.dest.same_as(clock) and not isinstance(stmt.value, tirx.IntImm)
         ]
         assert len(updates) == 1
         expected = owner.annotations["tl.storage_epoch_guard_map"][storage]
-        assert any(
-            isinstance(parent, tirx.IfThenElse) and tvm.arith.Analyzer().can_prove_equal(parent.condition, expected)
-            for parent in updates[0][1]
-        )
+        assert any(tvm.arith.Analyzer().can_prove_equal(condition, expected) for condition in guard_conditions(updates[0][1]))
 
 
 @pytest.mark.parametrize("case", ["inner-guard", "mutated-bound"])
@@ -70,29 +67,29 @@ def test_nested_condition_cannot_escape_into_outer_epoch(case):
     if case == "mutated-bound":
         tasks.append(unit(tirx.BufferStore(bound, 0, [0])))
     tasks.append(unit(copy(ub, c), guard=guard))
-    child = unit(tirx.For(j, 0, extent, tirx.ForKind.SERIAL, seq(*tasks)), core=None)
+    child = unit(tirx.For(j, 0, extent, 1, tirx.ForKind.DEFAULT, seq(*tasks)), core=None)
     body = seq(unit(tirx.Bind(extent, bound[0])), child) if case == "mutated-bound" else child
-    owner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]})
+    owner = tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body, annotations={"multi_buffer_eligible": [ub]})
     before = kernel(
         unit(owner, core=None),
         buffers=[ub],
         params=[a, c, bound if case == "mutated-bound" else extent],
         annotations={
-            "tl.buffer_versions_map": {ub.data: 1 if case == "mutated-bound" else 2},
-            "tl.buffer_version_mode": {ub.data: "counter"},
+            "tl.buffer_versions_map": {ub: 1 if case == "mutated-bound" else 2},
+            "tl.buffer_version_mode": {ub: "counter"},
         },
     )
     after = transform.PrepareMultiBuffer()(before)
-    (owner,) = [loop for loop in nodes(after, tirx.For) if loop.loop_var.same_as(i)]
-    assert tvm.arith.Analyzer().can_prove(owner.annotations["tl.storage_epoch_guard_map"][ub.data])
-    clock = owner.annotations["tl.multi_buffer_counter_map"][ub.data]
+    (owner,) = [loop for loop in nodes(after, tirx.For) if loop.var.same_as(i)]
+    assert tvm.arith.Analyzer().can_prove(owner.annotations["tl.storage_epoch_guard_map"][ub])
+    clock = owner.annotations["tl.multi_buffer_counter_map"][ub]
     advances = [
         (stmt, parents)
         for stmt, parents in statements(after)
-        if isinstance(stmt, tirx.BufferStore) and stmt.buffer.same_as(clock) and not isinstance(stmt.value, tirx.IntImm)
+        if isinstance(stmt, tirx.BufferStore) and stmt.dest.same_as(clock) and not isinstance(stmt.value, tirx.IntImm)
     ]
     assert len(advances) == 1
-    assert not any(isinstance(parent, tirx.For) and parent.loop_var.same_as(j) for parent in advances[0][1])
+    assert not any(isinstance(parent, tirx.For) and parent.var.same_as(j) for parent in advances[0][1])
 
 
 @pytest.mark.parametrize("case", ["union", "cross-stage", "late-definition"])
@@ -107,10 +104,10 @@ def test_lexical_epoch_guard_is_available_at_first_access(case):
     if case == "late-definition":
         body.append(unit(tirx.Bind(late, q), core=7))
     body.append(unit(copy(ub, c), guard=late if case == "late-definition" else q, stage=1 if case == "cross-stage" else 0))
-    before = kernel(unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, seq(*body)), core=None), buffers=[ub], params=[a, c, p, q])
+    before = kernel(unit(tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, seq(*body)), core=None), buffers=[ub], params=[a, c, p, q])
     after = transform.PrepareMultiBuffer()(before)
     (loop,) = nodes(after, tirx.For)
-    guard = loop.annotations["tl.storage_epoch_guard_map"].get(ub.data, tirx.const(True, "bool"))
+    guard = loop.annotations["tl.storage_epoch_guard_map"].get(ub, tirx.const(True, "bool"))
     expected = tirx.Or(p, q) if case == "union" else tirx.const(True, "bool")
     assert tvm.arith.Analyzer().can_prove_equal(guard, expected)
 
@@ -123,13 +120,13 @@ def test_cross_stage_storage_cannot_use_counter_clock(mode, owners):
     i = tirx.Var("i", "int32")
     guard = i % 2 == 0
     body = seq(unit(copy(a, ub), guard=guard), unit(copy(ub, c), guard=guard, stage=1))
-    loop = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]})
+    loop = tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body, annotations={"multi_buffer_eligible": [ub]})
     owner_loops = []
     for index in range(owners):
         iv = tirx.Var(f"owner{index}", "int32")
         owner_loops.append(
             unit(
-                tirx.For(iv, 0, 4, tirx.ForKind.SERIAL, tirx.stmt_functor.substitute(body, {i: iv}), annotations=loop.annotations),
+                tirx.For(iv, 0, 4, 1, tirx.ForKind.DEFAULT, tirx.stmt_functor.substitute(body, {i: iv}), annotations=loop.annotations),
                 core=None,
             )
         )
@@ -137,10 +134,10 @@ def test_cross_stage_storage_cannot_use_counter_clock(mode, owners):
         seq(*owner_loops),
         buffers=[ub],
         params=[a, c],
-        annotations={"tl.buffer_versions_map": {ub.data: 2}, "tl.buffer_version_mode": {ub.data: mode}},
+        annotations={"tl.buffer_versions_map": {ub: 2}, "tl.buffer_version_mode": {ub: mode}},
     )
     if mode == "counter" or owners > 1:
-        with pytest.raises(tvm.error.InternalError, match="Align their T.Stage values" if owners > 1 else "multiple schedule stages"):
+        with pytest.raises(RuntimeError, match="Align their T.Stage values" if owners > 1 else "multiple schedule stages"):
             transform.PrepareMultiBuffer()(before)
     else:
         after = transform.PrepareMultiBuffer()(before)

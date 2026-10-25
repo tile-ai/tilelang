@@ -20,7 +20,7 @@ struct Copy {
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::Analyzer analyzer) {
     return LowerNormalCopy(op, lower_args, analyzer);
   }
 };

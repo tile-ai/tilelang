@@ -14,18 +14,21 @@ bool TargetIsAscend(Target target) {
   return target.defined() && target->kind->name == "ascend";
 }
 
-bool IsAscendVectorizableFP8(DataType dtype) {
+bool IsAscendVectorizableFP8(PrimType dtype) {
   // NOTE: E8M0 is a special type of FP8 which is not handled here.
   // We only handle FP8 types which can be represented with
   // __asc_fp8_interpretation_t here.
-  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
-         dtype.is_float8_e5m2();
+  return dtype.MatchesCode(kDLFloat8_e4m3) ||
+         dtype.MatchesCode(kDLFloat8_e4m3fn) ||
+         dtype.MatchesCode(kDLFloat8_e5m2);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.TargetIsAscend",
-                        [](Target target) { return TargetIsAscend(target); });
+  refl::GlobalDef()
+      .def("tl.IsAscendVectorizableFP8", IsAscendVectorizableFP8)
+      .def("tl.TargetIsAscend",
+           [](Target target) { return TargetIsAscend(target); });
 }
 
 } // namespace tl

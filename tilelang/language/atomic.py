@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import tilelang.language as T
 from tilelang._typing import BufferLikeType
-from tvm import DataType, ir
-from tvm.tirx import PrimExpr, Buffer, Var, op
+from tilelang._compat.tvm import DataType, ir
+from tilelang._compat.tirx import PrimExpr, Buffer, Var, op, expr_dtype
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
@@ -26,7 +26,7 @@ _ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
 def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
     if isinstance(dst, Var) and T.has_let_value(dst):
         dst = T.get_let_value(dst)
-    buffer = dst if isinstance(dst, Buffer) else dst.buffer
+    buffer = dst if isinstance(dst, Buffer) else dst.source
     return buffer.dtype.with_lanes(lanes)
 
 
@@ -84,7 +84,7 @@ def atomic_max(
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmax_elem_op intrinsic
-        return_type = dst.dtype if return_prev else "handle"
+        return_type = expr_dtype(dst) if return_prev else "handle"
         atomic_max_op = op.Op.get("tl.atomic_max_ret_elem_op") if return_prev else op.Op.get("tl.atomic_max_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
@@ -170,7 +170,7 @@ def atomic_min(
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmin_elem_op intrinsic
-        return_type = dst.dtype if return_prev else "handle"
+        return_type = expr_dtype(dst) if return_prev else "handle"
         atomic_min_op = op.Op.get("tl.atomic_min_ret_elem_op") if return_prev else op.Op.get("tl.atomic_min_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
@@ -268,7 +268,7 @@ def atomic_add(
     # Thread-level atomic add, where both extent can't be inferred
     if dst_extent is None and src_extent is None:
         atomic_add_op = op.Op.get("tl.atomic_add_ret_elem_op") if return_prev else op.Op.get("tl.atomic_add_elem_op")
-        return_type = dst.dtype if return_prev else "handle"
+        return_type = expr_dtype(dst) if return_prev else "handle"
 
         # Pass destination by pointer to match device signature
         if memory_order is None:
@@ -426,7 +426,7 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
     return T.call_intrin(
-        src.dtype,
+        expr_dtype(src),
         op.Op.get("tl.atomic_load_elem_op"),
         T.access_ptr(src, "r"),
         _get_memory_order_id("atomic_load", memory_order, _ATOMIC_LOAD_MEMORY_ORDERS),

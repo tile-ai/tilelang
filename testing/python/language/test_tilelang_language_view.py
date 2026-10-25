@@ -9,7 +9,7 @@ import torch
 def view_test(N, M, dtype, new_dtype=None):
     new_shape = [N // M, M]
     if new_dtype:
-        from tvm import DataType
+        from tilelang._compat.tvm import DataType
 
         dtype_src = DataType(dtype)
         dtype_dst = DataType(new_dtype)
@@ -57,7 +57,7 @@ def test_reshape_view():
 def view_shape_mismatch_test(N, M, dtype, new_dtype=None):
     new_shape = [N // M, M + 1]
     if new_dtype:
-        from tvm import DataType
+        from tilelang._compat.tvm import DataType
 
         dtype_src = DataType(dtype)
         dtype_dst = DataType(new_dtype)
@@ -84,11 +84,19 @@ def test_view_shape_mismatch():
 
 
 def test_view_subbyte_dtype_change():
+    from tvm_tirx import ir
+    from tvm_tirx.script.ir_builder import IRBuilder
+    from tvm_tirx.tirx.script import ir_builder
+
     A = tvm.tirx.decl_buffer((16, 32), "float4_e2m1fn", name="A")
-    A_viewed = T.view(A, (16, 16), dtype=T.uint8)
+    with IRBuilder() as builder:
+        with ir_builder.scope():
+            A_viewed = T.view(A, (16, 16), dtype=T.uint8)
     assert str(A_viewed.dtype) == "uint8"
     assert tuple(int(dim) for dim in A_viewed.shape) == (16, 16)
-    assert A_viewed.data.same_as(A.data)
+    binding = builder.get().body.seq[0]
+    assert binding.var.same_as(A_viewed)
+    ir.assert_structural_equal(binding.value.args[0], A.data)
 
 
 def fp4_to_uint8_view_test(rows_per_cta=16, mask_k=256):

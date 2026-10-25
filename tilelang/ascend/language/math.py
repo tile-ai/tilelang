@@ -1,6 +1,6 @@
 """Ascend scalar math expressed with common TIR operations."""
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.language.common import rsqrt as _common_rsqrt, sqrt as _common_sqrt
 from tilelang.language.kernel import KernelLaunchFrame
@@ -18,9 +18,9 @@ def rsqrt(x, *, dtype=None) -> tirx.PrimExpr:
     The optional ``dtype`` keyword is accepted for the same frontend contract.
     """
     if KernelLaunchFrame.Current() is None or _get_current_simtvf() is not None or inside_simdvf():
-        return _common_rsqrt(x, dtype=dtype)
+        return _common_rsqrt(x)
 
-    root = _common_sqrt(x, dtype=dtype)
-    if root.dtype != "float32":
-        return _common_rsqrt(x, dtype=dtype)
-    return tirx.const(1, root.dtype) / root
+    root = _common_sqrt(x)
+    if root.ty.dtype != "float32":
+        return _common_rsqrt(x)
+    return tirx.const(1, root.ty.dtype) / root

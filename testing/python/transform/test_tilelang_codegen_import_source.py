@@ -11,6 +11,7 @@ import pytest
 
 import tilelang.testing
 from tilelang import tvm
+from tvm_tirx import ir
 
 tirx = tvm.tirx
 
@@ -26,7 +27,7 @@ CODEGENS = [
     ),
     pytest.param(
         "hip_without_compile",
-        {"kind": "hip", "mcpu": "gfx90a"},
+        {"kind": "rocm", "mcpu": "gfx90a"},
         "__device__",
         marks=tilelang.testing.requires_rocm.marks(support_required="compile-only"),
         id="hip",
@@ -59,7 +60,7 @@ def _generate_source(codegen, target, imports):
     target = tvm.target.Target(target)
     body = tirx.Evaluate(tirx.call_extern("int32", "call_helper", 1))
     for source in reversed(imports):
-        body = tirx.AttrStmt(tirx.IntImm("int32", 0), "pragma_import_c", source, body)
+        body = ir.RegionStmt("tirx.scope", [], [], {"pragma_import_c": source}, body)
     func = tirx.PrimFunc([], body).with_attr("global_symbol", "import_kernel")
     if target.kind.name != "c":
         func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
@@ -96,7 +97,7 @@ def test_empty_raw_import(codegen, target, qualifier):
 
 
 def test_raw_import_requires_string():
-    with pytest.raises(tvm.error.InternalError, match="pragma_import_c expects a string-valued source"):
+    with pytest.raises(TypeError, match="[sS]tr"):
         _generate_source("c_host", "c", [tirx.IntImm("int32", 1)])
 
 

@@ -13,8 +13,9 @@ namespace tl {
 // Projections of the physical TMEM coordinate (datapath@0, column@1) onto
 // one axis (the other axis's strides become 0).
 // E.g. Composition(kColOnly, (128,64):(1@0,1@1)) == (128,64):(0,1).
-TVM_DLL extern const cute::Layout kDpOnly;  // (datapath, column) -> datapath
-TVM_DLL extern const cute::Layout kColOnly; // (datapath, column) -> column
+TILELANG_DLL extern const cute::Layout
+    kDpOnly; // (datapath, column) -> datapath
+TILELANG_DLL extern const cute::Layout kColOnly; // (datapath, column) -> column
 
 // Metadata for one tcgen05.ld/st data-movement shape.
 //
@@ -36,8 +37,8 @@ public:
 
 class Tcgen05Meta : public ffi::ObjectRef {
 public:
-  TVM_DLL Tcgen05Meta(ffi::String intrinsics_name, cute::Layout tv,
-                      int64_t max_chunks);
+  TILELANG_DLL Tcgen05Meta(ffi::String intrinsics_name, cute::Layout tv,
+                           int64_t max_chunks);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Tcgen05Meta, ffi::ObjectRef,
                                              Tcgen05MetaNode);
 };
@@ -81,9 +82,11 @@ public:
 
 class Tcgen05CopyPlan : public ffi::ObjectRef {
 public:
-  TVM_DLL Tcgen05CopyPlan(cute::Layout fragment, int64_t num_chunks_each_wg,
-                          cute::Layout rest_domain, int64_t num_issues,
-                          int64_t vals_per_issue, int64_t datapaths_per_warp);
+  TILELANG_DLL Tcgen05CopyPlan(cute::Layout fragment,
+                               int64_t num_chunks_each_wg,
+                               cute::Layout rest_domain, int64_t num_issues,
+                               int64_t vals_per_issue,
+                               int64_t datapaths_per_warp);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Tcgen05CopyPlan, ffi::ObjectRef,
                                              Tcgen05CopyPlanNode);
 };

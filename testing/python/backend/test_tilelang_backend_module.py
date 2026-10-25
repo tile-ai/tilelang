@@ -12,7 +12,7 @@ def test_builtin_backend_modules_are_explicit():
     expected = {
         "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
         "cutedsl": (("cuda",), ["cutedsl"]),
-        "rocm": (("hip",), ["tvm_ffi", "cython"]),
+        "rocm": (("rocm",), ["tvm_ffi", "cython"]),
         "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),
         "metal": (("metal",), ["torch", "tvm_ffi"]),
         "webgpu": (("webgpu",), ["tvm_ffi"]),
@@ -66,7 +66,8 @@ def test_backend_variants_require_target_predicates():
         ("c", "cpu", "c"),
         ("llvm", "cpu", "llvm"),
         ("cuda", "cuda", "cuda"),
-        ("hip", "rocm", "hip"),
+        ("hip", "rocm", "rocm"),
+        ("rocm", "rocm", "rocm"),
         ("metal", "metal", "metal"),
         ("webgpu", "webgpu", "webgpu"),
     ],

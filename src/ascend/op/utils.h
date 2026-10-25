@@ -9,7 +9,7 @@
 #ifndef TVM_TL_ASCEND_OP_UTILS_H_
 #define TVM_TL_ASCEND_OP_UTILS_H_
 
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 
 #include <algorithm>
 
@@ -18,33 +18,42 @@
 namespace tvm {
 namespace tl {
 
+using tirx::TensorVar;
+
+namespace ascend {
+inline TensorRegion NativeTensorRegion(const TensorVar &tensor,
+                                       const ffi::Array<Range> &ranges) {
+  return TensorRegion(tensor, ranges, TensorRegionType());
+}
+} // namespace ascend
+
 constexpr const char *kL0SFBindings = "tl.l0_sf_bindings";
-using L0SFBindings = ffi::Map<tirx::Var, tirx::Var>;
+using L0SFBindings = ffi::Map<Var, Var>;
 
 // The annotation is emitted by alloc_l0*_sf, never inferred from consumers.
-L0SFBindings CollectL0SFBindings(const tirx::Stmt &body);
+L0SFBindings CollectL0SFBindings(const Stmt &body);
 class GemmBlockScaled;
 void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
-                      arith::Analyzer *analyzer);
+                      sym::Analyzer analyzer);
 
-inline bool IsSSBuffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "shared.ss" || buffer.scope() == "shared.ss.dyn");
+inline bool IsSSBuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.ss" ||
+         buffer.scope().name() == "shared.ss.dyn";
 }
 
-inline bool IsL1Buffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "shared.l1" || buffer.scope() == "shared.l1.dyn");
+inline bool IsL1Buffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l1" ||
+         buffer.scope().name() == "shared.l1.dyn";
 }
 
-inline bool IsL0ABuffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "shared.l0a" || buffer.scope() == "shared.l0a.dyn");
+inline bool IsL0ABuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l0a" ||
+         buffer.scope().name() == "shared.l0a.dyn";
 }
 
-inline bool IsL0BBuffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "shared.l0b" || buffer.scope() == "shared.l0b.dyn");
+inline bool IsL0BBuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l0b" ||
+         buffer.scope().name() == "shared.l0b.dyn";
 }
 
 // MX scale-factor handles (alloc_l0a_sf/alloc_l0b_sf): dedicated scopes for
@@ -52,24 +61,24 @@ inline bool IsL0BBuffer(const Buffer &buffer) {
 // the hardware keys the slots to the bound data tile's address — so every
 // allocation accounting excludes them by scope. Versioning and address reuse
 // group them with their data tile; logical access analysis keeps them separate.
-inline bool IsL0ASFBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "shared.l0a.sf";
+inline bool IsL0ASFBuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l0a.sf";
 }
 
-inline bool IsL0BSFBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "shared.l0b.sf";
+inline bool IsL0BSFBuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l0b.sf";
 }
 
-inline bool IsL0SFBuffer(const Buffer &buffer) {
+inline bool IsL0SFBuffer(const TensorVar &buffer) {
   return IsL0ASFBuffer(buffer) || IsL0BSFBuffer(buffer);
 }
 
-inline bool IsL0CBuffer(const Buffer &buffer) {
-  return buffer.defined() &&
-         (buffer.scope() == "shared.l0c" || buffer.scope() == "shared.l0c.dyn");
+inline bool IsL0CBuffer(const TensorVar &buffer) {
+  return buffer.scope().name() == "shared.l0c" ||
+         buffer.scope().name() == "shared.l0c.dyn";
 }
 
-inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
+inline bool IsAscendOnChipBuffer(const TensorVar &buffer) {
   return IsSharedBuffer(buffer) || IsL1Buffer(buffer) || IsL0ABuffer(buffer) ||
          IsL0BBuffer(buffer) || IsL0CBuffer(buffer) || IsSSBuffer(buffer);
 }
@@ -93,8 +102,8 @@ inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
  * The buffer keeps ``require_2d == false`` semantics, so 1-D regions still take
  * the neutral function's dedicated path and are unaffected.
  */
-inline PrimExpr MakeAscendLeadingDimAccessPtr(const BufferRegion &region,
-                                              int rw_mask) {
+inline Expr MakeAscendLeadingDimAccessPtr(const TensorRegion &region,
+                                          int rw_mask) {
   // ffi::Array is copy-on-write, so Set() here does not disturb the caller.
   auto leading = region->region;
   int n = static_cast<int>(leading.size());
@@ -102,10 +111,11 @@ inline PrimExpr MakeAscendLeadingDimAccessPtr(const BufferRegion &region,
   // A 1-D region keeps the neutral behaviour, where the min *is* the offset.
   for (int i = std::max(0, n - 2); n >= 2 && i < n; ++i) {
     const auto &r = leading[i];
-    leading.Set(i, Range::FromMinExtent(make_zero(r->min.dtype()), r->extent));
+    leading.Set(
+        i, Range::FromMinExtent(prim::MakeConst(r->begin.ty(), 0), r->extent));
   }
-  return MakeAccessPtrFromRegion(BufferRegion(region->buffer, leading),
-                                 rw_mask);
+  return MakeAccessPtrFromRegion(
+      TensorRegion(region->source, leading, TensorRegionType()), rw_mask);
 }
 
 } // namespace tl

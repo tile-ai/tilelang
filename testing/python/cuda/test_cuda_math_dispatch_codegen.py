@@ -2,7 +2,7 @@ import pytest
 
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 FAST_MATH_OPS = ["exp", "exp10", "log", "log2", "log10", "tan", "cos", "sin"]
@@ -33,6 +33,17 @@ def _intrinsic(dtype, name, *arguments):
     return tirx.call_intrin(dtype, tvm.ir.Op.get(name), *arguments)
 
 
+def _assert_native_binary_dispatch(source, packed_name, dtype, lanes):
+    body = source.rsplit("void math_dispatch(", 1)[-1]
+    if dtype == "float32":
+        intrinsic = {"add2": "__fadd2_rn(", "sub2": "sub.rn.f32x2", "mul2": "__fmul2_rn(", "min2": "min(", "max2": "max("}[packed_name]
+        count = lanes if packed_name in ("min2", "max2") else lanes // 2
+    else:
+        intrinsic = {"add2": "__hadd2(", "sub2": "__hsub2(", "mul2": "__hmul2(", "min2": "__hmin2(", "max2": "__hmax2("}[packed_name]
+        count = lanes // 2
+    assert body.count(intrinsic) == count
+
+
 def _source(expression, parameters, arch="sm_90"):
     build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
@@ -59,7 +70,7 @@ def test_fast_math_names_and_headers(operation, dtype):
     else:
         expected = f"h{operation}"
     assert f"{expected}(value)" in source
-    assert ("#include <tl_templates/cuda/math.h>" in source) == (operation in {"exp", "log", "cos", "sin"})
+    assert '#include "tl_templates/cuda/common.h"' in source
 
 
 @tilelang.testing.requires_cuda
@@ -100,6 +111,9 @@ def test_half_ieee_math_names(operation, operand_count, expected, dtype):
     expression = _intrinsic(dtype, f"tl.{operation}", *parameters, "rn")
     source = _source(expression, parameters)
     arguments = ", ".join(parameter.name for parameter in parameters)
+    if dtype == "bfloat16" and operation == "ieee_fmaf":
+        assert "__hfma(left, right, addend)" in source
+        expected = "tl_ieee_bf16_fma"
     assert f"{expected}({arguments})" in source
 
 
@@ -110,7 +124,7 @@ def test_half_ieee_math_names(operation, operand_count, expected, dtype):
 def test_half_ieee_math_rejects_other_rounding(operation, base_name, operand_count, dtype, rounding_mode):
     parameters = [tirx.Var(f"operand_{index}", dtype) for index in range(operand_count)]
     expression = _intrinsic(dtype, f"tl.{operation}", *parameters, rounding_mode)
-    with pytest.raises(tvm.error.InternalError, match="Only rounding mode 'rn'"):
+    with pytest.raises(ValueError, match="Only rounding mode 'rn'"):
         _source(expression, parameters)
 
 
@@ -125,7 +139,7 @@ def test_ieee_rsqrt_implicit_rounding(dtype, expected):
 @tilelang.testing.requires_cuda
 def test_ieee_rsqrt_rejects_float64():
     value = tirx.Var("value", "float64")
-    with pytest.raises(tvm.error.InternalError, match="frsqrt is not supported for float64"):
+    with pytest.raises(TypeError, match="frsqrt is not supported for float64"):
         _source(_intrinsic("float64", "tl.ieee_frsqrt", value), [value])
 
 
@@ -136,15 +150,21 @@ def test_explicit_packed_math_dispatch(operation, operand_count, dtype):
     vector_dtype = f"{dtype}x2"
     parameters = [tirx.Var(f"operand_{index}", vector_dtype) for index in range(operand_count)]
     expression = _intrinsic(vector_dtype, f"tl.{operation}", *parameters)
+    if dtype == "float32" and operation.endswith("_nan"):
+        with pytest.raises(TypeError, match="matching packed floating-point operands"):
+            _source(expression, parameters)
+        return
     source = _source(expression, parameters)
     assert source.count(f"tl::{operation}(") == 1
     if dtype == "float32":
         assert "tl::from_uint1<" not in source
         assert "tl::to_uint1(" not in source
     else:
-        native_type = "__half2" if dtype == "float16" else "__nv_bfloat162"
-        assert source.count(f"tl::from_uint1<{native_type}>") == operand_count
-        assert source.count("tl::to_uint1(") == 1
+        native_type = "half2" if dtype == "float16" else "nv_bfloat162"
+        for index in range(operand_count):
+            assert f"{native_type} operand_{index}" in source
+        assert "tl::from_uint1<" not in source
+        assert "tl::to_uint1(" not in source
 
 
 @tilelang.testing.requires_cuda
@@ -155,7 +175,7 @@ def test_binary_packed_math_dispatch(constructor, packed_name, dtype, arch, lane
     lhs = tirx.Var("lhs", f"{dtype}x{lanes}")
     rhs = tirx.Var("rhs", f"{dtype}x{lanes}")
     source = _source(constructor(lhs, rhs), [lhs, rhs], arch)
-    assert source.count(f"tl::{packed_name}(") == lanes // 2
+    _assert_native_binary_dispatch(source, packed_name, dtype, lanes)
 
 
 @tilelang.testing.requires_cuda
@@ -166,7 +186,7 @@ def test_wide_half_binary_packed_math_dispatch(constructor, packed_name, dtype, 
     lhs = tirx.Var("lhs", f"{dtype}x{lanes}")
     rhs = tirx.Var("rhs", f"{dtype}x{lanes}")
     source = _source(constructor(lhs, rhs), [lhs, rhs])
-    assert source.count(f"tl::{packed_name}(") == lanes // 2
+    _assert_native_binary_dispatch(source, packed_name, dtype, lanes)
     assert f"ulonglong{lanes // 4}" in source
 
 
@@ -206,7 +226,8 @@ def test_packed_fma_fusion(dtype, arch, explicit, commuted):
     arguments = [addend, product] if commuted else [product, addend]
     expression = _intrinsic(vector_dtype, "tl.add2", *arguments) if explicit else tirx.Add(*arguments)
     source = _source(expression, [lhs, rhs, addend], arch)
-    assert source.count("tl::fma2(") == 1
+    expected = "tl::fma2(" if explicit else "__ffma2_rn(" if dtype == "float32" else "__hfma2("
+    assert source.count(expected) == 1
     assert "tl::mul2(" not in source
     assert "tl::add2(" not in source
 
@@ -221,7 +242,8 @@ def test_wide_packed_fma_fusion(dtype, arch, lanes, commuted):
     product = tirx.Mul(lhs, rhs)
     expression = tirx.Add(addend, product) if commuted else tirx.Add(product, addend)
     source = _source(expression, [lhs, rhs, addend], arch)
-    assert source.count("tl::fma2(") == lanes // 2
+    expected = "__ffma2_rn(" if dtype == "float32" else "__hfma2("
+    assert source.count(expected) == lanes // 2
     assert "tl::mul2(" not in source
     assert "tl::add2(" not in source
 
@@ -251,7 +273,7 @@ def test_fast_math_preserves_nested_header_requirement():
     outer = _intrinsic("float32", "tl.__log2", inner)
     source = _source(outer, [value])
     assert "__log2f(__expf(value))" in source
-    assert "#include <tl_templates/cuda/math.h>" in source
+    assert '#include "tl_templates/cuda/common.h"' in source
 
 
 @tilelang.testing.requires_cuda
@@ -261,4 +283,4 @@ def test_fast_math_preserves_outer_header_requirement():
     outer = _intrinsic("float32", "tl.__exp", inner)
     source = _source(outer, [value])
     assert "__expf(__log2f(value))" in source
-    assert "#include <tl_templates/cuda/math.h>" in source
+    assert '#include "tl_templates/cuda/common.h"' in source

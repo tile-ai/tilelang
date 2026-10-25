@@ -16,6 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  USE_CUDA: 'OFF'
+  USE_ROCM: 'OFF'
+  USE_ASCEND: 'OFF'
+  TVM_TIRX_REPOSITORY: ${{ vars.TVM_TIRX_REPOSITORY }}
+  TVM_TIRX_WHEEL: ${{ vars.TVM_TIRX_WHEEL }}
+  TVM_TIRX_REVISION: ${{ vars.TVM_TIRX_REVISION }}
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
@@ -234,8 +240,9 @@ jobs:
           uv venv --python "${{ matrix.python-version }}" new
 
           source new/bin/activate
+          python testing/tools/prepare_tirx.py
           uv pip install -v -r requirements-test.txt
-          uv pip install -v .
+          TILELANG_USE_INSTALLED_TIRX=ON uv pip install -v --no-build-isolation .
 
       - name: Install Main version (Baseline)
         run: |
@@ -246,12 +253,21 @@ jobs:
           uv venv --python "${{ matrix.python-version }}" old
           source old/bin/activate
 
-          uv pip install -v -r requirements-test.txt
-          uv pip install -v .
+          if [[ -f TVM_TIRX_COMMIT ]]; then
+            python testing/tools/prepare_tirx.py
+            uv pip install -v -r requirements-test.txt
+            TILELANG_USE_INSTALLED_TIRX=ON uv pip install -v --no-build-isolation .
+          else
+            uv pip install -v -r requirements-test.txt
+            uv pip install -v .
+          fi
           rm -rf tilelang build
 
           uv venv --python "${{ matrix.python-version }}" test_regression
           source test_regression/bin/activate
+          if [[ -f TVM_TIRX_COMMIT ]]; then
+            export UV_FIND_LINKS="${PWD}/dist/tirx"
+          fi
           uv pip install -v -r requirements-test.txt
 
       - name: Show ccache stats

@@ -19,7 +19,6 @@ def _compile(prim_func):
 
 
 def _make_reduce_kernel(reduce_fn, length, dtype, *, nan_propagate):
-
     @T.prim_func
     def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
         with T.Kernel(1, threads=32):
@@ -42,7 +41,7 @@ def test_reduce_max_default_uses_plain_op():
     k = _compile(_make_reduce_kernel(T.reduce_max, 64, T.float16, nan_propagate=False))
     src = k.get_kernel_source()
     assert "tl::MaxOp" in src and "MaxOpNan" not in src
-    assert "__hmax(" in src and "__hmax_nan" not in src
+    assert "max(" in src and "__hmax_nan" not in src
 
 
 @tilelang.testing.requires_cuda
@@ -112,7 +111,6 @@ def test_reduce_min_runtime_nan_behavior():
 
 
 def _make_reduce_clear_false_kernel(reduce_fn, length, dtype, *, nan_propagate):
-
     @T.prim_func
     def kernel(a: T.Tensor((length,), dtype), out: T.Tensor((1,), dtype)):
         with T.Kernel(1, threads=32):
@@ -198,7 +196,7 @@ def test_reduce_nan_dtype_contract(reduce_fn, dtype, clear, nan_propagate):
     mod = tilelang.tvm.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if nan_propagate and dtype not in (T.float16, T.bfloat16):
-        with pytest.raises(ValueError, match=f"nan_propagate=True requires float16 or bfloat16 output, got {dtype}"):
+        with pytest.raises(ValueError, match=rf"nan_propagate=True requires float16 or bfloat16 output, got (?:T\.)?{dtype}"):
             tilelang.transform.LayoutInference()(mod)
     else:
         tilelang.transform.LayoutInference()(mod)

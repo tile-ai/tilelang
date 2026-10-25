@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from tvm import IRModule, s_tir, tirx
-from tvm.target import Target
-from tvm.tirx import PrimFunc, SBlock
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.tvm import IRModule, tirx
+from tvm_tirx.target import Target
+from tilelang._compat.tirx import PrimFunc
+from tvm_tirx import ir
+from tilelang._compat.stmt_functor import post_order_visit
 
 import tilelang
 from tilelang.backend.pass_pipeline import PassPipeline
@@ -54,10 +55,13 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
     def visit(node):
         nonlocal found
-        if isinstance(node, SBlock):
-            for buffer in node.alloc_buffers:
-                if buffer.scope() in ("shared.barrier", "shared.cluster_barrier"):
-                    found = True
+        if (
+            isinstance(node, ir.Bind)
+            and isinstance(node.value, ir.Call)
+            and node.value.op.name == "tirx.alloc_tensor"
+            and node.var.scope().name in ("shared.barrier", "shared.cluster_barrier")
+        ):
+            found = True
 
     for _, func in mod.functions.items():
         if isinstance(func, PrimFunc):
@@ -96,6 +100,7 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # loop bodies are still in source order and tile ops still declare
     # their access regions.
     mod = tilelang.transform.VerifyBufferInit()(mod)
+    mod = tilelang.transform.NormalizePipelineCPAsync()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
@@ -208,15 +213,15 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
-    mod = s_tir.transform.HoistIfThenElse()(mod)
+    mod = tirx.transform.HoistIf()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
@@ -229,19 +234,17 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     # @CUDA-specific
     mod = tilelang.cuda.transform.LowerLDGSTG()(mod)
     mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
 
+    mod = tilelang.cuda.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
+    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
 
-    # @CUDA-specific
-    # Mark the function contains pdl_sync or pdl_trigger
-    mod = tilelang.cuda.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
@@ -273,10 +276,6 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
-
-    # @CUDA-specific
-    # Transform threadblock to persistent threadblock
-    mod = tilelang.cuda.transform.PersistThreadblock()(mod)
 
     return mod
 

@@ -8,9 +8,9 @@ import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
-import tvm
-from tvm import tirx
-from tvm.target import Target
+from tilelang import tvm
+from tilelang._compat.tvm import tirx
+from tvm_tirx.target import Target
 
 M = N = 512
 K = 64
@@ -67,7 +67,9 @@ def test_cpu_parallel_gemm_correctness(rows, pass_configs, cpu_num_threads, para
     )
     source = kernel.get_kernel_source()
     if parallel:
-        pragma = "#pragma omp parallel for collapse(2)"
+        pragma = "#pragma omp parallel for"
+        if rows > BLOCK_M:
+            pragma += " collapse(2)"
         if cpu_num_threads is not None:
             pragma += f" num_threads({cpu_num_threads})"
         assert pragma in source

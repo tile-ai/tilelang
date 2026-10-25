@@ -1,11 +1,9 @@
-from tilelang import tvm
-from tvm import ir
+from tilelang._compat.tvm import ir
 import functools
 import torch
 import tvm_ffi
 from typing import Generic, TypeVar, TYPE_CHECKING
-from tvm import tirx
-import tvm.tirx.script.builder._ffi_api as tb_ffi
+from tvm_tirx import ir as native_ir
 import numpy as np
 from tilelang import logger
 
@@ -23,7 +21,10 @@ if TYPE_CHECKING:
         def is_float4_e2m1_unpacked(self) -> bool: ...
         def is_float4(self) -> bool: ...
 else:
-    dtype = tvm.DataType
+
+    class dtype(tvm_ffi.dtype):
+        pass
+
 
 # Keep a typing alias separate from the tuple used by runtime checks.
 AnyDType = ir.Type | str | type | torch.dtype | dtype
@@ -145,47 +146,24 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
-    # When called with multiple args, pack the scalars into a vector via Shuffle.
-    # e.g. T.bfloat16x2(a, b) -> tirx.Shuffle([a, b], [0, 1]) : bfloat16x2
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False):
     if len(args) > 1:
-        return tirx.Shuffle(list(args), list(range(len(args))))
-    expr = args[0] if args else None
-    if isinstance(expr, int_):
-        return tvm.tirx.const(expr, dtype=self)
-    if self in _STR_TO_TVM_DTYPE_CALL:
-        attr = _STR_TO_TVM_DTYPE_CALL[self]
-        call = getattr(tb_ffi, attr, None)
-        return call(expr, is_size_var)
-    # try to construct the ffi call
-    if self.startswith("uint"):
-        val = "UInt" + self[4:]
-    elif self.startswith("int"):
-        val = "Int" + self[3:]
-    elif self.startswith("float"):
-        val = "Float" + self[5:]
-    elif self.startswith("bfloat"):
-        val = "BFloat" + self[6:]
-    elif self.startswith("tfloat"):
-        val = "TensorFloat" + self[6:]
-    elif self.is_float4_e2m1_unpacked():
-        val = "Float4E2M1Unpacked"
-        if self.lanes > 1:
-            val += f"x{self.lanes}"
-    else:
-        raise TypeError(f"Invalid type {self}")
-    if "_" in val:
-        first, second = val.split("_", maxsplit=1)
-        val = first + second.upper()
-    call = getattr(tb_ffi, val, None)
-    if call is None:
-        raise TypeError(f"Convert to datatype `{self}` is not supported by tvm\ncalling failed on `tvm.tirx.script.builder._ffi_api.{val}`")
-    return call(expr, is_size_var)
+        return native_ir.prim.Shuffle(list(args), list(range(len(args))))
+    primitive = native_ir.PrimType(self)
+    if not args or args[0] is None:
+        variable = native_ir.Var("var", primitive)
+        if is_size_var:
+            variable.tilelang_size_var = True
+        return variable
+    value = args[0]
+    return value.astype(primitive) if isinstance(value, native_ir.Expr) else native_ir.const(value, primitive)
 
 
 @functools.cache
 def __dtype_as_torch__(self: dtype) -> torch.dtype:
     """Convert TileLang dtype to PyTorch dtype."""
+    if self.is_float4_e2m1_unpacked():
+        return torch.uint8
     dtype_str = str(self)
 
     if dtype_str == "float8_e4m3":
@@ -245,7 +223,18 @@ __orig_dtype_new = dtype.__new__
 def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, dtype):
         return value
+    if isinstance(value, ir.PrimType):
+        value = value.dtype
+    if isinstance(value, tvm_ffi.dtype):
+        converted = str.__new__(cls, str(value))
+        converted._tvm_ffi_dtype = value._tvm_ffi_dtype
+        return converted
     if isinstance(value, str):
+        if value.startswith(("custom[tfloat32]", "tfloat32")):
+            lanes = int_(value.rsplit("x", 1)[1]) if "x" in value else 1
+            return __dtype_new__(cls, tvm_ffi.dtype.from_dlpack_data_type((130, 32, lanes)))
+        if value in ("custom[float4_e2m1_unpacked]8", "custom[float4_e2m1_unpacked]", "float4_e2m1_unpacked"):
+            return __dtype_new__(cls, tvm_ffi.dtype.from_dlpack_data_type((131, 8, 1)))
         return __orig_dtype_new(cls, _CANONICAL_TO_DISPLAY_STR.get(value, value))
     elif value in _DTYPE_TO_STR:
         return __orig_dtype_new(cls, _DTYPE_TO_STR[value])
@@ -347,7 +336,7 @@ dtype.is_float4 = __dtype_is_float4__
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
-    if isinstance(value, (dtype, ir.Type)):
+    if isinstance(value, dtype):
         return value
     return dtype(value)
 

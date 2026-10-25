@@ -1,10 +1,12 @@
 """The Ascend dialect exposes its extensions without changing common APIs."""
 
 import pytest
+import tilelang
 import tilelang.language.common as common_language
 from tilelang.ascend import language as T
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import allocated_buffer, nodes
+from tvm_tirx import ir
 
 ASCEND_ONLY_NAMES = {
     "AscendTileScheduler",
@@ -67,5 +69,38 @@ def test_allocation_records_binding_without_a_consumer(leading):
 
     a, sf = allocated_buffer(main, "a"), allocated_buffer(main, "_sf")
     assert tuple(int(x) for x in sf.shape) == (*leading, 32, 2)
-    bindings = [block.annotations["tl.l0_sf_bindings"] for block in nodes(main, tirx.SBlock) if "tl.l0_sf_bindings" in block.annotations]
-    assert len(bindings) == 1 and bindings[0][sf.data].same_as(a.data)
+    bindings = [region.attrs["tl.l0_sf_bindings"] for region in nodes(main, ir.RegionStmt) if "tl.l0_sf_bindings" in region.attrs]
+    assert len(bindings) == 1 and bindings[0][sf].same_as(a)
+
+
+@pytest.mark.parametrize("dtype", ["int8", "uint8", "int16", "uint16", "float16", "bfloat16", "int32", "uint32", "float32"])
+def test_copy_pad_value_infers_native_primitive_type(dtype):
+    value = ir.Var("value", dtype)
+    call = T.ascend_set_copy_pad_value(value)
+    assert call.op.name == "tl.ascend_set_copy_pad_value"
+    assert call.ty == ir.PrimType("void")
+    assert str(call.args[0].ty.dtype) == dtype
+
+
+def test_copy_pad_value_requires_explicit_literal_type():
+    with pytest.raises(ValueError, match="requires dtype for Python literals"):
+        T.ascend_set_copy_pad_value(1.0)
+
+
+def test_copy_pad_value_emits_a_scheduled_native_register_write():
+    @T.prim_func
+    def main(source: T.Tensor((4, 17), "float32"), output: T.Tensor((4, 17), "float32")):
+        with T.Kernel(1):
+            storage = T.alloc_shared((4, 17), "float32")
+            T.copy(source, storage, pad_value=3.5)
+            T.copy(storage, output)
+
+    calls = nodes(main, ir.Call)
+    pad = next(call for call in calls if call.op.name == "tl.ascend_set_copy_pad_value")
+    copy = next(call for call in calls if call.op.name == "tl.tileop.ascend_copy")
+    assert pad.ty == ir.PrimType("void")
+    assert str(pad.args[0].ty.dtype) == "float32"
+    assert int(copy.attrs["data_select"]) == 1
+    artifact = tilelang.lower(main, target="ascend", enable_host_codegen=False, enable_device_compile=False)
+    assert "asc_set_copy_pad_val" in artifact.kernel_source
+    assert artifact.kernel_source.index("asc_set_copy_pad_val") < artifact.kernel_source.index("asc_copy_gm2ub")

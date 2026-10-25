@@ -22,12 +22,13 @@
  * \brief Lower Ascend dual-copy operations using the enclosing cthread sid.
  */
 
+#include "ascend/transform/auto_schedule/kernel_rewriter.h"
+#include "ascend/transform/native_visitor.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/function.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -45,18 +46,29 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using ffi::Any;
 using ffi::Array;
 using ffi::Map;
-using ffi::ObjectRef;
 using ffi::Optional;
 using ffi::String;
 
 namespace {
 
-Call RewriteRegion(const Call &region_call, int split_axis,
+BlockAnnotations CallAnnotations(const CallNode *call) {
+  return call->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>()->dict;
+}
+
+bool IsCthread(const RegionStmtNode *node) {
+  return (node->op.same_as(tirx::launch_thread_op()) ||
+          node->op.same_as(Op::Get("tl.launch_grid"))) &&
+         node->args.size() == 2 &&
+         node->args[0].as_or_throw<StringImm>()->value == "cthread";
+}
+
+Call RewriteRegion(const Expr &region_call, int split_axis,
                    const PrimExpr &offset, const PrimExpr &split_extent) {
   AccessRegion access = NormalizeToAccessRegion(region_call, kAccessReadWrite);
-  BufferRegion buffer_region = access.region;
+  TensorRegion buffer_region = access.region;
   Array<Range> ranges = buffer_region->region;
   ICHECK_GE(split_axis, 0);
   ICHECK_LT(split_axis, static_cast<int>(ranges.size()));
@@ -64,27 +76,27 @@ Call RewriteRegion(const Call &region_call, int split_axis,
   Array<PrimExpr> indices;
   indices.reserve(ranges.size());
   for (size_t dimension = 0; dimension < ranges.size(); ++dimension) {
-    PrimExpr index = ranges[dimension]->min;
+    PrimExpr index = ranges[dimension]->begin;
     if (static_cast<int>(dimension) == split_axis)
       index = index + offset;
     indices.push_back(index);
   }
 
-  Array<PrimExpr> arguments = {BufferLoad(buffer_region->buffer, indices),
-                               Integer(access.access_mask)};
+  Array<Expr> arguments = {TensorLoad(buffer_region->source, indices),
+                           IntImm::Int32(access.access_mask)};
   for (size_t dimension = 0; dimension < ranges.size(); ++dimension) {
     arguments.push_back(static_cast<int>(dimension) == split_axis
                             ? split_extent
                             : ranges[dimension]->extent);
   }
-  return Call(DataType::Handle(), region(), arguments, region_call->annotations,
-              region_call->span);
+  auto call = region_call.as<CallNode>();
+  return Call(std::nullopt, region(), arguments,
+              call ? call->attrs : std::nullopt, {}, region_call->loc);
 }
 
-Map<String, ObjectRef>
-StripDualCopyAnnotations(const Map<String, ObjectRef> &annotations,
-                         bool strip_double) {
-  Map<String, ObjectRef> result;
+Map<String, Any> StripDualCopyAnnotations(const Map<String, Any> &annotations,
+                                          bool strip_double) {
+  Map<String, Any> result;
   for (const auto &[key, value] : annotations) {
     if (key == "dual_dst_ctl" || key == "unit_flag_ctrl" ||
         (strip_double && key == "double"))
@@ -154,11 +166,10 @@ void ValidateStaticSplitConstraints(const AscendCopy &copy, DualCopyPath path,
   int dual_control = copy->dual_dst_ctl;
   int source_axis = SplitAxis(copy->src_range, dual_control, path);
   int destination_axis = SplitAxis(copy->dst_range, dual_control, path);
-  const int64_t *source_extent =
-      as_const_int(copy->src_range[source_axis]->extent);
-  const int64_t *destination_extent =
-      as_const_int(copy->dst_range[destination_axis]->extent);
-  if (source_extent == nullptr || destination_extent == nullptr)
+  auto source_extent = GetConstInt(copy->src_range[source_axis]->extent);
+  auto destination_extent =
+      GetConstInt(copy->dst_range[destination_axis]->extent);
+  if (!source_extent || !destination_extent)
     return;
 
   bool source_is_full = path == DualCopyPath::kHardwareL0CToUB ||
@@ -181,29 +192,28 @@ void ValidateStaticSplitConstraints(const AscendCopy &copy, DualCopyPath path,
 }
 
 bool CallNeedsSoftwareSid(const CallNode *op) {
-  if (!IsAscendCopyCall(op) || !op->annotations.Get("dual_dst_ctl").has_value())
+  if (!IsAscendCopyCall(op) ||
+      !CallAnnotations(op).Get("dual_dst_ctl").has_value())
     return false;
 
-  AscendCopy copy(op->args, op->annotations);
+  AscendCopy copy(op->args, CallAnnotations(op));
   return IsSoftwareDualCopy(ClassifyDualCopy(copy));
 }
 
-class UnscopedDualCopyFinder : public StmtExprVisitor {
+class UnscopedDualCopyFinder : public ascend::AnalysisVisitor {
 public:
   static bool NeedsSid(const Stmt &stmt) {
-    UnscopedDualCopyFinder finder;
-    finder(stmt);
-    return finder.needs_sid_;
+    auto finder = ffi::make_object<UnscopedDualCopyFinder>();
+    finder->Visit(stmt);
+    return finder->needs_sid_;
   }
 
 private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    const auto *iter_var = op->node.as<IterVarNode>();
-    bool is_cthread = op->attr_key == tirx::attr::thread_extent &&
-                      iter_var != nullptr && iter_var->thread_tag == "cthread";
+  void VisitStmt_(const RegionStmtNode *op) final {
+    bool is_cthread = IsCthread(op);
     if (is_cthread)
       ++cthread_depth_;
-    StmtExprVisitor::VisitStmt_(op);
+    ascend::AnalysisVisitor::VisitStmt_(op);
     if (is_cthread)
       --cthread_depth_;
   }
@@ -212,79 +222,58 @@ private:
     if (cthread_depth_ == 0 && CallNeedsSoftwareSid(op))
       needs_sid_ = true;
     if (!needs_sid_)
-      StmtExprVisitor::VisitExpr_(op);
+      ascend::AnalysisVisitor::VisitExpr_(op);
   }
 
   int cthread_depth_{0};
   bool needs_sid_{false};
 };
 
-class DualCopyRewriter : public StmtMutator {
+class DualCopyRewriter : public ascend::NativeMutator {
 public:
   explicit DualCopyRewriter(bool allow_root_sid_synthesis)
       : allow_root_sid_synthesis_(allow_root_sid_synthesis) {}
 
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != tirx::attr::thread_extent)
-      return StmtMutator::VisitStmt_(op);
-    const auto *iter_var = op->node.as<IterVarNode>();
-    if (iter_var == nullptr || iter_var->thread_tag != "cthread")
-      return StmtMutator::VisitStmt_(op);
-
-    bool is_unscoped_cthread = vector_block_depth_ == 0;
-    if (is_unscoped_cthread)
-      ++unscoped_cthread_depth_;
-    Optional<Var> outer_sid = sid_;
-    Optional<PrimExpr> outer_sid_extent = sid_extent_;
-    sid_ = iter_var->var;
-    sid_extent_ = op->value;
-    Stmt body = VisitStmt(op->body);
-    sid_ = std::move(outer_sid);
-    sid_extent_ = std::move(outer_sid_extent);
-    if (is_unscoped_cthread)
-      --unscoped_cthread_depth_;
-    if (body.same_as(op->body))
-      return ffi::GetRef<Stmt>(op);
-    return AttrStmt(op->node, op->attr_key, op->value, std::move(body),
-                    op->span);
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    bool is_vector_block = op->name_hint == "VECTOR";
-    if (is_vector_block)
+  Stmt VisitStmt_(const RegionStmtNode *op) final {
+    auto previous_sid = sid_;
+    auto previous_extent = sid_extent_;
+    auto name = ascend::KernelRegionName(op);
+    bool vector_region = name == "VECTOR";
+    bool launch = IsCthread(op);
+    bool unscoped = launch && vector_block_depth_ == 0;
+    bool synthesize = allow_root_sid_synthesis_ && name == "tilelang_root" &&
+                      !sid_ &&
+                      UnscopedDualCopyFinder::NeedsSid(ffi::GetRef<Stmt>(op));
+    if (vector_region)
       ++vector_block_depth_;
-    Stmt result = StmtMutator::VisitStmt_(op);
-    if (is_vector_block)
+    if (unscoped)
+      ++unscoped_cthread_depth_;
+    if (launch) {
+      sid_ = op->body_params[0].as_or_throw<PrimVar>();
+      sid_extent_ = op->args[1].as_or_throw<PrimExpr>();
+    } else if (synthesize) {
+      sid_ = PrimVar("sid", PrimType::Int(32));
+      sid_extent_ = IntImm::Int32(2);
+    }
+    Stmt result = ascend::NativeMutator::VisitStmt_(op);
+    if (synthesize) {
+      result =
+          RegionStmt(Op::Get("tl.launch_grid"),
+                     {StringImm("cthread"), sid_extent_.value()},
+                     {sid_.value()}, DictAttrs(), SeqStmt(result), {}, op->loc);
+    }
+    sid_ = previous_sid;
+    sid_extent_ = previous_extent;
+    if (unscoped)
+      --unscoped_cthread_depth_;
+    if (vector_region)
       --vector_block_depth_;
     return result;
   }
 
-  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
-    Stmt result;
-    if (!allow_root_sid_synthesis_ || op->block->name_hint != "tilelang_root" ||
-        sid_.has_value() ||
-        !UnscopedDualCopyFinder::NeedsSid(ffi::GetRef<Stmt>(op))) {
-      result = StmtMutator::VisitStmt_(op);
-    } else {
-      Var sid("sid", DataType::Int(32));
-      PrimExpr extent = Integer(2);
-      IterVar sid_thread(Range(0, extent), sid, IterVarType::kThreadIndex,
-                         "cthread");
-      sid_ = sid;
-      sid_extent_ = extent;
-      Stmt body = StmtMutator::VisitStmt_(op);
-      sid_ = std::nullopt;
-      sid_extent_ = std::nullopt;
-      result = AttrStmt(sid_thread, tirx::attr::thread_extent, extent,
-                        std::move(body), op->span);
-    }
-
-    return result;
-  }
-
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    Stmt rewritten = StmtMutator::VisitStmt_(op);
+    Stmt rewritten = ascend::NativeMutator::VisitStmt_(op);
     const auto *evaluate = rewritten.as<EvaluateNode>();
     ICHECK(evaluate != nullptr);
     const auto *call_node = evaluate->value.as<CallNode>();
@@ -294,7 +283,7 @@ private:
 
     if (!IsAscendCopyCall(call_node))
       return rewritten;
-    AscendCopy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, CallAnnotations(call.get()));
     DualCopyPath path = ClassifyDualCopy(copy);
     if (path == DualCopyPath::kNotDualCopy) {
       return rewritten;
@@ -310,29 +299,28 @@ private:
     if (path == DualCopyPath::kHardwareL0CToUB)
       return rewritten;
 
-    Var sid = RequireSid(call);
+    PrimVar sid = RequireSid(call);
     int dual_control = copy->dual_dst_ctl;
     int source_axis = SplitAxis(copy->src_range, dual_control, path);
     int destination_axis = SplitAxis(copy->dst_range, dual_control, path);
     if (path == DualCopyPath::kSoftwareGMToUB) {
       PrimExpr split_extent = copy->dst_range[destination_axis]->extent;
-      Call source = RewriteRegion(Downcast<Call>(call->args[0]), source_axis,
+      Call source = RewriteRegion(call->args[0], source_axis,
                                   sid * split_extent, split_extent);
-      return Evaluate(Call(call->dtype, call->op,
-                           {source, Downcast<Call>(call->args[1])},
-                           StripDualCopyAnnotations(call->annotations, false)));
+      return Evaluate(Call(call->ty, call->op, {source, call->args[1]},
+                           DictAttrs(StripDualCopyAnnotations(
+                               CallAnnotations(call.get()), false))));
     }
 
     PrimExpr split_extent = copy->src_range[source_axis]->extent;
-    Call destination =
-        RewriteRegion(Downcast<Call>(call->args[1]), destination_axis,
-                      sid * split_extent, split_extent);
-    return Evaluate(Call(call->dtype, call->op,
-                         {Downcast<Call>(call->args[0]), destination},
-                         StripDualCopyAnnotations(call->annotations, true)));
+    Call destination = RewriteRegion(call->args[1], destination_axis,
+                                     sid * split_extent, split_extent);
+    return Evaluate(Call(call->ty, call->op, {call->args[0], destination},
+                         DictAttrs(StripDualCopyAnnotations(
+                             CallAnnotations(call.get()), true))));
   }
 
-  Var RequireSid(const Call &call) const {
+  PrimVar RequireSid(const Call &call) const {
     if (!allow_root_sid_synthesis_ &&
         (vector_block_depth_ == 0 || unscoped_cthread_depth_ != 0)) {
       TVM_FFI_THROW(ValueError)
@@ -347,16 +335,14 @@ private:
            "scope and outside a tilelang_root where one can be created. "
            "Operation: "
         << call;
-    const int64_t *extent =
-        sid_extent_.has_value() ? as_const_int(sid_extent_.value()) : nullptr;
-    TVM_FFI_CHECK(extent != nullptr && *extent == 2, ValueError)
+    auto extent = sid_extent_ ? GetConstInt(sid_extent_.value()) : std::nullopt;
+    TVM_FFI_CHECK(extent && *extent == 2, ValueError)
         << "RewriteDualCopy requires a cthread extent of 2, got "
-        << (sid_extent_.has_value() ? sid_extent_.value() : PrimExpr())
-        << ". Operation: " << call;
+        << sid_extent_.value_or(IntImm::Int32(0)) << ". Operation: " << call;
     return sid_.value();
   }
 
-  Optional<Var> sid_;
+  Optional<PrimVar> sid_;
   Optional<PrimExpr> sid_extent_;
   int vector_block_depth_{0};
   int unscoped_cthread_depth_{0};
@@ -366,16 +352,18 @@ private:
 } // namespace
 
 tvm::transform::Pass RewriteDualCopy() {
-  auto pass_func = [](PrimFunc func, const IRModule &,
+  auto pass_func = [](tirx::Function func, const IRModule &,
                       const tvm::transform::PassContext &pass_context) {
     bool enable_auto_schedule =
-        pass_context->GetConfig<Bool>(kEnableAutoSchedule, Bool(true)).value();
-    func.CopyOnWrite()->body =
-        DualCopyRewriter(enable_auto_schedule)(func->body);
+        pass_context->GetConfig<bool>(kEnableAutoSchedule).value_or(true);
+    if (!func->body)
+      return func;
+    auto rewriter = ffi::make_object<DualCopyRewriter>(enable_auto_schedule);
+    func.CopyOnWrite()->body = rewriter->VisitStmt(func->body.value());
     return func;
   };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0, "tl.RewriteDualCopy",
-                                             {});
+  return tirx::transform::CreateFunctionPass(pass_func, 0,
+                                             "tl.RewriteDualCopy");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

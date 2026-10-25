@@ -2,6 +2,8 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
+from tvm_tirx import ir
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
@@ -87,27 +89,42 @@ def _get_clc_query_codegen_source() -> str:
     return artifact.kernel_source
 
 
+def _run_cluster_launch(execution_backend):
+    kernel = matmul(256, 256, 128, 128, 128, 32)
+    compiled = tilelang.compile(kernel, out_idx=[2], execution_backend=execution_backend)
+    artifact = compiled.artifact or tilelang.lower(kernel, target="cuda", enable_device_compile=False)
+    functions = list(artifact.device_mod.functions.values())
+    assert len(functions) == 1
+    calls = []
+    post_order_visit(
+        artifact.host_mod,
+        lambda node: calls.append(node)
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == "tirx.call_ffi_kernel"
+        else None,
+    )
+    assert len(calls) == 1
+    launch = calls[0]
+    fields = list(launch.attrs.launch_fields)
+    if fields:
+        launch_values = dict(zip(fields, list(launch.args)[-len(fields) :]))
+        cluster_prefix = "cluster"
+    else:
+        fields = list(launch.attrs.launch_params)
+        assert fields == list(functions[0].attrs["tirx.kernel_launch_params"])
+        launch_values = dict(zip(fields, list(launch.args)[1 + len(functions[0].params) :]))
+        cluster_prefix = "clusterCtaIdx"
+    assert [int(launch_values[f"{cluster_prefix}.{axis}"]) for axis in "xyz"] == [2, 1, 1]
+    left = torch.randn((256, 128), dtype=torch.float16, device="cuda")
+    right = torch.randn((128, 256), dtype=torch.float16, device="cuda")
+    torch.testing.assert_close(compiled(left, right), left @ right, rtol=1e-2, atol=1e-2)
+
+
 def run_cython_cluster_launch():
-    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
-    mod = tilelang.compile(kernel, execution_backend="cython")
-    assert "clusterDim = {2, 1, 1}" in mod.get_host_source()
+    _run_cluster_launch("cython")
 
 
 def run_tvm_ffi_cluster_launch():
-    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
-    mod = tilelang.compile(kernel, execution_backend="tvm_ffi")
-    check_str = r"""
-  (((TVMFFIAny*)stack_ffi_any)[3].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[3].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[3].v_int64) = ((int64_t)2);
-  (((TVMFFIAny*)stack_ffi_any)[4].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[4].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[4].v_int64) = ((int64_t)1);
-  (((TVMFFIAny*)stack_ffi_any)[5].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[5].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[5].v_int64) = ((int64_t)1);
-"""
-    assert check_str in mod.get_host_source()
+    _run_cluster_launch("tvm_ffi")
 
 
 @tilelang.testing.requires_cuda
@@ -148,7 +165,7 @@ def test_clc_query_codegen_includes_cluster_header():
     print("=== clc query codegen ===")
     print(src)
 
-    assert "#include <tl_templates/cuda/cluster.h>" in src
+    assert '#include "tl_templates/cuda/cluster.h"' in src
     assert "tl::clc_is_canceled(" in src
     assert "tl::clc_get_first_ctaid_x(" in src
 

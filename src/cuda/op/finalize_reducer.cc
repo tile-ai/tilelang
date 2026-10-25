@@ -24,11 +24,14 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                         PrimExpr thread_offset,
                                         PrimExpr all_threads, int batch,
                                         int workspace_stride, Target target) {
+    TVM_FFI_CHECK(GetConstInt(thread_offset) && GetConstInt(all_threads),
+                  ValueError)
+        << "Reducer collective templates require constant participant bounds";
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-       << scale << ", " << thread_offset;
+       << scale << ", " << *GetConstInt(thread_offset);
     if (TargetSupportsNamedBarrier(target)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << *GetConstInt(all_threads) << ">";
     } else {
       ss << ", tl::SyncThreadsBarrier";
     }
@@ -40,11 +43,14 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset,
                                          PrimExpr all_threads, Target target) {
+    TVM_FFI_CHECK(GetConstInt(thread_offset) && GetConstInt(all_threads),
+                  ValueError)
+        << "Reducer collective templates require constant participant bounds";
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
-       << scale << ", " << thread_offset;
+       << scale << ", " << *GetConstInt(thread_offset);
     if (TargetSupportsNamedBarrier(target)) {
-      ss << ", tl::NamedBarrier<" << all_threads << ">";
+      ss << ", tl::NamedBarrier<" << *GetConstInt(all_threads) << ">";
     }
     ss << ">::run";
     return ss.str();

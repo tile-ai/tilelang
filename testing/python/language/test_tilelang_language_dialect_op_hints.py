@@ -18,8 +18,8 @@ import tilelang.cpu.language as Tcpu
 import tilelang.language as T
 import tilelang.rocm.language as Trocm
 import tilelang.testing
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.tvm import tirx
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _keywords(func) -> set[str]:
@@ -35,7 +35,7 @@ def _tileop_annotations(func, opname: str) -> dict:
 
     def visit(node):
         if isinstance(node, tirx.Call) and str(getattr(node.op, "name", "")) == opname:
-            found.update({str(k): v for k, v in node.annotations.items()})
+            found.update({str(key): value for key, value in (node.attrs or {}).items()})
 
     post_order_visit(func.body, visit)
     return found
@@ -201,7 +201,7 @@ def test_cuda_atomic_add_use_tma_rejected_on_cpu():
         with T.Kernel(1):
             T.atomic_add(B, A, use_tma=True)
 
-    with pytest.raises(Exception, match="does not support use_tma"):
+    with pytest.raises((ValueError, RuntimeError), match="does not support (?:use_tma|TMA)"):
         tilelang.compile(main, target="c", out_idx=[1])
 
 

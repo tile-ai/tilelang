@@ -33,6 +33,7 @@ def _transposed_b_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_effective_k_with_transposed_b_ignores_nonzero_padding():
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU unavailable")

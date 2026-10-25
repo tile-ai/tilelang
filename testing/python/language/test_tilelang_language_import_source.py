@@ -27,7 +27,7 @@ def _make_import_source_kernel(prelude):
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
         with T.Kernel(1, threads=128):
             T.import_source(prelude)
-            with T.sblock():
+            with T.scope():
                 T.import_source(WRAPPER)
                 tid = T.get_thread_binding(0)
                 B[tid] = T.call_extern("int32", "call_helper", A[tid])
@@ -38,7 +38,7 @@ def _make_import_source_kernel(prelude):
 def _make_prelude_kernel(prelude):
     @T.prim_func
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
-        with T.Kernel(1, threads=128, prelude=prelude), T.sblock():
+        with T.Kernel(1, threads=128, prelude=prelude), T.scope():
             T.import_source(WRAPPER)
             tid = T.get_thread_binding(0)
             B[tid] = T.call_extern("int32", "call_helper", A[tid])
@@ -73,7 +73,7 @@ def test_kernel_prelude_ends_with_newline(prelude):
 def test_import_attr_ends_with_newline(prelude):
     @T.prim_func
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
-        with T.Kernel(1, threads=128), T.attr(0, "pragma_import_c", prelude), T.attr(0, "pragma_import_c", WRAPPER):
+        with T.Kernel(1, threads=128), T.scope(attrs={"pragma_import_c": prelude}), T.scope(attrs={"pragma_import_c": WRAPPER}):
             tid = T.get_thread_binding(0)
             B[tid] = T.call_extern("int32", "call_helper", A[tid])
 
@@ -90,7 +90,7 @@ def test_import_uses_tl_templates(make_kernel):
 def test_empty_import_source():
     @T.prim_func
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
-        with T.Kernel(1, threads=128, prelude=""), T.attr(0, "pragma_import_c", ""):
+        with T.Kernel(1, threads=128, prelude=""), T.scope(attrs={"pragma_import_c": ""}):
             T.import_source("")
             tid = T.get_thread_binding(0)
             B[tid] = A[tid] + 1

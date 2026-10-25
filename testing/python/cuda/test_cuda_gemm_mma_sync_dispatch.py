@@ -29,7 +29,7 @@ def test_gemm_bf16_accum_fp16_rejected_at_frontend():
     # Regression for bf16 x bf16 -> fp16: previously accepted by the frontend
     # and rejected by an nvcc static_assert; now must fail during lowering
     # with the native mma.sync diagnostic instead.
-    with pytest.raises(tvm.error.InternalError, match=r"requires native mma\.sync lowering"):
+    with pytest.raises(RuntimeError, match=r"requires native mma\.sync lowering"):
         tilelang.compile(
             _make_gemm_kernel("bfloat16", "float16"),
             out_idx=[2],

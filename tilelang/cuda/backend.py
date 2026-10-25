@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS

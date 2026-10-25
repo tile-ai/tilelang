@@ -1,4 +1,4 @@
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 import tilelang.language.common as T
 
 __all__ = ["rng_init", "rng_rand", "rng_rand_float"]

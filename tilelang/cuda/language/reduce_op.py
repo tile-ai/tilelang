@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.language.reduce_op import (
     reduce_absmax as _common_reduce_absmax,

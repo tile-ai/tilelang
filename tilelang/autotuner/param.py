@@ -5,8 +5,8 @@ from __future__ import annotations
 import contextlib
 import tilelang
 from tilelang import tvm as tvm
-from tvm.tirx import PrimFunc
-from tvm.target import Target
+from tilelang._compat.tirx import PrimFunc
+from tvm_tirx.target import Target
 from typing import TYPE_CHECKING, Literal, Any
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ from tilelang import logger
 import json
 import hashlib
 import uuid
-from tvm.runtime import Executable
+from tvm_tirx.codegen.executable import Executable
 
 if TYPE_CHECKING:
     from tilelang.backend.module import BackendContext

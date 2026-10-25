@@ -42,46 +42,52 @@ namespace ascend {
 // counter algorithms operate on each subcore without counter-specific rules.
 class SubcoreProjector {
 public:
-  static SBlock Rewrite(const SBlock &root, const ConstrSet &outer_ctx,
-                        const Var &sid) {
-    ICHECK(!root->annotations.count(kSplitSubcores));
+  static RegionStmt Rewrite(const RegionStmt &root, const ConstrSet &outer_ctx,
+                            const Var &sid) {
+    ICHECK(!root->attrs->dict.count(kSplitSubcores));
     ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
     SubcoreProjector projector(sid,
                                scheduled.metadata.num_aiv_subcores.value_or(2));
+    std::vector<TaskNode *> original_tasks;
+    CollectAllTaskNodes(scheduled.tree, original_tasks);
+    for (TaskNode *task : original_tasks)
+      for (const Var &variable : task->GetWriteVars())
+        projector.local_definitions_.insert(variable);
     projector.FindVaryingValues(scheduled.tree);
     if (!projector.NeedsProjection(scheduled.tree))
       return root;
     Stmt body = projector.RewriteList(scheduled.tree, -1);
     projector.VerifyProjectedFixpipeTasks(body);
+    Array<Stmt> aliases;
+    for (const auto &[tensor, source] : projector.external_aliases_) {
+      Bind declaration(tensor, Call(tensor->ty, tirx::decl_tensor_op(),
+                                    {source.data()}, {}, {tensor->ty}));
+      auto task = MakeScheduleMarker(attr::kAscendTask, ffi::Map<String, Any>{},
+                                     declaration);
+      aliases.push_back(MakeScheduleMarker(
+          attr::kScheduleUnit, ScheduleUnitMetadata{{kScheduleUnitStage, -1}},
+          task));
+    }
+    aliases.push_back(body);
+    body = SeqStmt(aliases);
     VarSet used;
     PostOrderVisit(body, [&](const ObjectRef &node) {
       if (const auto *var = node.as<VarNode>())
         used.insert(ffi::GetRef<Var>(var));
-      if (const auto *load = node.as<BufferLoadNode>())
-        used.insert(load->buffer->data);
-      if (const auto *store = node.as<BufferStoreNode>())
-        used.insert(store->buffer->data);
+      if (const auto *load = node.as<TensorLoadNode>())
+        used.insert(load->source.as_or_throw<TensorVar>());
+      if (const auto *store = node.as<TensorStoreNode>())
+        used.insert(store->dest.as_or_throw<TensorVar>());
     });
     auto active = [&](const Var &storage, int p) {
       auto it = projector.vars_[p].find(storage);
       return it != projector.vars_[p].end() && used.count(it->second);
     };
-    SBlock result = root;
-    SBlockNode *writer = result.CopyOnWrite();
-    writer->body = std::move(body);
-    Array<Buffer> allocations;
-    for (const Buffer &buffer : root->alloc_buffers) {
-      if (projector.varying_.count(buffer->data)) {
-        for (int p = 0; p < projector.count_; ++p)
-          if (active(buffer->data, p))
-            allocations.push_back(projector.BufferFor(buffer, p));
-      } else {
-        allocations.push_back(buffer);
-      }
-    }
-    writer->alloc_buffers = std::move(allocations);
+    RegionStmt result = root;
+    RegionStmtNode *writer = result.CopyOnWrite();
+    writer->body = SeqStmt(std::move(body));
     Map<String, Any> annotations;
-    for (const auto &[key, value] : root->annotations) {
+    for (const auto &[key, value] : root->attrs->dict) {
       if (auto versions = value.try_cast<BufferVersionMap>()) {
         BufferVersionMap mapped;
         for (const auto &[storage, versions_count] : versions.value()) {
@@ -106,14 +112,13 @@ public:
           }
         }
         annotations.Set(key, mapped);
-      } else if (auto layouts = value.try_cast<Map<Buffer, Layout>>()) {
-        Map<Buffer, Layout> mapped;
+      } else if (auto layouts = value.try_cast<Map<TensorVar, Layout>>()) {
+        Map<TensorVar, Layout> mapped;
         for (const auto &[buffer, layout] : layouts.value()) {
           if (projector.Varies(buffer)) {
             for (int p = 0; p < projector.count_; ++p)
-              if (active(buffer->data, p) ||
-                  (!projector.varying_.count(buffer->data) &&
-                   projector.buffers_[p].count(buffer)))
+              if (active(buffer, p) || (!projector.varying_.count(buffer) &&
+                                        projector.buffers_[p].count(buffer)))
                 mapped.Set(projector.BufferFor(buffer, p), layout);
           } else {
             mapped.Set(buffer, layout);
@@ -129,8 +134,8 @@ public:
       if (used.count(storage))
         ub_sids.Set(storage, p);
     annotations.Set(kAivStorageMap, ub_sids);
-    annotations.Set(kSplitSubcores, Bool(true));
-    writer->annotations = std::move(annotations);
+    annotations.Set(kSplitSubcores, IntImm::Bool(true));
+    writer->attrs = DictAttrs(std::move(annotations));
     return result;
   }
 
@@ -138,7 +143,7 @@ private:
   using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
   using VarMap = std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual>;
   using BufferMap =
-      std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+      std::unordered_map<TensorVar, TensorVar, ObjectPtrHash, ObjectPtrEqual>;
 
   SubcoreProjector(Var sid, int count) : sid_(std::move(sid)), count_(count) {
     ICHECK(count == 1 || count == 2);
@@ -154,9 +159,10 @@ private:
         return true;
     for (const auto &regions :
          {task->GetReadRegions(), task->GetWriteRegions()})
-      for (const BufferRegion &region : regions)
-        if (Varies(region->buffer) || (IsSharedBuffer(region->buffer) &&
-                                       !task->UsesPipe(ResourcePipe::kFixpipe)))
+      for (const TensorRegion &region : regions)
+        if (Varies(region->source.as_or_throw<TensorVar>()) ||
+            (IsSharedBuffer(region->source.as_or_throw<TensorVar>()) &&
+             !task->UsesPipe(ResourcePipe::kFixpipe)))
           return true;
     return task->UsesPipe(ResourcePipe::kVector) ||
            task->UsesPipe(ResourcePipe::kMTE3);
@@ -167,20 +173,19 @@ private:
     PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (const auto *var = node.as<VarNode>())
         varying |= varying_.count(ffi::GetRef<Var>(var));
-      if (const auto *load = node.as<BufferLoadNode>())
-        varying |= varying_.count(load->buffer->data);
+      if (const auto *load = node.as<TensorLoadNode>())
+        varying |= varying_.count(load->source.as_or_throw<TensorVar>());
     });
     return varying;
   }
 
-  bool Varies(const Buffer &buffer) const {
-    if (varying_.count(buffer->data) || Varies(buffer->elem_offset))
+  bool Varies(const TensorVar &buffer) const {
+    if (varying_.count(buffer))
       return true;
-    for (const auto &expressions : {buffer->shape, buffer->strides})
-      for (const PrimExpr &expr : expressions)
-        if (Varies(expr))
-          return true;
-    return false;
+    bool varying = false;
+    for (const Var &variable : tvm::UndefinedVars(buffer->ty))
+      varying |= varying_.count(variable);
+    return varying;
   }
 
   bool NeedsProjection(
@@ -195,16 +200,19 @@ private:
               ? static_cast<const TaskNode *>(node.get())
               : static_cast<const ControlNode *>(node.get())->task.get();
       bool varying_control = false;
-      PostOrderVisit(WrapScheduledGuards(task->stmt, node->GetGuards()),
-                     [&](const ObjectRef &stmt) {
-                       if (const auto *branch = stmt.as<IfThenElseNode>())
-                         varying_control |= Varies(branch->condition);
-                       if (const auto *loop = stmt.as<ForNode>())
-                         varying_control |= Varies(loop->min) ||
-                                            Varies(loop->extent) ||
-                                            (loop->step.has_value() &&
-                                             Varies(loop->step.value()));
-                     });
+      PostOrderVisit(
+          WrapScheduledGuards(task->stmt, node->GetGuards()),
+          [&](const ObjectRef &stmt) {
+            if (const auto *region = stmt.as<RegionStmtNode>();
+                region && ScheduleMarkerKey(region) == kScheduleCondition)
+              varying_control |=
+                  Varies(ScheduleMarkerPayload(region).as_or_throw<PrimExpr>());
+            if (const auto *branch = stmt.as<IfNode>())
+              varying_control |= Varies(branch->condition);
+            if (const auto *loop = stmt.as<ForNode>())
+              varying_control |= Varies(loop->begin) || Varies(loop->end) ||
+                                 Varies(loop->step);
+          });
       if (varying_control)
         return true;
       if (Varies(task) && !task->UsesPipe(ResourcePipe::kVector) &&
@@ -215,10 +223,12 @@ private:
           return true;
         for (const auto &regions :
              {task->GetReadRegions(), task->GetWriteRegions()})
-          for (const BufferRegion &region : regions)
-            if (IsSSBuffer(region->buffer) || IsL1Buffer(region->buffer) ||
-                IsL0ABuffer(region->buffer) || IsL0BBuffer(region->buffer) ||
-                IsL0CBuffer(region->buffer))
+          for (const TensorRegion &region : regions)
+            if (IsSSBuffer(region->source.as_or_throw<TensorVar>()) ||
+                IsL1Buffer(region->source.as_or_throw<TensorVar>()) ||
+                IsL0ABuffer(region->source.as_or_throw<TensorVar>()) ||
+                IsL0BBuffer(region->source.as_or_throw<TensorVar>()) ||
+                IsL0CBuffer(region->source.as_or_throw<TensorVar>()))
               return true;
       }
       if (node->IsControl() &&
@@ -238,13 +248,13 @@ private:
         const auto *call = node.as<CallNode>();
         if (!call || !IsAscendCopyCall(call))
           return;
-        AscendCopy copy(call->args, call->annotations);
+        AscendCopy copy(call->args, AscendCallAnnotations(call));
         if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
             copy->dual_dst_ctl != 0) {
           // Hardware dual destinations share an offset and a generation.
           // Keep this UB allocation common to both address spaces and keep
           // the Fixpipe instruction intact (including partial fractals).
-          dual_storages_.insert(copy->dst->data);
+          dual_storages_.insert(task->StorageOf(copy->dst));
           dual_tasks_.insert(task);
         }
       });
@@ -252,10 +262,14 @@ private:
     for (TaskNode *task : tasks) {
       for (const auto &regions :
            {task->GetReadRegions(), task->GetWriteRegions()})
-        for (const BufferRegion &region : regions)
-          if (IsSharedBuffer(region->buffer) &&
-              !dual_storages_.count(region->buffer->data))
-            varying_.insert(region->buffer->data);
+        for (const TensorRegion &region : regions) {
+          auto tensor = region->source.as_or_throw<TensorVar>();
+          Var storage = task->StorageOf(tensor);
+          if (IsSharedBuffer(tensor) && !dual_storages_.count(storage)) {
+            varying_.insert(tensor);
+            varying_.insert(storage);
+          }
+        }
     }
     bool changed = true;
     while (changed) {
@@ -270,69 +284,67 @@ private:
           continue;
         for (const Var &var : task->GetWriteVars())
           changed |= varying_.insert(var).second;
-        for (const BufferRegion &region : task->GetWriteRegions())
+        for (const TensorRegion &region : task->GetWriteRegions())
           if (IsRegisterRegion(region))
-            changed |= varying_.insert(region->buffer->data).second;
+            changed |=
+                varying_.insert(region->source.as_or_throw<TensorVar>()).second;
       }
     }
   }
 
-  Var VarFor(const Var &var, int p) {
-    if (!varying_.count(var))
-      return var;
-    auto it = vars_[p].find(var);
-    if (it != vars_[p].end())
-      return it->second;
-    Var result = var.copy_with_suffix("_aiv" + std::to_string(p));
-    vars_[p].emplace(var, result);
-    // Enclosing controls revisit projected children. Keep the same identity
-    // when their loop binders are encountered again on this subcore.
-    vars_[p].emplace(result, result);
+  Var VarFor(const Var &variable, int subcore) {
+    if (auto tensor = variable.as<TensorVar>())
+      return BufferFor(tensor.value(), subcore);
+    if (!varying_.count(variable))
+      return variable;
+    auto found = vars_[subcore].find(variable);
+    if (found != vars_[subcore].end())
+      return found->second;
+    Var result(variable->name + "_aiv" + std::to_string(subcore), variable->ty,
+               variable->loc);
+    vars_[subcore].emplace(variable, result);
+    vars_[subcore].emplace(result, result);
     return result;
   }
 
-  Buffer BufferFor(const Buffer &buffer, int p) {
-    auto it = buffers_[p].find(buffer);
-    if (it != buffers_[p].end())
-      return it->second;
+  TensorVar BufferFor(const TensorVar &buffer, int subcore) {
+    auto found = buffers_[subcore].find(buffer);
+    if (found != buffers_[subcore].end())
+      return found->second;
     if (!Varies(buffer))
       return buffer;
-    // Views can depend on sid even when their underlying storage is common.
-    // Use the same projection for definitions, accesses, and metadata keys.
-    Rewriter rewriter(this, p);
-    arith::Analyzer analyzer;
-    auto rewrite = [&](const PrimExpr &expr) {
-      return analyzer.Simplify(rewriter(expr));
-    };
-    Buffer result = buffer;
-    auto *writer = result.CopyOnWrite();
-    writer->data = VarFor(buffer->data, p);
-    writer->name = buffer->name + "_aiv" + std::to_string(p);
-    writer->shape = buffer->shape.Map(rewrite);
-    writer->strides = buffer->strides.Map(rewrite);
-    writer->elem_offset = rewrite(buffer->elem_offset);
-    buffers_[p].emplace(buffer, result);
-    // A projected view may still depend on a projected loop binder.
-    buffers_[p].emplace(result, result);
-    if (IsSharedBuffer(buffer) && varying_.count(buffer->data))
-      ub_sids_.Set(result->data, Integer(p));
+    auto rewriter = ffi::make_object<Rewriter>(this, subcore);
+    auto type = rewriter->Mutate(buffer->ty)
+                    .ValueOrUnchanged(buffer->ty)
+                    .as_or_throw<TensorType>();
+    TensorVar result(buffer->name + "_aiv" + std::to_string(subcore), type,
+                     buffer->loc);
+    buffers_[subcore].emplace(buffer, result);
+    buffers_[subcore].emplace(result, result);
+    vars_[subcore].emplace(buffer, result);
+    vars_[subcore].emplace(result, result);
+    if (IsSharedBuffer(buffer) && varying_.count(buffer))
+      ub_sids_.Set(result, subcore);
+    if (!local_definitions_.count(buffer))
+      external_aliases_.emplace_back(result, buffer);
     return result;
   }
 
   static void VerifyReplayableFixpipeTask(const Stmt &body) {
     bool external_effect = false;
     PostOrderVisit(body, [&](const ObjectRef &node) {
-      if (const auto *store = node.as<BufferStoreNode>())
+      if (const auto *store = node.as<TensorStoreNode>())
         external_effect |=
-            !IsRegisterRegion(BufferRegion::FullRegion(store->buffer));
+            !(IsLocalBuffer(store->dest.as_or_throw<TensorVar>(), true) ||
+              IsFragmentBuffer(store->dest.as_or_throw<TensorVar>()));
       if (const auto *call = node.as<CallNode>()) {
         if (IsAscendCopyCall(call)) {
-          AscendCopy copy(call->args, call->annotations);
+          AscendCopy copy(call->args, AscendCallAnnotations(call));
           external_effect |=
               !IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst);
         } else {
-          external_effect |= SideEffect(ffi::GetRef<PrimExpr>(call)) >
-                             CallEffectKind::kReadState;
+          external_effect |=
+              SideEffect(ffi::GetRef<Expr>(call)) > CallEffectKind::kReadState;
         }
       }
     });
@@ -344,30 +356,31 @@ private:
   }
 
   void VerifyProjectedFixpipeTasks(const Stmt &body) const {
-    std::unordered_map<int, std::vector<AttrStmt>> projections;
+    std::unordered_map<int, std::vector<RegionStmt>> projections;
     PostOrderVisit(body, [&](const ObjectRef &node) {
-      const auto *attr = node.as<AttrStmtNode>();
-      if (!attr || (attr->attr_key != tl::attr::kAscendTask &&
-                    attr->attr_key != tl::attr::kAscendPerCoreTask))
+      const auto *attr = node.as<RegionStmtNode>();
+      if (!attr || (ScheduleMarkerKey(attr) != tl::attr::kAscendTask &&
+                    ScheduleMarkerKey(attr) != tl::attr::kAscendPerCoreTask))
         return;
-      auto metadata = task_metadata_detail::CopyTaskMetadata(attr->node);
+      auto metadata =
+          task_metadata_detail::CopyTaskMetadata(ScheduleMarkerPayload(attr));
       auto origin = metadata.Get("subcore_origin");
       if (origin &&
-          replay_check_origins_.count(origin.value().cast<Integer>()->value))
-        projections[origin.value().cast<Integer>()->value].push_back(
-            ffi::GetRef<AttrStmt>(attr));
+          replay_check_origins_.count(GetIntAnnotation(origin.value()).value()))
+        projections[GetIntAnnotation(origin.value()).value()].push_back(
+            ffi::GetRef<RegionStmt>(attr));
     });
     // An enclosing projected loop may rewrite a task once per recursive call.
     // Count surviving copies across the complete tree, after outer guards have
     // removed inactive branches, rather than within one RewriteList call.
     for (const auto &[origin, tasks] : projections) {
       if (tasks.size() > 1)
-        for (const AttrStmt &task : tasks)
+        for (const RegionStmt &task : tasks)
           VerifyReplayableFixpipeTask(task);
     }
   }
 
-  class Rewriter : public StmtExprMutator {
+  class Rewriter : public NativeMutator {
   public:
     Rewriter(SubcoreProjector *owner, int p, bool allow_constants = true)
         : owner_(owner), p_(p), conditional_depth_(allow_constants ? 0 : 1) {}
@@ -379,10 +392,10 @@ private:
     }
 
     Any RewriteMetadata(const Any &value) {
-      if (auto buffer = value.try_cast<Buffer>())
+      if (auto buffer = value.try_cast<TensorVar>())
         return owner_->BufferFor(buffer.value(), p_);
-      if (const auto *expr = value.as<PrimExprNode>())
-        return VisitExpr(ffi::GetRef<PrimExpr>(expr));
+      if (auto expression = value.as<Expr>())
+        return VisitExpr(expression.value());
       if (auto array = value.try_cast<Array<Any>>()) {
         Array<Any> result;
         for (const Any &entry : array.value())
@@ -400,38 +413,50 @@ private:
 
   private:
     struct PerCoreRouting {
-      PrimExpr path{Bool(true)};
-      PrimExpr active{Bool(false)};
+      PrimExpr path{IntImm::Bool(true)};
+      PrimExpr active{IntImm::Bool(false)};
       bool routed{false};
       bool replays_fixpipe{false};
     };
 
-    PrimExpr GetPerCoreActiveGuard(const AttrStmt &task, PrimExpr active) {
-      Map<Var, PrimExpr> bindings;
-      VarSet locals;
-      PostOrderVisit(task->body, [&](const ObjectRef &node) {
-        if (const auto *loop = node.as<ForNode>())
-          locals.insert(loop->loop_var);
-        if (const auto *bind = node.as<BindNode>()) {
-          locals.insert(bind->var);
-          PrimExpr value = Substitute(bind->value, bindings);
-          bool immutable = SideEffect(value) <= CallEffectKind::kReadState;
-          PostOrderVisit(value, [&](const ObjectRef &input) {
-            immutable &= input.as<BufferLoadNode>() == nullptr;
-          });
-          if (immutable)
-            bindings.Set(bind->var, value);
+    PrimExpr GetPerCoreActiveGuard(const RegionStmt &task, PrimExpr active) {
+      class MarkerUnwrapper : public NativeMutator {
+        Stmt VisitStmt_(const RegionStmtNode *op) final {
+          if (!ScheduleMarkerKey(op).empty())
+            return VisitStmt(UnwrapScheduleMarker(op));
+          return NativeMutator::VisitStmt_(op);
         }
-      });
+      };
+      Map<PrimVar, PrimExpr> bindings;
+      VarSet locals;
+      PostOrderVisit(
+          MarkerUnwrapper().VisitStmt(task), [&](const ObjectRef &node) {
+            if (const auto *loop = node.as<ForNode>())
+              locals.insert(loop->var);
+            if (const auto *bind = node.as<BindNode>()) {
+              locals.insert(bind->var);
+              auto scalar = bind->var.as<PrimVar>();
+              auto scalar_value = bind->value.as<PrimExpr>();
+              if (!scalar || !scalar_value)
+                return;
+              PrimExpr value = Substitute(scalar_value.value(), bindings);
+              bool immutable = SideEffect(value) <= CallEffectKind::kReadState;
+              PostOrderVisit(value, [&](const ObjectRef &input) {
+                immutable &= input.as<TensorLoadNode>() == nullptr;
+              });
+              if (immutable)
+                bindings.Set(scalar.value(), value);
+            }
+          });
       // Condition snapshots belong inside PerCoreTask. Expand only immutable
       // bindings when exposing the selected candidates to outer
       // synchronization.
-      active = analyzer_.Simplify(Substitute(active, bindings));
+      active = analyzer_->Simplify(Substitute(active, bindings));
       bool available = SideEffect(active) <= CallEffectKind::kReadState;
       PostOrderVisit(active, [&](const ObjectRef &node) {
         if (const auto *var = node.as<VarNode>())
           available &= !locals.count(ffi::GetRef<Var>(var));
-        available &= node.as<BufferLoadNode>() == nullptr;
+        available &= node.as<TensorLoadNode>() == nullptr;
       });
       ICHECK(available)
           << "Cannot project PerCoreTask Fixpipe routing: candidate dispatch "
@@ -440,167 +465,172 @@ private:
       return active;
     }
 
-    Stmt RewritePerCoreCandidate(const AttrStmt &task) {
-      auto metadata = task_metadata_detail::CopyTaskMetadata(task->node);
+    Stmt RewritePerCoreCandidate(const RegionStmt &task) {
+      auto metadata = task_metadata_detail::CopyTaskMetadata(
+          ScheduleMarkerPayload(task.get()));
       auto origin = metadata.Get("subcore_origin");
       int origin_id;
       if (origin) {
-        origin_id = origin.value().cast<Integer>()->value;
+        origin_id = GetIntAnnotation(origin.value()).value();
       } else {
         auto [it, inserted] =
             owner_->candidate_origins_.emplace(task, owner_->next_origin_);
         if (inserted)
           ++owner_->next_origin_;
         origin_id = it->second;
-        metadata.Set("subcore_origin", Integer(origin_id));
+        metadata.Set("subcore_origin", origin_id);
       }
-      AttrStmt marked = task;
-      marked.CopyOnWrite()->node = std::move(metadata);
+      RegionStmt marked = WithSchedulePayload(task.get(), metadata);
       // Each candidate is its own atomic task. Neither the routing target nor
       // its guard may leak into a sibling candidate's rewrite.
-      Rewriter rewriter(owner_, p_, conditional_depth_ == 0);
-      rewriter.local_vars_ = local_vars_;
-      Stmt body = rewriter(marked);
-      local_vars_.insert(rewriter.local_vars_.begin(),
-                         rewriter.local_vars_.end());
-      PrimExpr active = analyzer_.Simplify(rewriter.active_);
+      auto rewriter =
+          ffi::make_object<Rewriter>(owner_, p_, conditional_depth_ == 0);
+      rewriter->local_vars_ = local_vars_;
+      Stmt body = rewriter->VisitStmt(marked);
+      local_vars_.insert(rewriter->local_vars_.begin(),
+                         rewriter->local_vars_.end());
+      PrimExpr active = analyzer_->Simplify(rewriter->active_);
       bool has_access = HasTaskBufferAccess(task->body);
       if (has_access) {
         per_core_->active = per_core_->active || (per_core_->path && active);
-        per_core_->routed |= !is_one(active);
+        per_core_->routed |= !(GetConstInt(active) == 1);
       }
-      has_local_copy_guard_ |= rewriter.HasLocalCopyGuard();
-      per_core_->replays_fixpipe |= rewriter.CanReplayFixpipe();
+      has_local_copy_guard_ |= rewriter->HasLocalCopyGuard();
+      per_core_->replays_fixpipe |= rewriter->CanReplayFixpipe();
       // An enclosing loop can revisit an already projected candidate. Its
       // explicit route now names p_, while the original guard is outside it.
       // Ordinary AIV candidates execute on distinct physical subcores; only
       // Fixpipe candidates can replay their effects on the same AIC.
-      if (rewriter.CanReplayFixpipe() ||
-          (!origin && rewriter.copy_target_.defined() && is_one(active)))
+      if (rewriter->CanReplayFixpipe() ||
+          (!origin && rewriter->copy_target_.has_value() &&
+           (GetConstInt(active) == 1)))
         owner_->replay_check_origins_.insert(origin_id);
-      if (is_zero(active))
-        return Evaluate(0);
-      return is_one(active) ? body : IfThenElse(active, body);
-    }
-
-    Buffer VisitBufferUse(const Buffer &buffer) final {
-      return owner_->BufferFor(buffer, p_);
-    }
-
-    Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
-      return owner_->BufferFor(buffer, p_);
-    }
-
-    Stmt VisitStmt_(const SBlockNode *op) final {
-      SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
-      block.CopyOnWrite()->annotations =
-          RewriteMetadata(op->annotations).cast<Map<String, Any>>();
-      return block;
+      if ((GetConstInt(active) == 0))
+        return Evaluate(IntImm::Int32(0));
+      return (GetConstInt(active) == 1)
+                 ? body
+                 : Stmt(MakeScheduleMarker(kScheduleCondition, active, body));
     }
 
     Stmt VisitStmt_(const ForNode *op) final {
       // Each projected loop needs its own binder, even with uniform bounds.
-      owner_->varying_.insert(op->loop_var);
-      Var loop_var = owner_->VarFor(op->loop_var, p_);
+      owner_->varying_.insert(op->var);
+      PrimVar loop_var = owner_->VarFor(op->var, p_).as_or_throw<PrimVar>();
       local_vars_.insert(loop_var);
-      For loop = Downcast<For>(StmtExprMutator::VisitStmt_(op));
-      if (is_no_op(loop->body))
-        return Evaluate(0);
-      loop.CopyOnWrite()->loop_var = loop_var;
+      For loop = NativeMutator::VisitStmt_(op).as_or_throw<For>();
+      if (tirx::IsNoOp(loop->body))
+        return Evaluate(IntImm::Int32(0));
+      loop.CopyOnWrite()->var = loop_var;
       loop.CopyOnWrite()->annotations =
           RewriteMetadata(op->annotations).cast<Map<String, Any>>();
       return loop;
     }
 
-    Stmt VisitStmt_(const AttrStmtNode *op) final {
-      if (per_core_ && op->attr_key == tl::attr::kAscendTask)
-        return RewritePerCoreCandidate(ffi::GetRef<AttrStmt>(op));
-      AttrStmt attr;
-      if (op->attr_key == tl::attr::kAscendPerCoreTask) {
+    Stmt VisitStmt_(const RegionStmtNode *op) final {
+      auto key = ScheduleMarkerKey(op);
+      if (key.empty()) {
+        for (const Var &variable : op->body_params) {
+          owner_->varying_.insert(variable);
+          local_vars_.insert(owner_->VarFor(variable, p_));
+        }
+        for (const Var &variable : op->result_vars)
+          owner_->varying_.insert(variable);
+        return NativeMutator::VisitStmt_(op);
+      }
+      if (key == kScheduleCondition) {
+        auto condition = analyzer_->Simplify(
+            VisitExpr(ScheduleMarkerPayload(op).as_or_throw<PrimExpr>()));
+        if (GetConstInt(condition) == 0)
+          return Evaluate(IntImm::Int32(0));
+        if (GetConstInt(condition) == 1)
+          return VisitStmt(UnwrapScheduleMarker(op));
+        PrimExpr path = per_core_ ? per_core_->path : IntImm::Bool(true);
+        if (per_core_)
+          per_core_->path = path && condition;
+        ++conditional_depth_;
+        Stmt body = VisitStmt(UnwrapScheduleMarker(op));
+        --conditional_depth_;
+        if (per_core_)
+          per_core_->path = path;
+        if (tirx::IsNoOp(body))
+          return body;
+        return MakeScheduleMarker(key, condition, body, op->loc,
+                                  !op->result_vars.empty());
+      }
+      if (per_core_ && key == attr::kAscendTask)
+        return RewritePerCoreCandidate(ffi::GetRef<RegionStmt>(op));
+      Stmt body{ffi::UnsafeInit{}};
+      if (key == attr::kAscendPerCoreTask) {
         ICHECK(per_core_ == nullptr);
         PerCoreRouting routing;
         per_core_ = &routing;
-        attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+        body = VisitStmt(UnwrapScheduleMarker(op));
         per_core_ = nullptr;
-        // Subcore-dependent and task-local routes can execute the group more
-        // than once on AIC. Its explicit synchronization is a single protocol
-        // whose participation and execution counts must not follow that replay.
         ICHECK(owner_->count_ == 1 || !routing.replays_fixpipe ||
-               !HasCrossCoreSync(attr->body))
+               !HasCrossCoreSync(body))
             << "Subcore projection of T.PerCoreTask with explicit "
-               "synchronization and subcore-dependent or task-local Fixpipe "
-               "routing is not supported: projection may change the "
-               "synchronization participation or execution counts. Move it "
-               "outside T.PerCoreTask, or compute each explicit sub_blockid "
-               "before T.PerCoreTask using subcore-uniform values";
-        if (routing.routed)
-          active_ = active_ && GetPerCoreActiveGuard(attr, routing.active);
+               "synchronization and "
+               "subcore-dependent or task-local Fixpipe routing is not "
+               "supported";
+        if (routing.routed) {
+          auto projected =
+              MakeScheduleMarker(key, ScheduleMarkerPayload(op), body, op->loc);
+          active_ = active_ && GetPerCoreActiveGuard(projected, routing.active);
+        }
       } else {
-        attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+        body = VisitStmt(UnwrapScheduleMarker(op));
       }
-      // Projection can remove a condition inside an assumption/attribute
-      // guard. Do not leave a schedule unit whose guarded payload is empty.
-      if (is_no_op(attr->body))
-        return Evaluate(0);
-      attr.CopyOnWrite()->node = RewriteMetadata(op->node);
-      if (op->attr_key == tl::attr::kAscendTask ||
-          op->attr_key == tl::attr::kAscendPerCoreTask) {
-        auto metadata = task_metadata_detail::CopyTaskMetadata(attr->node);
-        metadata.Set("subcore", Integer(p_));
-        attr.CopyOnWrite()->node = std::move(metadata);
+      if (tirx::IsNoOp(body))
+        return body;
+      Any payload = RewriteMetadata(ScheduleMarkerPayload(op));
+      if (key == attr::kAscendTask || key == attr::kAscendPerCoreTask) {
+        auto metadata = task_metadata_detail::CopyTaskMetadata(payload);
+        metadata.Set("subcore", p_);
+        payload = metadata;
       }
-      return attr;
+      return MakeScheduleMarker(key, payload, body, op->loc,
+                                !op->result_vars.empty());
     }
-    PrimExpr VisitExpr_(const VarNode *op) final {
-      Var var = ffi::GetRef<Var>(op);
-      if (var.same_as(owner_->sid_))
-        return make_const(var.dtype(), p_);
-      Var mapped = owner_->VarFor(var, p_);
+
+    Expr VisitExpr_(const VarNode *op) final {
+      Var variable = ffi::GetRef<Var>(op);
+      if (variable.same_as(owner_->sid_))
+        return MakeConst(variable.as_or_throw<PrimVar>().ty(), p_);
+      Var mapped = owner_->VarFor(variable, p_);
       if (auto constant = owner_->constants_.Get(mapped))
         return constant.value();
       return mapped;
     }
 
-    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-      BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-      load.CopyOnWrite()->buffer = owner_->BufferFor(op->buffer, p_);
-      return load;
-    }
-
-    Stmt VisitStmt_(const BufferStoreNode *op) final {
-      BufferStore store =
-          Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-      store.CopyOnWrite()->buffer = owner_->BufferFor(op->buffer, p_);
-      return store;
-    }
-
     Stmt VisitStmt_(const BindNode *op) final {
-      Var var = owner_->VarFor(op->var, p_);
-      PrimExpr value = analyzer_.Simplify(VisitExpr(op->value));
-      local_vars_.insert(var);
+      Var variable = owner_->VarFor(op->var, p_);
+      Expr value = VisitExpr(op->value);
+      if (auto scalar = value.as<PrimExpr>())
+        value = analyzer_->Simplify(scalar.value());
+      local_vars_.insert(variable);
       if (conditional_depth_ == 0 && value.as<IntImmNode>())
-        owner_->constants_.Set(var, value);
-      return Bind(var, value, op->span);
+        owner_->constants_.Set(variable, value.as_or_throw<PrimExpr>());
+      return Bind(variable, value, op->loc);
     }
 
     Stmt VisitStmt_(const SeqStmtNode *op) final {
       Array<Stmt> statements;
       for (const Stmt &statement : op->seq) {
         Stmt rewritten = VisitStmt(statement);
-        if (!is_no_op(rewritten))
+        if (!tirx::IsNoOp(rewritten))
           statements.push_back(std::move(rewritten));
       }
-      return SeqStmt::Flatten(statements);
+      return SeqStmt(statements);
     }
 
-    Stmt VisitStmt_(const IfThenElseNode *op) final {
-      PrimExpr condition = analyzer_.Simplify(VisitExpr(op->condition));
-      if (is_one(condition))
+    Stmt VisitStmt_(const IfNode *op) final {
+      PrimExpr condition = analyzer_->Simplify(VisitExpr(op->condition));
+      if ((GetConstInt(condition) == 1))
         return VisitStmt(op->then_case);
-      if (is_zero(condition))
+      if ((GetConstInt(condition) == 0))
         return op->else_case.has_value() ? VisitStmt(op->else_case.value())
-                                         : Evaluate(0);
-      PrimExpr path = per_core_ ? per_core_->path : Bool(true);
+                                         : Evaluate(IntImm::Int32(0));
+      PrimExpr path = per_core_ ? per_core_->path : IntImm::Bool(true);
       if (per_core_)
         per_core_->path = path && condition;
       ++conditional_depth_;
@@ -614,93 +644,82 @@ private:
       --conditional_depth_;
       if (per_core_)
         per_core_->path = path;
-      if (is_no_op(then_case) &&
-          (!else_case.has_value() || is_no_op(else_case.value())))
-        return Evaluate(0);
-      if (is_no_op(then_case))
-        return IfThenElse(!condition, else_case.value(), std::nullopt,
-                          op->span);
-      if (else_case.has_value() && is_no_op(else_case.value()))
+      if (tirx::IsNoOp(then_case) &&
+          (!else_case.has_value() || tirx::IsNoOp(else_case.value())))
+        return Evaluate(IntImm::Int32(0));
+      if (tirx::IsNoOp(then_case))
+        return If(!condition, SeqStmt(else_case.value()), std::nullopt,
+                  op->loc);
+      if (else_case.has_value() && tirx::IsNoOp(else_case.value()))
         else_case = std::nullopt;
-      return IfThenElse(condition, then_case, else_case, op->span);
-    }
-
-    Stmt VisitStmt_(const AllocBufferNode *op) final {
-      return AllocBuffer(
-          owner_->BufferFor(op->buffer, p_),
-          RewriteMetadata(op->annotations).cast<Map<String, Any>>(), op->span);
-    }
-
-    PrimExpr VisitExpr_(const CallNode *op) final {
-      Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-      Map<String, ObjectRef> annotations;
-      for (const auto &[key, value] : call->annotations)
-        annotations.Set(key,
-                        value.as<PrimExprNode>()
-                            ? ObjectRef(VisitExpr(Downcast<PrimExpr>(value)))
-                            : value);
-      call.CopyOnWrite()->annotations = annotations;
-      return call;
+      return If(condition, SeqStmt(then_case),
+                else_case ? Optional<SeqStmt>(SeqStmt(else_case.value()))
+                          : std::nullopt,
+                op->loc);
     }
 
     Stmt VisitStmt_(const EvaluateNode *op) final {
-      PrimExpr source_value = op->value;
-      Evaluate statement = Downcast<Evaluate>(StmtExprMutator::VisitStmt_(op));
+      Expr source_value = op->value;
+      Evaluate statement =
+          NativeMutator::VisitStmt_(op).as_or_throw<Evaluate>();
       const auto *call_node = statement->value.as<CallNode>();
       if (!call_node || !IsAscendCopyCall(call_node))
         return statement;
       Call call = ffi::GetRef<Call>(call_node);
-      AscendCopy copy(call->args, call->annotations);
+      AscendCopy copy(call->args, AscendCallAnnotations(call.get()));
       if (!IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst))
         return statement;
       // AIC executes this task, while its UB destination is owned by p.
       ICHECK_EQ(copy->dual_dst_ctl, 0);
-      Map<String, ObjectRef> annotations = call->annotations;
-      PrimExpr target = Integer(p_);
+      Map<String, Any> annotations = AscendCallAnnotations(call.get());
+      PrimExpr target = IntImm::Int32(p_);
       if (auto explicit_sid = annotations.Get("sub_blockid"))
-        target = Downcast<PrimExpr>(explicit_sid.value());
+        target = copy->sub_blockid;
       // Keep a single routing target for each projected atomic task.
-      if (copy_target_.defined()) {
-        ICHECK(analyzer_.CanProveEqual(target, copy_target_.value()))
+      if (copy_target_.has_value()) {
+        ICHECK(analyzer_->CanProveEqual(target, copy_target_.value()))
             << "Projected Fixpipe copies in one T.Task must use the same "
                "sub_blockid; put copies with different destinations in "
                "separate T.Task scopes";
       }
       copy_target_ = target;
-      annotations.Set("sub_blockid", Integer(p_));
-      call.CopyOnWrite()->annotations = annotations;
+      annotations.Set("sub_blockid", IntImm::Int32(p_));
+      call.CopyOnWrite()->attrs = DictAttrs(annotations);
       statement.CopyOnWrite()->value = call;
-      Call source = Downcast<Call>(source_value);
+      Call source = source_value.as_or_throw<Call>();
       if (auto origin = owner_->copy_origins_.find(source);
           origin != owner_->copy_origins_.end())
         source = origin->second;
       // Classify the original route: projection can turn sid and its aliases
       // into constants even though multiple copies execute on the same AIC.
-      auto source_route = source->annotations.Get("sub_blockid");
+      auto source_route =
+          AscendCallAnnotations(source.get()).Get("sub_blockid");
+      auto source_route_expr =
+          source_route ? source_route.value().as<PrimExpr>() : std::nullopt;
       has_varying_copy_route_ |=
           !source_route ||
-          owner_->Varies(Downcast<PrimExpr>(source_route.value()));
+          (source_route_expr && owner_->Varies(source_route_expr.value()));
       owner_->copy_origins_.emplace(call, std::move(source));
 
-      PrimExpr condition = analyzer_.Simplify(target == p_);
+      PrimExpr condition = analyzer_->Simplify(target == p_);
       bool task_local = SideEffect(condition) > CallEffectKind::kReadState;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
         if (const auto *var = node.as<VarNode>())
           task_local |= local_vars_.count(ffi::GetRef<Var>(var)) != 0;
-        task_local |= node.as<BufferLoadNode>() != nullptr;
+        task_local |= node.as<TensorLoadNode>() != nullptr;
       });
       // Task-local definitions must dominate the route test. Mutable loads
       // also stay at the copy site so earlier task writes remain visible.
       if (task_local) {
         has_local_copy_guard_ = true;
-        return IfThenElse(condition, statement, std::nullopt, op->span);
+        return If(condition, SeqStmt(statement), std::nullopt, op->loc);
       }
       active_ = active_ && condition;
       return statement;
     }
 
   public:
-    PrimExpr active_{Bool(true)};
+    PrimExpr active_{IntImm::Bool(true)};
 
   private:
     SubcoreProjector *owner_;
@@ -711,14 +730,14 @@ private:
     Optional<PrimExpr> copy_target_;
     bool has_varying_copy_route_{false};
     bool has_local_copy_guard_{false};
-    arith::Analyzer analyzer_;
+    sym::Analyzer analyzer_;
   };
 
   bool Varies(const Any &value) const {
+    if (auto buffer = value.try_cast<TensorVar>())
+      return Varies(buffer.value());
     if (auto var = value.try_cast<Var>())
       return varying_.count(var.value());
-    if (auto buffer = value.try_cast<Buffer>())
-      return Varies(buffer.value());
     return false;
   }
 
@@ -731,7 +750,8 @@ private:
           continue;
         }
         for (int p = 0; p < count_; ++p)
-          result.push_back(Rewriter(this, p).RewriteMetadata(entry));
+          result.push_back(
+              ffi::make_object<Rewriter>(this, p)->RewriteMetadata(entry));
       }
       return result;
     }
@@ -739,7 +759,8 @@ private:
       Array<Any> result;
       for (const Any &entry : value.cast<Array<Any>>())
         for (int p = 0; p < count_; ++p)
-          result.push_back(Rewriter(this, p).RewriteMetadata(entry));
+          result.push_back(
+              ffi::make_object<Rewriter>(this, p)->RewriteMetadata(entry));
       return result;
     }
     if (auto map = value.try_cast<Map<Any, Any>>()) {
@@ -750,9 +771,9 @@ private:
           continue;
         }
         for (int p = 0; p < count_; ++p) {
-          Rewriter rewriter(this, p);
-          result.Set(rewriter.RewriteMetadata(storage),
-                     rewriter.RewriteMetadata(entry));
+          auto rewriter = ffi::make_object<Rewriter>(this, p);
+          result.Set(rewriter->RewriteMetadata(storage),
+                     rewriter->RewriteMetadata(entry));
         }
       }
       return result;
@@ -780,24 +801,24 @@ private:
         ++next_origin_;
       int origin = origin_it->second;
       for (int p = begin; p < end; ++p) {
-        Stmt body;
+        Stmt body{ffi::UnsafeInit{}};
         if (node->IsTask()) {
-          AttrStmt marker = Downcast<AttrStmt>(task->stmt);
-          auto metadata = task_metadata_detail::CopyTaskMetadata(marker->node);
+          RegionStmt marker = task->stmt.as_or_throw<RegionStmt>();
+          auto metadata = task_metadata_detail::CopyTaskMetadata(
+              ScheduleMarkerPayload(marker.get()));
           if (project) {
-            metadata.Set("subcore", Integer(p));
-            metadata.Set("subcore_origin", Integer(origin));
+            metadata.Set("subcore", p);
+            metadata.Set("subcore_origin", origin);
           }
-          body = AttrStmt(metadata, marker->attr_key, marker->value,
-                          marker->body, marker->span);
+          body = WithSchedulePayload(marker.get(), metadata);
         } else {
           const auto *control = static_cast<const ControlNode *>(node.get());
           For loop = control->control;
           if (project)
-            varying_.insert(loop->loop_var);
+            varying_.insert(loop->var);
           loop.CopyOnWrite()->body =
-              RewriteList(control->children, project ? p : -1,
-                          conditional_parent || node->HasConditions());
+              SeqStmt(RewriteList(control->children, project ? p : -1,
+                                  conditional_parent || node->HasConditions()));
           if (!project) {
             Map<String, Any> annotations;
             for (const auto &[key, value] : loop->annotations)
@@ -808,34 +829,34 @@ private:
         }
         body = WrapScheduledGuards(body, node->GetGuards());
         if (project) {
-          Rewriter rewriter(this, p, !conditional_parent);
-          body = rewriter(body);
-          arith::Analyzer analyzer;
-          PrimExpr active = analyzer.Simplify(rewriter.active_);
-          if (is_zero(active))
+          auto rewriter =
+              ffi::make_object<Rewriter>(this, p, !conditional_parent);
+          body = rewriter->VisitStmt(body);
+          sym::Analyzer analyzer;
+          PrimExpr active = analyzer->Simplify(rewriter->active_);
+          if ((GetConstInt(active) == 0))
             continue;
-          if (node->IsTask() && rewriter.CanReplayFixpipe())
+          if (node->IsTask() && rewriter->CanReplayFixpipe())
             replay_check_origins_.insert(origin);
-          if (!is_one(active))
-            body = IfThenElse(active, body);
+          if (!(GetConstInt(active) == 1))
+            body = MakeScheduleMarker(kScheduleCondition, active, body);
         }
-        if (const auto *eval = body.as<EvaluateNode>();
-            eval && is_zero(eval->value))
+        if (tirx::IsNoOp(body))
           continue;
-        result.push_back(
-            AttrStmt(ScheduleUnitMetadata{{kScheduleUnitStage,
-                                           Integer(node->GetStage())}},
-                     attr::kScheduleUnit, Integer(1), body));
+        result.push_back(MakeScheduleMarker(
+            attr::kScheduleUnit,
+            ScheduleUnitMetadata{{kScheduleUnitStage, node->GetStage()}},
+            body));
       }
     }
-    return SeqStmt::Flatten(result);
+    return SeqStmt(result);
   }
 
   Var sid_;
   int count_;
   int next_origin_{0};
   std::unordered_map<const IRStructure *, int> origins_;
-  std::unordered_map<AttrStmt, int, ObjectPtrHash, ObjectPtrEqual>
+  std::unordered_map<RegionStmt, int, ObjectPtrHash, ObjectPtrEqual>
       candidate_origins_;
   std::unordered_set<int> replay_check_origins_;
   std::unordered_map<Call, Call, ObjectPtrHash, ObjectPtrEqual> copy_origins_;
@@ -846,6 +867,8 @@ private:
   std::array<BufferMap, 2> buffers_;
   Map<Var, PrimExpr> constants_;
   AivStorageMap ub_sids_;
+  VarSet local_definitions_;
+  std::vector<std::pair<TensorVar, TensorVar>> external_aliases_;
 };
 
 } // namespace ascend

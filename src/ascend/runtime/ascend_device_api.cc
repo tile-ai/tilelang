@@ -27,23 +27,17 @@ class AscendDeviceAPI final : public DeviceAPI {
 public:
   void SetDevice(Device dev) final {}
 
-  void GetAttr(Device dev, DeviceAttrKind kind, ffi::Any *rv) final {
-    if (kind == kExist) {
-      *rv = 1;
+  ffi::Any GetAttr(Device dev, const ffi::String &name) final {
+    if (name == "exist") {
+      return true;
     }
+    return nullptr;
   }
 
-  void *AllocDataSpace(Device dev, size_t nbytes, size_t alignment,
-                       DLDataType type_hint) final {
+  ffi::Tensor Empty(ffi::ShapeView shape, DLDataType dtype, DLDevice device,
+                    ffi::Optional<MemoryScope> memory_scope) final {
     TVM_FFI_THROW(RuntimeError)
         << "AscendDeviceAPI does not allocate device memory; NPU buffers are "
-           "managed by PyTorch (torch_npu).";
-    TVM_FFI_UNREACHABLE();
-  }
-
-  void FreeDataSpace(Device dev, void *ptr) final {
-    TVM_FFI_THROW(RuntimeError)
-        << "AscendDeviceAPI does not free device memory; NPU buffers are "
            "managed by PyTorch (torch_npu).";
     TVM_FFI_UNREACHABLE();
   }

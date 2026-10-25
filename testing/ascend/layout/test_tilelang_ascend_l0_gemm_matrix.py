@@ -30,6 +30,7 @@ def make_l0_gemm_kernel(M: int, K: int, N: int, dtype: str):
 
 @pytest.mark.parametrize("dtype,atol,rtol", [("bfloat16", 1e-2, 1e-2), ("float8_e4m3fn", 1e-1, 5e-2)])
 @pytest.mark.parametrize("m,k,n", [(1, 64, 64), (15, 15, 15), (32, 32, 32), (100, 100, 100)])
+@tilelang.testing.requires_ascend
 def test_l0_gemm_matrix(dtype, atol, rtol, m, k, n):
     kernel = tilelang.compile(make_l0_gemm_kernel(m, k, n, dtype), target="ascend", out_idx=-1)
     x = (torch.randn(m, k, device="npu") * 0.25).to(getattr(torch, dtype))

@@ -4,7 +4,7 @@
  *
  * These layouts and utilities are Ascend-specific and were split out of the
  * generic src/layout/ tree. They rely on the shared layout infrastructure in
- * "layout/layout.h" (Layout, tirx::Buffer, Range, ExpandLayout2D, ...).
+ * "layout/layout.h" (Layout, tirx::TensorVar, Range, ExpandLayout2D, ...).
  */
 #ifndef TVM_TL_ASCEND_LAYOUT_ASCEND_LAYOUTS_H_
 #define TVM_TL_ASCEND_LAYOUT_ASCEND_LAYOUTS_H_
@@ -20,17 +20,18 @@ namespace tl {
 // (16 for bf16/fp16, 32 for fp8, 8 for fp32). In MajorK, cols is the reduce-K
 // axis; in MajorMN, cols is the output M/N axis. The legacy NZ name is kept as
 // an alias of MajorK during the transition.
-Layout MakeAscendMajorKLayout(const tirx::Buffer &buffer, int k_align = 1);
-Layout MakeAscendMajorMNLayout(const tirx::Buffer &buffer, int k_align = 1);
-Layout MakeAscendL0CLayout(const tirx::Buffer &buffer);
-Layout MakeAscendSFLayout(const tirx::Buffer &buffer);
-Layout MakeAscendNZLayout(const tirx::Buffer &buffer);
+Layout MakeAscendMajorKLayout(const tirx::TensorVar &buffer, int k_align = 1);
+Layout MakeAscendMajorMNLayout(const tirx::TensorVar &buffer, int k_align = 1);
+Layout MakeAscendL0CLayout(const tirx::TensorVar &buffer);
+Layout MakeAscendSFLayout(const tirx::TensorVar &buffer);
+Layout MakeAscendNZLayout(const tirx::TensorVar &buffer);
 
 // Compact padded-NZ layout used by software UB ND->NZ scatter:
 // [leading..., row, col] -> [flatten(leading...) * (cols/C0) + col/C0,
 //                            row, col%C0].
-Layout MakeAscendCompactNZLayout(const tirx::Buffer &buffer);
-bool IsAscendCompactNZLayout(const Layout &layout, const tirx::Buffer &buffer);
+Layout MakeAscendCompactNZLayout(const tirx::TensorVar &buffer);
+bool IsAscendCompactNZLayout(const Layout &layout,
+                             const tirx::TensorVar &buffer);
 
 // Ascend NZ column fractal C0 = 32 bytes / element_size = 256 / element_bits
 // (16 for bf16/fp16, 32 for fp8, 8 for fp32).
@@ -38,7 +39,7 @@ int AscendC0(int element_bits);
 
 // Ascend ND (row-major) identity layout for GM/UB operands; OutputShape ==
 // InputShape. Used for copy-parameter derivation only (not anchored).
-Layout makeAscendNDLayout(const tirx::Buffer &buffer);
+Layout makeAscendNDLayout(const tirx::TensorVar &buffer);
 
 /// Compute a 0-origin strided buffer view for a logical sub-region on a
 /// layout-annotated physical buffer.
@@ -49,7 +50,7 @@ Layout makeAscendNDLayout(const tirx::Buffer &buffer);
 ///   - layout: the layout whose forward map describes the physical layout.
 ///   - logical_region: one Range per layout input dim, [min, min+extent).
 ///
-/// Produces a Buffer sharing phys_buf->data, with:
+/// Produces a TensorVar sharing phys_buf->data, with:
 ///   - shape = physical extents (from MapRegionBounds)
 ///   - strides = row-major strides of phys_buf shape
 ///   - elem_offset = sum(phys_region[i].min * strides[i])
@@ -60,9 +61,8 @@ Layout makeAscendNDLayout(const tirx::Buffer &buffer);
 /// Example (NZ): logical [32:64, 32:96] on [128, 128] bf16
 ///   → phys_region = [2:2, 2:4, 0:16, 0:16]
 ///   → shape = [2, 4, 16, 16], strides = [2048, 256, 16, 1], offset = 4608
-tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
-                              const Layout &layout,
-                              const ffi::Array<Range> &logical_region);
+Call MakeStridedSlice(const tirx::TensorVar &phys_buf, const Layout &layout,
+                      const ffi::Array<Range> &logical_region);
 
 // ── Ascend fractal layout analysis ──────────────────────────────────
 //
@@ -91,25 +91,25 @@ enum class LogicalAxis {
 
 struct AscendFractalLayoutInfo {
   AscendFractalKind kind;
-  PrimExpr c0;       // C0 value (or 16 for L0C, pack for SF)
-  PrimExpr row_frac; // always 16
-  PrimExpr rows;     // logical rows (dim -2)
-  PrimExpr cols;     // logical cols (dim -1)
-  PrimExpr outer0;   // full physical extent of C0-axis outer for matrix data or
-                     // row16-axis outer for SF
-  PrimExpr outer1;   // full physical extent of row16-axis outer for matrix data
-                     // or C0-axis outer for SF
-  LogicalAxis c0_axis;    // which logical axis is grouped by C0/pack
+  PrimExpr c0 = 0;       // C0 value (or 16 for L0C, pack for SF)
+  PrimExpr row_frac = 0; // always 16
+  PrimExpr rows = 0;     // logical rows (dim -2)
+  PrimExpr cols = 0;     // logical cols (dim -1)
+  PrimExpr outer0 = 0; // full physical extent of C0-axis outer for matrix data
+                       // or row16-axis outer for SF
+  PrimExpr outer1 = 0; // full physical extent of row16-axis outer for matrix
+                       // data or C0-axis outer for SF
+  LogicalAxis c0_axis; // which logical axis is grouped by C0/pack
   LogicalAxis row16_axis; // which logical axis is grouped by 16
 };
 
 struct AscendFractalRegionInfo {
-  Range outer0;    // C0-axis outer region for matrix data or row16-axis outer
-                   // region for SF
-  Range outer1;    // row16-axis outer region for matrix data or C0-axis outer
-                   // region for SF
-  Range row_inner; // row%16 region
-  Range col_inner; // C0% (or 16%) region
+  Range outer0{ffi::UnsafeInit{}}; // C0-axis outer region for matrix data or
+                                   // row16-axis outer region for SF
+  Range outer1{ffi::UnsafeInit{}}; // row16-axis outer region for matrix data or
+                                   // C0-axis outer region for SF
+  Range row_inner{ffi::UnsafeInit{}}; // row%16 region
+  Range col_inner{ffi::UnsafeInit{}}; // C0% (or 16%) region
 };
 
 /// Whether a layout carries a canonical Ascend fractal tag (not compact NZ).
@@ -118,7 +118,7 @@ bool IsAscendFractalLayout(const Layout &layout);
 /// Extract information from a tagged canonical Ascend fractal layout.
 /// Returns false for undefined/invalid inputs and fails for an untagged layout.
 bool TryExtractAscendFractalLayout(const Layout &layout,
-                                   const tirx::Buffer &buf,
+                                   const tirx::TensorVar &buf,
                                    AscendFractalLayoutInfo *out);
 
 /// Map a logical region through \p layout and extract the trailing four

@@ -1,4 +1,5 @@
 import tilelang
+import math
 import tilelang.language as T
 import torch
 import re
@@ -40,14 +41,19 @@ def qwq(dtype=torch.float8_e4m3fn):
 def test_hoist_broadcast(dtype):
     kernel = qwq(dtype)
     print(kernel.get_kernel_source())
-    matches = re.findall(r"(\w+) broadcast_var(_[0-9]+)? = \1", kernel.get_kernel_source())
-    assert len(matches) == 4
+    matches = re.findall(r"\b\w+ broadcast_var(?:_[0-9]+)? =", kernel.get_kernel_source())
+    assert len(matches) == (4 if dtype == torch.float16 else 5)
     a = torch.empty((32,), device="cuda", dtype=dtype)
     b = torch.empty((16,), device="cuda", dtype=dtype)
     c = torch.empty((8,), device="cuda", dtype=dtype)
     d = torch.empty((4,), device="cuda", dtype=dtype)
     e = torch.empty((2,), device="cuda", dtype=dtype)
     kernel(a, b, c, d, e)
+    for output, value in [(a, 1.0), (b, 13.5), (c, 3.14), (d, 2.72), (e, 430.0)]:
+        if dtype == torch.float8_e8m0fnu:
+            value = 2.0 ** math.ceil(math.log2(value))
+        expected = torch.full(output.shape, value, dtype=torch.float32, device="cuda").to(dtype).float()
+        torch.testing.assert_close(output.float(), expected, rtol=0, atol=0)
 
 
 auto_target = tvm.target.Target(determine_target("auto"))
@@ -68,13 +74,13 @@ def test_transform_hoist():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             A_shared[0:8] = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
 
     @T.prim_func
     def after():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
             broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
             A_shared[0:8] = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
@@ -86,14 +92,14 @@ def test_transform_hoist_let_stmt():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             val: T.float8_e4m3fnx8 = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
             A_shared[0:8] = val
 
     @T.prim_func
     def after():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
             broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)
             val: T.float8_e4m3fnx8 = T.Broadcast(broadcast_var, 8) + T.Broadcast(broadcast_var_1, 8)
@@ -112,7 +118,7 @@ def test_transform_hoist_let_stmt_with_nested_bufferstore_broadcasts():
     @T.prim_func
     def before():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             # LetStmt value has broadcasts
             val: T.float8_e4m3fnx8 = T.Broadcast(T.float8_e4m3fn(1.2), 8) + T.Broadcast(T.float8_e4m3fn(3.4), 8)
             # Body is a BufferStore with additional broadcasts
@@ -121,7 +127,7 @@ def test_transform_hoist_let_stmt_with_nested_bufferstore_broadcasts():
     @T.prim_func
     def after():
         with T.Kernel(8):
-            A_shared = T.decl_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
+            A_shared = T.alloc_buffer((256), T.float8_e4m3fn, scope="shared.dyn")
             # Hoisted from LetStmt value
             broadcast_var: T.float8_e4m3fn = T.float8_e4m3fn(1.2)
             broadcast_var_1: T.float8_e4m3fn = T.float8_e4m3fn(3.4)

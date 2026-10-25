@@ -24,11 +24,13 @@ using namespace ffi;
  */
 class AtomicOpBaseNode : public TileOperatorNode {
 public:
-  PrimExpr src_value; ///< Source values, for cases src is not a buffer
-  Buffer src, dst;    ///< Source and destination buffers
+  explicit AtomicOpBaseNode(ffi::UnsafeInit tag) : dst(tag) {}
+  Optional<PrimExpr> src_value;
+  Optional<TensorVar> src;
+  TensorVar dst;
   Array<Range> src_range,
       dst_range; ///< Access ranges for source and destination
-  Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
+  BlockAnnotations annotations;
   // Supported annotation keys:
   //   - "coalesced_width": IntImm, width for memory coalescing optimization
   //   - "memory_order": IntImm, memory order for atomic operations
@@ -37,7 +39,7 @@ public:
 
   /// Lower through the registered target implementation.
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
 
   /// Infer layout through the registered target implementation.
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
@@ -46,12 +48,25 @@ public:
   /// Get memory order from annotations (default: relaxed = 0)
   int GetMemoryOrder() const {
     if (auto val = annotations.Get("memory_order")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value;
-      }
+      auto order = GetIntAnnotation(val.value());
+      TVM_FFI_CHECK(order && *order >= 0 && *order <= 5, ValueError)
+          << "Atomic memory_order must be a constant integer in [0, 5]";
+      return *order;
     }
     return 0;
   }
+
+  bool UseTMA() const {
+    if (auto value = annotations.Get("use_tma")) {
+      auto enabled = GetIntAnnotation(value.value());
+      TVM_FFI_CHECK(enabled && (*enabled == 0 || *enabled == 1), ValueError)
+          << "Atomic use_tma must be a constant boolean";
+      return *enabled;
+    }
+    return false;
+  }
+
+  void Initialize(const Array<Expr> &arguments, BlockAnnotations options);
 
   /// Get the element-wise operation Op (pure virtual, implemented by derived)
   virtual const Op &GetElemOp() const = 0;
@@ -68,7 +83,7 @@ struct AtomicReduceImpl {
                             InferLevel level);
 
   Stmt (*lower)(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterAtomicReduceImpl(AtomicReduceImpl impl);
@@ -76,6 +91,7 @@ void RegisterAtomicReduceImpl(AtomicReduceImpl impl);
 /// Node class for atomic maximum operations
 class AtomicMaxNode : public AtomicOpBaseNode {
 public:
+  using AtomicOpBaseNode::AtomicOpBaseNode;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicMax", AtomicMaxNode,
                                     TileOperatorNode);
 
@@ -100,15 +116,14 @@ class AtomicMax : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicMax, TileOperator,
                                              AtomicMaxNode);
-  TVM_DLL
-  AtomicMax(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL AtomicMax(Array<Expr> args, BlockAnnotations annotations = {});
   static const Op &Get();
 };
 
 /// Node class for atomic minimum operations
 class AtomicMinNode : public AtomicOpBaseNode {
 public:
+  using AtomicOpBaseNode::AtomicOpBaseNode;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicMin", AtomicMinNode,
                                     TileOperatorNode);
 
@@ -133,9 +148,7 @@ class AtomicMin : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicMin, TileOperator,
                                              AtomicMinNode);
-  TVM_DLL
-  AtomicMin(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL AtomicMin(Array<Expr> args, BlockAnnotations annotations = {});
   static const Op &Get();
 };
 

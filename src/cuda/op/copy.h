@@ -53,18 +53,18 @@ struct TMADesc {
   Array<PrimExpr> global_stride;
   Array<PrimExpr> smem_box;
   Array<PrimExpr> smem_stride;
-  PrimExpr global_addr;
+  Expr global_addr{ffi::UnsafeInit{}};
   int swizzle;
   int interleave;
   int oob_fill;
   int l2_promotion;
 
-  Array<PrimExpr> EncodeCallArgs() const {
-    Array<PrimExpr> args;
+  Array<Expr> EncodeCallArgs() const {
+    Array<Expr> args;
     args.reserve(rank * 4 + 7);
 
-    args.push_back(data_type);
-    args.push_back(static_cast<int>(rank));
+    args.push_back(PrimExpr(data_type));
+    args.push_back(PrimExpr(static_cast<int>(rank)));
     args.push_back(global_addr);
     for (auto e : global_shape)
       args.push_back(e);
@@ -74,10 +74,10 @@ struct TMADesc {
       args.push_back(e);
     for (auto e : smem_stride)
       args.push_back(e);
-    args.push_back(interleave);
-    args.push_back(swizzle);
-    args.push_back(l2_promotion);
-    args.push_back(oob_fill);
+    args.push_back(PrimExpr(interleave));
+    args.push_back(PrimExpr(swizzle));
+    args.push_back(PrimExpr(l2_promotion));
+    args.push_back(PrimExpr(oob_fill));
 
     return args;
   }
@@ -91,7 +91,8 @@ struct TMADesc {
 // instruction `rest_idx` (std::nullopt when rest_size == 1).
 struct TMABulkCopyPlan {
   TMADesc desc;
-  Buffer shared_tensor;          // physical (remapped) shared buffer
+  TensorVar shared_tensor{
+      ffi::UnsafeInit{}};        // physical (remapped) shared buffer
   int64_t box_size;              // elements per TMA instruction
   int64_t rest_size;             // TMA instructions per copy
   cute::IntTuple shared_offset;  // physical offset of the tile base
@@ -100,6 +101,7 @@ struct TMABulkCopyPlan {
   cute::Layout rest_to_tma_mode; // instruction index -> TMA coord steps
 
   PrimExpr SharedOffset(std::optional<PrimExpr> rest_idx) const;
+  Expr SharedPointer(std::optional<PrimExpr> rest_idx, int access_mask) const;
   Array<PrimExpr> TmaCoords(std::optional<PrimExpr> rest_idx) const;
 
   // One statement per TMA instruction: `make_copy` receives the rest index
@@ -119,15 +121,16 @@ struct TMABulkCopyAnalysis {
 // `box_dim_caps` overrides the per-global-dim box limit of kTmaMaxBoxDim
 // (im2col allows 1024 pixels per column).
 TMABulkCopyAnalysis
-AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
-                   Buffer shared_tensor, const Array<Range> &global_range,
+AnalyzeTMABulkCopy(const LowerArgs &lower_args, const TensorVar &global_tensor,
+                   TensorVar shared_tensor, const Array<Range> &global_range,
                    const Array<Range> &shared_range,
                    const std::vector<int64_t> &box_dim_caps = {});
 
 struct CopyAnalysisContext {
+  explicit CopyAnalysisContext(Target target) : target(std::move(target)) {}
   Target target;
   const LayoutMap *layout_map = nullptr;
-  arith::Analyzer *analyzer = nullptr;
+  ffi::Optional<sym::Analyzer> analyzer;
   bool emit_diagnostics = false;
 };
 

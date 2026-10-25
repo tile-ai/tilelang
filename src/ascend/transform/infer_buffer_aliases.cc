@@ -22,16 +22,15 @@
  * \brief Infer pairwise buffer-reuse compatibility for manual schedules.
  */
 #include "buffer_alias.h"
+#include "compat/visit.h"
 #include "merge_ub_common.h"
 #include "support/check.h"
-#include <tvm/arith/analyzer.h>
+#include "transform/common/attr.h"
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -51,8 +50,6 @@
 #include "ascend_pipe.h"
 #include "core_mask.h"
 #include "op/builtin.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 
@@ -100,19 +97,22 @@ struct LinearEvent {
 
   // Sync primitives
   std::string hard_event;
-  PrimExpr event_id_expr; // raw event_id expression (may contain loop vars)
-  std::string pipe_name;  // for pipe_barrier
-  int mode_id = 0;        // for cross_core
+  PrimExpr event_id_expr{
+      IntImm::Int32(0)}; // raw event_id expression (may contain loop vars)
+  std::string pipe_name; // for pipe_barrier
+  int mode_id = 0;       // for cross_core
+  const VarNode *loop_variable = nullptr;
+  const VarNode *sid_variable = nullptr;
   CoreMask core_mask = kCoreUnassigned;
   ResourcePipe exec_pipe = ResourcePipe::kUnknown;
 
   // Scope markers
   const ForNode *for_node = nullptr;
-  const IfThenElseNode *if_node = nullptr;
+  const IfNode *if_node = nullptr;
 
   // Alloc info
   struct AllocInfo {
-    const AllocBufferNode *alloc = nullptr;
+    const BindNode *alloc = nullptr;
     size_t scope_level = 0;
   };
   bool IsBufferAccess() const { return kind == EventKind::kBufferAccess; }
@@ -124,28 +124,12 @@ struct LinearEvent {
   }
 };
 
-// Visitor that checks whether a PrimExpr references a Var with "sid" in its
-// name_hint — used to detect cross-core sid-dependent event_id expressions.
-class SidDetector : public ExprVisitor {
+class SyncAwareLinearizer : public ascend::AnalysisVisitor {
 public:
-  bool found = false;
-  void VisitExpr_(const VarNode *op) final {
-    if (std::string(op->name_hint).find("sid") != std::string::npos)
-      found = true;
-    ExprVisitor::VisitExpr_(op);
-  }
-};
-
-static bool ContainsSid(const PrimExpr &e) {
-  SidDetector d;
-  d(e);
-  return d.found;
-}
-
-class SyncAwareLinearizer : public StmtExprVisitor {
-public:
-  explicit SyncAwareLinearizer(const std::string &target_scope)
-      : target_scope_(target_scope) {}
+  SyncAwareLinearizer(const std::string &target_scope,
+                      ascend::StorageAliasAnalysis *storage)
+      : target_scope_(target_scope), storage_(storage) {}
+  bool uncertain_control_flow = false;
 
   std::vector<LinearEvent> linear_events;
   std::unordered_map<const VarNode *, LinearEvent::AllocInfo> alloc_info;
@@ -159,19 +143,36 @@ private:
     return IsDynamicSharedMemory(var);
   }
 
-  void VisitStmt_(const AllocBufferNode *op) final {
-    size_t level = scope_stack_.size();
-    const VarNode *buf = op->buffer->data.get();
-    if (IsTargetMemory(op->buffer->data)) {
-      LinearEvent::AllocInfo info;
-      info.alloc = op;
-      info.scope_level = level;
-      alloc_info[buf] = info;
+  void VisitStmt_(const BindNode *node) final {
+    const auto *call = node->value.as<CallNode>();
+    if (call && call->op.same_as(tirx::alloc_tensor_op())) {
+      if (IsTargetMemory(node->var)) {
+        alloc_info[node->var.get()] = {node, scope_stack_.size()};
+      }
+      return;
     }
-    StmtExprVisitor::VisitStmt_(op);
+    if (storage_->Resolve(node->value)) {
+      VisitAddress(node->value);
+      return;
+    }
+    VisitExpr(node->value);
   }
 
+  void VisitStmt_(const WhileNode *node) final {
+    uncertain_control_flow = true;
+    ascend::AnalysisVisitor::VisitStmt_(node);
+  }
+
+  void VisitStmt_(const BreakNode *) final { uncertain_control_flow = true; }
+  void VisitStmt_(const ContinueNode *) final { uncertain_control_flow = true; }
+  void VisitStmt_(const ReturnNode *) final { uncertain_control_flow = true; }
+
   void VisitStmt_(const ForNode *op) final {
+    auto begin_value = GetConstInt(op->begin);
+    auto end_value = GetConstInt(op->end);
+    auto step_value = GetConstInt(op->step);
+    if (!begin_value || !end_value || !step_value || *step_value <= 0)
+      uncertain_control_flow = true;
     LinearEvent begin;
     begin.kind = EventKind::kForBegin;
     begin.scope_level = static_cast<int>(scope_stack_.size());
@@ -179,7 +180,7 @@ private:
     linear_events.push_back(begin);
 
     loop_stack_.push_back(op);
-    StmtExprVisitor::VisitStmt_(op);
+    ascend::AnalysisVisitor::VisitStmt_(op);
     loop_stack_.pop_back();
 
     LinearEvent end;
@@ -189,23 +190,38 @@ private:
     linear_events.push_back(end);
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
+  void VisitStmt_(const IfNode *op) final {
+    if (auto condition = GetConstInt(op->condition)) {
+      if (*condition)
+        VisitStmt(op->then_case);
+      else if (op->else_case)
+        VisitStmt(op->else_case.value());
+      return;
+    }
+    bool pipeline_guard = !loop_stack_.empty();
+    if (pipeline_guard) {
+      auto annotation = loop_stack_.back()->annotations.Get("enable_offset");
+      pipeline_guard = annotation && GetIntAnnotation(*annotation).value_or(0);
+      for (const Var &variable : tvm::UndefinedVars(op->condition))
+        pipeline_guard &= variable.same_as(loop_stack_.back()->var);
+    }
+    uncertain_control_flow |= !pipeline_guard;
     LinearEvent if_begin;
     if_begin.kind = EventKind::kIfBegin;
     if_begin.scope_level = static_cast<int>(scope_stack_.size());
     if_begin.if_node = op;
     linear_events.push_back(if_begin);
 
-    StmtExprVisitor::VisitStmt(op->then_case);
+    VisitStmt(op->then_case);
 
-    if (op->else_case.defined()) {
+    if (op->else_case.has_value()) {
       LinearEvent else_begin;
       else_begin.kind = EventKind::kElseBegin;
       else_begin.scope_level = static_cast<int>(scope_stack_.size());
       else_begin.if_node = op;
       linear_events.push_back(else_begin);
 
-      StmtExprVisitor::VisitStmt(op->else_case.value());
+      VisitStmt(op->else_case.value());
     }
 
     LinearEvent if_end;
@@ -215,91 +231,84 @@ private:
     linear_events.push_back(if_end);
   }
 
-  void VisitStmt_(const SBlockNode *op) final {
-    CoreMask saved = current_core_mask_;
-    if (op->name_hint == "VECTOR")
+  void VisitStmt_(const RegionStmtNode *node) final {
+    CoreMask previous_core = current_core_mask_;
+    const VarNode *previous_sid = current_sid_;
+    auto name = node->attrs.GetAttr<String>("name_hint").value_or("");
+    if (name == "VECTOR")
       current_core_mask_ = kCoreVector;
-    else if (op->name_hint == "CUBE")
+    else if (name == "CUBE")
       current_core_mask_ = kCoreCube;
-    // Scope blocks provide the pipe for bare BufferStore/BufferLoad accesses
-    // that are not nested in an instruction call.
-    ResourcePipe block_pipe = GetAscendBlockPipe(op->name_hint);
-    bool has_block_pipe = block_pipe != ResourcePipe::kUnknown;
-    if (has_block_pipe)
-      pipe_stack_.push_back(block_pipe);
-    StmtExprVisitor::VisitStmt_(op);
-    if (has_block_pipe)
+    if (node->op.same_as(tirx::launch_thread_op()) &&
+        node->args[0].as_or_throw<StringImm>()->value == "cthread")
+      current_sid_ = node->body_params[0].get();
+    ResourcePipe pipe = GetAscendBlockPipe(name);
+    if (pipe != ResourcePipe::kUnknown)
+      pipe_stack_.push_back(pipe);
+    scope_stack_.push_back(node);
+    VisitStmt(node->body);
+    scope_stack_.pop_back();
+    if (pipe != ResourcePipe::kUnknown)
       pipe_stack_.pop_back();
-    current_core_mask_ = saved;
+    current_core_mask_ = previous_core;
+    current_sid_ = previous_sid;
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent && !in_thread_env_) {
-      in_thread_env_ = true;
-      scope_stack_.push_back(op);
-      StmtExprVisitor::VisitStmt_(op);
-      scope_stack_.pop_back();
-      in_thread_env_ = false;
-    } else if (op->attr_key == tirx::attr::extern_scope) {
-      scope_stack_.push_back(op);
-      StmtExprVisitor::VisitStmt_(op);
-      scope_stack_.pop_back();
-    } else if (op->attr_key == s_tir::attr::virtual_thread) {
-      scope_stack_.push_back(op);
-      StmtExprVisitor::VisitStmt_(op);
-      scope_stack_.pop_back();
-    } else {
-      StmtExprVisitor::VisitStmt_(op);
-    }
+  const VarNode *Root(const Expr &expression) const {
+    if (const auto *load = expression.as<TensorLoadNode>())
+      return Root(load->source);
+    if (const auto *region = expression.as<TensorRegionNode>())
+      return Root(region->source);
+    if (const auto *call = expression.as<CallNode>();
+        call && call->op.same_as(tl::access_ptr()))
+      return Root(call->args[0]);
+    auto access = storage_->Resolve(expression);
+    return access ? access->root.get() : nullptr;
   }
 
-  void VisitStmt_(const BufferStoreNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-    const VarNode *buf = op->buffer->data.get();
-    if (alloc_info.count(buf)) {
-      LinearEvent e;
-      e.kind = EventKind::kBufferAccess;
-      e.scope_level = static_cast<int>(scope_stack_.size());
-      e.touched.push_back(buf);
-      e.is_write.push_back(true);
-      e.core_mask = current_core_mask_;
-      e.exec_pipe = CurrentExecPipe();
-      linear_events.push_back(e);
-    }
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    const VarNode *buf = op->buffer->data.get();
-    if (alloc_info.count(buf)) {
-      LinearEvent e;
-      e.kind = EventKind::kBufferAccess;
-      e.scope_level = static_cast<int>(scope_stack_.size());
-      e.touched.push_back(buf);
-      e.is_write.push_back(false);
-      e.core_mask = current_core_mask_;
-      e.exec_pipe = CurrentExecPipe();
-      linear_events.push_back(e);
-    }
-  }
-
-  void VisitExpr_(const VarNode *op) final {
-    // Direct variable references count as reads for liveness.  Buffer-var
-    // arguments of tvm_access_ptr are handled by the CallNode override below
-    // (which knows the read/write mask); suppress the generic read here so we
-    // do not mislabel every access_ptr operand as a read.
-    if (suppress_var_read_.count(op))
+  void RecordAccess(const Expr &expression, bool write) {
+    const VarNode *storage = Root(expression);
+    if (!storage || !alloc_info.count(storage))
       return;
-    if (alloc_info.count(op)) {
-      LinearEvent e;
-      e.kind = EventKind::kBufferAccess;
-      e.scope_level = static_cast<int>(scope_stack_.size());
-      e.touched.push_back(op);
-      e.is_write.push_back(false);
-      e.core_mask = current_core_mask_;
-      e.exec_pipe = CurrentExecPipe();
-      linear_events.push_back(e);
+    LinearEvent event;
+    event.kind = EventKind::kBufferAccess;
+    event.scope_level = static_cast<int>(scope_stack_.size());
+    event.touched.push_back(storage);
+    event.is_write.push_back(write);
+    event.core_mask = current_core_mask_;
+    event.exec_pipe = CurrentExecPipe();
+    linear_events.push_back(event);
+  }
+
+  void VisitAddress(const Expr &expression) {
+    if (const auto *load = expression.as<TensorLoadNode>()) {
+      for (const PrimExpr &index : load->indices)
+        VisitExpr(index);
+    } else if (const auto *region = expression.as<TensorRegionNode>()) {
+      Visit(region->region);
+    } else if (const auto *call = expression.as<CallNode>()) {
+      if (!call->args.empty())
+        VisitAddress(call->args[0]);
+      for (size_t index = 1; index < call->args.size(); ++index)
+        VisitExpr(call->args[index]);
     }
+  }
+
+  void VisitStmt_(const TensorStoreNode *node) final {
+    VisitExpr(node->value);
+    for (const PrimExpr &index : node->indices)
+      VisitExpr(index);
+    RecordAccess(node->dest, true);
+  }
+
+  void VisitExpr_(const TensorLoadNode *node) final {
+    for (const PrimExpr &index : node->indices)
+      VisitExpr(index);
+    RecordAccess(node->source, false);
+  }
+
+  void VisitExpr_(const VarNode *node) final {
+    RecordAccess(GetRef<Var>(node), false);
   }
 
   void VisitStmt_(const EvaluateNode *op) final {
@@ -308,7 +317,7 @@ private:
       if (TryRecordSync(call))
         return;
     }
-    StmtExprVisitor::VisitStmt_(op);
+    ascend::AnalysisVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallNode *op) final {
@@ -334,52 +343,31 @@ private:
     if (inst_pipe != ResourcePipe::kUnknown) {
       pipe_stack_.push_back(inst_pipe);
       pushed_pipe = true;
-    } else if (!op->op.same_as(builtin::tvm_access_ptr()) &&
+    } else if (!op->op.same_as(tl::access_ptr()) &&
                IsAscendPipeRelevantCall(call)) {
       unknown_instr_ops.insert(call->op.as<Op>().value()->name);
     }
-    // tvm_access_ptr(type, buffer_var, offset, extent, rw_mask): record the
-    // access with the correct read/write flag from rw_mask (1=read, 2=write,
-    // 3=read+write) instead of letting the bare buffer_var count as a read.
-    if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() >= 5) {
-      if (const auto *buf = op->args[1].as<VarNode>()) {
-        if (alloc_info.count(buf)) {
-          int64_t rw = 0;
-          if (const auto *imm = op->args[4].as<IntImmNode>())
-            rw = imm->value;
-          bool is_read = (rw & 1) != 0;
-          bool is_write = (rw & 2) != 0;
-          // A pure access_ptr with an unknown/zero mask is treated as a read
-          // (conservative: keeps the buffer live) rather than being dropped.
-          if (!is_read && !is_write)
-            is_read = true;
-          LinearEvent e;
-          e.kind = EventKind::kBufferAccess;
-          e.scope_level = static_cast<int>(scope_stack_.size());
-          e.touched.push_back(buf);
-          e.is_write.push_back(is_write);
-          e.core_mask = current_core_mask_;
-          e.exec_pipe = CurrentExecPipe();
-          linear_events.push_back(e);
-          // Suppress the generic VarNode read for this buffer var while we
-          // visit the rest of the access_ptr sub-expression.
-          suppress_var_read_.insert(buf);
-          for (const PrimExpr &arg : op->args)
-            VisitExpr(arg);
-          suppress_var_read_.erase(buf);
-          return;
-        }
-      }
+    if (Root(call)) {
+      int64_t mask = 1;
+      if (op->op.same_as(tl::access_ptr()) && op->args.size() >= 3)
+        mask = GetConstInt(op->args[2]).value_or(3);
+      else if (auto value = AscendCallAnnotations(op).Get(attr::kAccessMask))
+        mask = GetIntAnnotation(value.value()).value_or(3);
+      RecordAccess(call, (mask & 2) != 0);
+      VisitAddress(call);
+    } else {
+      ascend::AnalysisVisitor::VisitExpr_(op);
     }
-    StmtExprVisitor::VisitExpr_(op);
-    if (pushed_pipe) {
+    if (pushed_pipe)
       pipe_stack_.pop_back();
-    }
   }
 
   bool TryRecordSync(const CallNode *call) {
     LinearEvent e;
     e.scope_level = static_cast<int>(scope_stack_.size());
+    e.loop_variable =
+        loop_stack_.empty() ? nullptr : loop_stack_.back()->var.get();
+    e.sid_variable = current_sid_;
 
     if (call->op.same_as(ascend_set_flag())) {
       e.kind = EventKind::kSetFlag;
@@ -388,7 +376,7 @@ private:
         e.hard_event = str_imm->value;
         e.exec_pipe = GetFlagEndpointPipe(e.hard_event, FlagEndpoint::kSet);
       }
-      e.event_id_expr = call->args[1];
+      e.event_id_expr = call->args[1].as_or_throw<PrimExpr>();
       e.core_mask = current_core_mask_;
       linear_events.push_back(e);
       return true;
@@ -400,7 +388,7 @@ private:
         e.hard_event = str_imm->value;
         e.exec_pipe = GetFlagEndpointPipe(e.hard_event, FlagEndpoint::kWait);
       }
-      e.event_id_expr = call->args[1];
+      e.event_id_expr = call->args[1].as_or_throw<PrimExpr>();
       e.core_mask = current_core_mask_;
       linear_events.push_back(e);
       return true;
@@ -420,12 +408,12 @@ private:
       e.kind = EventKind::kCrossCoreSet;
       ICHECK_GE(call->args.size(), 3U);
       if (auto *int_imm = call->args[0].as<IntImmNode>())
-        e.mode_id = static_cast<int>(int_imm->value);
+        e.mode_id = int_imm->value.as<int>().value();
       if (auto *str_imm = call->args[1].as<StringImmNode>()) {
         e.hard_event = str_imm->value; // store pipe name
         e.exec_pipe = ParseAscendPipe(e.hard_event);
       }
-      e.event_id_expr = call->args[2];
+      e.event_id_expr = call->args[2].as_or_throw<PrimExpr>();
       e.core_mask = current_core_mask_;
       linear_events.push_back(e);
       return true;
@@ -434,12 +422,12 @@ private:
       e.kind = EventKind::kCrossCoreWait;
       ICHECK_GE(call->args.size(), 3U);
       if (auto *int_imm = call->args[0].as<IntImmNode>())
-        e.mode_id = static_cast<int>(int_imm->value);
+        e.mode_id = int_imm->value.as<int>().value();
       if (auto *str_imm = call->args[1].as<StringImmNode>()) {
         e.hard_event = str_imm->value;
         e.exec_pipe = ParseAscendPipe(e.hard_event);
       }
-      e.event_id_expr = call->args[2];
+      e.event_id_expr = call->args[2].as_or_throw<PrimExpr>();
       e.core_mask = current_core_mask_;
       linear_events.push_back(e);
       return true;
@@ -448,16 +436,14 @@ private:
   }
 
   std::string target_scope_;
-  bool in_thread_env_ = false;
+  ascend::StorageAliasAnalysis *storage_;
+  const VarNode *current_sid_ = nullptr;
   CoreMask current_core_mask_ = kCoreUnassigned;
 
   std::vector<ResourcePipe> pipe_stack_;
   ResourcePipe CurrentExecPipe() const {
     return pipe_stack_.empty() ? ResourcePipe::kUnknown : pipe_stack_.back();
   }
-  // Buffer vars whose bare VarNode read should be suppressed because the
-  // enclosing tvm_access_ptr already recorded the access with its rw_mask.
-  std::unordered_set<const VarNode *> suppress_var_read_;
   std::vector<const Object *> scope_stack_; // generic scope tracking
   std::vector<const ForNode *> loop_stack_; // active For loops
 };
@@ -546,7 +532,7 @@ struct ActiveRange {
 static int ParseLowerGuardOffset(const PrimExpr &cond,
                                  const ForNode *for_node) {
   const auto *ge = cond.as<GENode>();
-  if (ge == nullptr || ge->a.as<VarNode>() != for_node->loop_var.get())
+  if (ge == nullptr || ge->a.as<VarNode>() != for_node->var.get())
     return 0;
   const auto *add = ge->b.as<AddNode>();
   if (add == nullptr)
@@ -556,12 +542,10 @@ static int ParseLowerGuardOffset(const PrimExpr &cond,
     return 0;
 
   int64_t step = 1;
-  if (for_node->step.defined()) {
-    if (const auto *step_imm = for_node->step.value().as<IntImmNode>())
-      step = step_imm->value;
-  }
+  if (const auto *step_imm = for_node->step.as<IntImmNode>())
+    step = step_imm->value.as<int64_t>().value();
   if (step != 0)
-    return static_cast<int>(offset->value / step);
+    return static_cast<int>(offset->value.as<int64_t>().value() / step);
   return 0;
 }
 
@@ -577,12 +561,11 @@ static int ParseLowerGuardOffset(const PrimExpr &cond,
 // loop-var-dependent flag ids (k-1, k%2+2, ...) evaluate correctly.
 static int EvalGuardAtLoopVal(const PrimExpr &cond, const ForNode *for_node,
                               int64_t loop_val) {
-  Map<Var, PrimExpr> subs;
-  subs.Set(GetRef<Var>(for_node->loop_var.get()),
-           IntImm(for_node->loop_var->dtype, loop_val));
+  Map<PrimVar, PrimExpr> subs;
+  subs.Set(for_node->var, IntImm(for_node->var.ty(), loop_val));
   PrimExpr e = Substitute(cond, subs);
-  arith::Analyzer analyzer;
-  e = analyzer.Simplify(e);
+  sym::Analyzer analyzer;
+  e = analyzer->Simplify(e);
   if (const auto *imm = e.as<IntImmNode>())
     return imm->value != 0 ? 1 : 0;
   return -1;
@@ -597,8 +580,7 @@ static UnrollPlan MakeConservativeLoopPlan(const ForNode *for_node,
   fallback.phys_count = phys_count;
   fallback.force_loop_live = phys_count > 1;
   fallback.phys_for_unrolled.push_back(0);
-  fallback.loop_var_vals.push_back(
-      IntImm(for_node->loop_var->dtype, loop_start_val));
+  fallback.loop_var_vals.push_back(for_node->begin);
   for (int i = begin_idx; i <= end_idx; ++i)
     fallback.event_unrolled_iters[i].push_back(0);
   return fallback;
@@ -617,7 +599,7 @@ static UnrollPlan MakeConservativeLoopPlan(const ForNode *for_node,
 //   - modulus (k % M): the steady-state id pattern repeats with period M.
 // Crucially the natural trip-count bound (k < N) contributes tail depth
 // phys_count - N ≈ 0, NOT N, so large loops don't force a large unroll.
-class LoopVarConstCollector : public ExprVisitor {
+class LoopVarConstCollector : public tirx::StmtExprVisitor {
 public:
   explicit LoopVarConstCollector(const VarNode *loop_var, int64_t loop_start)
       : loop_var_(loop_var), loop_start_(loop_start) {}
@@ -640,7 +622,7 @@ public:
   void RecordMod(const PrimExpr &a, const PrimExpr &b) {
     if (RefersLoopVar(a, loop_var_)) {
       if (const auto *c = b.as<IntImmNode>()) {
-        int mod = static_cast<int>(c->value);
+        int mod = static_cast<int>(c->value.as<int64_t>().value());
         max_mod = std::max(max_mod, mod);
         if (mod > 1) {
           int gcd = std::gcd(mod_period, mod);
@@ -649,13 +631,13 @@ public:
       }
     }
   }
-  void VisitExpr_(const ModNode *op) final {
+  Optional<VisitInterrupt> Visit_(const ModNode *op) final {
     RecordMod(op->a, op->b);
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const FloorModNode *op) final {
+  Optional<VisitInterrupt> Visit_(const FloorModNode *op) final {
     RecordMod(op->a, op->b);
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
 
   // lower bound: loop_var side >= const
@@ -668,48 +650,49 @@ public:
   }
 
   //   a < b
-  void VisitExpr_(const LTNode *op) final {
+  Optional<VisitInterrupt> Visit_(const LTNode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
       if (const auto *c = op->b.as<IntImmNode>())
-        RecordUpper(c->value); // k < C
+        RecordUpper(c->value.as<int64_t>().value()); // k < C
     } else if (RefersLoopVar(op->b, loop_var_)) {
       if (const auto *c = op->a.as<IntImmNode>())
-        RecordLower(c->value + 1); // C < k  → k >= C+1
+        RecordLower(c->value.as<int64_t>().value() + 1); // C < k  → k >= C+1
     }
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
   //   a <= b
-  void VisitExpr_(const LENode *op) final {
+  Optional<VisitInterrupt> Visit_(const LENode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
       if (const auto *c = op->b.as<IntImmNode>())
-        RecordUpper(c->value + 1); // k <= C → k < C+1
+        RecordUpper(c->value.as<int64_t>().value() + 1); // k <= C → k < C+1
     } else if (RefersLoopVar(op->b, loop_var_)) {
       if (const auto *c = op->a.as<IntImmNode>())
-        RecordLower(c->value); // C <= k
+        RecordLower(c->value.as<int64_t>().value()); // C <= k
     }
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const GTNode *op) final {
+  Optional<VisitInterrupt> Visit_(const GTNode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
       if (const auto *c = op->b.as<IntImmNode>())
-        RecordLower(c->value + 1); // k > C → k >= C+1
+        RecordLower(c->value.as<int64_t>().value() + 1); // k > C → k >= C+1
     } else if (RefersLoopVar(op->b, loop_var_)) {
       if (const auto *c = op->a.as<IntImmNode>())
-        RecordUpper(c->value); // C > k → k < C
+        RecordUpper(c->value.as<int64_t>().value()); // C > k → k < C
     }
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const GENode *op) final {
+  Optional<VisitInterrupt> Visit_(const GENode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
       if (const auto *c = op->b.as<IntImmNode>())
-        RecordLower(c->value); // k >= C
+        RecordLower(c->value.as<int64_t>().value()); // k >= C
     } else if (RefersLoopVar(op->b, loop_var_)) {
       if (const auto *c = op->a.as<IntImmNode>())
-        RecordUpper(c->value + 1); // C >= k → k <= C → k < C+1
+        RecordUpper(c->value.as<int64_t>().value() +
+                    1); // C >= k → k <= C → k < C+1
     }
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const EQNode *op) final {
+  Optional<VisitInterrupt> Visit_(const EQNode *op) final {
     // k == C constrains both ends.
     const IntImmNode *c = nullptr;
     if (RefersLoopVar(op->a, loop_var_))
@@ -717,25 +700,28 @@ public:
     else if (RefersLoopVar(op->b, loop_var_))
       c = op->a.as<IntImmNode>();
     if (c) {
-      RecordLower(c->value);
-      RecordUpper(c->value + 1);
+      RecordLower(c->value.as<int64_t>().value());
+      RecordUpper(c->value.as<int64_t>().value() + 1);
     }
-    ExprVisitor::VisitExpr_(op);
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const SubNode *op) final {
+  Optional<VisitInterrupt> Visit_(const SubNode *op) final {
     if (RefersLoopVar(op->a, loop_var_))
       if (const auto *c = op->b.as<IntImmNode>())
-        max_offset = std::max<int>(max_offset, static_cast<int>(c->value));
-    ExprVisitor::VisitExpr_(op);
+        max_offset = std::max<int>(
+            max_offset, static_cast<int>(c->value.as<int64_t>().value()));
+    return tirx::StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const AddNode *op) final {
+  Optional<VisitInterrupt> Visit_(const AddNode *op) final {
     if (RefersLoopVar(op->a, loop_var_))
       if (const auto *c = op->b.as<IntImmNode>())
-        max_offset = std::max<int>(max_offset, static_cast<int>(c->value));
+        max_offset = std::max<int>(
+            max_offset, static_cast<int>(c->value.as<int64_t>().value()));
     if (RefersLoopVar(op->b, loop_var_))
       if (const auto *c = op->a.as<IntImmNode>())
-        max_offset = std::max<int>(max_offset, static_cast<int>(c->value));
-    ExprVisitor::VisitExpr_(op);
+        max_offset = std::max<int>(
+            max_offset, static_cast<int>(c->value.as<int64_t>().value()));
+    return tirx::StmtExprVisitor::Visit_(op);
   }
 
 private:
@@ -753,22 +739,26 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
   UnrollPlan plan;
   plan.for_node = for_node;
 
-  int64_t phys_extent_val = 1;
-  if (auto *ext_imm = for_node->extent.as<IntImmNode>())
-    phys_extent_val = ext_imm->value;
-  else
-    phys_extent_val = 256; // conservative fallback
-  plan.phys_count = static_cast<int>(phys_extent_val);
-
-  int64_t step_val = 1;
-  if (for_node->step.defined())
-    if (auto *s = for_node->step.value().as<IntImmNode>())
-      step_val = s->value;
-
-  int64_t loop_start_val = 0;
-  if (auto *s = for_node->min.as<IntImmNode>())
-    loop_start_val = s->value;
-  DataType loop_var_dtype = for_node->loop_var->dtype;
+  auto begin_value = GetConstInt(for_node->begin);
+  auto end_value = GetConstInt(for_node->end);
+  auto step_value = GetConstInt(for_node->step);
+  if (!begin_value || !end_value || !step_value || *step_value <= 0)
+    return MakeConservativeLoopPlan(for_node, 2, 0, begin_idx, end_idx);
+  sym::Analyzer bounds;
+  PrimExpr trip_count =
+      bounds->Simplify(floordiv(ascend::StorageIndex(for_node->end) -
+                                    ascend::StorageIndex(for_node->begin) +
+                                    IntImm::Int64(*step_value) - 1,
+                                IntImm::Int64(*step_value)));
+  auto extent = GetConstInt(trip_count);
+  if (!extent || *extent > std::numeric_limits<int>::max())
+    return MakeConservativeLoopPlan(for_node, 2, 0, begin_idx, end_idx);
+  plan.phys_count = std::max<int64_t>(0, *extent);
+  if (plan.phys_count == 0)
+    return plan;
+  int64_t step_val = *step_value;
+  int64_t loop_start_val = *begin_value;
+  PrimType loop_var_dtype = for_node->var.ty();
 
   // Bounded unroll path for software-pipelined loops.
   //
@@ -794,34 +784,33 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
   bool enable_offset = false;
   if (auto ann = for_node->annotations.Get("enable_offset"))
     enable_offset = ann.value().cast<bool>();
-  if (enable_offset && for_node->extent.as<IntImmNode>() &&
-      plan.phys_count >= 1) {
+  if (enable_offset && extent.has_value() && plan.phys_count >= 1) {
     // 1) Scan guards + flag-id expressions for loop-var-related constants.
-    LoopVarConstCollector coll(for_node->loop_var.get(), loop_start_val);
+    auto coll =
+        make_object<LoopVarConstCollector>(for_node->var.get(), loop_start_val);
     for (int i = begin_idx; i <= end_idx; ++i) {
       const LinearEvent &ev = events[i];
       if (ev.kind == EventKind::kIfBegin && ev.if_node) {
-        coll(ev.if_node->condition);
+        coll->Visit(ev.if_node->condition);
       }
       if ((ev.kind == EventKind::kSetFlag || ev.kind == EventKind::kWaitFlag ||
            ev.kind == EventKind::kCrossCoreSet ||
-           ev.kind == EventKind::kCrossCoreWait) &&
-          ev.event_id_expr.defined()) {
-        coll(ev.event_id_expr);
+           ev.kind == EventKind::kCrossCoreWait)) {
+        coll->Visit(ev.event_id_expr);
       }
     }
     // Head depth: prologue guards (C <= k) plus additive-offset context.
     // Tail depth: how many iterations before the end an upper-bound guard
     // (k < C) switches off, i.e. phys_count - (C - loop_start); plus offset.
-    int head_depth = coll.max_lower + coll.max_offset + coll.max_mod;
-    int tail_depth = coll.max_offset + coll.max_mod;
-    if (coll.max_upper >= 0) {
-      int upper_from_end =
-          plan.phys_count - (coll.max_upper - static_cast<int>(loop_start_val));
-      tail_depth =
-          std::max(tail_depth, upper_from_end + coll.max_offset + coll.max_mod);
+    int head_depth = coll->max_lower + coll->max_offset + coll->max_mod;
+    int tail_depth = coll->max_offset + coll->max_mod;
+    if (coll->max_upper >= 0) {
+      int upper_from_end = plan.phys_count -
+                           (coll->max_upper - static_cast<int>(loop_start_val));
+      tail_depth = std::max(tail_depth,
+                            upper_from_end + coll->max_offset + coll->max_mod);
     }
-    int period = std::max(coll.mod_period, 1);
+    int period = std::max(coll->mod_period, 1);
     head_depth = std::max(head_depth, period);
     tail_depth = std::max(tail_depth, period);
 
@@ -854,9 +843,9 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
             static_cast<int64_t>(phys_list.size()) >
         kMaxInstances) {
       LOG(WARNING) << "InferBufferAliases precise unroll budget exceeded for "
-                   << "loop " << for_node->loop_var->name_hint << ": "
-                   << events_in_loop << " events * " << phys_list.size()
-                   << " iterations > " << kMaxInstances
+                   << "loop " << for_node->var->name << ": " << events_in_loop
+                   << " events * " << phys_list.size() << " iterations > "
+                   << kMaxInstances
                    << "; falling back to conservative whole-loop liveness";
       return MakeConservativeLoopPlan(for_node, plan.phys_count, loop_start_val,
                                       begin_idx, end_idx);
@@ -974,8 +963,8 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
     // Non-pipelined loop: single unrolled iteration.
     plan.phys_for_unrolled.push_back(0);
     int64_t start_val = 0;
-    if (auto *s = for_node->min.as<IntImmNode>())
-      start_val = s->value;
+    if (auto *s = for_node->begin.as<IntImmNode>())
+      start_val = s->value.as<int64_t>().value();
     plan.loop_var_vals.push_back(IntImm(loop_var_dtype, start_val));
     for (int i = begin_idx; i <= end_idx; ++i)
       plan.event_unrolled_iters[i].push_back(0);
@@ -1057,16 +1046,18 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
 
 struct EventInstance {
   int node_id;
-  int linear_idx;    // index into LinearEvent array
-  int unrolled_iter; // which unrolled iteration
-  int physical_iter; // physical loop iteration
-  PrimExpr loop_val; // loop variable value at this instance
+  int linear_idx;                      // index into LinearEvent array
+  int unrolled_iter;                   // which unrolled iteration
+  int physical_iter;                   // physical loop iteration
+  PrimExpr loop_val{IntImm::Int32(0)}; // loop variable value at this instance
   EventKind kind;
   std::vector<const VarNode *> touched;
   std::vector<bool> is_write;
   std::string hard_event;
-  PrimExpr event_id_expr;
+  PrimExpr event_id_expr{IntImm::Int32(0)};
   int mode_id = 0;
+  const VarNode *loop_variable = nullptr;
+  const VarNode *sid_variable = nullptr;
   CoreMask core_mask = kCoreUnassigned;
   ResourcePipe exec_pipe = ResourcePipe::kUnknown;
   // Ids of *all* enclosing pipelined (multi-iteration) loops this instance
@@ -1116,6 +1107,10 @@ static void BuildEventInstancesRecursive(
       int for_end = j - 1; // points to kForEnd
 
       UnrollPlan plan = BuildLoopUnrollPlan(ev.for_node, events, i, for_end);
+      if (plan.phys_count == 0 || plan.phys_for_unrolled.empty()) {
+        i = for_end + 1;
+        continue;
+      }
 
       // Build the set of unrolled iterations for this loop.
       std::vector<int> local_unrolled;
@@ -1157,12 +1152,14 @@ static void BuildEventInstancesRecursive(
       inst.linear_idx = idx;
       inst.unrolled_iter = 0;
       inst.physical_iter = 0;
-      inst.loop_val = IntImm(DataType::Int(32), 0);
+      inst.loop_val = IntImm(PrimType::Int(32), 0);
       inst.kind = ev.kind;
       inst.touched = ev.touched;
       inst.is_write = ev.is_write;
       inst.hard_event = ev.hard_event;
       inst.event_id_expr = ev.event_id_expr;
+      inst.loop_variable = ev.loop_variable;
+      inst.sid_variable = ev.sid_variable;
       inst.mode_id = ev.mode_id;
       inst.core_mask = ev.core_mask;
       inst.exec_pipe = ev.exec_pipe;
@@ -1197,6 +1194,8 @@ static void BuildEventInstancesRecursive(
         inst.is_write = ev.is_write;
         inst.hard_event = ev.hard_event;
         inst.event_id_expr = ev.event_id_expr;
+        inst.loop_variable = ev.loop_variable;
+        inst.sid_variable = ev.sid_variable;
         inst.mode_id = ev.mode_id;
         inst.core_mask = ev.core_mask;
         inst.exec_pipe = ev.exec_pipe;
@@ -1479,12 +1478,13 @@ private:
     auto add_endpoint = [&](int idx, bool is_set, bool is_cross,
                             const std::string &hard_event, int mode_id) {
       EventInstance &inst = instances[idx];
-      bool has_sid = ContainsSid(inst.event_id_expr);
+      bool has_sid = inst.sid_variable &&
+                     LoopVarConstCollector::RefersLoopVar(inst.event_id_expr,
+                                                          inst.sid_variable);
       int sid_lo = 0, sid_hi = has_sid ? 2 : 1;
       for (int sid_val = sid_lo; sid_val < sid_hi; ++sid_val) {
         int64_t val = 0;
-        if (!EvaluateEventId(inst.event_id_expr, inst.loop_val, sid_val,
-                             has_sid, &val))
+        if (!EvaluateEventId(inst, sid_val, has_sid, &val))
           continue;
         SyncKey key{hard_event, mode_id, is_cross, val};
         buckets[key].push_back(Endpoint{idx, is_set});
@@ -1753,59 +1753,26 @@ private:
     }
   }
 
-  // Evaluate an event_id expression by substituting the loop variable value
-  // and (optionally) sid.  Returns true and writes the integer value if the
-  // expression simplified to a constant.
-  static bool EvaluateEventId(const PrimExpr &expr, const PrimExpr &loop_val,
-                              int sid_val, bool has_sid, int64_t *out) {
-    PrimExpr e = expr;
-    // Collect all Vars in the expression that look like loop variables
-    // (they appear in the expression as the For loop variable).
-    // Substitute them with loop_val.
-    class LoopVarFinder : public ExprVisitor {
-    public:
-      std::vector<Var> loop_vars;
-      void VisitExpr_(const VarNode *op) final {
-        if (std::string(op->name_hint).find("sid") == std::string::npos)
-          loop_vars.push_back(tvm::ffi::GetRef<Var>(op));
-        ExprVisitor::VisitExpr_(op);
-      }
-    };
-
-    LoopVarFinder finder;
-    finder(e);
-
-    Map<Var, PrimExpr> subs;
-    for (const Var &v : finder.loop_vars)
-      subs.Set(v, loop_val);
-
+  static bool EvaluateEventId(const EventInstance &instance, int sid_value,
+                              bool has_sid, int64_t *result) {
+    Map<PrimVar, PrimExpr> substitutions;
+    if (instance.loop_variable) {
+      auto variable =
+          GetRef<Var>(instance.loop_variable).as_or_throw<PrimVar>();
+      substitutions.Set(variable, prim::cast(instance.loop_val, variable.ty()));
+    }
     if (has_sid) {
-      // Find the sid Var and substitute it.
-      class SidVarFinder : public ExprVisitor {
-      public:
-        Var sid_var;
-        void VisitExpr_(const VarNode *op) final {
-          if (std::string(op->name_hint).find("sid") != std::string::npos)
-            sid_var = tvm::ffi::GetRef<Var>(op);
-          ExprVisitor::VisitExpr_(op);
-        }
-      };
-      SidVarFinder svf;
-      svf(e);
-      if (svf.sid_var.defined())
-        subs.Set(svf.sid_var, IntImm(DataType::Int(32), sid_val));
+      auto variable = GetRef<Var>(instance.sid_variable).as_or_throw<PrimVar>();
+      substitutions.Set(variable, IntImm(variable.ty(), sid_value));
     }
-
-    e = Substitute(e, subs);
-
-    arith::Analyzer analyzer;
-    e = analyzer.Simplify(e);
-
-    if (auto *imm = e.as<IntImmNode>()) {
-      *out = imm->value;
-      return true;
-    }
-    return false;
+    sym::Analyzer analyzer;
+    PrimExpr expression =
+        analyzer->Simplify(Substitute(instance.event_id_expr, substitutions));
+    auto value = GetConstInt(expression);
+    if (!value)
+      return false;
+    *result = *value;
+    return true;
   }
 };
 
@@ -1824,10 +1791,10 @@ public:
     return ordered[lhs][rhs] != ordered[rhs][lhs];
   }
 
-  void Build(const HappensBeforeGraph &hb,
-             const std::unordered_map<const VarNode *, const AllocBufferNode *>
-                 &shmem_allocs,
-             const std::vector<const VarNode *> &alloc_order) {
+  void Build(
+      const HappensBeforeGraph &hb,
+      const std::unordered_map<const VarNode *, const BindNode *> &shmem_allocs,
+      const std::vector<const VarNode *> &alloc_order) {
     for (const VarNode *v : alloc_order) {
       if (shmem_allocs.count(v))
         buffer_vars.push_back(v);
@@ -1841,8 +1808,8 @@ public:
           tail.push_back(kv.first);
       std::sort(tail.begin(), tail.end(),
                 [](const VarNode *a, const VarNode *b) {
-                  if (a->name_hint != b->name_hint)
-                    return a->name_hint < b->name_hint;
+                  if (a->name != b->name)
+                    return a->name < b->name;
                   return a < b;
                 });
       buffer_vars.insert(buffer_vars.end(), tail.begin(), tail.end());
@@ -1927,22 +1894,27 @@ public:
 };
 
 /*! \brief Infer pairwise reuse compatibility for one allocation scope. */
-BufferAliasMap
-InferBufferAliasesForScope(const Stmt &stmt, const AllocationMap &allocations,
-                           const AllocationOrder &allocation_order,
-                           const std::string &target_scope, bool verbose,
-                           bool disable_reuse) {
+BufferAliasMap InferBufferAliasesForScope(
+    const Stmt &stmt, const AllocationMap &allocations,
+    const AllocationOrder &allocation_order, const std::string &target_scope,
+    bool verbose, bool disable_reuse, ascend::StorageAliasAnalysis *storage) {
   if (disable_reuse || allocations.size() < 2) {
     BufferAliasMap aliases;
     for (const auto &[var, _] : allocations)
       AddBufferAliasStorage(&aliases, GetRef<Var>(var));
     return aliases;
   }
-  SyncAwareLinearizer linearizer(target_scope);
-  linearizer(stmt);
-  if (verbose && !linearizer.unknown_instr_ops.empty()) {
-    std::vector<std::string> ops(linearizer.unknown_instr_ops.begin(),
-                                 linearizer.unknown_instr_ops.end());
+  auto linearizer = make_object<SyncAwareLinearizer>(target_scope, storage);
+  linearizer->Visit(stmt);
+  if (linearizer->uncertain_control_flow) {
+    BufferAliasMap aliases;
+    for (const auto &[variable, allocation] : allocations)
+      AddBufferAliasStorage(&aliases, GetRef<Var>(variable));
+    return aliases;
+  }
+  if (verbose && !linearizer->unknown_instr_ops.empty()) {
+    std::vector<std::string> ops(linearizer->unknown_instr_ops.begin(),
+                                 linearizer->unknown_instr_ops.end());
     std::sort(ops.begin(), ops.end());
 
     LOG(WARNING)
@@ -1956,7 +1928,7 @@ InferBufferAliasesForScope(const Stmt &stmt, const AllocationMap &allocations,
       LOG(WARNING) << " - " << name;
   }
   std::vector<LinearEvent> events =
-      CoalesceBufferAccessRuns(linearizer.linear_events);
+      CoalesceBufferAccessRuns(linearizer->linear_events);
   HappensBeforeGraph happens_before;
   happens_before.Build(events);
 
@@ -1981,10 +1953,10 @@ InferBufferAliasesForScope(const Stmt &stmt, const AllocationMap &allocations,
                << target_scope << "\":";
     for (int a = 0; a < reuse_analysis.num_buffers; ++a) {
       std::stringstream stream;
-      stream << "    " << reuse_analysis.buffer_vars[a]->name_hint << " -> {";
+      stream << "    " << reuse_analysis.buffer_vars[a]->name << " -> {";
       for (int b = 0; b < reuse_analysis.num_buffers; ++b) {
         if (a != b && reuse_analysis.CanReuse(a, b)) {
-          stream << reuse_analysis.buffer_vars[b]->name_hint << " ";
+          stream << reuse_analysis.buffer_vars[b]->name << " ";
         }
       }
       stream << "}";
@@ -2010,44 +1982,117 @@ void MergeBufferAliasMaps(BufferAliasMap *destination,
   }
 }
 
-class BufferAliasContractStripper : public StmtMutator {
+class BufferAliasContractStripper : public ascend::NativeMutator {
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == kBufferAliasMap)
-      return VisitStmt(op->body);
-    return StmtMutator::VisitStmt_(op);
+  Stmt VisitStmt_(const RegionStmtNode *node) final {
+    auto region =
+        ascend::NativeMutator::VisitStmt_(node).as_or_throw<RegionStmt>();
+    auto attrs = region->attrs->dict;
+    attrs.erase(kBufferAliasMap);
+    region.CopyOnWrite()->attrs = DictAttrs(attrs);
+    return region;
+  }
+
+  Stmt VisitStmt_(const ForNode *node) final {
+    auto loop = ascend::NativeMutator::VisitStmt_(node).as_or_throw<For>();
+    loop.CopyOnWrite()->annotations.erase(kBufferAliasMap);
+    return loop;
   }
 };
 
-Stmt InferBufferAliases(Stmt stmt, bool verbose, bool disable_reuse) {
-  stmt = BufferAliasContractStripper()(std::move(stmt));
-  AllocateCollector collector;
-  collector(stmt);
+class BufferAliasContractInstaller : public ascend::NativeMutator {
+public:
+  std::unordered_map<const SeqStmtNode *, BufferAliasMap> contracts;
+  std::unordered_set<const SeqStmtNode *> owned;
+
+private:
+  Stmt VisitStmt_(const RegionStmtNode *node) final {
+    owned.insert(node->body.get());
+    auto region =
+        ascend::NativeMutator::VisitStmt_(node).as_or_throw<RegionStmt>();
+    auto found = contracts.find(node->body.get());
+    if (found != contracts.end()) {
+      auto attrs = region->attrs->dict;
+      attrs.Set(kBufferAliasMap, found->second);
+      region.CopyOnWrite()->attrs = DictAttrs(attrs);
+    }
+    return region;
+  }
+
+  Stmt VisitStmt_(const ForNode *node) final {
+    owned.insert(node->body.get());
+    auto loop = ascend::NativeMutator::VisitStmt_(node).as_or_throw<For>();
+    auto found = contracts.find(node->body.get());
+    if (found != contracts.end())
+      loop.CopyOnWrite()->annotations.Set(kBufferAliasMap, found->second);
+    return loop;
+  }
+
+  Stmt VisitStmt_(const SeqStmtNode *node) final {
+    auto body = ascend::NativeMutator::VisitStmt_(node).as_or_throw<SeqStmt>();
+    auto found = contracts.find(node);
+    if (found == contracts.end() || owned.count(node))
+      return body;
+    DictAttrs attrs(Map<String, Any>{{kBufferAliasMap, found->second}});
+    return SeqStmt({RegionStmt(tirx::scope_op(), {}, {}, attrs, body)});
+  }
+};
+
+tirx::Function InferBufferAliases(tirx::Function function, bool verbose,
+                                  bool disable_reuse) {
+  auto stripper = make_object<BufferAliasContractStripper>();
+  SeqStmt body =
+      stripper->VisitStmt(function->body.value()).as_or_throw<SeqStmt>();
+  auto attrs = function->attrs->dict;
+  attrs.erase(kBufferAliasMap);
+  function.CopyOnWrite()->attrs = DictAttrs(attrs);
+  function.CopyOnWrite()->body = body;
+  auto storage = make_object<ascend::StorageAliasAnalysis>();
+  storage->Collect(function);
+  auto collector = make_object<AllocateCollector>();
+  collector->Visit(body);
   BufferAliasMap aliases;
   auto analyze_scope = [&](const AllocationMap &allocations,
                            const AllocationOrder &allocation_order,
                            const std::string &target_scope) {
     if (allocations.empty())
       return;
-    BufferAliasMap local =
-        InferBufferAliasesForScope(stmt, allocations, allocation_order,
-                                   target_scope, verbose, disable_reuse);
+    BufferAliasMap local = InferBufferAliasesForScope(
+        body, allocations, allocation_order, target_scope, verbose,
+        disable_reuse, storage.get());
     MergeBufferAliasMaps(&aliases, local);
   };
-
-  analyze_scope(collector.dyn_shmem_allocs, collector.dyn_shmem_order, "");
+  analyze_scope(collector->dyn_shmem_allocs, collector->dyn_shmem_order, "");
   std::vector<std::string> scopes;
-  scopes.reserve(collector.ascend_scope_allocs.size());
-  for (const auto &[scope, _] : collector.ascend_scope_allocs)
+  for (const auto &[scope, allocations] : collector->ascend_scope_allocs)
     scopes.push_back(scope);
   std::sort(scopes.begin(), scopes.end());
-  for (const std::string &scope : scopes) {
-    analyze_scope(collector.ascend_scope_allocs.at(scope),
-                  collector.ascend_scope_order.at(scope), scope);
-  }
+  for (const std::string &scope : scopes)
+    analyze_scope(collector->ascend_scope_allocs.at(scope),
+                  collector->ascend_scope_order.at(scope), scope);
   ValidateBufferAliasMap(aliases);
-  return AttrStmt(std::move(aliases), kBufferAliasMap, Integer(1),
-                  std::move(stmt));
+  auto installer = make_object<BufferAliasContractInstaller>();
+  for (const auto &[variable, path] : collector->paths) {
+    BufferAliasMap &contract = installer->contracts[path.back().sequence];
+    AddBufferAliasStorage(&contract, GetRef<Var>(variable));
+  }
+  for (auto &[sequence, contract] : installer->contracts) {
+    auto local = contract;
+    for (const auto &[variable, compatible] : local) {
+      for (const Var &other : aliases.at(variable))
+        if (contract.count(other))
+          AddBufferAlias(&contract, variable, other);
+    }
+    ValidateBufferAliasMap(contract);
+  }
+  installer->owned.insert(body.get());
+  if (auto found = installer->contracts.find(body.get());
+      found != installer->contracts.end())
+    attrs.Set(kBufferAliasMap, found->second);
+  function.CopyOnWrite()->attrs = DictAttrs(attrs);
+  function.CopyOnWrite()->body =
+      installer->VisitStmt(body).as_or_throw<SeqStmt>();
+  return function;
 }
 
 } // namespace
@@ -2056,21 +2101,18 @@ using namespace tirx::transform;
 
 namespace transform {
 
-Pass InferBufferAliases() {
-  auto pass_func = [](PrimFunc func, const IRModule &, PassContext context) {
-    bool verbose =
-        context
-            ->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
-            .value();
+tvm::transform::Pass InferBufferAliases() {
+  auto pass_func = [](tirx::Function function, const IRModule &,
+                      const tvm::transform::PassContext &context) {
+    if (!function->body)
+      return function;
+    bool verbose = context->GetConfig<bool>(kDebugMergeSharedMemoryAllocations)
+                       .value_or(false);
     bool disable_reuse =
-        context->GetConfig<Bool>(kDisableSharedMemoryReuse, Bool(false))
-            .value();
-    PrimFuncNode *writer = func.CopyOnWrite();
-    writer->body =
-        tl::InferBufferAliases(std::move(writer->body), verbose, disable_reuse);
-    return func;
+        context->GetConfig<bool>(kDisableSharedMemoryReuse).value_or(false);
+    return tl::InferBufferAliases(std::move(function), verbose, disable_reuse);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.InferBufferAliases", {});
+  return CreateFunctionPass(pass_func, 0, "tl.InferBufferAliases");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

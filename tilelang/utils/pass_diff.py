@@ -11,7 +11,7 @@ Usage
 
     # Pass chain with named steps
     pass_diff(func, [
-        ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
+        ("AnnotateDeviceRegions", tilelang.transform.AnnotateDeviceRegions()),
         ("SplitHostDevice",       tvm.tirx.transform.SplitHostDevice()),
         ("ThreadSync",            tilelang.transform.ThreadSync("shared")),
     ])
@@ -31,7 +31,7 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tilelang.tvm import IRModule
+    from tvm_tirx import IRModule
 
 # ANSI color codes
 _RED = "\033[91m"

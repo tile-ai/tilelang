@@ -1,6 +1,8 @@
 import tilelang
 import tilelang.testing
 from tilelang import language as T
+from tilelang._compat.stmt_functor import post_order_visit
+from tvm_tirx import ir
 
 
 def test_issue_1734():
@@ -37,15 +39,19 @@ def test_issue_1734():
         return main
 
     mod = kernel.compile()
-    source = mod.get_kernel_source()
-    # Verify that the if statement is hoisted outside the for loop: the
-    # guarded loop must sit inside the if block (a "for (" before the
-    # first "}" after the if).
-    if_pos = source.find("if (")
-    assert if_pos != -1, "Guard should survive lowering"
-    after_if = source[if_pos:]
-    for_pos = after_if.find("for (")
-    assert for_pos != -1 and for_pos < after_if.find("}"), "Loop-invariant if should be hoisted outside the loop"
+    guarded_loops = []
+
+    def inspect_guard(node):
+        if not isinstance(node, ir.If):
+            return
+        loads = []
+        post_order_visit(node.condition, lambda value: loads.append(value) if isinstance(value, ir.TensorLoad) else None)
+        if any("C_local" in load.source.name for load in loads):
+            post_order_visit(node.then_case, lambda value: guarded_loops.append(value) if isinstance(value, ir.For) else None)
+
+    for function in mod.artifact.device_mod.functions.values():
+        post_order_visit(function, inspect_guard)
+    assert guarded_loops, "Loop-invariant if should enclose the residual loop"
 
 
 if __name__ == "__main__":

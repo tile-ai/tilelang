@@ -6,11 +6,7 @@
 #include "reduce.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/ir/cast.h>
 
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "../layout/layout.h"
@@ -18,12 +14,12 @@
 #include "../op/parallel.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
-#include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include "utils.h"
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -34,6 +30,22 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
+
+int64_t IntegerArgument(const Any &argument, const char *name) {
+  if (auto value = argument.as<bool>()) {
+    return value.value();
+  }
+  if (auto value = argument.as<int64_t>()) {
+    return value.value();
+  }
+  if (auto expression = argument.as<PrimExpr>()) {
+    if (auto value = GetConstInt(expression.value())) {
+      return *value;
+    }
+  }
+  TVM_FFI_THROW(ValueError)
+      << "ReduceOp " << name << " must be a constant integer";
+}
 
 std::vector<ReduceImpl> &ReduceImplRegistry() {
   static std::vector<ReduceImpl> registry;
@@ -68,47 +80,98 @@ void RegisterReduceImpl(ReduceImpl impl) {
   ReduceImplRegistry().push_back(impl);
 }
 
-ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
+ReduceOp::ReduceOp(Array<Expr> args, BlockAnnotations annotations) {
+  TVM_FFI_CHECK_EQ(args.size(), 5, ValueError)
+      << "ReduceOp expects five arguments";
+  ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>(ffi::UnsafeInit{});
   node->annotations = annotations;
-  // Accept BufferRegion/BufferLoad for src/dst
+  // Accept TensorRegion/TensorLoad for src/dst
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
   node->srcRegion_ = src_access.region;
   node->dstRegion_ = dst_access.region;
   node->SetAccessRegions({src_access, dst_access});
-  node->src = node->srcRegion_->buffer;
-  node->dst = node->dstRegion_->buffer;
-  std::string reduce_type = args[2].as<StringImm>().value()->value;
-  node->dim = args[3].as<IntImm>().value()->value;
+  node->src = node->srcRegion_->source.as_or_throw<TensorVar>();
+  node->dst = node->dstRegion_->source.as_or_throw<TensorVar>();
+  std::string reduce_type = args[2].as_or_throw<StringImm>()->value;
+  int64_t dimension = IntegerArgument(args[3], "dimension");
+  TVM_FFI_CHECK(dimension >= 0 &&
+                    dimension < static_cast<int64_t>(node->src.shape().size()),
+                ValueError)
+      << "ReduceOp dimension is out of range";
+  node->dim = dimension;
   node->type = ReduceType(reduce_type);
-  node->clear = args[4].as<Bool>().value();
+  int64_t clear = IntegerArgument(args[4], "clear");
+  TVM_FFI_CHECK(clear == 0 || clear == 1, ValueError)
+      << "ReduceOp clear must be boolean";
+  node->clear = clear != 0;
   // Optional "batch" annotation: number of output elements per batched
   // AllReduce call (default 1 = scalar).
   if (auto opt = annotations.Get("batch")) {
-    if (auto i = opt.value().as<IntImm>()) {
-      node->batch = static_cast<int>(i.value()->value);
-      ICHECK_GE(node->batch, 1) << "ReduceOp: batch must be >= 1";
-    }
+    int64_t batch = IntegerArgument(opt.value(), "batch");
+    TVM_FFI_CHECK(batch >= 1 && batch <= std::numeric_limits<int>::max(),
+                  ValueError)
+        << "ReduceOp batch must be a positive integer";
+    node->batch = batch;
   }
   // Optional annotation: "nan_propagate" — for fp16/bf16 max/min/absmax,
   // when true, lower to CUDA __hmax_nan/__hmin_nan so NaNs propagate.
   if (auto opt = annotations.Get("nan_propagate")) {
-    if (auto b = opt.value().as<Bool>()) {
-      node->nan_propagate = b.value();
-    } else if (auto i = opt.value().as<IntImm>()) {
-      node->nan_propagate = i.value()->value != 0;
-    }
+    int64_t propagate = IntegerArgument(opt.value(), "nan_propagate");
+    TVM_FFI_CHECK(propagate == 0 || propagate == 1, ValueError)
+        << "ReduceOp nan_propagate must be boolean";
+    node->nan_propagate = propagate != 0;
   }
   const bool is_minmax =
       node->type->IsMax() || node->type->IsMin() || node->type->IsAbsMax();
 
   if (node->nan_propagate && is_minmax) {
-    CHECK(node->dst->dtype.is_float16() || node->dst->dtype.is_bfloat16(),
-          ValueError)
+    TVM_FFI_CHECK(node->dst.dtype().MatchesElementType(kDLFloat, 16) ||
+                      node->dst.dtype().MatchesElementType(kDLBfloat, 16),
+                  ValueError)
         << "reduce_" << reduce_type
         << " with nan_propagate=True requires float16 or bfloat16 output, got "
-        << node->dst->dtype;
+        << node->dst.dtype();
+  }
+  if (node->type->IsBitAnd() || node->type->IsBitOr() ||
+      node->type->IsBitXor()) {
+    TVM_FFI_CHECK(node->src.dtype().MatchesCode(kDLInt, kDLUInt) &&
+                      node->dst.dtype().MatchesCode(kDLInt, kDLUInt),
+                  ValueError)
+        << "ReduceOp bitwise reductions require integer element types";
+  }
+  sym::Analyzer analyzer;
+  const auto &source_ranges = node->srcRegion_->region;
+  const auto &destination_ranges = node->dstRegion_->region;
+  TVM_FFI_CHECK(destination_ranges.size() == source_ranges.size() ||
+                    destination_ranges.size() + 1 == source_ranges.size(),
+                ValueError)
+      << "ReduceOp destination rank must remove or retain the reduced axis";
+  for (const TensorRegion &region : {node->srcRegion_, node->dstRegion_}) {
+    auto tensor = region->source.as_or_throw<TensorVar>();
+    for (size_t axis = 0; axis < region->region.size(); ++axis) {
+      const auto &domain = region->region[axis];
+      TVM_FFI_CHECK(!analyzer->CanProve(domain->begin < 0) &&
+                        !analyzer->CanProve(domain->extent < 0) &&
+                        !analyzer->CanProve(domain->begin + domain->extent >
+                                            tensor.shape()[axis]),
+                    ValueError)
+          << "ReduceOp region must lie within its tensor";
+    }
+  }
+  bool keep_dimension = destination_ranges.size() == source_ranges.size();
+  for (size_t axis = 0; axis < destination_ranges.size(); ++axis) {
+    size_t source_axis = keep_dimension || axis < static_cast<size_t>(node->dim)
+                             ? axis
+                             : axis + 1;
+    PrimExpr expected =
+        keep_dimension && axis == static_cast<size_t>(node->dim)
+            ? MakeConst(destination_ranges[axis]->extent.ty(), 1)
+            : source_ranges[source_axis]->extent;
+    TVM_FFI_CHECK(
+        !analyzer->CanProve(destination_ranges[axis]->extent != expected),
+        ValueError)
+        << "ReduceOp destination region has an incompatible extent";
   }
   data_ = std::move(node);
 }
@@ -172,7 +235,7 @@ static Array<PrimExpr> InputPlaceholders(size_t n) {
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &lower_args,
-                         arith::Analyzer *analyzer) const {
+                         sym::Analyzer analyzer) const {
   return ResolveReduceImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
@@ -186,26 +249,40 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
       layout_args.layout_map.count(src)) {
     auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
     auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
+    if (batch > 1) {
+      PrimExpr elements = 1;
+      for (const PrimExpr &extent : reducer_layout->OutputShape())
+        elements = elements * extent;
+      auto count = GetConstInt(layout_args.analyzer->Simplify(elements));
+      if (!count || *count < batch || *count % batch != 0) {
+        throw LayoutConflictException(
+            "ReduceOp batch must evenly divide the per-thread output "
+            "element count of the source layout");
+      }
+    }
 
     // Match the frontend's reduction shape contract before Reshape, which
     // only checks the total element count.
     Array<PrimExpr> expected_shape = reducer_layout->InputShape();
-    if (dst->shape.size() == src_layout->InputShape().size()) {
+    if (src_layout->InputDim() == 1 && dst.shape().empty()) {
+      expected_shape.clear();
+    }
+    if (dst.shape().size() == src_layout->InputShape().size()) {
       // Keeping the reduced axis requires its extent to be one.
       expected_shape = src_layout->InputShape();
-      expected_shape.Set(dim, make_const(expected_shape[dim].dtype(), 1));
+      expected_shape.Set(dim, MakeConst(expected_shape[dim].ty(), 1));
     }
-    bool valid_shape = dst->shape.size() == expected_shape.size();
+    bool valid_shape = dst.shape().size() == expected_shape.size();
     for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
-      valid_shape =
-          layout_args.analyzer->CanProveEqual(dst->shape[i], expected_shape[i]);
+      valid_shape = layout_args.analyzer->CanProveEqual(dst.shape()[i],
+                                                        expected_shape[i]);
     }
-    ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst->shape
+    ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst.shape()
                         << " for " << dst << ", expected " << expected_shape
                         << " when reducing axis " << dim << " of "
-                        << src->shape;
-    reducer_layout = Downcast<Fragment>(
-        reducer_layout->Reshape(dst->shape, layout_args.analyzer));
+                        << src.shape();
+    reducer_layout = reducer_layout->Reshape(dst.shape(), layout_args.analyzer)
+                         .as_or_throw<Fragment>();
 
     if (!layout_args.layout_map.count(dst)) {
       return {{dst, reducer_layout}};
@@ -216,11 +293,11 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
 
     // Keep placeholder bindings local to this containment check.
-    arith::Analyzer analyzer;
+    sym::Analyzer analyzer;
     auto indices = InputPlaceholders(reducer_layout->InputDim());
     for (size_t i = 0; i < indices.size(); i++) {
-      analyzer.Bind(Downcast<Var>(indices[i]),
-                    Range(0, reducer_layout->InputShape()[i]));
+      analyzer->Bind(indices[i].as_or_throw<PrimVar>(),
+                     Range(0, reducer_layout->InputShape()[i]));
     }
     if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
                                indices, analyzer)) {
@@ -238,10 +315,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
   return {};
 }
 
-TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce, 5)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReduceOpNode::RegisterReflection();

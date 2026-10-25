@@ -9,6 +9,7 @@ plus ``tl.ws_op_id`` markers. All lowering stays in
 byte-for-byte unchanged.
 """
 
+from tvm_ffi import structural_equal
 import pytest
 
 import tilelang
@@ -16,6 +17,8 @@ import tilelang.testing
 import torch
 from tilelang import language as T
 from tilelang import tvm
+from _native_ir import allocations
+from tilelang.testing.ir import collect_calls, collect_nodes
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
@@ -45,25 +48,16 @@ def _root_schedule(func):
 
     def visit(node):
         nonlocal result
-        if isinstance(node, tvm.tirx.SBlock) and node.name_hint == "tilelang_root":
-            result = node.annotations.get("tl.ws_schedule")
+        if isinstance(node, tvm.ir.RegionStmt) and "tl.ws_schedule" in node.attrs:
+            result = node.attrs["tl.ws_schedule"]
 
     tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
     return result
 
 
 def _alloc_buffers(mod):
-    """name -> Buffer allocated by the scheduled kernel's root block, for
-    building expected schedules that structurally match the emitted one."""
-    out = {}
-
-    def visit(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            for buffer in node.alloc_buffers:
-                out[str(buffer.name)] = buffer
-
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
-    return out
+    """Map allocated native tensors by name for schedule assertions."""
+    return {str(tensor.name): tensor for tensor in allocations(mod["main"])}
 
 
 def _pipelined_load_kernel(num_stages=2):
@@ -384,10 +378,16 @@ def test_worker_gemm_topology_materializes():
         ),
     )
 
-    script = str(tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"])
-    assert 'T.launch_thread("threadIdx.x", 256)' in script
-    assert "T.tma_copy" in script
-    assert "ws_schedule" not in script
+    function = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
+    launches = [
+        node
+        for node in collect_nodes(function, tvm.ir.RegionStmt)
+        if node.op.name == "tirx.launch_thread" and node.args[0].value == "threadIdx.x"
+    ]
+    assert len(launches) == 1 and int(launches[0].args[1]) == 256
+    copies = collect_calls(function, op="tl.tileop.copy")
+    assert sum(bool(call.attrs.get("is_tma_copy", False)) for call in copies) == 2
+    assert _root_schedule(function) is None
 
 
 def _tmem_gemm():
@@ -623,7 +623,7 @@ def test_guarded_write_into_versioned_pipeline_declines():
     pipelines (FA's rescale) keep source semantics and stay schedulable."""
     prepared = _prepare(_guarded_producer_kernel())
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 def _rmw_accumulator_kernel():
@@ -692,9 +692,7 @@ def test_rmw_accumulator_nested_pipelines():
                     {
                         "Worker": [
                             T.WSSync.producer_acquire("C_tmem"),
-                            "tl_tileop_copy_2",
-                            "parallel_0",
-                            "tl_tileop_copy_3",
+                            "if_0",
                             T.WSSync.producer_commit("C_tmem"),
                         ],
                         "Load": [
@@ -722,9 +720,9 @@ def test_rmw_accumulator_nested_pipelines():
                         "Worker": [
                             "loop_0",
                             T.WSSync.consumer_wait("C_tmem_root"),
-                            "tl_tileop_copy_4",
+                            "tl_tileop_copy_2",
                             T.WSSync.consumer_release("C_tmem_root"),
-                            "tl_tileop_copy_5",
+                            "tl_tileop_copy_3",
                         ],
                         "Load": ["loop_0"],
                         "MMA": [
@@ -876,7 +874,7 @@ def test_read_before_nested_cycle_declines():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -921,7 +919,7 @@ def test_no_shared_handoff_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 def _persistent_while_kernel():
@@ -1098,7 +1096,7 @@ def test_storage_cycling_in_sibling_loops_declines():
     data the first loop's consumer still reads. The kernel declines."""
     prepared = _prepare(_two_loop_kernel())
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 def _non_tma_layout_kernel():
@@ -1218,9 +1216,11 @@ def test_cp_async_copy_is_a_load_producer():
         ),
     )
 
-    script = str(tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"])
-    assert "ptx_commit_group" in script
-    assert "ptx_cp_async_barrier_noinc" in script
+    function = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
+    assert len(collect_calls(function, op="tirx.ptx.cp_async_commit_group")) == 1
+    assert len(collect_calls(function, op="tl.ptx_cp_async_barrier_noinc")) == 1
+    copies = collect_calls(function, op="tl.tileop.async_copy")
+    assert len(copies) == 1 and bool(copies[0].attrs["no_implicit_async_commit_wait"])
 
 
 @tilelang.testing.requires_cuda
@@ -1262,7 +1262,7 @@ def test_async_wgmma_wait_kernel_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -1289,7 +1289,7 @@ def test_raw_cp_async_kernel_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 def _pointer_table_kernel():
@@ -1331,7 +1331,7 @@ def test_pointer_table_bind_follows_freshened_buffer():
 
 @tilelang.testing.requires_cuda
 def test_unknown_scheduler_rejected():
-    with pytest.raises(Exception, match="unknown auto-warp-specialization scheduler"):
+    with pytest.raises(Exception, match="(?i)unknown auto-warp-specialization scheduler"):
         _auto_warp_specialization(_prepare(_pipelined_load_kernel()), scheduler="nonexistent")
 
 
@@ -1372,7 +1372,7 @@ def test_unschedulable_constructs_decline():
     for kernel in (atomic_kernel, hosted_async_kernel, sync_threads_kernel):
         prepared = _prepare(kernel)
         scheduled = _auto_warp_specialization(prepared)
-        assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+        assert structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -1409,7 +1409,7 @@ def test_thread_budget_exceeded_declines():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 def _waved_rmw_accumulator_kernel(depth=None, inner_depth=None):
@@ -1502,14 +1502,15 @@ def test_annotated_ws_pipeline_depth_on_inner_binding_declines():
     depth declines."""
     prepared = _prepare(_waved_rmw_accumulator_kernel(inner_depth=2))
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
-def test_annotated_ws_pipeline_depth_ring_numerical():
+@pytest.mark.parametrize("depth", [2, 3])
+def test_annotated_ws_pipeline_depth_ring_numerical(depth):
     kernel = tilelang.compile(
-        _waved_rmw_accumulator_kernel(depth=2),
+        _waved_rmw_accumulator_kernel(depth=depth),
         target="cuda",
         out_idx=[3],
         pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
@@ -1561,10 +1562,10 @@ def test_seamless_sibling_bindings_rejected_by_materializer():
                     T.copy(C_frag, C_tmem)
                     T.gemm(A2_shared, B2_shared, C_tmem, transpose_B=True, clear_accum=False)
 
-    mod, schedule = _schedule(kernel)
-    assert schedule is not None
-    with pytest.raises(Exception, match="not strictly nested"):
-        tilelang.cuda.transform.MaterializeWSSchedule()(mod)
+    with pytest.warns(RuntimeWarning, match="strictly nested"):
+        mod, schedule = _schedule(kernel)
+    assert schedule is None
+    tvm.ir.assert_structural_equal(mod, _prepare(kernel))
 
 
 if __name__ == "__main__":

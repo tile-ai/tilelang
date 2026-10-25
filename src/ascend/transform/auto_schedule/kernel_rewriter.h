@@ -24,139 +24,116 @@
 
 #pragma once
 
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
+
 #include <functional>
 #include <utility>
 #include <vector>
 
-#include <tvm/ffi/optional.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/function.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
-
-#include "support/check.h"
 #include "transform/common/constr_visitor.h"
 
-namespace tvm {
-namespace tl {
-namespace ascend {
+namespace tvm::tl::ascend {
+
+inline ffi::String KernelRegionName(const RegionStmtNode *region) {
+  return region->attrs.GetAttr<ffi::String>("name_hint").value_or("");
+}
 
 struct TilelangKernelContext {
-  tirx::SBlock root;
-  // Constraints established by statements that enclose this root.
+  RegionStmt root;
   ConstrSet outer_ctx;
-  ffi::Optional<tirx::Var> outer_sid;
+  ffi::Optional<PrimVar> outer_sid;
 };
 
 using TilelangKernelRewrite =
-    std::function<tirx::SBlock(const TilelangKernelContext &)>;
-
-// Walk the complete PrimFunc and rewrite every tilelang_root independently.
-// This preserves arbitrary outer wrappers and naturally supports both single-
-// and multi-kernel functions. When require_kernel is true, the pass fails if
-// no tilelang_root is found.
-tirx::PrimFunc RewriteTilelangKernels(tirx::PrimFunc func,
-                                      const char *pass_name,
-                                      const TilelangKernelRewrite &rewrite,
-                                      bool require_kernel = true);
-
-// Inline implementation.
-
-using namespace tirx;
-using ffi::GetRef;
-using ffi::Optional;
+    std::function<RegionStmt(const TilelangKernelContext &)>;
 
 namespace kernel_rewriter_detail {
 
-// Reuse ConstrVisitor's scope rules instead of duplicating them in the
-// mutating traversal below. Contexts are consumed in the same traversal order.
 class TilelangKernelContextCollector : public ConstrVisitor {
 public:
-  static std::vector<TilelangKernelContext> Collect(const Stmt &stmt) {
-    TilelangKernelContextCollector collector;
-    collector(stmt);
-    return std::move(collector.contexts_);
+  std::vector<TilelangKernelContext> contexts;
+
+protected:
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const RegionStmtNode *node) final {
+    if (KernelRegionName(node) == "tilelang_root") {
+      contexts.push_back({ffi::GetRef<RegionStmt>(node), GetConstrSet(), sid_});
+      return std::nullopt;
+    }
+    auto previous_sid = sid_;
+    bool launch = node->op.same_as(tirx::launch_thread_op()) ||
+                  node->op.same_as(Op::Get("tl.launch_grid"));
+    if (launch && node->args.size() == 2 &&
+        node->args[0].as_or_throw<StringImm>()->value == "cthread") {
+      sid_ = node->body_params[0].as_or_throw<PrimVar>();
+    }
+    ffi::Optional<ffi::VisitInterrupt> result;
+    if (launch && node->op.same_as(Op::Get("tl.launch_grid"))) {
+      auto variable = node->body_params[0].as_or_throw<PrimVar>();
+      auto extent = node->args[1].as_or_throw<PrimExpr>();
+      auto guard = MakeGuard(
+          variable, Range::FromMinExtent(MakeConst(extent.ty(), 0), extent));
+      result = Visit(node->body);
+    } else {
+      result = ConstrVisitor::Visit_(node);
+    }
+    sid_ = previous_sid;
+    return result;
   }
 
 private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    Optional<Var> outer_sid = sid_;
-    if (op->attr_key == tirx::attr::thread_extent) {
-      if (const auto *iter_var = op->node.as<IterVarNode>()) {
-        if (iter_var->thread_tag == "cthread")
-          sid_ = iter_var->var;
-      }
-    }
-    ConstrVisitor::VisitStmt_(op);
-    sid_ = std::move(outer_sid);
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint != "tilelang_root") {
-      ConstrVisitor::VisitStmt_(op);
-      return;
-    }
-    contexts_.push_back({GetRef<SBlock>(op), GetConstrSet(), sid_});
-  }
-
-  Optional<Var> sid_;
-  std::vector<TilelangKernelContext> contexts_;
+  ffi::Optional<PrimVar> sid_;
 };
 
-class TilelangKernelRewriter : public StmtMutator {
+class TilelangKernelRewriter : public tirx::StmtExprMutator {
 public:
-  TilelangKernelRewriter(
-      const TilelangKernelRewrite &rewrite,
-      const std::vector<TilelangKernelContext> &kernel_contexts)
-      : rewrite_(rewrite), kernel_contexts_(kernel_contexts) {}
+  TilelangKernelRewriter(TilelangKernelRewrite rewrite,
+                         std::vector<TilelangKernelContext> contexts)
+      : rewrite_(std::move(rewrite)), contexts_(std::move(contexts)) {}
+  size_t count{0};
 
-  Stmt Rewrite(const Stmt &stmt) { return VisitStmt(stmt); }
-  int NumRewrittenKernels() const { return num_rewritten_kernels_; }
-
-private:
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint != "tilelang_root")
-      return StmtMutator::VisitStmt_(op);
-    ICHECK_LT(static_cast<size_t>(num_rewritten_kernels_),
-              kernel_contexts_.size())
-        << "TileLang kernel rewrite encountered an uncollected tilelang_root";
-    const TilelangKernelContext &context =
-        kernel_contexts_[num_rewritten_kernels_];
-    ICHECK(context.root.same_as(GetRef<SBlock>(op)))
-        << "TileLang kernel context traversal order mismatch";
-    ++num_rewritten_kernels_;
-    SBlock rewritten = rewrite_(context);
-    ICHECK(rewritten.defined()) << "TileLang kernel rewrite returned null";
-    return rewritten;
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (KernelRegionName(node) != "tilelang_root") {
+      return StmtExprMutator::Mutate_(node, mode);
+    }
+    TVM_FFI_ICHECK_LT(count, contexts_.size());
+    const auto &context = contexts_[count++];
+    TVM_FFI_ICHECK(context.root.same_as(ffi::GetRef<RegionStmt>(node)));
+    return rewrite_(context);
   }
 
-  const TilelangKernelRewrite &rewrite_;
-  const std::vector<TilelangKernelContext> &kernel_contexts_;
-  int num_rewritten_kernels_{0};
+private:
+  TilelangKernelRewrite rewrite_;
+  std::vector<TilelangKernelContext> contexts_;
 };
 
 } // namespace kernel_rewriter_detail
 
-inline PrimFunc RewriteTilelangKernels(PrimFunc func, const char *pass_name,
-                                       const TilelangKernelRewrite &rewrite,
-                                       bool require_kernel) {
-  std::vector<TilelangKernelContext> kernel_contexts =
-      kernel_rewriter_detail::TilelangKernelContextCollector::Collect(
-          func->body);
-  kernel_rewriter_detail::TilelangKernelRewriter rewriter(rewrite,
-                                                          kernel_contexts);
-  Stmt body = rewriter.Rewrite(func->body);
-  ICHECK_EQ(static_cast<size_t>(rewriter.NumRewrittenKernels()),
-            kernel_contexts.size())
-      << "TileLang kernel rewrite did not consume every collected context";
+inline tirx::Function
+RewriteTilelangKernels(tirx::Function function, const char *pass_name,
+                       const TilelangKernelRewrite &rewrite,
+                       bool require_kernel = true) {
+  auto collector = ffi::make_object<
+      kernel_rewriter_detail::TilelangKernelContextCollector>();
+  if (function->body)
+    collector->Visit(function->body.value());
   if (require_kernel) {
-    ICHECK_GT(rewriter.NumRewrittenKernels(), 0)
+    TVM_FFI_CHECK(!collector->contexts.empty(), ValueError)
         << pass_name << " could not find a tilelang_root";
   }
-  func.CopyOnWrite()->body = std::move(body);
-  return func;
+  if (!function->body || collector->contexts.empty())
+    return function;
+  auto rewriter =
+      ffi::make_object<kernel_rewriter_detail::TilelangKernelRewriter>(
+          rewrite, collector->contexts);
+  SeqStmt original = function->body.value();
+  function.CopyOnWrite()->body =
+      rewriter->Mutate(original).ValueOrUnchanged(original);
+  TVM_FFI_ICHECK_EQ(rewriter->count, collector->contexts.size());
+  return function;
 }
 
-} // namespace ascend
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl::ascend

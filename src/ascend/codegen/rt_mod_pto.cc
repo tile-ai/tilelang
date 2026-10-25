@@ -14,10 +14,10 @@ std::string PTOCodeGen(IRModule mod) {
   CodeGenTileLangPTO cg;
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+    ICHECK(kv.second->IsInstance<tirx::FunctionNode>())
         << "CodeGenTileLangPTO: Can only take PrimFunc";
-    auto gvar = Downcast<GlobalVar>(kv.first);
-    auto f = Downcast<PrimFunc>(kv.second);
+    auto gvar = kv.first;
+    auto f = kv.second.as_or_throw<tirx::Function>();
     cg.AddFunction(gvar, f);
   }
 
@@ -36,12 +36,12 @@ std::string ApplyPostproc(std::string code, const Target &target) {
 
 ffi::Module BuildTileLangPTO(IRModule mod, Target target) {
   std::string code = ApplyPostproc(PTOCodeGen(mod), target);
-  return CSourceModuleCreate(code, "py", ffi::Array<ffi::String>());
+  return SourceModuleCreate(code, "py");
 }
 
 ffi::Module BuildTileLangPTOWithoutCompile(IRModule mod, Target target) {
   std::string code = ApplyPostproc(PTOCodeGen(mod), target);
-  return CSourceModuleCreate(code, "py", ffi::Array<ffi::String>());
+  return SourceModuleCreate(code, "py");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

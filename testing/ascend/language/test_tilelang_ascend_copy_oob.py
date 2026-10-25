@@ -3,10 +3,12 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 
 
 @pytest.mark.parametrize("rank", [1, 2], ids=["vector-tail", "matrix-column-tail"])
+@tilelang.testing.requires_ascend
 def test_dma_tail_roundtrip(rank):
     shape = (80,) if rank == 1 else (4, 80)
     tile_shape = (64,) if rank == 1 else (4, 64)
@@ -28,6 +30,7 @@ def test_dma_tail_roundtrip(rank):
 
 
 @pytest.mark.parametrize("mutable_offset", [False, True], ids=["scalar-parameter", "local-variable"])
+@tilelang.testing.requires_ascend
 def test_opaque_store_tail_preserves_neighboring_storage(mutable_offset):
     @T.prim_func
     def main(src: T.Tensor((8, 32), "float32"), out: T.Tensor((12, 32), "float32"), row_offset: T.int32):
@@ -50,6 +53,7 @@ def test_opaque_store_tail_preserves_neighboring_storage(mutable_offset):
 
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["direct", "transposed-nonsquare-load"])
+@tilelang.testing.requires_ascend
 def test_gemm_copy_tails_across_all_matrix_axes(transpose):
     m, n, k = 31, 19, 47
     tile_m, tile_n, tile_k = 16, 16, 32

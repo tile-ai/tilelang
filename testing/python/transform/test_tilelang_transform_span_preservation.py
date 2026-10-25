@@ -13,8 +13,8 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ir import get_stmt_span, span_to_location
-from tvm.ir.instrument import pass_instrument
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx.ir.transform import pass_instrument
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _count_spans(mod) -> tuple[int, int]:

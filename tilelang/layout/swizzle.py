@@ -3,13 +3,13 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
 
-import tvm
-from tvm import tirx
+import tvm_ffi
+from tvm_tirx import ir
 from tilelang import _ffi_api
-from tilelang._typing import BufferLikeType, BufferLikeTypeTuple
+from ._utils import BufferLikeType, as_tensor_view
 
 
-def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tirx.Buffer, list[int], str]:
+def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[ir.Var, list[ir.Expr], tvm_ffi.dtype]:
     """
     Extract buffer, shape, and dtype from BufferLikeType.
 
@@ -19,13 +19,8 @@ def _get_buffer_info(buffer_or_load_or_region: BufferLikeType) -> tuple[tirx.Buf
     Returns:
         tuple: (buffer, shape, dtype)
     """
-    if isinstance(buffer_or_load_or_region, tirx.Buffer):
-        return buffer_or_load_or_region, buffer_or_load_or_region.shape, buffer_or_load_or_region.dtype
-    elif isinstance(buffer_or_load_or_region, BufferLikeTypeTuple):
-        buf = buffer_or_load_or_region.buffer
-        return buf, buf.shape, buf.dtype
-    else:
-        raise TypeError(f"Expected BufferLikeType, got {type(buffer_or_load_or_region)}")
+    view = as_tensor_view(buffer_or_load_or_region)
+    return view.tensor, view.shape, view.dtype
 
 
 def _get_stride_continuous(buffer_or_load_or_region: BufferLikeType) -> tuple[int, int]:
@@ -58,7 +53,7 @@ def _get_element_size(buffer_or_load_or_region: BufferLikeType) -> int:
         int: Element size in bits
     """
     _, _, dtype = _get_buffer_info(buffer_or_load_or_region)
-    return int(tvm.DataType(dtype).bits)
+    return int(tvm_ffi.dtype(dtype).bits)
 
 
 # Use a stable swizzled layout to ensure consistent memory access patterns.

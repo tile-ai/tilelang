@@ -8,10 +8,10 @@
  *
  * Registered with "ascend.FLowerIntrinsic" for the split Ascend backend.
  */
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op_attr_types.h>
-
-#include "target/intrin_rule.h"
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/attr.h>
 
 namespace tvm {
 namespace codegen {
@@ -20,9 +20,9 @@ namespace intrin {
 using tirx::FLowerIntrinsic;
 
 struct AscendMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float()) {
-      switch (t.bits()) {
+  std::string operator()(PrimType type, std::string name) const {
+    if (type.MatchesCode(kDLFloat)) {
+      switch (type.bits()) {
       case 64:
         return name;
       case 32:
@@ -37,34 +37,30 @@ struct AscendMath {
   }
 };
 
-#define REGISTER_ASCEND_INTRIN(OpName)                                         \
-  TVM_REGISTER_OP("tirx." OpName)                                              \
-      .set_attr<FLowerIntrinsic>("ascend.FLowerIntrinsic",                     \
-                                 DispatchPureExtern<AscendMath>)
-
-REGISTER_ASCEND_INTRIN("sqrt");
-REGISTER_ASCEND_INTRIN("rsqrt");
-REGISTER_ASCEND_INTRIN("exp");
-REGISTER_ASCEND_INTRIN("exp2");
-REGISTER_ASCEND_INTRIN("exp10");
-REGISTER_ASCEND_INTRIN("log");
-REGISTER_ASCEND_INTRIN("log2");
-REGISTER_ASCEND_INTRIN("log10");
-REGISTER_ASCEND_INTRIN("log1p");
-REGISTER_ASCEND_INTRIN("tanh");
-REGISTER_ASCEND_INTRIN("tan");
-REGISTER_ASCEND_INTRIN("sin");
-REGISTER_ASCEND_INTRIN("cos");
-REGISTER_ASCEND_INTRIN("atan");
-REGISTER_ASCEND_INTRIN("atan2");
-REGISTER_ASCEND_INTRIN("erf");
-REGISTER_ASCEND_INTRIN("floor");
-REGISTER_ASCEND_INTRIN("ceil");
-REGISTER_ASCEND_INTRIN("fabs");
-REGISTER_ASCEND_INTRIN("round");
-REGISTER_ASCEND_INTRIN("trunc");
-
-#undef REGISTER_ASCEND_INTRIN
+TVM_FFI_STATIC_INIT_BLOCK() {
+  for (const char *name :
+       {"sqrt",  "rsqrt", "exp",   "exp2", "exp10", "log",   "log2",
+        "log10", "log1p", "tanh",  "tan",  "sin",   "cos",   "atan",
+        "atan2", "erf",   "floor", "ceil", "fabs",  "round", "trunc"}) {
+    OpDef(std::string("prim.") + name)
+        .set_attr<FLowerIntrinsic>(
+            "ascend.FLowerIntrinsic",
+            [name](PrimExpr expression) {
+              const auto *call = expression.as<CallNode>();
+              TVM_FFI_ICHECK(call);
+              std::string symbol = AscendMath{}(expression.ty(), name);
+              if (symbol.empty())
+                return expression;
+              ffi::Array<Expr> arguments{StringImm(symbol)};
+              for (const auto &argument : call->args)
+                arguments.push_back(argument);
+              return Call(expression.ty(), tirx::call_pure_extern_op(),
+                          arguments, call->attrs, {}, call->loc)
+                  .as_or_throw<PrimExpr>();
+            },
+            true);
+  }
+}
 
 } // namespace intrin
 } // namespace codegen

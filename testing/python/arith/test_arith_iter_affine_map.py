@@ -16,8 +16,9 @@
 # under the License.
 from tilelang import tvm
 import tilelang.testing
-from tvm.tirx import floordiv, floormod
-from tvm.script import tirx as T
+from tvm_tirx.ir.prim import floordiv, floormod
+import tilelang.language as T
+import pytest
 
 
 def ifuse(inputs, pred_extent=None):
@@ -48,6 +49,10 @@ def convert_iter_expr(expr):
     return tvm.arith.normalize_iter_map_to_expr(expr)
 
 
+def assert_expr_equal(actual, expected):
+    assert tvm.arith.Analyzer().can_prove_equal(actual, expected)
+
+
 def assert_iter_sum_pattern(expect_dict, dom_map, predicate=True, check_level="surjective", simplify_trivial_iterators=True):
     keys = list(expect_dict.keys())
     res = tvm.arith.detect_iter_map(
@@ -73,9 +78,9 @@ def assert_iter_sum_pattern(expect_dict, dom_map, predicate=True, check_level="s
             assert len(sum_expr.args) == 0
         else:
             assert len(sum_expr.args) == 1
-            tvm.testing.assert_prim_expr_equal(sum_expr.args[0].extent, extent)
-            tvm.testing.assert_prim_expr_equal(sum_expr.args[0].scale, scale)
-        tvm.testing.assert_prim_expr_equal(sum_expr.base, base)
+            assert_expr_equal(sum_expr.args[0].extent, extent)
+            assert_expr_equal(sum_expr.args[0].scale, scale)
+        assert_expr_equal(sum_expr.base, base)
         if expect_iter is not None:
             if not isinstance(expect_iter, tvm.arith.IterMapExpr):
                 sum_expr = convert_iter_expr(sum_expr)
@@ -128,8 +133,8 @@ def test_trivial():
 def test_fuse():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
-    c = tvm.tirx.SizeVar("c", "int32")
-    c0 = tvm.tirx.SizeVar("c0", "int32")
+    c = tvm.tirx.Var("c", "int32")
+    c0 = tvm.tirx.Var("c0", "int32")
 
     assert_iter_sum_pattern({y * 3 + 1 + c + x: (12, 1 + c)}, var_dom([(x, 3), (y, 4)]))
 
@@ -155,8 +160,8 @@ def test_fuse():
 def test_split():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
-    c0 = tvm.tirx.SizeVar("c0", "int32")
-    c1 = tvm.tirx.SizeVar("c1", "int32")
+    c0 = tvm.tirx.Var("c0", "int32")
+    c1 = tvm.tirx.Var("c1", "int32")
     fld = tvm.tirx.floordiv
     flm = tvm.tirx.floormod
 
@@ -515,7 +520,7 @@ def test_subspace_division():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
     z = tvm.tirx.Var("z", "int32")
-    c = tvm.tirx.SizeVar("c", "int32")
+    c = tvm.tirx.Var("c", "int32")
 
     # simple 1.1
     res = tvm.arith.subspace_divide([z * 12 + y * 3 + x + c], var_dom([(x, 3), (y, 4), (z, 5)]), [x])
@@ -953,7 +958,7 @@ class TestPadding:
     fld = tvm.tirx.floordiv
     flm = tvm.tirx.floormod
 
-    positive_test_case = tvm.testing.parameter(
+    positive_test_cases = (
         # left padding only, offset divisible
         ({y: 192}, {fld(64 + y, 32): (6, 2, 1), flm(64 + y, 32): (32, 0, 1)}, "bijective"),
         # left padding only, offset non-divisible
@@ -991,7 +996,7 @@ class TestPadding:
         ),
     )
 
-    negative_test_case = tvm.testing.parameter(
+    negative_test_cases = (
         # left padding only, offset non-divisible
         ({y: 176}, {fld(80 + y, 32), flm(80 + y, 32)}),
         ({y: 176}, {fld(80 + y, 32), fld(80 + y, 4)}),
@@ -1015,12 +1020,14 @@ class TestPadding:
         ({x: 255}, {fld(flm(x, 255), 16)}),
     )
 
+    @pytest.mark.parametrize("positive_test_case", positive_test_cases)
     def test_padding(self, positive_test_case):
         iter_extent, mapped_iterators, *args = positive_test_case
         check_level = args[0] if args else "surjective"
         dom_map = {var: tvm.ir.Range(0, ext) for var, ext in iter_extent.items()}
         assert_iter_sum_pattern(mapped_iterators, dom_map, check_level=check_level)
 
+    @pytest.mark.parametrize("negative_test_case", negative_test_cases)
     def test_padding_error(self, negative_test_case):
         iter_extent, mapped_iterators, *args = negative_test_case
         check_level = args[0] if args else "surjective"
@@ -1082,7 +1089,7 @@ def test_iter_map_simplify_symbolic_case():
     y = tvm.tirx.Var("y", "int64")
     z = x * 32 + y
 
-    n = tvm.tirx.SizeVar("n", "int64")
+    n = tvm.tirx.Var("n", "int64")
 
     def simple_fuse0(x):
         return (x // n) * n + x % n
@@ -1116,7 +1123,7 @@ def test_iter_map_simplify_symbolic_predicate():
     x = tvm.tirx.Var("x", "int64")
     y = tvm.tirx.Var("y", "int64")
 
-    n = tvm.tirx.SizeVar("n", "int64")
+    n = tvm.tirx.Var("n", "int64")
 
     def simple_fuse0(x):
         return (x // n) * n + x % n
@@ -1204,9 +1211,9 @@ def assert_normalize_to_iter_sum(index, input_iters, args, base):
         if isinstance(item, tvm.arith.IterSplitExpr):
             tvm.ir.assert_structural_equal(split, item)
             continue
-        tvm.testing.assert_prim_expr_equal(split.scale, item[1])
-        tvm.testing.assert_prim_expr_equal(tvm.arith.normalize_iter_map_to_expr(split), item[0] * item[1])
-    tvm.testing.assert_prim_expr_equal(res.base, base)
+        assert_expr_equal(split.scale, item[1])
+        assert_expr_equal(tvm.arith.normalize_iter_map_to_expr(split), item[0] * item[1])
+    assert_expr_equal(res.base, base)
 
 
 def test_normalize_to_iter_sum():

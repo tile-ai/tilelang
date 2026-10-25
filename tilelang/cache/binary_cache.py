@@ -8,7 +8,6 @@ import functools
 import json
 import os
 import shutil
-import sys
 import uuid
 from hashlib import sha256
 from typing import Any, ClassVar
@@ -69,44 +68,9 @@ class BinaryCache:
     @functools.cache
     def _get_tilelang_lib_stamp() -> str | None:
         """Return a content hash for native TileLang libraries when requested."""
-        import importlib
+        from tilelang.libinfo import native_library_stamp
 
-        lib_dirs: list[str] = []
-        try:
-            env_mod = importlib.import_module("tilelang.env")
-            lib_dirs.extend(getattr(env_mod, "TL_LIBS", []) or [])
-        except Exception:
-            pass
-
-        if sys.platform == "win32":
-            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
-        elif sys.platform == "darwin":
-            lib_names = [
-                "libtilelang.dylib",
-                "libtilelang.so",
-                "libtvm_runtime.dylib",
-                "libtvm_compiler.dylib",
-            ]
-        else:
-            lib_names = ["libtilelang.so", "libtvm_runtime.so", "libtvm_compiler.so"]
-
-        stamps: list[str] = []
-        seen_names: set[str] = set()
-        for lib_dir in lib_dirs:
-            for name in lib_names:
-                if name in seen_names:
-                    continue
-                path = os.path.join(lib_dir, name)
-                if os.path.exists(path):
-                    file_hash = sha256()
-                    with open(path, "rb") as f:
-                        for chunk in iter(lambda: f.read(1 << 20), b""):
-                            file_hash.update(chunk)
-                    stamps.append(f"{name}:{file_hash.hexdigest()}")
-                    seen_names.add(name)
-        if stamps:
-            return "|".join(stamps)
-        return None
+        return native_library_stamp()
 
     @classmethod
     def _finalize_key(cls, key_data: dict[str, Any]) -> str:

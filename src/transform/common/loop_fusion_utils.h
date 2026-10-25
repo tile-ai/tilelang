@@ -22,231 +22,131 @@
  * \brief Common utilities for TL transforms
  */
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
-#include <tvm/tirx/transform.h>
+#ifndef TILELANG_TRANSFORM_COMMON_LOOP_FUSION_UTILS_H_
+#define TILELANG_TRANSFORM_COMMON_LOOP_FUSION_UTILS_H_
 
-#include <queue>
+#include "compat/visit.h"
+#include "op/parallel.h"
+#include "op/reducer.h"
+#include "op/utils.h"
 
-#include "../../op/parallel.h"
-#include "../loop_partition.h"
-#include "../loop_vectorize.h"
-#include "arith/ir_mutator_with_analyzer.h"
+#include <tvm/tirx/stmt_functor_with_analyzer.h>
 
-namespace tvm {
-namespace tl {
+#include <limits>
+#include <vector>
 
-using namespace tirx;
-using arith::IRMutatorWithAnalyzer;
+namespace tvm::tl {
 
-class FragmentAccessDetector : public StmtExprVisitor {
+class FragmentAccessDetector {
 public:
-  FragmentAccessDetector() = default;
+  void Collect(const Stmt &statement) {
+    PostOrderVisit(statement, [this](const ffi::ObjectRef &object) {
+      if (const auto *load = object.as<TensorLoadNode>()) {
+        if (auto tensor = load->source.as<tirx::TensorVar>()) {
+          has_fragment_access_ |= IsFragmentBuffer(tensor.value()) ||
+                                  IsReducerV2Buffer(tensor.value());
+        }
+      } else if (const auto *store = object.as<TensorStoreNode>()) {
+        if (auto tensor = store->dest.as<tirx::TensorVar>()) {
+          has_fragment_access_ |= IsFragmentBuffer(tensor.value()) ||
+                                  IsReducerV2Buffer(tensor.value());
+        }
+      }
+    });
+  }
 
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
-
-  bool HasFragmentAccess() { return has_fragment_access_; }
+  bool HasFragmentAccess() const { return has_fragment_access_; }
 
 private:
-  void VisitExpr_(const BufferLoadNode *op) final {
-    // Check if the buffer is in global scope
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_access_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    // Check if the buffer is in global scope
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_access_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  // Helper function to determine if a buffer is local.fragment
-  bool IsFragmentBuffer(const Buffer &buffer) {
-    // The storage scope is often encoded in the buffer->data var name or
-    // associated attributes.
-    ffi::String scope = buffer.scope();
-    return scope == "local.fragment";
-  }
-
   bool has_fragment_access_{false};
 };
 
-/*!
- * \brief ParallelLoopFuser
- * This class is used to fuse a chain of parallel loops into one loop.
- * The loops must:
- *  - All be parallel (ForKind::kParallel)
- *  - Have bounds from 0 to their extent
- * Once fused, a single loop variable will replace the chain, and the
- * original loop variables will be derived by division and modulo operations.
- *
- * This can be helpful for inferring layout for the fragment in a subsequent
- * pass.
- */
-class ParallelLoopFuser : public IRMutatorWithAnalyzer {
+class ParallelLoopFuser : public tirx::StmtExprMutatorWithAnalyzer {
 public:
-  static Stmt Fuse(const Stmt &stmt) {
-    arith::Analyzer analyzer;
-    ParallelLoopFuser substituter(&analyzer);
-    return substituter.VisitStmt(stmt);
+  explicit ParallelLoopFuser(sym::Analyzer analyzer)
+      : StmtExprMutatorWithAnalyzer(analyzer),
+        analyzer_context_(std::move(analyzer)) {}
+
+  static Stmt Fuse(const Stmt &statement) {
+    return ffi::make_object<ParallelLoopFuser>(sym::Analyzer())
+        ->Mutate(statement, ffi::InplaceMode::kDisallow)
+        .ValueOrUnchanged(statement);
   }
 
 protected:
-  ParallelLoopFuser(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {};
-
   virtual bool PreserveParallelLoopNest(const ForNode *) const { return false; }
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Gather consecutive parallel loops
-    std::vector<const ForNode *> loop_chain;
-    const ForNode *current = op;
-    // check if has fragment access
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
     FragmentAccessDetector detector;
-    detector.Collect(op->body);
-    // Do not fuse if there is a fragment access
-    if (detector.HasFragmentAccess() || PreserveParallelLoopNest(op)) {
-      return IRMutatorWithAnalyzer::VisitStmt_(op);
+    detector.Collect(node->body);
+    if (detector.HasFragmentAccess() || PreserveParallelLoopNest(node)) {
+      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
     }
-    while (true) {
-      if (current->kind != ForKind::kParallel)
-        break;
-      if (!is_zero(current->min))
-        break;
-      loop_chain.push_back(current);
-
-      const ForNode *inner_for = current->body.as<ForNode>();
-      if (!inner_for) {
+    std::vector<const ForNode *> loops;
+    std::vector<int64_t> extents;
+    int64_t total = 1;
+    int bits = 32;
+    const ForNode *current = node;
+    while (current && current->kind == ForKind::kParallel &&
+           IsZero(current->begin) && IsOne(current->step)) {
+      if (current != node && !current->annotations.empty()) {
         break;
       }
-      current = inner_for;
-    }
-
-    // If only one loop found or loop chain size is 1, no fusion needed.
-    if (loop_chain.size() <= 1) {
-      return IRMutatorWithAnalyzer::VisitStmt_(op);
-    }
-
-    // If one of the loop has extent which is not 2^n, we do not fuse
-    for (auto l : loop_chain) {
-      PrimExpr extent = l->extent;
-      // If extent is not a constant integer, we cannot determine if it's power
-      // of 2
-      if (!extent.as<IntImmNode>()) {
-        return IRMutatorWithAnalyzer::VisitStmt_(op);
+      auto extent =
+          GetConstInt(analyzer_->Simplify(current->end - current->begin));
+      if (!extent || *extent <= 0 || (*extent & (*extent - 1)) != 0 ||
+          total > std::numeric_limits<int64_t>::max() / *extent) {
+        return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
       }
-      int64_t value = extent.as<IntImmNode>()->value;
-      // Check if value is power of 2: value > 0 and only has one bit set
-      if (value <= 0 || (value & (value - 1)) != 0) {
-        return IRMutatorWithAnalyzer::VisitStmt_(op);
-      }
+      total *= *extent;
+      bits = std::max(bits, current->var.ty().bits());
+      loops.push_back(current);
+      extents.push_back(*extent);
+      current = current->body->seq.size() == 1
+                    ? current->body->seq[0].as<ForNode>()
+                    : nullptr;
     }
-
-    // At this point we have multiple nested parallel loops starting at zero
-    // We will fuse them all.
-    PrimExpr fused_extent = make_const(DataType::Int(32), 1);
-    for (auto it = loop_chain.rbegin(); it != loop_chain.rend(); ++it) {
-      fused_extent = fused_extent * (*it)->extent;
+    if (loops.size() < 2) {
+      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
     }
-
-    std::string fused_name;
-    for (auto it = loop_chain.begin(); it != loop_chain.end(); ++it) {
-      fused_name += (*it)->loop_var->name_hint + "_";
+    if (total > std::numeric_limits<int32_t>::max()) {
+      bits = 64;
     }
-
-    fused_name += "fused";
-
-    // Create a new fused loop var
-    Var fused_var(fused_name, DataType::Int(32));
-
-    // The body of the last loop in the chain:
-    const ForNode *innermost_loop = loop_chain.back();
-    Stmt body = innermost_loop->body;
-
-    // We need to substitute all loop variables in the chain.
-    // The scheme:
-    // Suppose we have loops (i in [0,M], j in [0,N], k in [0,O])
-    // fused loop var f in [0, M*N*O]
-    // i = f / (N*O)
-    // j = (f % (N*O)) / O
-    // k = f % O
-    //
-    // Generalizing for a chain of lengths L:
-    // extents: E_0, E_1, ... E_{L-1}
-    // index_i = (f / (E_{i+1}*...*E_{L-1})) % E_i
-    // For the last one, it's just f % E_{L-1} if i == L-1.
-
-    // Compute the "stride" products for each loop variable
-    // stride[i] = product of extents of loops after i
-    // for L loops: stride[L-1] = 1
-    // stride[L-2] = E_{L-1}
-    // stride[L-3] = E_{L-1} * E_{L-2}
-    // ...
-    std::vector<PrimExpr> extents;
-    extents.reserve(loop_chain.size());
-    for (auto l : loop_chain) {
-      extents.push_back(l->extent);
-    }
-
-    std::vector<PrimExpr> strides(loop_chain.size(),
-                                  make_const(DataType::Int(32), 1));
-    for (int i = static_cast<int>(loop_chain.size()) - 2; i >= 0; i--) {
-      strides[i] = strides[i + 1] * extents[i + 1];
-    }
-
-    // We'll create a substitution map for all loop variables
-    // index_i = (f / strides[i]) % extents[i]
-    // We'll define a helper lambda:
-    auto create_index_expr = [&](int i) {
-      return FloorMod(FloorDiv(fused_var, strides[i]), extents[i]);
-    };
-
-    ffi::Map<Var, PrimExpr> var_map;
-    for (size_t i = 0; i < loop_chain.size(); i++) {
-      const ForNode *loop = loop_chain[i];
-      var_map.Set(loop->loop_var,
-                  analyzer_->Simplify(create_index_expr(static_cast<int>(i))));
-    }
-
-    // Perform the substitution
-    body = Substitute(body, var_map);
-
-    // Create the fused loop
-    For fused_for = For(fused_var, 0, fused_extent, ForKind::kParallel, body);
-    fused_for.CopyOnWrite()->annotations = op->annotations;
-
-    // If the outermost loop carried a parallel loop layout annotation,
-    // reshape it to the fused 1D domain so the fused loop's layout remains
-    // valid. Using Fragment::Reshape preserves forward_index/thread semantics
-    // and performs necessary simplifications.
-    if (fused_for->annotations.count(attr::kParallelLoopLayout)) {
-      auto old_layout = Downcast<Fragment>(
-          fused_for->annotations.Get(attr::kParallelLoopLayout).value());
-      size_t old_dim = old_layout->InputDim();
-      // Only attempt to fuse when dimensions match the number of fused loops.
-      if (old_dim == loop_chain.size()) {
-        ffi::Array<PrimExpr> new_shape = {fused_extent};
-        Fragment fused_layout =
-            Downcast<Fragment>(old_layout->Reshape(new_shape, analyzer_));
-        fused_for.CopyOnWrite()->annotations.Set(attr::kParallelLoopLayout,
-                                                 fused_layout);
-      } else {
-        // Dimension mismatch: drop the stale layout so downstream passes can
-        // re-infer a correct one for the fused loop.
-        fused_for.CopyOnWrite()->annotations.erase(attr::kParallelLoopLayout);
+    if (auto layout = node->annotations.Get(attr::kParallelLoopLayout)) {
+      if (layout.value().as_or_throw<Fragment>()->InputDim() != loops.size()) {
+        return ffi::GetRef<Stmt>(node);
       }
     }
-    return fused_for;
+
+    PrimType type = PrimType::Int(bits);
+    PrimVar fused_var("parallel_fused", type);
+    ffi::Map<PrimVar, PrimExpr> replacements;
+    int64_t stride = 1;
+    for (size_t axis = loops.size(); axis-- > 0;) {
+      PrimExpr index = FloorMod(FloorDiv(fused_var, MakeConst(type, stride)),
+                                MakeConst(type, extents[axis]));
+      replacements.Set(loops[axis]->var,
+                       Cast(loops[axis]->var.ty(), analyzer_->Simplify(index)));
+      stride *= extents[axis];
+    }
+    PrimExpr extent = MakeConst(type, total);
+    Stmt body = Substitute(loops.back()->body, replacements);
+    For result(fused_var, MakeConst(type, 0), extent, MakeConst(type, 1),
+               ForKind::kParallel, SeqStmt(body), node->annotations, node->loc);
+    if (auto annotation = node->annotations.Get(attr::kParallelLoopLayout)) {
+      auto layout = annotation.value().as_or_throw<Fragment>();
+      result.CopyOnWrite()->annotations.Set(
+          attr::kParallelLoopLayout,
+          layout->Reshape({extent}, analyzer_context_));
+    }
+    return result;
   }
+
+private:
+  sym::Analyzer analyzer_context_;
 };
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl
+
+#endif

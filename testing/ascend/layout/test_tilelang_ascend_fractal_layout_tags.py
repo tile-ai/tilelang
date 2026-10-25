@@ -2,7 +2,7 @@ import pytest
 
 import tilelang
 import tilelang.testing
-from tvm import tirx
+from tilelang._compat import tirx
 from tilelang.layout import (
     make_ascend_l0c_layout,
     make_ascend_major_k_layout,

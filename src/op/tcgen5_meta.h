@@ -1,10 +1,11 @@
 #ifndef TVM_TL_OP_TCGEN5_META_H_
 #define TVM_TL_OP_TCGEN5_META_H_
 
+#include "dtype.h"
 #include "support/check.h"
 #include <cstdint>
-#include <tvm/runtime/data_type.h>
-#include <tvm/runtime/logging.h>
+#include <tvm/ffi/error.h>
+#include <tvm/ir/type.h>
 
 #include <utility>
 #include <vector>
@@ -12,15 +13,13 @@
 namespace tvm {
 namespace tl {
 
-using runtime::DataType;
-
 struct TCGEN5MMAMeta {
   int atom_m, atom_n, atom_k;
   bool enable_ws, enable_2cta;
 };
 
 inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
+GetTCGEN5MMAMeta(int M, int N, int K, PrimType ab_dtype, PrimType c_dtype,
                  bool disable_2cta = false, bool disable_ws = false) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 // TODO (wt): Add more 2cta-preferred shapes
@@ -39,8 +38,9 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
     true, TCGEN5MMAMeta { atom_m, atom_n, atom_k, use_ws, use_2cta }           \
   }
   std::vector<int> ws_valid_atom_ns = {256, 128, 64};
-  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
-      (c_dtype.is_float() && c_dtype.bits() == 32)) {
+  if ((ab_dtype.MatchesElementType(kDLBfloat, 16) ||
+       ab_dtype.MatchesElementType(kDLFloat, 16)) &&
+      (c_dtype.MatchesCode(kDLFloat) && c_dtype.bits() == 32)) {
     if (K % 16 != 0)
       FAIL;
     if (!disable_2cta) {
@@ -76,10 +76,17 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
     } else {
       FAIL;
     }
-  } else if ((ab_dtype.is_float8() || ab_dtype.is_float6_e2m3fn() ||
-              ab_dtype.is_float6_e3m2fn() || ab_dtype.is_float4()) &&
-             ((c_dtype.is_float() && c_dtype.bits() == 32) ||
-              (c_dtype.is_float16() && c_dtype.bits() == 16))) {
+  } else if ((ab_dtype.MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3,
+                                   kDLFloat8_e4m3b11fnuz, kDLFloat8_e4m3fn,
+                                   kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                                   kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu) ||
+              ab_dtype.MatchesCode(kDLFloat6_e2m3fn) ||
+              ab_dtype.MatchesCode(kDLFloat6_e3m2fn) ||
+              ab_dtype.MatchesCode(kDLFloat4_e2m1fn) ||
+              IsFP4UnpackedType(ab_dtype)) &&
+             ((c_dtype.MatchesCode(kDLFloat) && c_dtype.bits() == 32) ||
+              (c_dtype.MatchesElementType(kDLFloat, 16) &&
+               c_dtype.bits() == 16))) {
     if (K % 32 != 0)
       FAIL;
     if (!disable_2cta) {
@@ -123,8 +130,9 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
     } else {
       FAIL;
     }
-  } else if ((ab_dtype.is_int() || ab_dtype.is_uint()) &&
-             ab_dtype.bits() == 8 && c_dtype.is_int() && c_dtype.bits() == 32) {
+  } else if ((ab_dtype.MatchesCode(kDLInt) || ab_dtype.MatchesCode(kDLUInt)) &&
+             ab_dtype.bits() == 8 && c_dtype.MatchesCode(kDLInt) &&
+             c_dtype.bits() == 32) {
     if (K % 32 != 0)
       FAIL;
     if (!disable_2cta) {
@@ -177,8 +185,8 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype,
 }
 
 inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
-                                   DataType a_dtype, DataType b_dtype,
-                                   DataType c_dtype, bool a_is_k_major,
+                                   PrimType a_dtype, PrimType b_dtype,
+                                   PrimType c_dtype, bool a_is_k_major,
                                    bool b_is_k_major, int scale_in_a,
                                    int scale_in_b) {
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
@@ -190,25 +198,28 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
   ICHECK(scale_in_b == 1 || scale_in_b == -1)
       << "scale_in_b must be +/-1 for TCGEN5MMA";
 
-  auto encode_dtype = [&](DataType dtype) -> uint32_t {
-    if (dtype.is_float16()) {
+  auto encode_dtype = [&](PrimType dtype) -> uint32_t {
+    if (dtype.MatchesElementType(kDLFloat, 16)) {
       return static_cast<uint32_t>(0);
-    } else if (dtype.is_bfloat16()) {
+    } else if (dtype.MatchesElementType(kDLBfloat, 16)) {
       return static_cast<uint32_t>(1);
-    } else if (dtype.is_float8_e4m3fn() || dtype.is_float8_e4m3fnuz() ||
-               dtype.is_float8_e4m3()) {
+    } else if (dtype.MatchesCode(kDLFloat8_e4m3fn) ||
+               dtype.MatchesCode(kDLFloat8_e4m3fnuz) ||
+               dtype.MatchesCode(kDLFloat8_e4m3)) {
       return static_cast<uint32_t>(0);
-    } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
+    } else if (dtype.MatchesCode(kDLFloat8_e5m2fnuz) ||
+               dtype.MatchesCode(kDLFloat8_e5m2)) {
       return static_cast<uint32_t>(1);
-    } else if (dtype.is_float6_e2m3fn()) {
+    } else if (dtype.MatchesCode(kDLFloat6_e2m3fn)) {
       return static_cast<uint32_t>(3);
-    } else if (dtype.is_float6_e3m2fn()) {
+    } else if (dtype.MatchesCode(kDLFloat6_e3m2fn)) {
       return static_cast<uint32_t>(4);
-    } else if (dtype.is_float4()) {
+    } else if (dtype.MatchesCode(kDLFloat4_e2m1fn) ||
+               IsFP4UnpackedType(dtype)) {
       return static_cast<uint32_t>(5);
-    } else if (dtype.is_int() && dtype.bits() == 8) {
+    } else if (dtype.MatchesCode(kDLInt) && dtype.bits() == 8) {
       return static_cast<uint32_t>(1);
-    } else if (dtype.is_uint() && dtype.bits() == 8) {
+    } else if (dtype.MatchesCode(kDLUInt) && dtype.bits() == 8) {
       return static_cast<uint32_t>(0);
     }
     LOG(FATAL) << "Unsupported dtype for TCGEN5MMA descriptor: " << dtype;
@@ -219,11 +230,11 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
   uint32_t b_format = encode_dtype(b_dtype);
 
   uint32_t c_format = 0;
-  if (c_dtype.is_float16()) {
+  if (c_dtype.MatchesElementType(kDLFloat, 16)) {
     c_format = 0;
-  } else if (c_dtype.is_float()) {
+  } else if (c_dtype.MatchesCode(kDLFloat)) {
     c_format = 1;
-  } else if (c_dtype.is_int() && c_dtype.bits() == 32) {
+  } else if (c_dtype.MatchesCode(kDLInt) && c_dtype.bits() == 32) {
     c_format = 2;
   } else {
     LOG(FATAL) << "Unsupported accumulator dtype for TCGEN5MMA descriptor: "
@@ -271,8 +282,8 @@ inline uint32_t GetTCGEN5InstrDesc(int atom_m, int atom_n, int atom_k,
 // Bit layout: InstrDescriptorBlockScaled (see CUTLASS mma_sm100_desc.hpp)
 // TODO: Support nv-style block-scaled descriptor.
 inline uint32_t
-GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
-                              DataType b_dtype, bool a_is_k_major,
+GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, PrimType a_dtype,
+                              PrimType b_dtype, bool a_is_k_major,
                               bool b_is_k_major, int scale_in_a, int scale_in_b,
                               int a_sf_id, int b_sf_id) {
   ICHECK(atom_m % 16 == 0) << "atom_m must be divisible by 16";
@@ -281,17 +292,20 @@ GetTCGEN5BlockScaledInstrDesc(int atom_m, int atom_n, DataType a_dtype,
   ICHECK(scale_in_b == 1 || scale_in_b == -1);
 
   // a_format / b_format for MXF8F6F4: E4M3=0, E5M2=1
-  auto encode_mxfp_dtype = [&](DataType dtype) -> uint32_t {
-    if (dtype.is_float8_e4m3fn() || dtype.is_float8_e4m3fnuz() ||
-        dtype.is_float8_e4m3()) {
+  auto encode_mxfp_dtype = [&](PrimType dtype) -> uint32_t {
+    if (dtype.MatchesCode(kDLFloat8_e4m3fn) ||
+        dtype.MatchesCode(kDLFloat8_e4m3fnuz) ||
+        dtype.MatchesCode(kDLFloat8_e4m3)) {
       return 0u; // E4M3
-    } else if (dtype.is_float8_e5m2fnuz() || dtype.is_float8_e5m2()) {
+    } else if (dtype.MatchesCode(kDLFloat8_e5m2fnuz) ||
+               dtype.MatchesCode(kDLFloat8_e5m2)) {
       return 1u; // E5M2
-    } else if (dtype.is_float6_e2m3fn()) {
+    } else if (dtype.MatchesCode(kDLFloat6_e2m3fn)) {
       return 3u; // E2M3
-    } else if (dtype.is_float6_e3m2fn()) {
+    } else if (dtype.MatchesCode(kDLFloat6_e3m2fn)) {
       return 4u; // E3M2
-    } else if (dtype.is_float4()) {
+    } else if (dtype.MatchesCode(kDLFloat4_e2m1fn) ||
+               IsFP4UnpackedType(dtype)) {
       return 5u; // E2M1 (packed or f8f6f4/mxf8f6f4 unpacked storage)
     }
     LOG(FATAL) << "Unsupported dtype for block-scaled mxf8f6f4 descriptor: "

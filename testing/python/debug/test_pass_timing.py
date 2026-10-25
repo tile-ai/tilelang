@@ -36,10 +36,10 @@ def test_pass_timing_records_simple_pass():
     timing = TileLangPassTimingInstrument()
 
     with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.Simplify()(_simple_module())
+        tvm.tirx.transform.StmtSimplify()(_simple_module())
 
     assert timing.records
-    assert any(record.name.endswith(".Simplify") for record in timing.records)
+    assert any(record.name.endswith(".StmtSimplify") for record in timing.records)
     assert all(record.duration_s >= 0 for record in timing.records)
     assert all(0 <= record.self_duration_s <= record.duration_s for record in timing.records)
 
@@ -124,7 +124,7 @@ def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
     clock = [0.0]
     timing_tool = PassTimingTool()
 
-    @tvm.ir.instrument.pass_instrument
+    @tvm.ir.transform.instrument.pass_instrument
     class AdvanceClockAfterPass:
         def run_after_pass(self, mod, info):
             clock[0] += 1.0
@@ -141,7 +141,7 @@ def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
             AdvanceClockAfterPass(),
         ]
         with tvm.transform.PassContext(instruments=instruments):
-            tvm.tirx.transform.Simplify()(_simple_module())
+            tvm.tirx.transform.StmtSimplify()(_simple_module())
 
     timing = timing_tool.timings[0]
     assert timing.records[0].duration_s == 0.0
@@ -254,23 +254,23 @@ def test_pass_timing_captures_kernel_name_from_module():
     timing = TileLangPassTimingInstrument()
 
     with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.Simplify()(_simple_module())
+        tvm.tirx.transform.StmtSimplify()(_simple_module())
 
     # The kernel name follows the PrimFunc's global_symbol attribute (which in
     # the real compilation flow is also used as the IRModule key).
     assert any(record.kernel == "program" for record in timing.records)
     report = timing.report()
-    assert "Simplify(program)" in report
+    assert "StmtSimplify(program)" in report
 
 
 def test_pass_timing_record_name_unaffected_by_kernel():
     timing = TileLangPassTimingInstrument()
 
     with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.Simplify()(_simple_module())
+        tvm.tirx.transform.StmtSimplify()(_simple_module())
 
     record = timing.records[0]
-    assert record.name.endswith(".Simplify")
+    assert record.name.endswith(".StmtSimplify")
     assert record.kernel == "program"
 
 

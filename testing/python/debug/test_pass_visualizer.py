@@ -105,7 +105,7 @@ def test_structure_tree_instrument_ignores_nested_passes():
 
     @tvm.transform.module_pass(opt_level=0, name="test.Outer")
     def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.Simplify()(mod)
+        return tvm.tirx.transform.StmtSimplify()(mod)
 
     with tvm.transform.PassContext(instruments=[instrument]):
         outer_pass(mod)
@@ -150,20 +150,20 @@ def test_structure_tree_instrument_cleans_up_after_failure():
 
     # Entering a new context resets the incomplete frame and records normally.
     with tvm.transform.PassContext(instruments=[instrument]):
-        tvm.tirx.transform.Simplify()(mod)
-    assert [record.name for record in instrument.ordered_records()] == ["tirx.Simplify"]
+        tvm.tirx.transform.StmtSimplify()(mod)
+    assert [record.name for record in instrument.ordered_records()] == ["tirx.StmtSimplify"]
     assert instrument.incomplete_passes == []
 
 
 @tilelang.testing.requires_cuda
 def test_inspect_structure_renders_tree(capsys):
-    """inspect_structure prints the SBlock tree with tile ops expanded by field."""
+    """inspect_structure prints native regions with tile ops expanded by field."""
     mod, _target = _build_small_module()
     inspect_structure(mod)
     out = capsys.readouterr().out
 
     assert "PrimFunc" in out
-    assert "SBlock" in out
+    assert "RegionStmt" in out
     # gemm is expanded by field name, not printed as one positional line.
     assert "T.gemm" in out
     assert "a_region" in out

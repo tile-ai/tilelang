@@ -241,8 +241,11 @@ wheel_cache_metadata() {
     local repo_dir="$1"
     local python_bin="$2"
 
-    printf 'schema=tilelang-perf-wheel-cache-v1\n'
+    printf 'schema=tilelang-perf-wheel-cache-v2\n'
     printf 'source_key=%s\n' "$(repo_source_key "${repo_dir}")"
+    if [[ -n "${TVM_TIRX_PREPARED_WHEEL:-}" ]]; then
+        printf 'tirx_wheel_sha256=%s\n' "$(hash_stdin < "${TVM_TIRX_PREPARED_WHEEL}")"
+    fi
     "${python_bin}" - <<'PY'
 import platform
 import sys
@@ -274,14 +277,18 @@ build_wheel_to_dir() {
     local venv_dir="$2"
     local build_dir="$3"
     local wheel_dir="$4"
+    local isolation_args=()
+    if [[ -f "${repo_dir}/TVM_TIRX_VERSION" ]]; then
+        isolation_args+=(--no-build-isolation)
+    fi
 
     rm -rf "${build_dir}"
     mkdir -p "$(dirname "${build_dir}")" "${wheel_dir}"
 
     if command -v uv >/dev/null 2>&1; then
-        uv build -v --wheel --python "${venv_dir}/bin/python" -C "build-dir=${build_dir}" --out-dir "${wheel_dir}" "${repo_dir}"
+        uv build -v --wheel "${isolation_args[@]}" --python "${venv_dir}/bin/python" -C "build-dir=${build_dir}" --out-dir "${wheel_dir}" "${repo_dir}"
     else
-        "${venv_dir}/bin/python" -m pip wheel -v --no-deps -C "build-dir=${build_dir}" --wheel-dir "${wheel_dir}" "${repo_dir}"
+        "${venv_dir}/bin/python" -m pip wheel -v --no-deps "${isolation_args[@]}" -C "build-dir=${build_dir}" --wheel-dir "${wheel_dir}" "${repo_dir}"
     fi
 }
 
@@ -400,6 +407,18 @@ install_repo() {
         source "${venv_dir}/bin/activate"
         export CMAKE_GENERATOR="${CMAKE_GENERATOR:-Ninja}"
         unset CMAKE_MAKE_PROGRAM
+        if [[ -f "${repo_dir}/TVM_TIRX_VERSION" ]]; then
+            local dependency_env="${build_dir}-tirx.env"
+            local name value
+            : > "${dependency_env}"
+            python testing/tools/prepare_tirx.py \
+                --output-dir "${build_dir}-tirx-wheels" \
+                --build-dir "${build_dir}-tirx" \
+                --github-env "${dependency_env}"
+            while IFS='=' read -r name value; do
+                export "${name}=${value}"
+            done < "${dependency_env}"
+        fi
         if command -v uv >/dev/null 2>&1; then
             uv pip install -v -r requirements-test.txt
         else

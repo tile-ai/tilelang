@@ -5,292 +5,294 @@
 
 #include "utils.h"
 
-#include <cmath>
-
 #include "builtin.h"
+#include "cuda/stubs/cuda.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 
-#include <tvm/tirx/builtin.h>
+#include <cmath>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-
+namespace tvm::tl {
 namespace {
 
-// Decoded form of a tl.region(...) bridge call.
-struct DecodedRegionCall {
-  Buffer buffer;
-  ffi::Array<Range> ranges;
-  int access_mask;
-};
-
-// Decode a tl.region call's args:
-//   args[0]: BufferLoad whose indices are per-axis minima.
-//   args[1]: constant int access mask (1=read, 2=write, 3=read-write).
-//   args[2 + i]: extent of axis i (supports dynamic PrimExpr).
-// A min encoded as a stride-1 Ramp carries its extent in the Ramp lanes; the
-// lanes must agree with the provided extent when both are constant.
-DecodedRegionCall DecodeRegionCall(const ffi::Array<PrimExpr> &args) {
-  size_t n = args.size();
-  size_t ndim = n - 2;
-  const auto *load = args[0].as<BufferLoadNode>();
-  ICHECK(load);
-  ICHECK(load->indices.size() == ndim)
-      << "load->indices.size() = " << load->indices << " ndim = " << ndim;
-  ffi::Array<Range> ranges;
-  for (size_t i = 0; i < ndim; i++) {
-    PrimExpr index = load->indices[i];
-    PrimExpr extent = args[2 + i];
-    if (const auto *ramp = index.as<RampNode>()) {
-      const auto *stride_imm = ramp->stride.as<IntImmNode>();
-      ICHECK(stride_imm && stride_imm->value == 1)
-          << "tl.region expects stride-1 Ramp for index";
-      if (const auto *lanes_imm = ramp->lanes.as<IntImmNode>()) {
-        if (const auto *ext_imm = extent.as<IntImmNode>()) {
-          ICHECK_EQ(lanes_imm->value, ext_imm->value)
-              << "Ramp lanes and provided extent must match";
-        }
-      }
-      ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-    } else {
-      ranges.push_back(Range::FromMinExtent(index, extent));
+TensorRegion CheckTensorRegion(const TensorRegion &region) {
+  tirx::TensorVar tensor = region->source.as_or_throw<tirx::TensorVar>();
+  TVM_FFI_CHECK_EQ(tensor.shape().size(), region->region.size(), ValueError)
+      << "Tensor region rank does not match its source";
+  for (const Range &range : region->region) {
+    if (const auto *extent = range->extent.as<IntImmNode>()) {
+      TVM_FFI_CHECK(extent->value >= 0, ValueError)
+          << "Tensor region extent must be nonnegative";
     }
   }
-  const int64_t *mask = as_const_int(args[1]);
-  ICHECK(mask) << "tl.region access mask must be a constant int, but got "
-               << args[1];
-  return {load->buffer, std::move(ranges), static_cast<int>(*mask)};
+  return region;
+}
+
+TensorRegion RegionFromLoad(const TensorLoad &load) {
+  ffi::Array<Range> ranges;
+  for (const PrimExpr &index : load->indices) {
+    if (const auto *ramp = index.as<RampNode>()) {
+      TVM_FFI_CHECK(GetConstInt(ramp->stride) == 1, ValueError)
+          << "Only stride-1 Ramp is supported in region conversion";
+      TVM_FFI_CHECK(GetConstInt(ramp->lanes).has_value(), ValueError)
+          << "Scalable vector lanes are not supported in region conversion";
+      ranges.push_back(
+          Range::FromMinExtent(ramp->base, ramp->lanes, index->loc));
+    } else {
+      PrimExpr base = index;
+      if (const auto *broadcast = index.as<BroadcastNode>()) {
+        base = broadcast->value;
+      }
+      ranges.push_back(
+          Range::FromMinExtent(base, MakeConst(base.ty(), 1), index->loc));
+    }
+  }
+  return CheckTensorRegion(
+      TensorRegion(load->source, ranges, TensorRegionType(), load->loc));
+}
+
+AccessRegion DecodeRegionCall(const Call &call) {
+  TVM_FFI_CHECK_GE(call->args.size(), 2U, ValueError)
+      << "tl.region requires a tensor region and an access mask";
+  auto mask = GetConstInt(call->args[1].as_or_throw<PrimExpr>());
+  TVM_FFI_CHECK(mask.has_value() && *mask >= 0 && *mask <= kAccessReadWrite,
+                ValueError)
+      << "tl.region access mask must be a constant in [0, 3]";
+  if (auto region = call->args[0].as<TensorRegion>()) {
+    TVM_FFI_CHECK_EQ(call->args.size(), 2U, ValueError);
+    return {CheckTensorRegion(region.value()), static_cast<int>(*mask)};
+  }
+  TensorLoad load = call->args[0].as_or_throw<TensorLoad>();
+  TVM_FFI_CHECK_EQ(call->args.size(), load->indices.size() + 2, ValueError)
+      << "tl.region requires one extent per tensor dimension";
+  ffi::Array<Range> ranges;
+  for (size_t axis = 0; axis < load->indices.size(); ++axis) {
+    PrimExpr index = load->indices[axis];
+    PrimExpr extent = call->args[axis + 2].as_or_throw<PrimExpr>();
+    if (const auto *ramp = index.as<RampNode>()) {
+      TVM_FFI_CHECK(GetConstInt(ramp->stride) == 1, ValueError)
+          << "tl.region expects a stride-1 Ramp";
+      sym::Analyzer analyzer;
+      TVM_FFI_CHECK(analyzer->CanProveEqual(ramp->lanes, extent), ValueError)
+          << "Ramp lanes and provided extent must match";
+      ranges.push_back(Range::FromMinExtent(ramp->base, extent, index->loc));
+    } else {
+      ranges.push_back(Range::FromMinExtent(index, extent, index->loc));
+    }
+  }
+  return {CheckTensorRegion(TensorRegion(load->source, ranges,
+                                         TensorRegionType(), call->loc)),
+          static_cast<int>(*mask)};
+}
+
+Type InferAccessPtrType(const CallNode *call) {
+  TVM_FFI_CHECK_EQ(call->args.size(), 3U, ValueError)
+      << "tl.access_ptr requires a tensor access, extent and mask";
+  if (const auto *load = call->args[0].as<TensorLoadNode>()) {
+    return load->source.as_or_throw<tirx::TensorVar>().ty()->DataPtrType();
+  }
+  return NormalizeToBufferRegion(call->args[0])
+      ->source.as_or_throw<tirx::TensorVar>()
+      .ty()
+      ->DataPtrType();
+}
+
+void ValidateAccessPtr(const CallNode *call) {
+  Type expected = InferAccessPtrType(call);
+  TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty, expected), TypeError)
+      << "tl.access_ptr result must preserve the tensor pointer type";
+  TVM_FFI_CHECK(call->ty_args.empty(), TypeError)
+      << "tl.access_ptr does not accept type arguments";
+  PrimExpr extent = call->args[1].as_or_throw<IntExpr>();
+  if (const auto *constant = extent.as<IntImmNode>()) {
+    TVM_FFI_CHECK(constant->value >= 0, ValueError)
+        << "tl.access_ptr extent must be nonnegative";
+  }
+  PrimExpr mask = call->args[2].as_or_throw<IntExpr>();
+  if (const auto *constant = mask.as<IntImmNode>()) {
+    TVM_FFI_CHECK(constant->value >= 0 && constant->value <= 3, ValueError)
+        << "tl.access_ptr mask must be in [0, 3]";
+  }
 }
 
 } // namespace
 
-bool IsZeroBitPattern(const PrimExpr &expr) {
-  if (const auto *broadcast = expr.as<BroadcastNode>()) {
+bool IsZeroBitPattern(const PrimExpr &expression) {
+  if (const auto *broadcast = expression.as<BroadcastNode>()) {
     return IsZeroBitPattern(broadcast->value);
   }
-  if (const auto *imm = expr.as<IntImmNode>()) {
-    return imm->value == 0;
+  if (const auto *integer = expression.as<IntImmNode>()) {
+    return integer->value == 0;
   }
-  if (const auto *imm = expr.as<FloatImmNode>()) {
-    return imm->value == 0.0 && !std::signbit(imm->value);
+  if (const auto *floating = expression.as<FloatImmNode>()) {
+    return floating->value == 0.0 && !std::signbit(floating->value);
   }
   return false;
 }
 
-bool IsBufferLikeExpr(const PrimExpr &expr) {
-  if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
+bool IsBufferLikeExpr(const Expr &expression) {
+  if (expression.as<tirx::TensorVar>() || expression.as<TensorLoadNode>() ||
+      expression.as<TensorRegionNode>()) {
     return true;
   }
-  if (const auto *call = expr.as<CallNode>()) {
-    return (call->op.same_as(region()));
+  if (const auto *call = expression.as<CallNode>()) {
+    return call->op.same_as(region());
   }
   return false;
 }
 
-BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
-  // Case 1: Already a BufferRegion
-  if (arg->IsInstance<BufferRegionNode>()) {
-    return Downcast<BufferRegion>(arg);
+TensorRegion NormalizeToBufferRegion(const Expr &expression) {
+  if (auto region = expression.as<TensorRegion>()) {
+    return CheckTensorRegion(region.value());
   }
-
-  // Case 2: BufferLoad — convert indices to ranges (Ramp -> lanes, else
-  // extent=1)
-  if (const auto *load = arg.as<BufferLoadNode>()) {
+  if (auto tensor = expression.as<tirx::TensorVar>()) {
     ffi::Array<Range> ranges;
-    for (const PrimExpr &index : load->indices) {
-      if (const auto *ramp = index.as<RampNode>()) {
-        ICHECK(ramp->stride.as<IntImmNode>()) << "Ramp stride must be IntImm";
-        ICHECK_EQ(ramp->stride.as<IntImmNode>()->value, 1)
-            << "Only stride-1 Ramp is supported in region conversion";
-        ICHECK(ramp->lanes.as<IntImmNode>())
-            << "Scalable vector lanes not supported in region conversion";
-        ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-      } else {
-        ranges.push_back(Range::FromMinExtent(index, 1));
-      }
+    for (const PrimExpr &extent : tensor.value().shape()) {
+      ranges.push_back(Range::FromMinExtent(MakeConst(extent.ty(), 0), extent));
     }
-    return BufferRegion(load->buffer, ranges);
+    return TensorRegion(tensor.value(), ranges, TensorRegionType(),
+                        expression->loc);
   }
-
-  // Case 3: tl.region(...) — decode the transport bridge
-  if (const auto *call = arg.as<CallNode>()) {
-    if (call->op.same_as(region())) {
-      DecodedRegionCall decoded = DecodeRegionCall(call->args);
-      return BufferRegion(decoded.buffer, decoded.ranges);
-    }
-    LOG(FATAL) << "Unsupported argument for BufferRegion (expect "
-                  "BufferLoad/BufferRegion/tl.region): "
-               << arg;
+  if (auto load = expression.as<TensorLoad>()) {
+    return RegionFromLoad(load.value());
   }
-
-  LOG(FATAL) << "Unsupported argument for BufferRegion: " << arg;
-  throw; // Unreachable
+  if (auto call = expression.as<Call>();
+      call && call.value()->op.same_as(region())) {
+    return DecodeRegionCall(call.value()).region;
+  }
+  TVM_FFI_THROW(TypeError)
+      << "Expected TensorVar, TensorLoad, TensorRegion or tl.region, got "
+      << expression;
 }
 
-AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
+AccessRegion NormalizeToAccessRegion(const Expr &expression,
                                      int default_access_mask) {
-  if (const auto *call = arg.as<CallNode>()) {
-    if (call->op.same_as(region())) {
-      DecodedRegionCall decoded = DecodeRegionCall(call->args);
-      return {BufferRegion(decoded.buffer, decoded.ranges),
-              decoded.access_mask};
-    }
+  if (auto call = expression.as<Call>();
+      call && call.value()->op.same_as(region())) {
+    return DecodeRegionCall(call.value());
   }
-  return {NormalizeToBufferRegion(arg), default_access_mask};
+  return {NormalizeToBufferRegion(expression), default_access_mask};
 }
 
-PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
-                                 bool require_2d) {
-  Buffer buf = region->buffer;
-  int ndim = static_cast<int>(buf->shape.size());
-  if (require_2d) {
-    ICHECK(ndim >= 2) << "Expect buffers with at least 2 dims";
+Expr MakeAccessPtrFromRegion(const TensorRegion &region, int rw_mask,
+                             bool require_2d) {
+  CheckTensorRegion(region);
+  size_t rank = region->region.size();
+  TVM_FFI_CHECK(!require_2d || rank >= 2, ValueError)
+      << "Expected a tensor region with at least two dimensions";
+  PrimExpr extent = 1;
+  size_t first_axis = rank > 2 ? rank - 2 : 0;
+  for (size_t axis = first_axis; axis < rank; ++axis) {
+    extent = extent * region->region[axis]->extent;
   }
-
-  PrimExpr offset, extent;
-  if (ndim == 1) {
-    // 1D: straightforward
-    auto axis = region->region[0];
-    offset = axis->min;
-    extent = axis->extent;
-  } else {
-    // Compute row-major strides
-    std::vector<PrimExpr> strides(ndim);
-    PrimExpr one = make_const(buf->shape[0].dtype(), 1);
-    PrimExpr cur = one;
-    for (int i = ndim - 1; i >= 0; --i) {
-      strides[i] = cur;
-      cur = cur * buf->shape[i];
-    }
-    // Offset: sum_{i in [0..ndim-1]} min_i * stride_i
-    offset = make_const(buf->shape[0].dtype(), 0);
-    for (int i = 0; i < ndim; ++i) {
-      offset = offset + region->region[i]->min * strides[i];
-    }
-    // Extent: last two extents product (elements)
-    extent =
-        region->region[ndim - 2]->extent * region->region[ndim - 1]->extent;
-  }
-
-  // ptype and return handle
-  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
-  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                                IntImm(DataType::Int(32), rw_mask)};
-  return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
+  Call pointer(std::nullopt, access_ptr(), {region, extent, PrimExpr(rw_mask)},
+               std::nullopt, {}, region->loc);
+  pointer.Validate();
+  return pointer;
 }
 
-PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load, int rw_mask) {
-  Buffer buf = load->buffer;
-  int ndim = static_cast<int>(buf->shape.size());
-
-  // Compute offset using row-major layout (iterate in reverse)
-  PrimExpr offset = 0;
-  PrimExpr stride = 1;
-
-  for (int i = ndim - 1; i >= 0; --i) {
-    const PrimExpr &index = load->indices[i];
-    if (const auto *ramp = index.as<RampNode>()) {
-      // For Ramp, use the base
-      offset = offset + ramp->base * stride;
-    } else {
-      // For scalar index (IntImm or other PrimExpr)
-      offset = offset + index * stride;
-    }
-    stride = stride * buf->shape[i];
-  }
-
-  // Extent is 1 element for a single BufferLoad access
-  PrimExpr extent = make_const(DataType::Int(32), 1);
-
-  // Build access_ptr
-  PrimExpr ptype = tirx::TypeAnnotation(buf->dtype);
-  ffi::Array<PrimExpr> acc_args{ptype, buf->data, offset, extent,
-                                IntImm(DataType::Int(32), rw_mask)};
-  return Call(DataType::Handle(), builtin::tvm_access_ptr(), acc_args);
+Expr MakeAccessPtrFromBufferLoad(const TensorLoad &load, int rw_mask) {
+  Call pointer(std::nullopt, access_ptr(),
+               {load, PrimExpr(1), PrimExpr(rw_mask)}, std::nullopt, {},
+               load->loc);
+  pointer.Validate();
+  return pointer;
 }
 
-// Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
-int to_CUtensorMapDataType(DataType dtype) {
-  // CUDA 13 adds packed U4 TensorMap formats. The vendored CUDA stub may lag
-  // the installed toolkit, so keep the enum value by CUDA's documented order.
-  constexpr int kTensorMapDataType16U4Align8B = 13;
-  constexpr int kTensorMapDataType16U4Align16B = 14;
-  if (dtype.is_float4_e2m1_unpacked()) {
-    return kTensorMapDataType16U4Align16B;
+Expr LowerAccessPtrCall(const Call &call) {
+  TVM_FFI_CHECK(call->op.same_as(access_ptr()), TypeError)
+      << "Expected tl.access_ptr";
+  call.Validate();
+  Expr base = call->args[0];
+  if (const auto *load = base.as<TensorLoadNode>()) {
+    ffi::Array<PrimExpr> indices =
+        load->indices.Map([](const PrimExpr &index) -> PrimExpr {
+          if (const auto *ramp = index.as<RampNode>())
+            return ramp->base;
+          if (const auto *broadcast = index.as<BroadcastNode>())
+            return broadcast->value;
+          return index;
+        });
+    base = TensorLoad(load->source, indices, base->loc);
   }
-  if (dtype.is_float4_e2m1fn()) {
-    return kTensorMapDataType16U4Align8B;
+  TensorRegion region = NormalizeToBufferRegion(base);
+  ffi::Array<PrimExpr> indices =
+      region->region.Map([](const Range &range) { return range->begin; });
+  ffi::Map<ffi::String, ffi::Any> annotations;
+  if (call->attrs.has_value()) {
+    annotations = call->attrs.value().as_or_throw<DictAttrs>()->dict;
   }
-
-  CUtensorMapDataType tp;
-  if (dtype.is_float()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else if (dtype.is_bfloat16()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  } else if (dtype.is_tfloat32()) {
-    // tfloat32 uses same memory layout as float32
-    tp = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
-  } else if (dtype.is_float8()) {
-    tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-  } else if (dtype.is_int()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_INT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else if (dtype.is_uint()) {
-    switch (dtype.bits()) {
-    case 64:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT64;
-      break;
-    case 32:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT32;
-      break;
-    case 16:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT16;
-      break;
-    case 8:
-      tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
-      break;
-    default:
-      ICHECK(0) << dtype;
-    }
-  } else {
-    ICHECK(0) << dtype;
-  }
-  return static_cast<int>(tp);
+  annotations.Set(attr::kAccessRegion, region);
+  annotations.Set(attr::kAccessExtent, call->args[1]);
+  annotations.Set(attr::kAccessMask, call->args[2]);
+  return Call(call->ty, tirx::address_of_op(),
+              {TensorLoad(region->source, indices, call->loc)},
+              DictAttrs(annotations), {}, call->loc);
 }
 
-} // namespace tl
-} // namespace tvm
+int to_CUtensorMapDataType(PrimType type) {
+  TVM_FFI_CHECK(type.IsScalar(), TypeError)
+      << "TensorMap elements must have scalar types";
+  if (IsFP4UnpackedType(type))
+    return 14;
+  if (IsTensorFloat32(type))
+    return CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+  if (type.MatchesElementType(kDLFloat4_e2m1fn, 4))
+    return 13;
+  if (type.MatchesCode(kDLBfloat) && type.bits() == 16)
+    return CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+  if (type.MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3, kDLFloat8_e4m3b11fnuz,
+                       kDLFloat8_e4m3fn, kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                       kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu)) {
+    return CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  }
+  if (type.MatchesCode(kDLFloat)) {
+    if (type.bits() == 16)
+      return CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+    if (type.bits() == 32)
+      return CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+    if (type.bits() == 64)
+      return CU_TENSOR_MAP_DATA_TYPE_FLOAT64;
+  }
+  if (type.MatchesCode(kDLInt, kDLUInt)) {
+    if (type.bits() == 8)
+      return CU_TENSOR_MAP_DATA_TYPE_UINT8;
+    if (type.bits() == 16)
+      return CU_TENSOR_MAP_DATA_TYPE_UINT16;
+    if (type.bits() == 32) {
+      return type.MatchesCode(kDLInt) ? CU_TENSOR_MAP_DATA_TYPE_INT32
+                                      : CU_TENSOR_MAP_DATA_TYPE_UINT32;
+    }
+    if (type.bits() == 64) {
+      return type.MatchesCode(kDLInt) ? CU_TENSOR_MAP_DATA_TYPE_INT64
+                                      : CU_TENSOR_MAP_DATA_TYPE_UINT64;
+    }
+  }
+  TVM_FFI_THROW(TypeError) << "Unsupported CUDA TensorMap element type: "
+                           << type;
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("tl.access_ptr")
+      .set_native_fn_attr<&InferAccessPtrType>(tvm::op_attr::kInferType)
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallNode *)>::FromNative<&ValidateAccessPtr>(),
+                     true);
+  OpDef("tl.region")
+      .set_attr(tvm::op_attr::kFixedReturnType, TensorRegionType());
+  ffi::reflection::GlobalDef()
+      .def("tl.NormalizeToBufferRegion", NormalizeToBufferRegion)
+      .def("tl.NormalizeToAccessRegion",
+           [](Expr expression, int access_mask) {
+             AccessRegion access =
+                 NormalizeToAccessRegion(expression, access_mask);
+             return ffi::Array<ffi::Any>{access.region, access.access_mask};
+           })
+      .def("tl.MakeAccessPtrFromRegion", MakeAccessPtrFromRegion)
+      .def("tl.MakeAccessPtrFromBufferLoad", MakeAccessPtrFromBufferLoad)
+      .def("tl.LowerAccessPtrCall", LowerAccessPtrCall)
+      .def("tl.IsZeroBitPattern", IsZeroBitPattern)
+      .def("tl.ToCUtensorMapDataType", to_CUtensorMapDataType);
+}
+
+} // namespace tvm::tl

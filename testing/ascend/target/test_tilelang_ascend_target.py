@@ -9,7 +9,7 @@ from tilelang.ascend.target import (
     target_is_ascend,
     target_is_pto,
 )
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def test_native_ascend_target_kind():
@@ -44,11 +44,10 @@ def test_ascend_target_options():
     assert str(target.attrs["mcpu"]) == "dav-3510"
 
 
-def test_target_kind_is_authoritative_for_ascend():
-    with pytest.raises(AssertionError, match="Target c -keys=ascend is not supported"):
-        determine_target("c -keys=ascend", return_object=True)
-
-    c_target = Target({"kind": "c", "keys": ["ascend"]})
+@pytest.mark.parametrize("specification", ["c -keys=ascend", {"kind": "c", "keys": ["ascend"]}])
+def test_target_kind_is_authoritative_for_ascend(specification):
+    c_target = determine_target(specification, return_object=True)
+    assert c_target.kind.name == "c"
     assert not target_is_ascend(c_target)
     assert get_backend("cpu").get_pipeline(c_target).name == "c"
     assert get_backend("cpu").get_device_codegen(c_target).name == "c"

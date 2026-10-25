@@ -95,6 +95,8 @@ tilelang/jit/adapter/cython/.cycache
 
 # cache directory for clangd
 .cache/
+/build_all_backends/
+/build_installed_tirx/
 
 # claude (keep local settings ignored, but track the skills symlinks)
 **/.claude

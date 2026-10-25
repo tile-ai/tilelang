@@ -1,5 +1,9 @@
 """Tests for TileLang `LowerTileOp` synchronization and copy lowering."""
 
+from tilelang._compat.tensor import tensor_parameter_map
+from tilelang._compat.stmt_functor import substitute
+
+
 from collections import Counter
 
 import pytest
@@ -18,6 +22,37 @@ def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
     loops = [loop for loop in collect_nodes(func, tvm.tirx.For) if annotation in loop.annotations]
     assert len(loops) == 1, f"Expected one loop with {annotation}, got {len(loops)}"
     return loops[0]
+
+
+def _pipeline_wait_trace(loop):
+    analyzer = tvm.arith.Analyzer()
+    trace = []
+
+    def visit(statement, clock):
+        if not collect_calls(statement, op="tl.mbarrier_wait_parity"):
+            return
+        if isinstance(statement, tvm.ir.SeqStmt):
+            for child in statement.seq:
+                visit(child, clock)
+        elif isinstance(statement, tvm.ir.RegionStmt):
+            visit(statement.body, clock)
+        elif isinstance(statement, tvm.ir.If):
+            condition = analyzer.simplify(substitute(statement.condition, {loop.var: tvm.ir.const(clock, loop.var.ty)}))
+            assert isinstance(condition, tvm.ir.IntImm), f"Unexpected non-clock wait guard: {condition}"
+            branch = statement.then_case if bool(condition) else statement.else_case
+            if branch is not None:
+                visit(branch, clock)
+        else:
+            assert isinstance(statement, tvm.ir.Evaluate)
+            call = statement.value
+            assert call.op.name == "tl.mbarrier_wait_parity"
+            phase = analyzer.simplify(substitute(call.args[1], {loop.var: tvm.ir.const(clock, loop.var.ty)}))
+            slot = analyzer.simplify(substitute(call.args[0].indices[0], {loop.var: tvm.ir.const(clock, loop.var.ty)}))
+            trace.append((clock, int(slot), int(phase)))
+
+    for clock in range(int(loop.begin), int(loop.end), int(loop.step)):
+        visit(loop.body, clock)
+    return trace
 
 
 @tilelang.testing.requires_cuda
@@ -124,7 +159,8 @@ def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dty
         if loop.kind == tvm.tirx.ForKind.VECTORIZED and collect_calls(loop, op="tl.ptx_cp_async")
     ]
     assert len(async_vector_loops) == 1
-    assert int(async_vector_loops[0].extent) == vector_size
+    assert int(async_vector_loops[0].step) == 1
+    assert int(async_vector_loops[0].end - async_vector_loops[0].begin) == vector_size
 
 
 @tilelang.testing.requires_cuda
@@ -155,8 +191,9 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
-        copy_calls = collect_calls(mod["main"], op="tl.tileop.copy")
-        assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
+        pipeline = _find_loop_with_annotation(mod["main"], "tl_pipelined_num_stages")
+        copy_calls = collect_calls(pipeline.body, op="tl.tileop.copy")
+        assert all("tl.pipeline_mbar_phase_expr" in (call.attrs or {}) for call in copy_calls)
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.LowerTileOp()(mod)
 
@@ -165,14 +202,10 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
     loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
-    assert len(waits) == num_stages
-    assert len(loop_waits) == 1
-    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
-    assert sorted(barrier_indices) == list(range(num_stages))
-    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
-    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
-    assert constant_phases == [0] * (num_stages - 1)
-    expected = (loop.loop_var - loop.min) % 2
+    assert len(waits) == len(loop_waits) == 1
+    assert int(loop.end - loop.begin) == 6 + num_stages - 1
+    assert _pipeline_wait_trace(loop) == [(clock, 0, clock % 2) for clock in range(6)]
+    expected = (loop.var - loop.begin) % 2
     assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
 
 
@@ -218,14 +251,10 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
     loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
-    assert len(waits) == num_stages
-    assert len(loop_waits) == 1
-    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
-    assert barrier_indices == [0] * num_stages
-    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
-    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
-    assert constant_phases == [i % 2 for i in range(num_stages - 1)]
-    logical_epoch = loop.loop_var - loop.min + num_stages - 1
+    assert len(waits) == len(loop_waits) == 1
+    assert int(loop.end - loop.begin) == 6 + num_stages - 1
+    assert _pipeline_wait_trace(loop) == [(clock, 0, clock % 2) for clock in range(6)]
+    logical_epoch = loop.var - loop.begin
     assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
 
 
@@ -335,11 +364,11 @@ def _for_predicate_annotations(func: tvm.tirx.PrimFunc) -> list:
 
 
 def _thread_extent_vars(func: tvm.tirx.PrimFunc) -> list:
-    """Vars bound by threadIdx.x thread_extent AttrStmts (real thread bindings)."""
+    """Variables bound by native threadIdx.x launch regions."""
     return [
-        attr.node.var
-        for attr in collect_nodes(func, tvm.tirx.AttrStmt)
-        if attr.attr_key == "thread_extent" and attr.node.thread_tag == "threadIdx.x"
+        region.body_params[0]
+        for region in collect_nodes(func, tvm.ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
     ]
 
 
@@ -352,7 +381,7 @@ def _assert_no_unexpected_free_vars(func: tvm.tirx.PrimFunc):
     not by name — and checks that no *other* free variable (e.g. a synthetic
     thread placeholder) survives.
     """
-    buffer_data_vars = [buffer.data for buffer in func.buffer_map.values()]
+    buffer_data_vars = [buffer.data for buffer in tensor_parameter_map(func).values()]
     unexpected = [
         var
         for var in tvm.tirx.analysis.undefined_vars(func.body, func.params)
@@ -369,7 +398,7 @@ def _cpu_target(with_host: bool = False) -> tvm.target.Target:
 @pytest.mark.parametrize("target_kind", ["cuda", "hip"])
 @pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
 def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, thread_start):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "rocm", "mcpu": "gfx1100"})
     size = 2 * rows * cols + 8
 
     @T.prim_func
@@ -563,7 +592,8 @@ def test_split_host_device_cpu_device_abi_is_clean():
     # reads/writes — any leaked synthetic scalar would show up as an extra
     # parameter here.
     device_param_names = {_var_name(param) for param in device_func.params}
-    assert device_param_names == {"flag", "out"}, f"unexpected device ABI: {device_param_names}"
+    assert device_param_names == {"flag_ptr", "out_ptr"}, f"unexpected device ABI: {device_param_names}"
+    assert all(isinstance(parameter.ty, tvm.ir.PtrType) for parameter in device_func.params)
     _assert_no_unexpected_free_vars(device_func)
 
 

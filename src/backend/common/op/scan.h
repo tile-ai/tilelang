@@ -12,7 +12,7 @@
 #include "op/utils.h"
 
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/abi.h>
 
 #include <sstream>
 
@@ -36,12 +36,21 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
   } else if (IsSharedBuffer(op.src)) {
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
-    auto threads = lower_args.thread_bounds->extent;
-    auto thread_offset = lower_args.thread_bounds->min;
-    Array<PrimExpr> args;
+    auto threads = GetConstInt(lower_args.thread_bounds->extent);
+    auto thread_offset = GetConstInt(lower_args.thread_bounds->begin);
+    TVM_FFI_CHECK(threads && *threads >= 32 && *threads <= 1024 &&
+                      (*threads & (*threads - 1)) == 0 && thread_offset &&
+                      *thread_offset >= 0 && *thread_offset % 32 == 0,
+                  ValueError)
+        << pretty_name << " requires a constant, warp-aligned thread range";
+    Array<Expr> args;
 
-    PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
-    PrimExpr dst_ptr = MakeAccessPtrFromRegion(op.dstRegion_, 2);
+    Expr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
+    Expr dst_ptr = MakeAccessPtrFromRegion(op.dstRegion_, 2);
+    TVM_FFI_CHECK(op.src.ty()->HasDefaultLayout() &&
+                      op.dst.ty()->HasDefaultLayout(),
+                  ValueError)
+        << pretty_name << " requires contiguous native tensor layouts";
 
     Array<PrimExpr> src_extents;
     for (const auto &range : op.srcRegion_->region) {
@@ -52,16 +61,16 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     if (ndim == 1) {
       ICHECK_EQ(op.dim, 0) << scan_noun
                            << " over a 1D buffer only supports dim = 0.";
-      ss << "tl::" << symbol_prefix << "1D<" << threads << ", "
-         << (op.reverse ? "true" : "false") << ", " << thread_offset
+      ss << "tl::" << symbol_prefix << "1D<" << *threads << ", "
+         << (op.reverse ? "true" : "false") << ", " << *thread_offset
          << ">::run";
       args = {StringImm(ss.str()), src_ptr, dst_ptr, src_extents[0]};
     } else if (ndim == 2) {
-      ss << "tl::" << symbol_prefix << "2D<" << threads << ", " << op.dim
-         << ", " << (op.reverse ? "true" : "false") << ", " << thread_offset
+      ss << "tl::" << symbol_prefix << "2D<" << *threads << ", " << op.dim
+         << ", " << (op.reverse ? "true" : "false") << ", " << *thread_offset
          << ">::run";
-      PrimExpr src_stride = op.src->shape[op.src->shape.size() - 1];
-      PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
+      PrimExpr src_stride = op.src.shape().back();
+      PrimExpr dst_stride = op.dst.shape().back();
       args = {StringImm(ss.str()), src_ptr,    dst_ptr,   src_extents[0],
               src_extents[1],      src_stride, dst_stride};
     } else {
@@ -69,23 +78,23 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
                  << " currently supports only 1D or 2D buffers, got " << ndim
                  << "D.";
     }
-    return Evaluate(Call(op.dst->dtype, builtin::call_extern(), args));
+    return Evaluate(Call(TupleType(Array<Type>{}), call_extern_op(), args));
   } else {
     ICHECK(false) << "Cannot lower " << op_name << " for " << op.src.scope()
                   << " and " << op.dst.scope();
   }
 
-  return Stmt();
+  TVM_FFI_UNREACHABLE();
 }
 
 inline Stmt LowerCumSum(const CumSumOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
+                        sym::Analyzer) {
   return LowerSharedScan(op, lower_args, "cumsum", "CumSum", "CumSum",
                          "Cumulative sum");
 }
 
 inline Stmt LowerCumMax(const CumMaxOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
+                        sym::Analyzer) {
   return LowerSharedScan(op, lower_args, "cummax", "CumMax", "CumMax",
                          "Cumulative maximum");
 }

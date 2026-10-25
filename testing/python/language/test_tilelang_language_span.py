@@ -11,6 +11,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tvm_tirx import ir, tirx
 from tilelang.ir import (
     get_buffer_span,
     get_stmt_span,
@@ -20,7 +21,7 @@ from tilelang.ir import (
     span_coverage,
     span_to_location,
 )
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _marker_line(marker: str) -> int:
@@ -71,12 +72,11 @@ def _alloc_buffer_span_lines(func) -> dict[int, list[str]]:
     lines: dict[int, list[str]] = {}
 
     def visit(node):
-        if type(node).__name__ == "SBlockRealize":
-            for buf in node.block.alloc_buffers:
-                loc = span_to_location(get_buffer_span(buf))
-                if loc is not None:
-                    assert loc[0] == __file__
-                    lines.setdefault(loc[1], []).append(buf.name)
+        if isinstance(node, ir.Bind) and tirx.is_tensor_var(node.var):
+            loc = span_to_location(get_buffer_span(node.var))
+            if loc is not None:
+                assert loc[0] == __file__
+                lines.setdefault(loc[1], []).append(node.var.name)
 
     post_order_visit(func.body, visit)
     return lines
@@ -109,7 +109,7 @@ def test_span_disabled(monkeypatch):
 
 
 def test_span_not_in_structural_equal(monkeypatch):
-    from tvm.ir import assert_structural_equal
+    from tvm_tirx.ir import assert_structural_equal
 
     func_on = _make_kernel()
     monkeypatch.setenv("TILELANG_ENABLE_IR_SPAN", "0")
@@ -139,7 +139,7 @@ def test_make_span_and_setters_roundtrip():
     # Exercise the raw setters on a real node.
     set_stmt_span(func.body, span)
     assert span_to_location(get_stmt_span(func.body)) == (__file__, 42)
-    buf = func.buffer_map[func.params[0]]
+    buf = func.params[0]
     set_buffer_span(buf, span)
     assert span_to_location(get_buffer_span(buf)) == (__file__, 42)
 
@@ -280,7 +280,7 @@ def _make_eager_jit_buffers():
 
 def test_eager_jit_param_and_empty_buffer_spans():
     func = _make_eager_jit_buffers()
-    locations = {buf.name: span_to_location(get_buffer_span(buf)) for buf in func.buffer_map.values()}
+    locations = {buf.name: span_to_location(get_buffer_span(buf)) for buf in func.params if tirx.is_tensor_var(buf)}
     assert locations["A"] == (__file__, _marker_line("span_marker_eager_param"))
     assert locations["C"] == (__file__, _marker_line("span_marker_eager_empty"))
 
@@ -318,7 +318,11 @@ def _make_match_buffer_kernel():
 
 def test_match_buffer_has_span():
     func = _make_match_buffer_kernel()
-    (buffer_a,) = func.buffer_map.values()
+    buffers = []
+    post_order_visit(
+        func.body, lambda node: buffers.append(node.var) if isinstance(node, ir.Bind) and tirx.is_tensor_var(node.var) else None
+    )
+    (buffer_a,) = buffers
     assert span_to_location(get_buffer_span(buffer_a)) == (
         __file__,
         _marker_line("span_marker_match_buffer"),
@@ -337,7 +341,11 @@ def _make_tensor_from_ptr_kernel():
 
 def test_make_tensor_has_span():
     func = _make_tensor_from_ptr_kernel()
-    (buffer_a,) = func.buffer_map.values()
+    buffers = []
+    post_order_visit(
+        func.body, lambda node: buffers.append(node.var) if isinstance(node, ir.Bind) and tirx.is_tensor_var(node.var) else None
+    )
+    (buffer_a,) = buffers
     assert span_to_location(get_buffer_span(buffer_a)) == (
         __file__,
         _marker_line("span_marker_make_tensor"),
@@ -358,7 +366,7 @@ def _make_kernel_param_span():
 
 def test_param_buffer_has_span():
     func = _make_kernel_param_span()
-    buffer_a = func.buffer_map[func.params[0]]
+    buffer_a = func.params[0]
     loc = span_to_location(get_buffer_span(buffer_a))
     assert loc is not None, "parameter buffer A carries no span"
     assert loc == (__file__, _marker_line("span_marker_param_a"))

@@ -1,0 +1,32 @@
+name: Prepare paired standalone TIRx
+description: Install an explicitly selected patched TIRx source or wheel, never the stock PyPI compiler.
+inputs:
+  source:
+    description: Existing standalone source checkout outside TileLang 3rdparty.
+    default: ''
+  wheel:
+    description: Platform-matching paired wheel path or URL.
+    default: ''
+  repository:
+    description: Git repository containing the paired revision.
+    default: ''
+  revision:
+    description: Full commit SHA, defaulting to TVM_TIRX_COMMIT.
+    default: ''
+  repair:
+    description: Repair the independent dependency wheel for distribution.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TVM_TIRX_SOURCE: ${{ inputs.source || env.TVM_TIRX_SOURCE }}
+        TVM_TIRX_WHEEL: ${{ inputs.wheel || env.TVM_TIRX_WHEEL }}
+        TVM_TIRX_REPOSITORY: ${{ inputs.repository || env.TVM_TIRX_REPOSITORY }}
+        TVM_TIRX_REVISION: ${{ inputs.revision || env.TVM_TIRX_REVISION }}
+        TIRX_REPAIR: ${{ inputs.repair }}
+      run: |
+        arguments=(--github-env)
+        if [[ "${TIRX_REPAIR}" == "true" ]]; then arguments+=(--repair); fi
+        python testing/tools/prepare_tirx.py "${arguments[@]}"

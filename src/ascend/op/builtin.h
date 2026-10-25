@@ -26,7 +26,7 @@ static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
  * no `TLOpBuilder`: ParseOperator returns an empty TileOperator, which every
  * tile-op consumer skips via `.defined()`.
  */
-TVM_DLL const Op &conflict_hint();
+TILELANG_DLL const Op &conflict_hint();
 
 /*!
  * \brief Ascend pipeline barrier intrinsic.
@@ -34,7 +34,7 @@ TVM_DLL const Op &conflict_hint();
  * ascend_pipe_barrier(pipe_t_string)
  *
  */
-TVM_DLL const Op &ascend_pipe_barrier();
+TILELANG_DLL const Op &ascend_pipe_barrier();
 
 // Ascend SIMD raw CCE intrinsics (T.simd.* API).
 // TIR ops registered as tl.simd.<name>. Emit raw CCE intrinsics
@@ -42,107 +42,108 @@ TVM_DLL const Op &ascend_pipe_barrier();
 // Fragment registers use vector_<T> types; masks are vector_bool.
 
 // -- Mask
-TVM_DLL const Op &simd_pset();
-TVM_DLL const Op &simd_pge();
-TVM_DLL const Op &simd_pand();
-TVM_DLL const Op &simd_por();
-TVM_DLL const Op &simd_pxor();
-TVM_DLL const Op &simd_pnot();
-TVM_DLL const Op &simd_psel();
+TILELANG_DLL const Op &simd_pset();
+TILELANG_DLL const Op &simd_pge();
+TILELANG_DLL const Op &simd_pand();
+TILELANG_DLL const Op &simd_por();
+TILELANG_DLL const Op &simd_pxor();
+TILELANG_DLL const Op &simd_pnot();
+TILELANG_DLL const Op &simd_psel();
 
 // -- Load / Store
-TVM_DLL const Op &simd_pld();
-TVM_DLL const Op &simd_pst();
-TVM_DLL const Op &simd_vld();
-TVM_DLL const Op &simd_vld2(); // dual-dest load (e.g. DINTLV_B16) → vec_pair
-TVM_DLL const Op &simd_vsts();
-TVM_DLL const Op &simd_vst2();
-TVM_DLL const Op &simd_vsstb();
+TILELANG_DLL const Op &simd_pld();
+TILELANG_DLL const Op &simd_pst();
+TILELANG_DLL const Op &simd_vld();
+TILELANG_DLL const Op &
+simd_vld2(); // dual-dest load (e.g. DINTLV_B16) → vec_pair
+TILELANG_DLL const Op &simd_vsts();
+TILELANG_DLL const Op &simd_vst2();
+TILELANG_DLL const Op &simd_vsstb();
 
 // -- Binary arithmetic
-TVM_DLL const Op &simd_vadd();
-TVM_DLL const Op &simd_vaddc();
-TVM_DLL const Op &simd_vsubc();
-TVM_DLL const Op &simd_vaddcs();
-TVM_DLL const Op &simd_vsubcs();
-TVM_DLL const Op &simd_vmull();
-TVM_DLL const Op &simd_vlrelu();
-TVM_DLL const Op &simd_vprelu();
-TVM_DLL const Op &simd_update_mask();
-TVM_DLL const Op &simd_ppack();
-TVM_DLL const Op &simd_punpack();
-TVM_DLL const Op &simd_pintlv();
-TVM_DLL const Op &simd_pdintlv();
-TVM_DLL const Op &simd_vunpack();
-TVM_DLL const Op &simd_vusqz();
-TVM_DLL const Op &simd_vsub();
-TVM_DLL const Op &simd_vmul();
-TVM_DLL const Op &simd_vmula();
-TVM_DLL const Op &simd_vmadd();
-TVM_DLL const Op &simd_vaxpy();
-TVM_DLL const Op &simd_vdiv();
-TVM_DLL const Op &simd_vmax();
-TVM_DLL const Op &simd_vmin();
-TVM_DLL const Op &simd_vand();
-TVM_DLL const Op &simd_vor();
-TVM_DLL const Op &simd_vxor();
-TVM_DLL const Op &simd_vshl();
-TVM_DLL const Op &simd_vshr();
+TILELANG_DLL const Op &simd_vadd();
+TILELANG_DLL const Op &simd_vaddc();
+TILELANG_DLL const Op &simd_vsubc();
+TILELANG_DLL const Op &simd_vaddcs();
+TILELANG_DLL const Op &simd_vsubcs();
+TILELANG_DLL const Op &simd_vmull();
+TILELANG_DLL const Op &simd_vlrelu();
+TILELANG_DLL const Op &simd_vprelu();
+TILELANG_DLL const Op &simd_update_mask();
+TILELANG_DLL const Op &simd_ppack();
+TILELANG_DLL const Op &simd_punpack();
+TILELANG_DLL const Op &simd_pintlv();
+TILELANG_DLL const Op &simd_pdintlv();
+TILELANG_DLL const Op &simd_vunpack();
+TILELANG_DLL const Op &simd_vusqz();
+TILELANG_DLL const Op &simd_vsub();
+TILELANG_DLL const Op &simd_vmul();
+TILELANG_DLL const Op &simd_vmula();
+TILELANG_DLL const Op &simd_vmadd();
+TILELANG_DLL const Op &simd_vaxpy();
+TILELANG_DLL const Op &simd_vdiv();
+TILELANG_DLL const Op &simd_vmax();
+TILELANG_DLL const Op &simd_vmin();
+TILELANG_DLL const Op &simd_vand();
+TILELANG_DLL const Op &simd_vor();
+TILELANG_DLL const Op &simd_vxor();
+TILELANG_DLL const Op &simd_vshl();
+TILELANG_DLL const Op &simd_vshr();
 
 // -- Unary
-TVM_DLL const Op &simd_vexp();
-TVM_DLL const Op &simd_vln();
-TVM_DLL const Op &simd_vsqrt();
-TVM_DLL const Op &simd_vabs();
-TVM_DLL const Op &simd_vneg();
-TVM_DLL const Op &simd_vrelu();
-TVM_DLL const Op &simd_vnot();
+TILELANG_DLL const Op &simd_vexp();
+TILELANG_DLL const Op &simd_vln();
+TILELANG_DLL const Op &simd_vsqrt();
+TILELANG_DLL const Op &simd_vabs();
+TILELANG_DLL const Op &simd_vneg();
+TILELANG_DLL const Op &simd_vrelu();
+TILELANG_DLL const Op &simd_vnot();
 
 // -- Broadcast
-TVM_DLL const Op &simd_vdup();
-TVM_DLL const Op &simd_vdupv(); // 5-arg vector→vector lane-N broadcast
+TILELANG_DLL const Op &simd_vdup();
+TILELANG_DLL const Op &simd_vdupv(); // 5-arg vector→vector lane-N broadcast
 
 // -- Cross-lane reduction
-TVM_DLL const Op &simd_vcpadd();
-TVM_DLL const Op &simd_vcadd();
-TVM_DLL const Op &simd_vcmax();
-TVM_DLL const Op &simd_vcmin();
-TVM_DLL const Op &simd_vcgadd();
-TVM_DLL const Op &simd_vcgmax();
-TVM_DLL const Op &simd_vcgmin();
-TVM_DLL const Op &simd_vsqz();
-TVM_DLL const Op &simd_dhistv2();
-TVM_DLL const Op &simd_chistv2();
+TILELANG_DLL const Op &simd_vcpadd();
+TILELANG_DLL const Op &simd_vcadd();
+TILELANG_DLL const Op &simd_vcmax();
+TILELANG_DLL const Op &simd_vcmin();
+TILELANG_DLL const Op &simd_vcgadd();
+TILELANG_DLL const Op &simd_vcgmax();
+TILELANG_DLL const Op &simd_vcgmin();
+TILELANG_DLL const Op &simd_vsqz();
+TILELANG_DLL const Op &simd_dhistv2();
+TILELANG_DLL const Op &simd_chistv2();
 
 // -- Index ramp / compare
-TVM_DLL const Op &simd_vci();
-TVM_DLL const Op &simd_vcmp();
-TVM_DLL const Op &simd_vcmps();
+TILELANG_DLL const Op &simd_vci();
+TILELANG_DLL const Op &simd_vcmp();
+TILELANG_DLL const Op &simd_vcmps();
 
 // -- Register permutation
-TVM_DLL const Op &simd_vintlv();
-TVM_DLL const Op &simd_vgatherb();
-TVM_DLL const Op &simd_vgather2();
-TVM_DLL const Op &simd_vscatter();
-TVM_DLL const Op &simd_vdintlv();
-TVM_DLL const Op &simd_pair_get();
-TVM_DLL const Op &simd_vpack();
+TILELANG_DLL const Op &simd_vintlv();
+TILELANG_DLL const Op &simd_vgatherb();
+TILELANG_DLL const Op &simd_vgather2();
+TILELANG_DLL const Op &simd_vscatter();
+TILELANG_DLL const Op &simd_vdintlv();
+TILELANG_DLL const Op &simd_pair_get();
+TILELANG_DLL const Op &simd_vpack();
 
 // -- Type conversion
-TVM_DLL const Op &simd_vcvt();
+TILELANG_DLL const Op &simd_vcvt();
 
 // -- Special
-TVM_DLL const Op &simd_vsel();
-TVM_DLL const Op &simd_vselr();
-TVM_DLL const Op &simd_vmaxs();
-TVM_DLL const Op &simd_vmins();
-TVM_DLL const Op &simd_vmuls();
-TVM_DLL const Op &simd_vadds();
-TVM_DLL const Op &simd_vshls();
-TVM_DLL const Op &simd_vshrs();
-TVM_DLL const Op &simd_mem_bar();
-TVM_DLL const Op &simd_vexpdif();
-TVM_DLL const Op &simd_vabsdif();
+TILELANG_DLL const Op &simd_vsel();
+TILELANG_DLL const Op &simd_vselr();
+TILELANG_DLL const Op &simd_vmaxs();
+TILELANG_DLL const Op &simd_vmins();
+TILELANG_DLL const Op &simd_vmuls();
+TILELANG_DLL const Op &simd_vadds();
+TILELANG_DLL const Op &simd_vshls();
+TILELANG_DLL const Op &simd_vshrs();
+TILELANG_DLL const Op &simd_mem_bar();
+TILELANG_DLL const Op &simd_vexpdif();
+TILELANG_DLL const Op &simd_vabsdif();
 
 /*!
  * \brief Ascend SetFlag intrinsic for pipeline synchronization.
@@ -150,7 +151,7 @@ TVM_DLL const Op &simd_vabsdif();
  * ascend_set_flag(hard_event_string, event_id)
  *
  */
-TVM_DLL const Op &ascend_set_flag();
+TILELANG_DLL const Op &ascend_set_flag();
 
 /*!
  * \brief Ascend WaitFlag intrinsic for pipeline synchronization.
@@ -158,7 +159,7 @@ TVM_DLL const Op &ascend_set_flag();
  * ascend_wait_flag(hard_event_string, event_id)
  *
  */
-TVM_DLL const Op &ascend_wait_flag();
+TILELANG_DLL const Op &ascend_wait_flag();
 
 /*!
  * \brief Ascend thread fence intrinsic.
@@ -166,7 +167,7 @@ TVM_DLL const Op &ascend_wait_flag();
  * ascend_threadfence()
  *
  */
-TVM_DLL const Op &ascend_threadfence();
+TILELANG_DLL const Op &ascend_threadfence();
 
 /*!
  * \brief Ascend CrossCoreSetFlag intrinsic for cross-core synchronization.
@@ -174,7 +175,7 @@ TVM_DLL const Op &ascend_threadfence();
  * ascend_cross_core_set_flag(mode_id_string, pipe_string, flag_id)
  *
  */
-TVM_DLL const Op &ascend_cross_core_set_flag();
+TILELANG_DLL const Op &ascend_cross_core_set_flag();
 
 /*!
  * \brief Ascend CrossCoreWaitFlag intrinsic for cross-core synchronization.
@@ -182,7 +183,7 @@ TVM_DLL const Op &ascend_cross_core_set_flag();
  * ascend_cross_core_wait_flag(flag_id)
  *
  */
-TVM_DLL const Op &ascend_cross_core_wait_flag();
+TILELANG_DLL const Op &ascend_cross_core_wait_flag();
 
 /*!
  * \brief Ascend DMA copy from GM to UBuf.
@@ -192,7 +193,7 @@ TVM_DLL const Op &ascend_cross_core_wait_flag();
  * burstSrcStride, burstDstStride)
  *
  */
-TVM_DLL const Op &ascend_copy_gm_to_ubuf();
+TILELANG_DLL const Op &ascend_copy_gm_to_ubuf();
 
 /*!
  * \brief Ascend set padding fill value for subsequent padded MTE copies.
@@ -204,7 +205,7 @@ TVM_DLL const Op &ascend_copy_gm_to_ubuf();
  * pad value consumed by a following padded GM -> UB/L1 copy.
  *
  */
-TVM_DLL const Op &ascend_set_copy_pad_value();
+TILELANG_DLL const Op &ascend_set_copy_pad_value();
 
 /*!
  * \brief Ascend DMA copy from UBuf to GM.
@@ -213,7 +214,7 @@ TVM_DLL const Op &ascend_set_copy_pad_value();
  * burst_dst_stride, burst_src_stride)
  *
  */
-TVM_DLL const Op &ascend_copy_ubuf_to_gm();
+TILELANG_DLL const Op &ascend_copy_ubuf_to_gm();
 
 /*!
  * \brief Ascend DMA copy from GM to CBuf (L1).
@@ -226,7 +227,7 @@ TVM_DLL const Op &ascend_copy_ubuf_to_gm();
  * When transpose!=0 emits copy_gm_to_cbuf_multi_dn2nz (col-major → NZ),
  * which transposes the N/D mapping — useful for NN matmul on Ascend.
  */
-TVM_DLL const Op &ascend_copy_gm_to_cbuf();
+TILELANG_DLL const Op &ascend_copy_gm_to_cbuf();
 
 /*!
  * \brief Fill an L1 (CBuf) NZ matrix region with a scalar value.
@@ -240,7 +241,7 @@ TVM_DLL const Op &ascend_copy_gm_to_cbuf();
  * adjacent iterations. fill_word_bits selects a raw uint16_t or uint32_t
  * destination view, and raw_value carries the repeated element bit pattern.
  */
-TVM_DLL const Op &ascend_fill_l1();
+TILELANG_DLL const Op &ascend_fill_l1();
 
 /*!
  * \brief Ascend load from CBuf (L1) to CA (L0A).
@@ -248,7 +249,7 @@ TVM_DLL const Op &ascend_fill_l1();
  * ascend_load_cbuf_to_ca(dst, src, mStartPosition, kStartPosition,
  * mStep, kStep, srcStride, dstStride, transpose)
  */
-TVM_DLL const Op &ascend_load_cbuf_to_ca();
+TILELANG_DLL const Op &ascend_load_cbuf_to_ca();
 
 /*!
  * \brief Ascend load from CBuf (L1) to CB (L0B).
@@ -256,7 +257,7 @@ TVM_DLL const Op &ascend_load_cbuf_to_ca();
  * ascend_load_cbuf_to_cb(dst, src, mStartPosition, kStartPosition,
  * mStep, kStep, srcStride, dstStride, transpose)
  */
-TVM_DLL const Op &ascend_load_cbuf_to_cb();
+TILELANG_DLL const Op &ascend_load_cbuf_to_cb();
 
 /*!
  * \brief Ascend standalone MX scale-factor load into the L0A slot shadow of a
@@ -271,13 +272,13 @@ TVM_DLL const Op &ascend_load_cbuf_to_cb();
  * x/y are the L1-source fractal coordinates of the scales, exactly as in the
  * 16-arg companion form of ascend_load_cbuf_to_ca.
  */
-TVM_DLL const Op &ascend_load_ca_sf();
+TILELANG_DLL const Op &ascend_load_ca_sf();
 
 /*!
  * \brief Ascend standalone MX scale-factor load into the L0B slot shadow of a
  *        data tile. Argument protocol mirrors ascend_load_ca_sf.
  */
-TVM_DLL const Op &ascend_load_cb_sf();
+TILELANG_DLL const Op &ascend_load_cb_sf();
 
 /*!
  * \brief Ascend copy matrix from CC (L0C) to UBuf.
@@ -289,7 +290,7 @@ TVM_DLL const Op &ascend_load_cb_sf();
  * loop_enhance_merge_en, C0_pad_en, wino_post_en, broadcast_en, NZ2DN_en)
  *
  */
-TVM_DLL const Op &ascend_copy_matrix_cc_to_ub();
+TILELANG_DLL const Op &ascend_copy_matrix_cc_to_ub();
 
 /*!
  * \brief Ascend DMA copy from UBuf to CBuf (L1).
@@ -298,7 +299,7 @@ TVM_DLL const Op &ascend_copy_matrix_cc_to_ub();
  * src_gap, dst_gap)
  *
  */
-TVM_DLL const Op &ascend_copy_ubuf_to_cbuf();
+TILELANG_DLL const Op &ascend_copy_ubuf_to_cbuf();
 
 /*!
  * \brief Ascend ND→NZ scatter (SimdVF) from UB ND tile to UB NZ tile.
@@ -307,7 +308,7 @@ TVM_DLL const Op &ascend_copy_ubuf_to_cbuf();
  *                      dst_dtype_str, src_dtype_str)
  *
  */
-TVM_DLL const Op &ascend_nd2nz_scatter();
+TILELANG_DLL const Op &ascend_nd2nz_scatter();
 
 /*!
  * \brief Ascend post-scatter UB→L1 raw DMA with NZ-fractal stride correction.
@@ -315,9 +316,9 @@ TVM_DLL const Op &ascend_nd2nz_scatter();
  * ascend_nd2nz_post_copy(dst_l1, src_ub, rows, cols, full_rows, dst_dtype_str)
  *
  */
-TVM_DLL const Op &ascend_nd2nz_post_copy();
+TILELANG_DLL const Op &ascend_nd2nz_post_copy();
 
-TVM_DLL const Op &ascend_copy_matrix_cc_to_gm();
+TILELANG_DLL const Op &ascend_copy_matrix_cc_to_gm();
 
 /*!
  * \brief Ascend Cube MAD (matrix multiply-add) instruction.
@@ -326,7 +327,7 @@ TVM_DLL const Op &ascend_copy_matrix_cc_to_gm();
  * zero_Cmatrix)
  *
  */
-TVM_DLL const Op &ascend_mad();
+TILELANG_DLL const Op &ascend_mad();
 
 /*!
  * \brief Ascend Cube block-scaled MAD (MXFP8) instruction.
@@ -338,7 +339,7 @@ TVM_DLL const Op &ascend_mad();
  * L0A/L0B MX scale registers that must be loaded beforehand (e.g. via
  * T.copy(l1_data, l0, sf=l1_sf) which emits load_cbuf_to_ca_mx/cb_mx).
  */
-TVM_DLL const Op &ascend_mad_mx();
+TILELANG_DLL const Op &ascend_mad_mx();
 
 /*!
  * \brief Ascend GEMM with L1-scoped inputs (auto sub-K pipeline).
@@ -347,7 +348,7 @@ TVM_DLL const Op &ascend_mad_mx();
  * trans_b, clear_accum, dtype_str)
  *
  */
-TVM_DLL const Op &ascend_gemm_l1();
+TILELANG_DLL const Op &ascend_gemm_l1();
 
 /*!
  * \brief Ascend block-scaled GEMM with L1-scoped inputs (MXFP8).
@@ -358,7 +359,7 @@ TVM_DLL const Op &ascend_gemm_l1();
  *
  * Uses blockscaled_gemm.h template with mad_mx instruction.
  */
-TVM_DLL const Op &ascend_blockscaled_gemm_l1();
+TILELANG_DLL const Op &ascend_blockscaled_gemm_l1();
 
 /*!
  * \brief Ascend scalar GM read bypassing dcache.
@@ -368,7 +369,7 @@ TVM_DLL const Op &ascend_blockscaled_gemm_l1();
  * Replaces a scalar BufferLoad from a global buffer that has writes
  * elsewhere.  The codegen emits tl::read_gm_bypass_dcache(ptr).
  */
-TVM_DLL const Op &ascend_read_gm_bypass_dcache();
+TILELANG_DLL const Op &ascend_read_gm_bypass_dcache();
 
 /*!
  * \brief Ascend scalar GM write bypassing dcache.
@@ -378,7 +379,7 @@ TVM_DLL const Op &ascend_read_gm_bypass_dcache();
  * Replaces a scalar BufferStore to a global buffer that has writes
  * elsewhere.  The codegen emits tl::write_gm_bypass_dcache(ptr, val).
  */
-TVM_DLL const Op &ascend_write_gm_bypass_dcache();
+TILELANG_DLL const Op &ascend_write_gm_bypass_dcache();
 
 /*!
  * \brief Ascend get_buf for pipe buffer acquisition.
@@ -386,7 +387,7 @@ TVM_DLL const Op &ascend_write_gm_bypass_dcache();
  * ascend_get_buf(pipe_string, buf_id, mode)
  *
  */
-TVM_DLL const Op &ascend_get_buf();
+TILELANG_DLL const Op &ascend_get_buf();
 
 /*!
  * \brief Ascend rls_buf for pipe buffer release.
@@ -394,7 +395,7 @@ TVM_DLL const Op &ascend_get_buf();
  * ascend_rls_buf(pipe_string, buf_id, mode)
  *
  */
-TVM_DLL const Op &ascend_rls_buf();
+TILELANG_DLL const Op &ascend_rls_buf();
 
 /*!
  * \brief Ascend set HF32 mode for fp32 matmul.
@@ -403,13 +404,13 @@ TVM_DLL const Op &ascend_rls_buf();
  *   mode_int: 0=disable, 1=enable nearest_zero, 2=enable nearest_even
  *
  */
-TVM_DLL const Op &ascend_set_hf32_mode();
+TILELANG_DLL const Op &ascend_set_hf32_mode();
 
 /*!
  * \brief Set the preferred M/N result traversal direction for Ascend MAD.
  * ascend_set_mmad_direction(direction), where direction is "m" or "n".
  */
-TVM_DLL const Op &ascend_set_mmad_direction();
+TILELANG_DLL const Op &ascend_set_mmad_direction();
 
 /*!
  * \brief Ascend arm a hardware store-mode atomic op for GM stores.
@@ -423,14 +424,14 @@ TVM_DLL const Op &ascend_set_mmad_direction();
  * UB->GM stores reduce into GM in hardware. Clear with
  * ascend_set_atomic_none().
  */
-TVM_DLL const Op &ascend_set_atomic();
+TILELANG_DLL const Op &ascend_set_atomic();
 
 /*!
  * \brief Ascend clear the store-mode atomic flag (restore plain store).
  *
  * ascend_set_atomic_none()
  */
-TVM_DLL const Op &ascend_set_atomic_none();
+TILELANG_DLL const Op &ascend_set_atomic_none();
 
 } // namespace tl
 } // namespace tvm

@@ -5,7 +5,7 @@ import tilelang.testing
 from tilelang.testing.ir import collect_nodes
 from tilelang.backend.target import determine_target
 import tilelang.language as T
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))
 sm80_target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
@@ -212,7 +212,7 @@ def test_pipeline_planning_schedules_guarded_body_after_replayable_bind_inline()
     anno = annos[0]
     assert [int(v) for v in anno["software_pipeline_stage"]] == [0, 1]
     assert [int(v) for v in anno["software_pipeline_order"]] == [0, 1]
-    assert "software_pipeline_replayable_scalar_binds" not in anno
+    assert [int(v) for v in anno["software_pipeline_replayable_scalar_binds"]] == [1, 0, 0]
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
@@ -292,31 +292,8 @@ def test_pipeline_planning_before_after_tma_copy_plan():
             for i in T.serial(
                 4,
                 annotations={
-                    "software_pipeline_async_producer_groups": [
-                        T.int32(0),
-                        T.int32(-1),
-                        T.int32(-1),
-                        T.int32(-1),
-                    ],
-                    "software_pipeline_async_producers": [
-                        T.int32(1),
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(0),
-                    ],
-                    "software_pipeline_async_stages": [T.int32(0)],
-                    "software_pipeline_order": [
-                        T.int32(0),
-                        T.int32(1),
-                        T.int32(2),
-                        T.int32(3),
-                    ],
-                    "software_pipeline_stage": [
-                        T.int32(0),
-                        T.int32(1),
-                        T.int32(1),
-                        T.int32(1),
-                    ],
+                    "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2), T.int32(3)],
+                    "software_pipeline_stage": [T.int32(0), T.int32(0), T.int32(0), T.int32(1)],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
             ):
@@ -361,35 +338,11 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
             for _i in T.serial(
                 4,
                 annotations={
-                    "software_pipeline_async_producer_groups": [
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(-1),
-                        T.int32(-1),
-                        T.int32(-1),
-                    ],
-                    "software_pipeline_async_producers": [
-                        T.int32(1),
-                        T.int32(1),
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(0),
-                    ],
+                    "software_pipeline_async_producer_groups": [T.int32(0), T.int32(0), T.int32(-1), T.int32(-1), T.int32(-1)],
+                    "software_pipeline_async_producers": [T.int32(1), T.int32(1), T.int32(0), T.int32(0), T.int32(0)],
                     "software_pipeline_async_stages": [T.int32(0)],
-                    "software_pipeline_order": [
-                        T.int32(1),
-                        T.int32(2),
-                        T.int32(0),
-                        T.int32(3),
-                        T.int32(4),
-                    ],
-                    "software_pipeline_stage": [
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(3),
-                        T.int32(3),
-                        T.int32(3),
-                    ],
+                    "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2), T.int32(3), T.int32(4)],
+                    "software_pipeline_stage": [T.int32(0), T.int32(0), T.int32(2), T.int32(2), T.int32(2)],
                     "tl_pipelined_num_stages": T.int32(3),
                 },
             ):
@@ -451,31 +404,11 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
             for i in T.serial(
                 2,
                 annotations={
-                    "software_pipeline_async_producer_groups": [
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(-1),
-                        T.int32(-1),
-                    ],
-                    "software_pipeline_async_producers": [
-                        T.int32(1),
-                        T.int32(1),
-                        T.int32(0),
-                        T.int32(0),
-                    ],
+                    "software_pipeline_async_producer_groups": [T.int32(0), T.int32(0), T.int32(-1), T.int32(-1)],
+                    "software_pipeline_async_producers": [T.int32(1), T.int32(1), T.int32(0), T.int32(0)],
                     "software_pipeline_async_stages": [T.int32(0)],
-                    "software_pipeline_order": [
-                        T.int32(1),
-                        T.int32(2),
-                        T.int32(0),
-                        T.int32(3),
-                    ],
-                    "software_pipeline_stage": [
-                        T.int32(0),
-                        T.int32(0),
-                        T.int32(2),
-                        T.int32(2),
-                    ],
+                    "software_pipeline_order": [T.int32(0), T.int32(1), T.int32(2), T.int32(3)],
+                    "software_pipeline_stage": [T.int32(0), T.int32(0), T.int32(1), T.int32(1)],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
             ):
@@ -868,7 +801,7 @@ def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
     stages = [int(value) for value in anno["software_pipeline_stage"]]
     orders = [int(value) for value in anno["software_pipeline_order"]]
     assert stages == [1, 0, 0, 0, 1]
-    assert orders == [3, 0, 1, 2, 4]
+    assert orders == [0, 1, 2, 3, 4]
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
@@ -1019,7 +952,7 @@ def test_pipeline_planning_resolves_each_multi_root_anchor_before_minimum():
     anno = _collect_pipeline_loop_annotations(mod["main"])[0]
     stages = [int(value) for value in anno["software_pipeline_stage"]]
     orders = [int(value) for value in anno["software_pipeline_order"]]
-    assert stages == [0, 0, 0, 0, 0, 2, 0, 2]
+    assert stages == [0, 0, 0, 0, 0, 1, 0, 1]
     assert orders[1] < orders[2]
     assert orders[1] < orders[3]
     tl.transform.InjectSoftwarePipeline()(mod)
@@ -1106,5 +1039,19 @@ def test_pipeline_planning_waits_before_dependent_copy():
 
     mod = _run_pipeline_planning(before, sm80_target)
     anno = _collect_pipeline_loop_annotations(mod["main"])[0]
-    assert [int(v) for v in anno["software_pipeline_async_producers"]] == [1, 0, 0]
-    tl.transform.InjectSoftwarePipeline()(mod)
+    assert [int(v) for v in anno["software_pipeline_async_producers"]] == [1, 1, 0]
+    assert [int(v) for v in anno["software_pipeline_async_producer_groups"]] == [0, 1, -1]
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    waits = [int(call.args[0]) for call in collect_nodes(mod["main"], tvm.tirx.Call) if call.op.name == "tirx.ptx.cp_async_wait_group"]
+    assert sorted(waits) == [0, 0, 2]
+    loop = next(loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if loop.annotations.get("tl.pipeline_injected"))
+    dependent = [
+        position
+        for position, statement in enumerate(loop.body.seq)
+        if any(load.source.name.startswith("index") for load in collect_nodes(statement, tvm.tirx.BufferLoad))
+    ]
+    assert len(dependent) == 1
+    wait = loop.body.seq[dependent[0] - 1]
+    assert isinstance(wait, tvm.tirx.Evaluate)
+    assert wait.value.op.name == "tirx.ptx.cp_async_wait_group"
+    assert int(wait.value.args[0]) == 2

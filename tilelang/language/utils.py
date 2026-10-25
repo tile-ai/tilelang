@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from tilelang import tvm as tvm
-from tvm import ir, tirx
-from tvm.tirx import PrimExpr, BufferLoad, op
+from tilelang._compat.tvm import ir, tirx
+from tilelang._compat.tirx import PrimExpr, BufferLoad, op
 from tilelang import language as T
 from tilelang._typing import BufferLikeType, ShapeType
 
@@ -21,20 +21,26 @@ def _normalize_annotations(annotations: dict | None) -> dict:
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
-    """Create a tl.region call for a BufferLoad and extents."""
+    """Create a native tensor region from an element and its extents."""
+    if len(buffer.indices) != len(args):
+        raise ValueError("A region needs one extent per tensor dimension")
+    tensor_region = tirx.BufferRegion(
+        buffer.source,
+        [ir.Range.from_min_extent(origin, extent) for origin, extent in zip(buffer.indices, args)],
+    )
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
-    return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
+    return T.call_intrin("handle", op.Op.get("tl.region"), tensor_region, access_type)
 
 
 def buffer_region_to_tile_region(buffer_region: tirx.BufferRegion, access_type: str, extents: list[tirx.PrimExpr]) -> PrimExpr:
     """Clamp extents and return a tl.region call."""
-    mins = [r.min for r in buffer_region.region]
+    mins = [r.begin for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]
     assert len(region_extents) >= len(extents), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
     clamped_extents = [
         tirx.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i] for i in range(len(region_extents))
     ]
-    return region(tirx.BufferLoad(buffer_region.buffer, mins), access_type, *clamped_extents)
+    return region(tirx.BufferLoad(buffer_region.source, mins), access_type, *clamped_extents)
 
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:
@@ -119,7 +125,7 @@ def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[Prim
     If the buffer load has ramp indices, we will use the ramp's base and lanes to create the region.
     Otherwise, return None since the load cannot be converted to a region.
     """
-    buffer, indices = buffer_load.buffer, buffer_load.indices
+    buffer, indices = buffer_load.source, buffer_load.indices
     regions = []
     found_ramp: bool = False
 

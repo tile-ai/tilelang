@@ -1,16 +1,19 @@
 from __future__ import annotations
+
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+from tilelang._compat.tirx import expr_dtype
+from tvm_tirx import ir as native_ir
 from abc import ABC, abstractmethod
 from tilelang import tvm as tvm
 from typing import Any
-from tvm import IRModule
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
 
 from .utils import (
     is_ascend_target,
     is_metal_target,
     is_cutedsl_target,
     match_declare_kernel,
-    match_declare_kernel_cpu,
     is_cuda_target,
     is_hip_target,
     is_cpu_target,
@@ -18,10 +21,9 @@ from .utils import (
     parse_function_call_args,
     parse_tma_descriptor_args,
 )
-import re
 import logging
 import textwrap
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
@@ -284,7 +286,7 @@ class TLCUDASourceWrapper:
         return result
 
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
-        return arg_name in self.prim_func.buffer_map
+        return arg_name in tensor_parameter_map(self.prim_func)
 
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
@@ -296,8 +298,8 @@ class TLCUDASourceWrapper:
         # QA(@lei): Why not use device_mod.params?
         # device func lack buffer map (to convert buffer handle to buffer)
         for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
+            if param in tensor_parameter_map(self.prim_func):
+                buffer = tensor_parameter_map(self.prim_func)[param]
                 function_args.append(
                     {
                         "name": buffer.data.name,
@@ -548,17 +550,17 @@ class TLCUDASourceWrapper:
                 assert dtype == dynamic_symbolic_set[name]
 
         for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
+            if param in tensor_parameter_map(prim_func):
+                buffer = tensor_parameter_map(prim_func)[param]
                 for dim in buffer.shape:
                     if isinstance(dim, tvm.tirx.Var):
                         unique_push_back(dim.name, str(dim.dtype))
 
         # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
         for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for stride in buffer.strides:
+            if param in tensor_parameter_map(prim_func):
+                buffer = tensor_parameter_map(prim_func)[param]
+                for stride in tensor_strides(buffer):
                     if isinstance(stride, tvm.tirx.Var):
                         unique_push_back(stride.name, str(stride.dtype))
 
@@ -800,58 +802,15 @@ class TLCPUSourceWrapper:
         return result
 
     def create_call_func(self, code, function_informations):
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+        from .native import raw_host_function
 
-        function_args = []
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.name,
-                        "type": self._lookup_type(buffer.dtype) + "*",
-                    }
-                )
-            elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
-            else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
-        # Format the function arguments for declaration
-        def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
+        function = raw_host_function(self.prim_func, self.host_mod, self.target)
+        from tilelang.engine.lower import _prepare_device_codegen_mod
 
-        def func_call_args(s, function_args):
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
-
-        _call_str = """"""
-
-        for function_name, _ in function_informations.items():
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel_cpu(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            call_args = ", ".join(func_call_args(declaration, function_args))
-            _call_str += f"{function_name}({call_args})"
-
-        # Wrap the kernel dispatch logic in an external C function
-        host_func = self.CALL_PREFIX.format(def_args, _call_str)
-        return host_func
+        functions = dict(self.device_mod.functions.items())
+        functions["call"] = function
+        module = tvm.ffi.get_global_func("target.build.tilelang_c")(_prepare_device_codegen_mod(native_ir.IRModule(functions)), self.target)
+        return module.inspect_source()
 
     def parse_source_information(self):
         self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
@@ -869,11 +828,11 @@ class TLCPUSourceWrapper:
         # Determine the set of dynamic symbols used in the function
         dynamic_symbolic_set: dict[str, str] = {}
         for param in prim_func.params:
-            if param in prim_func.buffer_map:
-                buffer = prim_func.buffer_map[param]
-                for dim in buffer.shape:
+            if param in tensor_parameter_map(prim_func):
+                buffer = tensor_parameter_map(prim_func)[param]
+                for dim in (*buffer.shape, *tensor_strides(buffer)):
                     if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set[dim.name] = str(dim.dtype)
+                        dynamic_symbolic_set[dim.name] = str(expr_dtype(dim))
         return list(dynamic_symbolic_set.items())
 
     def get_cpu_init_func(self):
@@ -898,7 +857,7 @@ class TLCPUSourceWrapper:
         # Create the call function wrapper for the CPU kernel
         call_func = self.create_call_func(code, function_informations)
         # Combine the source, initialization function, and call function to form the complete library code
-        lib_code = self.source + init_func + call_func
+        lib_code = call_func + init_func
         return lib_code
 
     @property
@@ -969,8 +928,8 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
 
         function_args = []
         for param in self.prim_func.params:
-            if param in self.prim_func.buffer_map:
-                buffer = self.prim_func.buffer_map[param]
+            if param in tensor_parameter_map(self.prim_func):
+                buffer = tensor_parameter_map(self.prim_func)[param]
                 function_args.append(
                     {
                         "name": buffer.data.name,
@@ -1104,7 +1063,9 @@ class TLWrapper(BaseWrapper):
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
         if is_cuda_target(self.target):
-            wrapper_class = TLCUDASourceWrapper
+            from .native import NativeCUDASourceWrapper
+
+            wrapper_class = NativeCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
         elif is_ascend_target(self.target):

@@ -7,6 +7,7 @@ import tilelang.testing
 import torch
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_fill_full_unversioned_ub_npu():
     @T.prim_func
     def kernel(O: T.Buffer((64,), "float32")):
@@ -22,6 +23,7 @@ def test_simdvf_fill_full_unversioned_ub_npu():
     torch.testing.assert_close(out.cpu(), torch.full((64,), 1.0, dtype=torch.float32), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_fill_2d_ub_npu():
     @T.prim_func
     def kernel(O: T.Buffer((32, 64), "float32")):
@@ -37,6 +39,7 @@ def test_simdvf_fill_2d_ub_npu():
     torch.testing.assert_close(out.cpu(), torch.zeros((32, 64), dtype=torch.float32), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu():
     tile = 64
 
@@ -63,6 +66,7 @@ def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu():
     torch.testing.assert_close(c, a + 1.0, rtol=0, atol=1e-5)
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_fill_aligned_subregion_ub_npu():
     @T.prim_func
     def kernel(O: T.Buffer((64,), "float32")):

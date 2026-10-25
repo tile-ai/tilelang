@@ -15,10 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 from tilelang import tvm
-import tvm.testing
-from tvm import te
-from tvm import tirx
-from tvm.arith.analyzer import Analyzer
+from tilelang._compat import tirx
+from tvm_tirx.sym import Analyzer
 
 
 class IntSetChecker:
@@ -55,16 +53,17 @@ def test_vector():
 
 
 def test_scalable_vector():
+    """An unbounded lane count cannot exclude signed index overflow."""
     base = 5
     s = tvm.arith.IntSet.vector(tvm.tirx.Ramp(base, 2, tvm.tirx.vscale() * 4))
 
-    assert s.min_value.value == base
+    assert s.min_value.same_as(tvm.arith.int_set.neg_inf())
     assert s.max_value.same_as(tvm.arith.int_set.pos_inf())
 
 
 def test_add_sub():
     ck = IntSetChecker()
-    x, y = te.var("x"), te.var("y")
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
     ck.verify(x + y, {x: tvm.arith.IntervalSet(0, 10)}, (y, 10 + y))
     ck.verify(x + y, {x: tvm.arith.IntervalSet(0, 10), y: tvm.arith.IntervalSet(1, 11)}, (1, 21))
     ck.verify(x - y, {x: tvm.arith.IntervalSet(0, 10), y: tvm.arith.IntervalSet(1, 11)}, (-11, 9))
@@ -72,7 +71,7 @@ def test_add_sub():
 
 def test_mul_div():
     ck = IntSetChecker()
-    x, y = te.var("x"), te.var("y")
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
 
     tdiv = tvm.tirx.truncdiv
     ck.analyzer.update(y, tvm.arith.ConstIntBound(1, 100), override=True)
@@ -83,20 +82,20 @@ def test_mul_div():
     ck.verify(tdiv(x, y), {x: tvm.arith.IntervalSet(0, 10)}, (0, tdiv(10, y)))
     ck.verify(tdiv(x, 2), {x: tvm.arith.IntervalSet(1, 10)}, (0, 5))
 
-    fld = tvm.te.floordiv
+    fld = tirx.floordiv
     ck.verify(fld(x, y), {x: tvm.arith.IntervalSet(0, 10)}, (0, fld(10, y)))
     ck.verify(fld(x, 2), {x: tvm.arith.IntervalSet(-1, 10)}, (-1, 5))
 
 
 def test_mod():
     ck = IntSetChecker()
-    x, y = te.var("x"), te.var("y")
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
     tmod = tvm.tirx.truncmod
     ck.analyzer.update(y, tvm.arith.ConstIntBound(1, 100), override=True)
     ck.verify(tmod(x, y), {x: tvm.arith.IntervalSet(0, 10)}, (0, y - 1))
     ck.verify(tmod(x, 10), {x: tvm.arith.IntervalSet(1, 10)}, (0, 9))
 
-    flm = tvm.te.floormod
+    flm = tirx.floormod
     ck.verify(flm(x, 10), {x: tvm.arith.IntervalSet(-10, 10)}, (0, 9))
     ck.verify(flm(x, 10), {x: tvm.arith.IntervalSet(3, 5)}, (3, 5))
     ck.verify(flm(x, 10), {x: tvm.arith.IntervalSet(13, 15)}, (3, 5))
@@ -104,8 +103,8 @@ def test_mod():
     ck.verify(flm(x, 10), {x: tvm.arith.IntervalSet(3, 11)}, (0, 9))
     ck.verify(flm(x, 10), {x: tvm.arith.IntervalSet(1, 21)}, (0, 9))
 
-    fld = tvm.te.floordiv
-    z = te.var("z")
+    fld = tirx.floordiv
+    z = tirx.Var("z", "int32")
     ck.analyzer.bind(x, tvm.ir.Range.from_min_extent(0, 3))
     ck.verify(
         flm(y, 8),
@@ -122,17 +121,17 @@ def test_mod():
 
 def test_max_min():
     ck = IntSetChecker()
-    x, y = te.var("x"), te.var("y")
-    ck.verify(tvm.te.max(x, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (1, 11))
-    ck.verify(tvm.te.min(x - 1, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (-1, 9))
-    ck.verify(tvm.te.min(x, y), {}, (tvm.te.min(x, y), tvm.te.min(x, y)))
-    ck.verify(tvm.te.max(x, y), {}, (tvm.te.max(x, y), tvm.te.max(x, y)))
+    x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    ck.verify(tirx.max(x, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (1, 11))
+    ck.verify(tirx.min(x - 1, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (-1, 9))
+    ck.verify(tirx.min(x, y), {}, (tirx.min(x, y), tirx.min(x, y)))
+    ck.verify(tirx.max(x, y), {}, (tirx.max(x, y), tirx.max(x, y)))
 
 
 def test_select():
     ck = IntSetChecker()
-    # x, y = te.var("x"), te.var("y")
-    x = te.var("x")
+    # x, y = tirx.Var("x", "int32"), tirx.Var("y", "int32")
+    x = tirx.Var("x", "int32")
     ck.verify(tvm.tirx.Select(x > 0, x - 1, x + 1), {x: tvm.arith.IntervalSet(0, 10)}, (-1, 11))
 
 
@@ -369,8 +368,8 @@ def test_union_lower_bound():
 
 def test_modular_set():
     ck = IntSetChecker()
-    x = tvm.te.var("x", dtype="int32")
-    y = tvm.te.var("y", dtype="int32")
+    x = tirx.Var("x", "int32")
+    y = tirx.Var("y", "int32")
     expr = (x * 2048 + y * 16) % 7168
     ck.verify(expr, {x: tvm.arith.IntervalSet(0, 128), y: tvm.arith.IntervalSet(0, 3584)}, (0, 7152))
 

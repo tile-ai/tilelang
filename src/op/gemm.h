@@ -102,13 +102,17 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  tirx::Buffer a_, b_, c_;
-  // BufferRegion for A, B and C
-  BufferRegion aRegion_, bRegion_, cRegion_;
+  explicit GemmNode(ffi::UnsafeInit tag)
+      : a_(tag), b_(tag), c_(tag), aRegion_(tag), bRegion_(tag), cRegion_(tag) {
+  }
+
+  tirx::TensorVar a_, b_, c_;
+  // TensorRegion for A, B and C
+  TensorRegion aRegion_, bRegion_, cRegion_;
   bool transA_, transB_;
   int m_, n_, k_;
-  PrimExpr clearAccum_ = const_false();
-  tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
+  PrimExpr clearAccum_ = PrimExpr(false);
+  ffi::Optional<TensorLoad> mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
@@ -117,7 +121,7 @@ public:
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
-  Map<String, ObjectRef> annotations_;
+  BlockAnnotations annotations_;
 
   TVM_FFI_DECLARE_OBJECT_INFO("tl.Gemm", GemmNode, TileOperatorNode);
 
@@ -147,11 +151,11 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<TensorRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const override;
 
@@ -161,8 +165,8 @@ public:
   // Parse the 13 positional slots shared by every GEMM flavour
   // (see the protocol documented at Gemm::Gemm) into `node`. Shared by the
   // constructors of every GEMM flavour.
-  static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
-                                const Map<String, ObjectRef> &annotations);
+  static void InitFromDenseArgs(GemmNode *node, const Array<Expr> &args,
+                                const BlockAnnotations &annotations);
 
 private:
   mutable bool completed_ = false;
@@ -181,6 +185,11 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  Stmt (*lower)(const GemmNode &op, const LowerArgs &args,
+                sym::Analyzer analyzer) = nullptr;
+  LayoutMap (*infer_layout)(const GemmNode &op,
+                            const LayoutInferArgs &args) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);
@@ -191,8 +200,8 @@ const GemmImpl &ResolveGemmImpl(const Target &target);
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
-  TVM_DLL Gemm(Array<PrimExpr> args,
-               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL Gemm(Array<Expr> args,
+                    BlockAnnotations annotations = BlockAnnotations());
   static const Op &Get();
 };
 

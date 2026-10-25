@@ -1,228 +1,154 @@
-/*!
- *  \file lower_shared_barrier.cc
- *  \brief Convert shared.barrier buffers to plain shared + ptx init.
- */
+#include "compat/expr.h"
 #include "cuda/op/builtin.h"
-#include "support/check.h"
-#include "tvm/ir/type.h"
-#include <tvm/arith/analyzer.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+
+#include <tvm/tirx/op/gpu.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <utility>
-
-namespace tvm {
-namespace tl {
-
-namespace attr {
-// BlockAttr, Recording the arrive counts for each barrier allocation
-constexpr const char *kBarrierInit = "barrier_init";
-} // namespace attr
-
-using namespace tirx;
+namespace tvm::tl {
 using namespace ffi;
+using namespace tirx;
+
+namespace {
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
-    SharedBarrierRewriter rewriter(disable_shuffle_elect);
-    return rewriter(std::move(body));
-  }
+  explicit SharedBarrierRewriter(bool disable_shuffle)
+      : disable_shuffle_(disable_shuffle) {}
 
 private:
-  SharedBarrierRewriter(bool disable_shuffle_elect)
-      : disable_shuffle_elect_(disable_shuffle_elect) {}
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = GetRef<SBlock>(op);
-    Array<Buffer> alloc_buffers = op->alloc_buffers;
-
-    // Record the mapping from buffer data var to buffer for later lookup
-    for (auto buffer : alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
+  UnchangedOr<Expr> Mutate_(const VarNode *node, InplaceMode mode) final {
+    if (auto tensor = GetRef<Var>(node).as<TensorVar>()) {
+      if (auto replacement = tensors_.Get(tensor.value()))
+        return replacement.value();
     }
-    for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
-    }
+    return StmtExprMutator::Mutate_(node, mode);
+  }
 
-    // Only check buffers allocated in THIS block, not accumulated from parent
-    // blocks
-    Array<Buffer> barrier_buffers;
-    for (auto buffer : alloc_buffers) {
-      const auto *ptr_type =
-          buffer->data->type_annotation.as<PointerTypeNode>();
-      if (!ptr_type)
-        continue;
-      auto storage_scope = ptr_type->storage_scope;
-      if (storage_scope == "shared.barrier" ||
-          storage_scope == "shared.cluster_barrier") {
-        barrier_buffers.push_back(buffer);
-        if (storage_scope == "shared.cluster_barrier") {
-          has_cluster_barrier_ = true;
-        }
+  UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
+    Expr result = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(GetRef<Expr>(node));
+    if (node->op.same_as(access_ptr()) || node->op.same_as(address_of_op()) ||
+        node->op.same_as(tensor_data_ptr_op())) {
+      Call call = result.as_or_throw<Call>();
+      return Call(std::nullopt, call->op, call->args, call->attrs,
+                  call->ty_args, call->loc);
+    }
+    return result;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                            InplaceMode mode) final {
+    auto previous = threads_;
+    if (node->op.same_as(launch_thread_op())) {
+      String tag = node->args[0].as_or_throw<StringImm>()->value;
+      if (tag == "threadIdx.x" || tag == "threadIdx.y" ||
+          tag == "threadIdx.z") {
+        threads_.Set(tag, node->body_params[0].as_or_throw<PrimVar>());
       }
     }
+    auto result = StmtExprMutator::Mutate_(node, mode);
+    threads_ = previous;
+    return result;
+  }
 
-    if (barrier_buffers.empty()) {
-      return StmtExprMutator::VisitStmt_(op);
+  UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
+    auto tensor = node->var.as<TensorVar>();
+    if (!tensor)
+      return StmtExprMutator::Mutate_(node, mode);
+    String scope = tensor.value().scope().name();
+    if (scope != "shared.barrier" && scope != "shared.cluster_barrier") {
+      return StmtExprMutator::Mutate_(node, mode);
     }
-
-    ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
-
-    for (auto buffer : barrier_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-
-    /*
-    Transform:
-        mbarrier_list = T.alloc_barrier(arrive_counts: list[int], "handle",
-    scope="shared.barrier")
-
-    into:
-        # This is emitted by the definition of T.alloc_barrier
-        mbarrier_list = T.alloc_buffer(len(arrive_counts), "handle",
-    scope="shared.barrier")
-
-        # This is emitted by this pass
-        if tx == 0:
-          for i in range(len(arrive_counts)):
-            T.ptx_init_barrier_thread_count(mbarrier_list[i], arrive_counts[i])
-    */
-
-    // Extract the arrive counts from the block attr "barrier_init"
-    // The attr is a Map<Var, Array<PrimExpr>> where key is buffer.data and
-    // value is arrive counts
-    ICHECK(op->annotations.count(attr::kBarrierInit))
-        << "barrier_init is not defined";
-    auto barrier_init_map = op->annotations.Get(attr::kBarrierInit)
-                                ->as<Map<Var, Array<PrimExpr>>>()
-                                .value();
-
-    // Create init calls for each barrier buffer
-    // Initialize each barrier element with its respective arrive count
-    Array<Stmt> init_mbarrier_calls_;
-    for (auto buffer : barrier_buffers) {
-      auto data = buffer->data;
-      ICHECK(barrier_init_map.count(data))
-          << "Barrier buffer " << buffer->name
-          << " not found in barrier_init annotation";
-      auto arrive_counts = barrier_init_map.at(data);
-      ICHECK(arrive_counts.size() ==
-             static_cast<size_t>(buffer->shape[0].as<IntImmNode>()->value))
-          << "The number of arrive counts (" << arrive_counts.size()
-          << ") must match the barrier buffer size (" << buffer->shape[0]
-          << ") for buffer " << buffer->name;
-
-      for (size_t i = 0; i < arrive_counts.size(); i++) {
-        auto call =
-            Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-                 {BufferLoad(buffer,
-                             {IntImm(DataType::Int(32), static_cast<int>(i))}),
-                  arrive_counts[i]});
-        init_mbarrier_calls_.push_back(Evaluate(call));
+    TVM_FFI_CHECK(threads_.count("threadIdx.x"), ValueError)
+        << "Shared barriers must be allocated inside a CUDA thread launch";
+    const auto *allocation = node->value.as<CallNode>();
+    TVM_FFI_CHECK(allocation && allocation->op.same_as(alloc_tensor_op()),
+                  ValueError)
+        << "Shared barriers require an explicit allocation";
+    TVM_FFI_CHECK(tensor.value().dtype() == PrimType::UInt(64) &&
+                      tensor.value().shape().size() == 1,
+                  ValueError)
+        << "Shared barrier storage must be a rank-one uint64 tensor";
+    auto attributes =
+        allocation->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>();
+    auto counts = attributes.GetAttr<Array<PrimExpr>>("barrier_init");
+    auto extent = GetConstInt(tensor.value().shape()[0]);
+    TVM_FFI_CHECK(counts && extent && *extent > 0 &&
+                      static_cast<size_t>(*extent) == counts.value().size(),
+                  ValueError)
+        << "Barrier initialization requires one arrive count per slot";
+    TensorType type(tensor.value().shape(), tensor.value().dtype(),
+                    runtime::MemoryScope::Get("shared"),
+                    std::max(8, tensor.value().ty()->data_alignment),
+                    tensor.value().ty()->layout, node->loc);
+    TensorVar physical(tensor.value()->name, type, node->loc);
+    tensors_.Set(tensor.value(), physical);
+    attributes.CopyOnWrite()->dict.erase("barrier_init");
+    Array<Stmt> initialization;
+    for (size_t slot = 0; slot < counts.value().size(); ++slot) {
+      PrimExpr count = counts.value()[slot];
+      if (auto constant = GetConstInt(count)) {
+        TVM_FFI_CHECK(*constant > 0, ValueError)
+            << "Barrier arrive counts must be positive";
       }
+      initialization.push_back(Evaluate(
+          Call(PrimType::Void(), mbarrier_init(),
+               {TensorLoad(physical, {MakeConst(PrimType::Int(32), slot)}),
+                count})));
     }
-    if (init_mbarrier_calls_.empty())
-      return block;
-
-    Array<Stmt> new_body;
-    PrimExpr condition;
-    if (!disable_shuffle_elect_) {
-      condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
-    } else {
-      condition = EQ(thread_var_->var, 0);
+    PrimExpr leader = Call(PrimType::Bool(), tl_shuffle_elect(), {PrimExpr(0)})
+                          .as_or_throw<PrimExpr>();
+    if (disable_shuffle_) {
+      leader = MakeConst(PrimType::Bool(), true);
+      for (const auto &[tag, variable] : threads_)
+        leader = leader && variable == MakeConst(variable.ty(), 0);
     }
-    new_body.push_back(IfThenElse(condition,
-                                  init_mbarrier_calls_.size() == 1
-                                      ? init_mbarrier_calls_.back()
-                                      : SeqStmt(init_mbarrier_calls_),
-                                  Stmt()));
-
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), ptx_fence_barrier_init(), {})));
-    new_body.push_back(Evaluate(
-        Call(DataType::Handle(), builtin::tvm_storage_sync(),
-             {StringImm(has_cluster_barrier_ ? "cluster" : "shared")})));
-    new_body.push_back(block->body);
-
-    block.CopyOnWrite()->body = SeqStmt(new_body);
-
-    return StmtExprMutator::VisitStmt_(block.get());
+    Array<Stmt> statements{
+        Bind(physical,
+             Call(std::nullopt, alloc_tensor_op(), allocation->args, attributes,
+                  {type}, allocation->loc),
+             node->loc),
+        If(leader, SeqStmt(initialization)),
+        Evaluate(Call(PrimType::Void(), ptx_fence_barrier_init(), {})),
+        Evaluate(
+            Call(std::nullopt, gpu_storage_sync_op(),
+                 {StringImm(scope == "shared.cluster_barrier" ? "cluster"
+                                                              : "shared")}))};
+    return SeqStmt(statements, node->loc);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    auto buffer = load->buffer;
-    if (buffer_remap_.count(buffer)) {
-      auto new_buffer = buffer_remap_[load->buffer];
-      return BufferLoad(new_buffer, load->indices);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    auto buffer = store->buffer;
-    if (buffer_remap_.count(buffer)) {
-      auto new_buffer = buffer_remap_[store->buffer];
-      return BufferStore(new_buffer, store->value, store->indices);
-    }
-    return store;
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_var_ = iv;
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  // This is a workaround for cpu backend,
-  // we need to define a thread_var for the serial loop.
-  IterVar thread_var_;
-  Map<Var, Buffer> buffer_data_to_buffer_;
-  Map<Buffer, Buffer> buffer_remap_;
-  // Mapping from data Var of a Buffer to Buffer, for lookup
-  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
-  // Disable shuffle elect for the warp specialized kernel
-  bool disable_shuffle_elect_;
-  // Whether the block has a cluster barrier
-  bool has_cluster_barrier_ = false;
+  Map<TensorVar, TensorVar> tensors_;
+  Map<String, PrimVar> threads_;
+  bool disable_shuffle_;
 };
 
-PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
-  f.CopyOnWrite()->body =
-      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
-  return f;
-}
+} // namespace
 
 namespace transform {
-using namespace tirx::transform;
-
 tvm::transform::Pass LowerSharedBarrier() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    bool disable_shuffle_elect =
-        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
-    return tl::LowerSharedBarrier(std::move(f), disable_shuffle_elect);
+  auto pass =
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext context) -> Optional<tirx::Function> {
+    if (function->body) {
+      auto rewriter = make_object<SharedBarrierRewriter>(
+          context->GetConfig<bool>(kDisableShuffleElect).value_or(false));
+      SeqStmt body = function->body.value();
+      function.CopyOnWrite()->body =
+          rewriter->Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedBarrier", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.cuda.LowerSharedBarrier");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerSharedBarrier",
-                        LowerSharedBarrier);
+  reflection::GlobalDef().def("tl.cuda.transform.LowerSharedBarrier",
+                              LowerSharedBarrier);
 }
-
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+
+} // namespace tvm::tl

@@ -1,5 +1,7 @@
 # Installation Guide
 
+This checkout uses standalone `tvm_tirx`; it does not contain or support the former `3rdparty/tvm` submodule. Build and install the paired, patched dependency described in [the migration guide](../../MIGRATION_TIRX.md) before building TileLang wheels. An unpatched `apache-tvm-tirx==0.1.0a2` package does not provide the required compiler extensions. PyPI and nightly commands in this guide refer to published releases rather than the local migration.
+
 ## Installing with pip
 
 **Prerequisites for installation via wheel or PyPI:**
@@ -54,7 +56,7 @@ Verify that the ROCm target is detected:
 python -c "import tilelang; from tilelang.backend.target import determine_target; print(tilelang.__version__, determine_target(return_object=True))"
 ```
 
-This should print a `hip` target with your GPU architecture (e.g. `mcpu=gfx942`).
+This should print the native `rocm` target with your GPU architecture (e.g. `mcpu=gfx942`). `hip` remains an accepted TileLang input alias.
 
 If ROCm is installed outside `/opt/rocm`, or several HIP toolchains are visible on `PATH`, set `ROCM_PATH` to pin the installation TileLang should use:
 
@@ -74,6 +76,7 @@ Notes:
 - **Operating System**: Linux or Windows
 - **Python Version**: >= 3.10
 - **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **Native tools**: a C++20 compiler, CMake >= 3.26.1, and Ninja
 
 If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. The commands below use Ubuntu/Debian as the Linux example; Windows-specific notes are called out where they differ.
 
@@ -86,16 +89,15 @@ apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-e
 
 On Windows, install Python 3, CMake, and Visual Studio Build Tools with the MSVC C++ toolchain. Run the `pip install` commands below from a Visual Studio Developer Command Prompt (or `call VsDevCmd.bat` first) so that `cl.exe` is on `PATH` and CMake can detect the compiler.
 
-Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
-
-> **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
+Use the migrated TileLang checkout and initialize its remaining CUTLASS submodule with `git submodule update --init --recursive`. TIRx is an independent dependency, never a TileLang submodule. The pip examples below assume that its patched wheel is already installed in the selected environment. They use `--no-build-isolation` so CMake discovers that exact installation.
 
 ### With host CUDA toolchain
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
-pip install . -v
+cd /path/to/tilelang
+pip install -r requirements-dev.txt
+export CMAKE_ARGS="-DTILELANG_USE_INSTALLED_TIRX=ON"
+pip install . -v --no-build-isolation
 ```
 
 ### With pip-provided CUDA toolchain (no host CUDA required)
@@ -105,10 +107,10 @@ If you don't have CUDA installed on the host, you can use pip-provided CUDA pack
 **Option A** — pip toolchain in the current environment (use `--no-build-isolation`):
 
 ```bash
-git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tilelang
+cd /path/to/tilelang
 pip install -r requirements-dev.txt
 pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13"
+export CMAKE_ARGS="-DTILELANG_USE_INSTALLED_TIRX=ON"
 pip install . -v --no-build-isolation
 ```
 
@@ -117,13 +119,14 @@ pip install . -v --no-build-isolation
 ```bash
 # Point to the cu<ver> directory inside another venv's site-packages
 export WITH_PIP_CUDA_TOOLCHAIN=/path/to/venv/lib/python3.x/site-packages/nvidia/cu13
-pip install . -v
+export CMAKE_ARGS="-DTILELANG_USE_INSTALLED_TIRX=ON"
+pip install . -v --no-build-isolation
 ```
 
 If you want to install tilelang in development mode, you can use the `-e` flag so that any changes to the Python files will be reflected immediately without reinstallation.
 
 ```bash
-pip install -e . -v
+CMAKE_ARGS="-DTILELANG_USE_INSTALLED_TIRX=ON" pip install -e . -v --no-build-isolation
 ```
 
 > **Note**: changes to C++ files require rebuilding the tilelang C++ library. See [Faster Rebuild for Developers](#faster-rebuild-for-developers) below. A default `build` directory will be created if you use `pip install`, so you can also directly run `make` in the `build` directory to rebuild it as [Working from Source via PYTHONPATH](#working-from-source-via-pythonpath) suggested below.
@@ -132,26 +135,22 @@ pip install -e . -v
 
 ### Working from Source via `PYTHONPATH` (Recommended for Developers)
 
-If you prefer to work directly from the source tree via `PYTHONPATH` instead of using pip, make sure the native extension (`libtilelang.so`) is built first:
+For development against sibling `tilelang` and patched `tvm-tirx` checkouts, build both native libraries together. Run these commands from their parent directory:
 
 ```bash
-mkdir -p build
-cd build
-cmake .. -DUSE_CUDA=ON
-make -j
-```
-
-We also recommend using `ninja` to speed up compilation:
-
-```bash
-cmake .. -DUSE_CUDA=ON -G Ninja
-ninja
+cmake -S tilelang -B tilelang/build -G Ninja \
+  -DTVM_TIRX_SOURCE="$PWD/tvm-tirx" \
+  -DPython_EXECUTABLE="$(command -v python)" \
+  -DPython3_EXECUTABLE="$(command -v python)" \
+  -DUSE_CUDA=ON
+cmake --build tilelang/build --target tilelang --parallel
 ```
 
 Then add the repository root to `PYTHONPATH` before importing `tilelang`, for example:
 
 ```bash
-export PYTHONPATH=/path/to/tilelang:$PYTHONPATH
+export PYTHONPATH="$PWD/tilelang:$PWD/tvm-tirx/python${PYTHONPATH:+:$PYTHONPATH}"
+export TVM_TIRX_LIBRARY_PATH="$PWD/tilelang/build/lib"
 python -c "import tilelang; print(tilelang.__version__)"
 ```
 
@@ -163,17 +162,17 @@ Some useful CMake options you can toggle while configuring:
 - `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
 - `-DUSE_LLVM=ON` enables the LLVM backend for CPU codegen.
 
-(using-existing-tvm)=
+(using-existing-tirx)=
 
-### Building with Customized TVM Path
+### Selecting the Standalone TIRx Dependency
 
-If you already have a TVM codebase, use the `TVM_ROOT` environment variable to specify the location of your existing TVM repository when building tilelang:
+For a source dependency outside the sibling directory, select its patched checkout explicitly:
 
 ```bash
-TVM_ROOT=<your-tvm-repo> pip install . -v
+TVM_TIRX_SOURCE=/path/to/tvm-tirx pip install . -v --no-build-isolation
 ```
 
-> **Note**: This will still rebuild the TVM-related libraries (stored in `TL_LIBS`). And this method often leads to some path issues. Check `env.py` to see some environment variables which are not set properly.
+For an independently installed dependency, set `-DTILELANG_USE_INSTALLED_TIRX=ON` through `CMAKE_ARGS`. CMake discovers its package using the selected Python interpreter; `-Dtvm_tirx_DIR=/path/to/lib/cmake/tvm_tirx` can override discovery. Do not reuse a build directory between source and installed-dependency modes. `TVM_ROOT` and the former TVM monorepo are not supported.
 
 (install-using-docker)=
 
@@ -298,15 +297,15 @@ mkdir -p /usr/local/bin
 printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16
 chmod +x /usr/local/bin/llvm-config-16
 
-# TVM Python bits need Cython (for system Python used by the build)
-pip install --no-cache-dir "cython>=0.29.36,<3.0"
+pip install --no-cache-dir "cython>=3.1.0"
 
 # Clone + build TileLang (ROCm)
 # Default location: /opt/tilelang (adjust if you prefer a different path).
 git clone --recursive https://github.com/tile-ai/tilelang.git /opt/tilelang
 cd /opt/tilelang
 git submodule update --init --recursive
-export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DLLVM_CONFIG=${LLVM_CONFIG}"
+export CMAKE_ARGS="-DTILELANG_USE_INSTALLED_TIRX=ON -DUSE_CUDA=OFF -DUSE_ROCM=ON -DROCM_PATH=/opt/rocm -DUSE_LLVM=${LLVM_CONFIG}"
+pip install -r requirements-dev.txt
 
 # Avoid pulling CUDA wheels / reinstalling torch by skipping dependency resolution.
 # Assume torch is already installed in the container.
@@ -314,7 +313,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.11,<0.1.13" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi==0.1.15.post0" "z3-solver>=4.13.0,<4.15.5"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
@@ -358,7 +357,9 @@ Running kernels still requires the selected backend's compiler, runtime, and dev
 
 `USE_LLVM`: If to enable LLVM support for CPU codegen, default: `OFF`. Set `USE_LLVM=1` for auto-detection, or pass `-DUSE_LLVM=/path/to/llvm-config` through `CMAKE_ARGS` when you need a specific LLVM installation. LLVM 15 or newer is required.
 
-`TVM_ROOT`: TVM source root to use.
+`TVM_TIRX_SOURCE`: patched standalone TIRx source root. The default is a sibling `../tvm-tirx` checkout. This also selects its Python sources at runtime.
+
+`TILELANG_USE_INSTALLED_TIRX`: CMake option, passed as `-DTILELANG_USE_INSTALLED_TIRX=ON`, to link an independently installed dependency instead of rebuilding its sources.
 
 `WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 

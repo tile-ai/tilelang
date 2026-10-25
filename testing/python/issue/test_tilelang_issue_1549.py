@@ -2,6 +2,7 @@ import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
 import torch
+import re
 
 
 @tilelang.testing.requires_cuda
@@ -30,14 +31,8 @@ def test_issue_1549_strange_var_vectorization():
     data = torch.randint(0, 100, (M,), dtype=torch.int32, device="cuda")
     kernel(data)
     code = kernel.get_kernel_source()
-    print(code)
-    assert (
-        """for (int i = 0; i < 32; ++i) {
-    idx = ((i * 64) + ((int)threadIdx.x));
-    Data[((i * 64) + ((int)threadIdx.x))] = idx;
-  }"""
-        in code
-    )
+    torch.testing.assert_close(data, torch.arange(M, device="cuda", dtype=torch.int32), rtol=0, atol=0)
+    assert re.search(r"for \(int [^;]+ = 0; [^;]+ < 32; \+\+[^)]+\)", code)
 
 
 if __name__ == "__main__":

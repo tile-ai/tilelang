@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from tvm import arith
+from tilelang._compat.tvm import arith
 
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import _with_span
-from tvm import DataType
-from tvm.script import tirx as T
-from tvm.tirx import IntImm
-from tvm.tirx.buffer import Buffer
-from tvm.tirx.script.builder.ir import sblock_attr
+from tilelang._compat.tvm import DataType
+from tilelang._compat import builder as T
+from tilelang._compat.tirx import IntImm
+from tilelang._compat.tirx import Buffer
+from tilelang._compat.builder import scope_attr
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -21,7 +21,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     because the smem-merge pass cannot handle bool): Ascend UB handles bool
     buffers in the requested scope directly.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
@@ -32,7 +32,7 @@ def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
         dtype: Data type
         scope: Memory scope. Defaults to "shared.l1"
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
@@ -67,7 +67,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         elements *= int(extent)
     if elements * dtype.bits // 8 > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
-    return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
+    return _with_span(T.alloc_buffer(extents, str(dtype), scope="shared.ss"))
 
 
 def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:
@@ -76,7 +76,7 @@ def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:
     Layout is deferred to the consuming gemm operation, which infers K-major
     or MN-major from its transpose flags.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l0b(shape: ShapeType, dtype: DType, scope="shared.l0b") -> Buffer:
@@ -85,7 +85,7 @@ def alloc_l0b(shape: ShapeType, dtype: DType, scope="shared.l0b") -> Buffer:
     Layout is deferred to the consuming gemm operation, which infers K-major
     or MN-major from its transpose flags.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(T.alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool = True) -> Buffer:
@@ -97,12 +97,12 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
         scope: Memory scope. Defaults to "shared.l0c"
         layout: Whether to annotate the fixed Ascend L0C accumulator layout.
     """
-    buf = _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    buf = _with_span(T.alloc_buffer(shape, dtype, scope=scope))
     if layout:
         from tilelang.layout import make_ascend_l0c_layout
 
         if len(buf.shape) >= 2:
-            sblock_attr({"layout_map": {buf.data: make_ascend_l0c_layout(buf)}})
+            scope_attr({"layout_map": {buf: make_ascend_l0c_layout(buf)}})
     return buf
 
 
@@ -112,8 +112,8 @@ _MX_SF_K_PER_SCALE_BYTE = 32
 
 
 def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: ShapeType | None) -> Buffer:
-    if buf.scope() != expected_scope:
-        raise ValueError(f"expected a {expected_scope} data tile, got scope {buf.scope()} for {buf.name}")
+    if buf.scope().name != expected_scope:
+        raise ValueError(f"expected a {expected_scope} data tile, got scope {buf.scope().name} for {buf.name}")
     if len(buf.shape) < 2:
         raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
     dtype = DataType(sf_dtype)
@@ -131,8 +131,8 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
     analyzer = arith.Analyzer()
     if len(sf_shape) != len(buf.shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], buf.shape[:-2])):
         raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {buf.shape[:-2]}")
-    sf = _with_span(T.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
-    sblock_attr({"tl.l0_sf_bindings": {sf.data: buf.data}})
+    sf = _with_span(T.alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
+    scope_attr({"tl.l0_sf_bindings": {sf: buf}})
     return sf
 
 

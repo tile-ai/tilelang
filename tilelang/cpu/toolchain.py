@@ -22,7 +22,7 @@ import sys
 import warnings
 from typing import Any
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.transform.pass_config import PassConfigKey
 

@@ -3,7 +3,8 @@
 import torch
 import ctypes
 from libc.stdint cimport int64_t
-from tvm import arith, tirx
+from tvm_tirx import sym as arith
+from tilelang._compat import tirx
 
 
 cdef class PTOKernelWrapper:

@@ -3,8 +3,8 @@ import tilelang.cuda.language as T
 from dataclasses import dataclass
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
-from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion, handle_add_byte_offset
+from tilelang._compat.tvm import DataType
+from tilelang._compat.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang.utils import is_fragment, is_full_region
 from math import gcd
@@ -13,7 +13,7 @@ from tilelang.layout import (
     SwizzleMode,
     cute,
 )
-from tvm.runtime import convert
+from tilelang._compat.tirx import convert
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
     shared_16x16_to_mma_32x8_layout_sr_a,
@@ -381,7 +381,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
-        C_buf = C_region.buffer
+        C_buf = C_region.source
 
         num_inst_m = self.wgmma_num_inst_m
         num_inst_n = self.wgmma_num_inst_n
@@ -419,8 +419,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         assert is_full_region(A_region), "Fragment input A must be a full region"
         assert is_full_region(C_region), "Fragment output C must be a full region"
-        A_buf = A_region.buffer
-        C_buf = C_region.buffer
+        A_buf = A_region.source
+        C_buf = C_region.source
 
         num_inst_m = self.wgmma_num_inst_m
         num_inst_n = self.wgmma_num_inst_n
@@ -491,7 +491,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.b_shared_layout is not None, "WGMMA B operand has no shared layout to decode"
         return compute_gmma_descriptor(
             self.b_shared_layout,
-            B_region.buffer if isinstance(B_region, BufferRegion) else B_region,
+            B_region.source if isinstance(B_region, BufferRegion) else B_region,
             transposed=not self.b_transposed,
             micro_size_k=self.micro_size_k,
             region=list(B_region.region) if isinstance(B_region, BufferRegion) else None,
@@ -506,7 +506,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.a_shared_layout is not None, "WGMMA A operand has no shared layout to decode"
         return compute_gmma_descriptor(
             self.a_shared_layout,
-            A_region.buffer if isinstance(A_region, BufferRegion) else A_region,
+            A_region.source if isinstance(A_region, BufferRegion) else A_region,
             transposed=self.a_transposed,
             micro_size_k=self.micro_size_k,
             region=list(A_region.region) if isinstance(A_region, BufferRegion) else None,
@@ -531,8 +531,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_params : WGMMADescriptorParams
             Pre-computed parameters from ``compute_wgmma_b_desc_params()``.
         """
-        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
-        B_base_ptr = B_buf.access_ptr("r")
+        B_buf = B_region.source if isinstance(B_region, BufferRegion) else B_region
+        B_base_ptr = T.access_ptr(B_buf, "r")
         slice_byte_offset = b_params.slice_byte_offset
         if not isinstance(slice_byte_offset, int):
             # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
@@ -577,8 +577,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         a_params : WGMMADescriptorParams
             Pre-computed parameters from ``compute_wgmma_a_desc_params()``.
         """
-        A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
-        A_base_ptr = A_buf.access_ptr("r")
+        A_buf = A_region.source if isinstance(A_region, BufferRegion) else A_region
+        A_base_ptr = T.access_ptr(A_buf, "r")
         slice_byte_offset = a_params.slice_byte_offset
         if not isinstance(slice_byte_offset, int):
             is_sliced = True
@@ -911,7 +911,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         transform_func: Callable = None
         transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
 
-        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope().name}"
 
         micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
 

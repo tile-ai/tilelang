@@ -23,346 +23,312 @@
  */
 
 #include "loop_partition.h"
-#include "support/check.h"
-#include <tvm/ir/cast.h>
 
-#include <tvm/tirx/analysis.h>
+#include "op/utils.h"
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <limits>
 #include <utility>
 
-#include "../op/reducer.h"
-#include "../op/utils.h"
-#include "loop_vectorize.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
-class BufferIndiceSimplify : public StmtExprMutator {
+class BufferIndexSimplifier : public tirx::StmtExprMutator {
 public:
-  BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+  explicit BufferIndexSimplifier(sym::Analyzer analyzer)
+      : analyzer_(std::move(analyzer)) {}
 
 private:
-  Stmt VisitStmt_(const BindNode *node) final {
-    auto bind = Downcast<Bind>(StmtExprMutator::VisitStmt_(node));
-    if (SideEffect(bind->value) <= CallEffectKind::kPure) {
-      // Refresh let aliases from the substituted IR before simplifying uses.
-      // The analyzer may still bind them to the original loop indices.
-      analyzer_->Bind(bind->var, bind->value, /*allow_override=*/true);
+  ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    Bind binding = StmtExprMutator::Mutate_(node, mode)
+                       .ValueOrUnchanged(original)
+                       .as_or_throw<Bind>();
+    if (auto value = binding->value.as<PrimExpr>();
+        value && binding->var.as<PrimVar>() &&
+        SideEffect(value.value()) <= CallEffectKind::kPure) {
+      analyzer_->Bind(binding->var, value.value(), true);
     }
-    return bind;
+    return binding;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *node) final {
-    auto visited = StmtExprMutator::VisitExpr_(node);
-    auto n = Downcast<BufferLoad>(visited);
-    auto nptr = n.CopyOnWrite();
-    nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
-    return n;
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr original = ffi::GetRef<PrimExpr>(node);
+    TensorLoad load = StmtExprMutator::Mutate_(node, mode)
+                          .ValueOrUnchanged(original)
+                          .as_or_throw<TensorLoad>();
+    load.CopyOnWrite()->indices = load->indices.Map(
+        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    return load;
   }
-  Stmt VisitStmt_(const BufferStoreNode *node) final {
-    auto visited = StmtExprMutator::VisitStmt_(node);
-    auto n = Downcast<BufferStore>(visited);
-    auto nptr = n.CopyOnWrite();
-    nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
-    return n;
+
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    TensorStore store = StmtExprMutator::Mutate_(node, mode)
+                            .ValueOrUnchanged(original)
+                            .as_or_throw<TensorStore>();
+    store.CopyOnWrite()->indices = store->indices.Map(
+        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    return store;
   }
-  arith::Analyzer *analyzer_;
+
+  sym::Analyzer analyzer_;
 };
 
-// Lower generic `tl.parallel_multiplicity` markers: the marked side effect
-// must execute once per dynamic logical iteration of the partitioned loop,
-// so it is guarded to the canonical replica (REP == 0). When the loop layout
-// has no replication (or REP is provably zero) the marker is stripped. This
-// mutator understands only execution multiplicity — it knows nothing about
-// what the marked statement does.
-// The marker is a statement-level AttrStmt, so a statement-only mutator
-// suffices (expression subtrees cannot carry it).
-class MultiplicityMarkerLowerer : public StmtMutator {
+class MultiplicityMarkerLowerer : public tirx::StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, const Optional<PrimExpr> &replica_guard) {
-    MultiplicityMarkerLowerer lowerer(replica_guard);
-    return lowerer(std::move(stmt));
-  }
+  explicit MultiplicityMarkerLowerer(ffi::Optional<PrimExpr> guard)
+      : guard_(std::move(guard)) {}
 
 private:
-  explicit MultiplicityMarkerLowerer(Optional<PrimExpr> replica_guard)
-      : replica_guard_(std::move(replica_guard)) {}
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt statement = StmtExprMutator::Mutate_(node, mode)
+                         .ValueOrUnchanged(ffi::GetRef<Stmt>(node));
+    auto tensor = node->dest.as<TensorVar>();
+    if (guard_ && tensor && tensor.value().scope().name() == "global")
+      return If(*guard_, SeqStmt({statement}), std::nullopt, node->loc);
+    return statement;
+  }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kParallelMultiplicity) {
-      Stmt body = VisitStmt(op->body);
-      if (!replica_guard_.defined()) {
-        return body;
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    RegionStmt region = StmtExprMutator::Mutate_(node, mode)
+                            .ValueOrUnchanged(original)
+                            .as_or_throw<RegionStmt>();
+    if (region->op->name != "tl.parallel_multiplicity") {
+      return region;
+    }
+    if (guard_.has_value()) {
+      return If(guard_.value(), region->body, std::nullopt, region->loc);
+    }
+    return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), region->body, {},
+                      region->loc);
+  }
+
+  ffi::Optional<PrimExpr> guard_;
+};
+
+const ForNode *UnwrapLoop(const Stmt &statement) {
+  Stmt current = statement;
+  while (const auto *sequence = current.as<SeqStmtNode>()) {
+    if (sequence->seq.size() != 1)
+      return nullptr;
+    current = sequence->seq[0];
+  }
+  return current.as<ForNode>();
+}
+
+class FragmentAccessFinder : public tirx::StmtExprVisitor {
+public:
+  bool has_fragment{false};
+
+private:
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorLoadNode *load) final {
+    if (auto tensor = load->source.as<tirx::TensorVar>()) {
+      has_fragment |= IsFragmentBuffer(tensor.value());
+    }
+    return StmtExprVisitor::Visit_(load);
+  }
+  ffi::Optional<ffi::VisitInterrupt>
+  Visit_(const TensorStoreNode *store) final {
+    if (auto tensor = store->dest.as<tirx::TensorVar>()) {
+      has_fragment |= IsFragmentBuffer(tensor.value());
+    }
+    return StmtExprVisitor::Visit_(store);
+  }
+};
+
+class LoopPragmaUnroller : public tirx::StmtExprMutator {
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->kind == ForKind::kDefault) {
+      sym::Analyzer analyzer;
+      if (GetConstInt(analyzer->Simplify(node->end - node->begin))
+              .has_value()) {
+        For loop = ffi::GetRef<For>(node);
+        loop.CopyOnWrite()->kind = ForKind::kUnrolled;
+        return loop;
       }
-      return IfThenElse(replica_guard_.value(), body);
     }
-    return StmtMutator::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(node, mode);
   }
-
-  Optional<PrimExpr> replica_guard_;
 };
 
-// Rewrite the parallel loop into a common loop, which is mapped to threads
-For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
+} // namespace
+
+For PartitionLoop(For loop, PrimExpr thread_index, sym::Analyzer analyzer,
                   const Fragment &loop_layout, bool require_padding_guard) {
-  ICHECK(loop_layout.defined());
-  ICHECK(thread_index.defined());
-  // `op` is moved into `body` below; capture its span up front so reconstructed
-  // statements can still inherit the source location of the original loop.
-  const Span op_span = op->span;
-  int old_loop_depth = loop_layout->InputDim();
-  int new_loop_depth = loop_layout->OutputDim();
-  // Create the new loop iter var
-  Array<Var> vars;
-  for (int i = 0; i < new_loop_depth; i++) {
-    Var var = Var(std::string{char('i' + i)});
-    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype),
-                                             loop_layout->OutputShape()[i]));
-    vars.push_back(var);
+  TVM_FFI_CHECK(loop_layout.defined(), ValueError)
+      << "A loop fragment layout is required";
+  Location location = loop->loc;
+  size_t input_rank = loop_layout->InputDim();
+  size_t output_rank = loop_layout->OutputDim();
+  ffi::Array<PrimVar> variables;
+  ffi::Array<PrimExpr> output_shape = loop_layout->OutputShape();
+  for (size_t axis = 0; axis < output_rank; ++axis) {
+    PrimVar variable("partition_" + std::to_string(axis),
+                     output_shape[axis].ty());
+    analyzer->Bind(variable, Range::FromMinExtent(MakeConst(variable.ty(), 0),
+                                                  output_shape[axis]));
+    variables.push_back(variable);
   }
-  // Normalize the thread index against the layout thread range once, then
-  // feed the normalized expression into the inverse layout directly. The
-  // inverse indices, the bounds guard and the replicate index therefore all
-  // use the same normalized expression, without needing a Var-keyed
-  // substitution map.
-  PrimExpr normalized_thread_index = thread_index;
-  if (loop_layout->ThreadRange().defined()) {
-    normalized_thread_index = thread_index - loop_layout->ThreadRange()->min;
+  PrimExpr normalized_thread = thread_index;
+  if (auto range = loop_layout->ThreadRange()) {
+    normalized_thread = thread_index - range.value()->begin;
   }
-  Array<PrimExpr> forward_inputs(vars.begin(), vars.end());
-  forward_inputs.push_back(normalized_thread_index);
-  // create the substitute map, and the loop body
-  Map<Var, PrimExpr> vmap;
-  Stmt body = std::move(op);
-  Array<PrimExpr> loop_mins;
-  Array<PrimExpr> loop_extents;
-  // Only the inverse layout is needed here; the accompanying IterMapLevel is
-  // for callers that must distinguish exact from padded inversions.
-  Layout inv_loop = loop_layout->InverseWithLevel(require_padding_guard).first;
-  auto indices = inv_loop->Forward(forward_inputs);
-  for (int i = 0; i < old_loop_depth; i++) {
-    const ForNode *loop = body.as<ForNode>();
-    ICHECK(loop != nullptr)
-        << "No extra statements are allowed between nested parallel loops.";
-    vmap.Set(loop->loop_var, indices[i]);
-    loop_mins.push_back(loop->min);
-    loop_extents.push_back(loop->extent);
-    body = loop->body;
+  ffi::Array<PrimExpr> coordinates(variables.begin(), variables.end());
+  coordinates.push_back(normalized_thread);
+  Layout inverse = loop_layout->InverseWithLevel(require_padding_guard).first;
+  ffi::Array<PrimExpr> indices = inverse->Forward(coordinates);
+  ffi::Map<PrimVar, PrimExpr> replacements;
+  ffi::Array<PrimExpr> begins;
+  ffi::Array<PrimExpr> ends;
+  Stmt body = loop;
+  for (size_t axis = 0; axis < input_rank; ++axis) {
+    const ForNode *nested = UnwrapLoop(body);
+    TVM_FFI_CHECK(nested && nested->kind == ForKind::kParallel, ValueError)
+        << "A layout requires a perfectly nested parallel loop";
+    TVM_FFI_CHECK(nested->HasTrivialStep(), ValueError)
+        << "PartitionLoop requires unit-step parallel loops";
+    replacements.Set(nested->var, indices[axis]);
+    begins.push_back(nested->begin);
+    ends.push_back(nested->end);
+    body = nested->body;
   }
-  // substitute and re-construct the serial loop
-  body = Substitute(body, vmap);
-  // Guard executes the recovered loop body only if each inverse-mapped iterator
-  // falls back into the original For ranges. We first check every axis from the
-  // old loop nest (old_loop_depth) and then the extra index produced by inverse
-  // layouts that carry a replicate/thread component (`inv_output_shape`). Both
-  // must stay within bounds to ensure correctness. Example: layout([i, j]) =
-  // floor((i * 16 + j) / 32) may generate extra points when the new loop
-  // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
-  // or replicate index fall outside their original extents. This protects
-  // non-surjective loop_layout mappings that otherwise over-cover the parallel
-  // space.
-  // Always build guard and let analyzer decide if it can be proved true.
-  // This handles both non-bijective layouts and cases where loop extent
-  // differs from layout input shape (e.g., loop extent=4 with
-  // Fragment([8]->[1]) produces inverse index `tx % 8` ranging 0-7, requiring
-  // guard `tx % 8 < 4`).
-  PrimExpr guard = const_true();
-  for (int i = 0; i < old_loop_depth; i++) {
-    PrimExpr index = indices[i];
-    PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
-    PrimExpr upper_bound =
-        analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
-    guard = And(guard, And(lower_bound, upper_bound));
+  body = Substitute(body, replacements);
+  PrimExpr guard = (normalized_thread >= 0) &&
+                   (normalized_thread < loop_layout->ThreadExtent());
+  for (size_t axis = 0; axis < input_rank; ++axis) {
+    guard = guard && (indices[axis] >= begins[axis]) &&
+            (indices[axis] < ends[axis]);
   }
-  auto inv_output_shape = inv_loop->OutputShape();
-  if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
-    PrimExpr replicate_index = indices[old_loop_depth];
-    PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
-    PrimExpr lower_bound = analyzer->Simplify(
-        replicate_index >= make_zero(replicate_index.dtype()));
-    PrimExpr upper_bound =
-        analyzer->Simplify(replicate_index < replicate_extent);
-    guard = And(guard, And(lower_bound, upper_bound));
+  ffi::Array<PrimExpr> inverse_shape = inverse->OutputShape();
+  if (inverse_shape.size() > input_rank) {
+    guard = guard && (indices[input_rank] >= 0) &&
+            (indices[input_rank] < inverse_shape[input_rank]);
   }
-  {
-    // Lower generic execution-multiplicity markers against this loop's
-    // replicate index. REP exists only when the inverse layout carries a
-    // replicate component; otherwise every physical execution is a distinct
-    // logical iteration and the markers are simply stripped.
-    Optional<PrimExpr> replica_guard;
-    if (indices.size() > static_cast<size_t>(old_loop_depth)) {
-      PrimExpr is_replica_zero = analyzer->Simplify(EQ(
-          indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
-      if (!analyzer->CanProve(is_replica_zero)) {
-        replica_guard = is_replica_zero;
-      }
+  ffi::Optional<PrimExpr> replica_guard;
+  if (indices.size() > input_rank) {
+    PrimExpr primary_replica = analyzer->Simplify(indices[input_rank] == 0);
+    if (!analyzer->CanProve(primary_replica))
+      replica_guard = primary_replica;
+  }
+  auto multiplicity =
+      ffi::make_object<MultiplicityMarkerLowerer>(replica_guard);
+  body = multiplicity->Mutate(body).ValueOrUnchanged(body);
+  guard = analyzer->Simplify(guard);
+  if (!analyzer->CanProve(guard)) {
+    body = If(guard, SeqStmt(body), std::nullopt, location);
+  }
+  if (output_rank == 0) {
+    PrimVar single_iteration("partition_once", PrimType::Int(32));
+    body = For(single_iteration, 0, 1, 1, ForKind::kDefault, SeqStmt(body), {},
+               location);
+  } else {
+    for (size_t remaining = output_rank; remaining > 0; --remaining) {
+      size_t axis = remaining - 1;
+      PrimExpr extent = inverse->InputShape()[axis];
+      PrimType type = variables[axis].ty();
+      body =
+          For(variables[axis], MakeConst(type, 0), extent, MakeConst(type, 1),
+              ForKind::kDefault, SeqStmt(body), {}, location);
+      analyzer->Bind(variables[axis],
+                     Range::FromMinExtent(MakeConst(type, 0), extent), true);
     }
-    body = MultiplicityMarkerLowerer::Rewrite(std::move(body), replica_guard);
   }
-  PrimExpr simplified_guard = analyzer->Simplify(guard);
-  if (!analyzer->CanProve(simplified_guard)) {
-    body = IfThenElse(simplified_guard, body, Stmt(), op_span);
-  }
-
-  for (int i = new_loop_depth - 1; i >= 0; i--) {
-    body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
-               ForKind::kSerial, body, std::nullopt, {}, std::nullopt, op_span);
-    analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
-  }
-
-  body = BufferIndiceSimplify(analyzer)(body);
-
-  return Downcast<For>(body);
+  auto simplifier = ffi::make_object<BufferIndexSimplifier>(analyzer);
+  return simplifier->Mutate(body).ValueOrUnchanged(body).as_or_throw<For>();
 }
 
-class LoopPramaUnroller : public StmtExprMutator {
-public:
-  LoopPramaUnroller() = default;
-
-private:
-  Stmt VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kSerial) {
-      auto analyzer = std::make_shared<arith::Analyzer>();
-      if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
-        return StmtExprMutator::VisitStmt_(node);
-      }
-      For new_for = GetRef<For>(node);
-      auto for_ptr = new_for.CopyOnWrite();
-      for_ptr->kind = ForKind::kUnrolled;
-      return new_for;
-    }
-    return StmtExprMutator::VisitStmt_(node);
-  }
-};
-
-class LoopPartitioner : public StmtExprVisitor {
-public:
-  LoopPartitioner() = default;
-
-  Fragment Partition(const For &op, int num_thread, int vectorize_size) {
-    this->VisitStmt(op);
-    DataType dtype = DataType::Int(32);
-    if (!loop_vars_.empty()) {
-      dtype = loop_vars_.back()->var.dtype();
-    }
-    PrimExpr flattened = make_const(dtype, 0);
-    PrimExpr vector_extent = make_const(dtype, vectorize_size);
-    PrimExpr thread_extent_const = make_const(dtype, num_thread);
-    for (size_t i = 0; i < loop_vars_.size(); i++) {
-      PrimExpr extent = loop_vars_[i]->dom->extent;
-      flattened = flattened * extent + loop_vars_[i]->var;
-    }
-    PrimExpr access_idx = FloorDiv(flattened, vector_extent);
-    PrimExpr thd = FloorMod(access_idx, thread_extent_const);
-    PrimExpr idx = FloorDiv(access_idx, thread_extent_const) * vector_extent +
-                   FloorMod(flattened, vector_extent);
-
-    auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
-    if (has_fragment_) {
-      // for fragment buffer, we don't need to replicate the loop layout
-      auto thread_extent = *as_const_int(fragment->ThreadExtent());
-      auto num_thread_fragment = num_thread / thread_extent;
-      fragment = fragment->Replicate(num_thread_fragment);
-    }
-    return fragment;
-  }
-
-private:
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kParallel) {
-      body_ = node->body;
-      loop_vars_.push_back(
-          IterVar(Range::FromMinExtent(node->min, node->extent), node->loop_var,
-                  IterVarType::kDataPar));
-    }
-    StmtExprVisitor::VisitStmt_(node);
-  }
-
-  Stmt body_;
-  PrimExpr flattened = 0;
-  bool has_fragment_ = false;
-  Array<IterVar> loop_vars_;
-};
-
-Fragment PlanLoopPartition(const For &op, size_t num_thread,
+Fragment PlanLoopPartition(const For &loop, size_t num_thread,
                            int vectorize_size) {
-  LoopPartitioner partitioner;
-  return partitioner.Partition(op, num_thread, vectorize_size);
+  TVM_FFI_CHECK(num_thread > 0 &&
+                    num_thread <= std::numeric_limits<int32_t>::max(),
+                ValueError)
+      << "Thread count must be a positive int32";
+  TVM_FFI_CHECK_GT(vectorize_size, 0, ValueError);
+  ffi::Array<LayoutAxis> axes;
+  Stmt body = loop;
+  const ForNode *current = UnwrapLoop(body);
+  while (current && current->kind == ForKind::kParallel) {
+    TVM_FFI_CHECK(current->HasTrivialStep() && IsZero(current->begin),
+                  ValueError)
+        << "Loop partition planning requires zero-based, unit-step parallel "
+           "loops";
+    Range domain(current->begin, current->end);
+    axes.push_back(LayoutAxis(domain, current->var));
+    body = current->body;
+    current = UnwrapLoop(body);
+  }
+  TVM_FFI_CHECK(!axes.empty(), ValueError)
+      << "Loop partition planning requires a parallel loop";
+  PrimType type = axes.back()->var.ty();
+  PrimExpr flattened = MakeConst(type, 0);
+  for (const LayoutAxis &axis : axes) {
+    flattened = flattened * axis->dom->extent + axis->var;
+  }
+  PrimExpr width = MakeConst(type, vectorize_size);
+  PrimExpr threads = MakeConst(type, static_cast<int32_t>(num_thread));
+  PrimExpr access = floordiv(flattened, width);
+  PrimExpr thread = floormod(access, threads);
+  PrimExpr offset =
+      floordiv(access, threads) * width + floormod(flattened, width);
+  Fragment fragment(axes, {offset}, thread, std::nullopt);
+  auto finder = ffi::make_object<FragmentAccessFinder>();
+  finder->Visit(body);
+  if (finder->has_fragment) {
+    auto used_threads = GetConstInt(fragment->ThreadExtent());
+    TVM_FFI_CHECK(used_threads.has_value() && *used_threads > 0 &&
+                      static_cast<size_t>(*used_threads) <= num_thread,
+                  ValueError)
+        << "Fragment thread count must fit within the participating threads";
+    fragment = fragment->Replicate(num_thread / *used_threads);
+  }
+  return fragment;
 }
 
-Fragment PlanLoopPartition(const For &op, int vectorize_size,
+Fragment PlanLoopPartition(const For &loop, int vectorize_size,
                            const Range &thread_range) {
-  size_t num_thread = *as_const_int(thread_range->extent);
-  LoopPartitioner partitioner;
-  Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
-  return fragment->BindThreadRange(thread_range);
+  auto threads = GetConstInt(thread_range->extent);
+  TVM_FFI_CHECK(threads.has_value() && *threads > 0, ValueError)
+      << "Thread range extent must be a positive constant";
+  return PlanLoopPartition(loop, static_cast<size_t>(*threads), vectorize_size)
+      ->BindThreadRange(thread_range);
 }
 
-For PragmaUnrollLoop(For stmt) {
-  LoopPramaUnroller unroller;
-  For unrolled = Downcast<For>(unroller(std::move(stmt)));
-  return unrolled;
+For PragmaUnrollLoop(For loop) {
+  auto unroller = ffi::make_object<LoopPragmaUnroller>();
+  return unroller->Mutate(loop).ValueOrUnchanged(loop).as_or_throw<For>();
 }
 
-Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
-                       PrimExpr thread_index, arith::Analyzer *analyzer,
-                       const LayoutMap &layout_map,
-                       Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool require_padding_guard) {
-  // Save analyzer state to prevent conflicted bindings during vectorization
-  auto saved_analyzer = analyzer->Clone();
-
-  For result_loop = loop;
-  // Strip parallel-loop layout/predicate annotations on the original loop.
-  // After partitioning/vectorization, keeping them can confuse later passes.
-  // Also, annotations may contain complex expressions; mutators do not visit
-  // inside annotation payloads, so explicit removal here prevents stale state
-  // from leaking into subsequent transforms.
-  // Note: Map::erase(key) is a no-op if key doesn't exist.
-  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopLayout);
-  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopPredicate);
-  result_loop.CopyOnWrite()->annotations.erase(
-      attr::kParallelLoopRequiresPaddingGuard);
-
-  // Step 1: Partition the loop based on the layout (if this is a parallel loop)
-  if (parallel_loop) {
-    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
-                                loop_layout, require_padding_guard);
-  }
-
-  // Step 2: Vectorize the loop; the planner picks the size per loop
-  // (1 = scalar) from its access analysis.
-  result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
-
-  result_loop = PragmaUnrollLoop(result_loop);
-
-  // Step 3: Wrap with predicate if provided and this is a parallel loop
-  if (predicate.defined() && parallel_loop) {
-    return IfThenElse(predicate.value(), result_loop, Stmt(), loop->span);
-  }
-
-  return result_loop;
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("tl.parallel_multiplicity")
+      .signature()
+      .set_attr(tvm::op_attr::kRegionGetBodyParams,
+                FRegionGetBodyParams::FromNative<
+                    +[](const CallNode *) -> ffi::Array<Var> { return {}; }>())
+      .set_attr(tvm::op_attr::kRegionValidate,
+                FRegionValidate::FromNative<+[](const RegionStmtNode *region) {
+                  TVM_FFI_CHECK(region->attrs->dict.empty() &&
+                                    region->result_vars.empty(),
+                                ValueError)
+                      << "Parallel multiplicity regions have no attributes or "
+                         "results";
+                }>());
+  ffi::reflection::GlobalDef()
+      .def("tl.PartitionLoop", PartitionLoop)
+      .def("tl.PlanLoopPartition",
+           [](For loop, Range thread_range, int width) {
+             return PlanLoopPartition(loop, width, thread_range);
+           })
+      .def("tl.PragmaUnrollLoop", PragmaUnrollLoop);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

@@ -53,7 +53,7 @@ NOTE:
 local_size = 8 (gfx12) | 16 (gfx11)
 """
 
-from tvm.runtime import convert
+from tilelang._compat.tirx import convert
 
 
 # ──────────────────────────────────────────────────────────────────────────────

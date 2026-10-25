@@ -333,8 +333,8 @@ def test_tcgen05_gemm_matches_sync_gemm_issue_codegen():
 
     assert _tcgen05_issue_block(sync_source) == _tcgen05_issue_block(async_source)
     for source in (sync_source, async_source):
-        assert source.count(".wait(0)") == 1
-        assert source.index("tcgen05_mma_arrive") < source.index(".wait(0)")
+        assert source.count("tl::mbarrier_wait(") == 1
+        assert source.index("tcgen05_mma_arrive") < source.index("tl::mbarrier_wait(")
 
 
 @tilelang.testing.requires_cuda
@@ -380,10 +380,10 @@ def test_explicit_gemm_2cta_correctness():
     source = kernel.get_kernel_source()
     assert "tcgen05mma_ss<tl::DataType::kBFloat16, true>" in source
     mma_pos = source.index("tcgen05mma_ss<tl::DataType::kBFloat16, true>")
-    acquire_sync_pos = source.rfind("tl::cluster_sync()", 0, mma_pos)
+    acquire_sync_pos = source.rfind("barrier.cluster.wait.aligned", 0, mma_pos)
     assert 0 <= acquire_sync_pos < mma_pos
 
-    wait_pos = source.index(".wait(", mma_pos)
+    wait_pos = source.index("tl::mbarrier_wait(", mma_pos)
     load_pos = source.index("tl::tcgen05_ld_", wait_pos)
     assert 0 <= mma_pos < wait_pos < load_pos
 
@@ -405,7 +405,7 @@ def test_explicit_gemm_2cta_ts_thread_handoff_correctness():
     source = kernel.get_kernel_source()
     mma_pos = source.index("tcgen05mma_ts<tl::DataType::kBFloat16, true>")
     store_pos = source.rfind("tl::tcgen05_st_", 0, mma_pos)
-    sync_pos = source.rfind("tl::cluster_sync()", 0, mma_pos)
+    sync_pos = max(source.rfind("barrier.cluster.wait.aligned", 0, mma_pos), source.rfind("tl::cluster_sync()", 0, mma_pos))
     before_pos = source.rfind("tl::tcgen05_before_thread_sync()", 0, sync_pos)
     after_pos = source.index("tl::tcgen05_after_thread_sync()", sync_pos)
     assert 0 <= store_pos < before_pos < sync_pos < after_pos < mma_pos
@@ -426,14 +426,14 @@ def test_explicit_gemm_2cta_ts_thread_handoff_correctness():
     [_make_2cta_without_cluster_kernel, _make_2cta_invalid_cluster_kernel],
 )
 def test_tcgen05_gemm_2cta_requires_two_cta_cluster(kernel_factory):
-    with pytest.raises(tvm.error.InternalError, match=r"requires cluster_dims"):
+    with pytest.raises((ValueError, RuntimeError), match=r"requires cluster_dims"):
         tilelang.compile(kernel_factory(), target="cuda")
 
 
 @tilelang.testing.requires_cuda
 def test_tcgen05_gemm_2cta_rejects_non_blackwell_target():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-    with pytest.raises(tvm.error.InternalError, match=r"requires Blackwell TCGEN5MMA"):
+    with pytest.raises((ValueError, RuntimeError), match=r"requires Blackwell TCGEN5MMA"):
         tilelang.compile(_make_explicit_2cta_gemm_kernel(), target=target)
 
 
@@ -466,15 +466,15 @@ def test_tcgen05_gemm_rejects_non_tcgen05_lowering():
             T.copy(C_local, D[0:128, 0:128])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        (ValueError, RuntimeError),
         match=r"T\.tcgen05_gemm\(\) requires Blackwell TCGEN5MMA lowering",
     ) as excinfo:
         tilelang.compile(main, target="cuda")
     message = str(excinfo.value)
     assert "target=" in message
-    assert "A(scope=shared.dyn, dtype=bfloat16)" in message
-    assert "B(scope=shared.dyn, dtype=bfloat16)" in message
-    assert "C(scope=local.fragment, dtype=float32)" in message
+    assert "A(scope=shared.dyn, dtype=T.bfloat16)" in message
+    assert "B(scope=shared.dyn, dtype=T.bfloat16)" in message
+    assert "C(scope=local.fragment, dtype=T.float32)" in message
     assert "M=128, N=128, K=128" in message
     _assert_error_at(excinfo, "tcgen05_dense_error_span")
 
@@ -758,9 +758,7 @@ def _make_m64_ts_kernel(M, N, K):
             T.annotate_layout({a_shared: make_mma_swizzle_layout(a_shared)})
             T.copy(A, a_shared)
             T.copy(B, b_shared)
-            with T.sblock():
-                T.reads()
-                T.writes()
+            with T.scope():
                 a_tmem = T.alloc_tmem((M, K), T.bfloat16)
                 c_tmem = T.alloc_tmem((M, N), T.float32)
                 a_frag = T.alloc_fragment((M, K), T.bfloat16)

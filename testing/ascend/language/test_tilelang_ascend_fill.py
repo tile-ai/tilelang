@@ -39,6 +39,7 @@ def _scalar_fill_kernel(iters: int, tile: int):
     return _scalar_fill
 
 
+@tilelang.testing.requires_ascend
 def test_constant_fill_out_of_vf():
     rows, cols, value = 2, 32, -1.0
     out = _constant_fill_kernel(rows, cols, value)()
@@ -48,6 +49,7 @@ def test_constant_fill_out_of_vf():
     torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_scalar_fill_out_of_vf():
     iters, tile = 3, 64
     device = torch.device("npu")

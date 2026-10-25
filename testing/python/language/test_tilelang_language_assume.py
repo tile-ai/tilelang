@@ -6,6 +6,11 @@ import tilelang.language as T
 import tilelang.testing
 
 
+def device_body(kernel):
+    source = kernel.get_kernel_source()
+    return source[source.rindex('extern "C" __global__') :]
+
+
 def test_assume_remove_boundary_check():
     @tilelang.jit
     def kernel_with_assume():
@@ -21,7 +26,7 @@ def test_assume_remove_boundary_check():
         return main
 
     jit_kernel = kernel_with_assume()
-    source = jit_kernel.get_kernel_source()
+    source = device_body(jit_kernel)
 
     assert "if (" not in source
 
@@ -50,7 +55,7 @@ def test_assume_enable_vectorization():
         return main
 
     jit_kernel = kernel_vectorize(128)
-    source = jit_kernel.get_kernel_source()
+    source = device_body(jit_kernel)
 
     assert ("float4" in source) and ("if (" not in source)
 
@@ -80,7 +85,7 @@ def test_assume_complex_indexing():
         return main
 
     jit_kernel = kernel_complex()
-    source = jit_kernel.get_kernel_source()
+    source = device_body(jit_kernel)
 
     assert "if (" not in source
 
@@ -103,7 +108,7 @@ def test_assume_on_alloc_var():
         return main
 
     jit_kernel = kernel_alloc_var()
-    source = jit_kernel.get_kernel_source()
+    source = device_body(jit_kernel)
 
     assert "if (" not in source
 

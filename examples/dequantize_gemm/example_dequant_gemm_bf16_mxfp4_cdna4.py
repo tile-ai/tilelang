@@ -15,8 +15,8 @@ import itertools
 import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
-from tvm import tirx
+from tvm_ffi import dtype as DataType
+from tilelang._compat import tirx
 import torch
 
 from quantize import get_mxfp_intrin_group

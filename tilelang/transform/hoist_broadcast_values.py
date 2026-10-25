@@ -1,19 +1,12 @@
-from tvm import tirx
-from tvm.tirx import (
-    BufferStore,
-    Broadcast,
-    Var,
-    PrimFunc,
-    PyStmtExprMutator,
-    SeqStmt,
-)
-from tvm.tirx.stmt import Bind
-from tvm.tirx.transform import prim_func_pass
+from tvm_tirx import ir
+from tvm_tirx.ir.prim import Broadcast
+from tvm_tirx.tirx import Function
+from tvm_tirx.tirx.transform import function_pass
 
-from tilelang.ir import get_stmt_span, stamp_stmt_spans
+from tilelang._compat.functor import PyStmtExprMutator, mutator
 
 
-@tirx.functor.mutator
+@mutator
 class HoistBroadcastValuesMutator(PyStmtExprMutator):
     def __init__(self):
         super().__init__()
@@ -21,79 +14,53 @@ class HoistBroadcastValuesMutator(PyStmtExprMutator):
         self.hoist_enabled = False
 
     def visit_broadcast_(self, op):
-        if self.hoist_enabled and isinstance(op.value, (tirx.IntImm, tirx.FloatImm)):
-            val = self.visit_expr(op.value)
-            new_var = Var("broadcast_var", dtype=val.dtype)
-            self.pending_defs.append((new_var, val))
-            return Broadcast(new_var, op.lanes)
-        return Broadcast(self.visit_expr(op.value), self.visit_expr(op.lanes))
+        value = self.visit_expr(op.value)
+        lanes = self.visit_expr(op.lanes)
+        if self.hoist_enabled and isinstance(value, (ir.IntImm, ir.FloatImm)):
+            variable = ir.Var("broadcast_var", value.ty, loc=op.loc)
+            self.pending_defs.append((variable, value))
+            return Broadcast(variable, lanes, loc=op.loc)
+        return Broadcast(value, lanes, loc=op.loc)
 
-    def visit_buffer_store_(self, op: BufferStore):
-        saved_hoist_enabled = self.hoist_enabled
-        saved_pending_defs = self.pending_defs
-
+    def _with_hoisted_values(self, make_statement, loc):
+        saved_enabled = self.hoist_enabled
+        saved_definitions = self.pending_defs
         self.hoist_enabled = True
         self.pending_defs = []
+        try:
+            statement = make_statement()
+            if not self.pending_defs:
+                return statement
+            definitions = [ir.Bind(variable, value, loc=loc) for variable, value in self.pending_defs]
+            return ir.SeqStmt([*definitions, statement], loc=loc)
+        finally:
+            self.hoist_enabled = saved_enabled
+            self.pending_defs = saved_definitions
 
-        new_indices = [self.visit_expr(idx) for idx in op.indices]
-        new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
+    def visit_tensor_store_(self, op):
+        def make_statement():
+            indices = [self.visit_expr(index) for index in op.indices]
+            value = self.visit_expr(op.value)
+            return ir.TensorStore(op.dest, indices, value, loc=op.loc)
 
-        if self.pending_defs:
-            stmts = [Bind(var, val) for var, val in self.pending_defs]
-            stmts.append(new_stmt)
-            new_stmt = SeqStmt(stmts)
+        return self._with_hoisted_values(make_statement, op.loc)
 
-        self.hoist_enabled = saved_hoist_enabled
-        self.pending_defs = saved_pending_defs
-
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
-        return new_stmt
-
-    def visit_bind_(self, op: Bind):
-        saved_hoist_enabled = self.hoist_enabled
-        saved_pending_defs = self.pending_defs
-
-        self.hoist_enabled = True
-        self.pending_defs = []
-
-        new_value = self.visit_expr(op.value)
-
-        new_stmt = Bind(op.var, new_value)
-
-        if self.pending_defs:
-            stmts = [Bind(var, val) for var, val in self.pending_defs]
-            stmts.append(new_stmt)
-            new_stmt = SeqStmt(stmts)
-
-        self.hoist_enabled = saved_hoist_enabled
-        self.pending_defs = saved_pending_defs
-
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
-        return new_stmt
+    def visit_bind_(self, op):
+        return self._with_hoisted_values(lambda: ir.Bind(op.var, self.visit_expr(op.value), loc=op.loc), op.loc)
 
 
 def HoistBroadcastValues():
-    """
-    TVM Pass: HoistBroadcastValues.
+    """Bind broadcast immediates immediately before their store or definition.
 
-    This pass scans the TIR for Broadcast operations involving immediate constants (IntImm, FloatImm).
-    It extracts these constants into variables defined via Bind immediately preceding
-    the statement where the broadcast occurs.
-
-    Example Transformation:
-    -----------------------
-    Before:
-        A[i] = B[i] + T.Broadcast(3.14, 4) + T.Broadcast(3.14, 4)
-
-    After:
-        bv_3_14 = 3.14
-        bv_3_14_1 = 3.14
-        A[i] = B[i] + T.Broadcast(bv_3_14, 4) + T.Broadcast(bv_3_14_1, 4)
+    Each constant is hoisted inside its existing lexical scope. Tensor types,
+    variable identities, and source locations are preserved. The pass consumes
+    and produces native TIRx IR and does not require a legacy Buffer dialect.
     """
 
-    def pass_fn(func: PrimFunc, mod, ctx):
-        mutator = HoistBroadcastValuesMutator()
-        new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body, span=func.span)
+    def pass_fn(func: Function, mod, ctx):
+        if func.body is None:
+            return func
+        body = HoistBroadcastValuesMutator().visit_stmt(func.body)
+        return func.with_body(body, loc=func.loc)
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return function_pass(pass_fn, opt_level=0, name="tl.HoistBroadcastValues")

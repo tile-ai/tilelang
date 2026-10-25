@@ -2,8 +2,10 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
-from tvm.ir import Node, Range
-from tvm.tirx import IterVar, Var, PrimExpr, IndexMap
+from tvm_tirx.ir import Node, Range
+from tvm_tirx.ir import Expr, Var
+from tvm_tirx.tirx import IndexMap
+from ._utils import LayoutAxis
 from tilelang import _ffi_api
 
 
@@ -23,10 +25,10 @@ class Layout(Node):
         """
         forward_vars = []  # List to store IterVars corresponding to each shape dimension
 
-        # Create an IterVar for each dimension in the shape
+        # Create an LayoutAxis for each dimension in the shape
         for idx, size in enumerate(shape):
-            # Define an IterVar over the range [0, size) with an associated variable name
-            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
+            # Define an LayoutAxis over the range [0, size) with an associated variable name
+            iv = LayoutAxis(Range(0, size), Var(f"i{idx}", "int32"))
             forward_vars.append(iv)
 
         # Extract the variable references from the IterVars
@@ -36,7 +38,7 @@ class Layout(Node):
         forward_index = forward_fn(*vars)
 
         # Ensure forward_index is a list (to handle cases where a single expression is returned)
-        if isinstance(forward_index, PrimExpr):
+        if isinstance(forward_index, (int, Expr)):
             forward_index = [forward_index]
 
         # Call the FFI constructor to create the Layout object in C++ backend
@@ -49,7 +51,7 @@ class Layout(Node):
 
         Returns
         -------
-        PrimExpr or List[PrimExpr]
+        Expr or List[Expr]
             The computed forward index expression(s).
         """
         return _ffi_api.Layout_index(self)
@@ -82,7 +84,7 @@ class Layout(Node):
 
         Returns
         -------
-        List[IterVar]
+        List[LayoutAxis]
             A list of iteration variables that define the layout transformation.
         """
         return _ffi_api.Layout_forward_vars(self)
@@ -90,22 +92,22 @@ class Layout(Node):
     def get_forward_index(self):
         return self.index
 
-    def get_linearized_forward_index(self) -> PrimExpr:
+    def get_linearized_forward_index(self) -> Expr:
         """Return the row-major linear offset of the physical output index."""
         return _ffi_api.Layout_linearized_index(self)
 
-    def map_forward_index(self, indices: list[PrimExpr]) -> PrimExpr:
+    def map_forward_index(self, indices: list[Expr]) -> Expr:
         """
         Compute the forward index mapping for a given set of input indices.
 
         Parameters
         ----------
-        indices : list of PrimExpr
+        indices : list of Expr
             The input indices to be mapped to their corresponding output indices.
 
         Returns
         -------
-        PrimExpr
+        Expr
             The mapped index expression for the provided input indices.
         """
         # Retrieve the iteration variables used in the layout transformation
@@ -186,7 +188,7 @@ class Layout(Node):
 
         Parameters
         ----------
-        leading_shape : int or Sequence[int or PrimExpr]
+        leading_shape : int or Sequence[int or Expr]
             The shape of the new leading dimensions to prepend. Use an empty
             list/tuple for a no-op.
 
@@ -209,8 +211,8 @@ class Layout(Node):
             if isinstance(extent, int):
                 if extent <= 0:
                     raise ValueError(f"leading_shape[{idx}] must be > 0, got {extent}")
-            elif not isinstance(extent, PrimExpr):
-                raise TypeError(f"leading_shape elements must be int or PrimExpr, got {type(extent)!r} at index {idx}")
+            elif not isinstance(extent, Expr):
+                raise TypeError(f"leading_shape elements must be int or Expr, got {type(extent)!r} at index {idx}")
 
         return _ffi_api.Layout_expand(self, leading_shape)
 
@@ -231,7 +233,7 @@ class Layout(Node):
 
         Parameters
         ----------
-        shape : list[PrimExpr] or list[int]
+        shape : list[Expr] or list[int]
             The new input shape.
         rescale_num : int
             Rescale numerator for element size changes.
@@ -275,7 +277,7 @@ class Layout(Node):
         """
         return _ffi_api.Layout_map_region_bounds(self, region)
 
-    def __call__(self, *args: list[PrimExpr]) -> PrimExpr:
+    def __call__(self, *args: list[Expr]) -> Expr:
         return self.map_forward_index(args)
 
     def __repr__(self):

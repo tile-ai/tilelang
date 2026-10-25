@@ -17,8 +17,10 @@ using namespace ffi;
 /// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tirx::Buffer src, dst; ///< Source and destination buffers
-  BufferRegion srcRegion_, dstRegion_;
+  explicit CumSumOpNode(ffi::UnsafeInit tag)
+      : src(tag), dst(tag), srcRegion_(tag), dstRegion_(tag) {}
+  tirx::TensorVar src, dst;
+  TensorRegion srcRegion_, dstRegion_;
   int dim;      ///< Dimension along which to compute cumulative sum
   bool reverse; ///< Whether to compute in reverse order
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode,
@@ -36,7 +38,7 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
@@ -50,7 +52,7 @@ struct CumSumImpl {
   CumSumTargetPredicate match_target;
 
   Stmt (*lower)(const CumSumOpNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterCumSumImpl(CumSumImpl impl);
@@ -60,17 +62,18 @@ class CumSumOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
                                              CumSumOpNode);
-  TVM_DLL
-  CumSumOp(Array<PrimExpr> args,
-           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL
+  CumSumOp(Array<Expr> args, BlockAnnotations annotations = {});
   static const Op &Get();
 };
 
 /// Node class for cumulative maximum operations
 class CumMaxOpNode : public TileOperatorNode {
 public:
-  tirx::Buffer src, dst; ///< Source and destination buffers
-  BufferRegion srcRegion_, dstRegion_;
+  explicit CumMaxOpNode(ffi::UnsafeInit tag)
+      : src(tag), dst(tag), srcRegion_(tag), dstRegion_(tag) {}
+  tirx::TensorVar src, dst;
+  TensorRegion srcRegion_, dstRegion_;
   int dim;      ///< Dimension along which to compute cumulative maximum
   bool reverse; ///< Whether to compute in reverse order
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumMaxOp", CumMaxOpNode,
@@ -88,7 +91,7 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
@@ -102,7 +105,7 @@ struct CumMaxImpl {
   CumMaxTargetPredicate match_target;
 
   Stmt (*lower)(const CumMaxOpNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterCumMaxImpl(CumMaxImpl impl);
@@ -112,9 +115,8 @@ class CumMaxOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumMaxOp, TileOperator,
                                              CumMaxOpNode);
-  TVM_DLL
-  CumMaxOp(Array<PrimExpr> args,
-           Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL
+  CumMaxOp(Array<Expr> args, BlockAnnotations annotations = {});
   static const Op &Get();
 };
 

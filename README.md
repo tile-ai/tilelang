@@ -17,7 +17,7 @@
 [TileLang (Ascend 950)](./tilelang/ascend/README.md)
 </div>
 
-Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU/NPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
+Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU/NPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of standalone `tvm_tirx`, tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
 
 <img src="./images/MatmulExample.png" alt="TileLang tiled matrix multiplication example" />
 
@@ -135,6 +135,8 @@ TileLang uses `Target` objects to represent compilation targets. The default `au
 
 ## Installation
 
+**Standalone TIRx checkout:** this branch requires the paired, patched `tvm-tirx` dependency, not the former TVM submodule or an unpatched published TIRx wheel. Follow [MIGRATION_TIRX.md](./MIGRATION_TIRX.md) for source builds, paired wheels, and validation. The PyPI/nightly commands below install published TileLang releases, not these local migration changes.
+
 Install the latest stable release from PyPI:
 
 ```bash
@@ -155,7 +157,7 @@ pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 
 On AMD GPUs the same Linux wheels work out of the box: install a ROCm build of PyTorch first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/rocm7.0`), then `pip install tilelang`. A host ROCm installation is required at runtime; see the [ROCm notes](https://tilelang.com/get_started/Installation.html#installing-on-amd-gpus-rocm) in the installation guide.
 
-Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a custom TVM checkout, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
+Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a standalone TIRx dependency, follow the complete [installation guide](./docs/get_started/Installation.md).
 
 ## Quick Start
 

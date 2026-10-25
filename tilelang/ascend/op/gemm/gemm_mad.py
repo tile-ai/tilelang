@@ -8,9 +8,10 @@ from tilelang.layout import (
     try_extract_fractal_layout,
 )
 from tilelang.transform.simplify import _Simplify
-from tvm import DataType, arith, tirx
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang._compat.tvm import DataType, arith, tirx
+from tvm_tirx.ir import Range
+from tvm_tirx import ir
+from tvm_tirx.target import Target
 
 
 GEMM_INST_MAD = "ascend.mad"
@@ -20,29 +21,6 @@ def _to_int32(value):
     return tirx.IntImm("int32", value) if isinstance(value, int) else value
 
 
-def _compute_flat_offset(buf, region):
-    offset = tirx.const(0, "int32")
-    ndim = len(region.region)
-    for i, rng in enumerate(region.region):
-        stride = tirx.const(1, "int32")
-        for j in range(i + 1, ndim):
-            stride = stride * buf.shape[j]
-        offset = offset + tirx.Cast("int32", rng.min) * stride
-    return offset
-
-
-def _compute_flat_offset_excluding_last(buf, region):
-    offset = tirx.const(0, "int32")
-    ndim = len(region.region)
-    for i in range(ndim - 1):
-        rng = region.region[i]
-        stride = tirx.const(1, "int32")
-        for j in range(i + 1, len(buf.shape)):
-            stride = stride * buf.shape[j]
-        offset = offset + tirx.Cast("int32", rng.min) * stride
-    return offset
-
-
 def _compute_extent(region):
     extent = tirx.const(1, "int32")
     for rng in region.region:
@@ -50,30 +28,17 @@ def _compute_extent(region):
     return extent
 
 
-def _make_access_ptr(buf, region, rw_mask):
-    return tirx.op.tvm_access_ptr(
-        tirx.op.type_annotation(buf.dtype),
-        buf.data,
-        _compute_flat_offset(buf, region),
-        _compute_extent(region),
-        tirx.IntImm("int32", rw_mask),
-    )
+def _make_access_ptr(buf, region, rw_mask, *, exclude_last=False):
+    indices = [axis.begin for axis in region.region]
+    if exclude_last and indices:
+        indices[-1] = ir.const(0, str(indices[-1].ty))
+    return ir.Call("tl.access_ptr", [ir.TensorLoad(buf, indices), _compute_extent(region), ir.const(rw_mask)])
 
 
 def _find_layout(layout_map, buf):
     if layout_map is None:
         return None
-    for key in (buf.data if hasattr(buf, "data") else None, buf):
-        if key is not None:
-            layout = layout_map.get(key)
-            if layout is not None:
-                return layout
-    for key, layout in layout_map.items():
-        if hasattr(key, "data") and hasattr(buf, "data") and key.data.same_as(buf.data):
-            return layout
-        if hasattr(key, "name") and getattr(key, "name", None) == getattr(buf, "name", None):
-            return layout
-    return None
+    return layout_map.get(buf)
 
 
 _ASCEND_DTYPE_MAP = {
@@ -110,7 +75,7 @@ class GemmMAD(GemmBase):
             aligned = remainder == 0
         else:
             analyzer = arith.Analyzer()
-            aligned = analyzer.can_prove_equal(remainder, tirx.const(0, remainder.dtype))
+            aligned = analyzer.can_prove_equal(remainder, tirx.const(0, remainder.ty))
         assert aligned, (
             f"Ascend blockscaled GEMM requires operation K to be divisible by 64, got K={self.K}. "
             "Pad the participating L1/L0 buffers and invoke GEMM with the padded K extent."
@@ -164,10 +129,10 @@ class GemmMAD(GemmBase):
         return self._lower_l0()
 
     def _is_l1_input(self):
-        return self.A.scope() == "shared.l1" and self.B.scope() == "shared.l1"
+        return self.A.scope().name == "shared.l1" and self.B.scope().name == "shared.l1"
 
     def _is_l0_input(self):
-        return self.A.scope() == "shared.l0a" and self.B.scope() == "shared.l0b"
+        return self.A.scope().name == "shared.l0a" and self.B.scope().name == "shared.l0b"
 
     def _l0_operation_extents(self):
         """Return the logical MAD M/N/K carried by the three L0 regions."""
@@ -178,9 +143,9 @@ class GemmMAD(GemmBase):
 
         def require_zero_origin(name, region) -> None:
             for axis, rng in enumerate(region.region[-2:], start=-2):
-                assert prove_equal(rng.min, tirx.const(0, rng.min.dtype)), (
+                assert prove_equal(rng.begin, tirx.const(0, rng.begin.ty)), (
                     f"Ascend compact L0 region {name} requires zero origin on "
-                    f"trailing axis {axis}, got min={rng.min}. Split/non-zero-"
+                    f"trailing axis {axis}, got min={rng.begin}. Split/non-zero-"
                     "origin L0 tiles are not supported."
                 )
 
@@ -223,9 +188,9 @@ class GemmMAD(GemmBase):
 
     def _lower_l0(self):
         m, n, k = self._l0_operation_extents()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
-        a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1)
-        b_ptr = _make_access_ptr(self.BRegion.buffer, self.BRegion, 1)
+        c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
+        a_ptr = _make_access_ptr(self.ARegion.source, self.ARegion, 1)
+        b_ptr = _make_access_ptr(self.BRegion.source, self.BRegion, 1)
         call = tirx.call_intrin(
             "void",
             tirx.op.Op.get("tl.ascend_mad"),
@@ -249,24 +214,12 @@ class GemmMAD(GemmBase):
 
     def _lower_l1(self):
         tile_k_sub = self._compute_tile_k_sub()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
+        c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
 
-        a_buf = self.ARegion.buffer
-        b_buf = self.BRegion.buffer
-        a_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(a_buf.dtype),
-            a_buf.data,
-            _compute_flat_offset_excluding_last(a_buf, self.ARegion),
-            _compute_extent(self.ARegion),
-            tirx.IntImm("int32", 1),
-        )
-        b_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(b_buf.dtype),
-            b_buf.data,
-            _compute_flat_offset_excluding_last(b_buf, self.BRegion),
-            _compute_extent(self.BRegion),
-            tirx.IntImm("int32", 1),
-        )
+        a_buf = self.ARegion.source
+        b_buf = self.BRegion.source
+        a_ptr = _make_access_ptr(a_buf, self.ARegion, 1, exclude_last=True)
+        b_ptr = _make_access_ptr(b_buf, self.BRegion, 1, exclude_last=True)
 
         input_dtype = self._input_dtype()
         dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)

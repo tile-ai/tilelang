@@ -6,7 +6,7 @@ from __future__ import annotations
 import tvm_ffi
 
 from tilelang import _ffi_api
-from tilelang._typing import BufferLikeType
+from ._utils import BufferLikeType
 
 from .layout import Layout
 from .swizzle import _get_buffer_info

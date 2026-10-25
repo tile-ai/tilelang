@@ -1,7 +1,9 @@
 from __future__ import annotations
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
-from tvm.target import Target
+from tvm_tirx.target import Target
+from tvm_tirx.support.nvcc import find_cuda_path
+from tilelang.env import CUDA_HOME, TILELANG_TEMPLATE_PATH
 from .nvcc import get_target_compute_version, parse_compute_version
 
 
@@ -56,6 +58,10 @@ def compile_cuda(
         raise ValueError("target_format must be cubin or ptx")
 
     final_options = ["-default-device"]
+    from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
+
+    final_options += [f"-I{path}" for path in discover_cuda_include_paths(CUDA_HOME or find_cuda_path())]
+    final_options.append(f"-I{TILELANG_TEMPLATE_PATH}")
     if get_nvrtc_version() >= (12, 8):
         final_options += ["-pch"]
     if arch is not None:
@@ -83,16 +89,14 @@ def compile_cuda(
 
     if compile_result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
         msg = f"{code}\nCompilation error:\n"
-        if verbose:
-            result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
-            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log size: {result}"
-            log_bytes = bytes(log_size)
-            result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
-            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
-            msg += f"{log_bytes.decode('utf-8')}\n"
-        else:
-            msg += "Turn on verbose to see the full compilation log."
+        result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
+        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log size: {result}"
+        log_bytes = bytes(log_size)
+        result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
+        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
+        msg += f"{log_bytes.decode('utf-8')}\n"
         msg += f"Options: {' '.join(final_options)}\n"
+        nvrtc.nvrtcDestroyProgram(program)
         raise RuntimeError(msg)
 
     if target_format == "cubin":

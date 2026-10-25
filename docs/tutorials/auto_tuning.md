@@ -9,7 +9,7 @@ Auto-Tuning Techniques for Performance Optimization
 Auto-tuning a Tile Language program involves three main steps:
 
 1. Implement the target program using Tile Language with reserved optimization parameters
-2. ​Provide candidate configurations through manual search or [auto-generation using Carver](#using-carver-to-auto-generate-candidate-configurations)
+2. Provide explicit candidate configurations for the native TileLang kernel.
 3. Parallel compile and benchmark candidate configurations to identify the best performance
 
 ## Matrix Multiplication Example
@@ -80,7 +80,7 @@ configs = [
 ### Step 3: Compile and Benchmark
 Configure JIT compilation and benchmarking settings:
 ```python
-autotuner = AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+autotuner = AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K)).set_compile_args(
     out_idx=[-1],
     supply_type=tl.TensorSupplyType.Integer,
     ref_prog=ref_program,
@@ -92,35 +92,13 @@ out_c = result.kernel(a, b)
 ```
 The result object contains optimized kernel implementation which can be used by users directly
 
-## Using Carver to Auto-Generate Candidate Configurations
+## Standalone TIRx migration
 
-Carver is a lightweight framework for generating and ranking tile configurations (also known as tiling strategies, blocking schemes, or scheduling hints) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels.
+Autotuning compiles and benchmarks native TileLang kernels using `tvm-tirx`.
+Supply candidate dictionaries directly, as in the examples above; no TVM
+Schedule or TE representation is required.
 
-or common operators, Carver provides pre-built templates (e.g., `MatmulTemplate`):
-
-```python
-# Configure Matmul template
-arch = CUDA("cuda")
-carve_template = MatmulTemplate(
-    M=M,
-    N=N,
-    K=K,
-    in_dtype="float16",
-    out_dtype="float16",
-    accum_dtype="float",
-).with_arch(arch)
-
-# Generate top-k optimization hints (topk=10 recommended)
-roller_hints = carve_template.recommend_hints(topk=10)
-
-# Configure candidate parameters
-for hint in roller_hints:
-    # ...existing code...
-
-    config["block_M"] = block_m
-    config["block_N"] = block_n
-    config["block_K"] = hint.rstep[0]
-    config["num_stages"] = hint.pipeline_stage
-    config["thread_num"] = block_rows * block_cols * 32
-    config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-```
+The legacy Carver template/policy generator is retired. Hardware queries under
+`tilelang.carver.arch` remain available to filter candidates by shared-memory,
+thread-count, and architecture limits. The former `with_roller=True` example
+option raises a migration error instead of loading another compiler.

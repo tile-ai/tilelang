@@ -6,7 +6,15 @@ import torch
 import tilelang
 import tilelang.cpu.language as T
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
+
+
+def _allocate(tensor):
+    return tvm.ir.Bind(tensor, tvm.ir.Call("tirx.alloc_tensor", [], ty_args=[tensor.ty]))
+
+
+def _view(tensor, source):
+    return tvm.ir.Bind(tensor, tvm.ir.Call("tirx.decl_tensor", [source.data], ty_args=[tensor.ty]))
 
 
 @pytest.fixture
@@ -38,7 +46,7 @@ def _lower_grid(func, target="c"):
     result = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)["main"]
     grids = []
     tirx.stmt_functor.post_order_visit(
-        result.body, lambda n: grids.append(n) if isinstance(n, tirx.For) and n.loop_var.name == "bx" else None
+        result.body, lambda node: grids.append(node) if isinstance(node, tirx.For) and node.var.name == "bx" else None
     )
     assert len(grids) == 1
     return grids[0]
@@ -90,20 +98,24 @@ def test_direct_reset_control_flow(reset_kind):
     zero = T.int32(0)
 
     def fill(value, predicate=None):
-        return tirx.For(j, 0, 4, tirx.ForKind.SERIAL, tirx.BufferStore(s, value, [j], predicate=predicate))
+        store = tirx.BufferStore(s, value, [j])
+        if predicate is not None:
+            store = tirx.IfThenElse(predicate, store, None)
+        return tirx.For(j, 0, 4, 1, tirx.ForKind.DEFAULT, store)
 
     reset = fill(zero)
     if reset_kind == "empty_outer":
-        reset = tirx.For(t, 0, bx, tirx.ForKind.SERIAL, reset)
+        reset = tirx.For(t, 0, bx, 1, tirx.ForKind.DEFAULT, reset)
     elif reset_kind == "predicate":
         reset = fill(zero, bx == 0)
     elif reset_kind == "block_predicate":
-        reset = tirx.SBlockRealize([], bx == 0, tirx.SBlock([], [], [], "reset", reset))
+        reset = tirx.IfThenElse(bx == 0, tvm.ir.RegionStmt("tirx.scope", [], [], {}, reset), None)
     grid = tirx.For(
         bx,
         0,
         16,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         tirx.SeqStmt(
             [
                 tirx.IfThenElse(bx == 0, fill(zero), None),
@@ -114,8 +126,8 @@ def test_direct_reset_control_flow(reset_kind):
         ),
         annotations={"tl.cpu_grid_dim": 0},
     )
-    func = tirx.PrimFunc([B.data], tirx.SeqStmt([tirx.AllocBuffer(s), grid]), buffer_map={B.data: B})
-    expected = tirx.ForKind.PARALLEL if reset_kind == "complete" else tirx.ForKind.SERIAL
+    func = tirx.PrimFunc([B], tirx.SeqStmt([_allocate(s), grid]))
+    expected = tirx.ForKind.PARALLEL if reset_kind == "complete" else tirx.ForKind.DEFAULT
     assert _lower_grid(func).kind == expected
 
 
@@ -140,9 +152,9 @@ def test_direct_extern_effects(pure, capfd):
     bx = tirx.Var("bx", T.int32)
     B = tirx.decl_buffer((16,), T.int32, name="B")
     call = tirx.call_pure_extern(T.int32, "pure_scalar", bx) if pure else tirx.call_extern(T.int32, "counter")
-    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, tirx.BufferStore(B, call, [bx]), annotations={"tl.cpu_grid_dim": 0})
-    func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
-    assert _lower_grid(func, "llvm").kind == (tirx.ForKind.PARALLEL if pure else tirx.ForKind.SERIAL)
+    grid = tirx.For(bx, 0, 16, 1, tirx.ForKind.DEFAULT, tirx.BufferStore(B, call, [bx]), annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([B], grid)
+    assert _lower_grid(func, "llvm").kind == (tirx.ForKind.PARALLEL if pure else tirx.ForKind.DEFAULT)
     if not pure:
         assert "effects that cannot be proven safe" in capfd.readouterr().err
 
@@ -164,9 +176,9 @@ def test_cast_range_proof(target, cast_dtype, extent, parallel):
     n = tirx.Var("n", T.int32)
     index = tirx.Cast(cast_dtype, bx)
     body = tirx.IfThenElse(index >= 0, tirx.BufferStore(B, bx, [index]), None)
-    grid = tirx.For(bx, 0, n if extent is None else extent, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
-    func = tirx.PrimFunc([B.data, n] if extent is None else [B.data], grid, buffer_map={B.data: B})
-    assert _lower_grid(func, target).kind == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.SERIAL)
+    grid = tirx.For(bx, 0, n if extent is None else extent, 1, tirx.ForKind.DEFAULT, body, annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([B, n] if extent is None else [B], grid)
+    assert _lower_grid(func, target).kind == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.DEFAULT)
 
 
 @pytest.mark.parametrize("mixed_casts", [False, True])
@@ -180,9 +192,9 @@ def test_casts_preserve_iterator_identity(mixed_casts):
     else:
         # Retaining raw bx as a free parameter would hide this collision.
         index = tirx.Cast(T.int32, cast_bx) - bx
-    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, tirx.BufferStore(B, bx, [index]), annotations={"tl.cpu_grid_dim": 0})
-    func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
-    assert _lower_grid(func).kind == tirx.ForKind.SERIAL
+    grid = tirx.For(bx, 0, 16, 1, tirx.ForKind.DEFAULT, tirx.BufferStore(B, bx, [index]), annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([B], grid)
+    assert _lower_grid(func).kind == tirx.ForKind.DEFAULT
 
 
 @pytest.mark.usefixtures("fresh_compilation")
@@ -215,16 +227,16 @@ def test_parameter_alias_contract(target, alias_contract):
     body = tirx.BufferStore(B, A[bx] + 1, [bx])
     if alias_contract == "read_only":
         body = tirx.Evaluate(A[bx] + B[bx])
-    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
-    func = tirx.PrimFunc([A.data, B.data], grid, buffer_map={A.data: A, B.data: B})
+    grid = tirx.For(bx, 0, 16, 1, tirx.ForKind.DEFAULT, body, annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([A, B], grid)
     if alias_contract not in ("missing", "read_only"):
         func = func.with_attr("tirx.noalias", alias_contract != "disabled")
     if alias_contract == "both_non_restrict":
-        func = func.with_attr("tl.non_restrict_params", [A.data, B.data])
+        func = func.with_attr("tl.non_restrict_params", [A, B])
     elif alias_contract == "one_non_restrict":
-        func = func.with_attr("tl.non_restrict_params", [A.data])
+        func = func.with_attr("tl.non_restrict_params", [A])
     parallel = alias_contract in ("noalias", "missing", "one_non_restrict", "read_only")
-    assert _lower_grid(func, target).kind == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.SERIAL)
+    assert _lower_grid(func, target).kind == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.DEFAULT)
 
 
 @pytest.mark.usefixtures("fresh_compilation")
@@ -263,12 +275,12 @@ def test_parameter_view_access_width(target, view_dtype, capfd):
 def test_mixed_width_parameter_reads(write):
     bx = tirx.Var("bx", T.int32)
     B = tirx.decl_buffer((16,), T.int32, name="B")
-    view = tirx.decl_buffer((64,), T.uint8, data=B.data)
+    view = tirx.decl_buffer((64,), T.uint8, name="view")
     value = tirx.Cast(T.int32, view[bx]) + B[bx]
     body = tirx.BufferStore(B, value, [bx]) if write else tirx.Evaluate(value)
-    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
-    func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
-    assert _lower_grid(func).kind == (tirx.ForKind.SERIAL if write else tirx.ForKind.PARALLEL)
+    grid = tirx.For(bx, 0, 16, 1, tirx.ForKind.DEFAULT, body, annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([B], [_view(view, B), grid])
+    assert _lower_grid(func).kind == (tirx.ForKind.DEFAULT if write else tirx.ForKind.PARALLEL)
 
 
 @pytest.mark.parametrize("target", ["c", "llvm"])
@@ -294,13 +306,12 @@ def test_local_view_reset_covers_allocation(target, reset_kind):
     view = tirx.decl_buffer(
         (extent,),
         view_dtype,
-        data=state.data,
         elem_offset=offset,
         strides=[0] if reset_kind == "strided_view" else None,
         scope="local",
         name="view",
     )
-    reset = tirx.For(j, 0, extent, tirx.ForKind.SERIAL, tirx.BufferStore(view, view_dtype(0), [j]))
+    reset = tirx.For(j, 0, extent, 1, tirx.ForKind.DEFAULT, tirx.BufferStore(view, view_dtype(0), [j]))
     initial = tirx.Broadcast(T.int32(0), 3) if padded_vector else T.int32(0)
     carried = tirx.Shuffle([state[carried_index]], [2]) if padded_vector else state[carried_index]
     update = tirx.Broadcast(bx + 1, 3) if padded_vector else bx + 1
@@ -308,7 +319,8 @@ def test_local_view_reset_covers_allocation(target, reset_kind):
         bx,
         0,
         16,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         tirx.SeqStmt(
             [
                 tirx.IfThenElse(bx == 0, tirx.BufferStore(state, initial, [carried_index]), None),
@@ -319,15 +331,17 @@ def test_local_view_reset_covers_allocation(target, reset_kind):
         ),
         annotations={"tl.cpu_grid_dim": 0},
     )
-    func = tirx.PrimFunc([output.data], tirx.SeqStmt([tirx.AllocBuffer(state), grid]), buffer_map={output.data: output})
+    func = tirx.PrimFunc([output], tirx.SeqStmt([_allocate(state), _view(view, state), grid]))
     grid = _lower_grid(func, target)
-    assert grid.loop_var.same_as(bx)
-    assert grid.kind == (tirx.ForKind.PARALLEL if complete else tirx.ForKind.SERIAL)
+    assert grid.var.same_as(bx)
+    assert grid.kind == (tirx.ForKind.PARALLEL if complete else tirx.ForKind.DEFAULT)
     private_allocations = []
     tirx.stmt_functor.post_order_visit(
         grid.body,
         lambda node: (
-            private_allocations.append(node) if isinstance(node, tirx.AllocBuffer) and node.buffer.data.same_as(state.data) else None
+            private_allocations.append(node)
+            if isinstance(node, tvm.ir.Bind) and node.var.same_as(state) and node.value.op.name == "tirx.alloc_tensor"
+            else None
         ),
     )
     assert bool(private_allocations) == complete
@@ -372,19 +386,20 @@ def test_cpu_parallel_strided_ramp_reset_stays_serial():
     B = tirx.decl_buffer((256,), T.float32, name="B")
     s = tirx.decl_buffer((12,), T.float32, name="s", scope="local")
     one = tirx.Broadcast(T.float32(1.0), 4)
-    fake_reset = tirx.For(t, 0, 3, tirx.ForKind.SERIAL, tirx.BufferStore(s, one, [tirx.Ramp(4 * t, 0, 4)]))
+    fake_reset = tirx.For(t, 0, 3, 1, tirx.ForKind.DEFAULT, tirx.BufferStore(s, one, [tirx.Ramp(4 * t, 0, 4)]))
     read_carried = tirx.BufferStore(B, tirx.BufferLoad(s, [9]) + tirx.BufferLoad(s, [0]), [bx])
     write9 = tirx.BufferStore(s, tirx.BufferLoad(A, [bx]), [9])
     grid = tirx.For(
         bx,
         0,
         256,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         tirx.SeqStmt([fake_reset, read_carried, write9]),
         annotations={"tl.cpu_grid_dim": 0},
     )
-    func = tirx.PrimFunc([A.data, B.data], tirx.SeqStmt([tirx.AllocBuffer(s), grid]), buffer_map={A.data: A, B.data: B})
-    assert _lower_grid(func).kind == tirx.ForKind.SERIAL
+    func = tirx.PrimFunc([A, B], tirx.SeqStmt([_allocate(s), grid]))
+    assert _lower_grid(func).kind == tirx.ForKind.DEFAULT
 
 
 def test_cpu_parallel_strided_ramp_overlap_stays_serial():
@@ -396,9 +411,10 @@ def test_cpu_parallel_strided_ramp_overlap_stays_serial():
         bx,
         0,
         256,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         tirx.BufferStore(B, one, [tirx.Ramp(bx * 4, 2, 4)]),
         annotations={"tl.cpu_grid_dim": 0},
     )
-    func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
-    assert _lower_grid(func).kind == tirx.ForKind.SERIAL
+    func = tirx.PrimFunc([B], grid)
+    assert _lower_grid(func).kind == tirx.ForKind.DEFAULT

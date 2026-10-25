@@ -79,12 +79,16 @@ public:
 
 class GemmSPNode : public TileOperatorNode {
 public:
-  tirx::Buffer A, E, B, C;
+  explicit GemmSPNode(ffi::UnsafeInit tag)
+      : A(tag), E(tag), B(tag), C(tag), aRegion_(tag), eRegion_(tag),
+        bRegion_(tag), cRegion_(tag) {}
+
+  tirx::TensorVar A, E, B, C;
   // pointer to the A, E, B, C
-  BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
+  TensorRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
   int M, N, K;
-  PrimExpr clear_accum = const_false();
+  PrimExpr clear_accum = PrimExpr(false);
   int wg_wait = 0;
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
@@ -117,11 +121,11 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<TensorRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const;
 
@@ -152,8 +156,8 @@ void RegisterGemmSPImpl(GemmSPImpl impl);
 class GemmSP : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSP, TileOperator, GemmSPNode);
-  TVM_DLL GemmSP(Array<PrimExpr> args,
-                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL GemmSP(Array<Expr> args,
+                      BlockAnnotations annotations = BlockAnnotations());
   static const Op &Get();
 };
 

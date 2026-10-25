@@ -27,7 +27,7 @@ def _clamp_kernel(dtype="float32", threads=32):
             id="cuda",
         ),
         pytest.param(
-            {"kind": "hip", "mcpu": "gfx942"},
+            {"kind": "rocm", "mcpu": "gfx942"},
             "target.build.tilelang_hip_without_compile",
             marks=tilelang.testing.requires_rocm.marks(),
             id="hip",
@@ -64,19 +64,16 @@ def test_clamp_backend_codegen(target_config, build_func):
         target = tvm.target.Target(target_config)
         with target:
             source = lower(_clamp_kernel(), target=target).kernel_source
+    assert "!=" in source
+    assert "tl.clamp" not in source
     if target_config["kind"] in ("cuda", "c"):
-        assert "tl::clamp(" in source
-        if target_config["kind"] == "cuda":
-            assert "*(float4*)" in source
-    else:
-        assert "!=" in source  # NaN checks must survive simplification.
-        assert "tl.clamp" not in source
+        assert "*(float4*)" in source
 
 
-@pytest.mark.parametrize("kind", ["llvm", "hip", "metal", "webgpu"])
+@pytest.mark.parametrize("kind", ["llvm", "rocm", "metal", "webgpu"])
 def test_clamp_fallback_registration(kind):
     # LLVM/WebGPU codegens need not be compiled in to exercise their lowering.
-    from tvm import tirx
+    from tilelang._compat import tirx
 
     x = T.Var("x", "float32x4")
     func = tirx.PrimFunc([x], tirx.Evaluate(T.clamp(x, -1.0, 1.0))).with_attr("target", tvm.target.Target(kind))
@@ -84,7 +81,7 @@ def test_clamp_fallback_registration(kind):
     calls = []
     tirx.stmt_functor.post_order_visit(mod["main"].body, lambda node: calls.append(node) if isinstance(node, tirx.Call) else None)
     assert not any(call.op.same_as(tirx.op.Op.get("tl.clamp")) for call in calls)
-    assert any(call.op.same_as(tirx.op.Op.get("tirx.isnan")) for call in calls)
+    assert any(call.op.same_as(tirx.op.Op.get("prim.isnan")) for call in calls)
 
 
 @pytest.mark.parametrize("dtype", ["float16", "float32", "float64"])

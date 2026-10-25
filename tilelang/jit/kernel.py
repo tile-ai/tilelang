@@ -3,12 +3,12 @@ from typing import Any, Generic, Literal, ParamSpec, TypeVar
 from collections.abc import Callable
 
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
-from tvm.tirx import PrimFunc
+from tilelang._compat.tirx import PrimFunc
 
 from tilelang import tvm
 from tilelang import env
 from tilelang.backend.module import BackendContext, create_backend_context
-from tvm.target import Target
+from tvm_tirx.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
@@ -304,7 +304,7 @@ class JITKernel(Generic[_P, _T]):
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
-            base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+            base_pass_instruments.append(tvm.ir.transform.instrument.DumpIR(dump_dir=dump_ir_path))
 
         pass_instrument_context = f"stage=jit-lower, kernel={compile_metadata['kernel']}, backend={compile_metadata['backend']}"
         pass_instruments = [
@@ -820,7 +820,9 @@ class JITKernel(Generic[_P, _T]):
             os.makedirs(dir_path, exist_ok=True)
 
         if runtime_module is not None:
-            runtime_module.export_library(kernel_file)
+            from tvm_tirx.codegen.executable import Executable
+
+            Executable(runtime_module).export_library(kernel_file)
         elif not (os.path.exists(kernel_file) and os.path.samefile(cached_library, kernel_file)):
             shutil.copyfile(cached_library, kernel_file)
         logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")

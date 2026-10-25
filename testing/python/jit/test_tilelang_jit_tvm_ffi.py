@@ -423,12 +423,8 @@ def test_tvm_ffi_l2_persistent_map():
     kernel = elementwise_add_with_l2_cache(M, N)
 
     source = kernel.get_host_source()
-    assert "__tvm_cuda_stream_set_access_policy_window_packed" in source, (
-        "Expected __tvm_cuda_stream_set_access_policy_window_packed in the kernel source"
-    )
-    assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source, (
-        "Expected __tvm_cuda_stream_reset_access_policy_window_packed in the kernel source"
-    )
+    assert "tl.cuda.stream_set_access_policy_window" in source
+    assert "tl.cuda.stream_reset_access_policy_window" in source
 
     # Create test tensors
     a = torch.randn(M, N, dtype=torch.float32).cuda()

@@ -936,8 +936,8 @@ def test_buffer_lifetimes_alias_contract(make_program, may_alias):
 @pytest.mark.parametrize("sticky", [False, True], ids=["completed-groups", "sf-live-across-data-reload"])
 def test_l0_address_reuse_includes_the_bound_sf_lifetime(sticky):
     from tilelang.ascend import transform
-    from tvm import tirx
-    from testing.ascend._ir import kernel, nodes, seq
+    from tilelang._compat import tirx
+    from testing.ascend._ir import kernel, root_scope, seq
     from testing.ascend.auto_schedule._scheduled_ir import unit
 
     a, b = [tirx.decl_buffer((1,), "int32", name=name, scope="shared.l0a") for name in ("a", "b")]
@@ -957,14 +957,13 @@ def test_l0_address_reuse_includes_the_bound_sf_lifetime(sticky):
         seq(*[unit(task, core=2) for task in tasks]),
         buffers=[a, b, sa, sb],
         params=[out],
-        annotations={"tl.l0_sf_bindings": {sa.data: a.data, sb.data: b.data}},
+        annotations={"tl.l0_sf_bindings": {sa: a, sb: b}},
     )
     after = transform.InsertSync()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    aliases = root.annotations.get("tl.buffer_alias_map", {})
-    compatible = any(other.same_as(b.data) for other in aliases.get(a.data, []))
+    aliases = root_scope(after).attrs.get("tl.buffer_alias_map", {})
+    compatible = any(other.same_as(b) for other in aliases.get(a, []))
     assert compatible == (not sticky)
-    assert sa.data not in aliases and sb.data not in aliases
+    assert sa not in aliases and sb not in aliases
 
 
 if __name__ == "__main__":

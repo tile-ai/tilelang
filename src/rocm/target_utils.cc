@@ -6,7 +6,6 @@
 #include "rocm/target_utils.h"
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/cast.h>
 
 #include <string>
 
@@ -23,7 +22,7 @@ bool TargetIsCDNA(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = target->GetAttr<ffi::String>("mcpu").value();
     // if mcpu start with "gfx9", it is CDNA
     return mcpu.find("gfx9") == 0;
   }
@@ -34,7 +33,7 @@ bool TargetIsRDNA(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = target->GetAttr<ffi::String>("mcpu").value();
     // gfx11xx, gfx12xx are RDNA architectures
     return mcpu.find("gfx11") == 0 || mcpu.find("gfx12") == 0;
   }
@@ -45,7 +44,7 @@ bool TargetIsGfx950(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = target->GetAttr<ffi::String>("mcpu").value();
     return mcpu.find("gfx950") != std::string::npos;
   }
   return false;
@@ -55,7 +54,7 @@ bool TargetRocmHasAsyncCopy(Target target) {
   if (!TargetIsCDNA(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = target->GetAttr<ffi::String>("mcpu").value();
     if (mcpu.rfind("gfx9", 0) == 0) {
       int gfx_version = std::stoi(mcpu.substr(3, 2));
       return gfx_version >= 94;
@@ -75,7 +74,7 @@ int TargetGetRDNAGeneration(Target target) {
   if (!TargetIsRDNA(target))
     return 0;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<ffi::String>(target->attrs.at("mcpu"));
+    std::string mcpu = target->GetAttr<ffi::String>("mcpu").value();
     if (mcpu.rfind("gfx11", 0) == 0)
       return 11;
     if (mcpu.rfind("gfx12", 0) == 0)

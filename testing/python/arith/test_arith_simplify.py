@@ -17,8 +17,8 @@
 
 from tilelang import tvm
 import tilelang.testing
-from tvm import tirx
-import tvm.ir
+from tilelang._compat import tirx
+import pytest
 
 
 def test_simplify_reshape_flattened_index():
@@ -36,19 +36,23 @@ def test_simplify_reshape_flattened_index():
     )
 
 
-dtype = tvm.testing.parameter(
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "int8",
-    "int16",
-    "int32",
-    "int64",
-    "float16",
-    "float32",
-    "float64",
+@pytest.fixture(
+    params=[
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "float16",
+        "float32",
+        "float64",
+    ]
 )
+def dtype(request):
+    return request.param
 
 
 def test_can_prove_self_identity(dtype):
@@ -70,7 +74,9 @@ def test_simplify_symbolic_comparison():
 
     i0 = tirx.Var("i0", "int64")
     i1 = tirx.Var("i1", "int64")
-    n, m = tvm.tirx.SizeVar("n", "int64"), tvm.tirx.SizeVar("m", "int64")
+    n, m = tvm.tirx.Var("n", "int64"), tvm.tirx.Var("m", "int64")
+    ana.update(n, tvm.arith.ConstIntBound(0, tvm.arith.ConstIntBound.POS_INF))
+    ana.update(m, tvm.arith.ConstIntBound(0, tvm.arith.ConstIntBound.POS_INF))
     outer = (n + 31) // 32
     ana.bind(i0, tvm.ir.Range(0, outer))
     ana.bind(i1, tvm.ir.Range(0, 32))

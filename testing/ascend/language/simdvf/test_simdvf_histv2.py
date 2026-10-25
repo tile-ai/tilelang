@@ -45,6 +45,7 @@ def histv2_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_histv2():
     device = torch.device("npu")
     source = torch.arange(256, dtype=torch.int32, device=device).to(torch.uint8)

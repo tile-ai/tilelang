@@ -1,162 +1,53 @@
-/*!
- * \file tl/metal/op/fill.cc
- * \brief Metal implementation for tl.fill lowering.
- */
-
-#include "op/fill.h"
-#include <tvm/runtime/logging.h>
-
+#include "backend/common/op/fill.h"
 #include "backend/common/target_utils.h"
-#include "metal/op/builtin.h"
 #include "metal/op/utils.h"
-#include "op/utils.h"
-#include "transform/loop_partition.h"
-#include "transform/loop_vectorize.h"
 
-#include <tvm/tirx/builtin.h>
+#include <tvm/backend/metal/op/cooperative_tensor.h>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-
-namespace metal {
+namespace tvm::tl::metal {
 
 struct Fill {
-  static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
-    if (IsCooperativeTensorBuffer(op.dst)) {
-      int region_elements = 1;
-      for (auto r : op.region) {
-        auto imm = r->extent.as<IntImmNode>();
-        TVM_FFI_ICHECK(imm)
-            << "cooperative_tensor fill region must have constant extents";
-        region_elements *= imm->value;
-      }
-      constexpr int kTileM = 16;
-      constexpr int kTileN = 32;
-      constexpr int kTileElems = kTileM * kTileN;
-      TVM_FFI_ICHECK(region_elements % kTileElems == 0)
-          << "cooperative_tensor buffer size must be multiple of " << kTileElems
-          << ", got " << region_elements;
-      int num_tiles = region_elements / kTileElems;
-      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
-      Array<Stmt> stmts;
-      for (int i = 0; i < num_tiles; i++) {
-        stmts.push_back(
-            Evaluate(Call(DataType::Handle(), cooperative_tensor_fill(),
-                          {op.dst->data, IntImm(DataType::Int(32), i),
-                           fill_value, IntImm(DataType::Int(32), kTileM),
-                           IntImm(DataType::Int(32), kTileN)})));
-      }
-      if (stmts.size() == 1) {
-        return stmts[0];
-      }
-      return SeqStmt(stmts);
+  static Stmt Lower(const FillNode &operation, const LowerArgs &arguments,
+                    sym::Analyzer analyzer) {
+    bool cooperative = IsCooperativeTensorBuffer(operation.dst);
+    if (!cooperative && !IsSIMDGroupBuffer(operation.dst)) {
+      return backend::Fill::Lower(operation, arguments, analyzer);
     }
-
-    if (IsSIMDGroupBuffer(op.dst)) {
-      int region_elements = 1;
-      for (auto r : op.region) {
-        auto imm = r->extent.as<IntImmNode>();
-        TVM_FFI_ICHECK(imm)
-            << "simdgroup fill region must have constant extents";
-        region_elements *= imm->value;
-      }
-      TVM_FFI_ICHECK(region_elements % 64 == 0)
-          << "simdgroup buffer size must be multiple of 64 (8x8), got "
-          << region_elements;
-
-      int num_matrices = region_elements / 64;
-      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
-      Array<Stmt> stmts;
-      for (int i = 0; i < num_matrices; i++) {
-        stmts.push_back(Evaluate(Call(
-            DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
-            {op.dst->data, IntImm(DataType::Int(32), i), fill_value,
-             IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8)})));
-      }
-      if (stmts.size() == 1) {
-        return stmts[0];
-      }
-      return SeqStmt(stmts);
+    int64_t elements = 1;
+    for (const Range &range : operation.region) {
+      auto extent = GetConstInt(range->extent);
+      TVM_FFI_CHECK(extent && *extent > 0 && elements <= INT64_MAX / *extent,
+                    ValueError)
+          << "Metal matrix fill requires positive constant extents";
+      elements *= *extent;
     }
-
-    if (IsFragmentBuffer(op.dst)) {
-      auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({lower_args.target,
-                           lower_args.thread_bounds,
-                           lower_args.layout_map,
-                           analyzer,
-                           lower_args.buffer_remap,
-                           {}},
-                          InferLevel::kFree);
-      auto thread_loop =
-          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
-                        par_op->GetLoopLayout());
-      auto vectorized_loop =
-          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
-      auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-
-      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
-                          unrolled_loop);
-      }
-      return unrolled_loop;
+    int rows = cooperative ? 16 : 8;
+    int columns = cooperative ? 32 : 8;
+    int matrix_elements = rows * columns;
+    TVM_FFI_CHECK(elements % matrix_elements == 0, ValueError)
+        << "Metal matrix fill requires a multiple of " << matrix_elements
+        << " elements";
+    auto intrinsic = cooperative
+                         ? ::tvm::backend::metal::cooperative_tensor_fill_op()
+                         : Op::Get("tirx.metal.make_filled_simdgroup_matrix");
+    ffi::Array<Stmt> statements;
+    for (int64_t index = 0; index < elements / matrix_elements; ++index) {
+      statements.push_back(
+          Evaluate(Call(PrimType::Void(), intrinsic,
+                        {operation.dst.data(), IntImm::Int32(index),
+                         prim::cast(operation.value, operation.dst.dtype()),
+                         IntImm::Int32(rows), IntImm::Int32(columns)})));
     }
-
-    if (IsLocalBuffer(op.dst) || IsLocalVarBuffer(op.dst)) {
-      auto init_loop = op.MakeSIMTLoop(analyzer);
-      auto vectorized_loop =
-          VectorizeLoop(init_loop, analyzer, lower_args.layout_map);
-      return PragmaUnrollLoop(vectorized_loop);
-    }
-
-    if (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst)) {
-      auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({lower_args.target,
-                           lower_args.thread_bounds,
-                           lower_args.layout_map,
-                           analyzer,
-                           lower_args.buffer_remap,
-                           {}},
-                          InferLevel::kFree);
-      auto thread_loop =
-          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
-                        par_op->GetLoopLayout());
-      auto vectorized_loop =
-          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
-      auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
-                          unrolled_loop);
-      }
-      return unrolled_loop;
-    }
-
-    LOG(FATAL) << "Unsupported scope " << op.dst.scope();
-    return Stmt();
+    return SeqStmt(statements);
   }
 };
 
-} // namespace metal
-
 namespace {
 
-bool MatchMetalFillTarget(Target target) { return TargetIsMetal(target); }
-
-bool RegisterMetalFill() {
-  RegisterFillImpl(FillImpl{
-      "metal.Fill",
-      MatchMetalFillTarget,
-      metal::Fill::Lower,
-  });
+const bool registered = []() {
+  RegisterFillImpl({"metal.Fill", TargetIsMetal, Fill::Lower});
   return true;
-}
-
-const bool metal_fill_registered = RegisterMetalFill();
+}();
 
 } // namespace
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl::metal

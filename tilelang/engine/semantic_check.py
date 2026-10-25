@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm import IRModule
+from tilelang._compat.tvm import IRModule
 
 import tilelang
 from tilelang.transform import PassContext

@@ -18,7 +18,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import torch
-import tvm
+from tilelang import tvm
 
 tilelang.testing.set_random_seed()
 
@@ -731,7 +731,7 @@ def test_reject_update_before_init():
 
         return kernel
 
-    _compile_expect_error(make, "before T.reducer_init")
+    _compile_expect_error(make, "reducer_update must appear after reducer_init")
 
 
 def test_reject_missing_finalize():
@@ -771,7 +771,7 @@ def test_reject_ordinary_store():
 
         return kernel
 
-    _compile_expect_error(make, "illegal (store to|read of) reducer")
+    _compile_expect_error(make, "Ordinary access or aliasing of reducer.*is forbidden")
 
 
 def test_reject_read_before_finalize():
@@ -792,7 +792,7 @@ def test_reject_read_before_finalize():
 
         return kernel
 
-    _compile_expect_error(make, "illegal read of reducer")
+    _compile_expect_error(make, "Ordinary access or aliasing of reducer.*is forbidden")
 
 
 def test_reject_clear_on_reducer():
@@ -855,7 +855,7 @@ def test_reject_double_init():
 
         return kernel
 
-    _compile_expect_error(make, "double T.reducer_init")
+    _compile_expect_error(make, "double reducer_init")
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ def test_reject_finalize_in_different_scope():
 
         return kernel
 
-    _compile_expect_error(make, "not in the scope of its T.reducer_init")
+    _compile_expect_error(make, "finalize_reducer must remain in the init's control-flow scope")
 
 
 def test_finalize_in_conditional_refinement():
@@ -1076,7 +1076,7 @@ def test_reject_finalize_in_extra_loop():
 
         return kernel
 
-    _compile_expect_error(make, "not in the scope of its T.reducer_init")
+    _compile_expect_error(make, "finalize_reducer must be in the same iteration and branch as reducer_init")
 
 
 # ---------------------------------------------------------------------------
@@ -1359,7 +1359,7 @@ def test_annotated_dst_not_steered():
 
     compiled = tl.compile(kernel, out_idx=[-2, -1])
     source = compiled.get_kernel_source()
-    assert "float result[1];" in source, source
+    assert re.search(r"float result(?:_ptr)?\[1\];", source), source
 
     A = torch.randn(4, K, dtype=torch.float32, device="cuda")
     A2 = torch.randn(4, K, dtype=torch.float32, device="cuda")
@@ -1404,7 +1404,7 @@ def test_narrow_steering_unsatisfiable_falls_back_wide():
     compiled = tl.compile(kernel, out_idx=-1)
     source = compiled.get_kernel_source()
     # Wide fallback signature: replicated dst, participant-wide collective.
-    assert f"float result[{M}];" in source, source
+    assert re.search(rf"float result(?:_ptr)?\[{M}\];", source), source
     assert re.search(r"SumOp, 256", source), source
 
     A = torch.randn(M, K, dtype=torch.float32, device="cuda")
@@ -1422,7 +1422,7 @@ def test_narrow_steering_unsatisfiable_falls_back_wide():
 # fill and the finalize publish copy, which never declare vector loads of it.
 # ---------------------------------------------------------------------------
 
-_VECTOR_RMW_RE = r"float\d+ v\w* = \*\(float\d+\*\)\(acc"
+_VECTOR_RMW_RE = r"float\d+ v\w* = (?:\*\(float\d+\*\)\()?acc(?:_ptr)?"
 
 
 def _contiguous_update_kernel(M, threads, dtype, run, op="sum"):
@@ -1715,7 +1715,6 @@ def test_annotate_plain_fragment_on_reducer_raises():
     M, threads = 32, 128
 
     def build():
-
         @T.prim_func
         def kernel(A: T.Tensor((M,), T.float32), B: T.Tensor((M,), T.float32)):
             with T.Kernel(1, threads=threads):

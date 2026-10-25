@@ -12,7 +12,6 @@ from __future__ import annotations
 # Import the upstream TIR script surface through a target-aware adapter so
 # backend-only parser exports do not leak into the common language manifest.
 from .tir.common import *  # noqa: F401,F403
-from . import overrides as _overrides  # noqa: F401
 
 from .eager import *  # noqa: F401,F403
 from .tir.ir import *  # noqa: F401,F403
@@ -25,6 +24,7 @@ from .loop import (
     serial,  # noqa: F401
     unroll,  # noqa: F401
     vectorized,  # noqa: F401
+    thread_binding,
     Serial,  # noqa: F401
     Unroll,  # noqa: F401
     Vectorized,  # noqa: F401
@@ -67,7 +67,7 @@ from .allocate import (
     alloc_reducer,  # noqa: F401
     empty,  # noqa: F401
 )
-from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
+from tilelang._compat.builder import alloc_buffer as allocate  # noqa: F401
 from .copy_op import (  # noqa: F401
     copy,
     async_copy,
@@ -137,6 +137,8 @@ from .builtin import (  # noqa: F401
     syncthreads_and,
     syncthreads_count,
     syncthreads_or,
+    thread_return,
+    tvm_storage_sync,
 )
 
 from .utils import index_to_coordinates  # noqa: F401
@@ -182,9 +184,9 @@ def import_source(source: str | None = None):
     compiler flags for macros that configure those headers. Imports preserve
     visitation order; a trailing newline is optional.
     """
-    from tvm.tirx.script.builder.ir import sblock_attr
+    from tilelang._compat.builder import scope_attr
 
-    return sblock_attr({"pragma_import_c": source}) if source is not None else None
+    return scope_attr({"pragma_import_c": source}) if source is not None else None
 
 
 # ``__all__`` is the union of the star-imported submodule surfaces (each of
@@ -196,6 +198,7 @@ from .math_intrinsics import COMMON_MATH_INTRINSICS as _MATH_ALL  # noqa: E402
 
 _LOCAL_EXPORTS = (
     "BaseTileScheduler",
+    "Buffer",
     "Fragment",
     "FragmentBuffer",
     "PartialFragment",
@@ -260,6 +263,7 @@ _LOCAL_EXPORTS = (
     "copy",
     "cummax",
     "cumsum",
+    "dp4a",
     "dynamic",
     "symbolic",
     "empty",
@@ -314,6 +318,9 @@ _LOCAL_EXPORTS = (
     "syncthreads_and",
     "syncthreads_count",
     "syncthreads_or",
+    "thread_binding",
+    "tvm_storage_sync",
+    "thread_return",
     "transpose",
     "use_swizzle",
     "view",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm import DataType
+from tilelang._compat.tvm import DataType
 
 from .mma_macro_generator import TensorCoreIntrinEmitter
 

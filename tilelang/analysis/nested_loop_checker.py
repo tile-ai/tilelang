@@ -1,11 +1,11 @@
-from tvm import tirx
-from tvm.tirx import (
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import (
     For,
     Call,
     PrimFunc,
     PyStmtExprVisitor,
 )
-from tvm.tirx.transform import prim_func_pass
+from tvm_tirx.tirx.transform import function_pass as prim_func_pass
 
 
 def is_pipelined_for(op: For) -> bool:
@@ -34,6 +34,8 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
     def visit_for_(self, op: For) -> None:
         if op.kind == tirx.ForKind.PARALLEL:
             child = op.body
+            while isinstance(child, tirx.SeqStmt) and len(child.seq) == 1:
+                child = child.seq[0]
 
             # Special case: continuous nested parallel loop is allowed.
             if isinstance(child, tirx.For) and child.kind == tirx.ForKind.PARALLEL:
@@ -60,6 +62,7 @@ class _NestedLoopCheckVisitor(PyStmtExprVisitor):
             raise ValueError(
                 f'[Tilelang Semantic Check] Only elementwise operations are allowed inside a parallel loop. Got a tile-op "{op.op}".'
             )
+        super().visit_call_(op)
 
 
 def NestedLoopChecker():

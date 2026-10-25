@@ -4,7 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 from tilelang.layout import SwizzleMode
 from tilelang.layout.swizzle import (
     make_full_bank_swizzled_layout,

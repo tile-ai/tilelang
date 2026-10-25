@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as _parser
+import tvm_tirx.tirx.script as _parser
+from tvm_tirx.ir import prim
+from tilelang._compat.builder import bind
 
 from .exports import BACKEND_ONLY_TIR_EXPORTS
 
-__all__ = tuple(name for name in _parser.__all__ if name not in BACKEND_ONLY_TIR_EXPORTS)
+__all__ = tuple(name for name in _parser.__all__ if name not in BACKEND_ONLY_TIR_EXPORTS) + ("align_up", "bind")
+
+
+def align_up(value, alignment):
+    return prim.ceildiv(value, alignment) * alignment
 
 
 def __getattr__(name: str):

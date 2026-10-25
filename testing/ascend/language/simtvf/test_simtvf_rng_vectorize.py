@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 
 
@@ -39,6 +40,7 @@ def _rng_fill(groups, dtype, distribution, seed=42, seq=7, off=12):
 
 @pytest.mark.parametrize("distribution", ["uniform", "normal"])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@tilelang.testing.requires_ascend
 def test_parallel_rng_is_implicitly_fused_and_bitwise_equal_up_to_layout(dtype, distribution):
     groups = 16
     threads = 64

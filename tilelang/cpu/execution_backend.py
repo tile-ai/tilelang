@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.backend.execution_backend import ExecutionBackendSpec
 

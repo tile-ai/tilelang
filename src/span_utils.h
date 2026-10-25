@@ -1,19 +1,15 @@
 /*!
  * \file tl/span_utils.h
- * \brief Helpers to read/write source spans on tirx IR nodes and to format
- *        spans into compiler error messages.
+ * \brief Source-location helpers for standalone TIRx IR nodes.
  *
- * `StmtNode::span` / `BufferNode::span` / `PrimFuncNode::span` are mutable
- * fields that are reflected read-only to Python. These helpers write them
- * directly from C++, so spans can be injected during script parsing without
- * touching the vendored TVM fork. Spans never participate in structural
- * equality or hashing.
+ * The historical span helper names operate on native Location metadata.
+ * Native node locations are mutable and ignored by structural equality and
+ * hashing.
  */
 #ifndef TVM_TL_SPAN_UTILS_H_
 #define TVM_TL_SPAN_UTILS_H_
 
-#include <tvm/ir/source_map.h>
-#include <tvm/tirx/buffer.h>
+#include <tvm/ir/location.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
@@ -29,13 +25,18 @@ namespace tl {
  * \brief Format a span as "file:line:col" for error messages.
  * \return Empty string when the span or its source name is undefined.
  */
-inline std::string FormatSpan(const Span &span) {
-  if (!span.defined() || !span->source_name.defined()) {
-    return "";
+inline std::string FormatSpan(const Location &span) {
+  if (const auto *source = span.as<SourceLocNode>()) {
+    std::ostringstream os;
+    os << source->source_name->name << ":" << source->start_line << ":"
+       << source->start_column;
+    return os.str();
   }
-  std::ostringstream os;
-  os << span->source_name->name << ":" << span->line << ":" << span->column;
-  return os.str();
+  if (const auto *call = span.as<CallSiteLocNode>()) {
+    auto callee = FormatSpan(call->callee);
+    return callee.empty() ? FormatSpan(call->caller) : callee;
+  }
+  return "";
 }
 
 /*!
@@ -46,13 +47,13 @@ inline std::string FormatSpan(const Span &span) {
  * \note No-op when `span` is undefined. Spans never participate in structural
  *       equality or hashing, so stamping does not change compilation results.
  */
-void StampSubtreeSpans(const tirx::Stmt &stmt, const Span &span);
+void StampSubtreeSpans(const Stmt &stmt, const Location &span);
 
 /*!
  * \brief Suffix for error messages pointing at a source location, e.g.
  *        "\n  --> /path/to/kernel.py:21:1". Empty when no span is available.
  */
-inline std::string SpanHintSuffix(const Span &span) {
+inline std::string SpanHintSuffix(const Location &span) {
   std::string loc = FormatSpan(span);
   return loc.empty() ? "" : "\n  --> " + loc;
 }
@@ -62,7 +63,7 @@ inline std::string SpanHintSuffix(const Span &span) {
  * Useful when an error involves several buffers (e.g. src/dst) and any one of
  * their declaration sites helps the user locate the problem.
  */
-inline std::string SpanHintSuffix(std::initializer_list<Span> spans) {
+inline std::string SpanHintSuffix(std::initializer_list<Location> spans) {
   for (const auto &span : spans) {
     std::string hint = SpanHintSuffix(span);
     if (!hint.empty()) {

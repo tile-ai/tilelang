@@ -8,6 +8,7 @@ from tilelang.ascend import language as T
 
 
 @pytest.mark.parametrize("src_width,ub_width,cols", [(4, 64, 4), (8, 16, 4), (64, 1, 1)])
+@tilelang.testing.requires_ascend
 def test_strided_dma_roundtrip(src_width, ub_width, cols):
     @T.prim_func
     def copy(src: T.Tensor((4, src_width), "int32"), dst: T.Tensor((4, cols), "int32")):
@@ -22,6 +23,7 @@ def test_strided_dma_roundtrip(src_width, ub_width, cols):
 
 
 @pytest.mark.parametrize("rows", [0, 1, 4])
+@tilelang.testing.requires_ascend
 def test_dynamic_rows_with_fixed_middle_axis(rows):
     @T.prim_func
     def copy(src: T.Tensor((4, 2, 32), "float32"), dst: T.Tensor((4, 32), "float32"), n: T.int32):
@@ -69,6 +71,7 @@ def l0c_to_strided_gm_copy():
     return kernel
 
 
+@tilelang.testing.requires_ascend
 def test_l0c_to_strided_gm_uses_runtime_row_stride():
     kernel = tilelang.compile(l0c_to_strided_gm_copy(), target="ascend")
     device = torch.device("npu")
@@ -102,6 +105,7 @@ def fp4_copy():
     not hasattr(torch, "float4_e2m1fn_x2"),
     reason="PyTorch float4_e2m1fn_x2 dtype is unavailable",
 )
+@tilelang.testing.requires_ascend
 def test_gm2ub2gm_fp4_copy():
     kernel = tilelang.compile(
         fp4_copy(),

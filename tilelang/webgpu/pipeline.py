@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tvm import IRModule, s_tir, tirx
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule, tirx
+from tvm_tirx.target import Target
 
 import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
@@ -65,19 +65,18 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
-    mod = s_tir.transform.HoistIfThenElse()(mod)
+    mod = tirx.transform.HoistIf()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
-    mod = s_tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

@@ -26,10 +26,9 @@
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/string.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -48,7 +47,6 @@
 #include "ascend/transform/attr.h"
 #include "op/builtin.h"
 #include "op/utils.h"
-#include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -57,7 +55,6 @@ namespace ascend {
 
 using namespace tirx;
 
-constexpr const char *kBufferVersionMode = "tl.buffer_version_mode";
 constexpr const char *kMultiBufferCounterMap = "tl.multi_buffer_counter_map";
 constexpr const char *kStorageEpochGuardMap = "tl.storage_epoch_guard_map";
 constexpr const char *kMultiBufferBroadcastFill =
@@ -69,8 +66,7 @@ enum class BufferVersionMode {
   kCounter,
 };
 
-using BufferVersionModeMap = ffi::Map<Var, ffi::String>;
-using MultiBufferCounterMap = ffi::Map<Var, Buffer>;
+using MultiBufferCounterMap = ffi::Map<Var, TensorVar>;
 using StorageEpochGuardMap = ffi::Map<Var, PrimExpr>;
 using MultiBufferBroadcastFill = ffi::Array<Var>;
 
@@ -78,93 +74,96 @@ using MultiBufferBroadcastFill = ffi::Array<Var>;
 using BufferVersionModeTable =
     std::unordered_map<Var, BufferVersionMode, ObjectPtrHash, ObjectPtrEqual>;
 
-// AttrStmt::node is an Any and generic TIR mutators do not traverse it. Keep a
-// narrow whitelist of attribute protocols whose node is known to be a
+// RegionStmt::node is an Any and generic TIR mutators do not traverse it. Keep
+// a narrow whitelist of attribute protocols whose node is known to be a
 // PrimExpr and can follow the same physical version as the guarded task.
 inline bool CanRewriteMultiBufferAttrNode(const ffi::String &attr_key,
                                           const ffi::Any &node) {
-  bool is_assume = attr_key == tirx::attr::tilelang_assume ||
+  bool is_assume = attr_key == "tilelang_assume" ||
                    attr_key == attr::kAssumeRequiresRuntimeCheck;
-  return is_assume && node.as<PrimExprNode>();
+  return is_assume && node.as<PrimExpr>().has_value();
 }
 
 // Owner-external fills can initialize every physical version independently.
 // Keep this predicate shared by the early owner planner and PrepareMultiBuffer
 // so automatic annotation never accepts a task that coverage validation later
 // rejects.
-inline bool CanBroadcastFillToStorage(const Stmt &stmt, const Var &storage) {
-  class Detector : public StmtExprVisitor {
+inline bool
+CanBroadcastFillToStorage(const Stmt &stmt, const Var &storage,
+                          const StorageAliasAnalysis *analysis = nullptr) {
+  class Detector : public AnalysisVisitor {
   public:
-    explicit Detector(Var storage) : storage_(std::move(storage)) {}
-
+    Detector(Var storage, const StorageAliasAnalysis *analysis)
+        : storage_(std::move(storage)), analysis_(analysis) {}
     bool found{false};
     bool valid{true};
 
   private:
-    void VisitStmt_(const AttrStmtNode *op) final {
-      if (CanRewriteMultiBufferAttrNode(op->attr_key, op->node))
-        VisitExpr(Downcast<PrimExpr>(op->node));
-      StmtExprVisitor::VisitStmt_(op);
+    bool Matches(const Expr &expression) const {
+      if (expression.same_as(storage_))
+        return true;
+      if (analysis_)
+        if (auto access = analysis_->Resolve(expression))
+          return access->root.same_as(storage_);
+      return false;
     }
 
-    void VisitStmt_(const BufferStoreNode *op) final {
-      if (op->buffer->data.same_as(storage_))
+    void VisitStmt_(const RegionStmtNode *node) final {
+      auto key = ScheduleMarkerKey(node);
+      if (!key.empty()) {
+        if (CanRewriteMultiBufferAttrNode(key, ScheduleMarkerPayload(node)))
+          VisitExpr(ScheduleMarkerPayload(node).as_or_throw<PrimExpr>());
+        VisitStmt(UnwrapScheduleMarker(node));
+      } else {
+        VisitStmt(node->body);
+      }
+    }
+
+    void VisitStmt_(const TensorStoreNode *node) final {
+      if (Matches(node->dest))
         valid = false;
-      StmtExprVisitor::VisitStmt_(op);
+      AnalysisVisitor::VisitStmt_(node);
     }
 
-    void VisitExpr_(const BufferLoadNode *op) final {
-      if (op->buffer->data.same_as(storage_))
+    void VisitExpr_(const TensorLoadNode *node) final {
+      if (Matches(node->source))
         valid = false;
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(node);
     }
 
-    void VisitExpr_(const VarNode *op) final {
-      if (ffi::GetRef<Var>(op).same_as(storage_))
+    void VisitExpr_(const VarNode *node) final {
+      if (Matches(ffi::GetRef<Var>(node)))
         valid = false;
-      StmtExprVisitor::VisitExpr_(op);
     }
 
-    void VisitExpr_(const CallNode *op) final {
-      static const Op &fill_op = Op::Get("tl.tileop.fill");
-      static const Op &region_op = region();
-      if (op->op.same_as(fill_op) && !op->args.empty()) {
-        const auto *region_call = op->args[0].as<CallNode>();
-        if (region_call && region_call->op.same_as(region_op)) {
-          BufferRegion buffer_region =
-              NormalizeToBufferRegion(ffi::GetRef<Call>(region_call));
-          if (buffer_region->buffer->data.same_as(storage_)) {
-            found = true;
-            // Skip the destination BufferLoad itself, but reject reads from
-            // the target storage used to compute the destination bounds.
-            for (const Range &range : buffer_region->region) {
-              VisitExpr(range->min);
-              VisitExpr(range->extent);
-            }
-            for (size_t i = 1; i < op->args.size(); ++i)
-              VisitExpr(op->args[i]);
-            return;
+    void VisitExpr_(const CallNode *node) final {
+      if (node->op.same_as(Op::Get("tl.tileop.fill")) && !node->args.empty()) {
+        auto region = node->args[0].as<TensorRegion>();
+        if (region && Matches(region.value()->source)) {
+          found = true;
+          for (const Range &range : region.value()->region) {
+            VisitExpr(range->begin);
+            VisitExpr(range->extent);
           }
+          for (size_t index = 1; index < node->args.size(); ++index)
+            VisitExpr(node->args[index]);
+          return;
         }
       }
-      if (op->op.same_as(region_op)) {
-        BufferRegion buffer_region =
-            NormalizeToBufferRegion(ffi::GetRef<Call>(op));
-        if (buffer_region->buffer->data.same_as(storage_))
-          valid = false;
-      }
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(node);
     }
 
     Var storage_;
-  } detector(storage);
-  detector(stmt);
-  return detector.found && detector.valid;
+    const StorageAliasAnalysis *analysis_;
+  };
+  auto detector = ffi::make_object<Detector>(storage, analysis);
+  detector->Visit(stmt);
+  return detector->found && detector->valid;
 }
 
 struct MultiBufferOwnerInfo {
   ControlNode *loop{nullptr};
-  PrimExpr active_guard{Bool(true)};
+  PrimExpr active_guard{IntImm::Bool(true)};
 };
 
 // One scheduler-selected storage ring. A storage may have multiple disjoint
@@ -186,10 +185,10 @@ struct MultiBufferOwnerInfo {
 // those infos carry the same counter_group_id and counter.
 struct MultiBufferInfo {
   int counter_group_id{0};
-  Var storage;
+  Var storage{ffi::UnsafeInit{}};
   int num_versions{0};
   std::vector<MultiBufferOwnerInfo> owners;
-  Buffer counter;
+  TensorVar counter{ffi::UnsafeInit{}};
 
   bool UsesCounter() const { return counter.defined(); }
   bool NeedsVersionDimension() const { return num_versions > 1; }
@@ -203,7 +202,7 @@ struct MultiBufferInfo {
       ICHECK(result == nullptr)
           << "An IRStructure node belongs to nested multi-buffer owners for "
              "storage "
-          << storage->name_hint;
+          << storage->name;
       result = &owner;
     }
     return result;
@@ -227,8 +226,8 @@ public:
     return it == storage_indices_.end() ? nullptr : &infos_[it->second];
   }
 
-  const MultiBufferInfo *Find(const Buffer &buffer) const {
-    return Find(buffer->data);
+  const MultiBufferInfo *Find(const TensorVar &buffer) const {
+    return Find(static_cast<const Var &>(buffer));
   }
 
   // Pass-local builders append resolved storage records through this method.
@@ -252,7 +251,7 @@ public:
       ICHECK_EQ(info.counter_group_id, 0);
       ICHECK(!info.counter.defined());
       ICHECK_EQ(info.owners.size(), 1U);
-      ICHECK(is_one(info.owners.front().active_guard));
+      ICHECK(GetConstInt(info.owners.front().active_guard) == 1);
     }
     size_t index = infos_.size();
     auto [_, inserted] = storage_indices_.emplace(info.storage, index);
@@ -269,17 +268,18 @@ private:
 
 namespace multi_buffer_detail {
 
-inline ffi::Optional<AttrStmt> AsSemanticTask(const Stmt &stmt) {
-  const auto *task = stmt.as<AttrStmtNode>();
-  if (task == nullptr || (task->attr_key != attr::kAscendTask &&
-                          task->attr_key != attr::kAscendPerCoreTask)) {
+inline ffi::Optional<RegionStmt> AsSemanticTask(const Stmt &stmt) {
+  const auto *task = SingleScheduleStatement(stmt).as<RegionStmtNode>();
+  if (task == nullptr ||
+      (ScheduleMarkerKey(task) != attr::kAscendTask &&
+       ScheduleMarkerKey(task) != attr::kAscendPerCoreTask)) {
     return std::nullopt;
   }
-  return ffi::GetRef<AttrStmt>(task);
+  return ffi::GetRef<RegionStmt>(task);
 }
 
-inline AttrStmt RequireSemanticTask(const Stmt &stmt) {
-  ffi::Optional<AttrStmt> task = AsSemanticTask(stmt);
+inline RegionStmt RequireSemanticTask(const Stmt &stmt) {
+  ffi::Optional<RegionStmt> task = AsSemanticTask(stmt);
   ICHECK(task.has_value())
       << "Multi-buffer task annotation requires T.Task/T.PerCoreTask";
   return task.value();
@@ -292,11 +292,12 @@ GetMultiBufferBroadcastFills(const TaskNode *task) {
   ICHECK(task != nullptr);
   // Control headers also use TaskNode for access analysis, but only semantic
   // T.Task/T.PerCoreTask nodes can carry broadcast-fill metadata.
-  ffi::Optional<AttrStmt> semantic_task =
+  ffi::Optional<RegionStmt> semantic_task =
       multi_buffer_detail::AsSemanticTask(task->stmt);
   if (!semantic_task.has_value())
     return MultiBufferBroadcastFill();
-  const auto *metadata = semantic_task.value()->node.as<ffi::MapObj>();
+  const auto *metadata =
+      ScheduleMarkerPayload(semantic_task.value().get()).as<ffi::MapObj>();
   if (metadata == nullptr)
     return {};
   for (const auto &[key, value] : *metadata) {
@@ -322,23 +323,23 @@ inline void AddMultiBufferBroadcastFill(TaskNode *task, const Var &storage) {
       return;
   }
   storages.push_back(storage);
-  AttrStmt semantic_task = multi_buffer_detail::RequireSemanticTask(task->stmt);
+  RegionStmt semantic_task =
+      multi_buffer_detail::RequireSemanticTask(task->stmt);
   ffi::Map<ffi::String, ffi::Any> metadata =
-      task_metadata_detail::CopyTaskMetadata(semantic_task->node);
+      task_metadata_detail::CopyTaskMetadata(
+          ScheduleMarkerPayload(semantic_task.get()));
   metadata.Set(kMultiBufferBroadcastFill, std::move(storages));
-  task->stmt =
-      AttrStmt(std::move(metadata), semantic_task->attr_key,
-               semantic_task->value, semantic_task->body, semantic_task->span);
+  task->stmt = WithSchedulePayload(semantic_task.get(), std::move(metadata));
 }
 
 inline void ClearMultiBufferBroadcastFills(TaskNode *task) {
-  AttrStmt semantic_task = multi_buffer_detail::RequireSemanticTask(task->stmt);
+  RegionStmt semantic_task =
+      multi_buffer_detail::RequireSemanticTask(task->stmt);
   ffi::Map<ffi::String, ffi::Any> metadata =
-      task_metadata_detail::CopyTaskMetadata(semantic_task->node);
+      task_metadata_detail::CopyTaskMetadata(
+          ScheduleMarkerPayload(semantic_task.get()));
   metadata.erase(kMultiBufferBroadcastFill);
-  task->stmt =
-      AttrStmt(std::move(metadata), semantic_task->attr_key,
-               semantic_task->value, semantic_task->body, semantic_task->span);
+  task->stmt = WithSchedulePayload(semantic_task.get(), std::move(metadata));
 }
 
 inline MultiBufferOwnerMap
@@ -383,7 +384,7 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
     // protocol identity and later grouping compares owners pairwise.
     auto owners_it = owners_by_storage.find(storage);
     ICHECK(owners_it != owners_by_storage.end() && !owners_it->second.empty())
-        << "Prepared multi-buffer storage " << storage->name_hint
+        << "Prepared multi-buffer storage " << storage->name
         << " has no owner loop";
     const std::vector<ControlNode *> &owners = owners_it->second;
 
@@ -426,7 +427,7 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
       // group may cover several disjoint owners; each owner is independently
       // bound to its active-epoch domain below.
       auto [group, inserted] =
-          counter_groups.emplace(info.counter->data, next_counter_group_id);
+          counter_groups.emplace(info.counter, next_counter_group_id);
       if (inserted)
         ++next_counter_group_id;
       info.counter_group_id = group->second;
@@ -459,8 +460,8 @@ struct EpochDomain {
   int id{0};
   EpochDomainKind kind{EpochDomainKind::kLexical};
   ControlNode *owner{nullptr};
-  PrimExpr active_guard{Bool(true)};
-  Buffer counter;
+  PrimExpr active_guard{IntImm::Bool(true)};
+  TensorVar counter{ffi::UnsafeInit{}};
 
   bool IsCounter() const { return kind == EpochDomainKind::kCounter; }
 };
@@ -509,8 +510,7 @@ public:
             const int *domain_id =
                 FindStorageBinding(counter_bindings_, storage, owner->loop);
             ICHECK(domain_id != nullptr)
-                << "Missing counter epoch domain for storage "
-                << storage->name_hint;
+                << "Missing counter epoch domain for storage " << storage->name;
             return *domain_id;
           }
         }
@@ -541,7 +541,7 @@ public:
 private:
   int InternDomain(EpochDomainKind kind, ControlNode *owner,
                    const PrimExpr &active_guard,
-                   const Buffer &counter = Buffer()) {
+                   const TensorVar &counter = TensorVar(ffi::UnsafeInit{})) {
     ICHECK(kind == EpochDomainKind::kLexical || owner != nullptr);
     ICHECK_EQ(kind == EpochDomainKind::kCounter, counter.defined());
     for (const EpochDomain &domain : domains_) {
@@ -738,8 +738,7 @@ private:
       const Var &storage, ControlNode *owner, int domain_id) {
     ICHECK(bindings != nullptr);
     auto [_, inserted] = (*bindings)[storage].emplace(owner, domain_id);
-    ICHECK(inserted) << "Duplicate storage epoch binding for "
-                     << storage->name_hint;
+    ICHECK(inserted) << "Duplicate storage epoch binding for " << storage->name;
   }
 
   const int *FindStorageBinding(
@@ -763,7 +762,8 @@ private:
   }
 
   void AddLexicalScope(ControlNode *scope) {
-    int domain_id = InternDomain(EpochDomainKind::kLexical, scope, Bool(true));
+    int domain_id =
+        InternDomain(EpochDomainKind::kLexical, scope, IntImm::Bool(true));
     auto [it, inserted] = lexical_domain_ids_.emplace(scope, domain_id);
     ICHECK(inserted || it->second == domain_id)
         << "A lexical scope has inconsistent unconditional domains";
@@ -776,12 +776,13 @@ private:
 
     std::vector<Var> storages;
     std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen_storages;
-    auto append = [&](const std::vector<BufferRegion> &regions) {
-      for (const BufferRegion &region : regions) {
-        const Var &storage = region->buffer->data;
+    auto append = [&](const std::vector<TensorRegion> &regions) {
+      for (const TensorRegion &region : regions) {
+        Var storage = task->StorageOf(region->source.as_or_throw<TensorVar>());
         if (!seen_storages.insert(storage).second)
           continue;
-        std::string storage_scope = GetPtrStorageScope(storage);
+        std::string storage_scope =
+            region->source.as_or_throw<TensorVar>().scope().name();
         if (storage_scope == "local" || storage_scope == "local.var" ||
             storage_scope == "local.fragment") {
           continue;
@@ -790,7 +791,7 @@ private:
           if (!IsMultiBufferBroadcastFill(task, info->storage)) {
             ICHECK(info->FindOwner(task) != nullptr)
                 << "Multi-buffer task is outside every owner for storage "
-                << info->storage->name_hint;
+                << info->storage->name;
           }
         }
         storages.push_back(storage);

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as _parser
+from tvm_tirx.backend.metal.script import MetalNamespace
+
+_parser = MetalNamespace()
 
 from tilelang.language.tir.exports import METAL_ONLY_TIR_EXPORTS
 

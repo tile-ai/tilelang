@@ -1,10 +1,14 @@
 """Tests for CuTeDSL host codegen integration."""
 
+import ast
+
 import pytest
 import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tvm_tirx import ir, tirx
+from tilelang._compat.stmt_functor import ir_transform, post_order_visit
 
 CUTEDSL_SM90_TARGET = {"kind": "cutedsl", "arch": "sm_90"}
 
@@ -34,13 +38,40 @@ def _lower_cutedsl(program):
     return artifact, wrapper
 
 
-def _host_entry_gvar_and_func(wrapper):
-    """Return the GlobalVar and PrimFunc selected as the wrapper host entry."""
-    entry_func = wrapper._host_entry_func()
-    for gvar, host_func in wrapper.host_mod.functions.items():
-        if host_func.same_as(entry_func):
-            return gvar, host_func
-    raise AssertionError("Unable to locate wrapper host entry function in host_mod")
+def _host_program_arguments(wrapper):
+    constructor = next(
+        node
+        for node in ast.walk(ast.parse(wrapper.host_func))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "CuTeHostProgram"
+    )
+    return [ast.literal_eval(argument) for argument in constructor.args[:-1]]
+
+
+def _host_kernel_calls(wrapper):
+    host = ir.load_json(_host_program_arguments(wrapper)[0])
+    calls = []
+
+    def collect(node):
+        if isinstance(node, ir.Evaluate) and isinstance(node.value, ir.Call):
+            call = node.value
+            if isinstance(call.op, ir.Op) and call.op.name == "tirx.call_ffi_kernel":
+                calls.append(call)
+
+    post_order_visit(host, collect)
+    return calls
+
+
+def _rewrap(program, artifact, *, host_mod=None, device_mod=None):
+    from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
+    from tilelang.backend.target import determine_target
+
+    return TLCuTeDSLSourceWrapper(
+        ir.IRModule({program.attrs["global_symbol"]: program}),
+        artifact.kernel_source,
+        determine_target(CUTEDSL_SM90_TARGET),
+        artifact.device_mod if device_mod is None else device_mod,
+        artifact.host_mod if host_mod is None else host_mod,
+    )
 
 
 def single_kernel_program(N, block_size=64, dtype=T.float32):
@@ -145,97 +176,76 @@ def test_cutedsl_host_wrapper_follows_lowered_host_call_sites():
 
     _, wrapper = _lower_cutedsl(two_kernel_program(64))
 
-    call_sites = wrapper._collect_host_kernel_call_sites()
-    call_names = [call_site["function_name"] for call_site in call_sites]
+    call_sites = _host_kernel_calls(wrapper)
+    call_names = [call.args[0].value for call in call_sites]
     assert len(call_names) == 2
     assert call_names == wrapper.function_names
-
-    launcher_cpp = wrapper.get_launcher_cpp_code()
-    first_launch = launcher_cpp.index(f"Launch kernel 0: {call_names[0]}")
-    second_launch = launcher_cpp.index(f"Launch kernel 1: {call_names[1]}")
-    assert first_launch < second_launch
-
-    host_source = wrapper.host_func
-    first_cubin_launch = host_source.index(f"{call_names[0]}(")
-    second_cubin_launch = host_source.index(f"{call_names[1]}(")
-    assert first_cubin_launch < second_cubin_launch
+    assert [plan["name"] for plan in _host_program_arguments(wrapper)[2]] == call_names
+    for call in call_sites:
+        assert "stream" in call.attrs.launch_fields
+        assert call.attrs.num_kernel_args == 2
 
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_host_wrapper_preserves_repeated_same_kernel_call_sites():
     """Verify repeated host launches of the same device kernel remain distinct."""
 
-    _, wrapper = _lower_cutedsl(single_kernel_program(64))
-    original_call_site = wrapper._collect_host_kernel_call_sites()[0]
-    function_name = original_call_site["function_name"]
-    repeated_body = tilelang.tvm.tirx.SeqStmt(
-        [
-            tilelang.tvm.tirx.Evaluate(tilelang.tvm.tirx.call_packed(function_name, *original_call_site["function_params"])),
-            tilelang.tvm.tirx.Evaluate(tilelang.tvm.tirx.call_packed(function_name, *original_call_site["function_params"])),
-        ]
-    )
+    program = single_kernel_program(64)
+    artifact, original = _lower_cutedsl(program)
+    function_name = original.function_names[0]
 
-    entry_gvar, entry_func = _host_entry_gvar_and_func(wrapper)
-    wrapper.host_mod = tilelang.tvm.IRModule({entry_gvar.name_hint: entry_func.with_body(repeated_body)})
+    def repeat(node):
+        if isinstance(node, ir.Evaluate) and isinstance(node.value, ir.Call):
+            if isinstance(node.value.op, ir.Op) and node.value.op.name == "tirx.call_ffi_kernel":
+                return ir.SeqStmt([ir.Evaluate(node.value), ir.Evaluate(node.value)])
 
-    call_sites = wrapper._collect_host_kernel_call_sites()
-    call_names = [call_site["function_name"] for call_site in call_sites]
+    host_mod = ir_transform(artifact.host_mod, None, repeat)
+    wrapper = _rewrap(program, artifact, host_mod=host_mod)
+    call_sites = _host_kernel_calls(wrapper)
+    call_names = [call.args[0].value for call in call_sites]
     assert call_names == [function_name, function_name]
-    assert call_sites[0] is not call_sites[1]
-
-    wrapper.update_lib_code(wrapper.source)
-    launcher_cpp = wrapper.get_launcher_cpp_code()
-    first_launch = launcher_cpp.index(f"Launch kernel 0: {function_name}")
-    second_launch = launcher_cpp.index(f"Launch kernel 1: {function_name}")
-    assert first_launch < second_launch
-
-    host_source = wrapper.host_func
-    kernel_wrapper_source = host_source[host_source.index("def kernel_wrapper") :]
-    first_cubin_launch = kernel_wrapper_source.index(f"{function_name}(")
-    second_cubin_launch = kernel_wrapper_source.index(f"{function_name}(", first_cubin_launch + 1)
-    assert first_cubin_launch < second_cubin_launch
+    assert wrapper.function_names == [function_name]
+    assert len(wrapper.kernel_plans) == 1
+    ir.assert_structural_equal(call_sites[0], call_sites[1])
 
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_host_call_sites_ignore_dead_helper_funcs():
     """Verify CuTeDSL launch collection only scans the host entry function."""
 
-    _, wrapper = _lower_cutedsl(single_kernel_program(64))
-    call_sites = wrapper._collect_host_kernel_call_sites()
-    function_name = call_sites[0]["function_name"]
-
-    entry_gvar, entry_func = _host_entry_gvar_and_func(wrapper)
-    dead_helper = tilelang.tvm.tirx.PrimFunc(
-        [],
-        tilelang.tvm.tirx.Evaluate(tilelang.tvm.tirx.call_packed(function_name)),
-    ).with_attr("global_symbol", "dead_helper")
-    wrapper.host_mod = tilelang.tvm.IRModule(
-        {
-            entry_gvar.name_hint: entry_func,
-            "dead_helper": dead_helper,
-        }
-    )
-
-    assert wrapper._collect_host_kernel_call_sites() == call_sites
+    program = single_kernel_program(64)
+    artifact, original = _lower_cutedsl(program)
+    entry = artifact.host_mod[program.attrs["global_symbol"]]
+    dead_helper = ir.load_json(ir.save_json(entry)).with_attr({"global_symbol": "dead_helper", "tirx.is_entry_func": False})
+    functions = dict(artifact.host_mod.functions.items())
+    functions[ir.GlobalVar("dead_helper")] = dead_helper
+    wrapper = _rewrap(program, artifact, host_mod=ir.IRModule(functions))
+    assert [call.args[0].value for call in _host_kernel_calls(wrapper)] == original.function_names
+    ir.assert_structural_equal(ir.load_json(_host_program_arguments(original)[0]), ir.load_json(_host_program_arguments(wrapper)[0]))
 
 
 @tilelang.testing.requires_cuda
 def test_cutedsl_host_call_sites_require_launch_metadata():
     """Verify missing launch metadata for a real host call site fails fast."""
 
-    _, wrapper = _lower_cutedsl(single_kernel_program(64))
-    function_name = wrapper._collect_host_kernel_call_sites()[0]["function_name"]
+    program = single_kernel_program(64)
+    artifact, wrapper = _lower_cutedsl(program)
+    function_name = wrapper.function_names[0]
+    with pytest.raises(ValueError, match=f"{function_name}.*missing native device metadata"):
+        _rewrap(program, artifact, device_mod=ir.IRModule({}))
 
-    for metadata_name in ("block_info", "grid_info", "dynamic_smem_buf"):
-        original_metadata = getattr(wrapper, metadata_name)
-        metadata = dict(original_metadata)
-        metadata.pop(function_name)
-        try:
-            setattr(wrapper, metadata_name, metadata)
-            with pytest.raises(AssertionError, match=f".*{function_name}.*{metadata_name}.*"):
-                wrapper.update_lib_code(wrapper.source)
-        finally:
-            setattr(wrapper, metadata_name, original_metadata)
+    def invalidate(node):
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == "tirx.call_ffi_kernel":
+            attrs = tirx.CallFFIKernelAttr(
+                launch_params=node.attrs.launch_params,
+                launch_fields=node.attrs.launch_fields,
+                num_kernel_args=100,
+                kernel_attrs=node.attrs.kernel_attrs,
+            )
+            return ir.Call(node.op, node.args, attrs=attrs, ty=node.ty)
+
+    with pytest.raises(ValueError, match="operand count does not match its signature"):
+        _rewrap(program, artifact, host_mod=ir_transform(artifact.host_mod, None, invalidate))
 
 
 @tilelang.testing.requires_cuda
@@ -256,8 +266,9 @@ def test_cutedsl_adapter_exposes_device_and_host_sources():
 
     assert "@cute.kernel" in device_source
     assert "def call(" in host_source
-    assert "--gpu-arch=sm_90" in host_source
-    assert "_generate_cubin_if_needed" in host_source
+    assert "CuTeHostProgram" in host_source
+    assert "'sm_90'" in host_source
+    assert "return _program(arguments, stream, device_id)" in host_source
     assert device_source in combined_source
     assert host_source in combined_source
 

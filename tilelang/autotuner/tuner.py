@@ -12,8 +12,9 @@ from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
-from tvm.tirx import PrimFunc, Var
-from tvm.target import Target
+from tilelang._compat.tirx import PrimFunc, Var
+from tvm_tirx.target import Target
+from tvm_tirx.tirx import is_tensor_var
 import inspect
 from functools import partial
 from typing import Generic, Literal, Any, ParamSpec, TypeVar
@@ -337,7 +338,7 @@ class AutoTuner:
         for i, param in enumerate(prim_func.params):
             if i in result_idx:
                 continue
-            if param not in prim_func.buffer_map:
+            if not is_tensor_var(param):
                 kernel_name = get_prim_func_name(prim_func, "<unknown>")
                 raise ValueError(
                     f"Auto-tuning kernel '{kernel_name}' does not support auto-generated scalar inputs. "

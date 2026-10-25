@@ -28,7 +28,7 @@ struct AtomicAdd {
   }
 
   static Stmt Lower(const AtomicAddNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::Analyzer analyzer) {
     (void)analyzer;
     return LowerAtomicRMW(op, AtomicCombine::kAdd, lower_args, "atomic_add");
   }

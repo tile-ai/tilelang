@@ -1,12 +1,4 @@
-/*!
- * \file ws_analysis.cc
- * \brief Statement analysis shared by the warp-specialization passes.
- */
-
-#include "./ws_analysis.h"
-
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "ws_analysis.h"
 
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
@@ -14,289 +6,168 @@
 #include "layout/cute_layout.h"
 #include "op/gemm.h"
 #include "op/gemm_sp.h"
-#include "op/operator.h"
-#include "op/utils.h"
+#include "transform/common/memory_access.h"
 
-namespace tvm {
-namespace tl {
+#include <tvm/tirx/op/region.h>
 
-using namespace ffi;
+#include <unordered_set>
 
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-/// Detect if a statement is a SIMT global-to-shared memory copy.
-/// Matches any statement that writes to shared memory and reads from global
-/// memory, without reading shared or local buffers (which would indicate
-/// consumer-side compute).  This is intentionally broader than "pure direct
-/// copy" so that T.Parallel with complex indexing / if_then_else (later
-/// lowered to cp.async) is also captured.
-class SimtProducerDetector : public StmtExprVisitor {
+class TensorRemapper : public StmtExprMutator {
 public:
-  static bool Detect(const Stmt &stmt) {
-    SimtProducerDetector d;
-    d(stmt);
-    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
+  explicit TensorRemapper(BufferRemap remap) : remap_(std::move(remap)) {
+    for (const auto &[source, replacement] : remap_)
+      TVM_FFI_CHECK(source.dtype() == replacement.dtype(), TypeError)
+          << "Warp-specialization tensor remaps must preserve element types";
   }
 
 private:
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsSharedBuffer(op->buffer)) {
-      writes_shared_ = true;
+  UnchangedOr<Expr> Mutate_(const VarNode *node, InplaceMode mode) final {
+    if (auto tensor = GetRef<Var>(node).as<TensorVar>()) {
+      if (auto found = remap_.find(*tensor); found != remap_.end())
+        return Expr(found->second);
     }
-    StmtExprVisitor::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(node, mode);
   }
 
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsGlobalBuffer(op->buffer)) {
-      reads_global_ = true;
+  UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
+    auto tensor = node->var.as<TensorVar>();
+    auto found = tensor ? remap_.find(*tensor) : remap_.end();
+    if (found == remap_.end())
+      return StmtExprMutator::Mutate_(node, mode);
+    Expr value = Mutate(node->value, mode).ValueOrUnchanged(node->value);
+    if (auto call = value.as<Call>();
+        call && (call.value()->op.same_as(alloc_tensor_op()) ||
+                 call.value()->op.same_as(decl_tensor_op()))) {
+      value =
+          Call(found->second.ty(), call.value()->op, call.value()->args,
+               call.value()->attrs, {found->second.ty()}, call.value()->loc);
     }
-    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
-      reads_shared_local_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
+    TVM_FFI_CHECK(ffi::StructuralEqual()(value->ty, found->second.ty()),
+                  TypeError)
+        << "A remapped tensor definition must produce its replacement type";
+    return Bind(found->second, value, node->loc);
   }
 
-  bool writes_shared_{false};
-  bool reads_global_{false};
-  bool reads_shared_local_{false};
+  BufferRemap remap_;
 };
-
-class EvaluateCallInSimpleWrapperExtractor
-    : public StmtFunctor<Optional<Call>(const Stmt &)> {
-public:
-  Optional<Call> VisitStmt_(const EvaluateNode *op) final {
-    return op->value.as<Call>();
-  }
-
-  Optional<Call> VisitStmt_(const IfThenElseNode *op) final {
-    if (op->else_case.defined()) {
-      return Optional<Call>();
-    }
-    return VisitStmt(op->then_case);
-  }
-
-  Optional<Call> VisitStmt_(const AttrStmtNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockRealizeNode *op) final {
-    return VisitStmt(op->block->body);
-  }
-
-  Optional<Call> VisitStmtDefault_(const Object *) final {
-    return Optional<Call>();
-  }
-};
-
-class BufferRemapper : public StmtExprMutator {
-public:
-  static Stmt Rewrite(Stmt stmt, const BufferRemap &buffer_remap) {
-    if (buffer_remap.empty()) {
-      return stmt;
-    }
-    BufferRemapper remapper(buffer_remap);
-    return remapper.VisitStmt(stmt);
-  }
-
-private:
-  explicit BufferRemapper(const BufferRemap &buffer_remap)
-      : buffer_remap_(buffer_remap) {
-    for (const auto &[old_buf, new_buf] : buffer_remap_) {
-      var_remap_.emplace(old_buf->data, new_buf->data);
-    }
-  }
-
-  Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
-      return it->second;
-    }
-    return buffer;
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = var_remap_.find(ffi::GetRef<Var>(op));
-    if (it != var_remap_.end()) {
-      return it->second;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    Buffer new_buffer = RemapBuffer(load->buffer);
-    if (!new_buffer.same_as(load->buffer)) {
-      return BufferLoad(new_buffer, load->indices, load->predicate, load->span);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    Buffer new_buffer = RemapBuffer(store->buffer);
-    if (!new_buffer.same_as(store->buffer)) {
-      return BufferStore(new_buffer, store->value, store->indices,
-                         store->predicate, store->span);
-    }
-    return store;
-  }
-
-  const BufferRemap &buffer_remap_;
-  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> var_remap_;
-};
-
-class ManualWSDetector : public StmtExprVisitor {
-public:
-  static bool HasManualWS(const Stmt &stmt) {
-    ManualWSDetector d;
-    d(stmt);
-    return d.found_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    // Detect both the T.ws() language-level attr ("warp_specialize") and
-    // the compiler-level attr (kWarpSpecializationScope).
-    if (op->attr_key == "warp_specialize" ||
-        op->attr_key == attr::kWarpSpecializationScope) {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
-};
-
 } // namespace
 
-Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
-  EvaluateCallInSimpleWrapperExtractor extractor;
-  return extractor(stmt);
-}
-
-static bool ContainsPtxCpAsync(const Stmt &stmt) {
-  bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = node.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        found = true;
-      }
-    }
-  });
-  return found;
-}
-
-static bool IsPtxCommitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() &&
-         call.value()->op.same_as(builtin::ptx_commit_group());
-}
-
-static bool IsPtxWaitGroup(const Stmt &stmt) {
-  Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() && call.value()->op.same_as(builtin::ptx_wait_group());
+ffi::Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &statement) {
+  if (const auto *evaluation = statement.as<EvaluateNode>())
+    return evaluation->value.as<Call>();
+  if (const auto *sequence = statement.as<SeqStmtNode>();
+      sequence && sequence->seq.size() == 1)
+    return GetEvaluateCallInSimpleWrapper(sequence->seq[0]);
+  if (const auto *conditional = statement.as<IfNode>();
+      conditional && !conditional->else_case)
+    return GetEvaluateCallInSimpleWrapper(conditional->then_case);
+  if (const auto *region = statement.as<RegionStmtNode>();
+      region && region->body_params.empty() && region->result_vars.empty() &&
+      (region->op.same_as(tirx::scope_op()) || region->op->name == "tl.scope"))
+    return GetEvaluateCallInSimpleWrapper(region->body);
+  return std::nullopt;
 }
 
 bool IsBarrierOrTmaControlCall(const CallNode *call) {
-  // TODO: support warp specialization for cluster kernels and for TMA
-  // gather4 / scatter4 (their raw intrinsics and hand protocols decline).
-  return call->op.same_as(mbarrier_wait_parity()) ||
-         call->op.same_as(mbarrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier()) ||
-         call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
-         call->op.same_as(tl::named_barrier_arrive()) ||
-         call->op.same_as(tl::ptx_fence_barrier_init()) ||
-         call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-         call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
-         call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-         call->op.same_as(tma_load_multicast()) ||
-         call->op.same_as(tma_load_gather4()) ||
-         call->op.same_as(tma_store()) ||
-         call->op.same_as(tma_store_scatter4()) ||
-         call->op.same_as(tma_store_cluster()) ||
-         call->op.same_as(tma_store_arrive()) ||
-         call->op.same_as(tma_store_wait()) ||
-         call->op.same_as(builtin::tvm_storage_sync()) ||
-         call->op.same_as(tl::sync_grid()) ||
-         call->op.same_as(tl::syncthreads_count()) ||
-         call->op.same_as(tl::syncthreads_and()) ||
-         call->op.same_as(tl::syncthreads_or());
+  auto operation = call->op.as<Op>();
+  if (!operation)
+    return false;
+  std::string name = operation.value()->name;
+  static const std::unordered_set<std::string> barriers{
+      "tirx.gpu_storage_sync",
+      "tl.sync_grid",
+      "tl.cluster_sync",
+      "tl.syncthreads_count",
+      "tl.syncthreads_and",
+      "tl.syncthreads_or",
+      "tl.named_barrier_arrive",
+      "tl.ptx_fence_barrier_init",
+      "tl.ptx_cp_async_barrier_noinc",
+      "tl.ptx_arrive_cluster_barrier"};
+  return barriers.count(name) || name.starts_with("tl.tma_") ||
+         name.starts_with("tl.mbarrier_") ||
+         name.starts_with("tirx.ptx.mbarrier") ||
+         name == "tirx.ptx.cp_async_mbarrier_arrive";
 }
 
-std::optional<GemmInfo> GetGemmInfo(const TileOperator &op) {
-  if (const auto *gemm = op.as<GemmNode>())
-    return GemmInfo{gemm->cRegion_->buffer, gemm->wgWait_};
-  if (const auto *gemm = op.as<GemmSPNode>())
-    return GemmInfo{gemm->cRegion_->buffer, gemm->wg_wait};
+std::optional<GemmInfo> GetGemmInfo(const TileOperator &operation) {
+  if (const auto *gemm = operation.as<GemmNode>())
+    return GemmInfo{gemm->cRegion_->source.as_or_throw<tirx::TensorVar>(),
+                    gemm->wgWait_};
+  if (const auto *gemm = operation.as<GemmSPNode>())
+    return GemmInfo{gemm->cRegion_->source.as_or_throw<tirx::TensorVar>(),
+                    gemm->wg_wait};
   return std::nullopt;
 }
 
 TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
-  if (copy == nullptr) {
+  if (!copy)
     return TileStmtKind::kConsumer;
-  }
-  cuda::CopyInstSelection result =
-      cuda::ClassifyWarpSpecializedCopy(*copy, target);
-  if (!result.supported) {
-    return TileStmtKind::kConsumer;
-  }
-  if (cuda::CopyInstIsTMAStore(result.inst)) {
+  auto result = cuda::ClassifyWarpSpecializedCopy(*copy, target);
+  TVM_FFI_CHECK(result.supported, ValueError) << result.reason;
+  if (cuda::CopyInstIsTMAStore(result.inst))
     return TileStmtKind::kTmaStore;
-  }
-  if (cuda::CopyInstIsTMALoad(result.inst)) {
+  if (cuda::CopyInstIsTMALoad(result.inst))
     return TileStmtKind::kTmaProducer;
-  }
-  if (cuda::CopyInstIsCPAsync(result.inst)) {
+  if (cuda::CopyInstIsCPAsync(result.inst))
     return TileStmtKind::kCpAsyncProducer;
-  }
   return TileStmtKind::kConsumer;
 }
 
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
-  // Tile-op Calls: classify directly via CopyNode checks.
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (tile_op.defined()) {
-        if (auto *copy = tile_op.as<CopyNode>()) {
+TileStmtKind ClassifyStmt(const Stmt &statement, Target target) {
+  if (const auto *evaluation = statement.as<EvaluateNode>()) {
+    if (auto call = evaluation->value.as<Call>()) {
+      if (call.value()->op.same_as(ptx_cp_async()) && call.value()->attrs &&
+          call.value()
+              ->attrs.value()
+              .as_or_throw<DictAttrs>()
+              .GetAttr<bool>("tl.ws_managed_cp_async")
+              .value_or(false))
+        return TileStmtKind::kCpAsyncProducer;
+      auto operation = ParseOperator(*call);
+      if (operation.defined()) {
+        if (const auto *copy = operation.as<CopyNode>())
           return ClassifyCopy(copy, target);
-        }
-        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
-        // producer so it goes to the producer warp group.
-        if (tile_op.as<Im2ColOpNode>()) {
-          if (TargetIsHopper(target)) {
-            return TileStmtKind::kTmaProducer;
-          }
-        }
-        if (auto gemm = GetGemmInfo(tile_op)) {
-          if (IsTmemBuffer(gemm->accumulator)) {
-            return TileStmtKind::kTcgen05Mma;
-          }
-        }
-        return TileStmtKind::kConsumer; // non-copy tile-op
+        if (operation.as<Im2ColOpNode>() && TargetIsHopper(target))
+          return TileStmtKind::kTmaProducer;
+        if (auto gemm = GetGemmInfo(operation);
+            gemm && IsTmemBuffer(gemm->accumulator))
+          return TileStmtKind::kTcgen05Mma;
+        return TileStmtKind::kConsumer;
       }
     }
   }
-  // Explicit cp.async producer-side statements are already low-level builtins.
-  if (ContainsPtxCpAsync(stmt) || IsPtxCommitGroup(stmt) ||
-      IsPtxWaitGroup(stmt)) {
+  bool raw_copy = false;
+  PostOrderVisit(statement, [&](const ffi::ObjectRef &object) {
+    const auto *call = object.as<CallNode>();
+    auto operation = call ? call->op.as<Op>() : std::nullopt;
+    if (operation) {
+      std::string name = operation.value()->name;
+      raw_copy |=
+          name == "tl.ptx_cp_async" || name.starts_with("tirx.ptx.cp_async");
+    }
+  });
+  if (raw_copy)
     return TileStmtKind::kCpAsyncRaw;
+  auto collector = ffi::make_object<MemoryAccessCollector>();
+  collector->Visit(statement);
+  bool reads_global = false, writes_shared = false, reads_shared_local = false;
+  for (const MemoryAccess &access : collector->accesses) {
+    const ffi::String &scope = access.location.scope;
+    bool shared = scope == "shared" || scope == "shared.dyn";
+    reads_global |= (access.mask & kAccessRead) && scope == "global";
+    writes_shared |= (access.mask & kAccessWrite) && shared;
+    reads_shared_local |=
+        (access.mask & kAccessRead) && (shared || scope.find("local") == 0);
   }
-  // Non-tile-op: check for SIMT global-to-shared copy.
-  if (SimtProducerDetector::Detect(stmt)) {
-    return TileStmtKind::kSimtProducer;
-  }
-  return TileStmtKind::kConsumer;
+  return reads_global && writes_shared && !reads_shared_local
+             ? TileStmtKind::kSimtProducer
+             : TileStmtKind::kConsumer;
 }
 
 bool IsProducer(TileStmtKind kind) {
@@ -306,48 +177,94 @@ bool IsProducer(TileStmtKind kind) {
          kind == TileStmtKind::kSimtProducer;
 }
 
-bool HasManualWarpSpecialization(const Stmt &stmt) {
-  return ManualWSDetector::HasManualWS(stmt);
+bool HasManualWarpSpecialization(const Stmt &statement) {
+  bool found = false;
+  PostOrderVisit(statement, [&](const ffi::ObjectRef &object) {
+    if (const auto *region = object.as<RegionStmtNode>())
+      found |= region->attrs->dict.count("warp_specialize") ||
+               region->attrs->dict.count(attr::kWarpSpecializationScope);
+  });
+  return found;
 }
 
-Stmt RemapBuffers(Stmt stmt, const BufferRemap &remap) {
-  return BufferRemapper::Rewrite(std::move(stmt), remap);
+Stmt RemapBuffers(Stmt statement, const BufferRemap &remap) {
+  auto rewriter = ffi::make_object<TensorRemapper>(remap);
+  return rewriter->Mutate(statement).ValueOrUnchanged(statement);
 }
 
-bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
-  Optional<cute::ComposedLayout> composed =
-      cute::ComposedLayoutFromTileLang(layout);
-  if (!composed.defined())
-    return false;
-  // Recast to byte space (the swizzle atom is defined on byte addresses).
-  cute::ComposedLayout composed_bytes =
-      composed.value().Recast(buffer->dtype.bits(), /*new_bits=*/8);
-  return composed_bytes->swizzle->IsTMACompatible();
+bool IsTmaCompatibleLayout(const Layout &layout,
+                           const tirx::TensorVar &tensor) {
+  auto composed = cute::ComposedLayoutFromTileLang(layout);
+  return composed && composed.value()
+                         .Recast(tensor.dtype().bits(), 8)
+                         ->swizzle->IsTMACompatible();
 }
 
-void CollectAnnotatedLayouts(const SBlock &block, BufferLayoutMap &layouts) {
-  auto anno = block->annotations.Get("layout_map");
-  if (!anno.has_value())
-    return;
-  auto gmap = anno->as<Map<ObjectRef, ObjectRef>>();
-  if (!gmap.has_value())
-    return;
-  for (const auto &[key, val] : gmap.value()) {
-    Layout layout;
-    if (auto l = val.as<Layout>(); l.has_value())
-      layout = l.value();
-    if (auto buf = key.as<Buffer>(); buf.has_value()) {
-      layouts[buf.value()->data] = {buf.value(), layout};
-    } else if (auto var = key.as<Var>(); var.has_value()) {
-      for (const auto &buf : block->alloc_buffers) {
-        if (buf->data.same_as(var.value())) {
-          layouts[buf->data] = {buf, layout};
-          break;
-        }
-      }
-    }
-  }
+void CollectAnnotatedLayouts(const RegionStmt &region,
+                             BufferLayoutMap &layouts) {
+  auto annotations =
+      region->attrs.GetAttr<ffi::Map<tirx::TensorVar, Layout>>("layout_map");
+  if (annotations)
+    for (const auto &[tensor, layout] : *annotations)
+      layouts.insert_or_assign(tensor, std::make_pair(tensor, layout));
 }
 
-} // namespace tl
-} // namespace tvm
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef()
+      .def("tl.cuda.analysis.StorageAliases",
+           [](Stmt statement) {
+             MemoryAliases aliases;
+             ffi::Map<tirx::TensorVar, tirx::TensorVar> result;
+             PostOrderVisit(statement, [&](const ffi::ObjectRef &object) {
+               if (const auto *binding = object.as<BindNode>()) {
+                 aliases.Bind(binding);
+                 auto tensor = binding->var.as<tirx::TensorVar>();
+                 MemoryLocation location = aliases.Resolve(binding->var);
+                 if (tensor && location.allocation)
+                   if (auto owner =
+                           location.allocation.value().as<tirx::TensorVar>())
+                     result.Set(*tensor, *owner);
+               }
+             });
+             return result;
+           })
+      .def("tl.cuda.analysis.SideEffect",
+           [](Expr expression) {
+             return static_cast<int>(SideEffect(expression));
+           })
+      .def("tl.cuda.analysis.AccessSummary",
+           [](Stmt statement) {
+             auto collector = ffi::make_object<MemoryAccessCollector>();
+             collector->Visit(statement);
+             ffi::Map<Var, int64_t> memory;
+             for (const MemoryAccess &access : collector->accesses)
+               if (access.location.allocation) {
+                 Var storage = *access.location.allocation;
+                 memory.Set(storage,
+                            memory.Get(storage).value_or(0) | access.mask);
+               }
+             ffi::Array<Var> definitions;
+             PostOrderVisit(statement, [&](const ffi::ObjectRef &object) {
+               if (const auto *binding = object.as<BindNode>())
+                 definitions.push_back(binding->var);
+             });
+             return ffi::Array<ffi::Any>{memory, tvm::UndefinedVars(statement),
+                                         definitions, collector->exits};
+           })
+      .def("tl.cuda.analysis.ClassifyStmt",
+           [](Stmt statement, Target target) {
+             return static_cast<int>(ClassifyStmt(statement, target));
+           })
+      .def("tl.cuda.analysis.HasManualWarpSpecialization",
+           HasManualWarpSpecialization)
+      .def("tl.cuda.analysis.IsTmaCompatibleLayout", IsTmaCompatibleLayout)
+      .def("tl.cuda.analysis.RemapBuffers",
+           [](Stmt statement,
+              ffi::Map<tirx::TensorVar, tirx::TensorVar> replacements) {
+             BufferRemap remap;
+             for (const auto &[source, replacement] : replacements)
+               remap.emplace(source, replacement);
+             return RemapBuffers(statement, remap);
+           });
+}
+} // namespace tvm::tl

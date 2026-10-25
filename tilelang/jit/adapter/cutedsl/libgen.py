@@ -9,7 +9,7 @@ import os
 import tempfile
 import subprocess
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.contrib.nvcc import get_cuda_library_dirs, get_nvcc_compiler
 from tilelang.jit.adapter.libgen import LibraryGenerator

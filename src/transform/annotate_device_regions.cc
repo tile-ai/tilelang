@@ -3,79 +3,81 @@
  * \brief Split device function from host.
  */
 #include "common/attr.h"
-#include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-#include <tvm/ir/transform.h>
-#include <tvm/target/target.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
+
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <utility>
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-
-class DeviceRegionAnnotater : public StmtMutator {
+class DeviceRegionAnnotater : public tirx::StmtExprMutator {
 public:
-  explicit DeviceRegionAnnotater(Target device_target)
-      : device_target_(std::move(device_target)) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tvm::attr::kTarget) {
-      // If a target attribute already exists, use it as-is.
-      return tvm::ffi::GetRef<Stmt>(op);
-    } else if (op->attr_key == tirx::attr::thread_extent ||
-               op->attr_key == tl::attr::pipeline_exec_scope ||
-               op->attr_key == tirx::attr::device_scope) {
-      // These attributes are only allowed in device-side code, so
-      // they should be annotated with the function's default target.
-      Stmt body = tvm::ffi::GetRef<Stmt>(op);
-      return AttrStmt(device_target_, tvm::attr::kTarget, 0, body);
-    } else {
-      // All other annotations are ignored
-      return StmtMutator::VisitStmt_(op);
-    }
-  }
+  explicit DeviceRegionAnnotater(Target target) : target_(std::move(target)) {}
 
 private:
-  Target device_target_;
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->op->name == "tirx.device_scope") {
+      if (node->attrs->dict.count("target")) {
+        return ffi::Unchanged();
+      }
+      auto attributes = node->attrs->dict;
+      attributes.Set("target", target_);
+      return RegionStmt(node->op, node->args, node->body_params,
+                        DictAttrs(attributes), node->body, node->result_vars,
+                        node->loc);
+    }
+    if (node->op.same_as(tirx::launch_thread_op()) ||
+        node->attrs->dict.count(attr::pipeline_exec_scope)) {
+      return RegionStmt(Op::Get("tirx.device_scope"), {}, {},
+                        DictAttrs({{"target", target_}}),
+                        SeqStmt(ffi::GetRef<Stmt>(node)), {}, node->loc);
+    }
+    return StmtExprMutator::Mutate_(node, mode);
+  }
+
+  Target target_;
 };
 
+} // namespace
+
 tvm::transform::Pass AnnotateDeviceRegions() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
-    auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);
-    ICHECK(opt_target) << "AnnotateDeviceRegions: Require the target attribute";
-    Target target = opt_target.value();
-    Target device_target = target.WithoutHost();
-
-    if (target->GetHost()) {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    auto target = function->GetAttr<Target>("target");
+    TVM_FFI_CHECK(target.has_value(), ValueError)
+        << "AnnotateDeviceRegions requires a target";
+    if (target.value()->GetHost() && function->body) {
+      Target device_target = target.value().WithoutHost();
+      SeqStmt body = function->body.value();
       if (device_target->kind->name == "c") {
-        // Annotate the function with the device target
-        auto func_body = func->body;
-        func.CopyOnWrite()->body =
-            AttrStmt(device_target, tvm::attr::kTarget, 0, func_body);
+        const auto *region =
+            body->seq.size() == 1 ? body->seq[0].as<RegionStmtNode>() : nullptr;
+        if (region && region->op->name == "tirx.device_scope") {
+          auto annotater =
+              ffi::make_object<DeviceRegionAnnotater>(device_target);
+          body = annotater->Mutate(body).ValueOrUnchanged(body);
+        } else {
+          body =
+              SeqStmt(RegionStmt(Op::Get("tirx.device_scope"), {}, {},
+                                 DictAttrs({{"target", device_target}}), body));
+        }
+      } else {
+        auto annotater = ffi::make_object<DeviceRegionAnnotater>(device_target);
+        body = annotater->Mutate(body).ValueOrUnchanged(body);
       }
-
-      DeviceRegionAnnotater mutator(target.WithoutHost());
-      func.CopyOnWrite()->body = mutator(func->body);
+      function.CopyOnWrite()->body = body;
     }
-    return func;
+    return function;
   };
-
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateDeviceRegions", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.AnnotateDeviceRegions");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateDeviceRegions",
-                        AnnotateDeviceRegions);
+  ffi::reflection::GlobalDef().def("tl.transform.AnnotateDeviceRegions",
+                                   AnnotateDeviceRegions);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

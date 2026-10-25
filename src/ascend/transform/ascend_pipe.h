@@ -26,10 +26,10 @@
 #ifndef TVM_TL_ASCEND_TRANSFORM_ASCEND_PIPE_H_
 #define TVM_TL_ASCEND_TRANSFORM_ASCEND_PIPE_H_
 
+#include "transform/common/attr.h"
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/abi.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +46,11 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+
+inline BlockAnnotations AscendCallAnnotations(const CallNode *call) {
+  return call->attrs ? call->attrs.value().as_or_throw<DictAttrs>()->dict
+                     : BlockAnnotations{};
+}
 
 // Hardware execution pipe bitmask. Multiple bits describe a composite
 // lowered instruction; kAll is used only for a full-core PIPE_ALL fence.
@@ -131,7 +136,8 @@ inline ResourcePipe GetFlagEndpointPipe(const std::string &hard_event,
              : ParseAscendPipe(hard_event.substr(separator + 1));
 }
 
-inline uint16_t GetAscendCopyPipeMask(const Buffer &src, const Buffer &dst) {
+inline uint16_t GetAscendCopyPipeMask(const TensorVar &src,
+                                      const TensorVar &dst) {
   if (IsGlobalBuffer(src) && (IsSharedBuffer(dst) || IsL1Buffer(dst))) {
     return PipeMask(ResourcePipe::kMTE2);
   }
@@ -158,7 +164,7 @@ inline uint16_t GetAscendCopyPipeMask(const Buffer &src, const Buffer &dst) {
 // GetAscendBlockPipe before this classifier is ever consulted. Reporting a fill
 // as PIPE_V here would make InsertSync treat its scalar stores as vector work
 // and drop the S->V handshake with the consumer of the filled tile.
-inline uint16_t GetAscendFillPipeMask(const Buffer &dst) {
+inline uint16_t GetAscendFillPipeMask(const TensorVar &dst) {
   return PipeMask(IsL1Buffer(dst) ? ResourcePipe::kMTE2
                                   : ResourcePipe::kScalar);
 }
@@ -201,11 +207,11 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
 
   static const Op &fill_op = Op::Get("tl.tileop.fill");
   if (IsAscendCopyCall(call.get())) {
-    Copy copy(call->args, call->annotations);
+    Copy copy(call->args, AscendCallAnnotations(call.get()));
     return GetAscendCopyPipeMask(copy->src, copy->dst);
   }
   if (op.same_as(fill_op)) {
-    Fill fill(call->args, call->annotations);
+    Fill fill(call->args, AscendCallAnnotations(call.get()));
     return GetAscendFillPipeMask(fill->dst);
   }
 
@@ -287,7 +293,7 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
     return PipeMask(ResourcePipe::kScalar);
   }
 
-  if (op.same_as(builtin::call_extern()) && !call->args.empty()) {
+  if (op.same_as(tirx::call_extern_op()) && !call->args.empty()) {
     if (const auto *symbol = call->args[0].as<StringImmNode>()) {
       const std::string &external_name = symbol->value;
       if (external_name == "debug_print_msg" ||
@@ -298,8 +304,9 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
       if (external_name == "debug_print_buffer_dump" && call->args.size() > 3) {
         if (const auto *scope_call = call->args[3].as<CallNode>()) {
           if (!scope_call->args.empty()) {
-            if (const auto *load = scope_call->args[0].as<BufferLoadNode>()) {
-              std::string scope = load->buffer.scope();
+            if (const auto *load = scope_call->args[0].as<TensorLoadNode>()) {
+              std::string scope =
+                  load->source.as_or_throw<TensorVar>().scope().name();
               return PipeMask(scope == "shared" || scope == "shared.dyn"
                                   ? ResourcePipe::kVector
                                   : ResourcePipe::kCube);

@@ -49,9 +49,12 @@ def test_strided_stg32_uses_declared_stride():
 
     expected = torch.arange(1, M + 1, dtype=torch.int32, device="cuda")
     torch.testing.assert_close(view[:, 0], expected, rtol=0, atol=0)
+    expected_storage = torch.zeros_like(physical)
+    expected_storage[::PITCH] = expected
+    torch.testing.assert_close(physical, expected_storage, rtol=0, atol=0)
     source = kernel.get_kernel_source()
-    assert "dst[(row * 8)]" in source
-    assert "dst[(row * 3)]" not in source
+    assert "dst_ptr[(row * 8)]" in source
+    assert "dst_ptr[(row * 3)]" not in source
 
 
 @tilelang.testing.requires_cuda
@@ -65,8 +68,8 @@ def test_strided_ldg32_uses_declared_stride():
 
     torch.testing.assert_close(out, view[:, 0], rtol=0, atol=0)
     source = kernel.get_kernel_source()
-    assert "src[(row * 8)]" in source
-    assert "src[(row * 3)]" not in source
+    assert "src_ptr[(row * 8)]" in source
+    assert "src_ptr[(row * 3)]" not in source
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm import IRModule
+from tvm_tirx import IRModule
 
 
 def test_annotate_readonly_bare_data_var():

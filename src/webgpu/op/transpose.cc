@@ -4,7 +4,6 @@
  */
 
 #include "op/transpose.h"
-#include <tvm/ir/cast.h>
 
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -21,13 +20,16 @@ namespace webgpu {
 
 struct Transpose {
   static Stmt Lower(const TransposeNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::Analyzer analyzer) {
     bool is_cpu_target = lower_args.target->GetTargetDeviceType() == kDLCPU;
     auto simt_loop = op.MakeSIMTLoop(analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+    auto fused_loop = ParallelLoopFuser::Fuse(simt_loop).as_or_throw<For>();
 
     if (is_cpu_target || IsLocalBuffer(op.src) || IsLocalBuffer(op.dst)) {
-      return VectorizeLoop(fused_loop, lower_args.layout_map);
+      if (lower_args.target->kind->name == "c") {
+        return fused_loop;
+      }
+      return VectorizeLoop(fused_loop, analyzer, lower_args.layout_map);
     }
 
     auto par_op = ParallelOp(fused_loop);

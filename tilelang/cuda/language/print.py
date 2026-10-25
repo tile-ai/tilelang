@@ -3,7 +3,7 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 from typing import Any
 from tilelang.cuda.debug import device_assert as device_assert
 from tilelang.language.kernel import get_thread_bindings
@@ -24,7 +24,7 @@ def print_var(var: tirx.PrimExpr, msg: str = "") -> None:
     Returns:
         tirx.PrimExpr: The TIR expression for the debug print operation.
     """
-    tirx.call_extern("handle", "debug_print_var", msg, var)
+    tirx.call_extern("void", "debug_print_var", msg, var)
 
 
 @macro
@@ -40,7 +40,7 @@ def print_var_with_condition(condition: tirx.PrimExpr, var: tirx.PrimExpr, msg: 
         tirx.PrimExpr: The TIR expression for the debug print operation, if the condition is True.
     """
     if condition:
-        tirx.call_extern("handle", "debug_print_var", msg, var)
+        tirx.call_extern("void", "debug_print_var", msg, var)
 
 
 @macro
@@ -52,7 +52,7 @@ def print_global_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            tirx.call_extern("void", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
@@ -72,7 +72,7 @@ def print_shared_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            tirx.call_extern("void", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
@@ -94,7 +94,7 @@ def print_fragment_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
+            tirx.call_extern("void", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
 @macro
@@ -104,7 +104,7 @@ def print_msg(msg: str) -> None:
     """
     assert isinstance(msg, str), "msg must be a string"
     assert msg != "", "msg must not be empty"
-    tirx.call_extern("handle", "debug_print_msg", msg)
+    tirx.call_extern("void", "debug_print_msg", msg)
 
 
 @macro
@@ -121,7 +121,7 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            tirx.call_extern("void", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 # NOTE(chaofan): T.print is implemented as a macro, so no return
@@ -152,7 +152,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
-        if buffer.scope() == "local":
+        if buffer.scope().name == "local":
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
@@ -161,7 +161,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_local_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() == "local.fragment":
+        elif buffer.scope().name == "local.fragment":
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
@@ -172,7 +172,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_fragment_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() in {"shared", "shared.dyn"}:
+        elif buffer.scope().name in {"shared", "shared.dyn"}:
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
@@ -183,7 +183,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_shared_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() == "global":
+        elif buffer.scope().name == "global":
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
@@ -191,7 +191,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             condition = True
             print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
-            raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
+            raise ValueError(f"Unsupported buffer scope: {buffer.scope().name}")
 
     elif isinstance(obj, tirx.PrimExpr):
         if not msg:

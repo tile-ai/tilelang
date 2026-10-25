@@ -3,10 +3,10 @@ from __future__ import annotations
 import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
-from tvm import DataType, tirx
-from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
-from tvm.ir import Range
-from tvm.runtime import convert
+from tilelang._compat.tvm import DataType, tirx
+from tilelang._compat.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tvm_tirx.ir import Range
+from tilelang._compat.tirx import convert
 from ..layout.utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
@@ -252,10 +252,10 @@ class SparseTensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
+        A_other = [r.begin for r in A_region.region[:-2]]
         A_stride_last = A_buf.shape[-1]
 
         @T.macro
@@ -344,10 +344,10 @@ class SparseTensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         E_region = self._legalize_to_buffer_region(E_shared_buf)
-        E_buf = E_region.buffer
-        E_base0 = E_region.region[-2].min
-        E_base1 = E_region.region[-1].min
-        E_other = [r.min for r in E_region.region[:-2]]
+        E_buf = E_region.source
+        E_base0 = E_region.region[-2].begin
+        E_base1 = E_region.region[-1].begin
+        E_other = [r.begin for r in E_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_e(
@@ -399,10 +399,10 @@ class SparseTensorCoreIntrinEmitter:
                 raise ValueError(f"Unsupported dtype: {b_dtype}")
 
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
+        B_other = [r.begin for r in B_region.region[:-2]]
         B_stride_last = B_buf.shape[-1]
 
         @T.macro
@@ -493,7 +493,7 @@ class SparseTensorCoreIntrinEmitter:
             mins = [idx for idx in obj.indices]
             ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
+            return BufferRegion(obj.source, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
     def mma_sp(self, A_local_buf: Buffer, E_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr = 0):
@@ -513,7 +513,7 @@ class SparseTensorCoreIntrinEmitter:
         a_is_fragment = is_fragment(A_local_buf)
         e_is_fragment = is_fragment(E_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
-        assert not e_is_fragment, f"currently E_local_buf must be a local allocation, found {E_local_buf.scope()}"
+        assert not e_is_fragment, f"currently E_local_buf must be a local allocation, found {E_local_buf.scope().name}"
         a_local_stride: PrimExpr = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         e_local_stride: PrimExpr = k_inner * warp_rows * local_size_e if e_is_fragment else 0
         b_local_stride: PrimExpr = k_inner * warp_cols * local_size_b if b_is_fragment else 0
@@ -685,7 +685,7 @@ class SparseTensorCoreIntrinEmitter:
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
-        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope().name}"
 
         if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k

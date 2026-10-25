@@ -6,7 +6,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 FASTMATH_INTRINSICS = [
@@ -56,7 +56,7 @@ def test_fastmath_accepts_float_dtype_at_frontend(intrinsic, dtype):
     result = intrinsic(value)
 
     assert isinstance(result, tirx.Call)
-    assert result.dtype == dtype
+    assert str(result.ty.dtype) == dtype
 
 
 # Rows written by the kernels below, in order. The "pos" domain keeps the log

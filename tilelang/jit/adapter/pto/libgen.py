@@ -11,8 +11,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-from tvm.contrib import utils
-from tvm.target import Target
+from tvm_tirx.support import utils
+from tvm_tirx.target import Target
 
 from tilelang.env import env
 from tilelang.jit.adapter.libgen import LibraryGenerator

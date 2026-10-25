@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import tvm_ffi
+
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 def _bodies(root, function, *, with_names=True):
@@ -33,7 +35,7 @@ def _bodies(root, function, *, with_names=True):
         if with_names and root.attrs and "global_symbol" in root.attrs:
             name = str(root.attrs["global_symbol"])
         return [(name, root.body)]
-    if isinstance(root, (tirx.Stmt, tvm.ir.PrimExpr)):
+    if isinstance(root, (tvm.ir.Stmt, tvm.ir.Expr)):
         return [("<root>", root)]
     raise TypeError(f"Expected IRModule, PrimFunc, Stmt or PrimExpr, got {type(root).__name__}")
 
@@ -78,7 +80,8 @@ def collect_nodes(root, node_type, *, function: str | None = None) -> list:
     by global name. Other module functions are skipped. Function signatures and
     module metadata are not traversed. Shared nodes are visited once per body.
     """
-    if not isinstance(node_type, type) or not issubclass(node_type, tvm.runtime.Object):
+    tensor_views = (tirx.Buffer, tirx.BufferLoad, tirx.BufferStore, tirx.BufferRegion, tirx.PrimExpr)
+    if not isinstance(node_type, type) or (node_type not in tensor_views and not issubclass(node_type, tvm_ffi.Object)):
         raise TypeError("node_type must be a TVM object type")
     return [node for _, body in _bodies(root, function) for node in _collect(body, node_type)]
 

@@ -8,19 +8,22 @@ from functools import partial
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_ffi.container import Map
-from tvm.ir.base import Span
-from tvm.ir.expr import Range
-from tvm.tirx.stmt import BufferRegion
-from tvm.tirx.stmt_functor import substitute
+from tvm_tirx.ir import Location as Span
+from tvm_tirx.ir.expr import Range
+from tilelang._compat.tirx import BufferRegion
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+from tilelang._compat.stmt_functor import substitute
 from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
-from tilelang.language.frame import clear_let_values, register_let_value
+from tilelang.language.frame import clear_let_values, register_let_value, is_mutable_scalar
 from tilelang.utils import side_effect
-import tvm
-from tvm.tirx import Buffer
-from tvm.script.ir_builder import tirx, IRBuilder
+import tilelang._compat.tvm as tvm
+from tilelang._compat.tirx import Buffer
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx.script.ir_builder.base import AlreadyEmitted
+from tilelang._compat import builder as tirx
 
-from tvm.tirx.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tilelang._compat.tirx import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, ForwardRef, Literal, get_origin, ParamSpec
 from collections.abc import Callable
 from typing_extensions import Self
@@ -75,7 +78,7 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     elif is_var(expr):
         expr = tirx.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
-        expr = expr.asobject()
+        expr = expr.__tvm_ffi_object__()
     return expr
 
 
@@ -104,10 +107,10 @@ def _logical_shape_value(value, buffer: Buffer, dim: int):
 
 def _logical_stride_value(value, buffer: Buffer, dim: int):
     if isinstance(value, Buffer):
-        return value.strides[dim]
+        return tensor_strides(value)[dim]
 
     stride = value.stride()[dim]
-    if dim != len(buffer.strides) - 1:
+    if dim != len(buffer.shape) - 1:
         stride *= _packed_storage_factor(buffer, value)
     return stride
 
@@ -189,10 +192,10 @@ class Ref:
 
     @property
     def buffer(self):
-        return self.bufload.buffer
+        return self.bufload.source
 
     def store(self, value):
-        tirx.buffer_store(self.bufload.buffer, value, self.bufload.indices)
+        tirx.buffer_store(self.bufload.source, value, self.bufload.indices)
 
     def load(self):
         return self.bufload
@@ -230,7 +233,7 @@ def register_var_scope_frame(frame_type: type) -> None:
 
 
 def is_var(v: Any) -> bool:
-    return isinstance(v, Buffer) and v.scope() == "local.var"
+    return is_mutable_scalar(v)
 
 
 # phase1: eager jit obtain function signature
@@ -248,6 +251,7 @@ class Builder(BaseBuilder):
         self.out_idx = []
         self.out_tensor_cnt = 0
         self.constexpr_var = set()
+        self.parameter_tensors: dict[Var, Var] = {}
         self.eager_jit: EagerJITStage = "none"
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.func_pass_configs: dict[str, Any] | None = None
@@ -270,11 +274,13 @@ class Builder(BaseBuilder):
         return builder
 
     @contextmanager
-    def prim_func(self, name):
+    def prim_func(self, name, source_location=None, *, private=False):
         thread_local_storage.builder = self
         clear_let_values()
+        if self._spans_enabled and source_location is not None:
+            self._span_first_fileline = source_location
         try:
-            with self.ir_builder, self.with_frame(tirx.prim_func()):
+            with self.ir_builder, self.with_frame(tirx.prim_func(private=private)):
                 tirx.func_name(name)
                 yield
             if self.eager_jit != "phase1" and len(self.out_idx) != self.out_tensor_cnt:
@@ -317,6 +323,20 @@ class Builder(BaseBuilder):
         if self._spans_enabled:
             self._flush_span_pending()
         func = self.ir_builder.get()
+        if self.parameter_tensors:
+            pointer_uses = {
+                parameter: tvm.ir.Call("tirx.reinterpret", [tensor.data], ty=parameter.ty)
+                for parameter, tensor in self.parameter_tensors.items()
+                if not isinstance(parameter, Buffer)
+            }
+            body = substitute(func.body, pointer_uses) if pointer_uses else func.body
+            func = tvm.tirx.PrimFunc(
+                [self.parameter_tensors.get(parameter, parameter) for parameter in func.params],
+                body,
+                ret_type=func.ret_type,
+                attrs=func.attrs,
+                loc=func.loc,
+            )
         if self._spans_enabled and self._span_first_fileline is not None:
             from tilelang.ir import make_span, set_prim_func_span
 
@@ -381,7 +401,7 @@ class Builder(BaseBuilder):
         if parent is None or line <= 0:
             return
         from tilelang.ir import get_stmt_span, make_span, set_stmt_span
-        from tvm.tirx.stmt_functor import post_order_visit
+        from tilelang._compat.stmt_functor import post_order_visit
 
         try:
             stmts = parent.stmts
@@ -472,6 +492,8 @@ class Builder(BaseBuilder):
                 yield
 
     def eval(self, val: Any):
+        if isinstance(val, AlreadyEmitted):
+            return
         val = unwrap_expr(val)
         if val is None:
             pass
@@ -482,14 +504,14 @@ class Builder(BaseBuilder):
                     stacklevel=2,
                 )
             self.enter_frame(val)
-        elif isinstance(val, PrimExpr):
+        elif isinstance(val, tvm.ir.Expr) and not isinstance(val, (Buffer, Var)):
             tirx.evaluate(val)
         elif isinstance(val, (int, bool)):
             tirx.evaluate(tvm.tirx.const(val))
         elif isinstance(val, str):
             pass
         elif isinstance(val, tvm.tirx.stmt.BufferStore):
-            tirx.buffer_store(val.buffer, val.value, val.indices, val.predicate)
+            tirx.add_to_parent(val)
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
@@ -502,6 +524,10 @@ class Builder(BaseBuilder):
             from tilelang.language import serial
 
             it = serial(it.start, it.stop, it.step)
+        if isinstance(it, tirx.ThreadBinding):
+            with self.with_frame(it.frame) as variable:
+                yield variable if isinstance(it.begin, int) and it.begin == 0 else variable + it.begin
+            return
         if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
             # Python iterables expand the body at IR construction time. TIR
             # values must be excluded explicitly: Var carries an __iter__ shim
@@ -582,7 +608,7 @@ class Builder(BaseBuilder):
             raise self.PythonLoopContinue
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
-        tirx.evaluate(tirx.continue_loop())
+        tirx.continue_()
 
     def ctx_break(self):
         self.check_continue_break()
@@ -590,7 +616,7 @@ class Builder(BaseBuilder):
             raise self.PythonLoopBreak
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
-        tirx.evaluate(tirx.break_loop())
+        tirx.break_()
 
     def ctx_while(self, cond):
         self.check_continue_break()
@@ -635,8 +661,13 @@ class Builder(BaseBuilder):
         # Handle type annotation
         if value is self.empty:
             orig_value = locals.get(name, value)
-            if isinstance(annot, Buffer) and annot.scope() == "global":
-                from tilelang.language import match_buffer
+            if isinstance(annot, Buffer) and annot.scope().name == "global":
+                function_frame = self.frames[self.find_frame_idx(tirx.frame.PrimFuncFrame)]
+                if isinstance(orig_value, Var) and any(parameter.same_as(orig_value) for parameter in function_frame.args):
+                    tensor = Var(name, annot.ty)
+                    self.parameter_tensors[orig_value] = tensor
+                    return self.with_buffer_span(tensor)
+                from tilelang._compat.builder import match_buffer
 
                 return self.with_buffer_span(
                     IRBuilder.name(
@@ -645,7 +676,7 @@ class Builder(BaseBuilder):
                             orig_value,
                             annot.shape,
                             annot.dtype,
-                            strides=annot.strides,
+                            strides=tensor_strides(annot),
                         ),
                     )
                 )
@@ -673,7 +704,7 @@ class Builder(BaseBuilder):
         # Convert deferred comparison ops to PrimExpr so that Ref/alloc_var
         # store paths below can recognise them as assignable values.
         if isinstance(value, (EqualOp, NotEqualOp)):
-            value = value.asobject()
+            value = value.__tvm_ffi_object__()
 
         if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
             orig_value.store(value)
@@ -686,7 +717,7 @@ class Builder(BaseBuilder):
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
             self.name_inside_frame.pop(name, None)
             return value
-        if isinstance(value, tirx.IntImm) and value.dtype == "int32":
+        if isinstance(value, tirx.IntImm) and value.ty.dtype == "int32":
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
@@ -753,10 +784,12 @@ class Builder(BaseBuilder):
             arg._out_idx = self.out_tensor_cnt
             self.out_tensor_cnt += 1
             return arg
-        elif isinstance(value, (Buffer, tirx.IterVar, tirx.Var)):
+        elif isinstance(value, (Buffer, tirx.Var)):
             IRBuilder.name(name, value)
             return value
-        elif isinstance(value, (PrimExpr, BufferRegion)):
+        elif isinstance(value, tvm.ir.TensorRegion):
+            return value
+        elif isinstance(value, (tvm.ir.Expr, AlreadyEmitted)):
             var = tirx.bind(value)
             register_let_value(var, value)
             IRBuilder.name(name, var)
@@ -888,12 +921,17 @@ class Builder(BaseBuilder):
                 raise RuntimeError(f"Not all tensor from `T.empty` are returned, only got {value}")
             return NotImplemented
 
-    def ctx_with(self, ctx):
+    @contextmanager
+    def ctx_with(self, ctx, unpack=False):
         self.check_continue_break()
         if isinstance(ctx, tirx.frame.IRBuilderFrame):
-            return self.with_frame(ctx)
+            manager = self.with_frame(ctx)
         else:
-            return super().ctx_with(ctx)
+            manager = super().ctx_with(ctx, unpack=unpack)
+        with manager as value:
+            if unpack and isinstance(ctx, KernelLaunchFrame) and isinstance(value, Var):
+                value = (value,)
+            yield value
 
     def assert_expr(self, cond, msg=None):
         self.check_continue_break()
@@ -901,7 +939,7 @@ class Builder(BaseBuilder):
         if msg is None:
             msg = "Assertion failed"
         if isinstance(cond, PrimExpr):
-            self.enter_frame(tirx.Assert(cond, msg))
+            tirx.add_to_parent(tvm.ir.AssertStmt(cond, tvm.ir.StringImm("AssertionError"), [tvm.ir.StringImm(str(msg))]))
         elif not cond:
             raise AssertionError(msg)
 
@@ -919,14 +957,14 @@ class Builder(BaseBuilder):
             if annot_value is Var:
                 logger.warning("Use `T.Var` as macro annotations is deprecated, please use `T.Ref`")
             if isinstance(value, BufferLoad):
-                if is_var(value.buffer):
-                    return value.buffer
+                if is_var(value.source):
+                    return value.source
                 idx = [self.bind("_", idx) for idx in value.indices]
                 # indices = self.bind(f'_', value.indices)
-                return Ref(BufferLoad(value.buffer, indices=idx))
+                return Ref(BufferLoad(value.source, indices=idx))
             if isinstance(value, BufferRegion):
                 region = [Range(self.bind("_", x.begin), end=self.bind("_", x.end) if x.end is not None else None) for x in value.region]
-                return BufferRegion(value.buffer, region=region)
+                return BufferRegion(value.source, region=region)
             raise ValueError(
                 f"To pass as reference, argument `{name}` is expected to be a variable or a buffer region, but got {value}({type(value)})"
             )
@@ -1299,17 +1337,17 @@ class TirTemplate(Generic[_P, _T]):
         cls, name: str, prim_func: PrimFunc[_P, _T], constexpr: set[Var], ir_gen: IRGenerator[_P, _T] | None = None
     ) -> TirTemplate[_P, _T]:
         matcher = {}
-        for k, v in prim_func.buffer_map.items():
+        for k, v in tensor_parameter_map(prim_func).items():
             for i, s in enumerate(v.shape):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "shape", i, s.name)
-            for i, s in enumerate(v.strides):
+            for i, s in enumerate(tensor_strides(v)):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "stride", i, s.name)
         for s in constexpr:
             if s not in matcher:
-                shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
-                strides = {k: v.strides for k, v in prim_func.buffer_map.items()}
+                shapes = {k: v.shape for k, v in tensor_parameter_map(prim_func).items()}
+                strides = {k: tensor_strides(v) for k, v in tensor_parameter_map(prim_func).items()}
                 raise RuntimeError(
                     f"Constexpr variable `{s}` is not used in any buffer shape or stride.\n"
                     "At least one **DIRECT** usage is required. Please check:\n"
@@ -1330,7 +1368,7 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
-        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
+        buffers = {param.name: buffer for param, buffer in tensor_parameter_map(self.prim_func).items()}
         for k, ty, i, name in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
@@ -1357,7 +1395,7 @@ class TirTemplate(Generic[_P, _T]):
         builder = Builder()
         builder.eager_jit = "phase2"
         builder.eager_jit_subs = subs
-        with builder.prim_func(self.name):
+        with builder.prim_func(self.name, self.ir_gen.source_location):
             self.ir_gen.gen(builder)(**tensor_args, **kwargs)
         pf = builder.get()
         pf = _patch_prim_func_attrs(pf, builder)
@@ -1667,7 +1705,7 @@ class JITFunc(Generic[_P, _T]):
             # eager: trace function body through Builder to construct TIR
             builder = Builder()
             builder.eager_jit = "phase1"
-            with builder.prim_func(self.orig_func.__name__):
+            with builder.prim_func(self.orig_func.__name__, self.ir_gen.source_location):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
@@ -1726,28 +1764,48 @@ class JITFunc(Generic[_P, _T]):
 
 
 def substitute_primfunc(prim_func, vmap):
-    analyzer = tvm.arith.Analyzer()
+    replacements = {
+        variable: value if isinstance(value, tvm.ir.Expr) else tvm.ir.const(value, variable.ty) for variable, value in vmap.items()
+    }
 
-    def sub(v):
-        return analyzer.simplify(substitute(v, vmap))
+    def replace(variable, mutator):
+        if variable in replacements:
+            return replacements[variable]
+        return mutator.default_mutate(variable)
 
-    def substitute_buffer(buf):
-        return tvm.tirx.decl_buffer(
-            data=sub(buf.data),
-            shape=[sub(dim) for dim in buf.shape],
-            dtype=buf.dtype,
-            strides=[sub(stride) for stride in buf.strides] if buf.strides else None,
-        )
+    def rewrite(value):
+        return tvm.ffi.structural_mutate(value, (tvm.ir.Var, replace))
 
+    parameters = []
+    for parameter in prim_func.params:
+        if parameter in replacements:
+            if isinstance(replacements[parameter], tvm.ir.Var):
+                parameters.append(replacements[parameter])
+        else:
+            specialized = tvm.ir.Var(parameter.name, rewrite(parameter.ty), loc=parameter.loc)
+            replacements[parameter] = specialized
+            parameters.append(specialized)
     return PrimFunc(
-        params=[sub(v) for v in prim_func.params],
-        body=substitute(prim_func.body, vmap),
-        buffer_map={k: substitute_buffer(v) for k, v in prim_func.buffer_map.items()},
-        attrs=prim_func.attrs,
+        params=parameters,
+        body=rewrite(prim_func.body),
+        ret_type=rewrite(prim_func.ret_type),
+        attrs=rewrite(prim_func.attrs),
+        loc=prim_func.loc,
     )
 
 
-def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
+def prim_func(
+    func: Callable[_P, _T] = None,
+    *,
+    eager_jit: bool = False,
+    private: bool = False,
+    check_well_formed: bool = False,
+) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
+    """Build a native function, optionally checking that it has no free captures.
+
+    Lowering templates may capture tensors or hardware variables from the
+    surrounding kernel, so standalone well-formedness validation is opt-in.
+    """
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
@@ -1764,10 +1822,12 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
             # Call callable annotations (e.g., factory functions) to get the actual type.
             # Skip typing generics like Optional[int], Union[...], List[...] which are
             # callable but cannot be instantiated.
-            if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
+            if not isinstance(annot[k], (type, tvm.ir.Expr, tvm.ir.Type)) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
         if eager_jit:
+            if private or check_well_formed:
+                raise ValueError("private and check_well_formed options apply to directly constructed PrimFuncs")
             arg_names = list(sig.parameters.keys())
             tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
             tensor_args_defaults = {
@@ -1777,10 +1837,12 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
         else:
             try:
                 builder = Builder()
-                with builder.prim_func(func.__name__):
+                with builder.prim_func(func.__name__, ir_gen.source_location, private=private):
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
                 prim_func = _patch_prim_func_attrs(prim_func, builder)
+                if check_well_formed:
+                    tvm.tirx.analysis.check_well_formed(prim_func)
                 prim_func.orig_func = func
                 return prim_func
             except Exception as e:

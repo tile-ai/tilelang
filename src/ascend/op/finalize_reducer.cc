@@ -9,7 +9,7 @@
 #include "op/reducer.h"
 #include "support/check.h"
 
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/abi.h>
 
 #include <array>
 #include <cstdint>
@@ -25,7 +25,7 @@ using namespace tirx;
 namespace ascend {
 
 Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
-                          const LowerArgs &lower_args, arith::Analyzer *) {
+                          const LowerArgs &lower_args, sym::Analyzer) {
   ICHECK(op.op == ReducerV2OpType::kSum || op.op == ReducerV2OpType::kMax ||
          op.op == ReducerV2OpType::kMin)
       << "Ascend Reducer v2 currently supports sum, max, and min only; "
@@ -40,21 +40,22 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
   Array<PrimExpr> indices_0;
   indices_0.reserve(layout->OutputDim());
   for (int i = 0; i < layout->OutputDim(); ++i) {
-    indices_0.push_back(Var("__finred_" + std::to_string(i)));
+    indices_0.push_back(
+        PrimVar("__finred_" + std::to_string(i), PrimType::Int(32)));
   }
 
   std::vector<std::pair<int, int>> steps;
   if (op.explicit_plan) {
     for (size_t i = 0; i + 1 < op.plan_steps.size(); i += 2) {
-      steps.emplace_back(static_cast<int>(op.plan_steps[i]->value),
-                         static_cast<int>(op.plan_steps[i + 1]->value));
+      steps.emplace_back(op.plan_steps[i]->value.as<int>().value(),
+                         op.plan_steps[i + 1]->value.as<int>().value());
     }
   } else {
-    const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
+    auto p_extent = GetConstInt(layout->ReplicateExtent());
     ICHECK(p_extent);
     int extent = *p_extent;
     ICHECK(extent == 1 ||
-           extent == *as_const_int(lower_args.thread_bounds->extent))
+           extent == *GetConstInt(lower_args.thread_bounds->extent))
         << "Illegal finalize_reducer: extent=" << extent
         << "; T.thread_bounds=" << lower_args.thread_bounds;
     if (extent > 1) {
@@ -67,8 +68,8 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
 
   int64_t layout_batch_size = 1;
   for (int i = 0; i < layout->OutputDim(); ++i) {
-    const int64_t *p = as_const_int(layout->OutputShape()[i]);
-    if (p == nullptr) {
+    auto p = GetConstInt(layout->OutputShape()[i]);
+    if (!p) {
       layout_batch_size = -1;
       break;
     }
@@ -86,7 +87,7 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
         << ")";
   }
 
-  auto thread_offset = lower_args.thread_bounds->min;
+  auto thread_offset = lower_args.thread_bounds->begin;
   Array<Stmt> step_stmts;
   for (const auto &[reducing_threads, scale] : steps) {
     // Same policy as ascend::Reduce::CheckAllReduceWidth: AscendAllReduce gates
@@ -98,32 +99,35 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
     ss << "tl::AscendAllReduce<" << op_str << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";
 
-    Array<PrimExpr> thread_reduce_args = {StringImm(ss.str()),
-                                          BufferLoad(buffer, indices_0)};
+    Array<Expr> thread_reduce_args = {StringImm(ss.str()),
+                                      TensorLoad(buffer, indices_0)};
     // With a validated scale, only power-of-two widths <= 32 need no workspace.
     if (reducing_threads > 32 ||
         (reducing_threads & (reducing_threads - 1)) != 0) {
-      PrimExpr workspace = lower_args.add_workspace(
-          *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
+      Expr workspace = lower_args.add_workspace(
+          *GetConstInt(lower_args.thread_bounds->extent), buffer.dtype());
       thread_reduce_args.push_back(workspace);
     }
-    auto call = Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-    Stmt body = BufferStore(buffer, call, indices_0);
+    auto call =
+        Call(buffer.dtype(), tirx::call_extern_op(), thread_reduce_args);
+    Stmt body = TensorStore(buffer, indices_0, call.as_or_throw<PrimExpr>());
     for (int i = layout->OutputDim() - 1; i >= 0; --i) {
-      body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                 ForKind::kParallel, body);
+      body = For(indices_0[i].as<Var>().value().as_or_throw<PrimVar>(),
+                 PrimExpr(0), PrimExpr(0) + (layout->OutputShape()[i]),
+                 PrimExpr(1), ForKind::kParallel, SeqStmt(body));
     }
     step_stmts.push_back(body);
   }
 
-  if (op.seed.defined()) {
-    Stmt body = BufferStore(
-        buffer,
-        ReducerV2Combine(op.op, BufferLoad(buffer, indices_0), op.seed.value()),
-        indices_0);
+  if (op.seed.has_value()) {
+    Stmt body =
+        TensorStore(buffer, indices_0,
+                    ReducerV2Combine(op.op, TensorLoad(buffer, indices_0),
+                                     op.seed.value()));
     for (int i = layout->OutputDim() - 1; i >= 0; --i) {
-      body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                 ForKind::kParallel, body);
+      body = For(indices_0[i].as<Var>().value().as_or_throw<PrimVar>(),
+                 PrimExpr(0), PrimExpr(0) + (layout->OutputShape()[i]),
+                 PrimExpr(1), ForKind::kParallel, SeqStmt(body));
     }
     step_stmts.push_back(body);
   }

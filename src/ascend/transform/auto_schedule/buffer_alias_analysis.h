@@ -24,10 +24,10 @@
 
 #pragma once
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
@@ -45,8 +45,8 @@
 #include "./memory_detector.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/buffer_version.h"
+#include "compat/visit.h"
 #include "support/check.h"
-#include "tir/transforms/ir_utils.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
@@ -66,15 +66,15 @@ public:
   virtual ~BufferAliasAnalysisContext() = default;
 
   virtual std::vector<size_t>
-  ResolveLifetimeEndpoints(const tirx::Var &storage, TaskNode *task,
+  ResolveLifetimeEndpoints(const Var &storage, TaskNode *task,
                            bool at_beginning, ControlNode *scope) const = 0;
   virtual bool HappensBefore(ControlNode *scope, size_t src, size_t dst,
                              int64_t distance) const = 0;
   virtual std::optional<int64_t> MinimumDistance(ControlNode *scope, size_t src,
                                                  size_t dst) const = 0;
   virtual std::optional<StorageIterationPeriod>
-  StoragePeriod(const tirx::Var &storage, ControlNode *scope) const = 0;
-  virtual size_t PromoteLifetimeSite(const tirx::Var &storage, size_t site_id,
+  StoragePeriod(const Var &storage, ControlNode *scope) const = 0;
+  virtual size_t PromoteLifetimeSite(const Var &storage, size_t site_id,
                                      ControlNode *control) const = 0;
 };
 
@@ -86,12 +86,10 @@ using ffi::GetRef;
 // Local to buffer-lifetime analysis; never copied into TaskNode or scheduled
 // TIR.
 struct PhysicalTaskAccesses {
-  std::vector<BufferRegion> reads;
-  std::vector<BufferRegion> writes;
-  std::vector<BufferRegion> must_writes;
+  std::vector<TensorRegion> reads;
+  std::vector<TensorRegion> writes;
+  std::vector<TensorRegion> must_writes;
   std::vector<Var> opaque_vars;
-  std::vector<Var> read_vars;
-  std::vector<Var> write_vars;
 };
 
 inline PhysicalTaskAccesses AnalyzePhysicalTaskAccesses(const TaskNode *task) {
@@ -106,8 +104,6 @@ inline PhysicalTaskAccesses AnalyzePhysicalTaskAccesses(const TaskNode *task) {
     append(result.writes, detector.GetWriteRegions());
     append(result.must_writes, detector.GetMustWriteRegions());
     append(result.opaque_vars, detector.GetOpaqueAccessVars());
-    append(result.read_vars, detector.GetReadVars());
-    append(result.write_vars, detector.GetWriteVars());
   };
   const IRStructure *guard_owner = task;
   if (const IRStructure *parent = task->GetParent();
@@ -116,10 +112,9 @@ inline PhysicalTaskAccesses AnalyzePhysicalTaskAccesses(const TaskNode *task) {
     guard_owner = parent;
     const auto *loop = task->stmt.as<ForNode>();
     ICHECK(loop);
-    analyze(Evaluate(loop->min));
-    analyze(Evaluate(loop->extent));
-    if (loop->step.defined())
-      analyze(Evaluate(loop->step.value()));
+    analyze(Evaluate(loop->begin));
+    analyze(Evaluate(loop->end));
+    analyze(Evaluate(loop->step));
   } else {
     analyze(task->stmt);
   }
@@ -133,21 +128,26 @@ inline PhysicalTaskAccesses AnalyzePhysicalTaskAccesses(const TaskNode *task) {
         analyze(Evaluate(expr.value()));
     }
   }
+  if (const auto *storage = task->GetStorageAnalysis()) {
+    for (Var &variable : result.opaque_vars)
+      if (auto access = storage->Resolve(variable))
+        variable = access->root;
+  }
   return result;
 }
 
 struct TaskStorageAccess {
   TaskNode *task;
-  std::vector<BufferRegion> read_regions;
-  std::vector<BufferRegion> write_regions;
-  std::vector<BufferRegion> must_write_regions;
+  std::vector<TensorRegion> read_regions;
+  std::vector<TensorRegion> write_regions;
+  std::vector<TensorRegion> must_write_regions;
 
   bool Reads() const { return !read_regions.empty(); }
   bool Writes() const { return !write_regions.empty(); }
 };
 
 struct StorageAccessInfo {
-  Var storage;
+  Var storage{ffi::UnsafeInit{}};
   std::vector<TaskStorageAccess> accesses;
   bool opaque{false};
 };
@@ -161,7 +161,7 @@ struct ControlLifetimeComponent {
 };
 
 struct LifetimeSummary {
-  Var storage;
+  Var storage{ffi::UnsafeInit{}};
   bool valid{false};
   bool live_in{false};
   bool live_out{false};
@@ -184,9 +184,10 @@ struct ConditionSignature {
 using LifetimeSummaryMap =
     std::unordered_map<Var, LifetimeSummary, ObjectPtrHash, ObjectPtrEqual>;
 
-inline std::optional<BufferRegion>
-TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
-  if (!lhs->buffer.same_as(rhs->buffer) ||
+inline std::optional<TensorRegion>
+TryMergeDenseRegions(const TensorRegion &lhs, const TensorRegion &rhs) {
+  if (!lhs->source.as_or_throw<TensorVar>().same_as(
+          rhs->source.as_or_throw<TensorVar>()) ||
       lhs->region.size() != rhs->region.size()) {
     return std::nullopt;
   }
@@ -195,13 +196,13 @@ TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
   if (RegionCovers(rhs->region, lhs->region))
     return rhs;
 
-  arith::Analyzer analyzer;
+  sym::Analyzer analyzer;
   std::optional<size_t> differing_axis;
   for (size_t i = 0; i < lhs->region.size(); ++i) {
     const Range &lhs_range = lhs->region[i];
     const Range &rhs_range = rhs->region[i];
-    if (analyzer.CanProveEqual(lhs_range->min, rhs_range->min) &&
-        analyzer.CanProveEqual(lhs_range->extent, rhs_range->extent)) {
+    if (analyzer->CanProveEqual(lhs_range->begin, rhs_range->begin) &&
+        analyzer->CanProveEqual(lhs_range->extent, rhs_range->extent)) {
       continue;
     }
     if (differing_axis.has_value())
@@ -214,52 +215,55 @@ TryMergeDenseRegions(const BufferRegion &lhs, const BufferRegion &rhs) {
   size_t axis = differing_axis.value();
   const Range &lhs_range = lhs->region[axis];
   const Range &rhs_range = rhs->region[axis];
-  PrimExpr lhs_end = lhs_range->min + lhs_range->extent;
-  PrimExpr rhs_end = rhs_range->min + rhs_range->extent;
-  PrimExpr merged_min;
-  if (analyzer.CanProve(lhs_range->min <= rhs_range->min) &&
-      analyzer.CanProve(rhs_range->min <= lhs_end)) {
-    merged_min = lhs_range->min;
-  } else if (analyzer.CanProve(rhs_range->min <= lhs_range->min) &&
-             analyzer.CanProve(lhs_range->min <= rhs_end)) {
-    merged_min = rhs_range->min;
+  PrimExpr lhs_end = lhs_range->begin + lhs_range->extent;
+  PrimExpr rhs_end = rhs_range->begin + rhs_range->extent;
+  PrimExpr merged_min{ffi::UnsafeInit{}};
+  if (analyzer->CanProve(lhs_range->begin <= rhs_range->begin) &&
+      analyzer->CanProve(rhs_range->begin <= lhs_end)) {
+    merged_min = lhs_range->begin;
+  } else if (analyzer->CanProve(rhs_range->begin <= lhs_range->begin) &&
+             analyzer->CanProve(lhs_range->begin <= rhs_end)) {
+    merged_min = rhs_range->begin;
   } else {
     return std::nullopt;
   }
 
-  PrimExpr merged_end;
-  if (analyzer.CanProve(lhs_end >= rhs_end)) {
+  PrimExpr merged_end{ffi::UnsafeInit{}};
+  if (analyzer->CanProve(lhs_end >= rhs_end)) {
     merged_end = lhs_end;
-  } else if (analyzer.CanProve(rhs_end >= lhs_end)) {
+  } else if (analyzer->CanProve(rhs_end >= lhs_end)) {
     merged_end = rhs_end;
   } else {
     return std::nullopt;
   }
-  Region merged = lhs->region;
+  ffi::Array<Range> merged = lhs->region;
   merged.Set(axis, Range::FromMinExtent(merged_min, merged_end - merged_min));
-  return BufferRegion(lhs->buffer, std::move(merged));
+  return NativeTensorRegion(lhs->source.as_or_throw<TensorVar>(),
+                            std::move(merged));
 }
 
-inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
-                              const BufferRegion &read) {
+inline bool DenseRegionsCover(const std::vector<TensorRegion> &writes,
+                              const TensorRegion &read) {
   // Regions describe different access points. A store can change an index
   // buffer between them, so identical BufferLoads are not an equality proof.
   // Snapshot each write independently before merging: otherwise two changing
   // boundaries could falsely appear adjacent and merge into a constant range.
-  auto snapshot = [](const BufferRegion &region) {
+  auto snapshot = [](const TensorRegion &region) {
     FreshenMutableReads freshen(FreshenMutableReads::Mode::kSnapshot);
-    Region bounds;
+    ffi::Array<Range> bounds;
     bounds.reserve(region->region.size());
     for (const Range &axis : region->region) {
       bounds.push_back(
-          Range::FromMinExtent(freshen(axis->min), freshen(axis->extent)));
+          Range::FromMinExtent(freshen(axis->begin), freshen(axis->extent)));
     }
-    return BufferRegion(region->buffer, std::move(bounds));
+    return NativeTensorRegion(region->source.as_or_throw<TensorVar>(),
+                              std::move(bounds));
   };
-  BufferRegion read_snapshot = snapshot(read);
-  std::vector<BufferRegion> merged;
-  for (const BufferRegion &write : writes) {
-    if (write->buffer.same_as(read->buffer))
+  TensorRegion read_snapshot = snapshot(read);
+  std::vector<TensorRegion> merged;
+  for (const TensorRegion &write : writes) {
+    if (write->source.as_or_throw<TensorVar>().same_as(
+            read->source.as_or_throw<TensorVar>()))
       merged.push_back(snapshot(write));
   }
 
@@ -268,7 +272,7 @@ inline bool DenseRegionsCover(const std::vector<BufferRegion> &writes,
     changed = false;
     for (size_t i = 0; i < merged.size() && !changed; ++i) {
       for (size_t j = i + 1; j < merged.size(); ++j) {
-        std::optional<BufferRegion> combined =
+        std::optional<TensorRegion> combined =
             TryMergeDenseRegions(merged[i], merged[j]);
         if (!combined.has_value())
           continue;
@@ -288,19 +292,11 @@ inline bool IsGuaranteedSingleTrip(const ControlNode *control) {
   if (control == nullptr || control->BodyHasLoopBreak())
     return false;
 
-  const ForNode *loop = control->control.get();
-  PrimExpr extent = loop->extent;
-  PrimExpr step = loop->step.has_value() ? loop->step.value()
-                                         : make_const(extent.dtype(), 1);
-  if (step.dtype() != extent.dtype())
-    step = cast(extent.dtype(), step);
-
-  arith::Analyzer analyzer;
-  if (control->task)
-    control->task->outer_ctx.Populate(analyzer);
-  PrimExpr zero = make_const(extent.dtype(), 0);
-  return analyzer.CanProve(extent > zero) && analyzer.CanProve(step > zero) &&
-         analyzer.CanProve(extent <= step);
+  sym::Analyzer analyzer;
+  auto constraints = (control->task ? control->task->outer_ctx : ConstrSet())
+                         .Populate(analyzer);
+  return analyzer->CanProve(ScheduleLoopTripCount(control->control.get()) == 1,
+                            sym::ProofStrength::kSymbolicBound);
 }
 
 } // namespace buffer_alias_analysis_detail
@@ -328,36 +324,36 @@ public:
           physical_accesses.emplace(task, AnalyzePhysicalTaskAccesses(task))
               .first->second;
       struct TaskAccessRegions {
-        std::vector<BufferRegion> reads;
-        std::vector<BufferRegion> writes;
-        std::vector<BufferRegion> must_writes;
+        std::vector<TensorRegion> reads;
+        std::vector<TensorRegion> writes;
+        std::vector<TensorRegion> must_writes;
       };
       std::unordered_map<Var, TaskAccessRegions, ObjectPtrHash, ObjectPtrEqual>
           task_accesses;
       std::vector<Var> task_storage_order;
       auto get_task_access =
-          [&](const BufferRegion &region) -> TaskAccessRegions * {
+          [&](const TensorRegion &region) -> TaskAccessRegions * {
         // SS allocations are packed without lifetime reuse.
-        if (IsSSBuffer(region->buffer))
+        if (IsSSBuffer(region->source.as_or_throw<TensorVar>()))
           return nullptr;
-        if (!IsAscendOnChipBuffer(region->buffer) &&
-            !IsL0SFBuffer(region->buffer))
+        if (!IsAscendOnChipBuffer(region->source.as_or_throw<TensorVar>()) &&
+            !IsL0SFBuffer(region->source.as_or_throw<TensorVar>()))
           return nullptr;
-        const Var &storage = region->buffer->data;
+        Var storage = task->StorageOf(region->source.as_or_throw<TensorVar>());
         auto [it, inserted] = task_accesses.try_emplace(storage);
         if (inserted)
           task_storage_order.push_back(storage);
         return &it->second;
       };
-      for (const BufferRegion &region : physical.reads) {
+      for (const TensorRegion &region : physical.reads) {
         if (TaskAccessRegions *access = get_task_access(region))
           access->reads.push_back(region);
       }
-      for (const BufferRegion &region : physical.writes) {
+      for (const TensorRegion &region : physical.writes) {
         if (TaskAccessRegions *access = get_task_access(region))
           access->writes.push_back(region);
       }
-      for (const BufferRegion &region : physical.must_writes) {
+      for (const TensorRegion &region : physical.must_writes) {
         if (TaskAccessRegions *access = get_task_access(region))
           access->must_writes.push_back(region);
       }
@@ -385,24 +381,6 @@ public:
         if (info != storage_access_info_.end())
           info->second.opaque = true;
       }
-      auto mark_unrepresented = [&](const Var &var) {
-        auto info = storage_access_info_.find(var);
-        if (info == storage_access_info_.end())
-          return;
-        bool represented = false;
-        for (const TaskStorageAccess &access : info->second.accesses) {
-          if (access.task == task) {
-            represented = true;
-            break;
-          }
-        }
-        if (!represented)
-          info->second.opaque = true;
-      };
-      for (const Var &var : physical.read_vars)
-        mark_unrepresented(var);
-      for (const Var &var : physical.write_vars)
-        mark_unrepresented(var);
     }
   }
 
@@ -638,7 +616,7 @@ private:
         return;
       }
       auto *control = static_cast<ControlNode *>(node);
-      result.insert(control->control->loop_var);
+      result.insert(control->control->var);
       if (control->task) {
         for (const Var &var : control->task->GetWriteVars())
           result.insert(var);
@@ -655,16 +633,15 @@ private:
                                     const VarSet &variant_vars,
                                     VarSet *visiting) const {
     bool varies = false;
-    PostOrderVisit(expr, [&](const ObjectRef &node) {
+    tl::PostOrderVisit(expr, [&](const ObjectRef &node) {
       if (varies)
         return;
-      if (node.as<BufferLoadNode>() || node.as<ProducerLoadNode>() ||
-          node.as<ReduceNode>()) {
+      if (node.as<TensorLoadNode>()) {
         varies = true;
         return;
       }
       if (const auto *call = node.as<CallNode>()) {
-        if (SideEffect(GetRef<PrimExpr>(call)) > CallEffectKind::kPure)
+        if (SideEffect(GetRef<Expr>(call)) > CallEffectKind::kPure)
           varies = true;
         return;
       }
@@ -699,7 +676,7 @@ private:
     if (task != nullptr) {
       for (const Constr &constraint : task->outer_ctx.constrs_) {
         if (constraint.kind == Constr::kBindValue)
-          bindings[constraint.var] = constraint.value;
+          bindings.insert_or_assign(constraint.var, constraint.value);
       }
     }
     VarSet variant_vars = CollectIterationVariantVars(scope);
@@ -725,10 +702,11 @@ private:
     }
     std::reverse(path.begin(), path.end());
 
-    arith::Analyzer analyzer;
+    sym::Analyzer analyzer;
+    WithGroup<sym::ConstraintContext> constraints;
     for (const Constr &constraint : task->outer_ctx.constrs_) {
       if (constraint.kind != Constr::kConstr)
-        constraint.Populate(analyzer);
+        constraint.Populate(analyzer, constraints);
     }
     ConditionSignature signature;
     std::vector<PrimExpr> raw_conditions;
@@ -739,7 +717,8 @@ private:
         const auto *condition =
             static_cast<const ConditionGuard *>(guard.get());
         raw_conditions.push_back(condition->condition);
-        signature.conditions.push_back(analyzer.Simplify(condition->condition));
+        signature.conditions.push_back(
+            analyzer->Simplify(condition->condition));
       }
     }
     signature.iteration_invariant =
@@ -748,7 +727,7 @@ private:
   }
 
   PrimExpr ConditionPredicate(const std::vector<PrimExpr> &signature) const {
-    PrimExpr predicate = Bool(true);
+    PrimExpr predicate = IntImm::Bool(true);
     for (const PrimExpr &condition : signature)
       predicate = predicate && condition;
     return predicate;
@@ -759,28 +738,30 @@ private:
                              ControlNode *scope) const {
     if (conclusion.empty())
       return true;
-    arith::Analyzer analyzer;
-    analyzer.z3_prover.SetRLimit(50000);
-    if (scope != nullptr && scope->task)
-      scope->task->outer_ctx.Populate(analyzer);
+    sym::Analyzer analyzer;
+    analyzer->z3_prover.SetRLimit(50000);
+    auto constraints =
+        (scope && scope->task ? scope->task->outer_ctx : ConstrSet())
+            .Populate(analyzer);
     PrimExpr implication =
         !ConditionPredicate(premise) || ConditionPredicate(conclusion);
-    implication = analyzer.Simplify(implication);
-    return analyzer.CanProve(implication) ||
-           analyzer.z3_prover.CanProve(implication);
+    implication = analyzer->Simplify(implication);
+    return analyzer->CanProve(implication) ||
+           analyzer->z3_prover.CanProve(implication);
   }
 
   bool ProveMutuallyExclusive(const PrimExpr &lhs, const PrimExpr &rhs,
                               ControlNode *scope) const {
     if (!lhs.defined() || !rhs.defined())
       return false;
-    arith::Analyzer analyzer;
-    analyzer.z3_prover.SetRLimit(50000);
-    if (scope != nullptr && scope->task)
-      scope->task->outer_ctx.Populate(analyzer);
-    PrimExpr exclusive = analyzer.Simplify(!(lhs && rhs));
-    return analyzer.CanProve(exclusive) ||
-           analyzer.z3_prover.CanProve(exclusive);
+    sym::Analyzer analyzer;
+    analyzer->z3_prover.SetRLimit(50000);
+    auto constraints =
+        (scope && scope->task ? scope->task->outer_ctx : ConstrSet())
+            .Populate(analyzer);
+    PrimExpr exclusive = analyzer->Simplify(!(lhs && rhs));
+    return analyzer->CanProve(exclusive) ||
+           analyzer->z3_prover.CanProve(exclusive);
   }
 
   LifetimeSummary
@@ -879,7 +860,7 @@ private:
     };
     auto covers = [](const TaskStorageAccess &writer,
                      const TaskStorageAccess &reader) {
-      for (const BufferRegion &read : reader.read_regions) {
+      for (const TensorRegion &read : reader.read_regions) {
         if (!DenseRegionsCover(writer.must_write_regions, read))
           return false;
       }
@@ -947,27 +928,29 @@ private:
     // the regions repeat, one nearest ordered writer per residue represents
     // every older writer in that residue, by same-pipe event recurrence.
     auto period = context_->StoragePeriod(info.storage, analysis_scope);
-    auto shift_regions = [&](const std::vector<BufferRegion> &regions,
+    auto shift_regions = [&](const std::vector<TensorRegion> &regions,
                              int64_t distance) {
       if (analysis_scope == nullptr || distance == 0)
         return regions;
       const ForNode *loop = analysis_scope->control.get();
-      PrimExpr step =
-          loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
-      ffi::Map<Var, PrimExpr> substitution{
-          {loop->loop_var,
-           loop->loop_var +
-               make_const(loop->loop_var.dtype(), distance) * step}};
-      std::vector<BufferRegion> shifted;
-      for (const BufferRegion &region : regions)
-        shifted.emplace_back(region->buffer,
-                             Substitute(region->region, substitution));
+      PrimExpr step = loop->step;
+      ffi::Map<PrimVar, PrimExpr> substitution{
+          {loop->var, loop->var + MakeConst(loop->var.ty(), distance) * step}};
+      std::vector<TensorRegion> shifted;
+      for (const TensorRegion &region : regions)
+        shifted.push_back(
+            NativeTensorRegion(region->source.as_or_throw<TensorVar>(),
+                               region->region.Map([&](const Range &range) {
+                                 return Range::FromMinExtent(
+                                     Substitute(range->begin, substitution),
+                                     Substitute(range->extent, substitution));
+                               })));
       return shifted;
     };
     int64_t max_offset = 0;
     if (analysis_scope != nullptr) {
-      DataType dtype = analysis_scope->control->loop_var.dtype();
-      if (dtype.is_int())
+      PrimType dtype = analysis_scope->control->var.ty();
+      if (dtype.MatchesCode(kDLInt))
         max_offset = dtype.bits() >= 64
                          ? std::numeric_limits<int64_t>::max()
                          : (int64_t{1} << (dtype.bits() - 1)) - 1;
@@ -976,17 +959,17 @@ private:
                             period->iterations > 0 &&
                             period->iterations <= max_offset;
     if (regions_periodic) {
-      arith::Analyzer analyzer;
+      sym::Analyzer analyzer;
       // Do not bind the loop variable to its finite range: periodicity must
       // hold for shifted generations as well as the current iteration.
       VarSet variant_vars = CollectIterationVariantVars(analysis_scope);
-      const Var &loop_var = analysis_scope->control->loop_var;
-      Var explicit_ordinal("generation_ordinal", loop_var.dtype());
+      const PrimVar &loop_var = analysis_scope->control->var;
+      PrimVar explicit_ordinal("generation_ordinal", loop_var.ty());
       for (const TaskStorageAccess &access : accesses) {
         VarExprMap bindings;
         for (const Constr &constraint : access.task->outer_ctx.constrs_) {
           if (constraint.kind == Constr::kBindValue)
-            bindings[constraint.var] = constraint.value;
+            bindings.insert_or_assign(constraint.var, constraint.value);
         }
         auto has_stable_parameters = [&](const PrimExpr &expr) {
           // Only the explicit coordinate is shifted below. An unresolved let
@@ -1005,11 +988,11 @@ private:
             for (size_t axis = 0; axis < (*regions)[i]->region.size(); ++axis) {
               const Range &original = (*regions)[i]->region[axis];
               const Range &next = shifted[i]->region[axis];
-              regions_periodic &= has_stable_parameters(original->min) &&
+              regions_periodic &= has_stable_parameters(original->begin) &&
                                   has_stable_parameters(original->extent);
               regions_periodic &=
-                  analyzer.CanProveEqual(original->min, next->min) &&
-                  analyzer.CanProveEqual(original->extent, next->extent);
+                  analyzer->CanProveEqual(original->begin, next->begin) &&
+                  analyzer->CanProveEqual(original->extent, next->extent);
             }
           }
         }
@@ -1071,7 +1054,7 @@ private:
           auto writes = shift_regions(writer.must_write_regions, -*distance);
           bool covers_read = std::all_of(
               reader.read_regions.begin(), reader.read_regions.end(),
-              [&](const BufferRegion &read) {
+              [&](const TensorRegion &read) {
                 return DenseRegionsCover(writes, read);
               });
           if (covers_read)
@@ -1180,14 +1163,14 @@ private:
                                 !analysis_scope->BodyHasLoopBreak();
       if (scope_must_execute) {
         const ForNode *loop = analysis_scope->control.get();
-        PrimExpr step = loop->step.has_value()
-                            ? loop->step.value()
-                            : make_const(loop->extent.dtype(), 1);
-        arith::Analyzer analyzer;
-        if (analysis_scope->task)
-          analysis_scope->task->outer_ctx.Populate(analyzer);
+        sym::Analyzer analyzer;
+        auto constraints =
+            (analysis_scope->task ? analysis_scope->task->outer_ctx
+                                  : ConstrSet())
+                .Populate(analyzer);
         scope_must_execute =
-            analyzer.CanProve(loop->extent > 0) && analyzer.CanProve(step > 0);
+            analyzer->CanProve(ScheduleLoopTripCount(loop) > 0,
+                               sym::ProofStrength::kSymbolicBound);
       }
       bool outside_reads_have_must_def = scope_must_execute;
       for (const TaskStorageAccess &reader : reads_after_scope) {
@@ -1269,15 +1252,11 @@ private:
     ICHECK(child_result.components.empty());
 
     For loop = control->control;
-    PrimExpr extent = loop->extent;
-    PrimExpr step = loop->step.has_value() ? loop->step.value()
-                                           : make_const(extent.dtype(), 1);
-    if (step.dtype() != extent.dtype())
-      step = cast(extent.dtype(), step);
-    arith::Analyzer analyzer;
-    if (control->task)
-      control->task->outer_ctx.Populate(analyzer);
-    if (!analyzer.CanProve(step > 0) || !analyzer.CanProve(extent > 0))
+    sym::Analyzer analyzer;
+    auto constraints = (control->task ? control->task->outer_ctx : ConstrSet())
+                           .Populate(analyzer);
+    if (!analyzer->CanProve(ScheduleLoopTripCount(loop.get()) > 0,
+                            sym::ProofStrength::kSymbolicBound))
       return std::nullopt;
     // An inner-loop offset is not an outer-loop offset. Collapsing a local
     // generation to the child's entry/exit encloses every child iteration;
@@ -1307,14 +1286,15 @@ private:
     }
     std::vector<GenerationLifetime> generations;
     if (!parent_live_through) {
-      arith::Analyzer guard_analyzer;
+      sym::Analyzer guard_analyzer;
+      WithGroup<sym::ConstraintContext> guard_constraints;
       if (control->task) {
         for (const Constr &constraint : control->task->outer_ctx.constrs_) {
           if (constraint.kind != Constr::kConstr)
-            constraint.Populate(guard_analyzer);
+            constraint.Populate(guard_analyzer, guard_constraints);
         }
       }
-      PrimExpr control_guard = Bool(true);
+      PrimExpr control_guard = IntImm::Bool(true);
       std::vector<PrimExpr> raw_control_conditions;
       for (const std::unique_ptr<Guard> &guard : control->GetGuards()) {
         if (!guard->IsCondition())
@@ -1323,7 +1303,7 @@ private:
             static_cast<const ConditionGuard *>(guard.get());
         raw_control_conditions.push_back(condition->condition);
         control_guard =
-            control_guard && guard_analyzer.Simplify(condition->condition);
+            control_guard && guard_analyzer->Simplify(condition->condition);
       }
       bool control_guard_iteration_invariant = AreConditionsIterationInvariant(
           control->task.get(), raw_control_conditions, parent_scope);
@@ -1332,9 +1312,9 @@ private:
       std::vector<GenerationLifetime> local_summaries;
       for (const GenerationLifetime &generation : child_result.generations) {
         PrimExpr generation_guard =
-            generation.guard.defined() ? generation.guard : Bool(true);
+            generation.guard.defined() ? generation.guard : IntImm::Bool(true);
         PrimExpr promoted_guard =
-            guard_analyzer.Simplify(control_guard && generation_guard);
+            guard_analyzer->Simplify(control_guard && generation_guard);
         auto existing = std::find_if(
             local_summaries.begin(), local_summaries.end(),
             [&](const GenerationLifetime &summary) {

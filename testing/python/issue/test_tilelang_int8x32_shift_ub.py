@@ -49,9 +49,10 @@ def test_non_broadcast_8bit_small_vector_add_is_packed(lanes, dtype, torch_dtype
     assert packed is not None
     vector = packed.group(1)
     for field in "xyzw"[: lanes // 4]:
-        writes = [line for line in source.splitlines() if f"{vector}.{field}=" in line]
-        assert writes
-        assert not re.search(rf"=\s*{re.escape(vector)}\.{field}\s*&", writes[0])
+        pattern = rf"reinterpret_cast<(?:signed char|unsigned char|uchar)\*>\(&\({re.escape(vector)}\.{field}\)\)\[(\d+)\]\s*="
+        writes = [line for line in source.splitlines() if re.search(pattern, line)]
+        assert [int(re.search(pattern, line).group(1)) for line in writes] == list(range(4))
+        assert all(not re.search(rf"\b{re.escape(vector)}\b", line.split("=", 1)[1]) for line in writes)
 
 
 @tilelang.testing.requires_cuda
@@ -65,10 +66,8 @@ def test_non_broadcast_8bit_wide_vector_add_is_packed(dtype, torch_dtype, expect
     packed = re.search(rf"\b{expected_vector_type}\s+(__\w+);", source)
     assert packed is not None
     vector = packed.group(1)
-    for field in "xyzw":
-        writes = [line for line in source.splitlines() if f"{vector}.{field}=" in line]
-        assert writes
-        assert not re.search(rf"=\s*{re.escape(vector)}\.{field}\s*&", writes[0])
-    for shift in range(8, 64, 8):
-        assert f"static_cast<unsigned long long>(0x000000ffu) << {shift}" in source
-        assert f"& 0xffULL) << {shift}" in source
+    pattern = rf"reinterpret_cast<(?:signed char|unsigned char|uchar)\*>\(&\({re.escape(vector)}\)\)\[(\d+)\]\s*="
+    writes = [line for line in source.splitlines() if re.search(pattern, line)]
+    assert [int(re.search(pattern, line).group(1)) for line in writes] == list(range(32))
+    assert all(not re.search(rf"\b{re.escape(vector)}\b", line.split("=", 1)[1]) for line in writes)
+    assert "0x000000ffu <<" not in source

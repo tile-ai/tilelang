@@ -5,7 +5,7 @@ import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 M = N = K = 256
 BLOCK_M = BLOCK_N = 64

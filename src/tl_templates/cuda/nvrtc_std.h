@@ -65,155 +65,35 @@ struct CUtensorMap_st {
 using CUtensorMap = CUtensorMap_st;
 #endif
 
+#include <cuda/std/__algorithm/max.h>
+#include <cuda/std/__algorithm/min.h>
+#include <cuda/std/type_traits>
+#include <cuda/std/utility>
+
 namespace std {
-
-template <class T, T v> struct integral_constant {
-  static constexpr T value = v;
-
-  using value_type = T;
-  using type = integral_constant;
-
-  __device__ constexpr operator value_type() const noexcept { return value; }
-
-  __device__ constexpr value_type operator()() const noexcept { return value; }
-};
-
-using false_type = integral_constant<bool, false>;
-using true_type = integral_constant<bool, true>;
-
-template <class T, class U> struct is_same : false_type {};
-
-template <class T> struct is_same<T, T> : true_type {};
-
-template <class T, class U>
-inline constexpr bool is_same_v = is_same<T, U>::value;
-
-template <class T> struct is_integral : false_type {};
-
-template <> struct is_integral<bool> : true_type {};
-template <> struct is_integral<char> : true_type {};
-template <> struct is_integral<signed char> : true_type {};
-template <> struct is_integral<unsigned char> : true_type {};
-template <> struct is_integral<wchar_t> : true_type {};
-template <> struct is_integral<char16_t> : true_type {};
-template <> struct is_integral<char32_t> : true_type {};
-#ifdef __cpp_char8_t
-template <> struct is_integral<char8_t> : true_type {};
-#endif
-template <> struct is_integral<short> : true_type {};
-template <> struct is_integral<unsigned short> : true_type {};
-template <> struct is_integral<int> : true_type {};
-template <> struct is_integral<unsigned int> : true_type {};
-template <> struct is_integral<long> : true_type {};
-template <> struct is_integral<unsigned long> : true_type {};
-template <> struct is_integral<long long> : true_type {};
-template <> struct is_integral<unsigned long long> : true_type {};
-
-template <class T> struct is_integral<const T> : is_integral<T> {};
-template <class T> struct is_integral<volatile T> : is_integral<T> {};
-template <class T> struct is_integral<const volatile T> : is_integral<T> {};
-
-template <class T> inline constexpr bool is_integral_v = is_integral<T>::value;
-
-template <class T> struct is_void : false_type {};
-
-template <> struct is_void<void> : true_type {};
-template <> struct is_void<const void> : true_type {};
-template <> struct is_void<volatile void> : true_type {};
-template <> struct is_void<const volatile void> : true_type {};
-
-template <class T> inline constexpr bool is_void_v = is_void<T>::value;
-
-template <class T> struct is_pointer : false_type {};
-
-template <class T> struct is_pointer<T *> : true_type {};
-template <class T> struct is_pointer<T *const> : true_type {};
-template <class T> struct is_pointer<T *volatile> : true_type {};
-template <class T> struct is_pointer<T *const volatile> : true_type {};
-
-template <class T> inline constexpr bool is_pointer_v = is_pointer<T>::value;
-
-namespace index_sequence_impl {
-
-// Based on https://stackoverflow.com/a/32223343/11717224
-template <size_t... Ints> struct index_sequence {
-  using type = index_sequence;
-  using value_type = size_t;
-  static constexpr size_t size() noexcept { return sizeof...(Ints); }
-};
-
-template <class Sequence1, class Sequence2> struct _merge_and_renumber;
-
-template <size_t... I1, size_t... I2>
-struct _merge_and_renumber<index_sequence<I1...>, index_sequence<I2...>>
-    : index_sequence<I1..., (sizeof...(I1) + I2)...> {};
-
-template <size_t N>
-struct make_index_sequence
-    : _merge_and_renumber<typename make_index_sequence<N / 2>::type,
-                          typename make_index_sequence<N - N / 2>::type> {};
-
-template <> struct make_index_sequence<0> : index_sequence<> {};
-template <> struct make_index_sequence<1> : index_sequence<0> {};
-
-} // namespace index_sequence_impl
-
-template <size_t... Ns>
-using index_sequence = index_sequence_impl::index_sequence<Ns...>;
-
-template <size_t N>
-using make_index_sequence = index_sequence_impl::make_index_sequence<N>;
-
-template <typename T> constexpr T min(T a, T b) { return a < b ? a : b; }
-
-template <typename T> constexpr T max(T a, T b) { return a > b ? a : b; }
-
-template <bool B, class T, class F> struct conditional {
-  using type = T;
-};
-
-template <class T, class F> struct conditional<false, T, F> {
-  using type = F;
-};
-
-template <bool B, class T, class F>
-using conditional_t = typename conditional<B, T, F>::type;
-
-template <bool B, class T = void> struct enable_if {};
-
-template <class T> struct enable_if<true, T> {
-  using type = T;
-};
-
-template <class T> struct remove_extent {
-  using type = T;
-};
-
-template <class T> struct remove_extent<T[]> {
-  using type = T;
-};
-
-template <class T, size_t N> struct remove_extent<T[N]> {
-  using type = T;
-};
-
-template <class T> using remove_extent_t = typename remove_extent<T>::type;
-
-template <class T, unsigned I = 0>
-struct extent : integral_constant<size_t, 0> {};
-
-template <class T> struct extent<T[], 0> : integral_constant<size_t, 0> {};
-
-template <class T, unsigned I> struct extent<T[], I> : extent<T, I - 1> {};
-
-template <class T, size_t N>
-struct extent<T[N], 0> : integral_constant<size_t, N> {};
-
-template <class T, size_t N, unsigned I>
-struct extent<T[N], I> : extent<T, I - 1> {};
-
-template <class T, unsigned I = 0>
-inline constexpr size_t extent_v = extent<T, I>::value;
+using cuda::std::conditional;
+using cuda::std::conditional_t;
+using cuda::std::enable_if;
+using cuda::std::enable_if_t;
+using cuda::std::extent;
+using cuda::std::extent_v;
+using cuda::std::false_type;
+using cuda::std::index_sequence;
+using cuda::std::integral_constant;
+using cuda::std::is_integral;
+using cuda::std::is_integral_v;
+using cuda::std::is_pointer;
+using cuda::std::is_pointer_v;
+using cuda::std::is_same;
+using cuda::std::is_same_v;
+using cuda::std::is_void;
+using cuda::std::is_void_v;
+using cuda::std::make_index_sequence;
+using cuda::std::max;
+using cuda::std::min;
+using cuda::std::remove_extent;
+using cuda::std::remove_extent_t;
+using cuda::std::true_type;
 } // namespace std
 
 #endif // __CUDACC_RTC__

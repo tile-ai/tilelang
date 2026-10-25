@@ -9,12 +9,12 @@
 #include "utils.h"
 
 #include "builtin.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/builtin.h>
+#include <tvm/ffi/error.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/function.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt.h>
 
 #include "backend/common/target_utils.h"
@@ -42,15 +42,14 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.gemm_sp found multiple target-specific implementations for "
-          << target->str() << ": " << matched_impl->name << " and "
-          << impl.name;
+          << target << ": " << matched_impl->name << " and " << impl.name;
       matched_impl = &impl;
     }
   }
   ICHECK(matched_impl != nullptr)
       << "tl.gemm_sp requires a target-specific implementation, but no "
          "gemm_sp implementation is registered for "
-      << target->str();
+      << target;
   return *matched_impl;
 }
 
@@ -85,8 +84,10 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *      clear_accum (Bool)]
  *   Backend lowering knobs (wg_wait) ride in the annotations map.
  */
-GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
+GemmSP::GemmSP(Array<Expr> args, BlockAnnotations annotations) {
+  TVM_FFI_CHECK_EQ(args.size(), 12, ValueError)
+      << "gemm_sp expects 12 arguments";
+  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>(ffi::UnsafeInit{});
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto e_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[2], kAccessRead);
@@ -98,35 +99,38 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->cRegion_ = c_access.region;
   node->SetAccessRegions({a_access, e_access, b_access, c_access});
 
-  node->A = node->aRegion_->buffer;
-  node->E = node->eRegion_->buffer;
-  node->B = node->bRegion_->buffer;
-  node->C = node->cRegion_->buffer;
+  node->A = node->aRegion_->source.as_or_throw<TensorVar>();
+  node->E = node->eRegion_->source.as_or_throw<TensorVar>();
+  node->B = node->bRegion_->source.as_or_throw<TensorVar>();
+  node->C = node->cRegion_->source.as_or_throw<TensorVar>();
 
-  node->trans_A = args[4].as<Bool>().value();
-  node->trans_E = args[5].as<Bool>().value();
-  node->trans_B = args[6].as<Bool>().value();
-  node->M = args[7].as<IntImm>().value()->value;
-  node->N = args[8].as<IntImm>().value()->value;
-  node->K = args[9].as<IntImm>().value()->value;
-  node->policy = GemmSPWarpPolicy(args[10].as<IntImm>().value()->value);
+  node->trans_A = GetConstInt(args[4]).value() != 0;
+  node->trans_E = GetConstInt(args[5]).value() != 0;
+  node->trans_B = GetConstInt(args[6]).value() != 0;
+  node->M = GetConstInt(args[7]).value();
+  node->N = GetConstInt(args[8]).value();
+  node->K = GetConstInt(args[9]).value();
+  node->policy = GemmSPWarpPolicy(GetConstInt(args[10]).value());
   node->clear_accum = args[11].as<PrimExpr>().value();
   // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; it rides in
   // the annotations rather than the positional call protocol.
   if (auto val = annotations.Get("wg_wait")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
-    node->wg_wait = int_val->value;
+    auto value = GetIntAnnotation(val.value());
+    TVM_FFI_CHECK(value.has_value(), ValueError)
+        << "wg_wait annotation must be IntImmNode";
+    node->wg_wait = value.value();
   }
   if (auto val = annotations.Get("is_wgmma")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "is_wgmma annotation must be IntImmNode";
-    node->isWgmma_ = int_val->value != 0;
+    auto value = GetIntAnnotation(val.value());
+    TVM_FFI_CHECK(value.has_value(), ValueError)
+        << "is_wgmma annotation must be IntImmNode";
+    node->isWgmma_ = value.value() != 0;
   }
   if (auto val = annotations.Get("is_tcgen05")) {
-    const auto *int_val = val->as<IntImmNode>();
-    ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
-    node->isTcgen05_ = int_val->value != 0;
+    auto value = GetIntAnnotation(val.value());
+    TVM_FFI_CHECK(value.has_value(), ValueError)
+        << "is_tcgen05 annotation must be IntImmNode";
+    node->isTcgen05_ = value.value() != 0;
   }
 
   data_ = std::move(node);
@@ -137,21 +141,21 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
   result.reads.push_back(aRegion_);
   result.reads.push_back(eRegion_);
   result.reads.push_back(bRegion_);
-  if (!is_one(clear_accum)) {
+  if (!IsOne(clear_accum)) {
     result.reads.push_back(cRegion_);
   }
   result.writes.push_back(cRegion_);
   return result;
 }
 
-ffi::Array<BufferRegion> GemmSPNode::GetReadBeforeWriteRegions() const {
-  ffi::Array<BufferRegion> result;
+ffi::Array<TensorRegion> GemmSPNode::GetReadBeforeWriteRegions() const {
+  ffi::Array<TensorRegion> result;
   result.push_back(aRegion_);
   result.push_back(eRegion_);
   result.push_back(bRegion_);
   // See GemmNode::GetReadBeforeWriteRegions: only a provable absence of the
   // clear makes the accumulator's old contents a definite read.
-  if (is_zero(clear_accum)) {
+  if (IsZero(clear_accum)) {
     result.push_back(cRegion_);
   }
   return result;
@@ -168,42 +172,21 @@ String GemmSPNode::GetGemmSPInstructionKey(int block_size,
 }
 
 Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
-                       arith::Analyzer *analyzer) const {
-  if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
-             lower_args.thread_bounds, lower_args.thread_index));
-    ICHECK(prim_func->attrs.defined());
-    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
-    ICHECK(global_symbol.has_value());
-    if (prim_func->body.as<SBlockRealizeNode>()) {
-      SBlockRealize block_realize = Downcast<SBlockRealize>(prim_func->body);
-      auto block = block_realize->block;
-      {
-        SBlockNode *n = block.CopyOnWrite();
-        n->name_hint = global_symbol.value();
-        n->annotations.Set(tl::attr::kLexicalAllocScope,
-                           IntImm(DataType::Int(32), 1));
-      }
-      return SBlockRealize(block_realize->iter_values, block_realize->predicate,
-                           block);
-    }
-    // wrap with block realize node
-    Map<String, ObjectRef> block_annotations;
-    block_annotations.Set(tl::attr::kLexicalAllocScope,
-                          IntImm(DataType::Int(32), 1));
-    return SBlockRealize(
-        /*iter_values=*/Array<PrimExpr>(),
-        /*predicate=*/const_true(),
-        /*block=*/
-        SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-               /*name_hint=*/global_symbol.value(), prim_func->body,
-               /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
-               /*match_buffers=*/{}, /*annotations=*/block_annotations));
-  } else {
-    LOG(FATAL) << "No lower function found for gemm_sp";
-    return Stmt();
-  }
+                       sym::Analyzer analyzer) const {
+  auto lower = ffi::Function::GetGlobal("tl.gemm_sp.lower");
+  TVM_FFI_CHECK(lower.has_value(), ValueError)
+      << "No lower function found for gemm_sp";
+  auto function =
+      (*lower)(GetRef<GemmSP>(this), lower_args.layout_map, lower_args.target,
+               lower_args.thread_bounds, lower_args.thread_index)
+          .cast<tirx::Function>();
+  auto name = function->GetAttr<String>("global_symbol");
+  TVM_FFI_CHECK(name.has_value(), ValueError)
+      << "GEMM lowering must return a named native function";
+  return RegionStmt(Op::Get("tirx.scope"), {}, {},
+                    DictAttrs({{"name_hint", name.value()},
+                               {tl::attr::kLexicalAllocScope, true}}),
+                    function->body.value());
 }
 
 LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
@@ -211,16 +194,17 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
   if (completed_)
     return {};
   LayoutMap results;
-  if (const auto f = Function::GetGlobal("tl.gemm_sp.infer_layout")) {
-    auto inferred_layouts = Downcast<LayoutMap>((*f)(
-        GetRef<GemmSP>(this), layout_args.target, layout_args.thread_bounds));
-    auto block_size = *as_const_int(layout_args.thread_bounds->extent);
+  if (const auto f = ffi::Function::GetGlobal("tl.gemm_sp.infer_layout")) {
+    auto inferred_layouts = (*f)(GetRef<GemmSP>(this), layout_args.target,
+                                 layout_args.thread_bounds)
+                                .cast<LayoutMap>();
+    auto block_size = GetConstInt(layout_args.thread_bounds->extent).value();
     String gemm_inst = GetGemmSPInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
         ResolveGemmSPImpl(layout_args.target)
             .reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
-      const Buffer &buf = kv.first;
+      const TensorVar &buf = kv.first;
       const Layout &layout = kv.second;
       if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
           layout_args.layout_map.count(buf)) {
@@ -241,38 +225,23 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
   return results;
 }
 
-TIR_REGISTER_TL_TILE_OP(GemmSP, gemm_sp)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(GemmSP, gemm_sp, -1)
 
-TVM_REGISTER_OP("tl.tileop.wgmma_gemm_sp")
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "wgmma_gemm_sp")
-    .set_attr<OpBuilderFunc>("TLOpBuilder",
-                             [](Array<PrimExpr> args,
-                                Map<String, ObjectRef> annotations) {
-                               Map<String, ObjectRef> ann = annotations;
-                               ann.Set("is_wgmma",
-                                       IntImm(DataType::Int(32), 1));
-                               return GemmSP(args, ann);
-                             })
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
-TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_sp")
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "tcgen05_gemm_sp")
-    .set_attr<OpBuilderFunc>("TLOpBuilder",
-                             [](Array<PrimExpr> args,
-                                Map<String, ObjectRef> annotations) {
-                               Map<String, ObjectRef> ann = annotations;
-                               ann.Set("is_tcgen05",
-                                       IntImm(DataType::Int(32), 1));
-                               return GemmSP(args, ann);
-                             })
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TVM_FFI_STATIC_INIT_BLOCK() {
+  for (const auto &[name, annotation] : std::vector<std::pair<String, String>>{
+           {"tl.tileop.wgmma_gemm_sp", "is_wgmma"},
+           {"tl.tileop.tcgen05_gemm_sp", "is_tcgen05"}}) {
+    RegisterBuiltin<-1>(name, CallEffectKind::kOpaque);
+    OpDef(name)
+        .set_attr(tvm::op_attr::kFixedReturnType, TupleType(Array<Type>{}))
+        .set_attr<OpBuilderFunc>(
+            "TLOpBuilder",
+            [annotation](Array<Expr> args, BlockAnnotations annotations) {
+              annotations.Set(annotation, true);
+              return GemmSP(std::move(args), std::move(annotations));
+            });
+  }
+}
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmSPWarpPolicyNode::RegisterReflection();

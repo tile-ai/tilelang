@@ -36,6 +36,7 @@ def bitwise_kernel(n):
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_vxor_vnot():
     n = 64
     kernel = tilelang.compile(bitwise_kernel(n), target="ascend", out_idx=[2, 3])
@@ -68,6 +69,7 @@ def vcpadd_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_vcpadd():
     kernel = tilelang.compile(vcpadd_kernel(), target="ascend", out_idx=-1)
     a = torch.arange(64, dtype=torch.float32, device="cpu").to("npu")
@@ -110,6 +112,7 @@ def serial_vreg_accum_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_serial_vreg_accum():
     kernel = tilelang.compile(serial_vreg_accum_kernel(), target="ascend", out_idx=[2])
     device = torch.device("npu")
@@ -147,6 +150,7 @@ def relu_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_vlrelu_vprelu():
     torch.manual_seed(0)
     x = torch.randn(N, dtype=torch.float32, device="npu") * 2
@@ -160,6 +164,7 @@ def test_vlrelu_vprelu():
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
+@tilelang.testing.requires_ascend
 def test_absolute_difference(dtype):
     lanes = 2048 // tilelang.tvm.DataType(dtype).bits
 
@@ -184,6 +189,7 @@ def test_absolute_difference(dtype):
 
 @pytest.mark.parametrize("op", ["vmadd", "vmula"])
 @pytest.mark.parametrize("dtype,atol", [("float32", 1e-5), ("float16", 1e-2), ("bfloat16", 1e-1)])
+@tilelang.testing.requires_ascend
 def test_fused_multiply_add(op, dtype, atol):
     bits = tilelang.tvm.DataType(dtype).bits
     lanes = 2048 // bits

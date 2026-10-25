@@ -131,7 +131,7 @@ def test_vectorized_select_with_vector_condition():
 def test_vectorized_select_simplifies_loop_invariant_condition():
     source = _source(_broadcast_condition_kernel(), target="ascend")
     assert "make_ushort2" not in source
-    assert ") ? make_int2" in source
+    assert ") ? (make_int2" in source
 
 
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
@@ -167,7 +167,9 @@ def test_vector_predicate_not_is_materialized_per_lane():
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
     assert "(~" not in source
-    assert source.count(" = (!") >= 16
+    assert source.count(" = (!") == 8
+    assert source.count("==((ushort2*)(&(") == 8
+    assert source.count("?((half2*)(&(lhs_value))") == 16
 
 
 if __name__ == "__main__":

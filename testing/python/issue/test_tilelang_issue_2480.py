@@ -1,3 +1,5 @@
+import re
+
 import pytest
 import torch
 
@@ -7,6 +9,17 @@ import tilelang.testing
 
 
 LANES = 32
+
+
+def _assert_native_broadcast(source, dtype):
+    carrier = "ulonglong4" if dtype == "uint8" else "longlong4"
+    declaration = re.search(rf"\b{carrier}\s+(\w+);", source)
+    assert declaration is not None
+    vector = declaration.group(1)
+    pattern = rf"reinterpret_cast<(?:signed char|unsigned char|uchar)\*>\(&\({re.escape(vector)}\)\)\[(\d+)\]\s*=\s*(\w+);"
+    stores = re.findall(pattern, source)
+    assert [int(index) for index, _ in stores] == list(range(LANES))
+    assert len({value for _, value in stores}) == 1
 
 
 @pytest.mark.parametrize(
@@ -25,12 +38,7 @@ def test_runtime_int8_broadcast_to_32_lanes(dtype, torch_dtype, value):
                 out[i] = packed[i]
 
     kernel = tilelang.compile(main, target="cuda")
-    # The broadcast must fill all 64 bits of each (u)longlong4 field (issue
-    # #2480: a 4-arg make_(u)longlong4 call zeroed the upper halves). Since
-    # the variadic-packer refactor this is emitted as a tl::broadcast byte
-    # replication; the exact-value check below guards the packing itself.
-    constructor = "tl::broadcast<ulonglong4>" if dtype == "uint8" else "tl::broadcast<longlong4>"
-    assert constructor in kernel.get_kernel_source()
+    _assert_native_broadcast(kernel.get_kernel_source(), dtype)
     src = torch.tensor([value], dtype=torch_dtype, device="cuda")
     out = torch.empty(LANES, dtype=torch_dtype, device="cuda")
     kernel(src, out)
@@ -53,12 +61,7 @@ def test_constant_int8_broadcast_to_32_lanes(dtype, torch_dtype, value):
                 out[i] = packed[i]
 
     kernel = tilelang.compile(main, target="cuda")
-    # The broadcast must fill all 64 bits of each (u)longlong4 field (issue
-    # #2480: a 4-arg make_(u)longlong4 call zeroed the upper halves). Since
-    # the variadic-packer refactor this is emitted as a tl::broadcast byte
-    # replication; the exact-value check below guards the packing itself.
-    constructor = "tl::broadcast<ulonglong4>" if dtype == "uint8" else "tl::broadcast<longlong4>"
-    assert constructor in kernel.get_kernel_source()
+    _assert_native_broadcast(kernel.get_kernel_source(), dtype)
     out = torch.empty(LANES, dtype=torch_dtype, device="cuda")
     kernel(out)
 

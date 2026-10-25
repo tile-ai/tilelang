@@ -6,6 +6,8 @@ import tilelang
 import tilelang.language as T_default
 import tilelang.language.common as T_comm
 import tilelang.language.tir.op as common_tir_op
+from tilelang._compat.stmt_functor import post_order_visit
+from tvm_tirx import ir
 from tilelang.language.tir.exports import (
     BACKEND_ONLY_TIR_EXPORTS,
     CLASSIFIED_VENDOR_TIR_EXPORTS,
@@ -114,14 +116,14 @@ def test_rocm_language_composes_common_and_rocm_symbols():
 @pytest.mark.parametrize(
     ("emitter_name", "method_name", "mcpu", "expected_call"),
     [
-        ("MatrixCoreIntrinEmitter", "mfma", "gfx942", "T.tvm_mfma"),
-        ("WMMAIntrinEmitter", "wmma", "gfx1100", "T.tvm_rdna_wmma"),
+        ("MatrixCoreIntrinEmitter", "mfma", "gfx942", "tl.tvm_mfma"),
+        ("WMMAIntrinEmitter", "wmma", "gfx1100", "tl.tvm_rdna_wmma"),
     ],
 )
 def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name, mcpu, expected_call):
     from tilelang.rocm import intrinsics
 
-    target = tilelang.tvm.target.Target({"kind": "hip", "mcpu": mcpu})
+    target = tilelang.tvm.target.Target({"kind": "rocm", "mcpu": mcpu})
     emitter_cls = getattr(intrinsics, emitter_name)
     emitter = emitter_cls(
         a_dtype="float16",
@@ -146,7 +148,11 @@ def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name,
         c_local = T_comm.alloc_local((c_size,), "float32")
         emit(a_local, b_local, c_local)
 
-    assert expected_call in main.script()
+    calls = []
+    post_order_visit(
+        main.body, lambda node: calls.append(node.op.name) if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) else None
+    )
+    assert expected_call in calls
 
 
 def test_metal_language_owns_simdgroup_tir_exports():
@@ -166,7 +172,7 @@ def test_backend_tir_modules_own_their_vendor_ops():
 
 
 def test_upstream_vendor_tir_exports_are_classified():
-    import tvm.tirx.script.parser as upstream_tir_parser
+    import tvm_tirx.tirx.script as upstream_tir_parser
 
     vendor_exports = {
         name for name in upstream_tir_parser.__all__ if name.startswith("ptx_") or "simdgroup" in name or name in {"mma_fill", "mma_store"}

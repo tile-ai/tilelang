@@ -4,7 +4,7 @@ import re
 from typing import Any, Literal
 from collections.abc import Callable
 from tilelang import tvm as tvm
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
@@ -89,7 +89,7 @@ def is_cuda_target(target: Target) -> bool:
 
 
 def is_hip_target(target: Target) -> bool:
-    return target.kind.name == "hip"
+    return target.kind.name == "rocm"
 
 
 def is_cpu_target(target: Target) -> bool:

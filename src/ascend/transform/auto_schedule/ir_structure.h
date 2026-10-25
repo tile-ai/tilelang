@@ -1,8 +1,7 @@
 #pragma once
-#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
@@ -25,7 +24,10 @@
 #include "../ascend_pipe.h"
 #include "../buffer_version.h"
 #include "../core_mask.h"
+#include "../native_storage.h"
 #include "op/utils.h"
+#include "schedule_scope.h"
+#include "task_resources.h"
 
 namespace tvm {
 namespace tl {
@@ -40,70 +42,20 @@ class IRStructure;
 class TaskNode;
 class ControlNode;
 
-// HBM bandwidth-contention resource bits. These are tracked separately from
-// ResourcePipe because a load and a store use different issue pipes but can
-// still contend on the same HBM port.
-enum class HbmPort : uint16_t {
-  kNone = 0,
-  kAiv = 1 << 0, // AIV HBM port: GM<->UB
-  kAic = 1 << 1, // AIC HBM port: GM->L1 / L0C->GM
-  // UB->GM and L0C->GM share the HBM store path even though their commands
-  // issue from different cores and hardware pipes.
-  kStore = 1 << 2,
-};
-
-constexpr uint16_t kHbmCoreAffinityMask =
-    static_cast<uint16_t>(HbmPort::kAiv) | static_cast<uint16_t>(HbmPort::kAic);
-
-// Special scalar "registers" written by config/control intrinsics and read by
-// their consumers. Pipe-order registers model a scalar synchronization call
-// that fences the hardware pipe named by its argument without making the call
-// itself consume that pipe.
-enum class SpecialRegister : uint16_t {
-  kNone = 0,
-  kHf32Mode = 1 << 0,    // set_hf32_mode      <- read by Cube (MAD) ops
-  kPadValue = 1 << 1,    // set_copy_pad_value <- read by padded MTE2 copies
-  kLoopControl = 1 << 2, // loop_break         <- read by every sibling (fence)
-  kAtomicMode = 1 << 3,  // set_atomic         <- read by GM-store copies
-  kPipeMTE1 = 1 << 4,
-  kPipeMTE2 = 1 << 5,
-  kPipeMTE3 = 1 << 6,
-  kPipeCube = 1 << 7,
-  kPipeVector = 1 << 8,
-  kPipeFixpipe = 1 << 9,
-  kPipeScalar = 1 << 10,
-  kMmadDirection = 1 << 11, // set_mmad_direction <- read by Cube (MAD) ops
-};
-
-inline uint16_t PipeSpecialRegisterMask(uint16_t pipe_mask) {
-  uint16_t mask = 0;
-  auto add_pipe = [&](ResourcePipe pipe, SpecialRegister reg) {
-    if (pipe_mask & static_cast<uint16_t>(pipe))
-      mask |= static_cast<uint16_t>(reg);
-  };
-  add_pipe(ResourcePipe::kMTE1, SpecialRegister::kPipeMTE1);
-  add_pipe(ResourcePipe::kMTE2, SpecialRegister::kPipeMTE2);
-  add_pipe(ResourcePipe::kMTE3, SpecialRegister::kPipeMTE3);
-  add_pipe(ResourcePipe::kCube, SpecialRegister::kPipeCube);
-  add_pipe(ResourcePipe::kVector, SpecialRegister::kPipeVector);
-  add_pipe(ResourcePipe::kFixpipe, SpecialRegister::kPipeFixpipe);
-  add_pipe(ResourcePipe::kScalar, SpecialRegister::kPipeScalar);
-  return mask;
-}
-
 // Helper function to compare if two regions are equal
-inline bool RegionsEqual(const Region &a, const Region &b) {
+inline bool RegionsEqual(const ffi::Array<Range> &a,
+                         const ffi::Array<Range> &b) {
   if (a.size() != b.size())
     return false;
 
-  arith::Analyzer analyzer;
+  sym::Analyzer analyzer;
   for (size_t i = 0; i < a.size(); ++i) {
     // Check if min values are equal
-    if (!analyzer.CanProveEqual(a[i]->min, b[i]->min)) {
+    if (!analyzer->CanProveEqual(a[i]->begin, b[i]->begin)) {
       return false;
     }
     // Check if extent values are equal
-    if (!analyzer.CanProveEqual(a[i]->extent, b[i]->extent)) {
+    if (!analyzer->CanProveEqual(a[i]->extent, b[i]->extent)) {
       return false;
     }
   }
@@ -113,16 +65,17 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 // Return true only when every point in `inner` is provably contained in
 // `outer`. This is stricter than overlap and is suitable for checking whether
 // one task's declared write footprint fully defines another task's read.
-inline bool RegionCovers(const Region &outer, const Region &inner) {
+inline bool RegionCovers(const ffi::Array<Range> &outer,
+                         const ffi::Array<Range> &inner) {
   if (outer.size() != inner.size())
     return false;
 
-  arith::Analyzer analyzer;
+  sym::Analyzer analyzer;
   for (size_t i = 0; i < outer.size(); ++i) {
-    PrimExpr outer_end = outer[i]->min + outer[i]->extent;
-    PrimExpr inner_end = inner[i]->min + inner[i]->extent;
-    if (!analyzer.CanProve(outer[i]->min <= inner[i]->min) ||
-        !analyzer.CanProve(inner_end <= outer_end)) {
+    PrimExpr outer_end = outer[i]->begin + outer[i]->extent;
+    PrimExpr inner_end = inner[i]->begin + inner[i]->extent;
+    if (!analyzer->CanProve(outer[i]->begin <= inner[i]->begin) ||
+        !analyzer->CanProve(inner_end <= outer_end)) {
       return false;
     }
   }
@@ -132,40 +85,35 @@ inline bool RegionCovers(const Region &outer, const Region &inner) {
 constexpr int64_t kDynamicSerialTripCountFallback = 100;
 
 inline int64_t GetSerialTripCount(const For &loop,
-                                  arith::Analyzer *analyzer = nullptr) {
-  arith::Analyzer local_analyzer;
-  if (analyzer == nullptr)
-    analyzer = &local_analyzer;
+                                  sym::Analyzer analyzer = sym::Analyzer()) {
+  TVM_FFI_CHECK(!analyzer->CanProve(loop->step == 0), ValueError)
+      << "An Ascend scheduled loop cannot have a zero step";
+  PrimExpr count = analyzer->Simplify(ScheduleLoopTripCount(loop.get()));
+  if (auto value = GetConstInt(count))
+    return std::max<int64_t>(0, *value);
+  auto bound = analyzer->const_int_bound(count);
+  PrimVar unconstrained("trip_count", count.ty());
+  sym::Analyzer independent;
+  if (bound->max_value >= 0 &&
+      bound->max_value < independent->const_int_bound(unconstrained)->max_value)
+    return bound->max_value;
+  return kDynamicSerialTripCountFallback;
+}
 
-  auto upper_bound_or = [&](const PrimExpr &expr, int64_t fallback) {
-    if (const int64_t *value = as_const_int(expr))
-      return *value;
-
-    arith::ConstIntBound bound = analyzer->const_int_bound(expr);
-    arith::Analyzer unconstrained_analyzer;
-    Var unconstrained("unconstrained_trip_count", expr.dtype());
-    int64_t unconstrained_max =
-        unconstrained_analyzer.const_int_bound(unconstrained)->max_value;
-    bool has_useful_bound = bound->max_value >= 0 &&
-                            bound->max_value != arith::ConstIntBound::kPosInf &&
-                            bound->max_value < unconstrained_max;
-    return has_useful_bound ? bound->max_value : fallback;
-  };
-
-  PrimExpr step = loop->step.has_value() ? loop->step.value()
-                                         : IntImm(DataType::Int(32), 1);
-  int64_t extent =
-      upper_bound_or(loop->extent, kDynamicSerialTripCountFallback);
-  // A trip-count upper bound needs a lower bound for a symbolic positive
-  // step.  Use one when the step is not constant; using its upper bound would
-  // underestimate the number of serial iterations.
-  const int64_t *constant_step = as_const_int(step);
-  int64_t step_value = constant_step ? *constant_step : 1;
-  if (extent <= 0)
-    return 0;
-  if (step_value <= 0)
-    return extent;
-  return extent / step_value + (extent % step_value != 0);
+inline ConstrSet RemapScheduleContext(const ConstrSet &context,
+                                      const ffi::Map<Var, Var> &replacements) {
+  ConstrSet result;
+  for (const Constr &constraint : context.constrs_) {
+    Constr updated = constraint;
+    if (constraint.kind != Constr::kConstr)
+      updated.var = RemapScheduleVariables(constraint.var, replacements);
+    if (constraint.kind == Constr::kBindRange)
+      updated.range = RemapScheduleVariables(constraint.range, replacements);
+    else
+      updated.value = RemapScheduleVariables(constraint.value, replacements);
+    result.constrs_.push_back(std::move(updated));
+  }
+  return result;
 }
 
 // A wrapper introduced at a node relative to its nearest surviving structural
@@ -194,10 +142,10 @@ public:
     return std::make_unique<ConditionGuard>(condition);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    condition = Substitute(condition, {{old_var, new_var}});
+    condition = RemapScheduleVariables(condition, {{old_var, new_var}});
   }
   Stmt Wrap(Stmt body) const final {
-    return IfThenElse(condition, std::move(body));
+    return MakeScheduleMarker(kScheduleCondition, condition, std::move(body));
   }
 
   PrimExpr condition;
@@ -205,30 +153,25 @@ public:
 
 class AttributeGuard final : public Guard {
 public:
-  AttributeGuard(Any node, String key, PrimExpr value, Span span)
-      : node(std::move(node)), key(std::move(key)), value(std::move(value)),
-        span(std::move(span)) {}
+  AttributeGuard(Any node, String key, Location location)
+      : node(std::move(node)), key(std::move(key)), loc(std::move(location)) {}
 
   Kind GetKind() const final { return Kind::kAttribute; }
   std::unique_ptr<Guard> Clone() const final {
-    return std::make_unique<AttributeGuard>(node, key, value, span);
+    return std::make_unique<AttributeGuard>(node, key, loc);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    if (node.as<PrimExprNode>()) {
-      node = Substitute(Downcast<PrimExpr>(node), {{old_var, new_var}});
-    }
-    if (value.defined()) {
-      value = Substitute(value, {{old_var, new_var}});
-    }
+    auto remapper = ffi::make_object<ScheduleVarRemapper>(
+        ffi::Map<Var, Var>{{old_var, new_var}});
+    node = remapper->Mutate(node).ValueOrUnchanged(node);
   }
   Stmt Wrap(Stmt body) const final {
-    return AttrStmt(node, key, value, std::move(body), span);
+    return MakeScheduleMarker(key, node, std::move(body), loc);
   }
 
   Any node;
   String key;
-  PrimExpr value;
-  Span span;
+  Location loc;
 };
 
 using GuardList = std::vector<std::unique_ptr<Guard>>;
@@ -314,9 +257,9 @@ public:
   }
   // Prepend an AttrStmt wrapper supported by AutoSchedule.
   void PrependAttribute(const Any &node, const String &key,
-                        const PrimExpr &value, const Span &span) {
+                        const Location &location) {
     guards_.insert(guards_.begin(),
-                   std::make_unique<AttributeGuard>(node, key, value, span));
+                   std::make_unique<AttributeGuard>(node, key, location));
   }
 
   // Pipeline stage assigned by the Z3 scheduler: producer = 0, consumers are
@@ -360,6 +303,7 @@ public:
     index_ = other.index_;
     latency_ = other.latency_;
     ii_ = other.ii_;
+    storage_analysis_ = other.storage_analysis_;
   }
 
   // Resource pipe bitmask (accessible by all IR nodes)
@@ -376,21 +320,36 @@ public:
   virtual uint16_t GetHbmMask() const = 0;
 
   // Logical access regions. Physical footprints are derived from current IR.
-  virtual std::vector<BufferRegion> GetReadRegions() const = 0;
-  virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
+  virtual std::vector<TensorRegion> GetReadRegions() const = 0;
+  virtual std::vector<TensorRegion> GetWriteRegions() const = 0;
+
+  void SetStorageAnalysis(ffi::ObjectPtr<StorageAliasAnalysis> analysis) {
+    storage_analysis_ = std::move(analysis);
+  }
+
+  const StorageAliasAnalysis *GetStorageAnalysis() const {
+    return storage_analysis_.get();
+  }
+
+  Var StorageOf(const TensorVar &tensor) const {
+    if (storage_analysis_)
+      if (auto access = storage_analysis_->Resolve(tensor))
+        return access->root;
+    return tensor;
+  }
 
   // Storage identity is the Buffer data Var, so aliases with different shapes
   // and strides are treated as accesses to the same physical allocation.
   bool ReadsStorage(const Var &storage) const {
-    for (const BufferRegion &region : GetReadRegions()) {
-      if (region->buffer->data.same_as(storage))
+    for (const TensorRegion &region : GetReadRegions()) {
+      if (StorageOf(region->source.as_or_throw<TensorVar>()).same_as(storage))
         return true;
     }
     return false;
   }
   bool WritesStorage(const Var &storage) const {
-    for (const BufferRegion &region : GetWriteRegions()) {
-      if (region->buffer->data.same_as(storage))
+    for (const TensorRegion &region : GetWriteRegions()) {
+      if (StorageOf(region->source.as_or_throw<TensorVar>()).same_as(storage))
         return true;
     }
     return false;
@@ -408,12 +367,14 @@ public:
   std::vector<Var> GetOnChipStorages() const {
     std::vector<Var> storages;
     std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen;
-    auto collect = [&](const std::vector<BufferRegion> &regions) {
-      for (const BufferRegion &region : regions) {
-        if ((IsAscendOnChipBuffer(region->buffer) ||
-             IsL0SFBuffer(region->buffer)) &&
-            seen.insert(region->buffer->data).second) {
-          storages.push_back(region->buffer->data);
+    auto collect = [&](const std::vector<TensorRegion> &regions) {
+      for (const TensorRegion &region : regions) {
+        if ((IsAscendOnChipBuffer(region->source.as_or_throw<TensorVar>()) ||
+             IsL0SFBuffer(region->source.as_or_throw<TensorVar>())) &&
+            seen.insert(StorageOf(region->source.as_or_throw<TensorVar>()))
+                .second) {
+          storages.push_back(
+              StorageOf(region->source.as_or_throw<TensorVar>()));
         }
       }
     };
@@ -486,6 +447,7 @@ private:
   size_t index_{0};
   int64_t latency_{0};
   int64_t ii_{0};
+  ffi::ObjectPtr<StorageAliasAnalysis> storage_analysis_;
 };
 
 // Task node: one atomic scheduler node. Ordinary tasks contain one statement;
@@ -496,7 +458,7 @@ public:
   explicit TaskNode(std::unique_ptr<IRExtraInfo> extra_info = nullptr)
       : IRStructure(std::move(extra_info)) {}
 
-  Stmt stmt;
+  Stmt stmt{ffi::UnsafeInit{}};
 
   // Snapshot of the surrounding-scope ConstrSet at the moment this task was
   // built or decoded. Captures ancestor For ranges, LetStmt bindings,
@@ -530,10 +492,10 @@ public:
   bool ReadsAtomicRegister() const override { return reads_atomic_; }
 
   // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> GetReadRegions() const override {
+  std::vector<TensorRegion> GetReadRegions() const override {
     return read_regions_;
   }
-  std::vector<BufferRegion> GetWriteRegions() const override {
+  std::vector<TensorRegion> GetWriteRegions() const override {
     return write_regions_;
   }
   std::vector<Var> GetReadVars() const override { return read_vars_; }
@@ -550,10 +512,10 @@ public:
   void AddSpecialWrite(SpecialRegister reg) {
     special_write_mask_ |= static_cast<uint16_t>(reg);
   }
-  void SetReadRegions(const std::vector<BufferRegion> &regions) {
+  void SetReadRegions(const std::vector<TensorRegion> &regions) {
     read_regions_ = regions;
   }
-  void SetWriteRegions(const std::vector<BufferRegion> &regions) {
+  void SetWriteRegions(const std::vector<TensorRegion> &regions) {
     write_regions_ = regions;
   }
   const Map<Var, Optional<PrimExpr>> &GetL0Pitches() const {
@@ -569,30 +531,14 @@ public:
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
   void SetWriteVars(const std::vector<Var> &vars) { write_vars_ = vars; }
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
-    Map<Var, PrimExpr> substitution{{old_var, new_var}};
-    auto substitute_vars = [&](std::vector<Var> &vars) {
-      for (auto &var : vars) {
-        if (var.same_as(old_var))
-          var = new_var;
-      }
+    ffi::Map<Var, Var> substitution{{old_var, new_var}};
+    auto substitute_vars = [&](std::vector<Var> &variables) {
+      for (Var &variable : variables)
+        variable = RemapScheduleVariables(variable, substitution);
     };
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-        buffer_remap;
-    auto substitute_regions = [&](std::vector<BufferRegion> &regions) {
-      for (auto &region : regions) {
-        Buffer buffer = region->buffer;
-        auto buffer_it = buffer_remap.find(buffer);
-        if (buffer_it != buffer_remap.end()) {
-          buffer = buffer_it->second;
-        } else if (buffer->data.same_as(old_var)) {
-          Buffer remapped = buffer;
-          remapped.CopyOnWrite()->data = new_var;
-          buffer_remap.emplace(buffer, remapped);
-          buffer = std::move(remapped);
-        }
-        region = BufferRegion(std::move(buffer),
-                              Substitute(region->region, substitution));
-      }
+    auto substitute_regions = [&](std::vector<TensorRegion> &regions) {
+      for (TensorRegion &region : regions)
+        region = RemapScheduleVariables(region, substitution);
     };
     substitute_vars(read_vars_);
     substitute_vars(write_vars_);
@@ -600,14 +546,14 @@ public:
     substitute_regions(write_regions_);
     Map<Var, Optional<PrimExpr>> pitches;
     for (const auto &[storage, pitch] : l0_pitches_) {
-      pitches.Set(storage.same_as(old_var) ? new_var : storage,
-                  pitch.defined() ? Optional<PrimExpr>(
-                                        Substitute(pitch.value(), substitution))
-                                  : std::nullopt);
+      pitches.Set(RemapScheduleVariables(storage, substitution),
+                  pitch ? Optional<PrimExpr>(RemapScheduleVariables(
+                              pitch.value(), substitution))
+                        : std::nullopt);
     }
     l0_pitches_ = std::move(pitches);
-    outer_ctx = outer_ctx.Substitute(substitution);
-    stmt = Substitute(stmt, substitution);
+    outer_ctx = RemapScheduleContext(outer_ctx, substitution);
+    stmt = RemapScheduleVariables(stmt, substitution);
     SubstituteVarInGuards(old_var, new_var);
     SubstituteVarInExtraInfo(old_var, new_var);
   }
@@ -621,23 +567,25 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   // Helper methods to add regions (for incremental analysis)
-  void AddReadRegion(const BufferRegion &region) {
+  void AddReadRegion(const TensorRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : read_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
+      if (existing->source.as_or_throw<TensorVar>().same_as(
+              region->source.as_or_throw<TensorVar>()) &&
           RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
+        return; // ffi::Array<Range> already exists
       }
     }
     read_regions_.push_back(region);
   }
 
-  void AddWriteRegion(const BufferRegion &region) {
+  void AddWriteRegion(const TensorRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : write_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
+      if (existing->source.as_or_throw<TensorVar>().same_as(
+              region->source.as_or_throw<TensorVar>()) &&
           RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
+        return; // ffi::Array<Range> already exists
       }
     }
     write_regions_.push_back(region);
@@ -673,8 +621,8 @@ private:
   bool is_per_core_task_{false};
 
   // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> read_regions_;
-  std::vector<BufferRegion> write_regions_;
+  std::vector<TensorRegion> read_regions_;
+  std::vector<TensorRegion> write_regions_;
   Map<Var, Optional<PrimExpr>> l0_pitches_;
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
@@ -690,7 +638,7 @@ public:
   explicit ControlNode(std::unique_ptr<IRExtraInfo> extra_info = nullptr)
       : IRStructure(std::move(extra_info)) {}
 
-  For control; // The For operation
+  For control{ffi::UnsafeInit{}}; // The For operation
   std::shared_ptr<TaskNode> task;
   std::vector<std::shared_ptr<IRStructure>> children;
 
@@ -757,8 +705,8 @@ public:
   }
 
   // Memory access regions (aggregate from children & task)
-  std::vector<BufferRegion> GetReadRegions() const override {
-    std::vector<BufferRegion> regions;
+  std::vector<TensorRegion> GetReadRegions() const override {
+    std::vector<TensorRegion> regions;
     for (const auto &child : children) {
       if (child) {
         auto child_regions = child->GetReadRegions();
@@ -772,8 +720,8 @@ public:
     }
     return regions;
   }
-  std::vector<BufferRegion> GetWriteRegions() const override {
-    std::vector<BufferRegion> regions;
+  std::vector<TensorRegion> GetWriteRegions() const override {
+    std::vector<TensorRegion> regions;
     for (const auto &child : children) {
       if (child) {
         auto child_regions = child->GetWriteRegions();
@@ -819,23 +767,15 @@ public:
   }
 
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
-    Map<Var, PrimExpr> substitution{{old_var, new_var}};
+    ffi::Map<Var, Var> substitution{{old_var, new_var}};
     for (auto &child : children) {
       if (child)
         child->SubstituteVar(old_var, new_var);
     }
     if (task)
       task->SubstituteVar(old_var, new_var);
-    // Also substitute in the For statement's min/extent/step
-    For new_for = control;
-    new_for.CopyOnWrite()->min = Substitute(control->min, substitution);
-    new_for.CopyOnWrite()->extent = Substitute(control->extent, substitution);
-    if (control->step.has_value()) {
-      new_for.CopyOnWrite()->step =
-          Substitute(control->step.value(), substitution);
-    }
-    control = new_for;
-    loop_body_ctx_ = loop_body_ctx_.Substitute(substitution);
+    control = RemapScheduleVariables(control, substitution);
+    loop_body_ctx_ = RemapScheduleContext(loop_body_ctx_, substitution);
     SubstituteVarInGuards(old_var, new_var);
     SubstituteVarInExtraInfo(old_var, new_var);
   }
@@ -844,10 +784,10 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   int64_t GetTripCount() const {
-    arith::Analyzer analyzer;
-    if (task)
-      task->outer_ctx.Populate(analyzer);
-    return GetSerialTripCount(control, &analyzer);
+    sym::Analyzer analyzer;
+    auto constraints = task ? task->outer_ctx.Populate(analyzer)
+                            : WithGroup<sym::ConstraintContext>();
+    return GetSerialTripCount(control, analyzer);
   }
 
   ControlNode *GetParentControl() {
@@ -936,8 +876,8 @@ bool GuardImplies(const PrimExpr &premise, const PrimExpr &conclusion,
                   const ConstrSet &outer_ctx);
 Stmt WrapWithGuard(Stmt stmt, const PrimExpr &guard);
 
-inline bool IsRegisterRegion(const BufferRegion &region) {
-  String scope = region->buffer.scope();
+inline bool IsRegisterRegion(const TensorRegion &region) {
+  String scope = region->source.as_or_throw<TensorVar>().scope().name();
   return scope == "local" || scope == "local.var" || scope == "local.fragment";
 }
 

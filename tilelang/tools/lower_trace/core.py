@@ -185,7 +185,7 @@ def _inspect_module_source(mod) -> str:
 
 def _make_patched_source_module(original_module, patched_source: str):
     """Build a real TVM ``CSourceModule`` carrying user-edited source."""
-    import tvm.runtime._ffi_api as _ffi_api
+    import tvm_tirx.runtime._ffi_api as _ffi_api
 
     try:
         module_format = original_module.format
@@ -512,7 +512,7 @@ class LowerTraceSession(PassInstrumentationTool):
             backend_hint = ""
             if target_kind == "cuda":
                 backend_hint = " Use execution_backend='nvrtc' for edit-and-recompile support."
-            elif target_kind == "hip":
+            elif target_kind == "rocm":
                 backend_hint = " Use execution_backend='cython' for edit-and-recompile support."
             print(
                 f"  {_ANSI_YELLOW}[lower_trace] codegen/{index:02d}_{name}: NOTE — user edits in "

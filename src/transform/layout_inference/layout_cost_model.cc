@@ -6,10 +6,11 @@
 
 #include "layout_cost_model.h"
 
+#include "compat/visit.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/type.h>
 
 #include <algorithm>
 #include <limits>
@@ -34,6 +35,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 namespace {
 
@@ -96,7 +98,7 @@ template <typename T> std::string FormatVector(const std::vector<T> &values) {
  *  flat element index into the global buffer, written in the probe's
  *  point_vars — replica-independent by construction. */
 struct GlobalAccessProbe {
-  PrimExpr addr;
+  PrimExpr addr{0};
   int64_t elem_bytes{4};
   bool is_store{false};
   int64_t repeat{1}; // enclosing serial trip count: the address pattern
@@ -114,15 +116,16 @@ struct StatementProbe {
   std::vector<GlobalAccessProbe> accesses;
   bool measurable{false};
   // Forward-walk geometry, valid when `measurable`:
-  std::vector<int64_t> extents; // logical iteration space, outermost first
-  std::vector<Var> point_vars;  // one per extent; addr/thread/slot
-                                // expressions are written in these
-  Var rep_var;                  // replica index var of thread_expr
+  std::vector<int64_t> extents;    // logical iteration space, outermost first
+  std::vector<PrimVar> point_vars; // one per extent; addr/thread/slot
+                                   // expressions are written in these
+  PrimVar rep_var{"_cost_rep",
+                  PrimType::Int(32)}; // replica index var of thread_expr
   int64_t rep{1};
   int64_t threads{1};
-  int64_t slots{1};     // per-thread serial slots
-  PrimExpr thread_expr; // forward thread map: point_vars + rep_var
-  PrimExpr slot_expr;   // forward slot map: point_vars
+  int64_t slots{1};        // per-thread serial slots
+  PrimExpr thread_expr{0}; // forward thread map: point_vars + rep_var
+  PrimExpr slot_expr{0};   // forward slot map: point_vars
   // Widest vector access in bits the vectorizer will plan for this
   // statement's memory mix (MaxVectorLoadBits — the shared policy).
   int64_t vector_bits{128};
@@ -200,27 +203,30 @@ bool TryMultiplyPositive(int64_t lhs, int64_t rhs, int64_t *product) {
  *  Non-int foreign vars are kept and fail the affine recovery, marking the
  *  statement outside the model. */
 PrimExpr ZeroForeignVars(const PrimExpr &e, const VarSet &own) {
-  return Substitute(e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
-    if (own.count(var) || (!var->dtype.is_int() && !var->dtype.is_uint())) {
-      return ffi::Optional<PrimExpr>();
-    }
-    return make_zero(var->dtype);
-  });
+  return tirx::SubstituteWithDataTypeLegalization(
+      e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+        if (own.count(var) || !var->ty.as<PrimTypeNode>() ||
+            (!var->ty.as_or_throw<PrimType>().MatchesCode(kDLInt) &&
+             !var->ty.as_or_throw<PrimType>().MatchesCode(kDLUInt))) {
+          return std::nullopt;
+        }
+        return MakeConst(var->ty.as_or_throw<PrimType>(), 0);
+      });
 }
 
 /*! \brief The probe's iteration space as IterVars: (point_vars..., rep) —
  *  the canonical packing of FragmentNode::InverseWithLevel, replication as
  *  a trailing ordinary dimension. */
-Array<IterVar> ProbeIterVars(const StatementProbe &probe) {
-  Array<IterVar> ivs;
+Array<LayoutAxis> ProbeIterVars(const StatementProbe &probe) {
+  Array<LayoutAxis> ivs;
   for (size_t d = 0; d < probe.point_vars.size(); ++d) {
-    ivs.push_back(IterVar(Range(IntImm(DataType::Int(32), 0),
-                                IntImm(DataType::Int(32), probe.extents[d])),
-                          probe.point_vars[d], IterVarType::kDataPar));
+    ivs.push_back(LayoutAxis(Range(IntImm(PrimType::Int(32), 0),
+                                   IntImm(PrimType::Int(32), probe.extents[d])),
+                             probe.point_vars[d]));
   }
-  ivs.push_back(IterVar(
-      Range(IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), probe.rep)),
-      probe.rep_var, IterVarType::kDataPar));
+  ivs.push_back(LayoutAxis(
+      Range(IntImm(PrimType::Int(32), 0), IntImm(PrimType::Int(32), probe.rep)),
+      probe.rep_var));
   return ivs;
 }
 
@@ -343,7 +349,7 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
   // Recover the packed forward map as the plain strided cell layout.
   Optional<cute::Layout> flat =
       ProbeExprsToCute(probe, {probe.thread_expr, probe.slot_expr}, own);
-  if (!flat.defined()) {
+  if (!flat.has_value()) {
     DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                << " cannot be measured: forward map is not affine-"
                   "recoverable (thread="
@@ -385,7 +391,7 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
       return std::nullopt;
     }
     Optional<cute::Layout> g = ProbeExprsToCute(probe, {access.addr}, own);
-    if (!g.defined()) {
+    if (!g.has_value()) {
       DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                  << " has a non-affine address expression; charged "
                     "worst-case: "
@@ -534,17 +540,21 @@ ScoreStatement(const StatementProbe &probe, int member_idx, const char *what) {
 
 /*! \brief Row-major element strides; nullopt when the shape is symbolic
  *  or the buffer exceeds the int32 address algebra. */
-std::optional<std::vector<int64_t>> RowMajorStrides(const Buffer &buffer) {
-  size_t ndim = buffer->shape.size();
+std::optional<std::vector<int64_t>> RowMajorStrides(const TensorVar &buffer) {
+  size_t ndim = buffer.shape().size();
+  if (!buffer.ty()->HasDefaultLayout())
+    return std::nullopt;
+  if (ndim == 0)
+    return std::vector<int64_t>{};
   std::vector<int64_t> strides(ndim, 1);
   for (int d = static_cast<int>(ndim) - 2; d >= 0; --d) {
-    const int64_t *extent = as_const_int(buffer->shape[d + 1]);
+    auto extent = GetConstInt(buffer.shape()[d + 1]);
     if (!extent) {
       return std::nullopt;
     }
     strides[d] = strides[d + 1] * *extent;
   }
-  const int64_t *outer = as_const_int(buffer->shape[0]);
+  auto outer = GetConstInt(buffer.shape()[0]);
   if (!outer || strides[0] * *outer >= (int64_t(1) << 31)) {
     return std::nullopt;
   }
@@ -557,18 +567,16 @@ std::optional<std::vector<int64_t>> RowMajorStrides(const Buffer &buffer) {
  *  NVIDIA and a serviceable approximation elsewhere — until calibration
  *  demands a per-target dispatch here. */
 void BindMemoryGeometry(StatementProbe *probe, const Target &target) {
-  probe->warp_size = target->GetAttr<Integer>("thread_warp_size", Integer(32))
-                         .value()
-                         .IntValue();
+  probe->warp_size = target->GetAttr<int64_t>("thread_warp_size").value_or(32);
   probe->segment_bytes = 128;
 }
 
 /*! \brief Fresh point vars for a probe's logical space. */
-std::vector<Var> MakePointVars(size_t ndim) {
-  std::vector<Var> vars;
+std::vector<PrimVar> MakePointVars(size_t ndim) {
+  std::vector<PrimVar> vars;
   vars.reserve(ndim);
   for (size_t d = 0; d < ndim; ++d) {
-    vars.push_back(Var("_cost_x" + std::to_string(d), DataType::Int(32)));
+    vars.push_back(PrimVar("_cost_x" + std::to_string(d), PrimType::Int(32)));
   }
   return vars;
 }
@@ -585,18 +593,18 @@ bool BindForwardMaps(StatementProbe *probe, const Fragment &layout) {
   PrimExpr slots_expr = layout->OutputShape()[0];
   PrimExpr threads_expr = layout->ThreadExtent();
   PrimExpr rep_expr = layout->ReplicateExtent();
-  const int64_t *slots_ptr = as_const_int(slots_expr);
-  const int64_t *threads_ptr = as_const_int(threads_expr);
-  const int64_t *rep_ptr = as_const_int(rep_expr);
+  auto slots_ptr = GetConstInt(slots_expr);
+  auto threads_ptr = GetConstInt(threads_expr);
+  auto rep_ptr = GetConstInt(rep_expr);
   if (!slots_ptr || !threads_ptr || !rep_ptr || *slots_ptr <= 0 ||
       *threads_ptr <= 0 || *rep_ptr <= 0) {
     return false;
   }
   Array<PrimExpr> points;
-  for (const Var &v : probe->point_vars) {
+  for (const PrimVar &v : probe->point_vars) {
     points.push_back(v);
   }
-  probe->rep_var = Var("_cost_rep", DataType::Int(32));
+  probe->rep_var = PrimVar("_cost_rep", PrimType::Int(32));
   probe->thread_expr = layout->ForwardThread(points, probe->rep_var);
   probe->slot_expr = layout->Forward(points)[0];
   probe->slots = *slots_ptr;
@@ -611,7 +619,7 @@ bool BindForwardMaps(StatementProbe *probe, const Fragment &layout) {
  *  is the global side's affine address in the same logical point. */
 StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
                               bool frag_is_src, const Target &target) {
-  const Buffer &global = frag_is_src ? copy->dst : copy->src;
+  const TensorVar &global = frag_is_src ? copy->dst : copy->src;
   const Array<Range> &frag_range =
       frag_is_src ? copy->src_range : copy->dst_range;
   const Array<Range> &global_range =
@@ -627,7 +635,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
     BindMemoryGeometry(&probe, target);
     probe.worst_elements = 1;
     for (const Range &r : frag_range) {
-      const int64_t *extent = as_const_int(r->extent);
+      auto extent = GetConstInt(r->extent);
       probe.worst_elements *= extent ? *extent : 1;
     }
     GlobalAccessProbe access;
@@ -645,12 +653,12 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
   std::vector<int64_t> extents;
   int64_t logical_elements = 1;
   for (size_t d = 0; d < ndim; ++d) {
-    if (!is_zero(frag_range[d]->min)) {
+    if (!IsZero(frag_range[d]->begin)) {
       return worst_only("copy covers a nonzero fragment-side offset");
     }
-    const int64_t *frag_extent = as_const_int(frag_range[d]->extent);
-    const int64_t *global_extent = as_const_int(global_range[d]->extent);
-    const int64_t *shape_extent = as_const_int(frag_layout->InputShape()[d]);
+    auto frag_extent = GetConstInt(frag_range[d]->extent);
+    auto global_extent = GetConstInt(global_range[d]->extent);
+    auto shape_extent = GetConstInt(frag_layout->InputShape()[d]);
     if (!frag_extent || !global_extent || !shape_extent ||
         *frag_extent != *shape_extent || *global_extent != *shape_extent) {
       return worst_only("copy is symbolic, partial, or shape-mismatched");
@@ -659,7 +667,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
     logical_elements *= *shape_extent;
   }
 
-  int64_t elem_bits = global->dtype.bits() * global->dtype.lanes();
+  int64_t elem_bits = global.dtype().bits() * global.dtype().lanes();
   if (elem_bits < 8) {
     return worst_only("global element width is below one byte");
   }
@@ -679,10 +687,10 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
   probe.vector_bits = MaxVectorLoadBits(target, /*global_only_access=*/true);
   BindMemoryGeometry(&probe, target);
 
-  PrimExpr addr = make_zero(DataType::Int(32));
+  PrimExpr addr = MakeConst(PrimType::Int(32), 0);
   for (size_t d = 0; d < ndim; ++d) {
-    addr = addr + (global_range[d]->min + probe.point_vars[d]) *
-                      IntImm(DataType::Int(32), (*strides)[d]);
+    addr = addr + (global_range[d]->begin + probe.point_vars[d]) *
+                      IntImm(PrimType::Int(32), (*strides)[d]);
   }
   GlobalAccessProbe access;
   access.addr = std::move(addr);
@@ -699,7 +707,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
 class LoopGlobalAccessCollector : public StmtExprVisitor {
 public:
   struct RawAccess {
-    Buffer buffer;
+    TensorVar buffer;
     Array<PrimExpr> indices;
     bool is_store;
     int64_t repeat;
@@ -710,28 +718,30 @@ public:
   // width-cap policy (256-bit loads are global-only).
   bool touches_shared{false};
 
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { Visit(stmt); }
 
 private:
-  void VisitStmt_(const ForNode *op) final {
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
+      return StmtExprVisitor::Visit_(op);
     }
-    const int64_t *extent = as_const_int(op->extent);
+    auto extent = GetConstInt(
+        sym::Analyzer()->Simplify(ceildiv(op->end - op->begin, op->step)));
     serial_stack_.push_back(extent ? *extent : -1);
-    StmtExprVisitor::VisitStmt_(op);
+    StmtExprVisitor::Visit_(op);
     serial_stack_.pop_back();
+    return std::nullopt;
   }
-  void VisitStmt_(const BufferStoreNode *op) final {
-    Record(op->buffer, op->indices, /*is_store=*/true);
-    StmtExprVisitor::VisitStmt_(op);
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorStoreNode *op) final {
+    Record(op->dest.as_or_throw<TensorVar>(), op->indices, /*is_store=*/true);
+    return StmtExprVisitor::Visit_(op);
   }
-  void VisitExpr_(const BufferLoadNode *op) final {
-    Record(op->buffer, op->indices, /*is_store=*/false);
-    StmtExprVisitor::VisitExpr_(op);
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorLoadNode *op) final {
+    Record(op->source.as_or_throw<TensorVar>(), op->indices,
+           /*is_store=*/false);
+    return StmtExprVisitor::Visit_(op);
   }
-  void Record(const Buffer &buffer, const Array<PrimExpr> &indices,
+  void Record(const TensorVar &buffer, const Array<PrimExpr> &indices,
               bool is_store) {
     if (IsSharedBuffer(buffer)) {
       touches_shared = true;
@@ -763,10 +773,10 @@ private:
  *  even be sized (skip — nothing sensible to charge). */
 std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
                                              const Target &target) {
-  LoopGlobalAccessCollector collector;
-  collector.Collect(loop->GetRoot());
+  auto collector = ffi::make_object<LoopGlobalAccessCollector>();
+  collector->Collect(loop->GetRoot());
   StatementProbe probe;
-  if (collector.accesses.empty()) {
+  if (collector->accesses.empty()) {
     DLOG(INFO) << "[LayoutCost] parallel-loop probe has no direct global "
                   "accesses";
     return probe; // pure fragment/shared loop: no global traffic to model
@@ -776,21 +786,22 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
   // the loop has no layout: an attempt must never profit from an unsolved
   // (opaque) loop.
   std::vector<int64_t> extents;
-  std::vector<Var> nest_vars;
+  std::vector<PrimVar> nest_vars;
   int64_t domain = 1;
   {
     const ForNode *cur = loop->GetRoot().get();
     while (cur != nullptr && cur->kind == ForKind::kParallel) {
-      const int64_t *value = as_const_int(cur->extent);
+      auto value = GetConstInt((cur->end - cur->begin));
       if (!value) {
         DLOG(INFO) << "[LayoutCost] parallel-loop probe is unavailable: "
                       "symbolic parallel extent";
         return std::nullopt; // truly unsizeable: nothing sensible to charge
       }
       extents.push_back(*value);
-      nest_vars.push_back(cur->loop_var);
+      nest_vars.push_back(cur->var);
       domain *= *value;
-      cur = cur->body.as<ForNode>();
+      cur = cur->body->seq.size() == 1 ? cur->body->seq[0].as<ForNode>()
+                                       : nullptr;
     }
   }
   probe.worst_elements = domain;
@@ -804,10 +815,10 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
     StatementProbe worst;
     BindMemoryGeometry(&worst, target);
     worst.worst_elements = probe.worst_elements;
-    for (const auto &raw : collector.accesses) {
+    for (const auto &raw : collector->accesses) {
       GlobalAccessProbe access;
       access.elem_bytes = std::max<int64_t>(
-          1, raw.buffer->dtype.bits() * raw.buffer->dtype.lanes() / 8);
+          1, raw.buffer.dtype().bits() * raw.buffer.dtype().lanes() / 8);
       access.is_store = raw.is_store;
       access.repeat = raw.symbolic_repeat ? 1 : raw.repeat;
       worst.accesses.push_back(std::move(access));
@@ -828,22 +839,22 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
     return worst_only("loop forward maps have unsupported geometry");
   }
   probe.vector_bits = MaxVectorLoadBits(
-      target, /*global_only_access=*/!collector.touches_shared);
+      target, /*global_only_access=*/!collector->touches_shared);
   BindMemoryGeometry(&probe, target);
 
-  for (const auto &raw : collector.accesses) {
+  for (const auto &raw : collector->accesses) {
     if (raw.symbolic_repeat) {
       return worst_only("global access has a symbolic serial repeat count");
     }
-    int64_t elem_bits = raw.buffer->dtype.bits() * raw.buffer->dtype.lanes();
+    int64_t elem_bits = raw.buffer.dtype().bits() * raw.buffer.dtype().lanes();
     auto strides = RowMajorStrides(raw.buffer);
     if (elem_bits < 8 || !strides.has_value() ||
-        raw.indices.size() != raw.buffer->shape.size()) {
+        raw.indices.size() != raw.buffer.shape().size()) {
       return worst_only("global access has unsupported dtype, shape, or rank");
     }
-    PrimExpr addr = make_zero(DataType::Int(32));
+    PrimExpr addr = MakeConst(PrimType::Int(32), 0);
     for (size_t d = 0; d < raw.indices.size(); ++d) {
-      addr = addr + raw.indices[d] * IntImm(DataType::Int(32), (*strides)[d]);
+      addr = addr + raw.indices[d] * IntImm(PrimType::Int(32), (*strides)[d]);
     }
     GlobalAccessProbe access;
     access.addr = std::move(addr);
@@ -867,15 +878,15 @@ int64_t CountRegisterSlots(const LayoutMap &tmp_layout_map) {
     if (auto frag = layout.as<Fragment>()) {
       int64_t frag_reg_num = 1;
       for (auto i : frag.value()->OutputShape()) {
-        auto pci = as_const_int(i);
-        ICHECK(pci != nullptr) << "Can not use non-constant range to "
-                                  "iterate over a fragment/local "
-                                  "buffer. Non-constant shape expr is: "
-                               << i
-                               << ". This is possibly because you use "
-                                  "symbolic shape when "
-                                  "accessing a fragment/local buffer."
-                               << SpanHintSuffix(buffer->span);
+        auto pci = GetConstInt(i);
+        ICHECK(pci.has_value()) << "Can not use non-constant range to "
+                                   "iterate over a fragment/local "
+                                   "buffer. Non-constant shape expr is: "
+                                << i
+                                << ". This is possibly because you use "
+                                   "symbolic shape when "
+                                   "accessing a fragment/local buffer."
+                                << SpanHintSuffix(buffer->loc);
         frag_reg_num *= *pci;
       }
       regs += frag_reg_num;
@@ -912,24 +923,24 @@ int64_t CountSpilledBytes(const std::vector<int> &members,
     if (!loop_layout.defined()) {
       return;
     }
-    arith::Analyzer analyzer;
+    sym::Analyzer analyzer;
     FragmentThreadIndexProbe probe(loop_layout, loop_op->GetLoopVars(),
-                                   &analyzer);
+                                   analyzer);
     if (!probe.valid()) {
       return;
     }
     auto const_product = [](const Array<PrimExpr> &dims) -> int64_t {
       int64_t product = 1;
       for (const PrimExpr &dim : dims) {
-        const int64_t *extent = as_const_int(dim);
-        if (extent == nullptr) {
+        auto extent = GetConstInt(dim);
+        if (!extent.has_value()) {
           return -1;
         }
         product *= *extent;
       }
       return product;
     };
-    for (const Buffer &buffer : loop_op->GetAccessOrder()) {
+    for (const TensorVar &buffer : loop_op->GetAccessOrder()) {
       if (!layout_map.count(buffer)) {
         continue;
       }
@@ -942,16 +953,16 @@ int64_t CountSpilledBytes(const std::vector<int> &members,
         continue;
       }
       int64_t elem_bytes =
-          (buffer->dtype.bits() * buffer->dtype.lanes() + 7) / 8;
+          (buffer.dtype().bits() * buffer.dtype().lanes() + 7) / 8;
       // The whole per-thread array is demoted, not just the touched slot.
       int64_t array_slots = const_product(fragment.value()->OutputShape());
       int64_t array_bytes = (array_slots < 0 ? 1 : array_slots) * elem_bytes;
       // Every executed iteration touches the demoted array through local
       // memory (round trip).
       int64_t per_thread_iters = const_product(loop_layout->OutputShape());
-      const int64_t *threads = as_const_int(loop_layout->ThreadExtent());
+      auto threads = GetConstInt(loop_layout->ThreadExtent());
       int64_t traffic_bytes =
-          (per_thread_iters < 0 || threads == nullptr)
+          (per_thread_iters < 0 || !threads.has_value())
               ? array_bytes
               : 2 * (*threads) * per_thread_iters * elem_bytes;
       spilled += std::max(array_bytes, traffic_bytes);
@@ -1026,7 +1037,7 @@ public:
                    << " (scope=" << copy->dst.scope() << ')';
         bool src_frag = IsFragmentBuffer(copy->src);
         bool dst_frag = IsFragmentBuffer(copy->dst);
-        Buffer frag;
+        TensorVar frag = copy->src;
         bool frag_is_src = false;
         if (src_frag && IsGlobalBuffer(copy->dst)) {
           frag = copy->src;

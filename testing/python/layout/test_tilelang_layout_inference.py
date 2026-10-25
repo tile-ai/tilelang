@@ -3,15 +3,15 @@ import re
 import pytest
 import tilelang
 import tilelang.testing
-import tvm
+from tilelang import tvm
 from tilelang import language as T
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 @tilelang.jit
 def _tilelang_issue_layout_free_inference_choose_smallest_replication():
     @T.prim_func
-    def main(A: T.Tensor((128, 4), T.float), B: T.Tensor((128, 4), T.float)):
+    def main(source: T.Tensor((4,), T.float), A: T.Tensor((128, 4), T.float), B: T.Tensor((128, 4), T.float)):
         with T.Kernel(1, threads=128) as _:
             A_frag = T.alloc_fragment((128, 4), T.float)
             B_frag = T.alloc_fragment((128, 4), T.float)
@@ -21,20 +21,34 @@ def _tilelang_issue_layout_free_inference_choose_smallest_replication():
                     A_frag: T.Fragment(A_frag.shape, lambda i, j: (i, j)),
                 }
             )
+            T.copy(source, S_frag)
             for i, j in T.Parallel(128, 4):
                 A_frag[i, j] = S_frag[j]
             for i, j in T.Parallel(128, 4):
                 B_frag[i, j] = S_frag[j]
+            T.copy(A_frag, A)
+            T.copy(B_frag, B)
 
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_issue_layout_free_inference_choose_smallest_replication():
+    import torch
+
     kernel = _tilelang_issue_layout_free_inference_choose_smallest_replication()
     source = kernel.get_kernel_source()
-    assert "float S_frag[4];" in source, "S_frag is not in the source"
-    assert "float B_frag[4];" in source, "B_frag is not in the source"
-    assert "float A_frag[4];" in source, "A_frag is not in the source"
+    for name in ("S_frag", "B_frag", "A_frag"):
+        allocation = re.search(rf"\bfloat([24]?) {name}(?:_ptr)?\[(\d+)\];", source)
+        assert allocation, f"{name} is not in the source"
+        assert int(allocation[1] or 1) * int(allocation[2]) == 4
+    values = torch.randn(4, device="cuda")
+    first = torch.empty((128, 4), device="cuda")
+    second = torch.empty_like(first)
+    kernel(values, first, second)
+    expected = values.expand_as(first)
+    torch.testing.assert_close(first, expected, rtol=0, atol=0)
+    torch.testing.assert_close(second, expected, rtol=0, atol=0)
 
 
 @tilelang.jit

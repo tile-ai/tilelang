@@ -3,75 +3,102 @@
  * \file hoist_global_buffer_allocations.cc
  */
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "compat/visit.h"
+
+#include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/tirx/var.h>
 
-#include "../op/utils.h"
-#include "common/attr.h"
-#include "tir/transforms/ir_utils.h"
-#include <tvm/tirx/stmt.h>
+#include <unordered_set>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+namespace {
 
-using namespace tirx;
-using namespace tirx::transform;
-
-class GlobalBufferAllocationsHoister : public StmtMutator {
+class DeviceAllocationCollector : public tirx::StmtExprMutator {
 public:
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    auto node = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-
-    if (IsHostMainBlock(op)) {
-      for (const auto &buf : global_buffers_) {
-        node.CopyOnWrite()->alloc_buffers.push_back(buf);
-      }
-    } else {
-      ffi::Array<Buffer> new_alloc_buffers;
-      for (const auto &buf : op->alloc_buffers) {
-        if (IsGlobalBuffer(buf)) {
-          global_buffers_.push_back(buf);
-        } else {
-          new_alloc_buffers.push_back(buf);
-        }
-      }
-      node.CopyOnWrite()->alloc_buffers = std::move(new_alloc_buffers);
-    }
-
-    return node;
+  explicit DeviceAllocationCollector(const RegionStmt &region) {
+    ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+        region,
+        [&](const Var &variable,
+            TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::WalkResult> {
+          if (kind != kTVMFFIDefRegionKindNone) {
+            definitions_.insert(variable.get());
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
-  ffi::Array<Buffer> global_buffers_;
+  ffi::Array<Stmt> allocations;
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                                 ffi::InplaceMode mode) final {
+    auto tensor = node->var.as<tirx::TensorVar>();
+    const auto *call = node->value.as<CallNode>();
+    if (!tensor || tensor->scope().name() != "global" || !call ||
+        !call->op.same_as(tirx::alloc_tensor_op())) {
+      return StmtExprMutator::Mutate_(node, mode);
+    }
+    for (const Var &variable : UndefinedVars(node->value)) {
+      TVM_FFI_CHECK(!definitions_.count(variable.get()), ValueError)
+          << "Cannot hoist global tensor " << tensor.value()->name
+          << " whose allocation depends on device-local variable "
+          << variable->name;
+    }
+    allocations.push_back(ffi::GetRef<Stmt>(node));
+    return SeqStmt({}, node->loc);
+  }
+
+  std::unordered_set<const VarNode *> definitions_;
 };
 
-PrimFunc HoistGlobalBufferAllocations(PrimFunc func) {
-  auto fptr = func.CopyOnWrite();
-  GlobalBufferAllocationsHoister hoister;
-  fptr->body = hoister(fptr->body);
-  return func;
-}
+class GlobalAllocationHoister : public tirx::StmtExprMutator {
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    bool device_region = node->op.same_as(tirx::launch_thread_op()) ||
+                         node->op->name == "tirx.device_scope" ||
+                         node->op->name == "tl.launch_grid";
+    if (!device_region) {
+      return StmtExprMutator::Mutate_(node, mode);
+    }
+    auto collector = ffi::make_object<DeviceAllocationCollector>(
+        ffi::GetRef<RegionStmt>(node));
+    Stmt original = ffi::GetRef<Stmt>(node);
+    Stmt body = collector->Mutate(original, mode).ValueOrUnchanged(original);
+    if (collector->allocations.empty()) {
+      return body;
+    }
+    auto statements = collector->allocations;
+    statements.push_back(body);
+    return SeqStmt(statements, node->loc);
+  }
+};
+
+} // namespace
 
 namespace transform {
 
-Pass HoistGlobalBufferAllocations() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return ::tvm::tl::HoistGlobalBufferAllocations(std::move(f));
+tvm::transform::Pass HoistGlobalBufferAllocations() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (function->body) {
+      auto hoister = ffi::make_object<GlobalAllocationHoister>();
+      SeqStmt body = function->body.value();
+      function.CopyOnWrite()->body =
+          hoister->Mutate(body).ValueOrUnchanged(body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.HoistGlobalBufferAllocations",
-                            {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.HoistGlobalBufferAllocations");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.HoistGlobalBufferAllocations",
-                        HoistGlobalBufferAllocations);
+  ffi::reflection::GlobalDef().def("tl.transform.HoistGlobalBufferAllocations",
+                                   HoistGlobalBufferAllocations);
 }
 
 } // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

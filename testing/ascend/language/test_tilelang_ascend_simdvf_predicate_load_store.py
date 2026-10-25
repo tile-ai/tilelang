@@ -4,7 +4,7 @@ import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def _predicate_load_store_kernel():

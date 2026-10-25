@@ -33,7 +33,7 @@ def issue_2123_atomic_load_repro(num_tiles, threads=32):
 
 
 def _assert_access_ptr_lowered(mod):
-    assert collect_calls(mod["main"], op="tirx.tvm_access_ptr")
+    assert collect_calls(mod["main"], op="tirx.address_of")
     assert_call_count(mod["main"], op="tl.access_ptr", count=0)
 
 

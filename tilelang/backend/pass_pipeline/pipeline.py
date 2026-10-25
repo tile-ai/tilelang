@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from tvm import IRModule
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
 
 LowerFunc = Callable[[IRModule, Target], IRModule]
 

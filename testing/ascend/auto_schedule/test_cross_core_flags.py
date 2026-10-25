@@ -1,11 +1,12 @@
 """Supported cross-core handshakes and user-reserved flag slots."""
 
 import pytest
+from tvm_tirx import ir
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import calls, copy, kernel, nodes, schedule, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
@@ -78,7 +79,7 @@ def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserve
 
 
 def test_unbounded_explicit_flag_is_rejected():
-    with pytest.raises(tvm.error.InternalError, match="integer range cannot be bounded"):
+    with pytest.raises(RuntimeError, match="integer range cannot be bounded"):
         before = schedule(_program("unbounded"), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         transform.InsertSync()(before)
 
@@ -101,12 +102,12 @@ def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
         )
         copies.append(unit(tirx.Evaluate(call), core=1 if sid == 0 else 4))
     before = kernel(
-        unit(tirx.For(rows, 1, 16, tirx.ForKind.SERIAL, seq(*copies)), core=None),
+        unit(tirx.For(rows, 1, (1) + (16), 1, tirx.ForKind.DEFAULT, seq(*copies)), core=None),
         buffers=[l1, *nz],
         annotations={"tl.split_subcores": True},
     )
     if overlap:
-        with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+        with pytest.raises(RuntimeError, match="does not support synchronization between AIV0 and AIV1"):
             transform.InsertSync()(before)
     else:
         after = transform.InsertSync()(before)
@@ -131,17 +132,17 @@ def test_alternating_epilogue_uses_each_aiv_flag_bank(versions):
     counters = list(owner.annotations["tl.multi_buffer_counter_map"].values())
     assert len(counters) == 2 and not counters[0].same_as(counters[1])
     counter_masks = {
-        int(task.node["core_mask"])
-        for task in nodes(before, tirx.AttrStmt)
-        if task.attr_key == "tl.ascend_task"
-        and any(store.buffer.same_as(counter) for store in nodes(task.body, tirx.BufferStore) for counter in counters)
+        int(task.attrs["tl.ascend_task"]["core_mask"])
+        for task in nodes(before, ir.RegionStmt)
+        if "tl.ascend_task" in task.attrs
+        and any(store.dest.same_as(counter) for store in nodes(task.body, tirx.BufferStore) for counter in counters)
     }
     assert counter_masks == {3, 6}
     after = transform.InsertSync()(before)
-    for task in nodes(after, tirx.AttrStmt):
-        if task.attr_key != "tl.ascend_task":
+    for task in nodes(after, ir.RegionStmt):
+        if "tl.ascend_task" not in task.attrs:
             continue
-        core = int(task.node["core_mask"])
+        core = int(task.attrs["tl.ascend_task"]["core_mask"])
         for call in calls(task.body, "tl.ascend_cross_core_set_flag") + calls(task.body, "tl.ascend_cross_core_wait_flag"):
             analyzer = tvm.arith.Analyzer()
             bound = analyzer.const_int_bound(analyzer.simplify(call.args[2]))
@@ -149,8 +150,8 @@ def test_alternating_epilogue_uses_each_aiv_flag_bank(versions):
             assert bound.max_value < (32 if core == 2 else 16)
     cube_ids = {
         int(call.args[2])
-        for task in nodes(after, tirx.AttrStmt)
-        if task.attr_key == "tl.ascend_task" and int(task.node["core_mask"]) == 2
+        for task in nodes(after, ir.RegionStmt)
+        if "tl.ascend_task" in task.attrs and int(task.attrs["tl.ascend_task"]["core_mask"]) == 2
         for call in calls(task.body, "tl.ascend_cross_core_wait_flag")
         if isinstance(call.args[2], tirx.IntImm)
     }
@@ -177,7 +178,7 @@ def test_cross_aiv_memory_dependencies_require_supported_ordering(hazard):
         assert len(calls(after, "tl.tileop.ascend_copy")) == 2
         assert not calls(after, "tl.ascend_cross_core_set_flag")
     else:
-        with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+        with pytest.raises(RuntimeError, match="does not support synchronization between AIV0 and AIV1"):
             transform.InsertSync()(before)
 
 
@@ -199,18 +200,18 @@ def test_only_actual_cube_dependencies_can_order_aiv_accesses(orders_accesses):
         annotations={"tl.split_subcores": True},
     )
     if not orders_accesses:
-        with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+        with pytest.raises(RuntimeError, match="does not support synchronization between AIV0 and AIV1"):
             transform.InsertSync()(before)
         return
     after = transform.InsertSync()(before)
     endpoints = {"set": set(), "wait": set()}
-    for task in nodes(after, tirx.AttrStmt):
-        if task.attr_key != "tl.ascend_task":
+    for task in nodes(after, ir.RegionStmt):
+        if "tl.ascend_task" not in task.attrs:
             continue
         for operation, cores in endpoints.items():
             for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
                 assert int(call.args[0]) == 4 and call.args[1].value != "PIPE_S"
-                cores.add(int(task.node["core_mask"]))
+                cores.add(int(task.attrs["tl.ascend_task"]["core_mask"]))
     assert endpoints == {"set": {1, 2}, "wait": {2, 4}}
 
 
@@ -231,7 +232,7 @@ def test_alternating_aiv_writers_without_cube_ordering_are_rejected(scope):
                         T.copy(ub, C)
 
     before = schedule(main, through="ResolveCore", auto_schedule=False)
-    with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+    with pytest.raises(RuntimeError, match="does not support synchronization between AIV0 and AIV1"):
         transform.InsertSync()(before)
 
 
@@ -240,7 +241,7 @@ def test_alternating_aiv_writers_without_cube_ordering_are_rejected(scope):
 @pytest.mark.parametrize("versions", [1, 3], ids=["publication", "ring-reuse"])
 def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
     ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
-    view = tirx.decl_buffer((1,), "uint64", data=ss.data) if packed else ss
+    view = tirx.decl_buffer((1,), "uint64", name="packed", scope="shared.ss") if packed else ss
     out = tirx.decl_buffer((2,), "uint32", name="out")
     if to_cube:
         tasks = [unit(tirx.BufferStore(ss, tirx.const(7, "uint32"), [sid]), core=core) for sid, core in enumerate((1, 4))]
@@ -254,18 +255,20 @@ def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
     annotations = {"tl.split_subcores": True}
     i = tirx.Var("i", "int32")
     if versions > 1:
-        body = unit(tirx.For(i, 0, 8, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ss.data]}), core=None)
-        annotations["tl.buffer_versions_map"] = {ss.data: versions}
+        body = unit(tirx.For(i, 0, 8, 1, tirx.ForKind.DEFAULT, body, annotations={"multi_buffer_eligible": [ss]}), core=None)
+        annotations["tl.buffer_versions_map"] = {ss: versions}
+    if packed:
+        body = seq(unit(ir.Bind(view, ir.Call("tirx.decl_tensor", [ss.data], ty_args=[view.ty])), core=7), body)
     before = kernel(body, buffers=[ss], params=[out], annotations=annotations)
     after = transform.InsertSync()(before)
     endpoints = {"set": [], "wait": []}
-    for task in nodes(after, tirx.AttrStmt):
-        if task.attr_key != "tl.ascend_task":
+    for task in nodes(after, ir.RegionStmt):
+        if "tl.ascend_task" not in task.attrs:
             continue
         for operation, events in endpoints.items():
             for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
                 assert int(call.args[0]) == 4 and call.args[1].value == "PIPE_S"
-                events.append((int(task.node["core_mask"]), tvm.arith.Analyzer().simplify(call.args[2])))
+                events.append((int(task.attrs["tl.ascend_task"]["core_mask"]), tvm.arith.Analyzer().simplify(call.args[2])))
     if versions > 1:
         initial, drained = (
             {int(slot) + (16 if core == 4 else 0) for core, slot in endpoints[operation] if isinstance(slot, tirx.IntImm)}

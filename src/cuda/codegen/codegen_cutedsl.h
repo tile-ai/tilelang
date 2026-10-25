@@ -6,9 +6,9 @@
 #define TVM_TL_TARGET_CODEGEN_CUTEDSL_H_
 
 #include "support/check.h"
-#include <tvm/target/codegen.h>
+#include <tvm/codegen/codegen.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 
 #include <optional>
 #include <string>
@@ -27,77 +27,80 @@ public:
   CodeGenTileLangCuTeDSL();
 
 protected:
-  void InitFuncState_(const PrimFunc &f) override;
+  void InitFuncState_(const tirx::Function &f) override;
 
   void PrintFuncDecorator_(std::ostream &os) override; // NOLINT(*)
-  void PreFunctionBody_(const PrimFunc &f) override;
+  void PreFunctionBody_(const tirx::Function &f) override;
 
 protected:
-  void PrintType(DataType t, std::ostream &os) override; // NOLINT(*)
+  void PrintType(PrimType t, std::ostream &os) override; // NOLINT(*)
 
-  void VisitExpr_(const BroadcastNode *op,
-                  std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const FloatImmNode *op,
-                  std::ostream &os) override;                       // NOLINT(*)
-  void VisitExpr_(const IntImmNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const CastNode *op, std::ostream &os) override;   // NOLINT(*)
-  void VisitExpr_(const DivNode *op, std::ostream &os) override;    // NOLINT(*)
-  void VisitExpr_(const MinNode *op, std::ostream &os) override;    // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
-  void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
-  void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const LetNode *op, std::ostream &os) override;    // NOLINT(*)
-  void VisitExpr_(const ShuffleNode *op,
-                  std::ostream &os) override; // NOLINT(*)
-  void VisitExpr_(const BufferLoadNode *op,
-                  std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const BroadcastNode *op,
+                 std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const FloatImmNode *op,
+                 std::ostream &os) override;                       // NOLINT(*)
+  void Dispatch_(const IntImmNode *op, std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const CastNode *op, std::ostream &os) override;   // NOLINT(*)
+  void Dispatch_(const DivNode *op, std::ostream &os) override;    // NOLINT(*)
+  void Dispatch_(const MinNode *op, std::ostream &os) override;    // NOLINT(*)
+  void Dispatch_(const MaxNode *op, std::ostream &os) override;    // NOLINT(*)
+  void Dispatch_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
+  void Dispatch_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
+                                                                   // NOLINT(*)
+  void Dispatch_(const ShuffleNode *op,
+                 std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const TensorLoadNode *op,
+                 std::ostream &os) override; // NOLINT(*)
 
-  void VisitStmt_(const BufferStoreNode *op) override;
-  void VisitStmt_(const BindNode *op) override;
-  void VisitStmt_(const AllocBufferNode *op) override;
-  void VisitStmt_(const AttrStmtNode *op) override;
-  void VisitStmt_(const ForNode *op) override;
-  void VisitStmt_(const IfThenElseNode *op) override;
-  void VisitStmt_(const EvaluateNode *op) override;
-  void VisitStmt_(const SeqStmtNode *op) override;
+  void Dispatch_(const TensorStoreNode *op) override;
+  void Dispatch_(const BindNode *op) override;
+  void PrintAllocTensor_(const BindNode *op,
+                         const CallNode *allocation) override;
+  void Dispatch_(const RegionStmtNode *op) override;
+  void Dispatch_(const ForNode *op) override;
+  void Dispatch_(const BreakNode *op) override;
+  void Dispatch_(const IfNode *op) override;
+  void Dispatch_(const EvaluateNode *op) override;
+  void Dispatch_(const SeqStmtNode *op) override;
 
 protected:
-  virtual void PrintVecElemLoad_(const std::string &vec, DataType t, int i,
+  virtual void PrintVecElemLoad_(const std::string &vec, PrimType t, int i,
                                  std::ostream &os); // NOLINT(*)
-  virtual void PrintVecElemStore_(const std::string &vec, DataType t, int i,
+  virtual void PrintVecElemStore_(const std::string &vec, PrimType t, int i,
                                   const std::string &value);
-  virtual void PrintVecStore_(const BufferNode *buffer, DataType t,
+  virtual void PrintVecStore_(const TensorVar &buffer, PrimType t,
                               PrimExpr base, const std::string &value);
-  void PrintVecBinaryOp_(const std::string &opstr, DataType dtype, PrimExpr lhs,
-                         PrimExpr rhs,
+  void PrintVecBinaryOp_(const std::string &opstr, PrimType dtype, Expr lhs,
+                         Expr rhs,
                          std::ostream &os); // NOLINT(*)
-  void PrintBinaryExpr_(const std::string &opstr, DataType dtype, PrimExpr lhs,
-                        PrimExpr rhs,
+  void PrintBinaryExpr_(const std::string &opstr, PrimType dtype, Expr lhs,
+                        Expr rhs,
                         std::ostream &os) override; // NOLINT(*)
   void PrintBinaryIntrinsic_(const CallNode *op, const char *opstr,
                              std::ostream &os) override; // NOLINT(*)
 
   void PrintCallExtern_(Type ret_type, ffi::String global_symbol,
-                        const ffi::Array<PrimExpr> &args, bool skip_first_arg,
+                        const ffi::Array<Expr> &args, bool skip_first_arg,
                         std::ostream &os) override; // NOLINT(*)
 
-  std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
-  std::string GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
+  std::string GetBufferPtr_(const TensorVar &buffer, PrimExpr index);
+  std::string GetSubByteBufferPtrAsByte_(const TensorVar &buffer,
                                          PrimExpr index);
-  std::string PrintBytePointerExpr_(const PrimExpr &expr);
-  std::string GetBufferRef_(DataType t, const BufferNode *buffer,
+  std::string PrintBytePointerExpr_(const Expr &expr);
+  std::string GetBufferRef_(PrimType t, const TensorVar &buffer,
                             PrimExpr index) override;
-  PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
+  PrimExpr LinearizeBufferIndices_(const TensorVar &buffer,
                                    const ffi::Array<PrimExpr> &indices);
 
   // Get pointer string from a Var expression (local buffer -> vid.iterator)
-  std::string GetVarPtr_(const PrimExpr &expr);
+  std::string GetVarPtr_(const Expr &expr);
 
   /*!
    * \brief Print expr representing the thread tag
    * \param IterVar iv The thread index to be binded;
    */
-  virtual void BindThreadIndex_(const IterVar &iv); // NOLINT(*)
+  virtual void BindThreadIndex_(const PrimVar &variable,
+                                const std::string &tag); // NOLINT(*)
 
   virtual void PrintStorageSync_(const CallNode *op);
 

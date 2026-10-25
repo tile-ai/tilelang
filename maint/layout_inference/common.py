@@ -21,7 +21,7 @@ import tilelang.language as T  # noqa: F401  (cases import via common)
 from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tilelang.layout import Fragment
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 
 # The two selection policies behind `tl.layout_cost_model`, by name.
 COST_MODELS = ("register-count", "io-aware")
@@ -86,10 +86,10 @@ def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
     def visit(node):
         buf, lanes = None, 0
         if isinstance(node, tvm.tirx.BufferLoad):
-            buf, lanes = node.buffer, node.dtype.lanes
+            buf, lanes = node.source, node.ty.lanes
         elif isinstance(node, tvm.tirx.BufferStore):
-            buf, lanes = node.buffer, node.value.dtype.lanes
-        if buf is not None and buf.scope() == "global":
+            buf, lanes = node.dest, node.value.ty.lanes
+        if buf is not None and buf.scope().name == "global":
             widths[buf.name] = max(widths.get(buf.name, 1), lanes)
 
     for _, func in artifact.device_mod.functions.items():

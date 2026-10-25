@@ -6,7 +6,7 @@ from .cpu import *
 from .cdna import *
 from .rdna import *
 from .metal import *
-from tvm.target import Target
+from tvm_tirx.target import Target
 import torch
 from tilelang.backend.target import determine_target
 from tilelang.rocm.target import target_get_rdna_generation, target_is_rdna
@@ -20,7 +20,7 @@ def get_arch(target: str | Target = "cuda") -> TileDevice:
         return CUDA(target)
     elif target.kind.name == "llvm":
         return CPU(target)
-    elif target.kind.name == "hip":
+    elif target.kind.name == "rocm":
         if target_is_rdna(target):
             if target_get_rdna_generation(target) in (11, 12):
                 return RDNA(target)

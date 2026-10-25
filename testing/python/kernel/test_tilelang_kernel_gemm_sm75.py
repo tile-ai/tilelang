@@ -5,7 +5,8 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
+from tvm_tirx import ir
 
 
 def _make_gemm_kernel(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype):
@@ -213,19 +214,23 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
     ldmatrix_calls = []
 
     def visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == "thread_extent":
-            analyzer.update(node.node.var, tvm.arith.ConstIntBound(0, int(node.value) - 1))
-        elif isinstance(node, tvm.tirx.For):
+        if isinstance(node, ir.RegionStmt) and node.op.name == "tirx.launch_thread":
+            analyzer.update(node.body_params[0], tvm.arith.ConstIntBound(0, int(node.args[1]) - 1))
+        elif isinstance(node, ir.For):
             analyzer.update(
-                node.loop_var,
-                tvm.arith.ConstIntBound(int(node.min), int(node.min) + int(node.extent) - 1),
+                node.var,
+                tvm.arith.ConstIntBound(int(node.begin), int(node.end) - 1),
             )
-        elif isinstance(node, (tvm.tirx.AllocBuffer, tvm.tirx.DeclBuffer)):
+        elif (
+            isinstance(node, ir.Bind)
+            and isinstance(node.value, ir.Call)
+            and node.value.op.name in ("tirx.alloc_tensor", "tirx.decl_tensor")
+        ):
             size = 1
-            for extent in node.buffer.shape:
+            for extent in node.var.shape:
                 size *= int(extent)
-            buffer_sizes[node.buffer.data] = size
-        elif isinstance(node, tvm.tirx.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
+            buffer_sizes[node.var] = size
+        elif isinstance(node, ir.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
             ldmatrix_calls.append(node)
 
     post_order_visit(func.body, visit)
@@ -233,8 +238,9 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
 
     for call in ldmatrix_calls:
         src = call.args[2]
-        assert str(src.op.name) == "tirx.tvm_access_ptr"
-        data, offset, extent = src.args[1], src.args[2], int(src.args[3])
+        assert src.op.name == "tirx.address_of"
+        load = src.args[0]
+        data, offset, extent = load.source, load.indices[0], int(src.attrs["tl.access_extent"])
         assert data in buffer_sizes, f"ldmatrix source {data.name} has no visible allocation"
         bound = analyzer.const_int_bound(offset)
         assert bound.min_value >= 0

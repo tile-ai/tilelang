@@ -1,11 +1,13 @@
 """InsertSync protects RAW and storage reuse independently of scheduling."""
 
+from tvm_ffi import structural_equal
 import pytest
+from tvm_tirx import ir
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_major_k_layout, make_ascend_major_mn_layout
-from tvm import tirx
-from testing.ascend._ir import allocated_buffer, calls, copy, kernel, nodes, seq, statements
+from tilelang._compat import tirx
+from testing.ascend._ir import root_scope, allocated_buffer, calls, copy, guard_conditions, kernel, nodes, seq, simd_scope, statements
 from testing.ascend.auto_schedule._scheduled_ir import copy_ring, unit
 
 
@@ -17,7 +19,7 @@ def _events(mod, operation, pipe):
 def test_ring_flags_use_the_data_clock(mode, owners, guarded):
     before = copy_ring(mode=mode, owners=owners, guarded=guarded, prepared=True)
     after = transform.InsertSync()(before)
-    clock = allocated_buffer(before, "epoch")[0] if mode == "counter" else nodes(before, tirx.For)[0].loop_var
+    clock = allocated_buffer(before, "epoch")[0] if mode == "counter" else nodes(before, tirx.For)[0].var
     analyzer = tvm.arith.Analyzer()
     for pipe in ("MTE2_MTE3", "MTE3_MTE2"):
         for operation in ("set", "wait"):
@@ -44,10 +46,7 @@ def test_ring_flags_use_the_data_clock(mode, owners, guarded):
             if stmt.value.op.name not in ("tl.ascend_set_flag", "tl.ascend_wait_flag") or isinstance(stmt.value.args[1], tirx.IntImm):
                 continue
             owner = next(parent for parent in reversed(parents) if isinstance(parent, tirx.For))
-            assert any(
-                isinstance(parent, tirx.IfThenElse) and analyzer.can_prove_equal(parent.condition, owner.loop_var % 2 == 0)
-                for parent in parents
-            )
+            assert any(analyzer.can_prove_equal(condition, owner.var % 2 == 0) for condition in guard_conditions(parents))
             guarded_events.append(stmt)
         assert guarded_events
 
@@ -97,10 +96,10 @@ def test_manually_indexed_storage_keeps_the_lexical_clock_under_a_guard():
         unit(copy(ub, c, src_indices=[i % 2, 0], src_shape=[1, 64], dst_indices=[i, 0], dst_shape=[1, 64]), guard=i % 2 == 0),
     )
     before = kernel(
-        unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body), core=None),
+        unit(tirx.For(i, 0, 4, 1, tirx.ForKind.DEFAULT, body), core=None),
         buffers=[ub],
         params=[a, c],
-        annotations={"tl.manual_multi_buffer": {ub.data: 2}},
+        annotations={"tl.manual_multi_buffer": {ub: 2}},
     )
     after = transform.InsertSync()(before)
     dynamic = []
@@ -124,7 +123,7 @@ def test_dma_row_writes_only_serialize_overlapping_regions(overlap):
     ub = tirx.decl_buffer((2, 64), "float32", name="ub", scope="shared.dyn")
     row = tirx.Var("row", "int32")
     load = copy(a, ub, src_indices=[row, 0], dst_indices=[0 if overlap else row, 0], src_shape=[1, 64], dst_shape=[1, 64])
-    rows = tirx.For(row, 0, 2, tirx.ForKind.SERIAL, unit(load))
+    rows = tirx.For(row, 0, 2, 1, tirx.ForKind.DEFAULT, unit(load))
     before = kernel(seq(unit(rows, core=None), unit(copy(ub, out))), buffers=[ub], params=[a, out])
     after = transform.InsertSync()(before)
     barriers = [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
@@ -180,7 +179,7 @@ def test_partial_l0_loads_complete_before_gemm_and_order_overlapping_writes(over
     releases, waits = _events(after, "set", "MTE1_M"), _events(after, "wait", "MTE1_M")
     assert releases and waits
     for release in releases:
-        assert any(tvm.ir.structural_equal(release.args[1], wait.args[1]) for wait in waits)
+        assert any(structural_equal(release.args[1], wait.args[1]) for wait in waits)
     operations = [stmt.value for stmt in nodes(after, tirx.Evaluate) if isinstance(stmt.value, tirx.Call)]
     loads = [i for i, call in enumerate(operations) if call.op.name == "tl.tileop.ascend_copy"]
     release_sites = [i for i, call in enumerate(operations) if any(call.same_as(release) for release in releases)]
@@ -278,7 +277,7 @@ def test_l0_copy_pitch_is_instantiated_per_iteration(varying_pitch):
         dst_shape=[16, 16],
         annotations={"l0_pitch": 1 + i if varying_pitch else tirx.IntImm("int32", 2)},
     )
-    body = unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, unit(load, core=2)), core=None)
+    body = unit(tirx.For(i, 0, 2, 1, tirx.ForKind.DEFAULT, unit(load, core=2)), core=None)
     layouts = {src: make_ascend_major_k_layout(src), a: make_ascend_major_k_layout(a)}
     after = transform.InsertSync()(kernel(body, buffers=[src, a], annotations={"layout_map": layouts}))
     barriers = [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE1"]
@@ -306,7 +305,7 @@ def test_atomic_l0_copies_require_a_uniform_pitch(overlap, unroll, varying_pitch
     loads = (
         seq(*(tirx.stmt_functor.substitute(load, {i: value}) for value in (0, 1)))
         if unroll
-        else tirx.For(i, 0, 2, tirx.ForKind.SERIAL, load)
+        else tirx.For(i, 0, 2, 1, tirx.ForKind.DEFAULT, load)
     )
     body = seq(
         unit(loads, core=2),
@@ -324,7 +323,7 @@ def test_equivalent_lexical_epoch_serializes_counter_ring():
     epoch = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
     i = tirx.Var("i", "int32")
     guard = i % 2 == 0
-    compute = tirx.SBlock([], [], [], "SIMD_VF", tirx.BufferStore(ub, ub[0], [0]))
+    compute = simd_scope(tirx.BufferStore(ub, ub[0], [0]))
     body = seq(
         unit(copy(a, ub), guard=guard),
         unit(compute, guard=guard),
@@ -335,19 +334,20 @@ def test_equivalent_lexical_epoch_serializes_counter_ring():
         i,
         0,
         4,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         body,
         annotations={
-            "multi_buffer_eligible": [ub.data],
-            "tl.multi_buffer_counter_map": {ub.data: epoch},
-            "tl.storage_epoch_guard_map": {ub.data: guard, a.data: guard},
+            "multi_buffer_eligible": [ub],
+            "tl.multi_buffer_counter_map": {ub: epoch},
+            "tl.storage_epoch_guard_map": {ub: guard, a: guard},
         },
     )
     before = kernel(
         seq(unit(tirx.BufferStore(epoch, 0, [0])), unit(owner, core=None)),
         buffers=[ub, epoch],
         params=[a],
-        annotations={"tl.buffer_versions_map": {ub.data: 2}},
+        annotations={"tl.buffer_versions_map": {ub: 2}},
     )
     after = transform.InsertSync()(before)
     # GM is reused every active epoch, so its lexical MTE3->MTE2 closure
@@ -358,5 +358,5 @@ def test_equivalent_lexical_epoch_serializes_counter_ring():
         assert released and acquired
         assert all(isinstance(event.args[1], tirx.IntImm) for event in released + acquired)
         assert sorted(int(event.args[1]) for event in released) == sorted(int(event.args[1]) for event in acquired)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    assert int(root.annotations["tl.buffer_versions_map"][ub.data]) == 2
+    root = root_scope(after)
+    assert int(root.attrs["tl.buffer_versions_map"][ub]) == 2

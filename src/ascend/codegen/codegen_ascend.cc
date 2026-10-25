@@ -8,15 +8,18 @@
 #include <unordered_set>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/gpu.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include "arith/pattern_match.h"
+#include "compat/visit.h"
+#include "transform/common/storage_size.h"
+#include <tvm/ir/prim/pattern_match.h>
 
 #include "ascend/op/builtin.h"
 #include "ascend/op/utils.h"
@@ -26,6 +29,26 @@
 namespace tvm {
 namespace codegen {
 using ffi::GetRef;
+using namespace prim;
+
+namespace {
+PrimExpr MakeZero(PrimType type) { return MakeConst(type, 0); }
+bool IsOne(const PrimExpr &value) { return tl::GetConstInt(value) == 1; }
+bool is_zero(const PrimExpr &value) { return tl::GetConstInt(value) == 0; }
+ffi::Map<ffi::String, ffi::Any> Attributes(const CallNode *node) {
+  return node->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>()->dict;
+}
+ffi::Map<ffi::String, ffi::Any> Attributes(const Call &node) {
+  return Attributes(node.get());
+}
+ffi::Map<ffi::String, ffi::Any> Attributes(const RegionStmtNode *node) {
+  return node->attrs->dict;
+}
+String RegionName(const RegionStmtNode *node) {
+  auto name = node->attrs->dict.Get("name_hint");
+  return name ? name->cast<String>() : String("");
+}
+} // namespace
 
 namespace {
 
@@ -47,7 +70,13 @@ bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
 
 bool IsSimdMergingCall(const CallNode *op,
                        std::string *intrinsic_name = nullptr) {
-  if (!op->dtype.is_void() || op->args.empty()) {
+  if (!IsSimdOp(op) || op->args.empty()) {
+    return false;
+  }
+  auto primitive = op->ty.as<PrimType>();
+  const auto *tuple = op->ty.as<TupleTypeNode>();
+  if (!(primitive && primitive->IsVoid()) &&
+      !(tuple && tuple->fields.empty())) {
     return false;
   }
   const auto *mode = op->args.back().as<StringImmNode>();
@@ -66,30 +95,30 @@ bool IsSimdMergingCall(const CallNode *op,
 
 // CCE merging overloads validated on dav-3510. Keep the existing C API path
 // for other element types, including FP8 and 64-bit vector representations.
-bool SupportsNativeSimdMerging(const std::string &name, DataType dtype) {
+bool SupportsNativeSimdMerging(const std::string &name, PrimType dtype) {
   const bool is_integer =
-      (dtype.is_int() || dtype.is_uint()) &&
+      (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
       (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32);
   const bool is_float =
-      dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32);
-  if (!is_integer && !is_float && !dtype.is_bfloat16()) {
+      dtype.MatchesCode(kDLFloat) && (dtype.bits() == 16 || dtype.bits() == 32);
+  if (!is_integer && !is_float && !dtype.MatchesElementType(kDLBfloat, 16)) {
     return false;
   }
   if (name == "vdup") {
     // CANN 9.2's scalar BF16 overload merges into an uninitialized temporary
     // instead of the old destination. Vector broadcast uses a different
     // overload.
-    return !dtype.is_bfloat16();
+    return !dtype.MatchesElementType(kDLBfloat, 16);
   }
   if (name == "vabs" || name == "vneg") {
-    return (is_integer && dtype.is_int()) || is_float;
+    return (is_integer && dtype.MatchesCode(kDLInt)) || is_float;
   }
   if (name == "vabsdif" || name == "vexp" || name == "vln" || name == "vsqrt" ||
       name == "vaxpy") {
     return is_float;
   }
   if (name == "vrelu") {
-    return is_float || (dtype.is_int() && dtype.bits() == 32);
+    return is_float || (dtype.MatchesCode(kDLInt) && dtype.bits() == 32);
   }
   if (name == "vshl" || name == "vshr" || name == "vshls" || name == "vshrs") {
     return is_integer;
@@ -126,28 +155,31 @@ static SfuPrecision PrecisionFromCode(int code) {
 }
 
 // MODE_MERGING calls are legalized to void calls, so use the explicit result
-// dtype supplied by the caller rather than reading op->dtype here.
-SfuPrecision ResolveSfuPrecision(const Call &op, DataType result_dtype,
+// dtype supplied by the caller rather than reading
+// PythonDType(GetRef<Expr>(op)) here.
+SfuPrecision ResolveSfuPrecision(const Call &op, PrimType result_dtype,
                                  SfuPrecision fallback) {
   // Precise paths (vdiv_0ulp_ftz_true, *_ftz_false wrappers) are float32-only:
   // non-fp32 keeps the hardware instruction regardless of annotations
   // (historical UsePreciseVdiv contract: "non-fp32 always uses hardware").
-  if (!result_dtype.is_float() || result_dtype.bits() != 32) {
+  if (!result_dtype.MatchesCode(kDLFloat) || result_dtype.bits() != 32) {
     return fallback;
   }
   // Per-op "precision" annotation (int code from the Python side,
   // normalized from the string aliases in tilelang/ascend/language/simd.py
   // -- no alias table here, mirroring the l2_cache_ctrl pattern).
-  if (auto p = op->annotations.Get("precision")) {
-    return PrecisionFromCode(Downcast<IntImm>(p.value())->value);
+  if (auto p = Attributes(op).Get("precision")) {
+    return PrecisionFromCode(tl::GetIntAnnotation(*p).value());
   }
   return fallback;
 }
 
-bool IsAscendWarpReduceDType(DataType dtype) {
-  return dtype.is_scalar() &&
-         ((dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
-          ((dtype.is_int() || dtype.is_uint()) && dtype.bits() == 32));
+bool IsAscendWarpReduceDType(PrimType dtype) {
+  return dtype.IsScalar() &&
+         ((dtype.MatchesCode(kDLFloat) &&
+           (dtype.bits() == 16 || dtype.bits() == 32)) ||
+          ((dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+           dtype.bits() == 32));
 }
 
 static std::string GetAscendScopeQualifier(const std::string &scope) {
@@ -199,18 +231,18 @@ std::string FixIndent(const std::string &body) {
   return oss.str();
 }
 
-// Map a TVM DataType to the Ascend CCE vector type suffix (e.g. Float32 ->
+// Map a TVM PrimType to the Ascend CCE vector type suffix (e.g. Float32 ->
 // "f32").
-std::string CCEVectorSuffix(DataType dtype) {
-  if (dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn())
+std::string CCEVectorSuffix(PrimType dtype) {
+  if (dtype.MatchesCode(kDLFloat8_e4m3) || dtype.MatchesCode(kDLFloat8_e4m3fn))
     return "f8e4m3";
-  if (dtype.is_float8_e5m2())
+  if (dtype.MatchesCode(kDLFloat8_e5m2))
     return "f8e5m2";
-  if (dtype.is_float8_e8m0fnu())
+  if (dtype.MatchesCode(kDLFloat8_e8m0fnu))
     return "f8e8m0";
-  if (dtype.is_float4_e2m1fn())
+  if (dtype.MatchesCode(kDLFloat4_e2m1fn))
     return "f4e2m1x2";
-  if (dtype.is_float()) {
+  if (dtype.MatchesCode(kDLFloat)) {
     if (dtype.bits() == 16)
       return "f16";
     if (dtype.bits() == 32)
@@ -218,13 +250,13 @@ std::string CCEVectorSuffix(DataType dtype) {
     LOG(FATAL) << "Unsupported Ascend SIMD floating-point element type "
                << dtype;
   }
-  if (dtype.is_bfloat16())
+  if (dtype.MatchesElementType(kDLBfloat, 16))
     return "bf16";
-  if (dtype.is_int() && (dtype.bits() == 8 || dtype.bits() == 16 ||
-                         dtype.bits() == 32 || dtype.bits() == 64))
+  if (dtype.MatchesCode(kDLInt) && (dtype.bits() == 8 || dtype.bits() == 16 ||
+                                    dtype.bits() == 32 || dtype.bits() == 64))
     return "s" + std::to_string(dtype.bits());
-  if (dtype.is_uint() && (dtype.bits() == 8 || dtype.bits() == 16 ||
-                          dtype.bits() == 32 || dtype.bits() == 64))
+  if (dtype.MatchesCode(kDLUInt) && (dtype.bits() == 8 || dtype.bits() == 16 ||
+                                     dtype.bits() == 32 || dtype.bits() == 64))
     return "u" + std::to_string(dtype.bits());
   LOG(FATAL) << "Unsupported Ascend SIMD vector element type " << dtype;
   return "";
@@ -232,29 +264,29 @@ std::string CCEVectorSuffix(DataType dtype) {
 
 // Get element width in bits for choosing b8/b16/b32 predicate/load/store
 // variants.
-int CCEElemWidthBits(DataType dtype) {
-  if (dtype.is_float4_e2m1fn())
+int CCEElemWidthBits(PrimType dtype) {
+  if (dtype.MatchesCode(kDLFloat4_e2m1fn))
     return 8;
   return dtype.bits();
 }
 
-// Map DataType to the C++ type name used in __ubuf__ pointer casts.
-std::string CCEUBufType(DataType dtype) {
-  if (dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn())
+// Map PrimType to the C++ type name used in __ubuf__ pointer casts.
+std::string CCEUBufType(PrimType dtype) {
+  if (dtype.MatchesCode(kDLFloat8_e4m3) || dtype.MatchesCode(kDLFloat8_e4m3fn))
     return "float8_e4m3_t";
-  if (dtype.is_float8_e5m2())
+  if (dtype.MatchesCode(kDLFloat8_e5m2))
     return "float8_e5m2_t";
-  if (dtype.is_float8_e8m0fnu())
+  if (dtype.MatchesCode(kDLFloat8_e8m0fnu))
     return "float8_e8m0_t";
-  if (dtype.is_float4_e2m1fn())
+  if (dtype.MatchesCode(kDLFloat4_e2m1fn))
     return "float4_e2m1x2_t";
-  if (dtype.is_float())
+  if (dtype.MatchesCode(kDLFloat))
     return (dtype.bits() == 16) ? "half" : "float";
-  if (dtype.is_bfloat16())
+  if (dtype.MatchesElementType(kDLBfloat, 16))
     return "bfloat16_t";
-  if (dtype.is_int())
+  if (dtype.MatchesCode(kDLInt))
     return "int" + std::to_string(dtype.bits()) + "_t";
-  if (dtype.is_uint())
+  if (dtype.MatchesCode(kDLUInt))
     return "uint" + std::to_string(dtype.bits()) + "_t";
   return "float";
 }
@@ -300,7 +332,7 @@ int64_t GetIntImmArg(const CallNode *op, size_t index, const char *intrinsic,
   const auto *value = op->args[index].as<IntImmNode>();
   ICHECK(value) << intrinsic << " argument " << index << " (" << argument_name
                 << ") must be an IntImm, but got " << op->args[index];
-  return value->value;
+  return value->value.as<int64_t>().value();
 }
 
 std::string GetStringImmArg(const CallNode *op, size_t index,
@@ -333,7 +365,7 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
   CodeGenC::Init(output_ssa);
   auto pass_ctx = tvm::transform::PassContext::Current();
   enable_fast_math_ =
-      pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
+      pass_ctx->GetConfig<bool>(tl::kEnableFastMath).value_or(false);
   preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
   preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
 }
@@ -355,15 +387,15 @@ void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
   }
 }
 
-void CodeGenTileLangAscend::PrintCCEVectorSuffix(DataType t, std::ostream &os) {
+void CodeGenTileLangAscend::PrintCCEVectorSuffix(PrimType t, std::ostream &os) {
   os << CCEVectorSuffix(t);
 }
 
-static std::string GetAscendFP8Type(DataType type) {
+static std::string GetAscendFP8Type(PrimType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
   std::string vec;
-  if (type.is_scalar()) {
+  if (type.IsScalar()) {
     vec = "";
   } else if (lanes == 2) {
     vec = "_2";
@@ -375,11 +407,11 @@ static std::string GetAscendFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8) for "
                   "Ascend fp8";
   }
-  if (type.is_float8_e4m3() || type.is_float8_e4m3fn()) {
+  if (type.MatchesCode(kDLFloat8_e4m3) || type.MatchesCode(kDLFloat8_e4m3fn)) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.is_float8_e5m2()) {
+  } else if (type.MatchesCode(kDLFloat8_e5m2)) {
     stream << "fp8_e5" << vec << "_t";
-  } else if (type.is_float8_e8m0fnu()) {
+  } else if (type.MatchesCode(kDLFloat8_e8m0fnu)) {
     stream << "fp8_e8" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported Ascend fp8 type " << type;
@@ -387,11 +419,11 @@ static std::string GetAscendFP8Type(DataType type) {
   return stream.str();
 }
 
-static std::string GetAscendFP8ScalarValueType(DataType type) {
-  if (type.is_float8_e4m3() || type.is_float8_e4m3fn()) {
+static std::string GetAscendFP8ScalarValueType(PrimType type) {
+  if (type.MatchesCode(kDLFloat8_e4m3) || type.MatchesCode(kDLFloat8_e4m3fn)) {
     return "tl::float_e4m3_t";
   }
-  if (type.is_float8_e5m2()) {
+  if (type.MatchesCode(kDLFloat8_e5m2)) {
     return "tl::float_e5m2_t";
   }
   LOG(FATAL) << "Unsupported Ascend scalar fp8 conversion type " << type;
@@ -411,12 +443,12 @@ const char *CodeGenTileLangAscend::VFModeName(VFMode mode) const {
 }
 
 void CodeGenTileLangAscend::ValidateSimdVectorType(
-    DataType dtype, const std::string &context) const {
+    PrimType dtype, const std::string &context) const {
   if (dtype.lanes() <= 1) {
     LOG(FATAL) << context << " expects an Ascend SIMD vector register, got "
                << dtype;
   }
-  if (dtype.is_bool()) {
+  if (dtype.MatchesCode(kDLBool)) {
     if (dtype.lanes() != 256) {
       LOG(FATAL) << context << " has invalid SIMD predicate type " << dtype
                  << ": SimdVF predicates must be boolx256";
@@ -424,7 +456,7 @@ void CodeGenTileLangAscend::ValidateSimdVectorType(
     return;
   }
 
-  DataType element_dtype = dtype.element_of();
+  PrimType element_dtype = dtype.WithLanes(1);
   CCEVectorSuffix(element_dtype);
   int64_t register_bits =
       static_cast<int64_t>(element_dtype.bits()) * dtype.lanes();
@@ -438,7 +470,7 @@ void CodeGenTileLangAscend::ValidateSimdVectorType(
 }
 
 void CodeGenTileLangAscend::RejectGenericVectorInSimd(const char *op_name,
-                                                      DataType dtype) const {
+                                                      PrimType dtype) const {
   if (IsInsideSimdVF() && dtype.lanes() > 1) {
     LOG(FATAL) << "Generic vector " << op_name << " with dtype " << dtype
                << " cannot be emitted inside SimdVF; use an explicit "
@@ -447,15 +479,19 @@ void CodeGenTileLangAscend::RejectGenericVectorInSimd(const char *op_name,
 }
 
 void CodeGenTileLangAscend::ValidateGenericVectorType(const char *op_name,
-                                                      DataType dtype) {
+                                                      PrimType dtype) {
   RejectGenericVectorInSimd(op_name, dtype);
   std::ostringstream type;
   PrintType(dtype, type);
 }
 
-void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
+void CodeGenTileLangAscend::PrintType(const PrimType &t, std::ostream &os) {
+  if (t.IsVoid()) {
+    os << "void";
+    return;
+  }
   int lanes = t.lanes();
-  if (t.is_handle()) {
+  if (t.MatchesCode(kDLOpaqueHandle)) {
     ICHECK_EQ(lanes, 1) << "does not support vector types for handles";
     os << "void*";
     return;
@@ -463,14 +499,15 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
 
   if (IsInsideSimdVF() && lanes > 1) {
     ValidateSimdVectorType(t, "SimdVF type");
-    os << (t.is_bool() ? "vector_bool"
-                       : "vector_" + CCEVectorSuffix(t.element_of()));
+    os << (t.MatchesCode(kDLBool)
+               ? "vector_bool"
+               : "vector_" + CCEVectorSuffix(t.WithLanes(1)));
     return;
   }
   if (lanes > 1) {
     // SIMT vector comparisons use one ushort per predicate lane. Wider
     // predicates and 16-bit values use uint carriers.
-    if (t.is_bool() && lanes <= 8) {
+    if (t.MatchesCode(kDLBool) && lanes <= 8) {
       ICHECK(lanes <= 4 || lanes % 2 == 0)
           << "Ascend wide vector bool type requires an even lane count, got "
           << t;
@@ -478,22 +515,29 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
                         : "uint" + std::to_string(lanes / 2));
       return;
     }
-    if ((t.is_float16() || t.is_bfloat16()) && lanes <= 8 && lanes % 2 == 0) {
+    if ((t.MatchesElementType(kDLFloat, 16) ||
+         t.MatchesElementType(kDLBfloat, 16)) &&
+        lanes <= 8 && lanes % 2 == 0) {
       os << "uint" << lanes / 2;
       return;
     }
-    if ((t.is_float() && t.bits() == 32) ||
-        ((t.is_int() || t.is_uint()) && t.bits() == 32)) {
+    if ((t.MatchesCode(kDLFloat) && t.bits() == 32) ||
+        ((t.MatchesCode(kDLInt) || t.MatchesCode(kDLUInt)) && t.bits() == 32)) {
       if (lanes == 2 || lanes == 4) {
-        os << (t.is_float() ? "float" : t.is_int() ? "int" : "uint") << lanes;
+        os << (t.MatchesCode(kDLFloat) ? "float"
+               : t.MatchesCode(kDLInt) ? "int"
+                                       : "uint")
+           << lanes;
         return;
       }
     }
-    if (t.is_float8() && (lanes == 2 || lanes == 4 || lanes == 8)) {
+    if (t.MatchesCode(kDLFloat8_e4m3, kDLFloat8_e4m3fn, kDLFloat8_e5m2,
+                      kDLFloat8_e8m0fnu) &&
+        (lanes == 2 || lanes == 4 || lanes == 8)) {
       os << GetAscendFP8Type(t);
       return;
     }
-    if (t.is_float4_e2m1fn() && lanes == 2) {
+    if (t.MatchesCode(kDLFloat4_e2m1fn) && lanes == 2) {
       os << "float4_e2m1x2_t";
       return;
     }
@@ -501,16 +545,12 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
                << " to an Ascend type";
   }
 
-  if (t.is_void()) {
-    os << "void";
-    return;
-  }
-  if (t == DataType::Bool()) {
+  if (t == PrimType::Bool()) {
     os << "bool";
     return;
   }
 
-  if (t.is_float()) {
+  if (t.MatchesCode(kDLFloat)) {
     if (t.bits() == 16) {
       os << "half";
     } else if (t.bits() == 32) {
@@ -521,26 +561,28 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
       LOG(FATAL) << "Cannot convert scalar type " << t << " to Ascend type";
     }
     return;
-  } else if (t.is_bfloat16()) {
+  } else if (t.MatchesElementType(kDLBfloat, 16)) {
     os << "bfloat16_t";
     return;
-  } else if (t.is_float8()) {
+  } else if (t.MatchesCode(kDLFloat8_e4m3, kDLFloat8_e4m3fn, kDLFloat8_e5m2,
+                           kDLFloat8_e8m0fnu)) {
     os << (IsInsideSimtVF() ? GetAscendFP8ScalarValueType(t)
                             : GetAscendFP8Type(t));
     return;
-  } else if (t.is_float4_e2m1fn()) {
+  } else if (t.MatchesCode(kDLFloat4_e2m1fn)) {
     os << "float4_e2m1x2_t";
     return;
-  } else if (t.is_int() || t.is_uint()) {
+  } else if (t.MatchesCode(kDLInt) || t.MatchesCode(kDLUInt)) {
     if (t.bits() == 8 || t.bits() == 16 || t.bits() == 32 || t.bits() == 64) {
-      os << (t.is_int() ? "int" : "uint") << t.bits() << "_t";
+      os << (t.MatchesCode(kDLInt) ? "int" : "uint") << t.bits() << "_t";
       return;
     }
   }
   LOG(FATAL) << "Cannot convert scalar type " << t << " to Ascend type";
 }
 
-void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangAscend::AddFunction(const GlobalVar &global,
+                                        const tirx::Function &f) {
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked across PrimFunc code generation";
   this->InitFuncState(f);
@@ -548,15 +590,15 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   has_gemm_l1_ = false;
   has_philox_rng_ = false;
   ascend_rng_state_var_.clear();
-  unroll_factor_.clear();
+  sub_block_id_var_.clear();
   ReserveKeywordsAsUnique();
   name_supply_->ReserveName("block_idx");
 
   // Register function parameters with their storage scope for codegen
   for (const auto &param : f->params) {
-    if (param->dtype.is_handle()) {
-      auto scope = GetPtrStorageScope(param);
-      alloc_storage_scope_[param.get()] = scope;
+    if (PythonIsPointer(param)) {
+      auto scope = PythonStorageScope(param);
+      alloc_storage_scope_[param.get()] = runtime::MemoryScope(scope);
     }
   }
 
@@ -565,21 +607,26 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   bool has_vector_subcores = false;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
+  bool has_sub_block_id = false;
   int vector_count = 2;
-  tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &n) {
-    if (const auto *block = n.as<SBlockNode>()) {
-      if (block->name_hint == "CUBE")
+  tl::PostOrderVisit(f->body.value(), [&](const ffi::ObjectRef &n) {
+    if (const auto *block = n.as<RegionStmtNode>()) {
+      if (block->op.same_as(tirx::launch_thread_op()) &&
+          block->args[0].as_or_throw<StringImm>()->value == "cthread") {
+        has_sub_block_id = true;
+      }
+      if (RegionName(block) == "CUBE")
         has_cube = true;
-      else if (block->name_hint == "VECTOR") {
+      else if (RegionName(block) == "VECTOR") {
         has_vector = true;
-        if (auto opt = block->annotations.Get("vector_count")) {
+        if (auto opt = block->attrs->dict.Get("vector_count")) {
           has_vector_subcores = true;
-          const auto *count = opt.value().as<IntImmNode>();
-          ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
+          auto count = tl::GetIntAnnotation(opt.value());
+          ICHECK(count && (*count == 1 || *count == 2))
               << "Mixed-kernel vector_count must be the constant integer 1 or "
                  "2, got "
               << opt.value();
-          vector_count = count->value;
+          vector_count = *count;
         }
       }
     }
@@ -664,7 +711,12 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   ICHECK(global_symbol) << "CodeGenTileLangAscend: Expect PrimFunc to have the "
                            "global_symbol attribute";
   current_function_name_ = global_symbol.value();
-  bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
+  bool no_alias = f->GetAttr(tirx::attr::kNoAlias).value_or(false);
+
+  if (has_sub_block_id ||
+      (kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 1)) {
+    sub_block_id_var_ = name_supply_->FreshName("sub_block_id");
+  }
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
@@ -672,14 +724,14 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
   for (size_t i = 0; i < f->params.size(); ++i) {
-    tirx::Var v = f->params[i];
+    Var v = f->params[i];
     std::string vid = AllocVarID(v.get());
     if (i != 0) {
       stream << ", ";
     }
-    if (v.dtype().is_handle()) {
-      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-        if (ptr->storage_scope == "grid_constant") {
+    if (PythonIsPointer(v)) {
+      if (auto *ptr = v->ty.as<PtrTypeNode>()) {
+        if (ptr->scope.name() == "grid_constant") {
           stream << "__grid_constant__ const ";
           CodeGenC::PrintType(ptr->element_type, stream);
           stream << ' ' << vid;
@@ -692,10 +744,16 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
         PrintStorageScope(it->second, stream);
       }
 
-      CodeGenC::PrintType(GetType(v), stream);
-      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
+      if (auto tensor = v.as<TensorVar>()) {
+        PrintType(tensor->dtype(), stream);
+        stream << '*';
+        RegisterHandleType(v.get(), tensor->dtype());
+      } else {
+        CodeGenC::PrintType(v->ty, stream);
+      }
+      if (auto *ptr = v->ty.as<PtrTypeNode>()) {
         if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
-          RegisterHandleType(v.get(), prim->dtype);
+          RegisterHandleType(v.get(), GetRef<PrimType>(prim));
         }
       }
 
@@ -703,14 +761,14 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
         PrintRestrict(v, stream);
       }
     } else {
-      CodeGenC::PrintType(GetType(v), stream);
+      CodeGenC::PrintType(v->ty, stream);
     }
     stream << ' ' << vid;
   }
   stream << ") {\n";
   this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
-  this->PrintStmt(f->body);
+  this->PrintStmt(f->body.value());
   this->EndScope(func_scope);
   this->PrintIndent();
   this->stream << "}\n\n";
@@ -718,21 +776,22 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       << "Ascend VF mode leaked after PrimFunc code generation";
 }
 
-void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
+void CodeGenTileLangAscend::PreFunctionBody(const tirx::Function &f) {
   this->stream << "  asc_init();\n";
+  if (!sub_block_id_var_.empty()) {
+    stream << "  int32_t " << sub_block_id_var_
+           << " = asc_get_sub_block_id();\n";
+  }
   // Emit the function-entry #line anchor after the compiler prologue, so the
   // directive's line mapping is not consumed by generated code.
   CodeGenTileLangCBase::PreFunctionBody(f);
 }
 
 ffi::Array<Var>
-CodeGenTileLangAscend::CollectVFCaptures(const SBlockNode *op) const {
-  ffi::Array<Var> predefined;
-  for (const Buffer &buf : op->alloc_buffers) {
-    predefined.push_back(buf->data);
-  }
+CodeGenTileLangAscend::CollectVFCaptures(const RegionStmtNode *op) const {
+  ffi::Array<Var> predefined = op->body_params;
 
-  ffi::Array<Var> undefined = UndefinedVars(op->body, predefined);
+  ffi::Array<Var> undefined = tvm::UndefinedVars(op->body, predefined);
   ffi::Array<Var> captures;
   std::unordered_set<const VarNode *> seen;
   for (const Var &var : undefined) {
@@ -743,17 +802,19 @@ CodeGenTileLangAscend::CollectVFCaptures(const SBlockNode *op) const {
     // context, so their block index must not be captured. A plain __simd_vf__
     // helper has no such context, so block_idx is passed as a parameter.
     auto it = var_idmap_.find(var.get());
-    if (op->name_hint == "SIMT_VF" && it != var_idmap_.end() &&
+    if (RegionName(op) == "SIMT_VF" && it != var_idmap_.end() &&
         it->second == "block_idx") {
       continue;
     }
     seen.insert(var.get());
 
-    const DataType dtype = var->dtype;
-    ICHECK(dtype.lanes() == 1 &&
-           (dtype.is_int() || dtype.is_uint() || dtype.is_float() ||
-            dtype.is_handle() || dtype.is_bool()))
-        << op->name_hint << " capture variable `" << var
+    const PrimType dtype =
+        PythonIsPointer(var) ? PrimType::Void() : PythonDType(var);
+    ICHECK(PythonIsPointer(var) ||
+           (dtype.lanes() == 1 &&
+            (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt) ||
+             dtype.MatchesCode(kDLFloat) || dtype.MatchesCode(kDLBool))))
+        << RegionName(op) << " capture variable `" << var
         << "` has unsupported dtype `" << dtype
         << "`. Only scalar int/uint/float/bool/handle are supported.";
     captures.push_back(var);
@@ -761,21 +822,29 @@ CodeGenTileLangAscend::CollectVFCaptures(const SBlockNode *op) const {
   return captures;
 }
 
-void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
+void CodeGenTileLangAscend::EmitVFFunction(const RegionStmtNode *op,
                                            const ffi::Array<Var> &captures,
                                            const std::string &helper_name,
                                            const std::string &func_attrs,
                                            VFMode vf_mode) {
   for (const auto &v : captures) {
-    if (v->type_annotation.as<PointerTypeNode>()) {
-      alloc_storage_scope_[v.get()] = GetPtrStorageScope(v);
+    if (PythonIsPointer(v)) {
+      alloc_storage_scope_[v.get()] =
+          runtime::MemoryScope(PythonStorageScope(v));
+      if (auto tensor = v.as<TensorVar>()) {
+        RegisterHandleType(v.get(), tensor->dtype());
+      } else if (auto pointer = v->ty.as<PtrTypeNode>()) {
+        if (auto element_type = pointer->element_type.as<PrimType>()) {
+          RegisterHandleType(v.get(), element_type.value());
+        }
+      }
     }
   }
 
   std::unordered_map<const VarNode *, std::string> saved_var_idmap;
   saved_var_idmap.swap(var_idmap_);
-  NameSupply saved_name_supply = name_supply_;
-  name_supply_ = NameSupply();
+  UniqueNameSupply saved_name_supply = name_supply_;
+  name_supply_ = UniqueNameSupply();
   for (const auto &kv : saved_var_idmap) {
     var_idmap_[kv.first] = kv.second;
   }
@@ -788,19 +857,19 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   for (const auto &v : captures) {
     auto it = var_idmap_.find(v.get());
     std::string name =
-        (it != var_idmap_.end()) ? it->second : std::string(v->name_hint);
+        (it != var_idmap_.end()) ? it->second : std::string(v->name);
     if (name.find('.') != std::string::npos) {
       std::replace(name.begin(), name.end(), '.', '_');
       var_idmap_[v.get()] = name;
     }
     vf_param_name[v.get()] = name;
   }
-  // Reserve all capture parameter names in the fresh NameSupply so that
+  // Reserve all capture parameter names in the fresh UniqueNameSupply so that
   // newly generated variables inside the VF body do not shadow them.
   for (const auto &v : captures) {
     auto it = var_idmap_.find(v.get());
     std::string cap_name =
-        (it != var_idmap_.end()) ? it->second : std::string(v->name_hint);
+        (it != var_idmap_.end()) ? it->second : std::string(v->name);
     name_supply_->ReserveName(cap_name, false);
   }
   // Render body to temporary stream
@@ -812,7 +881,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
     // the helper signature use the surrounding kernel ABI, so keeping them in
     // VF mode can change scalar capture types (for example fp8_e4_t).
     VFModeScope vf_mode_scope(this, vf_mode);
-    this->VisitStmt(op->body);
+    this->PrintStmt(op->body);
     helper_body = FixIndent(stream.str());
   }
   stream.str("");
@@ -827,7 +896,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
     if (it != var_idmap_.end()) {
       return it->second;
     }
-    return v->name_hint;
+    return v->name;
   };
 
   decl_stream << func_attrs << " " << helper_name << "(";
@@ -839,31 +908,32 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
     auto pit = vf_param_name.find(v.get());
     std::string vname =
         (pit != vf_param_name.end()) ? pit->second : resolve_var_name(v);
-    if (!v->type_annotation.as<PointerTypeNode>()) {
-      PrintType(v.dtype(), decl_stream);
+    if (!PythonIsPointer(v)) {
+      PrintType(PythonDType(v), decl_stream);
       decl_stream << " " << vname;
     } else {
       auto scope_it = alloc_storage_scope_.find(v.get());
       if (scope_it != alloc_storage_scope_.end() &&
-          scope_it->second == "local.var") {
+          scope_it->second.name() == "local.var") {
         auto it = handle_data_type_.find(v.get());
         if (it != handle_data_type_.end()) {
           PrintType(it->second, decl_stream);
         } else {
-          PrintType(v.dtype(), decl_stream);
+          PrintType(PythonDType(v), decl_stream);
         }
         decl_stream << " " << vname;
       } else {
         auto it = handle_data_type_.find(v.get());
         if (it == handle_data_type_.end()) {
           for (const auto &kv : handle_data_type_) {
-            if (kv.first->name_hint == v->name_hint) {
+            if (kv.first->name == v->name) {
               it = handle_data_type_.find(kv.first);
               break;
             }
           }
         }
-        PrintStorageScope(GetPtrStorageScope(v), decl_stream);
+        PrintStorageScope(runtime::MemoryScope(PythonStorageScope(v)),
+                          decl_stream);
         if (it != handle_data_type_.end()) {
           PrintType(it->second, decl_stream);
           decl_stream << "* " << vname;
@@ -876,8 +946,25 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   decl_stream << ") {\n" << helper_body << "}\n\n";
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
-  if (op->name_hint == "CUBE") {
+void CodeGenTileLangAscend::Dispatch_(const RegionStmtNode *op) {
+  if (op->op.same_as(tirx::launch_thread_op())) {
+    auto tag = op->args[0].as_or_throw<StringImm>()->value;
+    auto variable = op->body_params[0].as_or_throw<PrimVar>();
+    if (tag == "cthread") {
+      ICHECK(!sub_block_id_var_.empty());
+      var_idmap_[variable.get()] = sub_block_id_var_;
+    } else if (tag == "blockIdx.x") {
+      var_idmap_[variable.get()] = "block_idx";
+    } else if (tag.starts_with("threadIdx.")) {
+      if (!IsOutsideVF())
+        var_idmap_[variable.get()] = tag;
+    } else {
+      CodeGenC::BindThreadIndex(variable, tag);
+    }
+    PrintStmt(op->body);
+    return;
+  }
+  if (RegionName(op) == "CUBE") {
     if (kernel_mode_ == AscendKernelMode::kMix) {
       PrintIndent();
       stream << "if ASC_IS_AIC {\n";
@@ -891,14 +978,14 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
     }
     return;
   }
-  if (op->name_hint == "VECTOR") {
+  if (RegionName(op) == "VECTOR") {
     if (kernel_mode_ == AscendKernelMode::kMix) {
       PrintIndent();
       stream << "if ASC_IS_AIV {\n";
       int scope = BeginScope();
       if (mix_aiv_count_ == 1) {
         PrintIndent();
-        stream << "if (asc_get_sub_block_id() == 0) {\n";
+        stream << "if (" << sub_block_id_var_ << " == 0) {\n";
         int active_aiv_scope = BeginScope();
         PrintStmt(op->body);
         EndScope(active_aiv_scope);
@@ -915,7 +1002,7 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
     }
     return;
   }
-  if (op->name_hint == "SIMD_VF") {
+  if (RegionName(op) == "SIMD_VF") {
     if (!has_simd_inst_included_) {
       preamble_stream_ << "#include <tl_templates/ascend/simd_inst.h>\n";
       has_simd_inst_included_ = true;
@@ -923,10 +1010,10 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
     auto captures = CollectVFCaptures(op);
     int64_t vf_idx = simdvf_helper_counter_++;
     {
-      auto it = op->annotations.find("tl.vf_source_index");
-      if (it != op->annotations.end()) {
+      auto it = Attributes(op).find("tl.vf_source_index");
+      if (it != Attributes(op).end()) {
         if (auto *imm = (*it).second.as<IntImmNode>()) {
-          vf_idx = imm->value;
+          vf_idx = imm->value.as<int64_t>().value();
         }
       }
     }
@@ -943,44 +1030,40 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
         stream << ", ";
       auto it = var_idmap_.find(captures[i].get());
       stream << (it != var_idmap_.end() ? it->second
-                                        : std::string(captures[i]->name_hint));
+                                        : std::string(captures[i]->name));
     }
     stream << ");\n";
     return;
   }
-  if (op->name_hint == "SIMT_VF") {
+  if (RegionName(op) == "SIMT_VF") {
     int64_t thread_x = 1, thread_y = 1, thread_z = 1;
     // Detect the threadIdx.{x,y,z} extents with a visitor rather than assuming
     // the thread_extent AttrStmts lead the block body. Earlier passes (e.g.
     // buffer allocation planning) may emit AllocBuffer/DeclBuffer statements
     // before the thread bindings; a positional scan would then miss them and
     // wrongly fall back to a single thread.
-    tirx::PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
-      const auto *attr = node.as<AttrStmtNode>();
-      if (attr == nullptr || attr->attr_key != tirx::attr::thread_extent) {
+    tl::PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
+      const auto *region = node.as<RegionStmtNode>();
+      if (!region || !region->op.same_as(tirx::launch_thread_op()))
         return;
-      }
-      const auto *iv = attr->node.as<IterVarNode>();
-      const auto *imm = attr->value.as<IntImmNode>();
-      if (iv == nullptr || imm == nullptr) {
-        return;
-      }
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_x = imm->value;
-      } else if (iv->thread_tag == "threadIdx.y") {
-        thread_y = imm->value;
-      } else if (iv->thread_tag == "threadIdx.z") {
-        thread_z = imm->value;
-      }
+      auto tag = region->args[0].as_or_throw<StringImm>()->value;
+      auto extent = tl::GetConstInt(region->args[1]);
+      ICHECK(extent) << "SIMT VF thread extents must be constant";
+      if (tag == "threadIdx.x")
+        thread_x = *extent;
+      else if (tag == "threadIdx.y")
+        thread_y = *extent;
+      else if (tag == "threadIdx.z")
+        thread_z = *extent;
     });
 
     auto captures = CollectVFCaptures(op);
     int64_t vf_idx = simtvf_helper_counter_++;
     {
-      auto it = op->annotations.find("tl.vf_source_index");
-      if (it != op->annotations.end()) {
+      auto it = Attributes(op).find("tl.vf_source_index");
+      if (it != Attributes(op).end()) {
         if (auto *imm = (*it).second.as<IntImmNode>()) {
-          vf_idx = imm->value;
+          vf_idx = imm->value.as<int64_t>().value();
         }
       }
     }
@@ -1008,7 +1091,7 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
       auto it = var_idmap_.find(captures[i].get());
       stream << ", "
              << (it != var_idmap_.end() ? it->second
-                                        : std::string(captures[i]->name_hint));
+                                        : std::string(captures[i]->name));
     }
     stream << ");\n";
     return;
@@ -1016,10 +1099,11 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
   PrintStmt(op->body);
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
-                                       std::ostream &os) { // NOLINT(*)
-  int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  RejectGenericVectorInSimd("Broadcast", op->dtype);
+void CodeGenTileLangAscend::Dispatch_(const BroadcastNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  int lanes = static_cast<int>(
+      (op->lanes).as_or_throw<IntImm>()->value.as<int64_t>().value());
+  RejectGenericVectorInSimd("Broadcast", PythonDType(GetRef<Expr>(op)));
 
   // Keep casts outside broadcasts so the vector value is converted as a
   // whole. Besides avoiding target-specific Broadcast(Cast(Call)) patterns,
@@ -1027,7 +1111,7 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
   // float2 -> bfloat16x2.
   if (const auto *cast = op->value.as<CastNode>()) {
     PrimExpr source = Broadcast(cast->value, op->lanes);
-    PrintExpr(Cast(op->dtype, source), os);
+    PrintExpr(Cast(PythonDType(GetRef<Expr>(op)), source), os);
     return;
   }
 
@@ -1039,7 +1123,8 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
   if (rng_call != nullptr) {
     const CallNode *call = rng_call;
     if (call->op.same_as(tl::rng_rand_float()) && (lanes == 2 || lanes == 4) &&
-        call->dtype.is_float() && call->dtype.bits() == 32) {
+        PythonDType(GetRef<Expr>(call)).MatchesCode(kDLFloat) &&
+        PythonDType(GetRef<Expr>(call)).bits() == 32) {
       ICHECK_EQ(call->args.size(), 1);
       const auto *dist = call->args[0].as<StringImmNode>();
       ICHECK(dist != nullptr) << "Ascend RNG distribution must be constant";
@@ -1050,15 +1135,17 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
     }
   }
 
-  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
-    const int64_t *p = as_const_int(op->value);
+  if ((PythonDType(GetRef<Expr>(op)).MatchesCode(kDLInt) ||
+       PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) &&
+      PythonDType(GetRef<Expr>(op)).bits() == 8) {
+    auto p = tl::GetConstInt(op->value);
     if (p) {
       if (lanes == 4) {
         // make_int8x4
         ICHECK(p);
         int64_t v = *p & 0xFF;
         v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
+        if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) {
           os << "(uint)" << v;
         } else {
           os << "(int)" << v;
@@ -1066,11 +1153,11 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
         return;
       } else if (lanes == 32 && IsInsideSimtVF()) {
         // make_int8x32
-        const int64_t *p = as_const_int(op->value);
+        auto p = tl::GetConstInt(op->value);
         ICHECK(p);
         int64_t v = *p & 0xFF;
         v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
+        if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) {
           os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
              << ")";
         } else {
@@ -1082,8 +1169,9 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
     }
   }
 
-  if (op->dtype.is_float() && op->dtype.bits() == 32 &&
-      op->dtype.lanes() == 8) {
+  if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLFloat) &&
+      PythonDType(GetRef<Expr>(op)).bits() == 32 &&
+      PythonDType(GetRef<Expr>(op)).lanes() == 8) {
     std::string v = PrintExpr(op->value);
     os << "make_ulonglong4(";
     for (int i = 0; i < 4; ++i) {
@@ -1095,16 +1183,18 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
-  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
+  if ((PythonDType(GetRef<Expr>(op)).MatchesCode(kDLInt) ||
+       PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) &&
+      PythonDType(GetRef<Expr>(op)).bits() == 4) {
     bool fail = false;
-    const int64_t *p = as_const_int(op->value);
+    auto p = tl::GetConstInt(op->value);
     ICHECK(p) << "BroadcastNode " << op << " value: " << op->value
               << " is not a constant";
     int64_t v = *p & 0xF;
 
     if (lanes == 4) {
       v = (v << 12) | (v << 8) | (v << 4) | v;
-      if (op->dtype.is_uint()) {
+      if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) {
         os << "(uint16_t)" << v;
       } else {
         os << "(int16_t)" << v;
@@ -1113,19 +1203,19 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
       v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) | (v << 8) |
           (v << 4) | v;
       if (lanes == 8) {
-        if (op->dtype.is_uint()) {
+        if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) {
           os << "(uint)" << v;
         } else {
           os << "(int)" << v;
         }
       } else if (lanes == 16 || lanes == 32) {
         os << "make_";
-        PrintType(op->dtype, os);
+        PrintType(PythonDType(GetRef<Expr>(op)), os);
         os << '(';
         for (int i = 0; i < lanes / 8; ++i) {
           if (i != 0)
             os << ", ";
-          if (op->dtype.is_uint()) {
+          if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLUInt)) {
             os << "(uint)" << v;
           } else {
             os << "(int)" << v;
@@ -1145,10 +1235,12 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
   // Legacy packed broadcast carriers do not denote addressable SIMT vectors,
   // so materialize them lane by lane.
   const bool is_packed_16 =
-      (op->dtype.is_float16() || op->dtype.is_bfloat16()) && lanes <= 8 &&
-      lanes % 2 == 0;
+      (PythonDType(GetRef<Expr>(op)).MatchesElementType(kDLFloat, 16) ||
+       PythonDType(GetRef<Expr>(op)).MatchesElementType(kDLBfloat, 16)) &&
+      lanes <= 8 && lanes % 2 == 0;
   const bool is_packed_predicate =
-      op->dtype.is_bool() && lanes > 4 && lanes <= 8 && lanes % 2 == 0;
+      PythonDType(GetRef<Expr>(op)).MatchesCode(kDLBool) && lanes > 4 &&
+      lanes <= 8 && lanes % 2 == 0;
   if (is_packed_16 || is_packed_predicate) {
     // Small FP16/BF16 vectors and wide predicates use uint carriers in
     // generated Ascend C. Materialize the carrier lane by lane instead of
@@ -1158,15 +1250,15 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
     TVM_FFI_ICHECK_LE(lanes, 8)
         << "Ascend packed Broadcast supports at most 8 lanes outside SIMD "
            "intrinsics, got "
-        << op->dtype;
+        << PythonDType(GetRef<Expr>(op));
     std::string result = name_supply_->FreshName("_");
     PrintIndent();
-    PrintType(op->dtype, stream);
+    PrintType(PythonDType(GetRef<Expr>(op)), stream);
     stream << ' ' << result << ";\n";
     SSAOperationScope ssa_scope(this);
-    std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    std::string value = SSAGetID(PrintExpr(op->value), PythonDType(op->value));
     for (int i = 0; i < lanes; ++i) {
-      PrintVecElemStore(result, op->dtype, i, value);
+      PrintVecElemStore(result, PythonDType(GetRef<Expr>(op)), i, value);
     }
     os << result;
     return;
@@ -1174,7 +1266,7 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
 
   std::string v = PrintExpr(op->value);
   os << "make_";
-  PrintType(op->dtype, os);
+  PrintType(PythonDType(GetRef<Expr>(op)), os);
   os << '(';
   for (int i = 0; i < lanes; ++i) {
     if (i != 0)
@@ -1184,12 +1276,13 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
   os << ')';
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const RampNode *op,
-                                       std::ostream &os) { // NOLINT(*)
-  int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  ValidateGenericVectorType("Ramp", op->dtype);
+void CodeGenTileLangAscend::Dispatch_(const RampNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  int lanes = static_cast<int>(
+      (op->lanes).as_or_throw<IntImm>()->value.as<int64_t>().value());
+  ValidateGenericVectorType("Ramp", PythonDType(GetRef<Expr>(op)));
   os << "make_";
-  PrintType(op->dtype, os);
+  PrintType(PythonDType(GetRef<Expr>(op)), os);
   os << '(';
   for (int i = 0; i < lanes; ++i) {
     if (i != 0) {
@@ -1203,15 +1296,16 @@ void CodeGenTileLangAscend::VisitExpr_(const RampNode *op,
 
 std::string
 CodeGenTileLangAscend::ResolveSimdIntrinsicName_(const Call &call,
-                                                 DataType result_dtype) const {
-  const std::string op_name = Downcast<Op>(call->op)->name;
+                                                 PrimType result_dtype) const {
+  const std::string op_name = (call->op).as_or_throw<Op>()->name;
   const std::string intrinsic_name =
       op_name.substr(std::string(kSimdOpPrefix).size());
 
   // Both zeroing and merging calls use the same precision wrapper. Merging
   // calls are void, so their actual result dtype is supplied by the caller.
   if (intrinsic_name == "vdiv") {
-    const bool is_f32 = result_dtype.is_float() && result_dtype.bits() == 32;
+    const bool is_f32 =
+        result_dtype.MatchesCode(kDLFloat) && result_dtype.bits() == 32;
     const SfuPrecision prec = ResolveSfuPrecision(call, result_dtype,
                                                   (is_f32 && !enable_fast_math_)
                                                       ? SfuPrecision::kExact
@@ -1235,7 +1329,8 @@ CodeGenTileLangAscend::ResolveSimdIntrinsicName_(const Call &call,
 void CodeGenTileLangAscend::PrintSimdCall_(const Call &call,
                                            size_t num_expr_args,
                                            std::ostream &os) {
-  os << "simd_inst::" << ResolveSimdIntrinsicName_(call, call->dtype) << "(";
+  os << "simd_inst::" << ResolveSimdIntrinsicName_(call, PythonDType(call))
+     << "(";
   for (size_t i = 0; i < call->args.size(); ++i) {
     if (i != 0) {
       os << ", ";
@@ -1244,7 +1339,7 @@ void CodeGenTileLangAscend::PrintSimdCall_(const Call &call,
       PrintExpr(call->args[i], os);
     } else {
       // Trailing arguments name control enums and must stay unquoted.
-      os << Downcast<StringImm>(call->args[i])->value;
+      os << (call->args[i]).as_or_throw<StringImm>()->value;
     }
   }
   os << ")";
@@ -1260,18 +1355,17 @@ bool CodeGenTileLangAscend::EmitSimdMergingCall(const CallNode *op,
   ICHECK_GE(op->args.size(), 3)
       << "Legalized MODE_MERGING call must contain a destination, operands, "
          "and mode";
-  ICHECK(op->args[0].dtype().is_handle())
+  ICHECK(PythonIsPointer(op->args[0]))
       << "Legalized MODE_MERGING destination must be a pointer";
   std::string resolved_name =
-      ResolveSimdIntrinsicName_(GetRef<Call>(op), op->args[1].dtype());
-  DataType dtype = op->args[1].dtype();
+      ResolveSimdIntrinsicName_(GetRef<Call>(op), PythonDType(op->args[1]));
+  PrimType dtype = PythonDType(op->args[1]);
   if (intrinsic_name == "vdup") {
     // Scalar broadcast overloads are selected by the destination vector type.
     const auto *destination = op->args[0].as<CallNode>();
-    ICHECK(destination &&
-           destination->op.same_as(tirx::builtin::address_of()) &&
+    ICHECK(destination && PythonIsOp(destination->op, "address_of") &&
            destination->args.size() == 1);
-    dtype = destination->args[0].dtype();
+    dtype = PythonDType(destination->args[0]);
   }
 
   // Use CCE merging for the validated overloads of these C API wrappers.
@@ -1402,14 +1496,9 @@ void CodeGenTileLangAscend::EmitGmToUbufCopy_(const CallNode *op) {
   std::string pointer_type = "uint8_t";
   const auto *right_pad = op->args[6].as<IntImmNode>();
   if (right_pad && right_pad->value != 0) {
-    DataType element_type = op->args[0].dtype();
-    if (element_type.is_handle()) {
-      if (const auto *call = op->args[0].as<CallNode>()) {
-        if (!call->args.empty()) {
-          element_type = call->args[0].dtype();
-        }
-      }
-    }
+    auto pointer = op->args[0]->ty.as<PtrTypeNode>();
+    ICHECK(pointer) << "Padded DMA destination must be a typed pointer";
+    PrimType element_type = pointer->element_type.as_or_throw<PrimType>();
     const int bits = element_type.bits();
     ICHECK(bits == 8 || bits == 16 || bits == 32)
         << "Ascend padded GM->UB copy supports 8/16/32-bit elements, got "
@@ -1530,14 +1619,15 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
 void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 1)
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
-  const int bit_width = op->args[0].dtype().bits();
+  const int bit_width = PythonDType(op->args[0]).bits();
   ICHECK(bit_width == 8 || bit_width == 16 || bit_width == 32)
-      << "Data type: " << op->args[0].dtype() << " is not supported in ascend";
+      << "Data type: " << PythonDType(op->args[0])
+      << " is not supported in ascend";
 
   const std::string value = PrintExpr(op->args[0]);
   const std::string target_value = name_supply_->FreshName("__asc_pad_val");
   PrintIndent();
-  PrintType(op->args[0].dtype(), stream);
+  PrintType(PythonDType(op->args[0]), stream);
   stream << " " << target_value << " = " << value << ";\n";
 
   PrintIndent();
@@ -1778,18 +1868,21 @@ bool CodeGenTileLangAscend::EmitAscendMemoryCall_(const CallNode *op) {
   return true;
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
+void CodeGenTileLangAscend::Dispatch_(const CallNode *op, std::ostream &os) {
   std::string simd_op_name;
   if (IsSimdOp(op, &simd_op_name)) {
     if (!IsInsideSimdVF()) {
       LOG(FATAL) << simd_op_name << " can only be emitted inside SimdVF";
     }
   }
-  if (op->op.same_as(builtin::bitwise_not()) && op->dtype.lanes() > 1) {
-    RejectGenericVectorInSimd("bitwise Not", op->dtype);
-    if (op->dtype.is_vector_bool() && op->dtype.lanes() <= 8) {
+  if (PythonIsOp(op->op, "bitwise_not") &&
+      PythonDType(GetRef<Expr>(op)).lanes() > 1) {
+    RejectGenericVectorInSimd("bitwise Not", PythonDType(GetRef<Expr>(op)));
+    if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLBool) &&
+        PythonDType(GetRef<Expr>(op)).lanes() <= 8) {
       ICHECK_EQ(op->args.size(), 1U);
-      EmitSimtVectorPredicateNot(op->args[0], op->dtype, os);
+      EmitSimtVectorPredicateNot(op->args[0].as_or_throw<PrimExpr>(),
+                                 PythonDType(GetRef<Expr>(op)), os);
       return;
     }
   }
@@ -1799,9 +1892,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   if (EmitAscendMemoryCall_(op)) {
     return;
   }
-  if (op->op.same_as(builtin::reinterpret())) {
+  if (PythonIsOp(op->op, "reinterpret")) {
     SSAOperationScope ssa_scope(this);
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
     return;
   }
   if (op->op.same_as(tl::device_assert())) {
@@ -1861,8 +1954,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 3)
         << "tl.ascend_get_buf expects exactly 3 arguments "
            "(pipe string, buf_id, mode)";
-    std::string pipe_str = Downcast<StringImm>(op->args[0])->value;
-    int64_t mode = Downcast<IntImm>(op->args[2])->value;
+    std::string pipe_str = (op->args[0]).as_or_throw<StringImm>()->value;
+    int64_t mode =
+        (op->args[2]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     this->PrintIndent();
     this->stream << "asc_lock(" << pipe_str << ", ";
     this->PrintExpr(op->args[1], this->stream);
@@ -1873,8 +1967,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 3)
         << "tl.ascend_rls_buf expects exactly 3 arguments "
            "(pipe string, buf_id, mode)";
-    std::string pipe_str = Downcast<StringImm>(op->args[0])->value;
-    int64_t mode = Downcast<IntImm>(op->args[2])->value;
+    std::string pipe_str = (op->args[0]).as_or_throw<StringImm>()->value;
+    int64_t mode =
+        (op->args[2]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     this->PrintIndent();
     this->stream << "asc_unlock(" << pipe_str << ", ";
     this->PrintExpr(op->args[1], this->stream);
@@ -1885,7 +1980,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_set_hf32_mode())) {
     ICHECK_EQ(op->args.size(), 1)
         << "tl.ascend_set_hf32_mode expects exactly 1 argument (mode_int)";
-    int mode = Downcast<IntImm>(op->args[0])->value;
+    int mode = (op->args[0]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     this->PrintIndent();
     if (mode == 0) {
       this->stream << "asc_disable_hf32();\n";
@@ -1907,19 +2002,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_set_atomic())) {
     ICHECK_EQ(op->args.size(), 2)
         << "tl.ascend_set_atomic expects 2 arguments (op_str, typed_zero)";
-    std::string atomic_op = Downcast<StringImm>(op->args[0])->value;
+    std::string atomic_op = (op->args[0]).as_or_throw<StringImm>()->value;
     const char *fn = atomic_op == "max"   ? "asc_set_atomic_max"
                      : atomic_op == "min" ? "asc_set_atomic_min"
                                           : "asc_set_atomic_add";
     ICHECK(atomic_op == "add" || atomic_op == "max" || atomic_op == "min")
         << "tl.ascend_set_atomic op must be add/max/min, got " << atomic_op;
 
-    DataType atomic_dtype = op->args[1].dtype();
+    PrimType atomic_dtype = PythonDType(op->args[1]);
     bool supported_dtype =
-        atomic_dtype.is_bfloat16() ||
-        (atomic_dtype.is_float() &&
+        atomic_dtype.MatchesElementType(kDLBfloat, 16) ||
+        (atomic_dtype.MatchesCode(kDLFloat) &&
          (atomic_dtype.bits() == 16 || atomic_dtype.bits() == 32)) ||
-        (atomic_dtype.is_int() &&
+        (atomic_dtype.MatchesCode(kDLInt) &&
          (atomic_dtype.bits() == 8 || atomic_dtype.bits() == 16 ||
           atomic_dtype.bits() == 32));
     ICHECK(supported_dtype)
@@ -1927,17 +2022,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
 
     this->PrintIndent();
     this->stream << fn;
-    if (atomic_dtype.is_bfloat16()) {
+    if (atomic_dtype.MatchesElementType(kDLBfloat, 16)) {
       this->stream << "_bfloat";
-    } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 16) {
+    } else if (atomic_dtype.MatchesCode(kDLFloat) &&
+               atomic_dtype.bits() == 16) {
       this->stream << "_float16";
-    } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 32) {
+    } else if (atomic_dtype.MatchesCode(kDLFloat) &&
+               atomic_dtype.bits() == 32) {
       this->stream << "_float";
-    } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 8) {
+    } else if (atomic_dtype.MatchesCode(kDLInt) && atomic_dtype.bits() == 8) {
       this->stream << "_int8";
-    } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 16) {
+    } else if (atomic_dtype.MatchesCode(kDLInt) && atomic_dtype.bits() == 16) {
       this->stream << "_int16";
-    } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
+    } else if (atomic_dtype.MatchesCode(kDLInt) && atomic_dtype.bits() == 32) {
       this->stream << "_int32";
     }
 
@@ -1952,7 +2049,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
              op->op.same_as(tl::warp_reduce_min())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "Ascend hardware warp reduction expects exactly one argument";
-    DataType dtype = op->args[0].dtype();
+    PrimType dtype = PythonDType(op->args[0]);
     ICHECK(IsAscendWarpReduceDType(dtype))
         << "Ascend hardware warp reduction supports only scalar float16, "
            "float32, int32, and uint32 values, but got "
@@ -1966,13 +2063,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_cross_core_set_flag()) ||
              op->op.same_as(tl::ascend_cross_core_wait_flag())) {
     EmitCrossCoreSync_(op, op->op.same_as(tl::ascend_cross_core_set_flag()));
-  } else if (op->op.same_as(tirx::builtin::address_of())) {
-    const auto *load = op->args[0].as<BufferLoadNode>();
+  } else if (PythonIsOp(op->op, "address_of")) {
+    const auto *load = op->args[0].as<TensorLoadNode>();
     ICHECK(op->args.size() == 1 && load);
-    const auto *buf_var = load->buffer->data.get();
+    const auto *buf_var = load->source.as_or_throw<Var>().get();
     std::string scope;
     if (alloc_storage_scope_.count(buf_var)) {
-      scope = alloc_storage_scope_.at(buf_var);
+      scope = alloc_storage_scope_.at(buf_var).name();
     }
     bool needs_ptr_arith = (scope.find("l0") != std::string::npos ||
                             scope.find("l1") != std::string::npos);
@@ -1981,30 +2078,30 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     // index (ramp base / lanes) and take the address of that register slot.
     bool is_local_vreg = IsInsideSimdVF() && scope == "local" &&
                          load->indices.size() == 1 &&
-                         load->indices[0].dtype().lanes() > 1;
+                         PythonDType(load->indices[0]).lanes() > 1;
     // Packed fp4 (float4_e2m1fnx2) held in GM/UBuf: emitted as the 1-byte
     // `float4_e2m1x2_t`. Handle only after the local-vreg / L0-L1 cases, since
     // a fp4 SIMD register slot must still use the register-index addressing
     // below.
-    bool is_fp4_ptr = load->dtype.is_float4_e2m1fn() &&
-                      load->indices.size() == 1 && !is_local_vreg &&
-                      !needs_ptr_arith;
+    bool is_fp4_ptr =
+        PythonDType(GetRef<Expr>(load)).MatchesCode(kDLFloat4_e2m1fn) &&
+        load->indices.size() == 1 && !is_local_vreg && !needs_ptr_arith;
     if (is_local_vreg) {
       PrimExpr index = load->indices[0];
-      ValidateSimdVectorType(load->dtype,
+      ValidateSimdVectorType(PythonDType(GetRef<Expr>(load)),
                              "SimdVF local register array element");
       const auto *ramp = index.as<RampNode>();
       PrimExpr base = ramp ? ramp->base : index;
-      int lanes = index.dtype().lanes();
-      PrimExpr elem_idx =
-          analyzer_.Simplify(floordiv(base, make_const(base.dtype(), lanes)));
+      int lanes = PythonDType(index).lanes();
+      PrimExpr elem_idx = analyzer_->Simplify(
+          floordiv(base, MakeConst(PythonDType(base), lanes)));
       os << "(&(" << GetVarID(buf_var) << "[";
       PrintExpr(elem_idx, os);
       os << "]))";
     } else if (needs_ptr_arith) {
       os << "((";
-      PrintStorageScope(scope, os);
-      PrintType(load->dtype, os);
+      PrintStorageScope(runtime::MemoryScope(scope), os);
+      PrintType(PythonDType(GetRef<Expr>(load)), os);
       os << "*)" << GetVarID(buf_var);
       if (load->indices.size() == 1) {
         PrimExpr idx = load->indices[0];
@@ -2012,12 +2109,14 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         // its packed-byte offset by the lane count.  L0/L1 pointers need the
         // same scalar-byte recovery as GM/UB pointers below; otherwise this
         // prints invalid pointer arithmetic such as `ptr + int2(...)`.
-        if (load->dtype.is_float4_e2m1fn() && idx.dtype().lanes() > 1) {
+        if (PythonDType(GetRef<Expr>(load)).MatchesCode(kDLFloat4_e2m1fn) &&
+            PythonDType(idx).lanes() > 1) {
           const auto *ramp = idx.as<RampNode>();
           ICHECK(ramp) << "Expected a Ramp index for packed fp4 L0/L1 access, "
                        << "got " << idx;
-          idx = analyzer_.Simplify(floordiv(
-              ramp->base, make_const(ramp->base.dtype(), idx.dtype().lanes())));
+          idx = analyzer_->Simplify(
+              floordiv(ramp->base, MakeConst(PythonDType(ramp->base),
+                                             PythonDType(idx).lanes())));
         }
         if (!is_zero(idx)) {
           os << " + ";
@@ -2030,24 +2129,25 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
       // offset by lanes and wrapped a Ramp (treating the packed pair as a
       // 2-wide vector). Recover the scalar byte index (ramp base / lanes) and
       // emit a plain 1-byte pointer `(&(((scope float4_e2m1x2_t*)var)[byte]))`.
-      std::string fp4_scope =
-          !scope.empty() ? scope
-                         : std::string(GetPtrStorageScope(load->buffer->data));
+      std::string fp4_scope = !scope.empty()
+                                  ? scope
+                                  : std::string(PythonStorageScope(
+                                        load->source.as_or_throw<Var>()));
       PrimExpr index = load->indices[0];
       const auto *ramp = index.as<RampNode>();
       PrimExpr base = ramp ? ramp->base : index;
-      int lanes = index.dtype().lanes();
+      int lanes = PythonDType(index).lanes();
       PrimExpr byte_idx =
-          lanes > 1 ? analyzer_.Simplify(
-                          floordiv(base, make_const(base.dtype(), lanes)))
+          lanes > 1 ? analyzer_->Simplify(
+                          floordiv(base, MakeConst(PythonDType(base), lanes)))
                     : base;
       os << "(&(((";
-      PrintStorageScope(fp4_scope, os);
+      PrintStorageScope(runtime::MemoryScope(fp4_scope), os);
       os << "float4_e2m1x2_t*)" << GetVarID(buf_var) << ")[";
       PrintExpr(byte_idx, os);
       os << "]))";
     } else {
-      CodeGenC::VisitExpr_(op, os);
+      CodeGenC::Dispatch_(op, os);
     }
   }
   // --- Scalar GM dcache bypass intrinsics ---
@@ -2055,25 +2155,28 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     // ascend_read_gm_bypass_dcache(address_of(BufferLoad))
     ICHECK_EQ(op->args.size(), 1);
     const auto *addr = op->args[0].as<CallNode>();
-    ICHECK(addr && addr->op.same_as(tirx::builtin::address_of()));
-    const auto *load = addr->args[0].as<BufferLoadNode>();
+    ICHECK(addr && PythonIsOp(addr->op, "address_of"));
+    const auto *load = addr->args[0].as<TensorLoadNode>();
     ICHECK(load && load->indices.size() == 1);
     os << "tl::read_gm_bypass_dcache("
-       << GetGmBypassPtr(load->dtype, load->buffer.get(), load->indices[0])
+       << GetGmBypassPtr(PythonDType(GetRef<Expr>(load)),
+                         load->source.as_or_throw<TensorVar>().get(),
+                         load->indices[0])
        << ")";
   } else if (op->op.same_as(tl::ascend_write_gm_bypass_dcache())) {
     // ascend_write_gm_bypass_dcache(address_of(BufferLoad), value)
     ICHECK_EQ(op->args.size(), 2);
     const auto *addr = op->args[0].as<CallNode>();
-    ICHECK(addr && addr->op.same_as(tirx::builtin::address_of()));
-    const auto *load = addr->args[0].as<BufferLoadNode>();
+    ICHECK(addr && PythonIsOp(addr->op, "address_of"));
+    const auto *load = addr->args[0].as<TensorLoadNode>();
     ICHECK(load && load->indices.size() == 1);
     // Evaluate ptr and value to strings first. The string PrintExpr overload
     // flushes any SSA statements (e.g. from if_then_else) to this->stream
     // before returning the expression text, so they land ahead of the call
     // line instead of being injected into the argument list.
-    std::string ptr =
-        GetGmBypassPtr(load->dtype, load->buffer.get(), load->indices[0]);
+    std::string ptr = GetGmBypassPtr(
+        PythonDType(GetRef<Expr>(load)),
+        load->source.as_or_throw<TensorVar>().get(), load->indices[0]);
     std::string value = this->PrintExpr(op->args[1]);
     this->PrintIndent();
     this->stream << "tl::write_gm_bypass_dcache(" << ptr << ", " << value
@@ -2131,7 +2234,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF runtime tail predicate: (value, width) ---
   else if (op->op.same_as(tl::simd_update_mask())) {
     ICHECK_EQ(op->args.size(), 2);
-    int width = (int)Downcast<IntImm>(op->args[1])->value;
+    int width =
+        (int)(op->args[1]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     os << "simd_inst::update_mask_b" << width << "(";
     PrintExpr(op->args[0], os); // value
     os << ")";
@@ -2148,7 +2252,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
            op->op.same_as(tl::simd_pdintlv())) {
     ICHECK_EQ(op->args.size(), 3);
     const char *name = op->op.same_as(tl::simd_pintlv()) ? "pintlv" : "pdintlv";
-    int width = (int)Downcast<IntImm>(op->args[2])->value;
+    int width =
+        (int)(op->args[2]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     os << "simd_inst::" << name << "_b" << width << "(";
     PrintExpr(op->args[0], os); // src0
     os << ", ";
@@ -2163,7 +2268,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF unsqueeze: (mask) -> prefix count ---
   else if (op->op.same_as(tl::simd_vusqz())) {
     ICHECK_EQ(op->args.size(), 1);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vusqz<";
     PrintType(elem, os);
     os << ">(";
@@ -2218,17 +2323,18 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF index ramp: (index, order) -> vci<T>(index, order) ---
   else if (op->op.same_as(tl::simd_vci())) {
     ICHECK_EQ(op->args.size(), 2);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vci<";
     PrintType(elem, os);
     os << ">(";
-    PrintExpr(op->args[0], os);                                   // index
-    os << ", " << Downcast<StringImm>(op->args[1])->value << ")"; // order
+    PrintExpr(op->args[0], os);                                         // index
+    os << ", " << (op->args[1]).as_or_throw<StringImm>()->value << ")"; // order
   }
   // --- SimdVF compare: (src0, src1, mask, op) -> vcmp_<op>(...) ---
   else if (op->op.same_as(tl::simd_vcmp())) {
     ICHECK_EQ(op->args.size(), 4);
-    os << "simd_inst::vcmp_" << Downcast<StringImm>(op->args[3])->value << "(";
+    os << "simd_inst::vcmp_" << (op->args[3]).as_or_throw<StringImm>()->value
+       << "(";
     PrintExpr(op->args[0], os); // src0
     os << ", ";
     PrintExpr(op->args[1], os); // src1
@@ -2239,7 +2345,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF compare-scalar: (src, scalar, mask, op) -> vcmps_<op>(...) ---
   else if (op->op.same_as(tl::simd_vcmps())) {
     ICHECK_EQ(op->args.size(), 4);
-    os << "simd_inst::vcmps_" << Downcast<StringImm>(op->args[3])->value << "(";
+    os << "simd_inst::vcmps_" << (op->args[3]).as_or_throw<StringImm>()->value
+       << "(";
     PrintExpr(op->args[0], os); // src
     os << ", ";
     PrintExpr(op->args[1], os); // scalar
@@ -2257,18 +2364,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   else if (op->op.same_as(tl::simd_pair_get())) {
     ICHECK_EQ(op->args.size(), 2);
     PrintExpr(op->args[0], os); // pair
-    int idx = (int)Downcast<IntImm>(op->args[1])->value;
+    int idx =
+        (int)(op->args[1]).as_or_throw<IntImm>()->value.as<int64_t>().value();
     os << (idx == 0 ? ".v0" : ".v1");
   }
   // --- SimdVF register pack: (src, part) ---
   else if (op->op.same_as(tl::simd_vpack())) {
     ICHECK_EQ(op->args.size(), 2);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vpack<";
     PrintType(elem, os);
     os << ">(";
     PrintExpr(op->args[0], os); // src
-    os << ", " << Downcast<StringImm>(op->args[1])->value << ")";
+    os << ", " << (op->args[1]).as_or_throw<StringImm>()->value << ")";
   }
   // --- SimdVF vector broadcast vdupv: (src, mask, pos, mode) ---
   else if (op->op.same_as(tl::simd_vdupv())) {
@@ -2278,7 +2386,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF gather 32B blocks: (base, index [, mask]) ---
   else if (op->op.same_as(tl::simd_vgatherb())) {
     ICHECK(op->args.size() == 2 || op->args.size() == 3);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vgatherb<";
     PrintType(elem, os);
     os << ">((" << "__ubuf__" << " ";
@@ -2304,7 +2412,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF predicate load: (addr, dist) ---
   else if (op->op.same_as(tl::simd_pld())) {
     ICHECK_EQ(op->args.size(), 2);
-    std::string dist = Downcast<StringImm>(op->args[1])->value;
+    std::string dist = (op->args[1]).as_or_throw<StringImm>()->value;
     static const std::unordered_map<std::string, std::string> kPldFn = {
         {"NORM", "plds_norm"},
         {"US", "plds_upsample"},
@@ -2322,7 +2430,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 3);
     std::string addr = this->PrintExpr(op->args[0]);
     std::string src = this->PrintExpr(op->args[1]);
-    std::string dist = Downcast<StringImm>(op->args[2])->value;
+    std::string dist = (op->args[2]).as_or_throw<StringImm>()->value;
     static const std::unordered_map<std::string, std::string> kPstFn = {
         {"NORM", "psts_norm"},
         {"PK", "psts_pack"},
@@ -2338,8 +2446,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   else if (op->op.same_as(tl::simd_vld())) {
     ICHECK(op->args.size() == 2 || op->args.size() == 3);
     bool post_update = op->args.size() == 3;
-    DataType elem = op->dtype.element_of();
-    std::string dist = Downcast<StringImm>(op->args[1])->value;
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
+    std::string dist = (op->args[1]).as_or_throw<StringImm>()->value;
     // Each load distribution maps to a dedicated single-purpose entry point;
     // the element width (B8/B16/B32) is carried by the type argument, so the
     // width-suffixed dist names collapse onto one function per family.
@@ -2381,8 +2489,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF dual-dest load: (addr, dist [, offset]) -> vec_pair ---
   else if (op->op.same_as(tl::simd_vld2())) {
     ICHECK(op->args.size() >= 2 && op->args.size() <= 3);
-    DataType elem = op->dtype.element_of();
-    std::string dist = Downcast<StringImm>(op->args[1])->value;
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
+    std::string dist = (op->args[1]).as_or_throw<StringImm>()->value;
     bool has_off = (op->args.size() == 3);
     os << "simd_inst::vld_x2<" << CCEUBufType(elem) << ">((" << "__ubuf__"
        << " " << CCEUBufType(elem) << "*)";
@@ -2400,8 +2508,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF store: (addr, src, mask, dist) ---
   else if (op->op.same_as(tl::simd_vsts())) {
     ICHECK_EQ(op->args.size(), 4);
-    DataType dtype = op->args[1].dtype().element_of();
-    std::string dist = Downcast<StringImm>(op->args[3])->value;
+    PrimType dtype = PythonDType(op->args[1]).WithLanes(1);
+    std::string dist = (op->args[3]).as_or_throw<StringImm>()->value;
     // Each store distribution maps to a dedicated single-purpose entry point;
     // the element width (B8/B16/B32) is carried by the type argument, so the
     // width-suffixed dist names collapse onto one function per family.
@@ -2430,7 +2538,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF dual-source interleaved store: (addr, src0, src1) ---
   else if (op->op.same_as(tl::simd_vst2())) {
     ICHECK_EQ(op->args.size(), 3);
-    DataType dtype = op->args[1].dtype().element_of();
+    PrimType dtype = PythonDType(op->args[1]).WithLanes(1);
     std::string src0 = this->PrintExpr(op->args[1]);
     std::string src1 = this->PrintExpr(op->args[2]);
     std::string addr = this->PrintExpr(op->args[0]);
@@ -2444,8 +2552,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   else if (op->op.same_as(tl::simd_vsstb())) {
     ICHECK(op->args.size() == 4 || op->args.size() == 5);
     bool post_update = op->args.size() == 5;
-    ICHECK_EQ(op->dtype.is_handle(), post_update);
-    DataType dtype = op->args[0].dtype().element_of();
+    ICHECK_EQ(PythonIsPointer(GetRef<Expr>(op)), post_update);
+    PrimType dtype = PythonDType(op->args[0]).WithLanes(1);
     // Capture operands first so SSA temporaries (e.g. from reinterpret) are
     // emitted on their own lines before the call statement.
     std::string src = this->PrintExpr(op->args[0]);
@@ -2455,7 +2563,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (post_update) {
       // Keep POST_UPDATE as an expression so the frontend can write the
       // advanced pointer back into its mutable handle carrier.
-      std::string post = Downcast<StringImm>(op->args[4])->value;
+      std::string post = (op->args[4]).as_or_throw<StringImm>()->value;
       ICHECK_EQ(post, "POST_UPDATE");
       os << "simd_inst::vsstb(" << src << ", (__ubuf__ " << CCEUBufType(dtype)
          << "*)" << base << ", " << stride << ", " << mask << ", " << post
@@ -2470,7 +2578,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF scatter-store: (src, base, index, mask) ---
   else if (op->op.same_as(tl::simd_vscatter())) {
     ICHECK_EQ(op->args.size(), 4);
-    DataType dtype = op->args[0].dtype().element_of();
+    PrimType dtype = PythonDType(op->args[0]).WithLanes(1);
     // Capture operands first so SSA temporaries (e.g. from reinterpret) are
     // emitted on their own lines before the call statement.
     std::string src = this->PrintExpr(op->args[0]);
@@ -2485,19 +2593,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF dup: scalar broadcast ---
   else if (op->op.same_as(tl::simd_vdup())) {
     ICHECK_EQ(op->args.size(), 3);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vdup<";
     PrintType(elem, os);
     os << ">(";
     PrintExpr(op->args[0], os); // scalar
     os << ", ";
-    PrintExpr(op->args[1], os);                                   // mask
-    os << ", " << Downcast<StringImm>(op->args[2])->value << ")"; // mode
+    PrintExpr(op->args[1], os);                                         // mask
+    os << ", " << (op->args[2]).as_or_throw<StringImm>()->value << ")"; // mode
   }
   // --- SimdVF cast: (src, mask, ...extra) ---
   else if (op->op.same_as(tl::simd_vcvt())) {
     ICHECK(op->args.size() >= 4 && op->args.size() <= 6);
-    DataType elem = op->dtype.element_of();
+    PrimType elem = PythonDType(GetRef<Expr>(op)).WithLanes(1);
     os << "simd_inst::vcvt<";
     PrintType(elem, os);
     os << ">(";
@@ -2505,7 +2613,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ", ";
     PrintExpr(op->args[1], os); // mask
     for (int i = 2; i < static_cast<int>(op->args.size()); ++i) {
-      os << ", " << Downcast<StringImm>(op->args[i])->value;
+      os << ", " << (op->args[i]).as_or_throw<StringImm>()->value;
     }
     os << ")";
   }
@@ -2520,7 +2628,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 2);
     PrintSimdCall_(GetRef<Call>(op), 2, os);
   } else if (op->op.same_as(tl::simd_mem_bar())) {
-    std::string mem_type_str = Downcast<StringImm>(op->args[0])->value;
+    std::string mem_type_str = (op->args[0]).as_or_throw<StringImm>()->value;
     this->PrintIndent();
     this->stream << "simd_inst::mem_bar(" << mem_type_str << ");\n";
   } else if (op->op.same_as(tl::loop_break())) {
@@ -2586,44 +2694,46 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(!ascend_rng_state_var_.empty())
         << "tl.rng_rand_float requires a preceding T.rng_init call in the "
            "same T.SimtVF() block";
-    ICHECK_NE(op->dtype.bits(), 64)
+    ICHECK_NE(PythonDType(GetRef<Expr>(op)).bits(), 64)
         << "float64 RNG (tl.rng_rand_float bit=64) is not supported on Ascend";
     const std::string dist = op->args[0].as<StringImmNode>()->value;
     ICHECK(dist == "uniform" || dist == "normal")
         << "Unsupported RNG distribution on Ascend: " << dist;
     os << "tl::philox_rand_" << dist << "(&" << ascend_rng_state_var_ << ")";
   } else {
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
   }
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const NotNode *op, std::ostream &os) {
-  if (op->dtype.lanes() > 1) {
-    RejectGenericVectorInSimd("Not", op->dtype);
-    if (op->dtype.is_vector_bool() && op->dtype.lanes() <= 8) {
-      EmitSimtVectorPredicateNot(op->a, op->dtype, os);
+void CodeGenTileLangAscend::Dispatch_(const NotNode *op, std::ostream &os) {
+  if (PythonDType(GetRef<Expr>(op)).lanes() > 1) {
+    RejectGenericVectorInSimd("Not", PythonDType(GetRef<Expr>(op)));
+    if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLBool) &&
+        PythonDType(GetRef<Expr>(op)).lanes() <= 8) {
+      EmitSimtVectorPredicateNot(op->a, PythonDType(GetRef<Expr>(op)), os);
       return;
     }
   }
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
-bool CodeGenTileLangAscend::IsGlobalGmBuffer(const BufferNode *buffer) const {
-  const VarNode *buf_var = buffer->data.get();
+bool CodeGenTileLangAscend::IsGlobalGmBuffer(const VarNode *buffer) const {
+  const VarNode *buf_var = GetRef<Var>(buffer).get();
   auto it = alloc_storage_scope_.find(buf_var);
-  std::string scope = (it != alloc_storage_scope_.end())
-                          ? it->second
-                          : std::string(GetPtrStorageScope(buffer->data));
+  std::string scope =
+      (it != alloc_storage_scope_.end())
+          ? std::string(it->second.name())
+          : std::string(PythonStorageScope(GetRef<Var>(buffer)));
   return scope == "global";
 }
 
-std::string CodeGenTileLangAscend::GetGmBypassPtr(DataType dtype,
-                                                  const BufferNode *buffer,
+std::string CodeGenTileLangAscend::GetGmBypassPtr(PrimType dtype,
+                                                  const VarNode *buffer,
                                                   PrimExpr index) {
-  const VarNode *buf_var = buffer->data.get();
+  const VarNode *buf_var = GetRef<Var>(buffer).get();
   std::ostringstream os;
   os << "((";
-  PrintStorageScope("global", os);
+  PrintStorageScope(runtime::MemoryScope("global"), os);
   PrintType(dtype, os);
   os << "*)" << GetVarID(buf_var) << " + ";
   PrintExpr(index, os);
@@ -2631,18 +2741,18 @@ std::string CodeGenTileLangAscend::GetGmBypassPtr(DataType dtype,
   return os.str();
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const BufferLoadNode *op,
-                                       std::ostream &os) {
-  DataType value_dtype = op->dtype;
-  const VarNode *buf_var = op->buffer->data.get();
+void CodeGenTileLangAscend::Dispatch_(const TensorLoadNode *op,
+                                      std::ostream &os) {
+  PrimType value_dtype = PythonDType(GetRef<Expr>(op));
+  const VarNode *buf_var = op->source.as_or_throw<TensorVar>().get();
 
   // For Ascend: scalar FP8 loads from shared/UBUF memory need conversion
   // through raw bytes, because the scalar FP8 type (tl::float_e4m3_t) is a
   // struct whose operator= does not support __ubuf__ to local assignment.
-  if (value_dtype.is_scalar() && tl::IsAscendVectorizableFP8(value_dtype)) {
+  if (value_dtype.IsScalar() && tl::IsAscendVectorizableFP8(value_dtype)) {
     auto it = alloc_storage_scope_.find(buf_var);
     if (it != alloc_storage_scope_.end()) {
-      const std::string &scope = it->second;
+      std::string scope = it->second.name();
       if (scope == "shared" || scope == "shared.dyn") {
         // __ubuf__ does not support custom struct pointer
         ICHECK_EQ(op->indices.size(), 1);
@@ -2652,7 +2762,7 @@ void CodeGenTileLangAscend::VisitExpr_(const BufferLoadNode *op,
         // tl::float_e4m3_t::from_bits(*(__ubuf__ uint8_t*)(buf + off))
         os << GetAscendFP8ScalarValueType(value_dtype) << "::from_bits("
            << "*(";
-        PrintStorageScope(scope, os);
+        PrintStorageScope(runtime::MemoryScope(scope), os);
         os << "uint8_t*)(" << buf_name;
         if (!is_zero(index)) {
           os << " + ";
@@ -2666,33 +2776,33 @@ void CodeGenTileLangAscend::VisitExpr_(const BufferLoadNode *op,
 
   // emit a real vector load when provably aligned, otherwise a brute-force
   // per-lane scalar gather.
-  DataType element_dtype = op->buffer->dtype;
+  PrimType element_dtype = op->source.as_or_throw<TensorVar>().dtype();
   if (value_dtype.lanes() > 1 && value_dtype.lanes() != element_dtype.lanes() &&
       op->indices.size() == 1) {
     EmitScalarizedLoad(op, os);
     return;
   }
 
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
 bool CodeGenTileLangAscend::VectorAccessIsAligned(const PrimExpr &index,
                                                   int lanes) {
   // Only a unit-stride ramp can become a reinterpret-cast vector access.
-  arith::PVar<PrimExpr> base;
-  if (!arith::ramp(base, 1, lanes).Match(index)) {
+  PVar<PrimExpr> base;
+  if (!tvm::ramp(base, 1, lanes).Match(index)) {
     return false;
   }
   // Prove the ramp base is divisible by the vector width.
   PrimExpr ramp_base = base.Eval();
-  PrimExpr lanes_const = make_const(ramp_base.dtype(), lanes);
-  return analyzer_.CanProveEqual(floormod(ramp_base, lanes_const),
-                                 make_zero(ramp_base.dtype()));
+  PrimExpr lanes_const = MakeConst(PythonDType(ramp_base), lanes);
+  return analyzer_->CanProveEqual(floormod(ramp_base, lanes_const),
+                                  MakeZero(PythonDType(ramp_base)));
 }
 
-void CodeGenTileLangAscend::EmitScalarizedLoad(const BufferLoadNode *op,
+void CodeGenTileLangAscend::EmitScalarizedLoad(const TensorLoadNode *op,
                                                std::ostream &os) {
-  DataType value_dtype = op->dtype;
+  PrimType value_dtype = PythonDType(GetRef<Expr>(op));
   ValidateGenericVectorType("BufferLoad", value_dtype);
   int lanes = value_dtype.lanes();
   PrimExpr index = op->indices[0];
@@ -2701,8 +2811,10 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const BufferLoadNode *op,
   // valid lowering: the only scalar-pipe GM path is the per-element
   // read_gm_bypass_dcache emitted in VisitExpr_. Vector GM traffic must go
   // through an MTE copy (T.copy) or a SimtVF/SimdVF region.
-  if (IsOutsideVF() && IsGlobalGmBuffer(op->buffer.get())) {
-    LOG(FATAL) << "Ascend: cannot vectorize GM access of " << op->buffer->name
+  if (IsOutsideVF() &&
+      IsGlobalGmBuffer(op->source.as_or_throw<TensorVar>().get())) {
+    LOG(FATAL) << "Ascend: cannot vectorize GM access of "
+               << op->source.as_or_throw<TensorVar>()->name
                << " (lanes=" << lanes
                << ") on the scalar core. Scalar-core GM reads must be a single "
                   "scalar element (lowered to read_gm_bypass_dcache); use "
@@ -2711,16 +2823,17 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const BufferLoadNode *op,
 
   // Provably aligned: a single reinterpret-cast vector load (fast path).
   if (VectorAccessIsAligned(index, lanes)) {
-    arith::PVar<PrimExpr> base;
-    ICHECK(arith::ramp(base, 1, lanes).Match(index));
-    std::string ref = GetVecLoad(value_dtype, op->buffer.get(), base.Eval());
+    PVar<PrimExpr> base;
+    ICHECK(tvm::ramp(base, 1, lanes).Match(index));
+    std::string ref = GetVecLoad(
+        value_dtype, op->source.as_or_throw<TensorVar>().get(), base.Eval());
     HandleVolatileLoads(ref, op, os);
     return;
   }
 
   // Otherwise scalarize: load each lane from its scalar element offset and pack
   // with a brace-initializer (which bisheng accepts, unlike `T(a, b)`).
-  DataType elem_dtype = value_dtype.element_of();
+  PrimType elem_dtype = value_dtype.WithLanes(1);
   const RampNode *ramp = index.as<RampNode>();
   std::ostringstream init;
   PrintType(value_dtype, init);
@@ -2730,20 +2843,22 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const BufferLoadNode *op,
       init << ", ";
     }
     PrimExpr lane_index =
-        ramp ? (ramp->base + ramp->stride * make_const(ramp->base.dtype(), i))
+        ramp ? (ramp->base +
+                ramp->stride * MakeConst(PythonDType(ramp->base), i))
              : index;
-    std::string lane_ref = GetBufferRef(elem_dtype, op->buffer.get(),
-                                        analyzer_.Simplify(lane_index));
+    std::string lane_ref =
+        GetBufferRef(elem_dtype, op->source.as_or_throw<TensorVar>().get(),
+                     analyzer_->Simplify(lane_index));
     init << lane_ref;
   }
   init << "}";
   os << init.str();
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
-  DataType value_dtype = op->value.dtype();
-  DataType element_dtype = op->buffer->dtype;
-  const VarNode *buf_var = op->buffer->data.get();
+void CodeGenTileLangAscend::Dispatch_(const TensorStoreNode *op) {
+  PrimType value_dtype = PythonDType(op->value);
+  PrimType element_dtype = op->dest.as_or_throw<TensorVar>().dtype();
+  const VarNode *buf_var = op->dest.as_or_throw<TensorVar>().get();
   PrimExpr index_expr = op->indices[0];
 
   // A vector store that stays on the scalar core (outside any VF body) cannot
@@ -2752,21 +2867,25 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
   // element-wise scalar work, so emit one scalar store per lane.
   if (IsOutsideVF() && value_dtype.lanes() > 1 &&
       value_dtype.lanes() != element_dtype.lanes() && op->indices.size() == 1 &&
-      !IsGlobalGmBuffer(op->buffer.get()) && EmitOutOfVFBroadcastStore(op)) {
+      !IsGlobalGmBuffer(op->dest.as_or_throw<TensorVar>().get()) &&
+      EmitOutOfVFBroadcastStore(op)) {
     return;
   }
 
   if (value_dtype.lanes() > 1 && op->indices.size() == 1) {
     const auto *broadcast_index = index_expr.as<BroadcastNode>();
     auto scope_it = alloc_storage_scope_.find(buf_var);
-    std::string buffer_scope = op->buffer.scope();
-    bool is_local_scope =
-        buffer_scope == "local" || buffer_scope == "local.var" ||
-        (scope_it != alloc_storage_scope_.end() &&
-         (scope_it->second == "local" || scope_it->second == "local.var"));
+    std::string buffer_scope = op->dest.as_or_throw<TensorVar>().scope().name();
+    bool is_local_scope = buffer_scope == "local" ||
+                          buffer_scope == "local.var" ||
+                          (scope_it != alloc_storage_scope_.end() &&
+                           (scope_it->second.name() == "local" ||
+                            scope_it->second.name() == "local.var"));
     if (broadcast_index && is_local_scope &&
-        value_dtype.lanes() ==
-            Downcast<IntImm>(broadcast_index->lanes)->value) {
+        value_dtype.lanes() == (broadcast_index->lanes)
+                                   .as_or_throw<IntImm>()
+                                   ->value.as<int64_t>()
+                                   .value()) {
       std::string buf_name = GetVarID(buf_var);
       std::string value = PrintExpr(op->value);
 
@@ -2786,10 +2905,10 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
   // For Ascend: scalar FP8 stores to shared/UBUF memory need to write the raw
   // .data byte, because tl::float_e4m3_t::operator= does not accept a local
   // struct on a __ubuf__ lvalue target.
-  if (value_dtype.is_scalar() && tl::IsAscendVectorizableFP8(value_dtype)) {
+  if (value_dtype.IsScalar() && tl::IsAscendVectorizableFP8(value_dtype)) {
     auto it = alloc_storage_scope_.find(buf_var);
     if (it != alloc_storage_scope_.end()) {
-      const std::string &scope = it->second;
+      std::string scope = it->second.name();
       if (scope == "shared" || scope == "shared.dyn") {
         // __ubuf__ does not support custom struct pointer
         ICHECK_EQ(op->indices.size(), 1);
@@ -2799,7 +2918,7 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
         // ((__ubuf__ uint8_t*)buf)[off] = value.data;
         PrintIndent();
         stream << "((";
-        PrintStorageScope(scope, stream);
+        PrintStorageScope(runtime::MemoryScope(scope), stream);
         stream << "uint8_t*)" << buf_name << ")[" << PrintExpr(index_expr)
                << "] = " << value << ".data;\n";
         return;
@@ -2814,34 +2933,36 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
     }
   }
 
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
 bool CodeGenTileLangAscend::EmitOutOfVFBroadcastStore(
-    const BufferStoreNode *op) {
+    const TensorStoreNode *op) {
   const auto *broadcast = op->value.as<BroadcastNode>();
   const auto *ramp = op->indices[0].as<RampNode>();
-  if (broadcast == nullptr || ramp == nullptr || !is_one(ramp->stride) ||
-      op->buffer->dtype.lanes() != 1) {
+  if (broadcast == nullptr || ramp == nullptr || !IsOne(ramp->stride) ||
+      op->dest.as_or_throw<TensorVar>().dtype().lanes() != 1) {
     return false;
   }
-  const IntImmNode *lanes = Downcast<IntImm>(broadcast->lanes).as<IntImmNode>();
+  const IntImmNode *lanes =
+      (broadcast->lanes).as_or_throw<IntImm>().as<IntImmNode>();
   ICHECK(lanes != nullptr) << "Broadcast lanes must be constant";
-  DataType elem_dtype = op->buffer->dtype;
+  PrimType elem_dtype = op->dest.as_or_throw<TensorVar>().dtype();
   SSAOperationScope ssa_scope(this);
   std::string value = SSAGetID(PrintExpr(broadcast->value), elem_dtype);
   for (int i = 0; i < lanes->value; ++i) {
     PrimExpr lane_index =
-        analyzer_.Simplify(ramp->base + make_const(ramp->base.dtype(), i));
+        analyzer_->Simplify(ramp->base + MakeConst(PythonDType(ramp->base), i));
     PrintIndent();
-    stream << GetBufferRef(elem_dtype, op->buffer.get(), lane_index) << " = "
-           << value << ";\n";
+    stream << GetBufferRef(elem_dtype, op->dest.as_or_throw<TensorVar>().get(),
+                           lane_index)
+           << " = " << value << ";\n";
   }
   return true;
 }
 
-bool CodeGenTileLangAscend::EmitScalarizedStore(const BufferStoreNode *op) {
-  DataType value_dtype = op->value.dtype();
+bool CodeGenTileLangAscend::EmitScalarizedStore(const TensorStoreNode *op) {
+  PrimType value_dtype = PythonDType(op->value);
   ValidateGenericVectorType("BufferStore", value_dtype);
   int lanes = value_dtype.lanes();
   PrimExpr index = op->indices[0];
@@ -2850,10 +2971,11 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const BufferStoreNode *op) {
   // valid lowering: the only scalar-pipe GM path is the per-element
   // write_gm_bypass_dcache emitted in VisitStmt_. Vector GM traffic must go
   // through an MTE copy (T.copy) or a SimtVF/SimdVF region.
-  if (IsOutsideVF() && IsGlobalGmBuffer(op->buffer.get())) {
+  if (IsOutsideVF() &&
+      IsGlobalGmBuffer(op->dest.as_or_throw<TensorVar>().get())) {
     LOG(FATAL)
-        << "Ascend: cannot vectorize GM access of " << op->buffer->name
-        << " (lanes=" << lanes
+        << "Ascend: cannot vectorize GM access of "
+        << op->dest.as_or_throw<TensorVar>()->name << " (lanes=" << lanes
         << ") on the scalar core. Scalar-core GM writes must be a single "
            "scalar element (lowered to write_gm_bypass_dcache); use "
            "T.copy or a T.SimtVF/T.SimdVF region for vector GM traffic.";
@@ -2870,14 +2992,15 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const BufferStoreNode *op) {
   // no vector index is constructed.
   const RampNode *ramp = index.as<RampNode>();
   ICHECK(ramp) << "scalarized store expects a ramp index, got " << index;
-  DataType elem_dtype = value_dtype.element_of();
+  PrimType elem_dtype = value_dtype.WithLanes(1);
   SSAOperationScope ssa_scope(this);
   std::string value = SSAGetID(PrintExpr(op->value), value_dtype);
   for (int i = 0; i < lanes; ++i) {
     PrimExpr lane_index =
-        ramp->base + ramp->stride * make_const(ramp->base.dtype(), i);
-    std::string lane_ref = GetBufferRef(elem_dtype, op->buffer.get(),
-                                        analyzer_.Simplify(lane_index));
+        ramp->base + ramp->stride * MakeConst(PythonDType(ramp->base), i);
+    std::string lane_ref =
+        GetBufferRef(elem_dtype, op->dest.as_or_throw<TensorVar>().get(),
+                     analyzer_->Simplify(lane_index));
     std::ostringstream lane_val;
     PrintVecElemLoad(value, value_dtype, i, lane_val);
     PrintIndent();
@@ -2886,56 +3009,69 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const BufferStoreNode *op) {
   return true;
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const SelectNode *op,
-                                       std::ostream &os) { // NOLINT(*)
-  if (!op->condition.dtype().is_fixed_length_vector()) {
-    CodeGenC::VisitExpr_(op, os);
+void CodeGenTileLangAscend::Dispatch_(const SelectNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (!PythonDType(op->condition).IsFixedLengthVector()) {
+    CodeGenC::Dispatch_(op, os);
     return;
   }
 
-  ValidateGenericVectorType("Select", op->condition.dtype());
-  ValidateGenericVectorType("Select", op->dtype);
+  ValidateGenericVectorType("Select", PythonDType(op->condition));
+  ValidateGenericVectorType("Select", PythonDType(GetRef<Expr>(op)));
 
-  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
-                 op->true_value->dtype == op->dtype &&
-                 op->dtype.lanes() == op->condition.dtype().lanes());
+  if (const auto *broadcast = op->condition.as<BroadcastNode>()) {
+    std::string condition = PrintExpr(broadcast->value);
+    std::string true_value = PrintExpr(op->true_value);
+    std::string false_value = PrintExpr(op->false_value);
+    os << "((" << condition << ") ? (" << true_value << ") : (" << false_value
+       << "))";
+    return;
+  }
+
+  TVM_FFI_ICHECK(PythonDType(op->false_value) ==
+                     PythonDType(GetRef<Expr>(op)) &&
+                 PythonDType(op->true_value) == PythonDType(GetRef<Expr>(op)) &&
+                 PythonDType(GetRef<Expr>(op)).lanes() ==
+                     PythonDType(op->condition).lanes());
 
   std::string result = name_supply_->FreshName("_");
   this->PrintIndent();
-  this->PrintType(op->dtype, stream);
+  this->PrintType(PythonDType(GetRef<Expr>(op)), stream);
   stream << ' ' << result << ";\n";
   SSAOperationScope ssa_scope(this);
   {
     std::string condition =
-        SSAGetID(PrintExpr(op->condition), op->condition.dtype());
-    std::string true_value = SSAGetID(PrintExpr(op->true_value), op->dtype);
-    std::string false_value = SSAGetID(PrintExpr(op->false_value), op->dtype);
+        SSAGetID(PrintExpr(op->condition), PythonDType(op->condition));
+    std::string true_value =
+        SSAGetID(PrintExpr(op->true_value), PythonDType(GetRef<Expr>(op)));
+    std::string false_value =
+        SSAGetID(PrintExpr(op->false_value), PythonDType(GetRef<Expr>(op)));
 
-    int lanes = op->dtype.lanes();
+    int lanes = PythonDType(GetRef<Expr>(op)).lanes();
     for (int i = 0; i < lanes; ++i) {
       std::ostringstream value;
       value << "(bool(";
-      PrintVecElemLoad(condition, op->condition.dtype(), i, value);
+      PrintVecElemLoad(condition, PythonDType(op->condition), i, value);
       value << ")?";
-      PrintVecElemLoad(true_value, op->dtype, i, value);
+      PrintVecElemLoad(true_value, PythonDType(GetRef<Expr>(op)), i, value);
       value << ':';
-      PrintVecElemLoad(false_value, op->dtype, i, value);
+      PrintVecElemLoad(false_value, PythonDType(GetRef<Expr>(op)), i, value);
       value << ')';
-      PrintVecElemStore(result, op->dtype, i, value.str());
+      PrintVecElemStore(result, PythonDType(GetRef<Expr>(op)), i, value.str());
     }
   }
   os << result;
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const ShuffleNode *op,
-                                       std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangAscend::Dispatch_(const ShuffleNode *op,
+                                      std::ostream &os) { // NOLINT(*)
   for (const PrimExpr &vector : op->vectors) {
-    if (vector.dtype().lanes() > 1) {
-      ValidateGenericVectorType("Shuffle", vector.dtype());
+    if (PythonDType(vector).lanes() > 1) {
+      ValidateGenericVectorType("Shuffle", PythonDType(vector));
     }
   }
-  if (op->dtype.lanes() > 1) {
-    ValidateGenericVectorType("Shuffle", op->dtype);
+  if (PythonDType(GetRef<Expr>(op)).lanes() > 1) {
+    ValidateGenericVectorType("Shuffle", PythonDType(GetRef<Expr>(op)));
   }
   SSAOperationScope ssa_scope(this);
 
@@ -2945,14 +3081,14 @@ void CodeGenTileLangAscend::VisitExpr_(const ShuffleNode *op,
   // element-wise access through their uint carrier.
   std::vector<std::string> input_lanes;
   for (const PrimExpr &vector : op->vectors) {
-    std::string vector_value = SSAGetID(PrintExpr(vector), vector.dtype());
-    if (vector.dtype().is_scalar()) {
+    std::string vector_value = SSAGetID(PrintExpr(vector), PythonDType(vector));
+    if (PythonDType(vector).IsScalar()) {
       input_lanes.push_back(std::move(vector_value));
       continue;
     }
-    for (int i = 0; i < vector.dtype().lanes(); ++i) {
+    for (int i = 0; i < PythonDType(vector).lanes(); ++i) {
       std::ostringstream element;
-      PrintVecElemLoad(vector_value, vector.dtype(), i, element);
+      PrintVecElemLoad(vector_value, PythonDType(vector), i, element);
       input_lanes.push_back(element.str());
     }
   }
@@ -2964,49 +3100,59 @@ void CodeGenTileLangAscend::VisitExpr_(const ShuffleNode *op,
     TVM_FFI_ICHECK(constant_index != nullptr)
         << "ShuffleNode indices must be constants at Ascend codegen time, got "
         << index;
-    TVM_FFI_ICHECK_GE(constant_index->value, 0)
+    TVM_FFI_ICHECK_GE(constant_index->value.as<int64_t>().value(), 0)
         << "ShuffleNode index must be non-negative, got "
-        << constant_index->value;
-    TVM_FFI_ICHECK_LT(static_cast<size_t>(constant_index->value),
-                      input_lanes.size())
-        << "ShuffleNode index " << constant_index->value
+        << constant_index->value.as<int64_t>().value();
+    TVM_FFI_ICHECK_LT(
+        static_cast<size_t>(constant_index->value.as<int64_t>().value()),
+        input_lanes.size())
+        << "ShuffleNode index " << constant_index->value.as<int64_t>().value()
         << " is outside the concatenated input with " << input_lanes.size()
         << " lanes";
-    output_lanes.push_back(input_lanes[constant_index->value]);
+    output_lanes.push_back(
+        input_lanes[constant_index->value.as<int64_t>().value()]);
   }
 
-  if (op->dtype.is_scalar()) {
+  if (PythonDType(GetRef<Expr>(op)).IsScalar()) {
     TVM_FFI_ICHECK_EQ(output_lanes.size(), 1);
     os << output_lanes[0];
     return;
   }
 
-  TVM_FFI_ICHECK_EQ(static_cast<int>(output_lanes.size()), op->dtype.lanes());
+  TVM_FFI_ICHECK_EQ(static_cast<int>(output_lanes.size()),
+                    PythonDType(GetRef<Expr>(op)).lanes());
   std::string result = name_supply_->FreshName("_");
   PrintIndent();
-  PrintType(op->dtype, stream);
+  PrintType(PythonDType(GetRef<Expr>(op)), stream);
   stream << ' ' << result << ";\n";
-  for (int i = 0; i < op->dtype.lanes(); ++i) {
-    PrintVecElemStore(result, op->dtype, i, output_lanes[i]);
+  for (int i = 0; i < PythonDType(GetRef<Expr>(op)).lanes(); ++i) {
+    PrintVecElemStore(result, PythonDType(GetRef<Expr>(op)), i,
+                      output_lanes[i]);
   }
   os << result;
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const ForNode *op) {
-  if (op->kind == tirx::ForKind::kUnrolled) {
+void CodeGenTileLangAscend::Dispatch_(const ForNode *op) {
+  auto factor = op->annotations.Get(tirx::attr::kPragmaUnroll);
+  if (op->annotations.count(tirx::attr::kDisableUnroll.name)) {
     PrintIndent();
-    auto it = unroll_factor_.find(op->loop_var);
-    if (it != unroll_factor_.end()) {
-      stream << "#pragma unroll " << PrintExpr(it->second) << "\n";
-    } else {
-      stream << "#pragma unroll\n";
+    stream << "#pragma unroll 1\n";
+  } else if (factor || op->kind == ForKind::kUnrolled) {
+    PrintIndent();
+    stream << "#pragma unroll";
+    if (factor) {
+      auto count = tl::GetIntAnnotation(*factor);
+      TVM_FFI_CHECK(count && *count > 0, ValueError)
+          << "Ascend unroll factor must be a positive integer";
+      stream << " " << *count;
     }
+    stream << "\n";
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const WhileNode *op) {
-  if (is_one(op->condition)) {
+void CodeGenTileLangAscend::Dispatch_(const WhileNode *op) {
+  if (IsOne(op->condition)) {
     PrintIndent();
     stream << "while (1) {\n";
     int while_scope = BeginScope();
@@ -3016,68 +3162,15 @@ void CodeGenTileLangAscend::VisitStmt_(const WhileNode *op) {
     stream << "}\n";
     return;
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const AttrStmtNode *op) {
-  // Push tl.assume facts (e.g. `stride % N == 0`) into analyzer
-  if (op->attr_key == tirx::attr::tilelang_assume) {
-    With<arith::ConstraintContext> cctx(&analyzer_,
-                                        Downcast<PrimExpr>(op->node));
-    this->VisitStmt(op->body);
-    return;
-  }
-  // Ascend text-only backend currently does not lower thread binding attrs into
-  // executable launch semantics. Keep generating the enclosed body instead of
-  // failing in the generic C backend.
-  if (op->attr_key == tirx::attr::thread_extent ||
-      op->attr_key == s_tir::attr::virtual_thread) {
-    if (const auto *iv = op->node.as<IterVarNode>()) {
-      // Materialize a placeholder symbol so later uses (e.g. simtvf_tx) are
-      // printable in expression codegen.
-      if ((iv->thread_tag == "threadIdx.x" || iv->thread_tag == "threadIdx.y" ||
-           iv->thread_tag == "threadIdx.z") &&
-          IsOutsideVF()) {
-        this->VisitStmt(op->body);
-        return;
-      }
-      if (std::string::npos == iv->thread_tag.find("threadIdx.") &&
-          std::string::npos == iv->thread_tag.find("blockIdx.")) {
-        PrintIndent();
-        PrintType(iv->var.dtype(), stream);
-        stream << " " << AllocVarID(iv->var.get()) << " = ";
-        if (iv->thread_tag == "cthread") {
-          stream << "asc_get_sub_block_id()";
-        } else {
-          stream << "0";
-        }
-        stream << ";\n";
-      } else if (iv->thread_tag == "blockIdx.x") {
-        var_idmap_[iv->var.get()] = "block_idx";
-      } else {
-        var_idmap_[iv->var.get()] = iv->thread_tag;
-      }
-    }
-    this->VisitStmt(op->body);
-    return;
-  }
-  // SimdVF scope marker: transparent in codegen, just visit body
-  if (op->attr_key == "tl.simdvf_scope") {
-    this->VisitStmt(op->body);
-    return;
-  }
-  if (op->attr_key == "pragma_unroll_factor") {
-    const auto *factor = op->value.as<IntImmNode>();
-    ICHECK(factor) << "pragma_unroll_factor must be a constant integer";
-    const auto *loop_var = op->node.as<VarNode>();
-    ICHECK(loop_var) << "pragma_unroll_factor must annotate a loop variable";
-    unroll_factor_[ffi::GetRef<Var>(loop_var)] = Downcast<IntImm>(op->value);
-  }
-  CodeGenC::VisitStmt_(op);
-}
-
-void CodeGenTileLangAscend::VisitStmt_(const AllocBufferNode *op) {
-  std::string scope = GetPtrStorageScope(op->buffer->data);
+void CodeGenTileLangAscend::PrintAllocTensor(const BindNode *op,
+                                             const CallNode *allocation) {
+  auto tensor = op->var.as_or_throw<TensorVar>();
+  auto annotations =
+      allocation->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>()->dict;
+  std::string scope = PythonStorageScope(tensor);
 
   if (scope == "shared") {
     LOG(FATAL) << "Static shared memory (scope='shared') is not supported on "
@@ -3088,39 +3181,41 @@ void CodeGenTileLangAscend::VisitStmt_(const AllocBufferNode *op) {
 
   // SimdVF: emit vector_<T> for fragment buffers
   if (IsInsideSimdVF() && scope == "local.fragment") {
-    std::string vid = AllocVarID(op->buffer->data.get());
+    std::string vid = AllocVarID(tensor.get());
     this->PrintIndent();
     stream << "vector_";
-    PrintCCEVectorSuffix(op->buffer->dtype, stream);
+    PrintCCEVectorSuffix(tensor.dtype(), stream);
     stream << " " << vid << ";\n";
-    alloc_storage_scope_[op->buffer->data.get()] = scope;
-    RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
+    alloc_storage_scope_[tensor.get()] = runtime::MemoryScope(scope);
+    RegisterHandleType(tensor.get(), tensor.dtype());
     return;
   }
 
   std::string qualifier = GetAscendScopeQualifier(scope);
   if (!qualifier.empty()) {
-    std::string vid = AllocVarID(op->buffer->data.get());
+    std::string vid = AllocVarID(tensor.get());
     // Generate: __qualifier__ <type> *buf = (__qualifier__ <type> *)0;
-    DataType dtype = op->buffer->dtype;
+    PrimType dtype = tensor.dtype();
     this->PrintIndent();
     stream << qualifier << " ";
     PrintType(dtype, stream);
     stream << " *" << vid << " = (" << qualifier << " ";
     PrintType(dtype, stream);
-    if (tl::IsSSBuffer(op->buffer)) {
+    if (tl::IsSSBuffer(tensor)) {
       ICHECK(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 2)
           << "SS buffers require a MIX kernel with two AIVs";
-      auto elements = GetRef<AllocBuffer>(op).ConstantAllocationSize();
+      auto elements = tl::GetConstInt(sym::Analyzer()->Simplify(
+          floordiv(tl::GetBufferStorageSizeBytes(tensor),
+                   static_cast<int64_t>(tensor.dtype().StorageBytes()))));
       ICHECK(elements.has_value() && elements.value() > 0 &&
-             elements.value() <= 3072 / dtype.bytes())
+             elements.value() <= 3072 / dtype.StorageBytes())
           << "SS allocations require a static total size of at most 3072 bytes";
     }
     // SS, like L1, starts at zero in its own address space. This is the
     // dav-3510 device value returned by AscendC::GetSsbufBaseAddr().
     stream << " *)0;\n";
-    alloc_storage_scope_[op->buffer->data.get()] = scope;
-    RegisterHandleType(op->buffer->data.get(), dtype);
+    alloc_storage_scope_[tensor.get()] = runtime::MemoryScope(scope);
+    RegisterHandleType(tensor.get(), dtype);
     return;
   }
 
@@ -3129,77 +3224,85 @@ void CodeGenTileLangAscend::VisitStmt_(const AllocBufferNode *op) {
   // since they are always written before read via SIMD operations.
   // Without this, zero-init via Broadcast expands to make_vector_f32(...)
   // with one argument per lane, which is both verbose and unnecessary.
-  if (IsInsideSimdVF() && scope == "local.var" &&
-      op->buffer->dtype.lanes() > 1) {
-    ValidateSimdVectorType(op->buffer->dtype, "SimdVF local.var allocation");
-    std::string vid = AllocVarID(op->buffer->data.get());
+  if (IsInsideSimdVF() && scope == "local.var" && tensor.dtype().lanes() > 1) {
+    ValidateSimdVectorType(tensor.dtype(), "SimdVF local.var allocation");
+    std::string vid = AllocVarID(tensor.get());
     this->PrintIndent();
-    PrintType(op->buffer->dtype, stream);
+    PrintType(tensor.dtype(), stream);
     stream << " " << vid << ";\n";
-    alloc_storage_scope_[op->buffer->data.get()] = scope;
-    RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
+    alloc_storage_scope_[tensor.get()] = runtime::MemoryScope(scope);
+    RegisterHandleType(tensor.get(), tensor.dtype());
     return;
   }
 
   if (scope == "local.var") {
-    auto alloc = AllocBuffer(ffi::GetRef<AllocBuffer>(op));
-    ICHECK_EQ(alloc.ConstantAllocationSize().value_or(0), 1)
+    ICHECK_EQ(tl::GetConstInt(PythonTensorSize(tensor)).value_or(0), 1)
         << "local.var should be scalar";
-    DataType dtype = op->buffer->dtype;
-    std::string vid = AllocVarID(op->buffer->data.get());
+    PrimType dtype = tensor.dtype();
+    std::string vid = AllocVarID(tensor.get());
     ffi::Optional<PrimExpr> init;
-    if (!dtype.is_handle()) {
-      init = tirx::make_const(dtype, 0);
+    if (!dtype.MatchesCode(kDLOpaqueHandle)) {
+      init = MakeConst(dtype, 0);
     }
-    auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
-    if (init_it != op->annotations.end()) {
-      PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-      if (!user_init.dtype().is_void() && user_init.dtype() != dtype) {
-        user_init = tirx::Cast(dtype, user_init);
+    auto init_it = annotations.find(tl::attr::kLocalVarInit);
+    if (init_it != annotations.end()) {
+      PrimExpr user_init = (*init_it).second.cast<PrimExpr>();
+      if (!PythonDType(user_init).IsVoid() && PythonDType(user_init) != dtype) {
+        user_init = prim::Cast(dtype, user_init);
       }
       init = user_init;
     }
     std::string init_value =
-        init.defined() ? PrintExpr(init.value()) : "nullptr";
+        init.has_value() ? PrintExpr(init.value()) : "nullptr";
     PrintIndent();
-    if (dtype.is_handle()) {
+    if (dtype.MatchesCode(kDLOpaqueHandle)) {
       // Handle local variables are exclusively mutable UB pointers in SimdVF.
       stream << "__ubuf__ void*";
     } else {
       PrintType(dtype, stream);
     }
     stream << " " << vid << " = " << init_value << ";\n";
-    alloc_storage_scope_[op->buffer->data.get()] = scope;
-    RegisterHandleType(op->buffer->data.get(), dtype);
+    alloc_storage_scope_[tensor.get()] = runtime::MemoryScope(scope);
+    RegisterHandleType(tensor.get(), dtype);
     return;
   }
 
   // For other scopes, use parent class implementation
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
-void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
+void CodeGenTileLangAscend::Dispatch_(const BindNode *op) {
+  if (const auto *allocation = op->value.as<CallNode>()) {
+    if (allocation->op.same_as(tirx::alloc_tensor_op())) {
+      PrintAllocTensor(op, allocation);
+      return;
+    }
+    if (allocation->op.same_as(tirx::decl_tensor_op())) {
+      CodeGenC::Dispatch_(op);
+      return;
+    }
+  }
   // Inside SimdVF body, bindings for vector registers and masks need concrete
   // CCE-friendly types instead of generic C handle printing.
   if (IsInsideSimdVF()) {
-    if (op->value.dtype().lanes() > 1) {
-      ValidateSimdVectorType(op->value.dtype(), "SimdVF binding");
+    if (auto primitive = op->value->ty.as<PrimType>();
+        primitive && primitive->lanes() > 1) {
+      ValidateSimdVectorType(PythonDType(op->value), "SimdVF binding");
     }
     std::string vid = AllocVarID(op->var.get());
-    if (op->var.dtype().is_handle() &&
-        op->var->type_annotation.as<PointerTypeNode>()) {
-      const auto *ptr = op->var->type_annotation.as<PointerTypeNode>();
-      std::string scope = GetPtrStorageScope(op->var);
+    if (PythonIsPointer(op->var) && op->var->ty.as<PtrTypeNode>()) {
+      const auto *ptr = op->var->ty.as<PtrTypeNode>();
+      std::string scope = PythonStorageScope(op->var);
       if (scope == "local.fragment") {
         const auto *prim = ptr->element_type.as<PrimTypeNode>();
         ICHECK(prim)
             << "SimdVF local.fragment bind expects primitive element type";
         PrintIndent();
         stream << "vector_";
-        PrintCCEVectorSuffix(prim->dtype, stream);
+        PrintCCEVectorSuffix(GetRef<PrimType>(prim), stream);
         stream << " " << vid << ";\n";
-        alloc_storage_scope_[op->var.get()] = scope;
-        RegisterHandleType(op->var.get(), prim->dtype);
+        alloc_storage_scope_[op->var.get()] = runtime::MemoryScope(scope);
+        RegisterHandleType(op->var.get(), GetRef<PrimType>(prim));
         return;
       }
     }
@@ -3207,10 +3310,13 @@ void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
       // simd_pset/pge(elem_width_bits, dist) -> vector_bool vid = p*_bXX(dist);
       if (call->op.same_as(tl::simd_pset()) ||
           call->op.same_as(tl::simd_pge())) {
-        int elem_bits = (int)Downcast<IntImm>(call->args[0])->value;
+        int elem_bits = (int)(call->args[0])
+                            .as_or_throw<IntImm>()
+                            ->value.as<int64_t>()
+                            .value();
         std::string dist =
             (call->args.size() >= 2 && call->args[1].as<StringImmNode>())
-                ? Downcast<StringImm>(call->args[1])->value
+                ? (call->args[1]).as_or_throw<StringImm>()->value
                 : "PAT_ALL";
         PrintIndent();
         stream << "vector_bool " << vid << " = asc_create_mask_b" << elem_bits
@@ -3219,7 +3325,10 @@ void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
       }
       // pair_get(pair, idx) -> inline as pair.vN, no auto decl
       if (call->op.same_as(tl::simd_pair_get())) {
-        int idx = (int)Downcast<IntImm>(call->args[1])->value;
+        int idx = (int)(call->args[1])
+                      .as_or_throw<IntImm>()
+                      ->value.as<int64_t>()
+                      .value();
         std::ostringstream tmp;
         PrintExpr(call->args[0], tmp);
         tmp << (idx == 0 ? ".v0" : ".v1");
@@ -3241,18 +3350,18 @@ void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
   // A handle var bound by a LetStmt (e.g. the pointer materialized by
   // T.make_tensor: `src = reinterpret(handle, src_ptrs[0])`) carries its
   // element type and storage scope in `type_annotation`, but the base
-  // CodeGenC::VisitStmt_ only inspects the scalar DataType (always "handle")
+  // CodeGenC::VisitStmt_ only inspects the scalar PrimType (always "handle")
   // and emits a scope-less `void*`. That loses the `__gm__`/`__ubuf__`
   // qualifier and the element type, so later casts to `__gm__ T*` are rejected
   // by bisheng. Read the PointerType directly and emit the qualified pointer.
-  if (op->var.dtype().is_handle()) {
-    if (const auto *ptr = op->var->type_annotation.as<PointerTypeNode>()) {
+  if (PythonIsPointer(op->var)) {
+    if (const auto *ptr = op->var->ty.as<PtrTypeNode>()) {
       if (const auto *prim = ptr->element_type.as<PrimTypeNode>()) {
-        std::string scope = GetPtrStorageScope(op->var);
+        std::string scope = PythonStorageScope(op->var);
         // Scoped pointer type, e.g. "__gm__ float *".
         std::ostringstream type_os;
-        PrintStorageScope(scope, type_os);
-        PrintType(prim->dtype, type_os);
+        PrintStorageScope(runtime::MemoryScope(scope), type_os);
+        PrintType(GetRef<PrimType>(prim), type_os);
         type_os << " *";
         std::string ptr_type = type_os.str();
 
@@ -3261,11 +3370,11 @@ void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
         // refuses to convert to a scoped pointer. Emit the bit-cast directly
         // against the scoped pointer type so no `void*` intermediate appears.
         const auto *call = op->value.as<CallNode>();
-        if (call && call->op.same_as(builtin::reinterpret()) &&
-            !call->args[0]->dtype.is_handle()) {
+        if (call && PythonIsOp(call->op, "reinterpret") &&
+            !PythonIsPointer(call->args[0])) {
           SSAOperationScope ssa_scope(this);
           std::string rhs =
-              SSAGetID(PrintExpr(call->args[0]), call->args[0]->dtype);
+              SSAGetID(PrintExpr(call->args[0]), PythonDType(call->args[0]));
           std::string vid = AllocVarID(op->var.get());
           PrintIndent();
           stream << ptr_type << vid << " = (*(" << ptr_type << " *)(&(" << rhs
@@ -3280,42 +3389,45 @@ void CodeGenTileLangAscend::VisitStmt_(const BindNode *op) {
           stream << ptr_type << vid << " = (" << ptr_type << ")" << value
                  << ";\n";
         }
-        alloc_storage_scope_[op->var.get()] = scope;
-        RegisterHandleType(op->var.get(), prim->dtype);
+        alloc_storage_scope_[op->var.get()] = runtime::MemoryScope(scope);
+        RegisterHandleType(op->var.get(), GetRef<PrimType>(prim));
         return;
       }
     }
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangAscend *p) { // NOLINT(*)
   // Type code is kBFloat/kFloat16
   // which is indeed CUTLASS supported types currently
-  if (op->dtype.is_bfloat16() || op->dtype.is_float16() ||
-      op->dtype.is_float()) {
+  if (PythonDType(GetRef<Expr>(op)).MatchesElementType(kDLBfloat, 16) ||
+      PythonDType(GetRef<Expr>(op)).MatchesElementType(kDLFloat, 16) ||
+      PythonDType(GetRef<Expr>(op)).MatchesCode(kDLFloat)) {
     std::ostringstream temp;
     if (std::isinf(op->value)) {
       temp << "tl::limits::";
-      if (op->dtype.is_float()) {
+      if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLFloat)) {
         temp << (op->value < 0 ? "kFloatNInf" : "kFloatInf");
-      } else if (op->dtype.is_float16()) {
+      } else if (PythonDType(GetRef<Expr>(op))
+                     .MatchesElementType(kDLFloat, 16)) {
         temp << (op->value < 0 ? "kHalfNInf" : "kHalfInf");
       } else {
         temp << (op->value < 0 ? "kBf16NInf" : "kBf16Inf");
       }
     } else if (std::isnan(op->value)) {
       temp << "tl::limits::";
-      if (op->dtype.is_float()) {
+      if (PythonDType(GetRef<Expr>(op)).MatchesCode(kDLFloat)) {
         temp << "kFloatNaN";
-      } else if (op->dtype.is_float16()) {
+      } else if (PythonDType(GetRef<Expr>(op))
+                     .MatchesElementType(kDLFloat, 16)) {
         temp << "kHalfNaN";
       } else {
         temp << "kBf16NaN";
       }
     } else {
-      p->PrintType(op->dtype, temp);
+      p->PrintType(PythonDType(GetRef<Expr>(op)), temp);
       temp << '(' << std::hexfloat << op->value << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
@@ -3325,33 +3437,37 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
-  if (op->dtype.is_float8() || op->dtype.is_float4()) {
-    p->PrintType(op->dtype, os);
+  if (PythonDType(GetRef<Expr>(op))
+          .MatchesCode(kDLFloat8_e4m3, kDLFloat8_e4m3fn, kDLFloat8_e5m2,
+                       kDLFloat8_e8m0fnu) ||
+      PythonDType(GetRef<Expr>(op)).MatchesCode(kDLFloat4_e2m1fn)) {
+    p->PrintType(PythonDType(GetRef<Expr>(op)), os);
     os << '(' << std::hexfloat << op->value << 'f';
     os << "/*" << std::scientific << op->value << "*/";
     os << ')';
     return;
   }
   // Type code is kFloat64/kFloat32 (kFloat16 is handled above)
-  switch (op->dtype.bits()) {
+  switch (PythonDType(GetRef<Expr>(op)).bits()) {
   default:
-    LOG(FATAL) << "Bad bit-width for float: " << op->dtype << "\n";
+    LOG(FATAL) << "Bad bit-width for float: " << PythonDType(GetRef<Expr>(op))
+               << "\n";
   }
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const FloatImmNode *op,
-                                       std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangAscend::Dispatch_(const FloatImmNode *op,
+                                      std::ostream &os) { // NOLINT(*)
   PrintConst(op, os, this);
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
-                                       std::ostream &os) { // NOLINT(*)
-  DataType from_ty = op->value.dtype();
-  DataType target_ty = op->dtype;
+void CodeGenTileLangAscend::Dispatch_(const CastNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  PrimType from_ty = PythonDType(op->value);
+  PrimType target_ty = PythonDType(GetRef<Expr>(op));
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
-  if (from_ty.is_scalar()) {
-    if (from_ty.is_float() && from_ty.bits() == 32 &&
+  if (from_ty.IsScalar()) {
+    if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
         tl::IsAscendVectorizableFP8(target_ty)) {
       os << GetAscendFP8ScalarValueType(target_ty) << "(";
       PrintExpr(op->value, os);
@@ -3359,43 +3475,47 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
       return;
     }
 
-    if (from_ty.is_float16() && tl::IsAscendVectorizableFP8(target_ty)) {
+    if (from_ty.MatchesElementType(kDLFloat, 16) &&
+        tl::IsAscendVectorizableFP8(target_ty)) {
       os << GetAscendFP8ScalarValueType(target_ty) << "(static_cast<float>(";
       PrintExpr(op->value, os);
       os << "))";
       return;
     }
 
-    if (from_ty.is_bfloat16() && tl::IsAscendVectorizableFP8(target_ty)) {
+    if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+        tl::IsAscendVectorizableFP8(target_ty)) {
       os << GetAscendFP8ScalarValueType(target_ty) << "(__bfloat162float(";
       PrintExpr(op->value, os);
       os << "))";
       return;
     }
 
-    if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_float() &&
-        target_ty.bits() == 32) {
+    if (tl::IsAscendVectorizableFP8(from_ty) &&
+        target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32) {
       os << "static_cast<float>(";
       PrintExpr(op->value, os);
       os << ")";
       return;
     }
 
-    if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_float16()) {
+    if (tl::IsAscendVectorizableFP8(from_ty) &&
+        target_ty.MatchesElementType(kDLFloat, 16)) {
       os << "static_cast<half>(static_cast<float>(";
       PrintExpr(op->value, os);
       os << "))";
       return;
     }
 
-    if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_bfloat16()) {
+    if (tl::IsAscendVectorizableFP8(from_ty) &&
+        target_ty.MatchesElementType(kDLBfloat, 16)) {
       os << "__float2bfloat16_rn(static_cast<float>(";
       PrintExpr(op->value, os);
       os << "))";
       return;
     }
 
-    return CodeGenC::VisitExpr_(op, os);
+    return CodeGenC::Dispatch_(op, os);
   }
 
   ValidateGenericVectorType("Cast", from_ty);
@@ -3435,7 +3555,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
       };
 
   // Handle conversion from float16 to float32.
-  if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
+  if (from_ty.MatchesElementType(kDLFloat, 16) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__half22float2", "half2", "float2");
       return;
@@ -3443,7 +3564,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float32 to float16.
-  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16()) {
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesElementType(kDLFloat, 16)) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22half2_rn", "float2", "half2");
       return;
@@ -3451,7 +3573,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from bfloat16 to float32
-  if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32) {
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__bfloat1622float2", "bfloat16x2_t", "float2", "",
                           /*src_needs_reinterpret=*/true);
@@ -3460,7 +3583,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float32 to bfloat16
-  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16()) {
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesElementType(kDLBfloat, 16)) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__float22bfloat162_rn", "float2", "bfloat16x2_t", "",
                           /*src_needs_reinterpret=*/false,
@@ -3470,10 +3594,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float32 to float8 (E4M3/E5M2)
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
       tl::IsAscendVectorizableFP8(target_ty)) {
-    bool target_type_is_e4m3 =
-        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+    bool target_type_is_e4m3 = target_ty.MatchesCode(kDLFloat8_e4m3) ||
+                               target_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string type_suffix = target_type_is_e4m3 ? "__ASC_E4M3" : "__ASC_E5M2";
 
     // Use __asc_cvt_float2_to_fp8x2 for vectorized conversion (float2 -> fp8x2)
@@ -3486,9 +3610,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float16 to float8 (E4M3/E5M2)
-  if (from_ty.is_float16() && tl::IsAscendVectorizableFP8(target_ty)) {
-    bool target_type_is_e4m3 =
-        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+  if (from_ty.MatchesElementType(kDLFloat, 16) &&
+      tl::IsAscendVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 = target_ty.MatchesCode(kDLFloat8_e4m3) ||
+                               target_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string cvt_func = target_type_is_e4m3
                                ? "tl::detail::cast_half2_to_fp8_e4m3x2"
                                : "tl::detail::cast_half2_to_fp8_e5m2x2";
@@ -3500,9 +3625,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from bfloat16 to float8 (E4M3/E5M2)
-  if (from_ty.is_bfloat16() && tl::IsAscendVectorizableFP8(target_ty)) {
-    bool target_type_is_e4m3 =
-        target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn();
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      tl::IsAscendVectorizableFP8(target_ty)) {
+    bool target_type_is_e4m3 = target_ty.MatchesCode(kDLFloat8_e4m3) ||
+                               target_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string cvt_func = target_type_is_e4m3
                                ? "tl::detail::cast_bfloat162_to_fp8_e4m3x2"
                                : "tl::detail::cast_bfloat162_to_fp8_e5m2x2";
@@ -3514,10 +3640,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float8 (E4M3/E5M2) to float32
-  if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_float() &&
+  if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.MatchesCode(kDLFloat) &&
       target_ty.bits() == 32) {
-    bool from_type_is_e4m3 =
-        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+    bool from_type_is_e4m3 = from_ty.MatchesCode(kDLFloat8_e4m3) ||
+                             from_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string src_x2_type =
         from_type_is_e4m3 ? "float8_e4m3x2_t" : "float8_e5m2x2_t";
     std::string cvt_func =
@@ -3531,9 +3657,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float8 (E4M3/E5M2) to float16
-  if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_float16()) {
-    bool from_type_is_e4m3 =
-        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+  if (tl::IsAscendVectorizableFP8(from_ty) &&
+      target_ty.MatchesElementType(kDLFloat, 16)) {
+    bool from_type_is_e4m3 = from_ty.MatchesCode(kDLFloat8_e4m3) ||
+                             from_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string src_x2_type =
         from_type_is_e4m3 ? "float8_e4m3x2_t" : "float8_e5m2x2_t";
     std::string cvt_func = from_type_is_e4m3
@@ -3547,9 +3674,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
   }
 
   // Handle conversion from float8 (E4M3/E5M2) to bfloat16
-  if (tl::IsAscendVectorizableFP8(from_ty) && target_ty.is_bfloat16()) {
-    bool from_type_is_e4m3 =
-        from_ty.is_float8_e4m3() || from_ty.is_float8_e4m3fn();
+  if (tl::IsAscendVectorizableFP8(from_ty) &&
+      target_ty.MatchesElementType(kDLBfloat, 16)) {
+    bool from_type_is_e4m3 = from_ty.MatchesCode(kDLFloat8_e4m3) ||
+                             from_ty.MatchesCode(kDLFloat8_e4m3fn);
     std::string src_x2_type =
         from_type_is_e4m3 ? "float8_e4m3x2_t" : "float8_e5m2x2_t";
     std::string cvt_func = from_type_is_e4m3
@@ -3563,11 +3691,11 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
     }
   }
 
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
-void CodeGenTileLangAscend::VisitExpr_(const VarNode *op,
-                                       std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangAscend::Dispatch_(const VarNode *op,
+                                      std::ostream &os) { // NOLINT(*)
   // block_idx / blockIdx.* / threadIdx.* map to ASC thread builtins,
   // which are unsigned (uint32). The IR binds them to a signed-int loop var
   // (IterVar forbids a uint var, see materialize_kernel_launch.cc). Without a
@@ -3577,15 +3705,16 @@ void CodeGenTileLangAscend::VisitExpr_(const VarNode *op,
   // consistent. The sanitized VF-parameter form ("blockIdx_x", no dot) is a
   // real int32 parameter and must not be touched.
   auto it = var_idmap_.find(op);
-  if (it != var_idmap_.end() && op->dtype.is_int() &&
+  auto primitive = op->ty.as<PrimType>();
+  if (it != var_idmap_.end() && primitive && primitive->MatchesCode(kDLInt) &&
       (it->second == "block_idx" || it->second.rfind("blockIdx.", 0) == 0 ||
        it->second.rfind("threadIdx.", 0) == 0)) {
     os << "((";
-    PrintType(op->dtype, os);
+    PrintType(PythonDType(GetRef<Expr>(op)), os);
     os << ")" << it->second << ")";
     return;
   }
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
 void CodeGenTileLangAscend::PrintStorageSync(const CallNode *op) {
@@ -3594,8 +3723,9 @@ void CodeGenTileLangAscend::PrintStorageSync(const CallNode *op) {
   stream << "asc_syncthreads();\n";
 }
 
-void CodeGenTileLangAscend::PrintStorageScope(const std::string &scope,
-                                              std::ostream &os) {
+void CodeGenTileLangAscend::PrintStorageScope(
+    const runtime::MemoryScope &memory_scope, std::ostream &os) {
+  std::string scope = memory_scope.name();
   if (scope == "global") {
     os << "__gm__ ";
   } else {
@@ -3611,9 +3741,10 @@ bool CodeGenTileLangAscend::IsScopePartOfType() const {
   return true;
 }
 
-void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec, DataType t,
-                                             int i, std::ostream &os) {
-  if (t.is_scalar()) {
+void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec,
+                                             const PrimType &t, int i,
+                                             std::ostream &os) {
+  if (t.IsScalar()) {
     os << vec;
     return;
   }
@@ -3625,16 +3756,16 @@ void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec, DataType t,
   ICHECK(i >= 0 && i < t.lanes() && i < 8)
       << "Ascend " << t << " small-vector lanes max 8" << ": i=" << i
       << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
-  if (t.is_float16()) {
+  if (t.MatchesElementType(kDLFloat, 16)) {
     os << "((half2*)(&(" << vec << ")))[" << (i / 2) << "]." << access[i % 2];
-  } else if (t.is_bfloat16()) {
+  } else if (t.MatchesElementType(kDLBfloat, 16)) {
     os << "((bfloat16x2_t*)(&(" << vec << ")))[" << (i / 2) << "]."
        << access[i % 2];
   } else if (tl::IsAscendVectorizableFP8(t)) {
     // Lanes are packed one byte each, so byte i is lane i.
     os << GetAscendFP8ScalarValueType(t) << "::from_bits(((uint8_t*)(&(" << vec
        << ")))[" << i << "])";
-  } else if (t.is_vector_bool() && t.lanes() > 4) {
+  } else if (t.MatchesCode(kDLBool) && t.lanes() > 4) {
     os << "((ushort2*)(&(" << vec << ")))[" << (i / 2) << "]." << access[i % 2];
   } else if (t.lanes() <= 4) {
     os << vec << "." << access[i];
@@ -3644,9 +3775,9 @@ void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec, DataType t,
 }
 
 void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
-                                              DataType t, int i,
+                                              const PrimType &t, int i,
                                               const std::string &value) {
-  if (t.is_scalar()) {
+  if (t.IsScalar()) {
     PrintIndent();
     stream << vec << " = " << value << ";\n";
     return;
@@ -3660,10 +3791,10 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
   ICHECK(i >= 0 && i < t.lanes() && i < 8)
       << "Ascend " << t << " small-vector lanes max 8" << ": i=" << i
       << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
-  if (t.is_float16()) {
+  if (t.MatchesElementType(kDLFloat, 16)) {
     stream << "((half2*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";
-  } else if (t.is_bfloat16()) {
+  } else if (t.MatchesElementType(kDLBfloat, 16)) {
     stream << "((bfloat16x2_t*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";
   } else if (tl::IsAscendVectorizableFP8(t)) {
@@ -3671,7 +3802,7 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
     stream << "((uint8_t*)(&(" << vec << ")))[" << i
            << "] = " << GetAscendFP8ScalarValueType(t) << "(" << value
            << ").data;\n";
-  } else if (t.is_vector_bool() && t.lanes() > 4) {
+  } else if (t.MatchesCode(kDLBool) && t.lanes() > 4) {
     stream << "((ushort2*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";
   } else if (t.lanes() <= 4) {
@@ -3681,18 +3812,18 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
   }
 }
 
-std::string CodeGenTileLangAscend::GetBufferRef(DataType t,
-                                                const BufferNode *buffer,
+std::string CodeGenTileLangAscend::GetBufferRef(const PrimType &t,
+                                                const VarNode *buffer,
                                                 PrimExpr index) {
-  if (tl::IsSSBuffer(GetRef<Buffer>(buffer))) {
-    ICHECK(vf_mode_ == VFMode::kNone && t.is_uint() &&
+  if (tl::IsSSBuffer(GetRef<Var>(buffer).as_or_throw<TensorVar>())) {
+    ICHECK(vf_mode_ == VFMode::kNone && t.MatchesCode(kDLUInt) &&
            (t.bits() == 32 || t.bits() == 64) && t.lanes() == 1)
         << "SS supports scalar uint32/uint64 accesses outside VF blocks only";
   }
-  const VarNode *buffer_var = buffer->data.get();
+  const VarNode *buffer_var = GetRef<Var>(buffer).get();
   std::string scope;
   if (alloc_storage_scope_.count(buffer_var)) {
-    scope = alloc_storage_scope_.at(buffer_var);
+    scope = alloc_storage_scope_.at(buffer_var).name();
   }
   if (scope == "local.var") {
     return GetVarID(buffer_var);
@@ -3700,9 +3831,9 @@ std::string CodeGenTileLangAscend::GetBufferRef(DataType t,
   return CodeGenC::GetBufferRef(t, buffer, index);
 }
 
-void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
-                                             PrimExpr lhs, PrimExpr rhs,
-                                             std::ostream &os) {
+void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op,
+                                             const PrimType &t, PrimExpr lhs,
+                                             PrimExpr rhs, std::ostream &os) {
   ValidateGenericVectorType("binary operation", t);
   // Comparisons need per-lane predicates for Select. Scalarize operations
   // without a native vector form and FP16/BF16/FP8 values carried in integers.
@@ -3710,8 +3841,9 @@ void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
                                       op == "fmod" || op == "min" ||
                                       op == "max";
   bool needs_scalarization =
-      t.is_vector_bool() || (lacks_vector_operation && t.lanes() > 1) ||
-      t.is_float16() || t.is_bfloat16() || tl::IsAscendVectorizableFP8(t);
+      t.MatchesCode(kDLBool) || (lacks_vector_operation && t.lanes() > 1) ||
+      t.MatchesElementType(kDLFloat, 16) ||
+      t.MatchesElementType(kDLBfloat, 16) || tl::IsAscendVectorizableFP8(t);
   if (!needs_scalarization) {
     CodeGenC::PrintVecBinaryOp(op, t, lhs, rhs, os);
     return;
@@ -3723,21 +3855,21 @@ void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
   stream << ' ' << sret << ";\n";
   SSAOperationScope ssa_scope(this);
   {
-    std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
-    std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
+    std::string vlhs = SSAGetID(PrintExpr(lhs), PythonDType(lhs));
+    std::string vrhs = SSAGetID(PrintExpr(rhs), PythonDType(rhs));
     for (int i = 0; i < t.lanes(); ++i) {
       std::ostringstream value_temp;
       if (isalpha(op[0])) {
         value_temp << op << "(";
-        PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
+        PrintVecElemLoad(vlhs, PythonDType(lhs), i, value_temp);
         value_temp << ", ";
-        PrintVecElemLoad(vrhs, rhs.dtype(), i, value_temp);
+        PrintVecElemLoad(vrhs, PythonDType(rhs), i, value_temp);
         value_temp << ")";
       } else {
         value_temp << "(";
-        PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
+        PrintVecElemLoad(vlhs, PythonDType(lhs), i, value_temp);
         value_temp << op;
-        PrintVecElemLoad(vrhs, rhs.dtype(), i, value_temp);
+        PrintVecElemLoad(vrhs, PythonDType(rhs), i, value_temp);
         value_temp << ")";
       }
       PrintVecElemStore(sret, t, i, value_temp.str());
@@ -3747,12 +3879,12 @@ void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
 }
 
 void CodeGenTileLangAscend::EmitSimtVectorPredicateNot(const PrimExpr &value,
-                                                       DataType dtype,
+                                                       PrimType dtype,
                                                        std::ostream &os) {
-  ICHECK(dtype.is_vector_bool() && dtype.lanes() <= 8)
+  ICHECK(dtype.MatchesCode(kDLBool) && dtype.lanes() <= 8)
       << "Ascend SIMT predicate not expects a small predicate vector, got "
       << dtype;
-  ICHECK_EQ(value.dtype(), dtype)
+  ICHECK_EQ(PythonDType(value), dtype)
       << "Ascend small-vector predicate not dtype mismatch";
 
   std::string result = name_supply_->FreshName("_");
@@ -3760,11 +3892,11 @@ void CodeGenTileLangAscend::EmitSimtVectorPredicateNot(const PrimExpr &value,
   PrintType(dtype, stream);
   stream << ' ' << result << ";\n";
   SSAOperationScope ssa_scope(this);
-  std::string operand = SSAGetID(PrintExpr(value), value.dtype());
+  std::string operand = SSAGetID(PrintExpr(value), PythonDType(value));
   for (int i = 0; i < dtype.lanes(); ++i) {
     std::ostringstream lane_value;
     lane_value << "(!";
-    PrintVecElemLoad(operand, value.dtype(), i, lane_value);
+    PrintVecElemLoad(operand, PythonDType(value), i, lane_value);
     lane_value << ')';
     PrintVecElemStore(result, dtype, i, lane_value.str());
   }
@@ -3773,13 +3905,15 @@ void CodeGenTileLangAscend::EmitSimtVectorPredicateNot(const PrimExpr &value,
 
 void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             ffi::String global_symbol,
-                                            const ffi::Array<PrimExpr> &args,
+                                            const ffi::Array<Expr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
-  DataType ret_dtype = GetRuntimeDataType(ret_type);
+  PrimType ret_dtype =
+      (IsVoidType(ret_type) ? PrimType::Void()
+                            : ret_type.as_or_throw<PrimType>());
   // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
   // Select the scalar-core implementation using the existing VF context.
-  if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
+  if (IsOutsideVF() && ret_dtype == PrimType::Float(32) &&
       global_symbol == "sqrtf") {
     global_symbol = "AscendC::Std::sqrt";
     if (!has_ascend_std_math_included_) {
@@ -3789,7 +3923,7 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
       has_ascend_std_math_included_ = true;
     }
   }
-  if (ret_dtype.is_fixed_length_vector()) {
+  if (ret_dtype.IsFixedLengthVector()) {
     ValidateGenericVectorType("external call", ret_dtype);
     // Scalarize: for each lane, extract scalar args, call the scalar
     // function, store result into the result vector lane.
@@ -3802,7 +3936,7 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
       std::vector<std::string> sargs;
       size_t arg_begin = static_cast<size_t>(skip_first_arg);
       for (size_t i = arg_begin; i < args.size(); ++i) {
-        std::string val = SSAGetID(PrintExpr(args[i]), args[i].dtype());
+        std::string val = SSAGetID(PrintExpr(args[i]), PythonDType(args[i]));
         sargs.push_back(std::move(val));
       }
       for (int i = 0; i < ret_dtype.lanes(); ++i) {
@@ -3811,7 +3945,8 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
         for (size_t j = 0; j < sargs.size(); ++j) {
           if (j > 0)
             scall << ", ";
-          PrintVecElemLoad(sargs[j], args[arg_begin + j].dtype(), i, scall);
+          PrintVecElemLoad(sargs[j], PythonDType(args[arg_begin + j]), i,
+                           scall);
         }
         scall << ")";
         PrintVecElemStore(sret, ret_dtype, i, scall.str());

@@ -1,10 +1,9 @@
 """Override the LetFrame to print a message when entering the frame."""
 
 from __future__ import annotations
-from tvm.tirx import Var, PrimExpr, BufferLoad, BufferRegion
-from tvm.ir import Range
-from tvm import DataType
-from tvm.tirx.script.builder.frame import TIRFrame
+from tilelang._compat.tirx import Var, PrimExpr, BufferLoad, BufferRegion
+from tilelang import _ffi_api
+from tvm_tirx.script.ir_builder.frame import StmtFrame as TIRFrame
 from collections import deque
 import threading
 
@@ -21,6 +20,7 @@ class FrameStack:
         """Initialize an empty frame stack and variable mapping."""
         self._stack = deque()
         self._var_value_map = {}
+        self.mutable_scalars = set()
 
     def push(self, item):
         """Push an item onto the stack and update variable mapping if applicable.
@@ -66,6 +66,7 @@ class FrameStack:
     def clear_values(self):
         """Clear all tracked variable bindings."""
         self._var_value_map.clear()
+        self.mutable_scalars.clear()
 
     def has_value(self, var):
         """Check if a variable has an associated value.
@@ -129,6 +130,15 @@ def clear_let_values():
     _get_let_stack().clear_values()
 
 
+def register_mutable_scalar(variable):
+    """Track scalar assignment syntax while constructing native local tensors."""
+    _get_let_stack().mutable_scalars.add(variable)
+
+
+def is_mutable_scalar(variable):
+    return isinstance(variable, Var) and variable in _get_let_stack().mutable_scalars
+
+
 class LetFrame(TIRFrame):
     """A TIR frame for let bindings that manages variable scope and value tracking.
 
@@ -147,11 +157,11 @@ class LetFrame(TIRFrame):
             indices = self.value.indices
             is_block_load = False
             for index in indices[:-1]:
-                if DataType(index.dtype).lanes > 1:
+                if index.ty.dtype.lanes != 1:
                     is_block_load = True
                     break
             if is_block_load:
-                self.value = BufferRegion(self.value.buffer, [Range(x.base, x.lanes) for x in indices])
+                self.value = _ffi_api.NormalizeToBufferRegion(self.value)
 
         _get_let_stack().push(self)
         return self.var

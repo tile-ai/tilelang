@@ -23,7 +23,7 @@ def _get_isfinite_source() -> str:
 
 
 def _get_isfinite_expr(code: str) -> str:
-    pattern = r"\b\w+\s*=\s*(.*\bisfinite\s*\(.*\));"
+    pattern = r"\b\w+(?:\[[^\]]+\])?\s*=\s*(.*\bisfinite\s*\(.*\));"
     for line in code.splitlines():
         match = re.search(pattern, line)
         if match:

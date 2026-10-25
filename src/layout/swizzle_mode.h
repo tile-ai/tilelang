@@ -25,8 +25,16 @@ public:
 
 class SwizzleMode : public ffi::Enum {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(SwizzleMode, ffi::Enum,
-                                             SwizzleModeObj);
+  SwizzleMode() : ffi::Enum(None()) {}
+
+  explicit SwizzleMode(ffi::ObjectPtr<SwizzleModeObj> data)
+      : ffi::Enum(ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SwizzleMode, ffi::Enum,
+                                                SwizzleModeObj);
 
   static SwizzleMode None() { return Get("NONE"); }
   static SwizzleMode Swizzle32B() { return Get("SWIZZLE_32B"); }
@@ -52,7 +60,17 @@ public:
 
   // Convert to CU_TENSOR_MAP_SWIZZLE_* values.
   int CanonicalOrdinal() const {
-    return static_cast<int>(operator->()->_value);
+    const auto &name = operator->()->_str_index;
+    if (name == "NONE")
+      return 0;
+    if (name == "SWIZZLE_32B")
+      return 1;
+    if (name == "SWIZZLE_64B")
+      return 2;
+    if (name == "SWIZZLE_128B")
+      return 3;
+    LOG(FATAL) << "Invalid SwizzleMode name: " << name;
+    return 0;
   }
 
   // The byte-space Sw<b,4,3> width: none->0, 32B->1, 64B->2, 128B->3.
@@ -91,8 +109,8 @@ public:
 
 private:
   static SwizzleMode Get(const ffi::String &name) {
-    ffi::Enum e = ffi::EnumObj::Get<SwizzleModeObj>(name);
-    const auto *node = e.as<SwizzleModeObj>();
+    ffi::Enum entry = ffi::EnumObj::_GetByStrIndex<SwizzleModeObj>(name);
+    const auto *node = entry.as<SwizzleModeObj>();
     ICHECK(node != nullptr)
         << "SwizzleMode entry `" << name << "` is not a SwizzleModeObj";
     return ffi::GetRef<SwizzleMode>(node);

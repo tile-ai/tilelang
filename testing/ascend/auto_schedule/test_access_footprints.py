@@ -1,6 +1,7 @@
 """Access footprints contracts."""
 
 import pytest
+from tvm_tirx import ir
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -134,16 +135,15 @@ def _make_raw_stepped_task_write_program():
     # affine binding. Rebuild this loop directly to cover imported/raw TIRX,
     # where ForNode::step remains non-unit.
     def add_raw_step(node):
-        if isinstance(node, tvm.tirx.For) and node.loop_var.name == "i":
+        if isinstance(node, tvm.tirx.For) and node.var.name == "i":
             return tvm.tirx.For(
-                node.loop_var,
-                node.min,
-                node.extent,
+                node.var,
+                node.begin,
+                node.end,
+                2,
                 node.kind,
                 node.body,
-                node.thread_binding,
                 node.annotations,
-                tvm.tirx.IntImm(node.loop_var.dtype, 2),
             )
         return None
 
@@ -293,7 +293,7 @@ def _make_mixed_opaque_access_program():
             b[0] = y[0]
             out_b[0] = b[0]
             with T.Task():
-                T.evaluate(tvm.tirx.call_extern("int32", "consume", a.access_ptr("r")))
+                T.evaluate(T.call_extern("int32", "consume", a.data))
                 a[0] = z[0]
             out_a[0] = a[0]
 
@@ -482,7 +482,7 @@ def test_pointer_footprint_must_fit_the_logical_view(pointer_kind):
             elif pointer_kind == "dense_view":
                 view = T.view(a)
             else:
-                view = tvm.tirx.decl_buffer((view_size,), "int32", data=a.data, scope="shared.dyn")
+                view = T.Tensor((view_size,), "int32", data=a.data, scope="shared.dyn")
             with T.Stage(0):
                 a[old_index] = 100
                 b[old_index] = 200
@@ -500,10 +500,10 @@ def test_pointer_footprint_must_fit_the_logical_view(pointer_kind):
                     out[0] = T.call_extern("int32", "consume_view", T.access_ptr(view[0], "r", extent=1 if pointer_kind == "single" else 2))
 
     pairs = _insert_sync_alias_pairs(main)
-    if pointer_kind in ("single", "compact"):
-        assert ("b", "view") in pairs
+    if pointer_kind in ("single", "compact", "dense_view"):
+        assert ("a", "b") in pairs
     else:
-        assert ("b", "view") not in pairs
+        assert ("a", "b") not in pairs
 
 
 @pytest.mark.parametrize("kind", ["gather", "gatherb", "vld2_offset", "vld2_compact", "compact"])
@@ -559,8 +559,8 @@ def test_raw_storage_pointer_escape_is_not_hidden_by_a_structured_access(pointer
                 a[0] = 300
                 with T.Task():
                     if pointer_kind == "carrier":
-                        pointer = T.alloc_var("handle", init=T.access_ptr(a[0], "r", extent=1))
-                        out[0] = T.call_extern("int32", "read_second", pointer) + a[0]
+                        pointer = T.alloc_var("uint64", init=T.reinterpret(T.access_ptr(a[0], "r", extent=1), "uint64"))
+                        out[0] = T.call_extern("int32", "read_second", T.reinterpret(pointer, "handle")) + a[0]
                     elif pointer_kind == "returned":
                         out[0] = (
                             T.call_extern("int32", "read_value", T.call_extern("handle", "advance", T.access_ptr(a[0], "r", extent=1)))
@@ -684,9 +684,8 @@ def test_nd2nz_scatter_checks_the_full_vector_read_footprint():
                 out[0] = b[1]
                 a[0] = T.float32(300)
                 T.evaluate(
-                    tvm.tirx.Call(
-                        "void",
-                        tvm.ir.Op.get("tl.ascend_nd2nz_scatter"),
+                    ir.Call(
+                        "tl.ascend_nd2nz_scatter",
                         [
                             T.access_ptr(a[0], "r", extent=1),
                             T.access_ptr(dst[0], "w", extent=17 * 64),
@@ -714,9 +713,9 @@ def test_mutable_layout_metadata_does_not_prove_physical_coverage(metadata_kind)
                 if metadata_kind == "stride":
                     view = T.StridedTensor((8,), (metadata[0],), "int32", data=a.data, scope="shared.dyn")
                 elif metadata_kind == "offset":
-                    view = tvm.tirx.decl_buffer((8,), "int32", data=a.data, elem_offset=metadata[0], scope="shared.dyn")
+                    view = T.Buffer((8,), "int32", data=a.data, elem_offset=metadata[0], scope="shared.dyn")
                 elif metadata_kind == "shape":
-                    view = tvm.tirx.decl_buffer((2, metadata[0]), "int32", data=a.data, scope="shared.dyn")
+                    view = T.Tensor((2, metadata[0]), "int32", data=a.data, scope="shared.dyn")
                 else:
                     view = T.StridedTensor((8,), (step,), "int32", data=a.data, scope="shared.dyn")
                 a[1] = 100
@@ -739,9 +738,9 @@ def test_mutable_layout_metadata_does_not_prove_physical_coverage(metadata_kind)
 
     pairs = _insert_sync_alias_pairs(main)
     if metadata_kind == "immutable":
-        assert ("b", "view") in pairs
+        assert ("a", "b") in pairs
     else:
-        assert ("b", "view") not in pairs
+        assert ("a", "b") not in pairs
 
 
 def test_layout_metadata_buffer_stays_live_until_the_access():
@@ -789,7 +788,7 @@ def test_padded_copy_coverage_uses_physical_rows(stride):
     # one-element DMA rows pads only its own seven following physical lanes;
     # view[31] remains live across b's write at the same allocation offset.
     pairs = _insert_sync_alias_pairs(main)
-    assert (("b", "view") in pairs) == (stride == 1)
+    assert (("allocation", "b") in pairs) == (stride == 1)
 
 
 def test_padded_copy_coalesced_aligned_rows_allow_reuse():

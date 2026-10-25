@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from tvm import tirx
-from tvm.tirx import Buffer, BufferLoad, BufferStore, For, ForKind, PrimFunc, PyStmtExprVisitor, Var
-from tvm.tirx.transform import prim_func_pass
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import Buffer, BufferLoad, BufferStore, For, ForKind, PrimFunc, PyStmtExprVisitor, Var
+from tvm_tirx.tirx.transform import function_pass as prim_func_pass
 
 from tilelang.utils.language import is_local
 
@@ -17,7 +17,7 @@ class _LoopVarUseAnalyzer(PyStmtExprVisitor):
         self.used = False
 
     def visit_var_(self, op: Var) -> None:
-        if op == self.var:
+        if op.same_as(self.var):
             self.used = True
 
 
@@ -44,25 +44,25 @@ class _ParallelLocalIndexCheckVisitor(PyStmtExprVisitor):
             return
 
         for loop in self.parallel_loop_stack:
-            analyzer = _LoopVarUseAnalyzer(loop.loop_var)
+            analyzer = _LoopVarUseAnalyzer(loop.var)
             for index in indices:
                 analyzer.visit_expr(index)
             if analyzer.used:
                 raise ValueError(
                     "[Tilelang Semantic Check] "
-                    f"Local buffer `{buffer.name}` is indexed by T.Parallel loop variable `{loop.loop_var}`. "
+                    f"Local buffer `{buffer.name}` is indexed by T.Parallel loop variable `{loop.var}`. "
                     "Local buffers are thread-private and do not participate in parallel layout inference. "
                     "Use T.serial/T.vectorized/T.unroll for per-thread local indexing, or T.alloc_fragment "
                     "when the indexed dimension should be distributed across threads."
                 )
 
-    def visit_buffer_load_(self, op: BufferLoad) -> None:
-        self._check_indices(op.buffer, op.indices)
-        super().visit_buffer_load_(op)
+    def visit_tensor_load_(self, op: BufferLoad) -> None:
+        self._check_indices(op.source, op.indices)
+        super().visit_tensor_load_(op)
 
-    def visit_buffer_store_(self, op: BufferStore) -> None:
-        self._check_indices(op.buffer, op.indices)
-        super().visit_buffer_store_(op)
+    def visit_tensor_store_(self, op: BufferStore) -> None:
+        self._check_indices(op.dest, op.indices)
+        super().visit_tensor_store_(op)
 
 
 def ParallelLocalIndexChecker():

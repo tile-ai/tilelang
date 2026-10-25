@@ -40,13 +40,17 @@ def negative_index_symbolic_before(shift: T.int32, A: T.Buffer((16,), T.float32)
 def test_legalize_negative_index_scalar():
     mod = tvm.IRModule({"main": negative_index_before})
     transformed = tl.transform.LegalizeNegativeIndex()(mod)
-    tvm.ir.assert_structural_equal(transformed["main"].body, negative_index_expected.body)
+    tvm.ir.assert_structural_equal(
+        transformed["main"].with_attr("global_symbol", "main"), negative_index_expected.with_attr("global_symbol", "main")
+    )
 
 
 def test_legalize_negative_index_affine_expr():
     mod = tvm.IRModule({"main": negative_index_loop_before})
     transformed = tl.transform.LegalizeNegativeIndex()(mod)
-    tvm.ir.assert_structural_equal(transformed["main"].body, negative_index_loop_expected.body)
+    tvm.ir.assert_structural_equal(
+        transformed["main"].with_attr("global_symbol", "main"), negative_index_loop_expected.with_attr("global_symbol", "main")
+    )
 
 
 def test_legalize_negative_index_symbolic_passthrough():

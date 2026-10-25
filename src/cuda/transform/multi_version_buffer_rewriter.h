@@ -1,19 +1,13 @@
-/*!
- * \brief Internal helper for pipeline buffer multi-versioning.
- * \file multi_version_buffer_rewriter.h
- */
-
 #ifndef TVM_TL_TRANSFORM_MULTI_VERSION_BUFFER_REWRITER_H_
 #define TVM_TL_TRANSFORM_MULTI_VERSION_BUFFER_REWRITER_H_
 
-#include <tvm/tirx/function.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt.h>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+Stmt RewriteBufferVersions(
+    Stmt statement, ffi::Map<tirx::TensorVar, tirx::TensorVar> replacements,
+    ffi::Map<tirx::TensorVar, ffi::Array<PrimExpr>> versions);
+}
 
-tirx::PrimFunc ApplyMultiVersionBufferRewriter(tirx::PrimFunc f);
-
-} // namespace tl
-} // namespace tvm
-
-#endif // TVM_TL_TRANSFORM_MULTI_VERSION_BUFFER_REWRITER_H_
+#endif

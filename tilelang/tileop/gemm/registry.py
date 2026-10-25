@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Callable
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 GemmTargetPredicate = Callable[[Target], bool]

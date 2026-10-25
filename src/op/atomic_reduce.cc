@@ -7,10 +7,6 @@
 #include "./atomic_reduce.h"
 #include "support/check.h"
 #include "utils.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
 
 #include "../layout/layout.h"
 
@@ -53,6 +49,60 @@ const AtomicReduceImpl &ResolveAtomicReduceImpl(Target target) {
 
 } // namespace
 
+void AtomicOpBaseNode::Initialize(const Array<Expr> &arguments,
+                                  BlockAnnotations options) {
+  TVM_FFI_CHECK_EQ(arguments.size(), 2, ValueError)
+      << "Atomic tile operators require source and destination operands";
+  annotations = std::move(options);
+  std::vector<AccessRegion> accesses;
+  if (IsBufferLikeExpr(arguments[0])) {
+    auto access = NormalizeToAccessRegion(arguments[0], kAccessRead);
+    src = access.region->source.as_or_throw<TensorVar>();
+    src_range = access.region->region;
+    accesses.push_back(std::move(access));
+  } else {
+    src_value = arguments[0].as_or_throw<PrimExpr>();
+  }
+  auto destination = NormalizeToAccessRegion(arguments[1], kAccessReadWrite);
+  destination.access_mask = kAccessReadWrite;
+  dst = destination.region->source.as_or_throw<TensorVar>();
+  dst_range = destination.region->region;
+  accesses.push_back(std::move(destination));
+  SetAccessRegions(std::move(accesses));
+  sym::Analyzer analyzer;
+  Array<PrimExpr> source_extents;
+  Array<PrimExpr> destination_extents;
+  for (const Range &range : src_range) {
+    TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+        << "Atomic source region cannot have negative extents";
+    if (!IsOne(range->extent)) {
+      source_extents.push_back(range->extent);
+    }
+  }
+  for (const Range &range : dst_range) {
+    TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+        << "Atomic destination region cannot have negative extents";
+    if (!IsOne(range->extent)) {
+      destination_extents.push_back(range->extent);
+    }
+  }
+  if (!source_extents.empty()) {
+    TVM_FFI_CHECK_EQ(source_extents.size(), destination_extents.size(),
+                     ValueError)
+        << "Atomic source and destination must have matching non-unit extents";
+    for (size_t axis = 0; axis < source_extents.size(); ++axis) {
+      TVM_FFI_CHECK(!analyzer->CanProve(source_extents[axis] !=
+                                        destination_extents[axis]),
+                    ValueError)
+          << "Atomic source and destination must have matching non-unit "
+             "extents";
+    }
+  }
+  GetMemoryOrder();
+  TVM_FFI_CHECK(!UseTMA() || src.has_value(), ValueError)
+      << "Atomic TMA operations require a tensor source";
+}
+
 void RegisterAtomicReduceImpl(AtomicReduceImpl impl) {
   ICHECK(impl.name != nullptr);
   ICHECK(impl.match_target != nullptr);
@@ -65,37 +115,16 @@ void RegisterAtomicReduceImpl(AtomicReduceImpl impl) {
 // AtomicMax Implementation
 // ============================================================================
 
-AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ICHECK(args.size() >= 2)
-      << "AtomicMax expects at least 2 arguments (src, dst), got "
-      << args.size();
-  ObjectPtr<AtomicMaxNode> node = make_object<AtomicMaxNode>();
-  std::vector<AccessRegion> access_regions;
-
-  if (IsBufferLikeExpr(args[0])) {
-    auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
-    node->src_range = src_access.region->region;
-    access_regions.push_back(std::move(src_access));
-  } else {
-    node->src_value = args[0];
-  }
-
-  auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
-  dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
-  node->dst_range = dst_access.region->region;
-  access_regions.push_back(std::move(dst_access));
-  node->SetAccessRegions(std::move(access_regions));
-
-  node->annotations = annotations;
+AtomicMax::AtomicMax(Array<Expr> args, BlockAnnotations annotations) {
+  auto node = ffi::make_object<AtomicMaxNode>(ffi::UnsafeInit{});
+  node->Initialize(args, std::move(annotations));
   data_ = std::move(node);
 }
 
 TileOperator AtomicMaxNode::Clone() const {
   auto op = make_object<AtomicMaxNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = par_op_->Clone().as_or_throw<ParallelOp>();
   }
   return AtomicMax(op);
 }
@@ -106,37 +135,16 @@ const Op &AtomicMaxNode::GetElemOp() const { return atomic_max_elem_op(); }
 // AtomicMin Implementation
 // ============================================================================
 
-AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ICHECK(args.size() >= 2)
-      << "AtomicMin expects at least 2 arguments (src, dst), got "
-      << args.size();
-  ObjectPtr<AtomicMinNode> node = make_object<AtomicMinNode>();
-  std::vector<AccessRegion> access_regions;
-
-  if (IsBufferLikeExpr(args[0])) {
-    auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
-    node->src_range = src_access.region->region;
-    access_regions.push_back(std::move(src_access));
-  } else {
-    node->src_value = args[0];
-  }
-
-  auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
-  dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
-  node->dst_range = dst_access.region->region;
-  access_regions.push_back(std::move(dst_access));
-  node->SetAccessRegions(std::move(access_regions));
-
-  node->annotations = annotations;
+AtomicMin::AtomicMin(Array<Expr> args, BlockAnnotations annotations) {
+  auto node = ffi::make_object<AtomicMinNode>(ffi::UnsafeInit{});
+  node->Initialize(args, std::move(annotations));
   data_ = std::move(node);
 }
 
 TileOperator AtomicMinNode::Clone() const {
   auto op = make_object<AtomicMinNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = par_op_->Clone().as_or_throw<ParallelOp>();
   }
   return AtomicMin(op);
 }
@@ -150,7 +158,7 @@ LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 Stmt AtomicOpBaseNode::Lower(const LowerArgs &lower_args,
-                             arith::Analyzer *analyzer) const {
+                             sym::Analyzer analyzer) const {
   return ResolveAtomicReduceImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
@@ -159,15 +167,9 @@ Stmt AtomicOpBaseNode::Lower(const LowerArgs &lower_args,
 // Operator Registration
 // ============================================================================
 
-TIR_REGISTER_TL_TILE_OP(AtomicMax, atomicmax)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(AtomicMax, atomicmax, 2)
 
-TIR_REGISTER_TL_TILE_OP(AtomicMin, atomicmin)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(AtomicMin, atomicmin, 2)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   AtomicMaxNode::RegisterReflection();

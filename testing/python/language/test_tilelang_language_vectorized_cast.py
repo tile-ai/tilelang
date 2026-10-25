@@ -3,7 +3,8 @@ import torch
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
+from tvm_tirx import ir
 
 
 @tilelang.jit
@@ -204,9 +205,19 @@ def test_fp4_fp8_codegen(lanes, destination, via_fp32):
     if via_fp32 and lanes == 2:
         # An annotation on either cast keeps the fp32 detour.
         for annotation_owner in ("inner", "outer"):
-            annotations = {"sat": tirx.IntImm("bool", 1)}
-            intermediate = tirx.Cast("float32" + suffix, value, annotations if annotation_owner == "inner" else None)
-            annotated = tirx.Cast(destination + suffix, intermediate, annotations if annotation_owner == "outer" else None)
+
+            def annotated_cast(dtype, operand):
+                return ir.Call(
+                    "tl.cast_with_rounding",
+                    [operand],
+                    attrs={"dtype": dtype, "round": "", "sat": True},
+                    ty=dtype + suffix,
+                )
+
+            intermediate = annotated_cast("float32", value) if annotation_owner == "inner" else tirx.Cast("float32" + suffix, value)
+            annotated = (
+                annotated_cast(destination, intermediate) if annotation_owner == "outer" else tirx.Cast(destination + suffix, intermediate)
+            )
             annotated_func = func.with_body(tirx.Evaluate(annotated))
             annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
             assert "__tl_cvt_e2m1" not in annotated_source

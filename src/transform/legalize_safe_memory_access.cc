@@ -1,844 +1,573 @@
-/*!
- * \file legalize_safe_memory_access.cc
- * \brief legalize safe memory access
- */
+#include "compat/expr.h"
+#include "op/builtin.h"
+#include "op/utils.h"
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor_with_analyzer.h>
 #include <tvm/tirx/transform.h>
 
-#include <optional>
-#include <utility>
-
-#include "../op/builtin.h"
-#include "../op/parallel.h"
-#include "../op/utils.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "common/access_ptr_utils.h"
-#include "loop_partition.h"
-#include "loop_vectorize.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
+namespace tvm::tl {
+namespace {
 using namespace ffi;
-using arith::IRMutatorWithAnalyzer;
+using namespace tirx;
 
-int GetConstAccessMask(const PrimExpr &expr) {
-  const auto *imm = expr.as<IntImmNode>();
-  ICHECK(imm) << "access_ptr rw_mask must be an integer constant, got " << expr;
-  return static_cast<int>(imm->value);
-}
-
-bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
-  return (GetConstAccessMask(expr) & required_mask) != 0;
-}
-
-// Extract a scalar lane from vector expressions used in bounds predicates.
-// This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
-// using Shuffle::ExtractElement, because the arithmetic prover handles the
-// resulting scalar integer expressions more reliably.
-struct VectorLaneScalarizer : public ExprMutator {
-  explicit VectorLaneScalarizer(int lane) : lane_(lane) {}
-
-private:
-  int lane_;
-
-  PrimExpr VisitExpr_(const RampNode *op) final {
-    PrimExpr base = VisitExpr(op->base);
-    PrimExpr stride = VisitExpr(op->stride);
-    return base + stride * IntImm(stride.dtype(), lane_);
-  }
-
-  PrimExpr VisitExpr_(const BroadcastNode *op) final {
-    return VisitExpr(op->value);
-  }
-
-  PrimExpr VisitExpr_(const ShuffleNode *op) final {
-    ICHECK_LT(lane_, op->indices.size());
-    const int64_t *idx = as_const_int(op->indices[lane_]);
-    ICHECK(idx)
-        << "Vector condition scalarization requires constant Shuffle indices: "
-        << GetRef<Shuffle>(op);
-    int64_t src_lane = *idx;
-    for (const PrimExpr &vec : op->vectors) {
-      ICHECK(!vec.dtype().is_scalable_vector());
-      int lanes = vec.dtype().lanes();
-      if (src_lane < lanes) {
-        if (vec.dtype().is_scalar()) {
-          ICHECK_EQ(src_lane, 0);
-          return VisitExpr(vec);
-        }
-        return VectorLaneScalarizer(static_cast<int>(src_lane))(vec);
-      }
-      src_lane -= lanes;
-    }
-    ICHECK(false) << "Shuffle index out of range: " << GetRef<Shuffle>(op);
-    return PrimExpr();
-  }
-
-  PrimExpr VisitExpr_(const CastNode *op) final {
-    PrimExpr value = VisitExpr(op->value);
-    DataType dtype =
-        op->dtype.is_fixed_length_vector() ? op->dtype.element_of() : op->dtype;
-    if (value.dtype() == dtype) {
-      return value;
-    } else {
-      return Cast(dtype, value);
-    }
-  }
+struct Guards {
+  Array<PrimExpr> conditions;
+  Array<PrimExpr> independent_conditions;
+  std::vector<std::pair<PrimVar, PrimExpr>> bindings;
 };
 
-// SafeMemChecker for a BufferLoad/BufferStore node:
-// 1. Identify BufferLoad and BufferStore nodes.
-// 2. For each index, compare against the buffer's shape.
-//    If the index might exceed the shape (upper bound too large),
-//    log a warning (local/shared) or handle accordingly (global).
-struct SafeMemChecker : public StmtExprVisitor {
-
-  bool disableOOBWarning = false;
-
-  SafeMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
-      : analyzer_(analyzer),
-        recursively_collect_conds_(recursively_collect_conds) {
-    disableOOBWarning =
-        tvm::transform::PassContext::Current()
-            ->GetConfig(kDisableOutOfBoundWarning, Optional<Bool>())
-            .value_or(true);
-  }
-  void VisitExpr_(const BufferLoadNode *op) final {
-    // If the buffer is in global scope, we will check its indices and add
-    // corresponding bound checks.
-    // If the buffer is in shared/local, although out of bound accesses are
-    // still possible, we assume the developers can handle them. This is because
-    // we are writing TilePrograms. Therefore we only log warnings if there
-    // are possible out-of-bounds.
-    CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true,
-                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
-    if (recursively_collect_conds_) {
-      StmtExprVisitor::VisitExpr_(op);
-    }
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    if (!op->op.same_as(tl::access_ptr())) {
-      StmtExprVisitor::VisitExpr_(op);
-      return;
-    }
-
-    ICHECK_EQ(op->args.size(), 3U)
-        << "tl.access_ptr expects 3 arguments, but got " << op->args;
-    const auto *base_load = op->args[0].as<BufferLoadNode>();
-    ICHECK(base_load) << "tl.access_ptr base must be BufferLoad, but got "
-                      << op->args[0];
-
-    int rw_mask = GetConstAccessMask(op->args[2]);
-    CheckBufferIndices(base_load->buffer, base_load->indices,
-                       /*is_load=*/(rw_mask & kAccessRead) != 0,
-                       !disableOOBWarning &&
-                           !IsGlobalBuffer(base_load->buffer));
-
-    if (recursively_collect_conds_) {
-      for (const PrimExpr &index : base_load->indices) {
-        VisitExpr(index);
-      }
-      if (base_load->predicate.defined()) {
-        VisitExpr(base_load->predicate.value());
-      }
-      VisitExpr(op->args[1]);
-      VisitExpr(op->args[2]);
-    }
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    // Check if the buffer is in global scope
-    CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false,
-                       !disableOOBWarning && !IsGlobalBuffer(op->buffer));
-    if (recursively_collect_conds_) {
-      StmtExprVisitor::VisitStmt_(op);
-    }
-  }
-
-  // Helper function to determine if a buffer is global
-  bool IsGlobalBuffer(const Buffer &buffer) {
-    // The storage scope is often encoded in the buffer->data var name or
-    // associated attributes. In typical TVM IR, global buffers have scope
-    // "global". Here we assume a helper function GetPtrStorageScope is
-    // available. If not, you might need to parse buffer->data->name_hint or
-    // associated attributes.
-    String scope = buffer.scope();
-    return scope == "global";
-  }
-
-  // Helper function to store a bounds predicate as scalar Bool(1) conditions.
-  void PushCondition(const PrimExpr &cond) {
-    if (cond.dtype().is_scalar()) {
-      ICHECK(cond.dtype() == DataType::Bool(1))
-          << "condition is not a boolean: " << cond;
-      PushScalarCondition(cond);
-      return;
-    }
-    PrimExpr simplified = analyzer_->Simplify(cond);
-    ICHECK(simplified.dtype().is_fixed_length_vector() &&
-           simplified.dtype().is_bool())
-        << "condition is not a fixed-length boolean vector: " << simplified;
-    int lanes = simplified.dtype().lanes();
-    for (int lane = 0; lane < lanes; lane++) {
-      PrimExpr scalar =
-          analyzer_->Simplify(VectorLaneScalarizer(lane)(simplified));
-      ICHECK(scalar.dtype() == DataType::Bool(1))
-          << "scalarized condition is not a boolean: " << scalar;
-      PushScalarCondition(scalar);
-    }
-  }
-
-  // Keep only predicates that still need a runtime guard.
-  void PushScalarCondition(const PrimExpr &cond) {
-    try {
-      if (analyzer_->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
-        return;
-      }
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
-    }
-    _conditions.push_back(cond);
-  }
-
-  // Check each index against the buffer shape dimensions
-  void CheckBufferIndices(const Buffer &buffer, const Array<PrimExpr> &indices,
-                          bool is_load, bool throw_warning) {
-    // Ensure indices count matches buffer dimension
-    if (indices.size() != buffer->shape.size()) {
-      LOG(WARNING) << "Buffer access dimension mismatch: indices size ("
-                   << indices.size() << ") vs. shape size ("
-                   << buffer->shape.size() << ")";
-      return;
-    }
-
-    for (size_t i = 0; i < indices.size(); i++) {
-      PrimExpr index = indices[i];
-      PrimExpr shape_dim = buffer->shape[i];
-
-      bool is_index_constant = true;
-      PostOrderVisit(index, [&](const ObjectRef &obj) {
-        if (const VarNode *v = obj.as<VarNode>()) {
-          is_index_constant = false;
-        }
-        if (const BufferLoadNode *v = obj.as<BufferLoadNode>()) {
-          is_index_constant = false;
-        }
-      });
-      if (is_index_constant) {
-        // If index is a constant, we can skip the check
-        continue;
-      }
-
-      // Shared/local warning checks are best-effort only. Some swizzled
-      // indices generated by tile-op lowering contain floor-div/mod and
-      // bitwise arithmetic that the interval analyzer cannot robustly handle.
-      // Do not let warning-only analysis turn into a hard compilation error.
-      if (throw_warning && HasAnalyzerFragilePattern(index)) {
-        continue;
-      }
-
-      // We want to check if index < shape_dim can be proven.
-      // If analyzer->CanProve(index < shape_dim) returns false,
-      // it means we cannot prove the access is within bounds.
-      PrimExpr upper_bound_cond = index < shape_dim;
-      bool can_prove_upper = false;
-      try {
-        can_prove_upper = analyzer_->CanProve(
-            upper_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const std::exception &e) {
-        // Some layout-lowered sparse/global indices contain arithmetic that
-        // defeats interval reasoning.  Safe-memory legalization should remain
-        // conservative in that case and emit an explicit runtime guard instead
-        // of hard-failing compilation.
-        can_prove_upper = false;
-      }
-
-      if (!can_prove_upper) {
-        // Fallback: use const_int_bound directly.
-        // CanProve's kSymbolicBound strategy uses int_set, which only tracks
-        // Var-keyed constraints. const_int_bound tracks PrimExpr-keyed
-        // constraints (including BufferLoad), so it can leverage bounds
-        // from an enclosing if-condition like `if bin_id < N`.
-        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
-        arith::ConstIntBound shape_bound =
-            analyzer_->const_int_bound(shape_dim);
-        if (index_bound->max_value < shape_bound->min_value) {
-          can_prove_upper = true;
-        }
-      }
-
-      if (!can_prove_upper) {
-        if (throw_warning) {
-          LOG(WARNING) << "Index access may exceed buffer bounds: " << index
-                       << " >= " << shape_dim
-                       << "; Buffer name: " << buffer->name;
-        }
-        if (IsGlobalBuffer(buffer)) {
-          PushCondition(upper_bound_cond);
-        }
-      }
-      // Check if index >= 0 can be proven.
-      PrimExpr lower_bound_cond = index >= 0;
-      bool can_prove_lower = false;
-      try {
-        can_prove_lower = analyzer_->CanProve(
-            lower_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const std::exception &e) {
-        can_prove_lower = false;
-      }
-
-      if (!can_prove_lower) {
-        // Same fallback as above for the lower bound.
-        arith::ConstIntBound index_bound = analyzer_->const_int_bound(index);
-        if (index_bound->min_value >= 0) {
-          can_prove_lower = true;
-        }
-      }
-
-      if (!can_prove_lower) {
-        if (throw_warning) {
-          LOG(WARNING) << "Index access may be negative: " << index << " < 0"
-                       << "; Buffer name: " << buffer->name;
-        }
-        if (IsGlobalBuffer(buffer)) {
-          PushCondition(lower_bound_cond);
-        }
-      }
-    }
-  }
-
-  static bool HasAnalyzerFragilePattern(const PrimExpr &expr) {
-    bool fragile = false;
-    PostOrderVisit(expr, [&](const ObjectRef &obj) {
-      if (obj->IsInstance<FloorDivNode>() || obj->IsInstance<FloorModNode>() ||
-          obj->IsInstance<DivNode>() || obj->IsInstance<ModNode>()) {
-        fragile = true;
-        return;
-      }
-      if (const auto *call = obj.as<CallNode>()) {
-        if (const auto *op_node = call->op.as<OpNode>()) {
-          String name = op_node->name;
-          if (name == "tir.bitwise_and" || name == "tir.bitwise_or" ||
-              name == "tir.bitwise_xor" || name == "tir.shift_left" ||
-              name == "tir.shift_right") {
-            fragile = true;
-          }
-        }
-      }
-    });
-    return fragile;
-  }
-
-  Array<PrimExpr> GetConditions() { return _conditions; }
-
-private:
-  Array<PrimExpr> _conditions;
-  arith::Analyzer *analyzer_;
-  bool recursively_collect_conds_;
+struct PointerAccess {
+  TensorRegion region;
+  PrimExpr extent;
+  PrimExpr mask;
 };
 
-class SafeMemorysRewriter : public IRMutatorWithAnalyzer {
+bool IsAddress(const CallNode *call) {
+  return call->op.same_as(access_ptr()) || call->op.same_as(address_of_op());
+}
+
+std::optional<PointerAccess> GetPointerAccess(const Expr &expression) {
+  const auto *call = expression.as<CallNode>();
+  if (!call || !IsAddress(call) || call->args.empty())
+    return std::nullopt;
+  if (call->op.same_as(access_ptr())) {
+    return PointerAccess{NormalizeToBufferRegion(call->args[0]),
+                         call->args[1].as_or_throw<PrimExpr>(),
+                         call->args[2].as_or_throw<PrimExpr>()};
+  }
+  auto attributes = call->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>();
+  auto region = attributes.GetAttr<TensorRegion>("tl.access_region");
+  return PointerAccess{
+      region.value_or(NormalizeToBufferRegion(call->args[0])),
+      attributes.GetAttr<PrimExpr>("tl.access_extent").value_or(PrimExpr(1)),
+      attributes.GetAttr<PrimExpr>("tl.access_mask").value_or(PrimExpr(3))};
+}
+
+bool IsAtomic(const CallNode *call) {
+  const auto *operation = call->op.as<OpNode>();
+  if (!operation)
+    return false;
+  std::string name = operation->name;
+  return name.starts_with("tl.atomic_") && name.ends_with("_elem_op");
+}
+
+class SafeMemoryRewriter : public StmtExprMutatorWithAnalyzer {
 public:
-  // Static method to substitute and transform the given PrimFunc
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    // Create an instance of the legalizer with the analyzer
-    SafeMemorysRewriter substituter(&analyzer);
-    // Get a mutable copy of the function node
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    for (const auto &[_, buffer] : f->buffer_map) {
-      substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-    // Apply the legalizer to the function body
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
+  SafeMemoryRewriter(const sym::Analyzer &analyzer, bool enabled, bool warnings)
+      : StmtExprMutatorWithAnalyzer(analyzer), enabled_(enabled),
+        warnings_(warnings) {}
+
+  void Initialize(const tirx::Function &function) {
+    MarkTensorParamShapes(function);
   }
 
 private:
-  struct AccessPtrInfo {
-    BufferLoad base_load;
-    PrimExpr rw_mask;
-  };
-
-  // Constructor initializing the base class with the analyzer
-  SafeMemorysRewriter(arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer) {}
-
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::access_ptr())) {
-      return VisitAccessPtrCall(op);
+  PrimExpr Simplify(const PrimExpr &value) {
+    try {
+      return analyzer_->Simplify(value);
+    } catch (const std::exception &) {
+      return value;
     }
-
-    PrimExpr expr = IRMutatorWithAnalyzer::VisitExpr_(op);
-    const auto *call_node = expr.as<CallNode>();
-    if (!call_node || !call_node->op.as<OpNode>()) {
-      return expr;
-    }
-    Call call = Downcast<Call>(expr);
-    Op call_op = Downcast<Op>(call->op);
-    if (!IsAtomicOp(call_op) || call.dtype().is_handle()) {
-      return call;
-    }
-
-    Array<PrimExpr> conditions = CollectCallAccessPtrConditions(call);
-    if (conditions.empty()) {
-      return call;
-    }
-
-    std::optional<AccessPtrInfo> fallback_ptr =
-        TryGetAccessPtrInfo(call->args[0]);
-    if (!fallback_ptr.has_value()) {
-      return call;
-    }
-
-    PrimExpr safe_value = GetSafeValue(fallback_ptr->base_load->buffer);
-    // Cast preserves the lane count, so vector-returning atomics need their
-    // scalar buffer fallback broadcast before any element-type conversion.
-    if (safe_value.dtype().lanes() != call.dtype().lanes()) {
-      ICHECK(safe_value.dtype().is_scalar() &&
-             call.dtype().is_fixed_length_vector())
-          << "Cannot adapt safe value " << safe_value << " with dtype "
-          << safe_value.dtype() << " to atomic return dtype " << call.dtype();
-      safe_value = Broadcast(safe_value, call.dtype().lanes());
-    }
-    if (safe_value.dtype() != call.dtype()) {
-      safe_value = Cast(call.dtype(), safe_value);
-    }
-    safe_value = analyzer_->Simplify(safe_value);
-    return if_then_else(CombineConditions(conditions), call, safe_value);
   }
 
-  PrimExpr VisitAccessPtrCall(const CallNode *op) {
-    ICHECK_EQ(op->args.size(), 3U)
-        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-    auto visit_expr = [this](const PrimExpr &expr) {
-      return this->VisitExpr(expr);
-    };
-    Array<PrimExpr> args{
-        detail::VisitAccessPtrBase(op->args[0], visit_expr),
-        VisitExpr(op->args[1]),
-        VisitExpr(op->args[2]),
-    };
-    return Call(op->dtype, op->op, args, op->annotations, op->span);
+  bool Proved(const PrimExpr &condition) {
+    try {
+      return analyzer_->CanProve(condition, sym::ProofStrength::kSymbolicBound);
+    } catch (const std::exception &) {
+      return false;
+    }
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
-
-    // For Load/Store, we only check the current node, not its children.
-    // Since rewriter will recursively visit children.
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker(load);
-    Array<PrimExpr> conditions = checker.GetConditions();
-
-    if (conditions.empty()) {
-      return load;
-    }
-
-    // For loading, we can always use safe value if the access is out of
-    // bounds. Flattening reverses the evaluation order of the legacy nested
-    // guards, so only do it when every condition is pure and total.
-    PrimExpr safe_value = GetSafeValue(load->buffer);
-    if (CanFlattenConditions(conditions)) {
-      return if_then_else(CombineConditions(conditions), load, safe_value);
-    }
-    PrimExpr guarded = load;
-    for (const PrimExpr &condition : conditions) {
-      guarded = if_then_else(condition, guarded, safe_value);
-    }
-    return guarded;
+  PrimExpr Freeze(const PrimExpr &value, Guards *guards) {
+    if (SideEffect(value) == CallEffectKind::kPure)
+      return value;
+    PrimVar variable("safe_index_" + std::to_string(next_index_++), value.ty(),
+                     value->loc);
+    guards->bindings.emplace_back(variable, value);
+    return variable;
   }
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    // Check if the buffer is in global scope
-    auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
+  PrimExpr Lane(const PrimExpr &value, int lane) {
+    if (value.ty().IsScalar())
+      return value;
+    if (const auto *ramp = value.as<RampNode>())
+      return ramp->base + ramp->stride * PrimExpr(lane);
+    if (const auto *broadcast = value.as<BroadcastNode>())
+      return broadcast->value;
+    return Simplify(Shuffle({value}, {IntImm::Int32(lane)}));
+  }
 
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker(store);
-    Array<PrimExpr> conditions = checker.GetConditions();
+  void AddBound(const PrimExpr &condition, bool global, const TensorVar &tensor,
+                Guards *guards) {
+    if (Proved(condition))
+      return;
+    if (global) {
+      guards->conditions.push_back(Simplify(condition));
+    } else if (warnings_) {
+      LOG(WARNING) << "Index access may exceed tensor bounds for "
+                   << tensor->name << ": " << condition;
+    }
+  }
 
-    // Skip boundary check if the store value is an IfThenElse
-    if (const IfThenElseNode *if_node = store->value.as<IfThenElseNode>()) {
-      if (!conditions.empty()) {
-        LOG(WARNING)
-            << "Skipping boundary check for store with IfThenElse value: "
-            << store->value
-            << "\nAs manual boundary check detected, potential out-of-bounds "
-               "access may occur."
-            << "\nAuto detect boundaries are " << conditions;
-        return store;
+  Array<PrimExpr> GuardIndices(const TensorVar &tensor,
+                               const Array<PrimExpr> &indices, Guards *guards) {
+    TVM_FFI_CHECK_EQ(indices.size(), tensor.shape().size(), ValueError);
+    bool global = tensor.scope().name() == "global";
+    bool has_mutable_index = false;
+    for (const PrimExpr &index : indices)
+      has_mutable_index |= SideEffect(index) != CallEffectKind::kPure;
+    Guards independent;
+    Array<PrimExpr> result;
+    for (size_t axis = 0; axis < indices.size(); ++axis) {
+      Guards *bounds =
+          global && has_mutable_index &&
+                  SideEffect(indices[axis]) == CallEffectKind::kPure
+              ? &independent
+              : guards;
+      PrimExpr index = global ? Freeze(indices[axis], guards) : indices[axis];
+      result.push_back(index);
+      for (int lane = 0; lane < index.ty().lanes(); ++lane) {
+        PrimExpr scalar = Lane(index, lane);
+        PrimType bound_type = scalar.ty() == PrimType::UInt(64)
+                                  ? PrimType::UInt(64)
+                                  : PrimType::Int(64);
+        scalar = prim::cast(scalar, bound_type);
+        AddBound(scalar >= MakeConst(bound_type, 0), global, tensor, bounds);
+        AddBound(scalar < prim::cast(tensor.shape()[axis], bound_type), global,
+                 tensor, bounds);
       }
-      return store;
     }
-
-    if (conditions.empty()) {
-      return store;
-    }
-
-    // If a store is out of bounds, we skip the corresponding stmt directly.
-    if (CanFlattenConditions(conditions)) {
-      return IfThenElse(CombineConditions(conditions), store, Stmt(),
-                        store->span);
-    }
-    Stmt guarded = store;
-    for (const PrimExpr &condition : conditions) {
-      guarded = IfThenElse(condition, guarded, Stmt(), store->span);
-    }
-    return guarded;
+    guards->independent_conditions = independent.conditions;
+    return result;
   }
 
-  // Recursively check Load/Store in the call arguments.
-  // For example
-  // T.call_extern("handle", "atomicAddx2", T.address_of(C),
-  // T.address_of(C_shared))
-
-  // NOTE(chaofan): This is currently not the most rigorous solution.
-  // The check here is primarily intended to handle extern functions like
-  // atomicAdd, which may involve memory access. Due to their special nature,
-  // the BufferLoad in their parameters might be used for boundary checks of the
-  // current statement. The current solution adopts a simplified approach:
-  // directly applying the boundary constraints of all parameters to the
-  // statement. While not entirely precise, it addresses most common scenarios.
-  // Check if the call is an atomic operation
-  bool IsAtomicOp(const Op &op) {
-    return op == atomic_add_elem_op() || op == atomic_add_ret_elem_op() ||
-           op == atomic_addx2_elem_op() || op == atomic_addx2_ret_elem_op() ||
-           op == atomic_addx4_elem_op() || op == atomic_addx4_ret_elem_op() ||
-           op == atomic_load_elem_op() || op == atomic_store_elem_op() ||
-           op == atomic_max_elem_op() || op == atomic_max_ret_elem_op() ||
-           op == atomic_min_elem_op() || op == atomic_min_ret_elem_op();
+  PrimExpr Condition(const Array<PrimExpr> &conditions) {
+    PrimExpr result = IntImm::Bool(true);
+    for (const PrimExpr &condition : conditions)
+      result = result && condition;
+    return Simplify(result);
   }
 
-  bool IsCPAsyncOp(const Op &op) {
-    return op == builtin::ptx_cp_async() || op == tl::ptx_cp_async();
+  PrimExpr Condition(const Guards &guards) {
+    return Condition(guards.conditions);
   }
 
-  static constexpr int kCPAsyncDstPtrArg = 0;
-  static constexpr int kCPAsyncSrcPtrArg = 1;
-
-  std::optional<AccessPtrInfo> TryGetAccessPtrInfo(const PrimExpr &expr) {
-    const auto *ptr_call = expr.as<CallNode>();
-    if (!ptr_call) {
-      return std::nullopt;
+  PrimExpr BindExpression(PrimExpr result, const Guards &guards,
+                          Optional<PrimExpr> fallback = std::nullopt) {
+    for (auto binding = guards.bindings.rbegin();
+         binding != guards.bindings.rend(); ++binding) {
+      result = Let(binding->first, binding->second, result, result->loc);
     }
+    if (!guards.independent_conditions.empty())
+      result =
+          tvm::if_then_else(Condition(guards.independent_conditions), result,
+                            fallback.value_or(MakeConst(result.ty(), 0)));
+    return result;
+  }
 
-    if (ptr_call->op.same_as(tl::access_ptr())) {
-      ICHECK_EQ(ptr_call->args.size(), 3U)
-          << "tl.access_ptr expects 3 arguments, but got " << ptr_call->args;
-      const auto *base_load = ptr_call->args[0].as<BufferLoadNode>();
-      ICHECK(base_load) << "tl.access_ptr base must be BufferLoad, but got "
-                        << ptr_call->args[0];
-      return AccessPtrInfo{
-          Downcast<BufferLoad>(ptr_call->args[0]),
-          ptr_call->args[2],
-      };
-    }
+  Stmt BindStatement(const Stmt &statement, const Guards &guards) {
+    Array<Stmt> statements;
+    for (const auto &[variable, value] : guards.bindings)
+      statements.push_back(Bind(variable, value));
+    statements.push_back(statement);
+    Stmt result = guards.bindings.empty() ? statement
+                                          : SeqStmt(statements, statement->loc);
+    if (!guards.independent_conditions.empty())
+      result = If(Condition(guards.independent_conditions), SeqStmt(result),
+                  std::nullopt, statement->loc);
+    return result;
+  }
 
-    if (ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_EQ(ptr_call->args.size(), 5U)
-          << "tvm_access_ptr expects 5 arguments, but got " << ptr_call->args;
-      const auto *var = ptr_call->args[1].as<VarNode>();
-      ICHECK(var) << "tvm_access_ptr buffer data must be Var, but got "
-                  << ptr_call->args[1];
-      Var buffer_data = Downcast<Var>(ptr_call->args[1]);
-      ICHECK(buffer_data_to_buffer_.count(buffer_data))
-          << "Buffer data var " << buffer_data
-          << " is not registered in buffer_data_to_buffer_.";
-      Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
-      return AccessPtrInfo{
-          BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
-          ptr_call->args[4],
-      };
-    }
-
+  Optional<TensorVar> Origin(const Expr &expression) {
+    if (auto tensor = expression.as<TensorVar>())
+      return origins_.Get(*tensor).value_or(*tensor);
+    if (const auto *load = expression.as<TensorLoadNode>())
+      return Origin(load->source);
+    if (const auto *region = expression.as<TensorRegionNode>())
+      return Origin(region->source);
+    const auto *call = expression.as<CallNode>();
+    if (call && !call->args.empty() &&
+        (IsAddress(call) || call->op.same_as(tensor_data_ptr_op()) ||
+         call->op.same_as(decl_tensor_op())))
+      return Origin(call->args[0]);
     return std::nullopt;
   }
 
-  AccessPtrInfo GetRequiredAccessPtrInfo(const PrimExpr &expr,
-                                         const char *context) {
-    std::optional<AccessPtrInfo> info = TryGetAccessPtrInfo(expr);
-    ICHECK(info.has_value())
-        << context << " expects tl.access_ptr or tvm_access_ptr, got " << expr;
-    return info.value();
-  }
-
-  Array<PrimExpr> CollectAccessPtrConditions(const PrimExpr &expr,
-                                             int required_mask) {
-    Array<PrimExpr> conditions;
-    std::optional<AccessPtrInfo> info = TryGetAccessPtrInfo(expr);
-    if (!info.has_value() || !AccessMaskMayUse(info->rw_mask, required_mask)) {
-      return conditions;
+  PrimExpr SafeValue(const TensorVar &tensor, PrimType type) {
+    auto value = safe_values_.Get(tensor);
+    if (!value)
+      value = safe_values_.Get(Origin(tensor).value_or(tensor));
+    PrimExpr result = value.value_or(MakeConst(type.WithLanes(1), 0));
+    if (result.ty().lanes() != type.lanes()) {
+      TVM_FFI_CHECK(result.ty().IsScalar(), ValueError)
+          << "Safe value must be scalar or match the access lanes";
+      result = Broadcast(result, type.lanes());
     }
-
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    bool is_load = (GetConstAccessMask(info->rw_mask) & kAccessRead) != 0;
-    checker.CheckBufferIndices(info->base_load->buffer,
-                               info->base_load->indices, is_load,
-                               /*throw_warning=*/false);
-    return checker.GetConditions();
+    return Simplify(prim::cast(result, type));
   }
 
-  Array<PrimExpr> CollectCallAccessPtrConditions(const Call &call) {
-    Array<PrimExpr> conditions;
-    for (const PrimExpr &arg : call->args) {
-      for (const PrimExpr &cond :
-           CollectAccessPtrConditions(arg, kAccessReadWrite)) {
-        conditions.push_back(cond);
+  Expr SnapshotPointer(const Expr &expression, Guards *guards) {
+    auto access = GetPointerAccess(expression);
+    if (!access)
+      return expression;
+    const auto *call = expression.as<CallNode>();
+    Array<Range> ranges;
+    Array<PrimExpr> indices;
+    for (const Range &range : access->region->region) {
+      PrimExpr begin = Freeze(range->begin, guards);
+      PrimExpr extent = Freeze(range->extent, guards);
+      indices.push_back(begin);
+      ranges.push_back(Range::FromMinExtent(begin, extent));
+    }
+    TensorRegion region(access->region->source, ranges, TensorRegionType(),
+                        expression->loc);
+    PrimExpr extent = Freeze(access->extent, guards);
+    PrimExpr mask = Freeze(access->mask, guards);
+    auto arguments = call->args;
+    auto attributes =
+        call->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>();
+    if (call->op.same_as(access_ptr())) {
+      arguments.Set(0, call->args[0].as<TensorLoadNode>()
+                           ? Expr(TensorLoad(region->source, indices))
+                           : Expr(region));
+      arguments.Set(1, extent);
+      arguments.Set(2, mask);
+    } else {
+      arguments.Set(0, TensorLoad(region->source, indices));
+      attributes.CopyOnWrite()->dict.Set("tl.access_region", region);
+      attributes.CopyOnWrite()->dict.Set("tl.access_extent", extent);
+      attributes.CopyOnWrite()->dict.Set("tl.access_mask", mask);
+    }
+    return Call(call->ty, call->op, arguments, attributes, call->ty_args,
+                call->loc);
+  }
+
+  Expr GuardPointer(const Expr &expression, Guards *guards,
+                    Optional<PrimExpr> required_extent = std::nullopt) {
+    auto access = GetPointerAccess(expression);
+    if (!access)
+      return expression;
+    TensorVar tensor = access->region->source.as_or_throw<TensorVar>();
+    bool global = tensor.scope().name() == "global";
+    const auto *call = expression.as<CallNode>();
+    PrimExpr extent = global ? Freeze(access->extent, guards) : access->extent;
+    Array<Range> ranges;
+    Array<PrimExpr> indices;
+    bool flat_base = call->args[0].as<TensorLoadNode>() != nullptr;
+    PrimExpr region_size = IntImm::Int64(1);
+    for (size_t axis = 0; axis < access->region->region.size(); ++axis) {
+      Range range = access->region->region[axis];
+      PrimExpr begin = range->begin;
+      PrimExpr length = range->extent;
+      if (flat_base && axis + 1 == access->region->region.size()) {
+        length = tvm::max(
+            length, prim::cast(required_extent.value_or(extent), length.ty()));
+      }
+      if (global) {
+        begin = Freeze(begin, guards);
+        length = Freeze(length, guards);
+      }
+      indices.push_back(begin);
+      ranges.push_back(Range::FromMinExtent(begin, length));
+      region_size = region_size * prim::cast(length, PrimType::Int(64));
+      if (GetConstInt(access->mask).value_or(3) != 0) {
+        PrimType bound_type = begin.ty() == PrimType::UInt(64)
+                                  ? PrimType::UInt(64)
+                                  : PrimType::Int(64);
+        PrimExpr wide_begin = prim::cast(begin, bound_type);
+        PrimExpr wide_length = prim::cast(length, bound_type);
+        PrimExpr wide_shape = prim::cast(tensor.shape()[axis], bound_type);
+        AddBound(wide_begin >= MakeConst(bound_type, 0), global, tensor,
+                 guards);
+        AddBound(wide_length >= MakeConst(bound_type, 0), global, tensor,
+                 guards);
+        AddBound(wide_length <= wide_shape, global, tensor, guards);
+        AddBound(wide_begin <= wide_shape - wide_length, global, tensor,
+                 guards);
       }
     }
-    return conditions;
-  }
-
-  bool NeedsEvaluateBoundaryCheck(const Call &call) {
-    return call->op == builtin::call_extern() ||
-           (call->op.as<OpNode>() && IsAtomicOp(Downcast<Op>(call->op)));
-  }
-
-  Array<PrimExpr> CollectCPAsyncConditions(const Call &call) {
-    ICHECK_GE(call->args.size(), 3U)
-        << "cp.async expects at least 3 arguments, but got " << call->args;
-    Array<PrimExpr> conditions;
-    AccessPtrInfo src_info =
-        GetRequiredAccessPtrInfo(call->args[kCPAsyncSrcPtrArg], "cp.async");
-    if (!AccessMaskMayUse(src_info.rw_mask, kAccessRead)) {
-      return conditions;
+    if (!flat_base && GetConstInt(access->mask).value_or(3) != 0) {
+      PrimExpr required =
+          prim::cast(required_extent.value_or(extent), PrimType::Int(64));
+      AddBound(required >= IntImm::Int64(0), global, tensor, guards);
+      AddBound(required <= region_size, global, tensor, guards);
+      AddBound(prim::cast(extent, PrimType::Int(64)) <= region_size, global,
+               tensor, guards);
     }
-
-    SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker.CheckBufferIndices(src_info.base_load->buffer,
-                               src_info.base_load->indices,
-                               /*is_load=*/true, /*throw_warning=*/false);
-    return checker.GetConditions();
+    TensorRegion region(tensor, ranges, TensorRegionType(), expression->loc);
+    auto arguments = call->args;
+    auto attributes =
+        call->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>();
+    if (call->op.same_as(access_ptr())) {
+      arguments.Set(0, region);
+      arguments.Set(1, extent);
+    } else {
+      arguments.Set(0, TensorLoad(tensor, indices));
+      attributes.CopyOnWrite()->dict.Set("tl.access_region", region);
+    }
+    return Call(call->ty, call->op, arguments, attributes, call->ty_args,
+                call->loc);
   }
 
-  Buffer GetCPAsyncSourceBuffer(const Call &call) {
-    ICHECK_GE(call->args.size(), 3U)
-        << "cp.async expects at least 3 arguments, but got " << call->args;
-    AccessPtrInfo src_info =
-        GetRequiredAccessPtrInfo(call->args[kCPAsyncSrcPtrArg], "cp.async");
-    return src_info.base_load->buffer;
+  Call GuardCallPointers(const Call &call, Guards *guards) {
+    Array<Expr> arguments;
+    for (const Expr &argument : call->args)
+      arguments.push_back(GuardPointer(argument, guards));
+    return Call(call->ty, call->op, arguments, call->attrs, call->ty_args,
+                call->loc);
   }
 
-  bool CanFlattenConditions(const Array<PrimExpr> &conditions) {
-    for (const PrimExpr &condition : conditions) {
-      ICHECK(condition.dtype() == DataType::Bool(1))
-          << "Safe-memory condition must be a scalar boolean, but got "
-          << condition.dtype() << ": " << condition;
+  UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
+    auto previous_values = safe_values_;
+    auto previous_origins = origins_;
+    auto result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    safe_values_ = previous_values;
+    origins_ = previous_origins;
+    return result;
+  }
 
-      if (SideEffect(condition) > CallEffectKind::kPure) {
-        return false;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                            InplaceMode mode) final {
+    auto previous_values = safe_values_;
+    if (auto values = node->attrs.GetAttr<Map<TensorVar, PrimExpr>>(
+            attr::kSafeValueMap)) {
+      for (const auto &[tensor, value] : *values) {
+        TVM_FFI_CHECK(SideEffect(value) == CallEffectKind::kPure, ValueError)
+            << "Safe-value annotations must be pure";
+        safe_values_.Set(tensor, value);
       }
+    }
+    RegionStmt result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+                            .ValueOrUnchanged(GetRef<Stmt>(node))
+                            .as_or_throw<RegionStmt>();
+    safe_values_ = previous_values;
+    DictAttrs attributes = result->attrs;
+    attributes.CopyOnWrite()->dict.erase(attr::kSafeValueMap);
+    result.CopyOnWrite()->attrs = attributes;
+    return result;
+  }
 
-      bool is_total = true;
-      PostOrderVisit(condition, [&](const ObjectRef &node) {
-        if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
-            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
-            node.as<ModNode>() || node.as<FloorDivNode>() ||
-            node.as<FloorModNode>()) {
-          is_total = false;
+  UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
+    if (auto tensor = node->var.as<TensorVar>()) {
+      if (auto origin = Origin(node->value))
+        origins_.Set(*tensor, *origin);
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+  }
+
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
+                                InplaceMode mode) final {
+    TensorLoad original = GetRef<TensorLoad>(node);
+    TensorLoad load = StmtExprMutator::Mutate_(node, mode)
+                          .ValueOrUnchanged(original)
+                          .as_or_throw<TensorLoad>();
+    if (!enabled_)
+      return load;
+    TensorVar tensor = load->source.as_or_throw<TensorVar>();
+    Guards guards;
+    Array<PrimExpr> indices = GuardIndices(tensor, load->indices, &guards);
+    PrimExpr result = TensorLoad(tensor, indices, load->loc);
+    if (!guards.conditions.empty())
+      result = tvm::if_then_else(Condition(guards), result,
+                                 SafeValue(tensor, result.ty()));
+    return BindExpression(result, guards, SafeValue(tensor, result.ty()));
+  }
+
+  UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                            InplaceMode mode) final {
+    TensorStore original = GetRef<TensorStore>(node);
+    TensorStore store = StmtExprMutator::Mutate_(node, mode)
+                            .ValueOrUnchanged(original)
+                            .as_or_throw<TensorStore>();
+    if (!enabled_)
+      return store;
+    Guards guards;
+    TensorVar tensor = store->dest.as_or_throw<TensorVar>();
+    Array<PrimExpr> indices = GuardIndices(tensor, store->indices, &guards);
+    Stmt result = TensorStore(tensor, indices, store->value, store->loc);
+    if (!guards.conditions.empty())
+      result = If(Condition(guards), SeqStmt(result), std::nullopt, store->loc);
+    return BindStatement(result, guards);
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
+    if (IsAddress(node)) {
+      Array<Expr> arguments;
+      for (size_t index = 0; index < node->args.size(); ++index) {
+        if (index == 0 && node->args[index].as<TensorLoadNode>()) {
+          const auto *load = node->args[index].as<TensorLoadNode>();
+          Array<PrimExpr> indices;
+          for (const PrimExpr &coordinate : load->indices)
+            indices.push_back(
+                Mutate(coordinate, mode).ValueOrUnchanged(coordinate));
+          arguments.push_back(TensorLoad(load->source, indices, load->loc));
+        } else {
+          arguments.push_back(Mutate(node->args[index], mode)
+                                  .ValueOrUnchanged(node->args[index]));
         }
-      });
-      if (!is_total) {
-        return false;
       }
+      return Call(node->ty, node->op, arguments, node->attrs, node->ty_args,
+                  node->loc);
     }
-    return true;
+    Expr original = GetRef<Expr>(node);
+    Expr result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+                      .ValueOrUnchanged(original);
+    auto call = result.as<Call>();
+    if (!enabled_ || !call || !IsAtomic(call->get()) ||
+        !result.as<PrimExpr>() || result->ty == PrimType::Void() ||
+        call.value()->args.empty())
+      return result;
+    auto destination = GetPointerAccess(call.value()->args[0]);
+    if (!destination)
+      return result;
+    Guards guards;
+    Call guarded = GuardCallPointers(*call, &guards);
+    PrimExpr value = guarded.as_or_throw<PrimExpr>();
+    if (!guards.conditions.empty()) {
+      value = tvm::if_then_else(
+          Condition(guards), value,
+          SafeValue(destination->region->source.as_or_throw<TensorVar>(),
+                    value.ty()));
+    }
+    return BindExpression(value, guards);
   }
 
-  PrimExpr CombineConditionsFrom(const Array<PrimExpr> &conditions, size_t i) {
-    if (i == conditions.size()) {
-      return PrimExpr();
+  Stmt RewriteAsync(const Call &call, const Location &location) {
+    TVM_FFI_CHECK(call->args.size() == 3 || call->args.size() == 4, ValueError);
+    auto source = GetPointerAccess(call->args[1]);
+    auto destination = GetPointerAccess(call->args[0]);
+    if (!source || !destination)
+      return Evaluate(call, location);
+    TensorVar source_tensor = source->region->source.as_or_throw<TensorVar>();
+    TensorVar destination_tensor =
+        destination->region->source.as_or_throw<TensorVar>();
+    TVM_FFI_CHECK(source_tensor.dtype() == destination_tensor.dtype(),
+                  TypeError)
+        << "Asynchronous copies require matching source and destination "
+           "element types";
+    Guards guards;
+    auto arguments = call->args;
+    arguments.Set(0, SnapshotPointer(arguments[0], &guards));
+    arguments.Set(1, SnapshotPointer(arguments[1], &guards));
+    PrimExpr count = Freeze(arguments[2].as_or_throw<PrimExpr>(), &guards);
+    arguments.Set(2, count);
+    PrimExpr predicate =
+        arguments.size() == 4
+            ? Freeze(arguments[3].as_or_throw<PrimExpr>(), &guards)
+            : IntImm::Bool(true);
+    if (arguments.size() == 4)
+      arguments.Set(3, predicate);
+    arguments.Set(1, GuardPointer(arguments[1], &guards, count));
+    destination = GetPointerAccess(arguments[0]);
+    PrimExpr condition = Condition(guards);
+    if (guards.conditions.empty()) {
+      return BindStatement(Evaluate(Call(call->ty, call->op, arguments,
+                                         call->attrs, call->ty_args, call->loc),
+                                    location),
+                           guards);
     }
-
-    PrimExpr condition = conditions[i];
-    bool implied = false;
-    try {
-      implied =
-          analyzer_->CanProve(condition, arith::ProofStrength::kSymbolicBound);
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
+    PrimExpr fallback = SafeValue(source_tensor, destination_tensor.dtype());
+    if (IsZeroBitPattern(fallback)) {
+      PrimExpr combined = Simplify(predicate && condition);
+      if (arguments.size() == 3)
+        arguments.push_back(combined);
+      else
+        arguments.Set(3, combined);
+      return BindStatement(Evaluate(Call(call->ty, call->op, arguments,
+                                         call->attrs, call->ty_args, call->loc),
+                                    location),
+                           guards);
     }
-    if (implied) {
-      return CombineConditionsFrom(conditions, i + 1);
-    }
-
-    With<arith::ConstraintContext> constraint(analyzer_, condition);
-    PrimExpr rest = CombineConditionsFrom(conditions, i + 1);
-    return rest.defined() ? tirx::And(condition, rest) : condition;
+    Array<PrimExpr> indices;
+    for (const Range &range : destination->region->region)
+      indices.push_back(range->begin);
+    TVM_FFI_CHECK(!indices.empty(), ValueError)
+        << "Asynchronous safe-value filling requires indexed destination "
+           "storage";
+    PrimExpr fill_count = count;
+    PrimVar lane("safe_fill", fill_count.ty());
+    indices.Set(indices.size() - 1,
+                indices.back() + prim::cast(lane, indices.back().ty()));
+    fallback =
+        tvm::if_then_else(predicate, fallback, MakeConst(fallback.ty(), 0));
+    Stmt fill = For(
+        lane, MakeConst(fill_count.ty(), 0), fill_count,
+        MakeConst(fill_count.ty(), 1), ForKind::kDefault,
+        SeqStmt(TensorStore(destination_tensor, indices, fallback, location)),
+        {}, location);
+    Stmt result =
+        If(condition,
+           SeqStmt(Evaluate(Call(call->ty, call->op, arguments, call->attrs,
+                                 call->ty_args, call->loc),
+                            location)),
+           SeqStmt(fill), location);
+    return BindStatement(result, guards);
   }
 
-  PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
-    ICHECK(!conditions.empty());
-    for (const PrimExpr &condition : conditions) {
-      ICHECK(condition.dtype() == DataType::Bool(1))
-          << "Safe-memory condition must be a scalar boolean, but got "
-          << condition.dtype() << ": " << condition;
+  UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
+    const auto *original_call = node->value.as<CallNode>();
+    if (original_call &&
+        original_call->op.same_as(Op::Get("tl.safe_value_hint"))) {
+      TensorVar tensor = original_call->args[0].as_or_throw<TensorVar>();
+      PrimExpr value = original_call->args[1].as_or_throw<PrimExpr>();
+      TVM_FFI_CHECK(SideEffect(value) == CallEffectKind::kPure, ValueError)
+          << "Safe-value hints must be pure; bind mutable or effectful values "
+             "before the hint";
+      safe_values_.Set(tensor, value);
+      return SeqStmt({}, node->loc);
     }
-    PrimExpr combined = CombineConditionsFrom(conditions, 0);
-    ICHECK(combined.defined());
-    return analyzer_->Simplify(combined);
+    Expr expression = Mutate(node->value, mode).ValueOrUnchanged(node->value);
+    auto call = expression.as<Call>();
+    if (!enabled_ || !call)
+      return Evaluate(expression, node->loc);
+    if (call.value()->op.same_as(ptx_cp_async()))
+      return RewriteAsync(*call, node->loc);
+    if (IsAtomic(call->get()) || call.value()->op.same_as(call_extern_op()) ||
+        call.value()->op.same_as(call_pure_extern_op())) {
+      Guards guards;
+      Call guarded = GuardCallPointers(*call, &guards);
+      Stmt result = Evaluate(guarded, node->loc);
+      if (!guards.conditions.empty())
+        result =
+            If(Condition(guards), SeqStmt(result), std::nullopt, node->loc);
+      return BindStatement(result, guards);
+    }
+    return Evaluate(expression, node->loc);
   }
 
-  Optional<PrimExpr> GetCPAsyncPredicate(const Call &call) {
-    if (call->args.size() >= 4U) {
-      return call->args[3];
-    }
-    return Optional<PrimExpr>();
-  }
-
-  Stmt RewriteCPAsync(const Evaluate &evaluate, const Call &call,
-                      const Array<PrimExpr> &conditions) {
-    if (conditions.empty()) {
-      return evaluate;
-    }
-
-    ICHECK_GE(call->args.size(), 3U)
-        << "cp.async expects at least 3 arguments, but got " << call->args;
-    AccessPtrInfo dst_info =
-        GetRequiredAccessPtrInfo(call->args[kCPAsyncDstPtrArg], "cp.async");
-    Buffer src_buffer = GetCPAsyncSourceBuffer(call);
-
-    PrimExpr combined = CombineConditions(conditions);
-    Optional<PrimExpr> existing_predicate = GetCPAsyncPredicate(call);
-
-    PrimExpr safe_value = GetSafeValue(src_buffer);
-    DataType dst_dtype = dst_info.base_load->buffer->dtype;
-    if (safe_value.dtype() != dst_dtype) {
-      safe_value = Cast(dst_dtype, safe_value);
-    }
-    safe_value = analyzer_->Simplify(safe_value);
-
-    // Hardware zero-fill requires an all-zero bit pattern.
-    if (IsZeroBitPattern(safe_value)) {
-      PrimExpr predicate = existing_predicate.defined()
-                               ? analyzer_->Simplify(tirx::And(
-                                     existing_predicate.value(), combined))
-                               : combined;
-      Array<PrimExpr> new_args{call->args[0], call->args[1], call->args[2]};
-      new_args.push_back(predicate);
-      return Evaluate(
-          Call(call->dtype, call->op, new_args, call->annotations, call->span));
-    }
-
-    Stmt else_case = BufferStore(dst_info.base_load->buffer, safe_value,
-                                 dst_info.base_load->indices);
-    return IfThenElse(combined, evaluate, else_case, evaluate->span);
-  }
-
-  Stmt WrapEvaluateWithConditions(const Evaluate &evaluate,
-                                  const Array<PrimExpr> &conditions) {
-    if (conditions.empty()) {
-      return evaluate;
-    }
-    Stmt evaluate_with_conditions = evaluate;
-    for (auto cond : conditions) {
-      evaluate_with_conditions =
-          IfThenElse(cond, evaluate_with_conditions, Stmt(), evaluate->span);
-    }
-    return evaluate_with_conditions;
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    auto evaluate = Downcast<Evaluate>(op);
-
-    if (const CallNode *call_node = op->value.as<CallNode>()) {
-      Call call = Downcast<Call>(op->value);
-      if (call->op.as<OpNode>() && IsCPAsyncOp(Downcast<Op>(call->op))) {
-        Array<PrimExpr> conditions = CollectCPAsyncConditions(call);
-        if (conditions.empty()) {
-          // Fallback when we cannot recover the underlying buffer access
-          // directly from the access_ptr arguments.
-          SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
-          checker(call);
-          conditions = checker.GetConditions();
-        }
-        return RewriteCPAsync(evaluate, call, conditions);
-      }
-
-      if (NeedsEvaluateBoundaryCheck(call)) {
-        // For side-effect calls (extern/atomic), recursively collect
-        // conditions from all children. We avoid rewriting BufferLoad in call
-        // arguments directly to prevent nullptr issues in downstream lowering.
-        SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
-        checker(call);
-        Array<PrimExpr> conditions = checker.GetConditions();
-        return WrapEvaluateWithConditions(evaluate, conditions);
-      }
-    }
-
-    return evaluate;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    for (auto buffer : op->alloc_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-    if (op->annotations.count(attr::kSafeValueMap)) {
-      auto map = op->annotations.Get(attr::kSafeValueMap)
-                     ->as<Map<Var, PrimExpr>>()
-                     .value();
-      for (const auto &[var, safe_value] : map) {
-        ICHECK(buffer_data_to_buffer_.count(var))
-            << "buffer " << var << " is not found in the block "
-            << buffer_data_to_buffer_;
-        auto buffer = buffer_data_to_buffer_[var];
-        annotated_safe_value_map_.Set(buffer, safe_value);
-        annotated_safe_value_by_data_.Set(var, safe_value);
-      }
-    }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
-  }
-
-  // Get the safe value of the buffer
-  PrimExpr GetSafeValue(const Buffer &buffer) {
-    if (annotated_safe_value_map_.count(buffer)) {
-      return annotated_safe_value_map_[buffer];
-    }
-    if (annotated_safe_value_by_data_.count(buffer->data)) {
-      return annotated_safe_value_by_data_[buffer->data];
-    }
-    return make_zero(buffer->dtype);
-  }
-
-  Map<Var, Buffer> buffer_data_to_buffer_;
-  Map<Buffer, PrimExpr> annotated_safe_value_map_;
-  Map<Var, PrimExpr> annotated_safe_value_by_data_;
+  bool enabled_;
+  bool warnings_;
+  int next_index_ = 0;
+  Map<TensorVar, PrimExpr> safe_values_;
+  Map<TensorVar, TensorVar> origins_;
 };
+} // namespace
 
-// Create a pass that legalizes vectorized loops in the IRModule
 tvm::transform::Pass LegalizeSafeMemoryAccess() {
-  using namespace tirx::transform;
-  // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    bool disable_safe_memory_legalize =
-        ctx->GetConfig<Bool>(kDisableSafeMemoryLegalize, Bool(false)).value();
-    if (disable_safe_memory_legalize) {
-      return f;
-    }
-    return SafeMemorysRewriter::Substitute(std::move(f));
+  auto pass =
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext context) -> ffi::Optional<tirx::Function> {
+    if (!function->body)
+      return function;
+    sym::Analyzer analyzer;
+    auto rewriter = ffi::make_object<SafeMemoryRewriter>(
+        analyzer,
+        !context->GetConfig<bool>(kDisableSafeMemoryLegalize).value_or(false),
+        !context->GetConfig<bool>(kDisableOutOfBoundWarning).value_or(true));
+    rewriter->Initialize(function);
+    SeqStmt body = *function->body;
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+    return function;
   };
-  // Create and return a PrimFunc pass with the transformation function
-  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeSafeMemoryAccess", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.LegalizeSafeMemoryAccess");
 }
 
-// Register the pass globally so it can be used in the compilation pipeline
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
-                        LegalizeSafeMemoryAccess);
+  ffi::reflection::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
+                                   LegalizeSafeMemoryAccess);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

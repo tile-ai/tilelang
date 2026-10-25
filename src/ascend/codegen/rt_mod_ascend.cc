@@ -1,11 +1,13 @@
+#include "backend/common/codegen/native_codegen.h"
 #include "codegen_ascend.h"
 #include "config.h"
 
-#include "runtime/metadata.h"
 #include "support/check.h"
+#include <tvm/codegen/build_common.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
+#include <tvm/tirx/transform.h>
 
 namespace tvm {
 
@@ -21,19 +23,27 @@ namespace codegen {
 
 namespace {
 
-std::string AscendCodeGen(IRModule mod) {
+std::string AscendCodeGen(IRModule mod, const Target &target) {
+  for (const auto &[global, base] : mod->functions) {
+    auto function = base.as_or_throw<tirx::Function>();
+    mod.CopyOnWrite()->functions.Set(
+        global, WithAttr(function, tvm::attr::kTarget, target));
+  }
+  mod = tirx::transform::StmtSimplify()(mod);
+  mod = tirx::transform::LowerIntrin()(mod);
   bool output_ssa = false;
   CodeGenTileLangAscend cg;
   cg.Init(output_ssa);
+  cg.ConfigureModule(mod);
   cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+    ICHECK(kv.second->IsInstance<tirx::FunctionNode>())
         << "CodeGenTileLangAscend: Can only take PrimFunc";
-    auto f = Downcast<PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
+    auto f = kv.second.as_or_throw<tirx::Function>();
+    auto calling_conv = f->GetAttr(tvm::attr::kCallingConv);
     auto is_global_func =
-        f->GetAttr<Bool>(tvm::tirx::attr::kIsGlobalFunc).value_or(Bool(false));
+        f->GetAttr<bool>("tirx.is_global_func").value_or(false);
     // For Ascend, we accept functions that are either:
     // 1. Device kernel launches (calling_conv == kDeviceKernelLaunch), or
     // 2. Global functions called via call_extern (is_global_func == true)
@@ -41,71 +51,36 @@ std::string AscendCodeGen(IRModule mod) {
         << "CodeGenTileLangAscend: Function must have "
            "calling_conv=kDeviceKernelLaunch "
         << "or be marked as a global function (tir.is_global_func=True)";
-    cg.AddFunction(f);
+    cg.AddFunction(kv.first, f);
   }
 
   return cg.Finish();
 }
 
-// Build the per-kernel FunctionInfo table the runtime module needs to recover
-// the launch grid (via LaunchParamConfig) and pack arguments. Mirrors the CUDA
-// ExtractFuncInfo (src/cuda/codegen/rt_mod_cuda.cc) but only carries what the
-// Ascend launch ABI uses: arg types + kernel launch params (thread extents).
-ffi::Map<ffi::String, runtime::FunctionInfo>
-ExtractFuncInfo(const IRModule &mod) {
-  ffi::Map<ffi::String, runtime::FunctionInfo> fmap;
-  for (auto kv : mod->functions) {
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-    // Only device kernels are launchable; skip call_extern globals.
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
-    if (!(calling_conv == CallingConv::kDeviceKernelLaunch)) {
-      continue;
-    }
-
-    ffi::Array<DLDataType> arg_types;
-    ffi::Array<ffi::String> launch_param_tags;
-
-    for (size_t i = 0; i < f->params.size(); ++i) {
-      DataType dtype = f->params[i].dtype();
-      if (dtype.is_bool())
-        dtype = DataType::Int(32);
-      arg_types.push_back(dtype);
-    }
-    if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
-            tirx::attr::kKernelLaunchParams)) {
-      for (const auto &tag : opt.value()) {
-        launch_param_tags.push_back(tag);
-      }
-    }
-
-    auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
-    std::string sym = global_symbol.has_value()
-                          ? static_cast<std::string>(global_symbol.value())
-                          : static_cast<std::string>(
-                                Downcast<GlobalVar>(kv.first)->name_hint);
-    fmap.Set(ffi::String(sym),
-             runtime::FunctionInfo(ffi::String(sym), arg_types,
-                                   launch_param_tags, {}));
-  }
-  return fmap;
-}
-
 } // namespace
 
 ffi::Module BuildTileLangAscend(IRModule mod, Target target) {
-  std::string code = AscendCodeGen(mod);
+  mod = tl::PrepareNativeCodegen(std::move(mod), target);
+  std::string code = AscendCodeGen(mod, target);
 
   if (const auto f =
           ffi::Function::GetGlobal("tilelang_callback_ascend_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
 
-  std::string aibin;
+  ffi::Bytes aibin;
   if (const auto f =
           ffi::Function::GetGlobal("tilelang_callback_ascend_compile")) {
     tvm::transform::PassContext pass_ctx =
         tvm::transform::PassContext::Current();
-    aibin = (*f)(code, target, pass_ctx->config).cast<std::string>();
+    auto compiled = (*f)(code, target, pass_ctx->config);
+    if (auto binary = compiled.as<ffi::Bytes>()) {
+      aibin = binary.value();
+    } else {
+      auto text_binary = compiled.cast<ffi::String>();
+      aibin = ffi::Bytes(text_binary.data(), text_binary.size());
+    }
+    ICHECK_NE(aibin.size(), 0) << "Ascend compiler returned an empty binary";
   } else {
     ICHECK(false) << "tilelang_callback_ascend_compile is not registered";
   }
@@ -118,7 +93,8 @@ ffi::Module BuildTileLangAscend(IRModule mod, Target target) {
 }
 
 ffi::Module BuildTileLangAscendWithoutCompile(IRModule mod, Target target) {
-  std::string code = AscendCodeGen(mod);
+  mod = tl::PrepareNativeCodegen(std::move(mod), target);
+  std::string code = AscendCodeGen(mod, target);
   if (const auto f =
           ffi::Function::GetGlobal("tilelang_callback_ascend_postproc")) {
     code = (*f)(code, target).cast<std::string>();
@@ -126,7 +102,7 @@ ffi::Module BuildTileLangAscendWithoutCompile(IRModule mod, Target target) {
   // Source-only module used by the cython adapter / inspect_source. The cython
   // path compiles host+device together with bisheng, so no runnable module is
   // needed here.
-  return CSourceModuleCreate(code, "asc", ffi::Array<ffi::String>());
+  return SourceModuleCreate(code, "asc");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

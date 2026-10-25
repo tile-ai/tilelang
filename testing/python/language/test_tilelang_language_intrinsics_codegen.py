@@ -1,4 +1,5 @@
 import pytest
+import re
 import torch
 
 import tilelang
@@ -26,7 +27,7 @@ def test_language_ldg_codegen():
     # Assert that codegen uses __ldg on CUDA backend
     # We look for the intrinsic call with address-of argument
     assert "__ldg(" in src, "Expected __ldg call in generated CUDA source"
-    assert "__ldg(&" in src or "__ldg(&(" in src, "Expected address-of form in __ldg call"
+    assert re.search(r"__ldg\(\s*\(*&", src), "Expected address-of form in __ldg call"
 
 
 def run_ldg_roundtrip(dtype, N=128):
@@ -40,7 +41,7 @@ def run_ldg_roundtrip(dtype, N=128):
 
     kernel = tilelang.compile(main, out_idx=[1], target="cuda")
     # Match the address-of form emitted by CUDA codegen.
-    assert "__ldg(&(" in kernel.get_kernel_source()
+    assert re.search(r"__ldg\(\s*\(*&", kernel.get_kernel_source())
 
     x = torch.randn(N, device="cuda").to(dtype.as_torch())
     assert torch.equal(kernel(x), x)

@@ -1,59 +1,48 @@
-"""Mark host-side Metal kernel calls for MPS synchronization."""
+"""Mark native host launch calls with the Metal command-buffer context."""
 
-from tvm import tirx as tir
-from tvm.ir import Op
-from tvm.tirx import AttrStmt, Evaluate, PyStmtExprMutator, functor
-from tvm.tirx.transform import prim_func_pass
+from tvm_tirx import ir
+from tvm_tirx.tirx.transform import function_pass
 
-
-"""
-Transformation pass to mark host-side kernel calls for Metal/MPS synchronization.
-
-To execute TVM-generated Metal kernels within a PyTorch environment, the TVM runtime
-must utilize PyTorch's active Metal command buffer (MPS). This ensures correct
-execution ordering and memory consistency between PyTorch operators and TVM kernels.
-
-This pass identifies calls to `tir.tvm_call_packed_lowered` occurring within a
-`compute_scope` and wraps them with a `metal_context` attribute. This attribute
-signals the downstream host C codegen to inject specific runtime logic that:
-1. Retrieves the current command buffer from `torch::mps`.
-2. Passes this stream to the TVM runtime before the kernel executes.
-"""
+from tilelang._compat.functor import PyStmtExprMutator
 
 
-_tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
-
-
-@functor.mutator
 class _MarkHostMetalContextMutator(PyStmtExprMutator):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.is_in_compute_scope = False
+    def __init__(self):
+        super().__init__()
+        self.in_compute_scope = False
 
-    def visit_attr_stmt_(self, stmt):
-        switch = stmt.attr_key == "compute_scope"
-        old_value = False
-        if switch:
-            assert not self.is_in_compute_scope
-            old_value, self.is_in_compute_scope = self.is_in_compute_scope, True
-        s = self.visit_stmt(stmt.body)
-        if switch:
-            self.is_in_compute_scope = old_value
-        return s
+    def visit_region_stmt_(self, statement):
+        previous = self.in_compute_scope
+        self.in_compute_scope |= statement.op.name == "tirx.compute_scope"
+        try:
+            return super().visit_region_stmt_(statement)
+        finally:
+            self.in_compute_scope = previous
 
-    def visit_evaluate_(self, op: Evaluate):
-        if self.is_in_compute_scope and isinstance(op.value, tir.Call) and op.value.op.same_as(_tvm_call_packed_lowered):
-            return AttrStmt(0, "metal_context", "", op)
-        return op
+    def visit_evaluate_(self, statement):
+        value = statement.value
+        if (
+            self.in_compute_scope
+            and isinstance(value, ir.Call)
+            and isinstance(value.op, ir.Op)
+            and value.op.name == "tirx.call_packed_lowered"
+        ):
+            return ir.RegionStmt(
+                "tirx.scope",
+                [],
+                [],
+                {"metal_context": True},
+                ir.SeqStmt([statement]),
+                loc=statement.loc,
+            )
+        return statement
 
 
 def MarkHostMetalContext():
-    def pass_fn(func, mod, ctx):
-        mutator = _MarkHostMetalContextMutator()
-        new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body, span=func.span)
+    def transform(function, module, context):
+        return function.with_body(_MarkHostMetalContextMutator().visit(function.body))
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return function_pass(transform, opt_level=0, name="tl.MarkHostMetalContext")
 
 
 __all__ = ["MarkHostMetalContext"]

@@ -4,7 +4,7 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm
+from tilelang import tvm
 from tilelang.engine.lower import lower
 
 
@@ -48,7 +48,7 @@ def test_warp_reduce_codegen(op, ascend_intrinsic, dtype):
 @pytest.mark.parametrize("dtype", UNSUPPORTED_DTYPES)
 def test_warp_reduce_rejects_unsupported_dtype(op, dtype):
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match="supports only scalar float16, float32, int32, and uint32",
     ):
         lower(make_warp_reduce_kernel(op, dtype), target="ascend")

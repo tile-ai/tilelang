@@ -1,4 +1,4 @@
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 __all__ = [

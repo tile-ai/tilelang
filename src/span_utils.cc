@@ -5,8 +5,8 @@
 
 #include "span_utils.h"
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
@@ -14,49 +14,49 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
-void SetStmtSpan(Stmt stmt, Span span) {
-  if (stmt.defined()) {
-    stmt.get()->span = std::move(span);
+void SetStmtSpan(Optional<Stmt> stmt, Optional<Location> span) {
+  if (stmt.has_value()) {
+    stmt.value()->loc = span.value_or(UnknownLoc());
   }
 }
 
-Span GetStmtSpan(const Stmt &stmt) {
-  return stmt.defined() ? stmt->span : Span();
+Location GetStmtSpan(const Optional<Stmt> &stmt) {
+  return stmt.has_value() ? stmt.value()->loc : UnknownLoc();
 }
 
-void SetBufferSpan(Buffer buffer, Span span) {
-  if (buffer.defined()) {
-    buffer.get()->span = std::move(span);
+void SetBufferSpan(Optional<TensorVar> buffer, Optional<Location> span) {
+  if (buffer.has_value()) {
+    buffer.value()->loc = span.value_or(UnknownLoc());
   }
 }
 
-Span GetBufferSpan(const Buffer &buffer) {
-  return buffer.defined() ? buffer->span : Span();
+Location GetBufferSpan(const Optional<TensorVar> &buffer) {
+  return buffer.has_value() ? buffer.value()->loc : UnknownLoc();
 }
 
-void SetPrimFuncSpan(PrimFunc func, Span span) {
-  if (func.defined()) {
-    func.get()->span = std::move(span);
+void SetPrimFuncSpan(Optional<tirx::Function> func, Optional<Location> span) {
+  if (func.has_value()) {
+    func.value()->loc = span.value_or(UnknownLoc());
   }
 }
 
-Span GetPrimFuncSpan(const PrimFunc &func) {
-  return func.defined() ? func->span : Span();
+Location GetPrimFuncSpan(const Optional<tirx::Function> &func) {
+  return func.has_value() ? func.value()->loc : UnknownLoc();
 }
 
-String SpanToString(const Span &span) { return FormatSpan(span); }
+String SpanToString(const Location &span) { return FormatSpan(span); }
 
-void StampSubtreeSpans(const Stmt &stmt, const Span &span) {
-  if (!stmt.defined() || !span.defined()) {
+void StampSubtreeSpans(const Stmt &stmt, const Location &span) {
+  if (span.as<UnknownLocNode>()) {
     return;
   }
-  PostOrderVisit(stmt, [&span](const ObjectRef &obj) {
-    if (const auto *node = obj.as<StmtNode>()) {
-      if (!node->span.defined()) {
-        const_cast<StmtNode *>(node)->span = span;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&span](const StmtNode *node) -> ffi::Expected<ffi::WalkResult> {
+        if (node->loc.as<UnknownLocNode>()) {
+          node->loc = span;
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -68,7 +68,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.ir.GetBufferSpan", &GetBufferSpan)
       .def("tl.ir.SetPrimFuncSpan", &SetPrimFuncSpan)
       .def("tl.ir.GetPrimFuncSpan", &GetPrimFuncSpan)
-      .def("tl.ir.StampSubtreeSpans", &StampSubtreeSpans)
+      .def("tl.ir.StampSubtreeSpans",
+           [](Optional<Stmt> stmt, Optional<Location> span) {
+             if (stmt.has_value() && span.has_value()) {
+               StampSubtreeSpans(stmt.value(), span.value());
+             }
+           })
       .def("tl.ir.SpanToString", &SpanToString);
 }
 

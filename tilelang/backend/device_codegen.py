@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from tvm import IRModule
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
 
 from tilelang import tvm
 from tilelang.instrumentation import run_codegen_with_instrumentation

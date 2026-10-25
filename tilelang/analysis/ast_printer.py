@@ -1,14 +1,14 @@
-from tvm import tirx
-from tvm.tirx import PyStmtExprVisitor, PrimFunc, Stmt
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import PyStmtExprVisitor, PrimFunc, Stmt
 
-from tvm.tirx.transform import prim_func_pass
+from tvm_tirx.tirx.transform import function_pass as prim_func_pass
 
 
 _seq_field_key = "seq"
 _then_field_key = "then_case"
 _else_field_key = "else_case"
 _child_fields = ["body", "block", _seq_field_key, _then_field_key, _else_field_key]
-_ignore_fields = ["span"]
+_ignore_fields = ["loc"]
 
 _stmt_line_limit = 140
 _middle_connector = "├── "
@@ -121,7 +121,7 @@ def ASTPrinter():
     """
 
     def pass_fn(func: PrimFunc, mod, ctx) -> PrimFunc:
-        print(f"PrimFunc(params={func.params}, ret_type={func.ret_type}, buffer_map={func.buffer_map}, attrs={func.attrs})")
+        print(f"PrimFunc(params={func.params}, ret_type={func.ret_type}, attrs={func.attrs})")
         func_body_prefix = _last_connector + "body="
         visitor = _ASTPrintVisitor()
         visitor.print_stmt_brief(func.body, func_body_prefix)

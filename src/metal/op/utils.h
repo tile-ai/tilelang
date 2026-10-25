@@ -16,12 +16,13 @@ namespace tvm {
 namespace tl {
 namespace metal {
 
-inline bool IsSIMDGroupBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "metal.simdgroup";
+inline bool IsSIMDGroupBuffer(const TensorVar &buffer) {
+  return buffer.defined() && buffer.scope().name() == "metal.simdgroup";
 }
 
-inline bool IsCooperativeTensorBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
+inline bool IsCooperativeTensorBuffer(const TensorVar &buffer) {
+  return buffer.defined() &&
+         buffer.scope().name() == "metal.cooperative_tensor";
 }
 
 inline std::pair<int, int> ComputeSquareWarpPartition(int num_warps, int M,

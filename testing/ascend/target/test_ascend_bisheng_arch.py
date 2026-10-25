@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.contrib import bisheng
 from tilelang.jit.adapter import libgen

@@ -1,339 +1,203 @@
-/*!
- * \file materialize_kernel_launch.cc
- * \brief Materialize the target-neutral kernel launch nest emitted by
- *        T.Kernel into a backend-specific form.
- *
- * T.Kernel traces into
- *
- *   for bx in thread_binding(blockIdx.x):        # one per grid axis
- *     tx = tl.launch_thread_idx(0)               # x, y, z placeholders
- *     ty = tl.launch_thread_idx(1)
- *     tz = tl.launch_thread_idx(2)
- *     block tilelang_root { annotations: tl.launch_threads?, ... }
- *
- * The grid loops are the program-index space every backend shares. The
- * thread placeholders only reserve Var identities the body may reference;
- * what they mean, and how many threads run, is decided here once the Target
- * is bound. Each backend pipeline chooses the mode for itself (no target
- * dispatch happens in this pass).
- *
- * "How a launch dimension is lowered" and "whether SIMT threads exist" are
- * independent axes, so they are two flags rather than one:
- *  - lower_grid_binding = true: every launch loop becomes an AttrStmt
- *    thread_extent scope carrying that loop's own thread tag. This is what
- *    targets with a real block/core-level launch want (CUDA, Ascend, ...).
- *    false (e.g. CPU): the launch loops become plain serial For loops, since
- *    such targets have no program-index space at all.
- *  - lower_thread_binding = true (SIMT backends, e.g. CUDA/ROCm/Metal):
- *    each thread placeholder is rebound as a threadIdx.* thread_extent over
- *    the same Var, with the extent taken from the `tl.launch_threads`
- *    annotation (T.Kernel threads=...) or, failing that, from
- *    `default_threads`.
- *    false (backends without SIMT, e.g. CPU and Ascend): thread placeholders
- *    are dropped and `tl.launch_threads` is ignored. A body that references a
- *    thread index has no meaning on such a target and is rejected. Ascend
- *    pairs this with lower_grid_binding = true: its NPU launch is a real 1-D
- *    core grid, while thread domains only exist inside T.SimtVF, which emits
- *    its own thread scopes below the launch nest.
- *
- * `launch_dim_tags` names extra thread_binding tags that belong to the launch
- * nest rather than to the thread domain, so a backend can extend the launch
- * vocabulary without this pass knowing about it. Ascend's T.MixedKernel uses
- * it for its `cthread` sub-block-id dimension, which its codegen reads back
- * off the thread_extent AttrStmt.
- *
- * Launch annotations listed in `unsupported_annotations` (e.g. `cluster_dims`
- * on a target without thread block clusters) are rejected instead of being
- * silently dropped further down the pipeline.
- *
- * Only the outermost contiguous launch nest is converted; thread_binding
- * loops deeper inside the kernel body (separated by the tilelang_root
- * block) are left for LowerOpaqueBlock to handle at its usual stage.
- */
-
-#include "../op/builtin.h"
 #include "common/attr.h"
-#include "support/check.h"
-#include <tvm/ir/transform.h>
-#include <tvm/runtime/logging.h>
+#include "compat/expr.h"
+#include "op/builtin.h"
+
+#include <tvm/ir/analysis.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
-#include <utility>
-#include <vector>
+#include <unordered_set>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using ffi::Array;
-using ffi::GetRef;
-using ffi::Optional;
-
+namespace tvm::tl {
 namespace {
 
-constexpr int kNumThreadAxes = 3;
-constexpr const char *kThreadTags[kNumThreadAxes] = {
-    "threadIdx.x", "threadIdx.y", "threadIdx.z"};
+using namespace ffi;
 
-bool IsBlockBinding(const ForNode *op) {
-  if (op->kind != ForKind::kThreadBinding || !op->thread_binding.defined())
-    return false;
-  std::string tag = op->thread_binding.value()->thread_tag;
-  return tag.rfind("blockIdx.", 0) == 0;
-}
-
-// `v = tl.launch_thread_idx(axis)` emitted by T.Kernel.
-bool IsLaunchThreadPlaceholder(const Stmt &stmt) {
-  const BindNode *bind = stmt.as<BindNode>();
-  if (!bind)
-    return false;
-  const CallNode *call = bind->value.as<CallNode>();
-  return call && call->op.same_as(launch_thread_idx());
-}
-
-int ThreadAxisOf(const BindNode *bind) {
-  const CallNode *call = bind->value.as<CallNode>();
-  ICHECK(call && call->args.size() == 1);
-  const int64_t *axis = as_const_int(call->args[0]);
-  ICHECK(axis && *axis >= 0 && *axis < kNumThreadAxes)
-      << "tl.launch_thread_idx expects a constant axis in [0, 3), got "
-      << call->args[0];
-  return static_cast<int>(*axis);
-}
-
-// The tilelang_root block that carries the launch annotations, if `body` is
-// the kernel body directly below the launch nest.
-const SBlockNode *GetLaunchBlock(const Stmt &body) {
-  const SBlockRealizeNode *realize = body.as<SBlockRealizeNode>();
-  if (!realize || !IsDeviceMainBlock(realize->block.get()))
+const CallNode *ThreadPlaceholder(const Stmt &statement) {
+  const auto *bind = statement.as<BindNode>();
+  if (bind == nullptr)
     return nullptr;
-  return realize->block.get();
+  const auto *call = bind->value.as<CallNode>();
+  return call && call->op.same_as(launch_thread_idx()) ? call : nullptr;
 }
 
-Optional<Array<PrimExpr>> GetLaunchThreads(const Stmt &body) {
-  const SBlockNode *block = GetLaunchBlock(body);
-  if (!block)
-    return std::nullopt;
-  if (auto threads = block->annotations.Get(attr::kLaunchThreads)) {
-    if (auto arr = threads.value().try_cast<Array<PrimExpr>>())
-      return arr.value();
-    LOG(FATAL) << "Expected `" << attr::kLaunchThreads
-               << "` to be an Array<PrimExpr>, but got "
-               << threads.value().GetTypeKey();
-  }
-  return std::nullopt;
+const RegionStmtNode *KernelScope(const SeqStmt &body) {
+  if (body->seq.size() != 1)
+    return nullptr;
+  const auto *region = body->seq[0].as<RegionStmtNode>();
+  return region && IsDeviceMainBlock(region) ? region : nullptr;
 }
 
-class KernelLaunchMaterializer : public StmtMutator {
+class KernelLaunchMaterializer : public tirx::StmtExprMutator {
 public:
-  KernelLaunchMaterializer(bool lower_grid_binding, bool lower_thread_binding,
+  KernelLaunchMaterializer(bool grid_binding, bool thread_binding,
                            Optional<Array<PrimExpr>> default_threads,
-                           Array<ffi::String> unsupported_annotations,
-                           Array<ffi::String> launch_dim_tags,
-                           ffi::String target_name)
-      : lower_grid_binding_(lower_grid_binding),
-        lower_thread_binding_(lower_thread_binding),
+                           Array<String> unsupported, Array<String> extra_tags,
+                           String target_name)
+      : grid_binding_(grid_binding), thread_binding_(thread_binding),
         default_threads_(std::move(default_threads)),
-        unsupported_annotations_(std::move(unsupported_annotations)),
-        launch_dim_tags_(std::move(launch_dim_tags)),
+        unsupported_(std::move(unsupported)),
+        extra_tags_(std::move(extra_tags)),
         target_name_(std::move(target_name)) {}
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    if (IsLaunchDimBinding(op)) {
-      return ConvertNest(GetRef<Stmt>(op));
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  // A launch without grid axes starts directly at the thread placeholders.
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    if (op->size() > 0 && IsLaunchThreadPlaceholder(op->seq[0])) {
-      return ConvertNest(GetRef<Stmt>(op));
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
 private:
-  // A launch dimension: the blockIdx.* grid axes every target shares, plus the
-  // tags this backend declared in `launch_dim_tags` (e.g. Ascend's `cthread`).
-  bool IsLaunchDimBinding(const ForNode *op) const {
-    if (IsBlockBinding(op))
-      return true;
-    if (op->kind != ForKind::kThreadBinding || !op->thread_binding.defined())
-      return false;
-    const std::string tag = op->thread_binding.value()->thread_tag;
-    return std::find(launch_dim_tags_.begin(), launch_dim_tags_.end(), tag) !=
-           launch_dim_tags_.end();
-  }
-
-  // Peel the contiguous launch nest rooted at `root` without descending into
-  // the kernel body below it, then rebuild it in the backend's form.
-  Stmt ConvertNest(const Stmt &root) {
-    std::vector<const ForNode *> grid_loops;
-    Stmt body = root;
-    while (const ForNode *loop = body.as<ForNode>()) {
-      if (!IsLaunchDimBinding(loop))
-        break;
-      grid_loops.push_back(loop);
-      body = loop->body;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                            InplaceMode inplace_mode) final {
+    if (IsDeviceMainBlock(node)) {
+      for (const String &key : unsupported_) {
+        TVM_FFI_CHECK(!node->attrs->dict.count(key), ValueError)
+            << "T.Kernel launch annotation `" << key
+            << "` is not supported on target `" << target_name_ << "`";
+      }
     }
-
-    std::vector<const BindNode *> thread_binds;
-    body = PeelThreadPlaceholders(body, &thread_binds);
-    RejectUnsupportedAnnotations(body);
-
-    body = lower_thread_binding_ ? BindThreads(thread_binds, body)
-                                 : DropThreads(thread_binds, body);
-
-    for (auto it = grid_loops.rbegin(); it != grid_loops.rend(); ++it) {
-      const ForNode *loop = *it;
-      if (lower_grid_binding_) {
-        ffi::String tag = loop->thread_binding.value()->thread_tag;
-        IterVar iter_var(Range::FromMinExtent(loop->min, loop->extent),
-                         loop->loop_var, IterVarType::kThreadIndex, tag);
-        body = AttrStmt(std::move(iter_var), tirx::attr::thread_extent,
-                        loop->extent, std::move(body), loop->span);
+    if (node->op->name != "tl.launch_grid") {
+      return StmtExprMutator::Mutate_(node, inplace_mode);
+    }
+    TVM_FFI_CHECK(node->args.size() == 2 && node->body_params.size() == 1 &&
+                      node->result_vars.empty(),
+                  ValueError)
+        << "Malformed launch dimension";
+    String tag = node->args[0].as_or_throw<StringImm>()->value;
+    bool block_tag =
+        tag == "blockIdx.x" || tag == "blockIdx.y" || tag == "blockIdx.z";
+    if (!block_tag && std::find(extra_tags_.begin(), extra_tags_.end(), tag) ==
+                          extra_tags_.end()) {
+      return StmtExprMutator::Mutate_(node, inplace_mode);
+    }
+    SeqStmt body =
+        Mutate(node->body).ValueOrUnchanged(node->body).as_or_throw<SeqStmt>();
+    PrimVar variable = node->body_params[0].as_or_throw<PrimVar>();
+    PrimExpr extent =
+        prim::cast(node->args[1].as_or_throw<PrimExpr>(), variable.ty());
+    if (auto value = GetConstInt(extent)) {
+      if (grid_binding_ && block_tag) {
+        TVM_FFI_CHECK_GT(*value, 0, ValueError)
+            << "Kernel grid extents must be positive";
       } else {
-        body = For(loop->loop_var, loop->min, loop->extent, ForKind::kSerial,
-                   std::move(body),
-                   /*thread_binding=*/std::nullopt, loop->annotations,
-                   loop->step, loop->span);
+        TVM_FFI_CHECK_GE(*value, 0, ValueError)
+            << "Kernel grid extents must be nonnegative";
       }
+      if (*value == 0)
+        return SeqStmt({});
     }
-    return body;
+    if (grid_binding_) {
+      return RegionStmt(tirx::launch_thread_op(), {StringImm(tag), extent},
+                        {variable}, DictAttrs(), body, {}, node->loc);
+    }
+    return For(variable, MakeConst(variable.ty(), 0), extent,
+               MakeConst(variable.ty(), 1), ForKind::kDefault, body,
+               node->attrs->dict, node->loc);
   }
 
-  // Split the leading `v = tl.launch_thread_idx(axis)` binds off `stmt` and
-  // return what follows them.
-  static Stmt PeelThreadPlaceholders(const Stmt &stmt,
-                                     std::vector<const BindNode *> *binds) {
-    const SeqStmtNode *seq = stmt.as<SeqStmtNode>();
-    if (!seq)
-      return stmt;
-    size_t i = 0;
-    while (i < seq->size() && IsLaunchThreadPlaceholder(seq->seq[i])) {
-      binds->push_back(seq->seq[i].as<BindNode>());
-      ++i;
+  UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
+                            InplaceMode inplace_mode) final {
+    if (node->seq.empty() || ThreadPlaceholder(node->seq[0]) == nullptr) {
+      return StmtExprMutator::Mutate_(node, inplace_mode);
     }
-    if (i == 0)
-      return stmt;
-    ICHECK_LT(i, seq->size())
-        << "T.Kernel launch has thread placeholders but no body";
-    if (i + 1 == seq->size())
-      return seq->seq[i];
-    return SeqStmt(Array<Stmt>(seq->seq.begin() + i, seq->seq.end()));
-  }
-
-  // SIMT: every placeholder becomes a threadIdx.* thread_extent scope over
-  // the same Var so body references stay valid.
-  Stmt BindThreads(const std::vector<const BindNode *> &thread_binds,
-                   Stmt body) {
-    if (thread_binds.empty())
+    Array<Var> variables;
+    std::vector<int> axes;
+    std::unordered_set<int> seen;
+    size_t prefix = 0;
+    for (; prefix < node->seq.size(); ++prefix) {
+      const CallNode *call = ThreadPlaceholder(node->seq[prefix]);
+      if (call == nullptr)
+        break;
+      TVM_FFI_CHECK_EQ(call->args.size(), 1U, ValueError)
+          << "Malformed thread placeholder";
+      auto axis = GetConstInt(call->args[0]);
+      TVM_FFI_CHECK(axis && *axis >= 0 && *axis < 3 &&
+                        seen.insert(*axis).second,
+                    ValueError)
+          << "Thread placeholders require distinct constant axes in [0, 3)";
+      variables.push_back(node->seq[prefix].as<BindNode>()->var);
+      axes.push_back(*axis);
+    }
+    SeqStmt body(Array<Stmt>(node->seq.begin() + prefix, node->seq.end()),
+                 node->loc);
+    const RegionStmtNode *kernel = KernelScope(body);
+    TVM_FFI_CHECK(kernel != nullptr, ValueError)
+        << "Thread placeholders must immediately precede a kernel scope";
+    auto requested =
+        kernel->attrs.GetAttr<Array<PrimExpr>>(attr::kLaunchThreads);
+    body = Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+    if (!thread_binding_) {
+      std::unordered_set<const VarNode *> used;
+      for (const Var &variable : UndefinedVars(body))
+        used.insert(variable.get());
+      for (const Var &variable : variables) {
+        TVM_FFI_CHECK(!used.count(variable.get()), ValueError)
+            << "T.Kernel thread index `" << variable->name
+            << "` is used on target `" << target_name_
+            << "`, which has no SIMT thread bindings";
+      }
       return body;
-    Array<PrimExpr> extents = ResolveThreadExtents(body);
-    for (auto it = thread_binds.rbegin(); it != thread_binds.rend(); ++it) {
-      const BindNode *bind = *it;
-      int axis = ThreadAxisOf(bind);
-      PrimExpr extent = extents[axis];
-      IterVar iter_var(
-          Range::FromMinExtent(make_zero(bind->var.dtype()), extent), bind->var,
-          IterVarType::kThreadIndex, kThreadTags[axis]);
-      body = AttrStmt(std::move(iter_var), tirx::attr::thread_extent, extent,
-                      std::move(body), bind->span);
     }
-    return body;
-  }
-
-  // No SIMT: thread placeholders carry no meaning, so they are removed. A body
-  // that reads one would otherwise silently run as a single thread.
-  Stmt DropThreads(const std::vector<const BindNode *> &thread_binds,
-                   Stmt body) {
-    for (const BindNode *bind : thread_binds) {
-      const VarNode *var = bind->var.get();
-      if (UsesVar(body, [var](const VarNode *v) { return v == var; })) {
-        LOG(FATAL) << "T.Kernel body references thread index `"
-                   << bind->var->name_hint << "`, but target `" << target_name_
-                   << "` has no SIMT threads. Express the computation with "
-                      "tile-level operators (T.Parallel, T.copy, ...) instead "
-                      "of per-thread indexing.";
-      }
-    }
-    return body;
-  }
-
-  void RejectUnsupportedAnnotations(const Stmt &body) const {
-    const SBlockNode *block = GetLaunchBlock(body);
-    if (!block)
-      return;
-    for (const ffi::String &key : unsupported_annotations_) {
-      if (block->annotations.count(key)) {
-        LOG(FATAL) << "T.Kernel launch annotation `" << key
-                   << "` is not supported on target `" << target_name_ << "`";
-      }
-    }
-  }
-
-  Array<PrimExpr> ResolveThreadExtents(const Stmt &body) {
-    Optional<Array<PrimExpr>> threads = GetLaunchThreads(body);
-    if (!threads.defined())
-      threads = default_threads_;
-    ICHECK(threads.defined())
+    if (!requested.has_value())
+      requested = default_threads_;
+    TVM_FFI_CHECK(requested.has_value(), ValueError)
         << "T.Kernel did not specify threads= and target `" << target_name_
         << "` provides no default thread-block size";
-    Array<PrimExpr> extents = threads.value();
-    ICHECK_LE(extents.size(), static_cast<size_t>(kNumThreadAxes));
-    while (extents.size() < static_cast<size_t>(kNumThreadAxes)) {
-      extents.push_back(IntImm(DataType::Int(32), 1));
+    Array<PrimExpr> extents = requested.value();
+    TVM_FFI_CHECK_LE(extents.size(), 3U, ValueError)
+        << "Kernel threads require at most three axes";
+    while (extents.size() < 3)
+      extents.push_back(PrimExpr(1));
+    const char *tags[] = {"threadIdx.x", "threadIdx.y", "threadIdx.z"};
+    for (size_t position = variables.size(); position-- > 0;) {
+      PrimVar variable = variables[position].as_or_throw<PrimVar>();
+      PrimExpr extent = prim::cast(extents[axes[position]], variable.ty());
+      auto constant = GetConstInt(extent);
+      TVM_FFI_CHECK(constant && *constant > 0, ValueError)
+          << "Kernel thread extents must be positive constants";
+      body = SeqStmt(RegionStmt(tirx::launch_thread_op(),
+                                {StringImm(tags[axes[position]]), extent},
+                                {variable}, DictAttrs(), body, {}, node->loc));
     }
-    return extents;
+    return body;
   }
 
-  bool lower_grid_binding_;
-  bool lower_thread_binding_;
+  bool grid_binding_;
+  bool thread_binding_;
   Optional<Array<PrimExpr>> default_threads_;
-  Array<ffi::String> unsupported_annotations_;
-  Array<ffi::String> launch_dim_tags_;
-  ffi::String target_name_;
+  Array<String> unsupported_;
+  Array<String> extra_tags_;
+  String target_name_;
 };
 
 } // namespace
 
-tvm::transform::Pass
-MaterializeKernelLaunch(bool lower_grid_binding, bool lower_thread_binding,
-                        Optional<Array<PrimExpr>> default_threads,
-                        Optional<Array<ffi::String>> unsupported_annotations,
-                        Optional<Array<ffi::String>> launch_dim_tags) {
-  using namespace tirx::transform;
-  Array<ffi::String> unsupported =
-      unsupported_annotations.value_or(Array<ffi::String>());
-  Array<ffi::String> dim_tags = launch_dim_tags.value_or(Array<ffi::String>());
-  auto pass_func =
-      [lower_grid_binding, lower_thread_binding, default_threads, unsupported,
-       dim_tags](PrimFunc func, const IRModule &mod,
-                 const tvm::transform::PassContext &ctx) -> PrimFunc {
-    ffi::String target_name = "<unbound>";
-    if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
-      target_name = target.value()->kind->name;
-    }
-    KernelLaunchMaterializer mutator(lower_grid_binding, lower_thread_binding,
-                                     default_threads, unsupported, dim_tags,
-                                     target_name);
-    func.CopyOnWrite()->body = mutator(func->body);
-    return func;
+tvm::transform::Pass MaterializeKernelLaunch(
+    bool lower_grid_binding, bool lower_thread_binding,
+    ffi::Optional<ffi::Array<PrimExpr>> default_threads,
+    ffi::Optional<ffi::Array<ffi::String>> unsupported_annotations,
+    ffi::Optional<ffi::Array<ffi::String>> launch_dim_tags) {
+  auto pass =
+      [=](tirx::Function function, IRModule,
+          tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (!function->body.has_value())
+      return function;
+    auto target = function->GetAttr<Target>("target");
+    auto lowerer = ffi::make_object<KernelLaunchMaterializer>(
+        lower_grid_binding, lower_thread_binding, default_threads,
+        unsupported_annotations.value_or(ffi::Array<ffi::String>{}),
+        launch_dim_tags.value_or(ffi::Array<ffi::String>{}),
+        target.has_value() ? target.value()->kind->name
+                           : ffi::String("<unbound>"));
+    SeqStmt body = function->body.value();
+    function.CopyOnWrite()->body =
+        lowerer->Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MaterializeKernelLaunch", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.MaterializeKernelLaunch");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MaterializeKernelLaunch",
-                        MaterializeKernelLaunch);
+  ffi::reflection::GlobalDef().def("tl.transform.MaterializeKernelLaunch",
+                                   MaterializeKernelLaunch);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

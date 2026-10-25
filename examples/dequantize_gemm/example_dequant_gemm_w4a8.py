@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from tvm import tirx
+from tilelang._compat import tirx
 import itertools
 import torch
 import argparse

@@ -37,7 +37,7 @@ class _InlineMethod:
 
     def _lazy_macro(self):
         if self._lazy is None:
-            from tvm.tirx.script.parser.entry import inline as _tvm_inline
+            from tvm_tirx.tirx.script.entry import inline as _tvm_inline
 
             self._lazy = _tvm_inline(self._func)
         return self._lazy
@@ -102,8 +102,8 @@ def _emits_store(func: Callable) -> bool:
 
 def _name_buffer(meta_name: str, attr: str, value: Any) -> None:
     """Give a state buffer a readable name ``{meta_name}_{attr}`` in the IR."""
-    from tvm.script.ir_builder import IRBuilder
-    from tvm.tirx import Buffer
+    from tvm_tirx.script.ir_builder import IRBuilder
+    from tilelang._compat.tirx import Buffer
 
     if not isinstance(value, Buffer):
         return

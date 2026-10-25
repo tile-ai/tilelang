@@ -2,6 +2,7 @@
 
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 
@@ -29,6 +30,7 @@ def vusqz_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_vusqz_prefix_count():
     torch.manual_seed(0)
     kernel = vusqz_kernel()
@@ -66,6 +68,7 @@ def vmull_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_vmull():
     torch.manual_seed(0)
     a = torch.randint(-1000, 1000, (N,), dtype=torch.int32, device="npu")
@@ -102,6 +105,7 @@ def vunpack_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_vunpack():
     torch.manual_seed(0)
     x = torch.randint(-30000, 30000, (128,), dtype=torch.int16, device="npu")
@@ -148,6 +152,7 @@ def _u64_limb(t):
     return [int(v) for v in (t.cpu().to(torch.int64) & 0xFFFFFFFF)]
 
 
+@tilelang.testing.requires_ascend
 def test_vaddc():
     torch.manual_seed(0)
     a = torch.randint(0, 2**32 - 1, (N,), dtype=torch.int64).to(torch.int32).to("npu")
@@ -161,6 +166,7 @@ def test_vaddc():
     torch.testing.assert_close(c.cpu(), torch.tensor([v >> 32 for v in sum64], dtype=torch.int64).to(torch.int32), rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_vsubc_carry():
     """carry = 1 where the subtraction did NOT borrow (add-style carry)."""
     torch.manual_seed(0)
@@ -220,6 +226,7 @@ def carry_chain_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_vaddcs_chain():
     torch.manual_seed(0)
     a0 = torch.randint(0, 2**32 - 1, (N,), dtype=torch.int64).to(torch.int32).to("npu")
@@ -265,6 +272,7 @@ def umask_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_update_mask():
     for c in [0, 1, 13, 63, 64, 100]:
         cnt = torch.tensor([c], dtype=torch.int32, device="npu")
@@ -317,6 +325,7 @@ def pred_rt_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_predicate_roundtrips():
     dummy = torch.arange(64, dtype=torch.int32, device="npu")
     o0 = torch.empty(64, dtype=torch.int32, device="npu")

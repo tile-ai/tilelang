@@ -22,18 +22,15 @@
  * \brief IRStructure node cloning and debug helpers for TileLang.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -57,7 +54,6 @@
 #include "./task_analysis.h"
 #include "op/builtin.h"
 #include "transform/common/attr.h"
-#include "transform/common/collector.h"
 
 namespace tvm {
 namespace tl {
@@ -72,53 +68,50 @@ bool GuardsStructurallyEqual(const PrimExpr &a, const PrimExpr &b) {
   return a.same_as(b) || ffi::StructuralEqual()(a, b);
 }
 
-bool GuardsEquivalentWithAnalyzer(arith::Analyzer *analyzer, const PrimExpr &a,
+bool GuardsEquivalentWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &a,
                                   const PrimExpr &b) {
   ICHECK(a.defined() && b.defined());
   if (GuardsStructurallyEqual(a, b))
     return true;
-  return analyzer->CanProveEqual(a, b);
+  return analyzer->CanProve(a == b, sym::ProofStrength::kSymbolicBound);
 }
 
-bool GuardImpliesWithAnalyzer(arith::Analyzer *analyzer,
-                              const PrimExpr &premise,
+bool GuardImpliesWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &premise,
                               const PrimExpr &conclusion) {
   ICHECK(premise.defined() && conclusion.defined());
   if (GuardsStructurallyEqual(premise, conclusion))
     return true;
-  auto exit_constraint = analyzer->EnterConstraint(premise);
-  bool result = analyzer->CanProve(conclusion);
-  exit_constraint();
-  return result;
+  With<sym::ConstraintContext> constraint(analyzer, premise);
+  return analyzer->CanProve(conclusion, sym::ProofStrength::kSymbolicBound);
 }
 
 } // namespace
 
 bool GuardsEquivalent(const PrimExpr &a, const PrimExpr &b,
                       const ConstrSet &outer_ctx) {
-  arith::Analyzer analyzer;
-  outer_ctx.Populate(analyzer);
-  return GuardsEquivalentWithAnalyzer(&analyzer, a, b);
+  sym::Analyzer analyzer;
+  auto constraints = outer_ctx.Populate(analyzer);
+  return GuardsEquivalentWithAnalyzer(analyzer, a, b);
 }
 
 bool GuardImplies(const PrimExpr &premise, const PrimExpr &conclusion,
                   const ConstrSet &outer_ctx) {
-  if (is_zero(premise) || is_one(conclusion) ||
+  if ((GetConstInt(premise) == 0) || (GetConstInt(conclusion) == 1) ||
       GuardsStructurallyEqual(premise, conclusion))
     return true;
-  arith::Analyzer analyzer;
-  outer_ctx.Populate(analyzer);
-  return GuardImpliesWithAnalyzer(&analyzer, premise, conclusion);
+  sym::Analyzer analyzer;
+  auto constraints = outer_ctx.Populate(analyzer);
+  return GuardImpliesWithAnalyzer(analyzer, premise, conclusion);
 }
 
 PrimExpr IRStructure::GetConditionGuard() const {
-  PrimExpr guard = Bool(true);
+  PrimExpr guard = IntImm::Bool(true);
   for (const auto &item : GetGuards()) {
     if (!item->IsCondition())
       continue;
     const PrimExpr &condition =
         static_cast<const ConditionGuard *>(item.get())->condition;
-    guard = is_one(guard) ? condition : guard && condition;
+    guard = (GetConstInt(guard) == 1) ? condition : guard && condition;
   }
   return guard;
 }
@@ -127,7 +120,7 @@ bool IRStructure::GuardsTouchStorage(const Var &storage) const {
   auto touches_storage = [&](const PrimExpr &expression) {
     return expression.defined() &&
            TaskAccessesStorage(AnalyzeTaskAccesses(Evaluate(expression)),
-                               storage);
+                               storage, GetStorageAnalysis());
   };
 
   for (const auto &guard : GetGuards()) {
@@ -148,7 +141,10 @@ bool IRStructure::GuardsTouchStorage(const Var &storage) const {
 
 Stmt WrapWithGuard(Stmt stmt, const PrimExpr &guard) {
   ICHECK(guard.defined());
-  return is_one(guard) ? stmt : IfThenElse(guard, std::move(stmt));
+  return (GetConstInt(guard) == 1)
+             ? stmt
+             : Stmt(MakeScheduleMarker(kScheduleCondition, guard,
+                                       std::move(stmt)));
 }
 
 ConstrSet TaskNode::GetContextBeforeConditionGuards() const {
@@ -178,25 +174,28 @@ ConstrSet TaskNode::GetContextBeforeConditionGuards() const {
 void ControlNode::InitializeLoopBodyContext() {
   ICHECK(task != nullptr);
   ConstrSet result = task->outer_ctx;
-  result.AddConstr(control->loop_var,
-                   Range::FromMinExtent(control->min, control->extent));
-  result.AddConstr(control->extent > 0);
+  result.AddConstr(control->var, ScheduleLoopRange(control.get()));
+  result.AddConstr(ScheduleLoopTripCount(control.get()) > 0);
   for (const auto &child : children) {
     if (!child->IsTask())
       continue;
     const auto *body_task = static_cast<const TaskNode *>(child.get());
     if (ffi::Optional<Bind> bind = GetFlatTaskBind(body_task->stmt);
-        bind.defined()) {
+        bind.has_value()) {
+      auto scalar = bind.value()->var.as<PrimVar>();
+      auto value_expr = bind.value()->value.as<PrimExpr>();
+      if (!scalar || !value_expr)
+        continue;
       PrimExpr definition_guard = body_task->GetConditionGuard();
-      if (is_one(definition_guard)) {
-        result.AddConstr(bind.value()->var, bind.value()->value);
-      } else if (!bind.value()->var.dtype().is_vector()) {
+      if ((GetConstInt(definition_guard) == 1)) {
+        result.AddConstr(scalar.value(), value_expr.value());
+      } else if (scalar->ty().IsScalar()) {
         // A condition snapshot defined under another condition is arbitrary
         // outside that condition. Preserve its definition domain instead of
         // globally binding the snapshot and proving facts from an assignment
         // that may not execute.
-        PrimExpr value = FreshenMutableReads()(bind.value()->value);
-        result.AddConstr(!definition_guard || bind.value()->var == value);
+        PrimExpr value = FreshenMutableReads()(value_expr.value());
+        result.AddConstr(!definition_guard || scalar.value() == value);
       }
     }
   }
@@ -270,16 +269,14 @@ int CompareIRStructure(IRStructure *lhs, IRStructure *rhs) {
 }
 
 PrimExpr CalculateIterationCount(ControlNode *loop) {
-  PrimExpr total_iter = IntImm(DataType::Int(32), 0);
-  PrimExpr total_multiplier = IntImm(DataType::Int(32), 1);
+  PrimExpr total_iter = IntImm(PrimType::Int(32), 0);
+  PrimExpr total_multiplier = IntImm(PrimType::Int(32), 1);
   for (; loop != nullptr; loop = loop->GetParentControl()) {
     const ForNode *for_node = loop->control.get();
-    PrimExpr step = for_node->step.has_value() ? for_node->step.value()
-                                               : IntImm(DataType::Int(32), 1);
     total_iter =
-        total_iter +
-        indexdiv(for_node->loop_var - for_node->min, step) * total_multiplier;
-    total_multiplier = total_multiplier * ceildiv(for_node->extent, step);
+        total_iter + indexdiv(for_node->var - for_node->begin, for_node->step) *
+                         total_multiplier;
+    total_multiplier = total_multiplier * ScheduleLoopTripCount(for_node);
   }
   return total_iter;
 }
@@ -399,6 +396,43 @@ void PrintIRStructure(const IRStructure *node, int indent) {
       PrintIRStructure(control->children[i].get(), indent + 2);
     }
   }
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef()
+      .def(
+          "tl.ascend.AnalyzeMemoryAccesses",
+          [](Stmt statement, bool physical, LayoutMap layouts) {
+            MemoryAccessDetector detector(
+                physical ? MemoryAccessDetector::AccessMode::kPhysical
+                         : MemoryAccessDetector::AccessMode::kLogical,
+                std::move(layouts));
+            detector.Analyze(statement);
+            auto reads = detector.GetReadRegions();
+            auto writes = detector.GetWriteRegions();
+            auto must_writes = detector.GetMustWriteRegions();
+            auto read_vars = detector.GetReadVars();
+            auto write_vars = detector.GetWriteVars();
+            auto opaque = detector.GetOpaqueAccessVars();
+            return ffi::Map<ffi::String, ffi::Any>{
+                {"reads", ffi::Array<TensorRegion>(reads.begin(), reads.end())},
+                {"writes",
+                 ffi::Array<TensorRegion>(writes.begin(), writes.end())},
+                {"must_writes", ffi::Array<TensorRegion>(must_writes.begin(),
+                                                         must_writes.end())},
+                {"read_vars",
+                 ffi::Array<Var>(read_vars.begin(), read_vars.end())},
+                {"write_vars",
+                 ffi::Array<Var>(write_vars.begin(), write_vars.end())},
+                {"opaque", ffi::Array<Var>(opaque.begin(), opaque.end())},
+                {"l0_pitches", detector.GetL0Pitches()}};
+          })
+      .def("tl.ascend.EstimateLoopTripCount",
+           [](For loop, ffi::Map<Var, Range> domains) {
+             sym::Analyzer analyzer;
+             analyzer->Bind(domains);
+             return GetSerialTripCount(loop, analyzer);
+           });
 }
 
 } // namespace ascend

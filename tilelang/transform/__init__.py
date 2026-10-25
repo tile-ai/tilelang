@@ -4,16 +4,35 @@
 from . import _ffi_api
 from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
-from tilelang import tvm as tvm  # noqa: F401
-from tvm.ir.transform import PassContext  # noqa: F401
-from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
-from .hoist_broadcast_values import HoistBroadcastValues  # noqa: F401
-from .decouple_type_cast import DecoupleTypeCast  # noqa: F401
+from tvm_tirx.ir.transform import PassContext
+
+
+def AddWrapperForSingleBufStore():
+    from .add_bufstore_wrapper import AddWrapperForSingleBufStore as create_pass
+
+    return create_pass()
+
+
+def HoistBroadcastValues():
+    from .hoist_broadcast_values import HoistBroadcastValues as create_pass
+
+    return create_pass()
+
+
+def DecoupleTypeCast():
+    from .decouple_type_cast import DecoupleTypeCast as create_pass
+
+    return create_pass()
 
 
 def get_pass_context():
     """Get the current pass context"""
     return PassContext.current()
+
+
+def NormalizePipelineCPAsync():
+    """Transfer closed, drained cp.async groups to the managed pipeline."""
+    return _ffi_api.NormalizePipelineCPAsync()
 
 
 def PipelinePlanning():
@@ -177,7 +196,7 @@ def LegalizeSafeMemoryAccess():
 
 
 def LowerAccessPtr():
-    """Lower TileLang frontend `tl.access_ptr` to `tir.builtin.tvm_access_ptr`.
+    """Lower `tl.access_ptr` to a typed native address with access metadata.
 
     Returns
     -------

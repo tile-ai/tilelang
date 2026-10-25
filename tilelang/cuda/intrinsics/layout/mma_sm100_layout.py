@@ -43,7 +43,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from tvm.tirx import Buffer
+from tilelang._compat.tirx import Buffer
 
 from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.layout import cute

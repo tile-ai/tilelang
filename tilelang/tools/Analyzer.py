@@ -1,8 +1,10 @@
 from __future__ import annotations
-import numpy as np
+import math
+import tvm_ffi
+from tvm_tirx import ir, tirx
 from dataclasses import dataclass
-from tilelang import tvm
-from tvm.tirx.stmt_functor import ir_transform
+from tilelang._compat.tensor import tensor_parameter_map
+from tilelang._compat.stmt_functor import ir_transform
 import logging
 
 # Configuration for different hardware architectures.
@@ -44,129 +46,80 @@ class Analyzer:
             fn: A TVM IRModule or PrimFunc to analyze.
             device: The target device information.
         """
-        if isinstance(fn, tvm.tirx.function.PrimFunc):
-            self.fn = tvm.IRModule({"main": fn})
+        if isinstance(fn, tirx.Function):
+            self.fn = ir.IRModule({"main": fn})
         else:
             self.fn = fn
         self.device = device
         self.total_flops = 0  # Total floating-point operations
         self.total_global_bytes = 0  # Total global memory bytes
-        self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1}  # Block dimensions
+        self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1, "blockIdx.z": 1}  # Block dimensions
         self.loop_stack = []  # Stack to track nested loops
         self.global_buffers = set()  # Set of global memory buffers
 
     def _analyze_copy(self, call):
-        """
-        Analyze memory copy operations (e.g., tl.copy).
-        Args:
-            call: A TVM Call node representing the copy operation.
-        """
-        src_buffer = call.args[0].args[0].buffer
-        dst_buffer = call.args[1].args[0].buffer
-
-        # Determine if the source or destination is a global buffer
-        if src_buffer in self.global_buffers:
-            buffer_region = call.args[0]
-        elif dst_buffer in self.global_buffers:
-            buffer_region = call.args[1]
-        else:
-            return
-
-        # Calculate the number of elements being copied
-        elements = 1
-        for r in range(2, len(buffer_region.args)):
-            elements *= buffer_region.args[r]
-        dtype_size = np.dtype(buffer_region.args[0].buffer.dtype).itemsize  # Size of the data type
-        bytes_transferred = elements * dtype_size  # Total bytes transferred
-
-        # Account for loop and block dimensions
-        loop_product = 1
-        for extent in self.loop_stack:
-            loop_product *= extent.value if hasattr(extent, "value") else extent
-        total_blocks = self.block_counts["blockIdx.x"] * self.block_counts["blockIdx.y"]
-        total_bytes = bytes_transferred * loop_product * total_blocks
-        self.total_global_bytes += total_bytes
+        """Count global traffic from the native source and destination regions."""
+        normalize = tvm_ffi.get_global_func("tl.NormalizeToBufferRegion")
+        repetitions = math.prod(self.loop_stack) * math.prod(self.block_counts.values())
+        for operand in call.args[:2]:
+            region = normalize(operand)
+            if region.source not in self.global_buffers:
+                continue
+            elements = math.prod(int(bound.extent) for bound in region.region)
+            dtype = region.source.dtype
+            self.total_global_bytes += ((elements * dtype.bits * dtype.lanes + 7) // 8) * repetitions
 
     def _analyze_gemm(self, call):
-        """
-        Analyze matrix multiplication (GEMM) operations (e.g., tl.gemm).
-        Args:
-            call: A TVM Call node representing the GEMM operation.
-        """
-        M = call.args[5].value
-        N = call.args[6].value
-        K = call.args[7].value
-        flops_per_call = 2 * M * N * K  # FLOPs for one GEMM operation
-
-        # Account for loop and block dimensions
-        loop_product = 1
-        for extent in self.loop_stack:
-            loop_product *= extent.value if hasattr(extent, "value") else extent
-        total_blocks = self.block_counts["blockIdx.x"] * self.block_counts["blockIdx.y"]
-        self.total_flops += flops_per_call * loop_product * total_blocks
+        """Count multiply-adds using the tile operation's explicit M/N/K operands."""
+        dimensions = [int(dimension) for dimension in call.args[5:8]]
+        repetitions = math.prod(self.loop_stack) * math.prod(self.block_counts.values())
+        self.total_flops += 2 * math.prod(dimensions) * repetitions
 
     def ir_pass(self):
-        """
-        Traverse and transform the IR module to extract performance-related information.
-        Returns:
-            self: The Analyzer instance.
-        """
-
-        def _ftransform(f, mod, ctx):
-            # Initialize the set of global buffers
-            self.global_buffers = set(f.buffer_map.values())
-            self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1}
+        """Traverse native functions, launch regions, and stepped loops."""
+        self.total_flops = 0
+        self.total_global_bytes = 0
+        for function in self.fn.functions.values():
+            if not isinstance(function, tirx.Function) or function.body is None:
+                continue
+            self.global_buffers = set(tensor_parameter_map(function).values())
+            self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1, "blockIdx.z": 1}
             self.loop_stack.clear()
+            block_stack = []
 
-            def _pre_visit(stmt):
-                """
-                Pre-visit callback for IR nodes.
-                Args:
-                    stmt: The current IR node being visited.
-                """
-                if isinstance(stmt, tvm.tirx.AttrStmt):
-                    # Handle thread extent attributes
-                    if stmt.attr_key == "thread_extent":
-                        iter_var = stmt.node
-                        thread_tag = iter_var.thread_tag
-                        if thread_tag in self.block_counts:
-                            extent = stmt.value.value if hasattr(stmt.value, "value") else stmt.value
-                            self.block_counts[thread_tag] = extent
-                elif isinstance(stmt, tvm.tirx.For):
-                    thread_binding = stmt.thread_binding
-                    if thread_binding is not None:
-                        thread_tag = thread_binding.thread_tag
-                        if thread_tag in self.block_counts:
-                            extent = stmt.extent.value if hasattr(stmt.extent, "value") else stmt.extent
-                            self.block_counts[thread_tag] = extent
-                    else:
-                        self.loop_stack.append(stmt.extent)
-                elif isinstance(stmt, tvm.tirx.Evaluate):
-                    # Handle Evaluate nodes containing calls
-                    value = stmt.value
-                    if isinstance(value, tvm.tirx.Call):
-                        if value.op.name in ("tl.copy", "tl.tileop.copy"):
-                            self._analyze_copy(value)
-                        elif value.op.name in ("tl.gemm", "tl.tileop.gemm"):
-                            self._analyze_gemm(value)
+            def launch_axis(statement):
+                if isinstance(statement, ir.RegionStmt) and statement.op.name in ("tirx.launch_thread", "tl.launch_grid"):
+                    axis = statement.args[0].value
+                    if axis in self.block_counts:
+                        return axis
                 return None
 
-            def _post_visit(stmt):
-                """
-                Post-visit callback for IR nodes.
-                Args:
-                    stmt: The current IR node being visited.
-                """
-                if isinstance(stmt, tvm.tirx.For) and stmt.thread_binding is None and self.loop_stack:
+            def pre_visit(statement, block_stack=block_stack):
+                axis = launch_axis(statement)
+                if axis is not None:
+                    block_stack.append((axis, self.block_counts[axis]))
+                    self.block_counts[axis] = int(statement.args[1])
+                elif isinstance(statement, ir.For):
+                    extent = len(range(int(statement.begin), int(statement.end), int(statement.step)))
+                    self.loop_stack.append(extent)
+                elif isinstance(statement, ir.Evaluate) and isinstance(statement.value, ir.Call):
+                    call = statement.value
+                    if isinstance(call.op, ir.Op):
+                        if call.op.name in ("tl.copy", "tl.tileop.copy"):
+                            self._analyze_copy(call)
+                        elif call.op.name in ("tl.gemm", "tl.tileop.gemm"):
+                            self._analyze_gemm(call)
+                return None
+
+            def post_visit(statement, block_stack=block_stack):
+                if launch_axis(statement) is not None:
+                    axis, previous = block_stack.pop()
+                    self.block_counts[axis] = previous
+                elif isinstance(statement, ir.For):
                     self.loop_stack.pop()
                 return None
 
-            # Use IR transformation to traverse and modify the function body
-            new_body = ir_transform(f.body, _pre_visit, _post_visit)
-            return f.with_body(new_body)
-
-        # Apply the custom PrimFunc pass
-        tvm.tirx.transform.prim_func_pass(_ftransform, opt_level=0)(self.fn)
+            ir_transform(function.body, pre_visit, post_visit)
         return self
 
     def calculate(self) -> AnalysisResult:

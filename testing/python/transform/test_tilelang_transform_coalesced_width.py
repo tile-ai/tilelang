@@ -8,7 +8,7 @@ import tilelang.testing
 @pytest.fixture(
     params=[
         pytest.param({"kind": "cuda", "arch": "sm_80"}, marks=tilelang.testing.requires_cuda.marks(), id="cuda"),
-        pytest.param({"kind": "hip", "mcpu": "gfx942"}, marks=tilelang.testing.requires_rocm.marks(), id="rocm"),
+        pytest.param({"kind": "rocm", "mcpu": "gfx942"}, marks=tilelang.testing.requires_rocm.marks(), id="rocm"),
     ]
 )
 def copy_target(request):

@@ -124,10 +124,10 @@ def test_lazy_jit_varargs_are_forwarded_to_factory():
         return kernel
 
     first = make_kernel.get_tir(1, 2)
-    assert first.body.value.value == 3
+    assert first.body.seq[0].value.value == 3
     assert make_kernel.get_tir(1, 2, scale=1) is first
-    assert make_kernel.get_tir(1, 2, scale=3).body.value.value == 9
-    assert make_kernel.get_tir().body.value.value == 0
+    assert make_kernel.get_tir(1, 2, scale=3).body.seq[0].value.value == 9
+    assert not make_kernel.get_tir().body.seq
 
 
 def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
@@ -142,9 +142,9 @@ def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
         return kernel
 
     first = make_kernel.get_tir(1, 2, scale=3, offset=4)
-    assert first.body.value.value == 21
+    assert first.body.seq[0].value.value == 21
     second = make_kernel.get_tir(1, 2, 3, scale=2, offset=4)
-    assert second.body.value.value == 20
+    assert second.body.seq[0].value.value == 20
     assert make_kernel.get_tir(1, 2, scale=3, offset=4) is first
 
 
@@ -266,12 +266,12 @@ def test_lazy_jit_hashable_defaults_reuse_specializations(monkeypatch, config_ty
     # Skip backend compilation to keep this test portable.
     monkeypatch.setattr(make_kernel, "compile", make_kernel.get_tir)
     first = make_kernel()
-    assert first.body.value.value == 1
+    assert first.body.seq[0].value.value == 1
     assert make_kernel(first_options) is first
     assert make_kernel(options=first_options) is first
 
     second = make_kernel(second_options)
-    assert second.body.value.value == 2
+    assert second.body.seq[0].value.value == 2
     assert make_kernel(options=second_options) is second
     assert make_kernel() is first
 

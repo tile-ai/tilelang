@@ -103,14 +103,14 @@ def test_simdvf_accepts_full_register_types():
 )
 def test_simdvf_rejects_partial_data_registers(dtype, expected_lanes):
     with pytest.raises(
-        tvm.error.InternalError,
-        match=rf"invalid SIMD register type {dtype}.*2048-bit register.*x{expected_lanes}",
+        RuntimeError,
+        match=rf"invalid SIMD register type .*{dtype}.*2048-bit register.*x{expected_lanes}",
     ):
         lower(_simd_register_kernel(dtype), target="ascend")
 
 
 def test_simdvf_rejects_small_predicate_carrier():
-    with pytest.raises(tvm.error.InternalError, match=r"predicates must be boolx256"):
+    with pytest.raises(RuntimeError, match=r"predicates must be boolx256"):
         lower(_simd_register_kernel("boolx8"), target="ascend")
 
 
@@ -121,7 +121,7 @@ def test_simdvf_rejects_generic_vector_broadcast():
             value = T.Broadcast(T.float32(1), 8)
             T.evaluate(tirx.call_extern("int32", "consume", value))
 
-    with pytest.raises(tvm.error.InternalError, match=r"Generic vector Broadcast.*inside SimdVF"):
+    with pytest.raises(RuntimeError, match=r"Generic vector Broadcast.*inside SimdVF"):
         lower(main, target="ascend")
 
 
@@ -152,7 +152,8 @@ def test_simtvf_capture_signature_uses_kernel_abi_type():
 
     source = lower(main, target="ascend").kernel_source
 
-    assert re.search(r"__simt_vf__ .*\(fp8_e4_t captured\)", source)
+    assert re.search(r"__simt_vf__ .*\(fp8_e4_t\* captured_ptr\)", source)
+    assert "consume(captured_ptr[0])" in source
     assert "tl::float_e4m3_t captured" not in source
 
 
@@ -168,8 +169,9 @@ def test_simdvf_local_register_address_uses_register_data():
 
     source = lower(main, target="ascend").kernel_source
 
-    assert "vector_s8 dst[1];" in source
-    assert "simd_inst::vmula((&(dst[0])), src, src, mask, MODE_ZEROING)" in source
+    destination = re.search(r"vector_s8 (\w+)\[1\];", source)
+    assert destination is not None
+    assert f"simd_inst::vmula((&({destination[1]}[0])), src, src, mask, MODE_ZEROING)" in source
 
 
 def test_simd_intrinsic_requires_simdvf_context():
@@ -178,7 +180,7 @@ def test_simd_intrinsic_requires_simdvf_context():
         with T.Kernel(1):
             T.evaluate(T.simd.pset(32))
 
-    with pytest.raises(tvm.error.InternalError, match=r"tl\.simd\.pset.*inside SimdVF"):
+    with pytest.raises(RuntimeError, match=r"tl\.simd\.pset.*inside SimdVF"):
         lower(main, target="ascend")
 
 
@@ -199,7 +201,7 @@ def test_nested_vf_blocks_are_rejected():
         with T.Kernel(1), T.SimtVF(threads=1), T.SimdVF():
             T.evaluate(0)
 
-    with pytest.raises(tvm.error.InternalError, match=r"Nested Ascend VF blocks"):
+    with pytest.raises(RuntimeError, match=r"Nested Ascend VF blocks"):
         lower(main, target="ascend")
 
 

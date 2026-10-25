@@ -398,35 +398,36 @@ TL_PATCH TL_DEVICE bfloat16_t __ldg(const bfloat16_t *ptr) {
   return bfloat16_t(__ldg(reinterpret_cast<const __nv_bfloat16 *>(ptr)));
 }
 
+namespace tl {
+
 // Pack two half values.
-TL_DEVICE unsigned __pack_half2(const half x, const half y) {
+TL_DEVICE unsigned pack_half2_bits(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
 }
 
 // Pack two half_t values.
-TL_DEVICE unsigned __pack_half2(const half_t x, const half_t y) {
+TL_DEVICE unsigned pack_half2_bits(const half_t x, const half_t y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
 }
 
 // Pack two bfloat16_t values.
-TL_DEVICE unsigned __pack_half2(const bfloat16_t x, const bfloat16_t y) {
+TL_DEVICE unsigned pack_half2_bits(const bfloat16_t x, const bfloat16_t y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
 }
 
 // Pack two bfloat16_t values.
-TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
+TL_DEVICE unsigned pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   unsigned v0 = *((unsigned short *)&x);
   unsigned v1 = *((unsigned short *)&y);
   return (v1 << 16) | v0;
 }
 
-namespace tl {
 TL_DEVICE float fast_rcp(float x) {
   float ret;
   asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(ret) : "f"(x));
@@ -1026,6 +1027,50 @@ TL_DEVICE void increase_descriptor_offset(Tcgen05SMemDescriptor &descriptor,
   descriptor.reg32_[0] += (offset >> 4);
 }
 
+template <int layout_type = 0, int leading_byte_offset = 0,
+          int stride_byte_offset = 0, typename Element>
+TL_DEVICE void initialize_wgmma_descriptor(uint64_t *descriptor,
+                                           Element *start_address) {
+  GmmaDescriptor value;
+  initialize_wgmma_descriptor<layout_type, leading_byte_offset,
+                              stride_byte_offset>(value, start_address);
+  *descriptor = value.desc_;
+}
+
+template <typename Element>
+TL_DEVICE void
+initialize_tcgen05_descriptor(uint64_t *descriptor, Element *start_address,
+                              int leading_byte_offset, int stride_byte_offset,
+                              int base_offset, bool leading_is_absolute,
+                              int swizzle_mode) {
+  Tcgen05SMemDescriptor value;
+  initialize_tcgen05_descriptor(value, start_address, leading_byte_offset,
+                                stride_byte_offset, base_offset,
+                                leading_is_absolute, swizzle_mode);
+  *descriptor = value.desc_;
+}
+
+template <typename Offset>
+TL_DEVICE void increase_descriptor_offset(uint64_t *descriptor, Offset offset) {
+  Tcgen05SMemDescriptor value(*descriptor);
+  increase_descriptor_offset(value, offset);
+  *descriptor = value.desc_;
+}
+
+template <typename Element>
+TL_DEVICE Element load_scalar(const Element *pointer) {
+  return *pointer;
+}
+
+template <bool tcgen05, typename Offset>
+TL_DEVICE uint64_t offset_descriptor(const uint64_t *pointer, Offset offset) {
+  if constexpr (tcgen05) {
+    return uint64_t(Tcgen05SMemDescriptor(*pointer) + offset);
+  } else {
+    return uint64_t(GmmaDescriptor(*pointer) + offset);
+  }
+}
+
 // and add the desired implicit conversion from bfloat16_t.
 struct float_e4m3_t : public cute::float_e4m3_t {
   using cute::float_e4m3_t::float_e4m3_t;
@@ -1120,7 +1165,7 @@ template <typename T> TL_DEVICE uint1 to_uint1(T v) {
 // Pack two half_t into a uint1.
 TL_DEVICE uint1 pack_half2(half_t a, half_t b) {
   unsigned packed =
-      __pack_half2(static_cast<__half>(a), static_cast<__half>(b));
+      pack_half2_bits(static_cast<__half>(a), static_cast<__half>(b));
   return uint1{packed};
 }
 
@@ -1513,6 +1558,8 @@ TL_DEFINE_SHFL_SYNC_OVERLOADS(half_t, uint16_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(bfloat16_t, uint16_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e4m3_t, uint8_t)
 TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e5m2_t, uint8_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(__nv_fp8_e4m3, uint8_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(__nv_fp8_e5m2, uint8_t)
 
 #undef TL_DEFINE_SHFL_SYNC_OVERLOADS
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import warnings
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 import tilelang.language as T
 from tilelang.cuda.debug import get_stack_str

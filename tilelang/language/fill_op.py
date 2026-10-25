@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from tilelang._typing import BufferLikeType
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 from tilelang.language.common import has_let_value, get_let_value
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region

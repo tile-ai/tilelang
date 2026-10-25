@@ -1,5 +1,5 @@
-from tvm import tirx
-from tvm.tirx import BufferLoad
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import BufferLoad
 
 from tilelang.utils.language import retrieve_ptr
 

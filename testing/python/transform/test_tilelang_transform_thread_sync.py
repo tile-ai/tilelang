@@ -1,12 +1,16 @@
+from tilelang._compat.tensor import tensor_parameter_map
+from testing.python.transform._native_ir import flat_access_ptr, ordinal_loops, storage_root, thread_sum
+
 # ruff: noqa
 
+from tvm_ffi import structural_equal
 import pytest
 
 from tilelang import tvm as tvm
 import tilelang.testing
 from tilelang.testing.ir import collect_calls, collect_nodes
-from tvm import tirx
-from tvm.script import tirx as T
+from tilelang._compat import tirx
+import tilelang.language as T
 
 
 def run_passes(func: tvm.tirx.PrimFunc):
@@ -16,8 +20,8 @@ def run_passes(func: tvm.tirx.PrimFunc):
 
     mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
 
-    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
-    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = tilelang.transform.SplitHostDevice()(mod)
     return tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -35,21 +39,23 @@ def _storage_syncs(root, scope="shared", *, arg_count=1):
     """Query full or named barriers by exact Op, scope and argument count."""
     return [
         call
-        for call in collect_calls(root, op="tirx.tvm_storage_sync")
+        for call in collect_calls(root, op="tirx.gpu_storage_sync")
         if len(call.args) == arg_count and isinstance(call.args[0], tirx.StringImm) and call.args[0].value == scope
     ]
 
 
 def _thread_var(func, tag="threadIdx.x"):
     variables = [
-        attr.node.var for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "thread_extent" and attr.node.thread_tag == tag
+        region.body_params[0]
+        for region in collect_nodes(func, tvm.ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == tag
     ]
     assert len(variables) == 1, f"Expected one binding for {tag}, got {len(variables)}"
     return variables[0]
 
 
 def _guard(root, condition):
-    guards = [node for node in collect_nodes(root, tirx.IfThenElse) if tvm.ir.structural_equal(node.condition, condition)]
+    guards = [node for node in collect_nodes(root, tirx.IfThenElse) if structural_equal(node.condition, condition)]
     assert len(guards) == 1, f"Expected one guard for {condition}, got {len(guards)}"
     return guards[0]
 
@@ -91,20 +97,23 @@ def _assert_partial_sync_params(syncs, thread_count):
     assert syncs, "Expected a partial barrier"
     for call in syncs:
         assert len(call.args) == 3
-        assert all(isinstance(arg, tirx.IntImm) and arg.dtype == "int32" for arg in call.args[1:])
+        assert all(isinstance(arg, tirx.IntImm) and arg.ty.dtype == "int32" for arg in call.args[1:])
         assert 0 < int(call.args[1]) < 16, "Named barrier ID must be in the CUDA hardware range"
         assert int(call.args[2]) == thread_count, "Wrong partial-barrier participant count"
 
 
 def _assert_shared_write_sync_read(branch, call):
     """Check the shared producer/barrier/consumer sequence of these kernels."""
-    writes = [store for store in collect_nodes(branch, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    writes = [store for store in collect_nodes(branch, tirx.BufferStore) if store.dest.ty.scope.name == "shared"]
     assert len(writes) == 1, "Expected one shared-memory producer"
     reads = [
         store
         for store in collect_nodes(branch, tirx.BufferStore)
-        if store.buffer.scope() == "local"
-        and any(load.buffer.data.same_as(writes[0].buffer.data) for load in collect_nodes(store.value, tirx.BufferLoad))
+        if store.dest.ty.scope.name == "local"
+        and any(
+            storage_root(branch, load.source).same_as(storage_root(branch, writes[0].dest))
+            for load in collect_nodes(store.value, tirx.BufferLoad)
+        )
     ]
     assert len(reads) == 1, "Expected one consumer of the producer's shared buffer"
     _assert_stmt_order(branch, writes[0], _sync_stmt(branch, call), reads[0])
@@ -131,13 +140,7 @@ def test_no_sync_between_atomic_adds_to_shared():
                 T.call_intrin(
                     "float32",
                     tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
-                    T.tvm_access_ptr(
-                        T.type_annotation("float32"),
-                        A_shared.data,
-                        i * 128 + tx,
-                        1,
-                        3,
-                    ),
+                    flat_access_ptr(A_shared, i * 128 + tx, 1, 3),
                     T.float32(1),
                     T.int32(0),
                 )
@@ -178,7 +181,7 @@ def test_thread_sync_shared_dyn_alias_different_element_sizes():
     fp8_writes = [
         store
         for store in collect_nodes(lowered, tirx.BufferStore)
-        if store.buffer.scope() == "shared.dyn" and store.buffer.dtype == "float8_e4m3fn"
+        if store.dest.ty.scope.name == "shared.dyn" and store.dest.ty.dtype.dtype == "float8_e4m3fn"
     ]
     assert len(fp8_writes) == 1
     for call in syncs:
@@ -205,13 +208,7 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
             T.call_intrin(
                 "float32",
                 tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
-                T.tvm_access_ptr(
-                    T.type_annotation("float32"),
-                    A_shared.data,
-                    T.Cast("int64", tx),
-                    1,
-                    3,
-                ),
+                flat_access_ptr(A_shared, T.Cast("int64", tx), 1, 3),
                 T.float32(1),
                 T.int32(0),
             )
@@ -226,18 +223,15 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
-        threadIdx_x = T.env_thread("threadIdx.x")
-        threadIdx_y = T.env_thread("threadIdx.y")
-        blockIdx_x = T.env_thread("blockIdx.x")
         p0 = T.decl_buffer([2], dtype="float32", data=p0_arg.data)
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
-        T.launch_thread(blockIdx_x, 8)
-        T.launch_thread(threadIdx_x, 4)
+        blockIdx_x = T.launch_thread("blockIdx.x", 8)
+        threadIdx_x = T.launch_thread("threadIdx.x", 4)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         result_local[0] = T.float32(0)
-        if threadIdx_y < 8:
+        if ty < 8:
             temp_shared[threadIdx_x] = p0[0]
             temp_shared[threadIdx_x] = temp_shared[threadIdx_x]
         result_local[0] = result_local[0] + temp_shared[0]
@@ -260,13 +254,11 @@ def test_no_sync_if_with_same_index_with_modulo_if():
 
     @T.prim_func(check_well_formed=False)
     def func() -> None:
-        threadIdx_x = T.env_thread("threadIdx.x")
-        blockIdx_x = T.env_thread("blockIdx.x")
         p0 = T.alloc_buffer([1], dtype="float32", scope="local")
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([32], dtype="float32", scope="shared")
-        T.launch_thread(blockIdx_x, 1)
-        T.launch_thread(threadIdx_x, 32)
+        blockIdx_x = T.launch_thread("blockIdx.x", 1)
+        threadIdx_x = T.launch_thread("threadIdx.x", 32)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         result_local[0] = T.float32(0)
@@ -282,13 +274,11 @@ def test_no_sync_if_with_same_index_with_modulo_if():
 def test_sync_read_thread_id_independent_location():
     @T.prim_func
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
-        threadIdx_x = T.env_thread("threadIdx.x")
-        blockIdx_x = T.env_thread("blockIdx.x")
         p0 = T.decl_buffer([2], dtype="float32", data=p0_arg.data)
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
-        T.launch_thread(blockIdx_x, 8)
-        T.launch_thread(threadIdx_x, 4)
+        blockIdx_x = T.launch_thread("blockIdx.x", 8)
+        threadIdx_x = T.launch_thread("threadIdx.x", 4)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         result_local[0] = T.float32(0)
@@ -348,7 +338,7 @@ def test_sync_shared():
     tvm.ir.assert_structural_equal(mod["main"], expected)
 
 
-@tvm.testing.requires_cuda
+@tilelang.testing.requires_cuda
 def test_sync_let_stmt():
     @T.prim_func(private=True)
     def func(A: T.Buffer((16 * 512), "float32")):
@@ -373,18 +363,7 @@ def test_sync_let_stmt():
         A_temp_3 = T.bind(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 384])
         in_thread_A_temp_1[0] = A_temp_3
         cross_thread_A_temp_1 = T.decl_buffer((1,), data=cross_thread_A_temp.data, scope="local")
-        with T.attr(
-            T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
-            "reduce_scope",
-            T.reinterpret(T.uint64(0), dtype="handle"),
-        ):
-            T.tvm_thread_allreduce(
-                T.uint32(1),
-                in_thread_A_temp_1[0],
-                T.bool(True),
-                cross_thread_A_temp_1[0],
-                threadIdx_x,
-            )
+        T.evaluate(thread_sum(in_thread_A_temp_1[0], cross_thread_A_temp_1[0], threadIdx_x))
 
     @T.prim_func(private=True)
     def expected(A: T.Buffer((8192,), "float32")):
@@ -400,7 +379,7 @@ def test_sync_let_stmt():
             A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
         in_thread_A_temp_1_1 = T.decl_buffer((1,), data=in_thread_A_temp_1.data, scope="local")
         in_thread_A_temp_1_1[0] = T.float32(0)
-        T.tvm_storage_sync("shared")
+        T.gpu_storage_sync("shared")
         A_temp_0 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x])
         in_thread_A_temp_1_1[0] = A_temp_0
         A_temp_1 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 128])
@@ -410,18 +389,7 @@ def test_sync_let_stmt():
         A_temp_3 = T.bind(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x + 384])
         in_thread_A_temp_1_1[0] = A_temp_3
         cross_thread_A_temp_1_1 = T.decl_buffer((1,), data=cross_thread_A_temp_1.data, scope="local")
-        T.attr(
-            T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
-            "reduce_scope",
-            T.reinterpret(T.uint64(0), dtype="handle"),
-        )
-        T.tvm_thread_allreduce(
-            T.uint32(1),
-            in_thread_A_temp_1_1[0],
-            T.bool(True),
-            cross_thread_A_temp_1_1[0],
-            threadIdx_x,
-        )
+        T.evaluate(thread_sum(in_thread_A_temp_1_1[0], cross_thread_A_temp_1_1[0], threadIdx_x))
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
@@ -429,7 +397,9 @@ def test_sync_let_stmt():
 
 
 @tilelang.testing.requires_cuda
-def test_sync_shared_dyn_stmatrix_loop_hoist():
+def test_sync_shared_dyn_stmatrix_loop_carried_barrier():
+    """Conservative matrix-store regions overlap across iterations and cannot hoist their barrier."""
+
     @T.prim_func
     def func():
         buf_dyn_shmem = T.alloc_buffer((98304,), "uint8", scope="shared.dyn")
@@ -447,17 +417,14 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
             )
             T.evaluate(
                 T.call_intrin(
-                    "handle",
+                    "void",
                     tvm.tirx.op.Op.get("tl.ptx_stmatrix"),
                     T.int32(0),
                     T.int32(4),
-                    T.tvm_access_ptr(
-                        T.type_annotation("uint8"),
-                        buf_dyn_shmem.data,
-                        off,
-                        98304 - off,
-                        2,
-                    ),
+                    flat_access_ptr(buf_dyn_shmem, off, 98304 - off, 2),
+                    T.int32(2),
+                    T.int32(2),
+                    T.int32(2),
                     T.int32(2),
                 )
             )
@@ -469,10 +436,12 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     assert syncs
     loops = collect_nodes(lowered, tirx.For)
     assert len(loops) == 1 and loops[0].kind == tirx.ForKind.UNROLLED
-    assert int(loops[0].extent) == 8
-    assert not _storage_syncs(loops[0], "shared.dyn")
+    assert int(loops[0].end - loops[0].begin) == 8
+    assert len(_storage_syncs(loops[0], "shared.dyn")) == len(syncs)
+    (store,) = collect_calls(loops[0], op="tl.ptx_stmatrix")
     for call in syncs:
-        _assert_stmt_order(lowered, _sync_stmt(lowered, call), loops[0])
+        _assert_stmt_order(loops[0], _sync_stmt(loops[0], store), _sync_stmt(loops[0], call))
+    assert tvm.tirx.analysis.check_well_formed(lowered)
 
 
 @tilelang.testing.requires_cuda
@@ -577,7 +546,7 @@ def test_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canoni
         temp_shared[1, tx] = T.float32(0)
         temp_shared[2, tx] = T.float32(0)
         temp_shared[3, tx] = T.float32(0)
-        T.tvm_storage_sync("shared")
+        T.gpu_storage_sync("shared")
         # Use TVM's serial builder to retain For.step; TileLang normalizes it.
         for i in T.serial(start, stop, step=step):
             temp_shared[i % 4, tx] = T.Cast("float32", i)
@@ -585,7 +554,7 @@ def test_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canoni
 
     mod = tvm.IRModule({"main": func})
     if canonicalize:
-        mod = tvm.s_tir.transform.CanonicalizeLoop()(mod)
+        mod = ordinal_loops(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     loops = collect_nodes(lowered, tirx.For)
@@ -595,9 +564,11 @@ def test_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canoni
     assert len(syncs) == expected_syncs
     if expected_syncs:
         # The read must finish before the next iteration overwrites its row.
-        writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.buffer.scope() == "shared"]
+        writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.dest.ty.scope.name == "shared"]
         assert len(writes) == 1
-        _assert_stmt_order(loop.body, _sync_stmt(loop, syncs[0]), writes[0])
+        reads = [store for store in collect_nodes(loop, tirx.BufferStore) if store.dest.ty.scope.name == "local"]
+        assert len(reads) == 1
+        _assert_stmt_order(loop.body, writes[0], reads[0], _sync_stmt(loop, syncs[0]))
 
 
 @pytest.mark.parametrize("canonicalize", [False, True])
@@ -615,7 +586,7 @@ def test_loop_carry_non_unit_step_last_pair(canonicalize):
         result_local[0] = T.float32(0)
         for j in range(24):
             temp_shared[j, tx] = T.float32(0)
-        T.tvm_storage_sync("shared")
+        T.gpu_storage_sync("shared")
         for i in range(3, 13, 3):
             temp_shared[i, tx] = T.Cast("float32", i)
             # Only i=9 -> i=12 aliases across neighboring threads.
@@ -623,22 +594,24 @@ def test_loop_carry_non_unit_step_last_pair(canonicalize):
 
     mod = tvm.IRModule({"main": func})
     if canonicalize:
-        mod = tvm.s_tir.transform.CanonicalizeLoop()(mod)
+        mod = ordinal_loops(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # The initialization loop must not count as a loop-carried barrier.
     loops = [
         loop
         for loop in collect_nodes(lowered, tirx.For)
-        if any(load.buffer.scope() == "shared" for load in collect_nodes(loop, tirx.BufferLoad))
+        if any(load.source.ty.scope.name == "shared" for load in collect_nodes(loop, tirx.BufferLoad))
     ]
     assert len(loops) == 1
     loop = loops[0]
     syncs = _storage_syncs(loop)
     assert len(syncs) == 1
-    writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.dest.ty.scope.name == "shared"]
     assert len(writes) == 1
-    _assert_stmt_order(loop.body, _sync_stmt(loop, syncs[0]), writes[0])
+    reads = [store for store in collect_nodes(loop, tirx.BufferStore) if store.dest.ty.scope.name == "local"]
+    assert len(reads) == 1
+    _assert_stmt_order(loop.body, writes[0], reads[0], _sync_stmt(loop, syncs[0]))
 
 
 @tilelang.testing.requires_cuda
@@ -744,7 +717,7 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
     guard = _guard(lowered, _thread_var(lowered) < 64)
     syncs = _storage_syncs(lowered)
     assert syncs and not _storage_syncs(guard)
-    writes = [store for store in collect_nodes(lowered, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    writes = [store for store in collect_nodes(lowered, tirx.BufferStore) if store.dest.ty.scope.name == "shared"]
     assert len(writes) == 1
     for call in syncs:
         _assert_stmt_order(lowered, writes[0], _sync_stmt(lowered, call), guard)
@@ -836,7 +809,7 @@ def test_sync_inside_uniform_if_runtime_block_uniform_condition():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
-    flags = lowered.buffer_map[lowered.params[0]]
+    flags = tensor_parameter_map(lowered)[lowered.params[0]]
     guard = _guard(lowered, tirx.BufferLoad(flags, [_thread_var(lowered, "blockIdx.x")]) > 0)
     syncs = _assert_syncs_inside(lowered, guard.then_case)
     assert len(syncs) == 1
@@ -871,7 +844,7 @@ def test_sync_hoist_nested_non_uniform_if():
     guard = _guard(lowered, _thread_var(lowered) < 64)
     syncs = _storage_syncs(lowered)
     assert syncs and not _storage_syncs(guard)
-    writes = [store for store in collect_nodes(lowered, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    writes = [store for store in collect_nodes(lowered, tirx.BufferStore) if store.dest.ty.scope.name == "shared"]
     assert len(writes) == 1
     for call in syncs:
         _assert_stmt_order(lowered, writes[0], _sync_stmt(lowered, call), guard)
@@ -1071,7 +1044,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="not warp-uniform"):
+    with pytest.raises(ValueError, match="warp-complete"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -1223,9 +1196,8 @@ def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    with pytest.raises(ValueError, match="statically known participant set"):
+        run_passes(func)
 
 
 def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
@@ -1250,9 +1222,8 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    with pytest.raises(ValueError, match="statically known participant set"):
+        run_passes(func)
 
 
 def test_aligned_else_partial_sync_is_preserved():
@@ -1299,7 +1270,7 @@ def test_misaligned_else_partial_sync_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[33 - tx]
 
-    with pytest.raises(Exception, match="not warp-uniform"):
+    with pytest.raises(ValueError, match="split a hardware warp"):
         run_passes(func)
 
 
@@ -1321,14 +1292,15 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        with T.Assert(n % 128 == 0, "n must be a multiple of the block size"):
+        with T.scope():
+            T.assert_(n % 128 == 0, "n must be a multiple of the block size")
             if tx < n:
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
     lowered = _device_func(run_passes(func))
     warnings = capfd.readouterr().err
-    parameters = [param for param in lowered.params if param.dtype == "int32"]
+    parameters = [param for param in lowered.params if isinstance(param.ty, tvm.ir.PrimType) and param.ty.dtype == "int32"]
     assert len(parameters) == 1
     guard = _guard(lowered, _thread_var(lowered) < parameters[0])
     syncs = _assert_syncs_inside(lowered, guard.then_case)
@@ -1354,14 +1326,14 @@ def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        with T.Assert(n % 64 == 0, "n must be a multiple of half the block"):
+        with T.scope():
+            T.assert_(n % 64 == 0, "n must be a multiple of half the block")
             if tx < n:
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
-    run_passes(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
+    with pytest.raises(ValueError, match="statically known participant set"):
+        run_passes(func)
 
 
 def test_premise_holds_across_an_enclosing_guard():
@@ -1380,14 +1352,15 @@ def test_premise_holds_across_an_enclosing_guard():
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
-        with T.Assert(n % 128 == 0, "n must be a multiple of the block size"):
+        with T.scope():
+            T.assert_(n % 128 == 0, "n must be a multiple of the block size")
             if n > 0:
                 if tx < n:
                     s[tx] = T.cast(tx, "float32")
                     l[0] = s[(tx + 64) % 128]
 
     lowered = _device_func(run_passes(func))
-    parameters = [param for param in lowered.params if param.dtype == "int32"]
+    parameters = [param for param in lowered.params if isinstance(param.ty, tvm.ir.PrimType) and param.ty.dtype == "int32"]
     assert len(parameters) == 1
     guard = _guard(lowered, _thread_var(lowered) < parameters[0])
     syncs = _assert_syncs_inside(lowered, guard.then_case)
@@ -1410,13 +1383,14 @@ def test_premise_covers_every_thread_dimension():
         tx = T.launch_thread("threadIdx.x", 128)
         ty = T.launch_thread("threadIdx.y", 2)
         tz = T.launch_thread("threadIdx.z", 1)
-        with T.Assert(n % 128 == 0, "n must be a multiple of the x extent"):
+        with T.scope():
+            T.assert_(n % 128 == 0, "n must be a multiple of the x extent")
             if tx < n:
                 s[ty * 128 + tx] = T.cast(tx, "float32")
                 l[0] = s[ty * 128 + (tx + 64) % 128]
 
     lowered = _device_func(run_passes(func))
-    parameters = [param for param in lowered.params if param.dtype == "int32"]
+    parameters = [param for param in lowered.params if isinstance(param.ty, tvm.ir.PrimType) and param.ty.dtype == "int32"]
     assert len(parameters) == 1
     guard = _guard(lowered, _thread_var(lowered) < parameters[0])
     syncs = _assert_syncs_inside(lowered, guard.then_case)
@@ -1448,12 +1422,12 @@ def test_assume_serves_as_a_premise_like_an_assert():
     mod = tvm.IRModule.from_expr(func)
     cuda_target = tvm.target.Target("cuda", host="llvm")
     mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
-    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
-    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     lowered = _device_func(tilelang.transform.ThreadSync("shared")(mod))
 
-    parameters = [param for param in lowered.params if param.dtype == "int32"]
+    parameters = [param for param in lowered.params if isinstance(param.ty, tvm.ir.PrimType) and param.ty.dtype == "int32"]
     assert len(parameters) == 1
     guard = _guard(lowered, _thread_var(lowered) < parameters[0])
     syncs = _assert_syncs_inside(lowered, guard.then_case)
@@ -1486,11 +1460,11 @@ def test_hazard_across_split_divergent_symbolic_guard_is_ordered():
     guards = collect_nodes(lowered, tirx.IfThenElse)
     assert len(guards) == 2
     writers = [
-        guard for guard in guards if any(store.buffer.scope() == "shared" for store in collect_nodes(guard.then_case, tirx.BufferStore))
+        guard for guard in guards if any(store.dest.ty.scope.name == "shared" for store in collect_nodes(guard.then_case, tirx.BufferStore))
     ]
     assert len(writers) == 1
     readers = [guard for guard in guards if not guard.same_as(writers[0])]
-    assert tvm.ir.structural_equal(writers[0].condition, readers[0].condition)
+    assert structural_equal(writers[0].condition, readers[0].condition)
     syncs = _storage_syncs(lowered)
     assert syncs
     assert all(not _storage_syncs(guard) for guard in guards)
@@ -1653,7 +1627,7 @@ def test_unbounded_atomic_touched_range_stays_conservative():
             T.call_extern(
                 "handle",
                 "fake_fill",
-                T.tvm_access_ptr(T.type_annotation("float32"), A_shared.data, 0, 256, 2),
+                flat_access_ptr(A_shared, 0, 256, 2),
             )
         )
         # Data-dependent atomic destination: the touched interval relaxes to
@@ -1695,7 +1669,7 @@ def test_sync_grid_acts_as_shared_barrier():
             T.call_extern(
                 "handle",
                 "fake_fill",
-                T.tvm_access_ptr(T.type_annotation("float32"), A_shared.data, 0, 256, 2),
+                flat_access_ptr(A_shared, 0, 256, 2),
             )
         )
         T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.sync_grid")))
@@ -1725,7 +1699,7 @@ def test_sync_grid_acts_as_shared_barrier():
     ids=["wrong_scope", "partial_barrier"],
 )
 def test_full_sync_assertion_rejects_wrong_scope_or_partial_barrier(args):
-    call = tirx.Call("int32", tvm.ir.Op.get("tirx.tvm_storage_sync"), args)
+    call = tirx.Call(tvm.ir.Op.get("tirx.gpu_storage_sync"), args, ty="int32")
     with pytest.raises(AssertionError):
         assert _storage_syncs(tirx.Evaluate(call)), "Expected a full shared-memory barrier"
 
@@ -1735,7 +1709,7 @@ def test_shared_write_sync_read_assertion_checks_statement_order(order):
     shared = tirx.decl_buffer((1,), "float32", scope="shared")
     local = tirx.decl_buffer((1,), "float32", scope="local")
     write = tirx.BufferStore(shared, tirx.FloatImm("float32", 1), [0])
-    call = tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared")
+    call = tirx.call_intrin("int32", "tirx.gpu_storage_sync", "shared")
     sync = tirx.Evaluate(call)
     read = tirx.BufferStore(local, tirx.BufferLoad(shared, [0]), [0])
     statements = (write, sync, read)
@@ -1750,7 +1724,7 @@ def test_shared_write_sync_read_assertion_checks_statement_order(order):
 @pytest.mark.parametrize("location", ["expected", "outside", "other_guard", "else"])
 def test_sync_branch_assertion_checks_the_actual_guard_subtree(location):
     condition = tirx.Var("condition", "bool")
-    call = tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared")
+    call = tirx.call_intrin("int32", "tirx.gpu_storage_sync", "shared")
     sync = tirx.Evaluate(call)
     expected_branch = sync if location == "expected" else tirx.Evaluate(0)
     guard = tirx.IfThenElse(condition, expected_branch, sync if location == "else" else None)
@@ -1774,7 +1748,7 @@ def test_statement_order_assertion_rejects_nested_regions(region):
     if region == "branch":
         nested = tirx.IfThenElse(tirx.Var("guard", "bool"), second, None)
     else:
-        nested = tirx.For(tirx.Var("i", "int32"), 0, 2, tirx.ForKind.SERIAL, second)
+        nested = tirx.For(tirx.Var("i", "int32"), 0, 2, 1, tirx.ForKind.DEFAULT, second)
     root = tirx.SeqStmt([first, nested])
     with pytest.raises(AssertionError, match="siblings in one SeqStmt"):
         _assert_stmt_order(root, first, second)
@@ -1782,7 +1756,7 @@ def test_statement_order_assertion_rejects_nested_regions(region):
 
 @pytest.mark.parametrize("barrier_id, thread_count", [(1, 32), (0, 32), (16, 32), (1, 64)])
 def test_partial_sync_assertion_checks_id_and_participant_count(barrier_id, thread_count):
-    call = tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared", barrier_id, thread_count)
+    call = tirx.call_intrin("int32", "tirx.gpu_storage_sync", "shared", barrier_id, thread_count)
     if (barrier_id, thread_count) == (1, 32):
         _assert_partial_sync_params([call], 32)
     else:
@@ -1795,7 +1769,7 @@ def _thread_sync_calls(func):
     barriers = []
 
     def collect(node):
-        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
+        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tirx.gpu_storage_sync"):
             barriers.append(tuple(int(arg) for arg in node.args[1:]))
 
     tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, collect)
@@ -1808,12 +1782,12 @@ def test_disjoint_partial_sync_scopes_use_distinct_ids():
         tx = T.launch_thread("threadIdx.x", 128)
         if tx // 64 == 0:
             for i in range(2):
-                T.evaluate(T.tvm_storage_sync("shared"))
-                T.evaluate(T.tvm_storage_sync("shared"))
+                T.evaluate(T.gpu_storage_sync("shared"))
+                T.evaluate(T.gpu_storage_sync("shared"))
         else:
             for j in range(2):
-                T.evaluate(T.tvm_storage_sync("shared"))
-                T.evaluate(T.tvm_storage_sync("shared"))
+                T.evaluate(T.gpu_storage_sync("shared"))
+                T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert [call[1] for call in barriers] == [64, 64, 64, 64]
@@ -1826,13 +1800,16 @@ def test_partial_sync_assume_scopes_use_distinct_ids():
     @T.prim_func(private=True)
     def func():
         tx = T.launch_thread("threadIdx.x", 128)
-        with T.attr(tx // 64 == 0, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        with T.attr(tx // 64 == 1, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        with T.attr(tx // 64 == 0, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
+        with T.scope():
+            T.evaluate(T.assume(tx // 64 == 0))
+            T.evaluate(T.gpu_storage_sync("shared"))
+        with T.scope():
+            T.evaluate(T.assume(tx // 64 == 1))
+            T.evaluate(T.gpu_storage_sync("shared"))
+        with T.scope():
+            T.evaluate(T.assume(tx // 64 == 0))
+            T.evaluate(T.gpu_storage_sync("shared"))
+        T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 4
@@ -1856,7 +1833,7 @@ def test_equivalent_partial_thread_guards_lower_to_the_same_barriers(guard):
             for k in range(2):
                 shared[tx] = A[k, tx]
                 Out[k, tx] = shared[(tx + 1) % 64]
-        T.evaluate(T.tvm_storage_sync("shared"))
+        T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 3
@@ -1869,14 +1846,14 @@ def test_partial_sync_preserves_outer_constraint_across_block_scope():
     @T.prim_func(private=True)
     def func():
         tx = T.launch_thread("threadIdx.x", 128)
-        T.evaluate(T.tvm_storage_sync("shared"))
+        T.evaluate(T.gpu_storage_sync("shared"))
         if tx < 64:
-            with T.sblock("guarded_sync"):
-                T.evaluate(T.tvm_storage_sync("shared"))
+            with T.scope():
+                T.evaluate(T.gpu_storage_sync("shared"))
         else:
-            with T.sblock("other_sync"):
-                T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
+            with T.scope():
+                T.evaluate(T.gpu_storage_sync("shared"))
+        T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 4
@@ -1893,9 +1870,9 @@ def test_equivalent_partial_thread_guards_reuse_barrier_id():
         tx = T.launch_thread("threadIdx.x", 256)
         replica: T.int32 = (tx - 128) // 64
         if tx >= 128 and replica == 0:
-            T.evaluate(T.tvm_storage_sync("shared"))
+            T.evaluate(T.gpu_storage_sync("shared"))
         if tx >= 128 and tx < 192:
-            T.evaluate(T.tvm_storage_sync("shared"))
+            T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 2
@@ -1910,8 +1887,8 @@ def test_partial_sync_assert_constraint_stays_in_scope():
         tx = T.launch_thread("threadIdx.x", 128)
         if bx < 16:
             assert tx // 64 == 0, "replica zero"
-            T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
+            T.evaluate(T.gpu_storage_sync("shared"))
+        T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 2
@@ -1929,9 +1906,9 @@ def test_partial_sync_rejects_nonrectangular_threads(guard):
     def func():
         tx = T.launch_thread("threadIdx.x", 256)
         if guard(tx):
-            T.evaluate(T.tvm_storage_sync("shared"))
+            T.evaluate(T.gpu_storage_sync("shared"))
 
-    with pytest.raises(tvm.error.InternalError, match="rectangle"):
+    with pytest.raises(ValueError, match="rectang"):
         _thread_sync_calls(func)
 
 
@@ -1941,7 +1918,7 @@ def test_partial_sync_multidimensional_rectangle():
         tx = T.launch_thread("threadIdx.x", 64)
         ty = T.launch_thread("threadIdx.y", 2)
         if tx // 32 == 0:
-            T.evaluate(T.tvm_storage_sync("shared"))
+            T.evaluate(T.gpu_storage_sync("shared"))
 
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 1

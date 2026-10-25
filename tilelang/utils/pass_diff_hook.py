@@ -158,7 +158,7 @@ def install_pass_diff_hook() -> None:
         "reset": _RESET,
     }
 
-    from tvm.ir.transform import Pass
+    from tvm_tirx.ir.transform import Pass
 
     _original_call = Pass.__call__
     Pass.__call__ = _patched_call  # type: ignore[assignment]
@@ -193,7 +193,7 @@ def uninstall_pass_diff_hook() -> None:
     if _original_call is None:
         return
 
-    from tvm.ir.transform import Pass
+    from tvm_tirx.ir.transform import Pass
 
     Pass.__call__ = _original_call  # type: ignore[assignment]
     _original_call = None

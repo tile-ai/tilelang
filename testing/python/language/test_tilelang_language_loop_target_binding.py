@@ -54,7 +54,7 @@ def count_local_var_stores(kernel):
     tvm.tirx.stmt_functor.post_order_visit(
         kernel.body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None
     )
-    return len([node for node in stores if node.buffer.scope() == "local.var"])
+    return len([node for node in stores if node.dest.ty.scope.name == "local"])
 
 
 def expired_var_kernel():

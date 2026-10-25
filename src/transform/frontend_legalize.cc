@@ -22,77 +22,142 @@
  * \brief Legalize the program from frontend
  */
 
-#include "support/check.h"
-#include <tvm/tirx/op.h>
+#include "compat/visit.h"
+
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "arith/ir_mutator_with_analyzer.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
+bool ContainsVariable(const ffi::ObjectRef &root, const Var &variable) {
+  bool found = false;
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+      root, [&](const Var &candidate) -> ffi::Expected<ffi::WalkResult> {
+        found |= candidate.same_as(variable);
+        return ffi::WalkResult::Advance();
+      });
+  return found;
+}
 
-using namespace tirx;
+bool IsReplayableRead(const PrimExpr &expression) {
+  if (SideEffect(expression) > CallEffectKind::kReadState)
+    return false;
+  bool replayable = true;
+  PostOrderVisit(expression, [&](const ffi::ObjectRef &object) {
+    if (auto call = object.as<CallNode>()) {
+      replayable &=
+          Op::GetAttrMap(tvm::op_attr::kCallEffectKind)
+              .get(call->op, CallEffectKind::kOpaque) == CallEffectKind::kPure;
+    }
+  });
+  return replayable;
+}
 
-class LetInliner : public arith::IRMutatorWithAnalyzer {
-public:
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    LetInliner substituter(&analyzer);
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
-  }
-
+class LetInliner : public tirx::StmtExprMutator {
 private:
-  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
-
-  Stmt VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kParallel) {
-      parallel_for_scope_++;
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    ffi::Array<Stmt> statements;
+    for (size_t index = 0; index < node->seq.size(); ++index) {
+      bool previous = allow_read_binding_;
+      allow_read_binding_ = false;
+      if (auto binding = node->seq[index].as<BindNode>();
+          binding && index + 1 < node->seq.size()) {
+        if (auto store = node->seq[index + 1].as<TensorStoreNode>()) {
+          allow_read_binding_ = IsReplayableRead(store->value) &&
+                                ContainsVariable(store->value, binding->var);
+          for (const PrimExpr &coordinate : store->indices) {
+            allow_read_binding_ &=
+                SideEffect(coordinate) <= CallEffectKind::kPure;
+          }
+          for (size_t later = index + 2; later < node->seq.size(); ++later) {
+            allow_read_binding_ &=
+                !ContainsVariable(node->seq[later], binding->var);
+          }
+        }
+      }
+      Stmt statement =
+          Mutate(node->seq[index], mode).ValueOrUnchanged(node->seq[index]);
+      allow_read_binding_ = previous;
+      if (auto sequence = statement.as<SeqStmtNode>();
+          sequence && sequence->seq.empty())
+        continue;
+      statements.push_back(statement);
     }
-    auto n = StmtExprMutator::VisitStmt_(node);
-    if (node->kind == ForKind::kParallel) {
-      parallel_for_scope_--;
+    return SeqStmt(statements, node->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                                 ffi::InplaceMode mode) final {
+    Expr value = Mutate(node->value, mode).ValueOrUnchanged(node->value);
+    auto scalar = value.as<PrimExpr>();
+    if (node->var.as<PrimVar>() && scalar &&
+        (SideEffect(scalar.value()) <= CallEffectKind::kPure ||
+         (allow_read_binding_ && IsReplayableRead(scalar.value())))) {
+      VarRemapSet(node->var, value);
+      return SeqStmt(ffi::Array<Stmt>{}, node->loc);
     }
-    return n;
+    return StmtExprMutator::Mutate_(node, mode);
   }
 
-  PrimExpr VisitExpr_(const VarNode *node) final {
-    if (let_bindings_.count(node)) {
-      return arith::IRMutatorWithAnalyzer::VisitExpr(let_bindings_[node]);
-    } else {
-      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  ffi::UnchangedOr<PrimExpr> Mutate_(const prim::LetNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr value = Mutate(node->value, mode).ValueOrUnchanged(node->value);
+    if (SideEffect(value) > CallEffectKind::kPure &&
+        !(IsReplayableRead(value) && IsReplayableRead(node->body))) {
+      return StmtExprMutator::Mutate_(node, mode);
+    }
+    ffi::Any previous = VarRemapGet(node->var);
+    VarRemapSet(node->var, value);
+    try {
+      PrimExpr body = Mutate(node->body, mode).ValueOrUnchanged(node->body);
+      VarRemapSet(node->var,
+                  previous == nullptr ? ffi::Any(node->var) : previous);
+      return body;
+    } catch (...) {
+      VarRemapSet(node->var,
+                  previous == nullptr ? ffi::Any(node->var) : previous);
+      throw;
     }
   }
 
-  Stmt VisitStmt_(const BindNode *node) final {
-    let_bindings_[node->var.get()] = node->value;
-    return Evaluate(Integer(0));
+  ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
+                                 ffi::InplaceMode mode) final {
+    Call call = StmtExprMutator::Mutate_(node, mode)
+                    .ValueOrUnchanged(ffi::GetRef<Expr>(node))
+                    .as_or_throw<Call>();
+    if (call->attrs) {
+      auto attrs = Mutate(call->attrs.value(), mode)
+                       .as_or_throw<ffi::UnchangedOr<Attrs>>();
+      if (!attrs.UnchangedOrSameAs(call->attrs.value())) {
+        call.CopyOnWrite()->attrs = std::move(attrs).ValueUnchecked();
+      }
+    }
+    return call;
   }
 
-  PrimExpr VisitExpr_(const LetNode *node) final {
-    let_bindings_[node->var.get()] = node->value;
-    return arith::IRMutatorWithAnalyzer::VisitExpr(node->body);
-  }
-
-  int parallel_for_scope_ = 0;
-  std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
+  bool allow_read_binding_{false};
 };
 
-using namespace tirx::transform;
+} // namespace
 
-Pass LetInline() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LetInliner::Substitute(std::move(f));
+tvm::transform::Pass LetInline() {
+  auto transform = [](tirx::Function function, const IRModule &,
+                      const tvm::transform::PassContext &) {
+    if (function->body) {
+      function.CopyOnWrite()->body =
+          ffi::make_object<LetInliner>()
+              ->Mutate(function->body, ffi::InplaceMode::kDisallow)
+              .ValueOrUnchanged(function->body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LetInline", {});
+  return tirx::transform::CreateFunctionPass(transform, 0, "tl.LetInline");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LetInline", LetInline);
+  ffi::reflection::GlobalDef().def("tl.transform.LetInline", LetInline);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

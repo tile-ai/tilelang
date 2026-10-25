@@ -25,9 +25,9 @@ import platform
 # pylint: disable=invalid-name
 import sys
 
-from tvm.base import py_str
-from tvm.contrib import tar as _tar
-from tvm.contrib import utils as _utils
+from tilelang._compat.utils import py_str
+from tvm_tirx.support import tar as _tar
+from tvm_tirx.support import utils as _utils
 
 
 def _is_linux_like():
@@ -329,7 +329,7 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
     --------
     .. code-block:: python
 
-       from tvm.contrib import cc, ndk
+       from tvm_tirx.support import cc, ndk
        # export using arm gcc
        mod = build_runtime_module()
        mod.export_library(path_dso,

@@ -29,7 +29,7 @@ def test_codegen_emits_const_for_readonly_params():
 
     # Extract kernel signature and check qualifiers
     lparen = match_declare_kernel(src)
-    rparen = src.find(")", lparen)
+    rparen = src.find(";", lparen)
     assert rparen != -1
     signature = src[lparen:rparen]
 

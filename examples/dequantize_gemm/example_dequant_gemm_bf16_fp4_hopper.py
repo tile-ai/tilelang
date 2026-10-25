@@ -1,8 +1,8 @@
 import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
-from tvm import tirx
+from tvm_ffi import dtype as DataType
+from tilelang._compat import tirx
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 

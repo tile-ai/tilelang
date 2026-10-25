@@ -21,7 +21,7 @@ import os.path as osp
 import tempfile
 from types import ModuleType
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.libgen import LibraryGenerator
@@ -169,6 +169,7 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            src.close()
             libpath = src.name.replace(".cu", ".cubin")
 
             project_root = osp.join(osp.dirname(__file__), "..", "..")
@@ -212,12 +213,13 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
 
-            cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
+            with target:
+                cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 
-            src.write(self.lib_code)
-            src.flush()
+            with open(src.name, "w") as source_file:
+                source_file.write(self.lib_code)
 
             self.srcpath = src.name
             self.libpath = libpath

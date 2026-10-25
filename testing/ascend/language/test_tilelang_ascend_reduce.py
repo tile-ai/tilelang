@@ -90,6 +90,7 @@ def _test_one(extent, scale, dtype, op):
         (8, 4, "int64", "sum"),
     ],
 )
+@tilelang.testing.requires_ascend
 def test_reduce(extent, scale, dtype, op):
     _test_one(extent, scale, dtype, op)
 
@@ -120,6 +121,7 @@ def make_default_layout_reduce_kernel(rows, extent, dtype, op):
     ],
 )
 @pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@tilelang.testing.requires_ascend
 def test_reduce_default_layout_multiple_groups(target, rows, extent, dtype, op):
     kernel = tilelang.compile(
         make_default_layout_reduce_kernel(rows, extent, dtype, op),
@@ -176,6 +178,7 @@ def make_multigroup_scale_kernel(rows, group_rows, extent, dtype, op):
     ],
 )
 @pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@tilelang.testing.requires_ascend
 def test_reduce_multiple_groups_scale_greater_than_one(target, rows, group_rows, extent):
     kernel = tilelang.compile(
         make_multigroup_scale_kernel(rows, group_rows, extent, "int32", "sum"),
@@ -193,6 +196,7 @@ def test_reduce_multiple_groups_scale_greater_than_one(target, rows, group_rows,
 
 
 @pytest.mark.parametrize("coalesced_width", [None, 2])
+@tilelang.testing.requires_ascend
 def test_reducer_v2_multidim_narrow_plan(coalesced_width):
     width = None if coalesced_width is None else T.int32(coalesced_width)
 
@@ -222,7 +226,6 @@ def test_reducer_v2_multidim_narrow_plan(coalesced_width):
 @pytest.mark.parametrize("op", ["bitand", "bitor", "bitxor"])
 @pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
-
     @T.prim_func
     def kernel(A: T.Tensor((32,), "int32"), B: T.Tensor((1,), "int32")):
         with T.Kernel(1) as _, T.SimtVF(threads=32):
@@ -252,6 +255,7 @@ def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
     ],
 )
 @pytest.mark.pto
+@tilelang.testing.requires_ascend
 def test_pto_reducer_v2_int32(op, extent):
     @T.prim_func
     def kernel(A: T.Tensor((extent,), "int32"), B: T.Tensor((1,), "int32")):
@@ -289,7 +293,7 @@ def test_pto_reducer_v2_rejects_bfloat16_allreduce():
             T.finalize_reducer(partial, result)
             T.copy(result, B)
 
-    with determine_target("pto", return_object=True), pytest.raises(Exception, match="PTO cross-thread allreduce.*got bfloat16"):
+    with determine_target("pto", return_object=True), pytest.raises(Exception, match=r"PTO cross-thread allreduce.*got (?:T\.)?bfloat16"):
         tilelang.lower(kernel, target="pto")
 
 

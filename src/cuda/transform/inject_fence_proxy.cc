@@ -1,563 +1,264 @@
-/*!
- * \file inject_fence_proxy.cc
- * \brief Inject proxy fences between generic and async proxies (sm90+)
- */
+#include "backend/common/target_utils.h"
+#include "compat/visit.h"
+#include "cuda/op/builtin.h"
+#include "op/operator.h"
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/transform.h>
 
-#include <cstdint>
-#include <utility>
-
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
-
-#include "backend/common/target_utils.h"
-#include "cuda/op/builtin.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using runtime::StorageRank;
-using runtime::StorageScope;
-using tvm::transform::PassContext;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
 
-/*!
- * \brief Proxy state tracking for Hopper's proxy switching rules.
- *
- * We track the *possible* last proxy state at a program point, because control
- * flow (if/loops) can merge different execution paths.
- *
- * - None   : no relevant proxy activity / state reset.
- * - Generic: last relevant op used the generic proxy path.
- * - Async  : last relevant op used the async proxy path.
- */
-class ProxyStateSet {
-public:
-  static ProxyStateSet None() { return ProxyStateSet(kNone); }
-  static ProxyStateSet Generic() { return ProxyStateSet(kGeneric); }
-  static ProxyStateSet Async() { return ProxyStateSet(kAsync); }
+enum class ProxyEvent { None, Generic, Async, Fence };
+constexpr unsigned kClean = 1;
+constexpr unsigned kDirty = 2;
 
-  bool MayBeNone() const { return bits_ & kNone; }
-  bool MayBeGeneric() const { return bits_ & kGeneric; }
-  bool MayBeAsync() const { return bits_ & kAsync; }
-
-  ProxyStateSet Union(ProxyStateSet other) const {
-    return ProxyStateSet(bits_ | other.bits_);
+bool Shared(const Type &type) {
+  if (const auto *pointer = type.as<PtrTypeNode>()) {
+    return pointer->scope.name().find("shared") == 0;
   }
-  ProxyStateSet &UnionInplace(ProxyStateSet other) {
-    bits_ |= other.bits_;
-    return *this;
+  if (const auto *tensor = type.as<tirx::TensorTypeNode>()) {
+    return tensor->scope.name().find("shared") == 0;
   }
-
-  bool operator==(const ProxyStateSet &other) const {
-    return bits_ == other.bits_;
-  }
-  bool operator!=(const ProxyStateSet &other) const {
-    return bits_ != other.bits_;
-  }
-
-private:
-  explicit ProxyStateSet(uint8_t bits) : bits_(bits) {}
-
-  static constexpr uint8_t kNone = 1 << 0;
-  static constexpr uint8_t kGeneric = 1 << 1;
-  static constexpr uint8_t kAsync = 1 << 2;
-  uint8_t bits_{kNone};
-};
-
-enum class ProxyEvent : uint8_t {
-  kNone,    // does not affect proxy state
-  kGeneric, // generic proxy activity
-  kAsync,   // async proxy activity
-  kNeutral, // barrier/reset (e.g., fence.proxy.async)
-};
-
-inline bool IsFenceProxyAsyncCall(const CallNode *call) {
-  return call && call->op.same_as(fence_proxy_async());
-}
-
-// Identify async intrinsics emitted by TileLang or TVM that require a fence
-// when they follow generic proxies.
-bool IsAsyncIntrinsic(const CallNode *call) {
-  if (call == nullptr) {
-    return false;
-  }
-
-  // TileLang async intrinsics
-  if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-      call->op.same_as(tma_load_multicast()) || call->op.same_as(tma_store()) ||
-      call->op.same_as(tma_load_gather4()) ||
-      call->op.same_as(tma_store_scatter4()) ||
-      call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs()) ||
-      call->op.same_as(ptx_wgmma_sp_ss()) ||
-      call->op.same_as(ptx_wgmma_sp_rs()) ||
-      call->op.same_as(ptx_tcgen05_mma_ss()) ||
-      call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
-      call->op.same_as(ptx_tcgen05_mma_ts())) {
-    return true;
-  }
-
-  // PTX async copy intrinsics on SM90+ (cp.async.bulk family).
-  if (call->op.same_as(builtin::ptx_cp_async_bulk())) {
-    return true;
-  }
-
   return false;
 }
 
-inline bool IsSharedPointerVar(const VarNode *var) {
-  if (var == nullptr) {
+bool MayWriteThrough(const Expr &expression) {
+  const auto *call = expression.as<CallNode>();
+  if (call && call->op.same_as(access_ptr()) && call->args.size() == 3) {
+    if (!(GetConservativeAccessMask(call->args[2].as_or_throw<PrimExpr>()) &
+          kAccessWrite))
+      return false;
+    return Shared(expression->ty);
+  }
+  if (call && call->attrs) {
+    auto mask = call->attrs.value().as_or_throw<DictAttrs>().GetAttr<PrimExpr>(
+        "tl.access_mask");
+    if (mask && !(GetConservativeAccessMask(*mask) & kAccessWrite))
+      return false;
+  }
+  if (expression.as<TensorLoadNode>())
     return false;
+  if (Shared(expression->ty))
+    return true;
+  if (call) {
+    for (const Expr &argument : call->args) {
+      if (MayWriteThrough(argument))
+        return true;
+    }
   }
-  const auto *ptr_type = var->type_annotation.as<PointerTypeNode>();
-  if (ptr_type == nullptr) {
-    return false;
-  }
-  auto scope = StorageScope::Create(ptr_type->storage_scope);
-  return scope.rank == StorageRank::kShared;
+  return false;
 }
 
-inline bool ExprContainsSharedPointerVar(const PrimExpr &expr) {
-  bool has_shared = false;
-  PostOrderVisit(expr, [&](const ObjectRef &node) {
-    if (has_shared) {
-      return;
-    }
-    if (const auto *var = node.as<VarNode>()) {
-      if (IsSharedPointerVar(var)) {
-        has_shared = true;
-      }
-    }
-  });
-  return has_shared;
+ProxyEvent Classify(const CallNode *call) {
+  if (call->op.same_as(fence_proxy_async()))
+    return ProxyEvent::Fence;
+  if (const auto *operation = call->op.as<OpNode>();
+      operation && (operation->name.starts_with("tirx.ptx.mbarrier_") ||
+                    operation->name == "tirx.ptx.cp_async_mbarrier_arrive"))
+    return ProxyEvent::None;
+  for (const Op &operation :
+       {tma_load(), tma_load_im2col(), tma_load_multicast(), tma_load_gather4(),
+        tma_store(), tma_store_scatter4(), ptx_wgmma_ss(), ptx_wgmma_rs(),
+        ptx_wgmma_sp_ss(), ptx_wgmma_sp_rs(), ptx_tcgen05_mma_ss(),
+        ptx_tcgen05_mma_blockscaled_ss(), ptx_tcgen05_mma_ts()}) {
+    if (call->op.same_as(operation))
+      return ProxyEvent::Async;
+  }
+  for (const Op &operation :
+       {mbarrier_arrive(), mbarrier_init(), mbarrier_expect_tx(),
+        mbarrier_wait_parity(), mbarrier_arrive_expect_tx(),
+        ptx_arrive_cluster_barrier(), tcgen05_mma_arrive()}) {
+    if (call->op.same_as(operation))
+      return ProxyEvent::None;
+  }
+  if (SideEffect(GetRef<Call>(call)) <= CallEffectKind::kReadState)
+    return ProxyEvent::None;
+  for (const Expr &argument : call->args) {
+    if (MayWriteThrough(argument))
+      return ProxyEvent::Generic;
+  }
+  return ProxyEvent::None;
 }
 
-// Some "generic proxy" shared-memory stores are expressed as opaque calls
-// (e.g. call_extern) that take pointers into shared memory via tvm_access_ptr
-// or address_of.  Recognize these so we do not accidentally treat them as async
-// and miss a required fence before the next async-proxy op.
-bool CallMayWriteSharedMemory(const CallNode *call) {
-  if (call == nullptr) {
-    return false;
-  }
-
-  bool writes_shared = false;
-  PostOrderVisit(GetRef<Call>(call), [&](const ObjectRef &node) {
-    if (writes_shared) {
-      return;
-    }
-    const auto *c = node.as<CallNode>();
-    if (c == nullptr) {
-      return;
-    }
-
-    if (c->op.same_as(builtin::tvm_access_ptr())) {
-      // tvm_access_ptr(dtype, base_ptr, offset, extent, rw_mask)
-      if (c->args.size() != 5) {
-        // Unexpected signature; be conservative if we still see a shared base.
-        if (c->args.size() >= 2 && ExprContainsSharedPointerVar(c->args[1])) {
-          writes_shared = true;
-        }
-        return;
-      }
-
-      if (!ExprContainsSharedPointerVar(c->args[1])) {
-        return;
-      }
-
-      // rw_mask: read(1), write(2), read/write(3).
-      const auto *mask_imm = c->args[4].as<IntImmNode>();
-      if (mask_imm == nullptr) {
-        // Unknown mask; could include writes.
-        writes_shared = true;
-        return;
-      }
-      if (mask_imm->value & 2) {
-        writes_shared = true;
-      }
-      return;
-    }
-
-    if (c->op.same_as(builtin::address_of())) {
-      // address_of(BufferLoad(...)) returns a pointer that may be used for a
-      // write in an opaque call.
-      if (c->args.size() != 1) {
-        return;
-      }
-      const auto *load = c->args[0].as<BufferLoadNode>();
-      if (load == nullptr) {
-        return;
-      }
-      auto scope = StorageScope::Create(GetPtrStorageScope(load->buffer->data));
-      if (scope.rank == StorageRank::kShared) {
-        writes_shared = true;
-      }
-      return;
-    }
-  });
-
-  return writes_shared;
-}
-
-ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
-  if (IsFenceProxyAsyncCall(call)) {
-    return ProxyEvent::kNeutral;
-  }
-  if (IsAsyncIntrinsic(call)) {
-    return ProxyEvent::kAsync;
-  }
-  if (CallMayWriteSharedMemory(call)) {
-    return ProxyEvent::kGeneric;
-  }
-
-  // Default: unknown/external ops do not affect proxy state. If you introduce a
-  // new async-proxy intrinsic, add it to IsAsyncIntrinsic.
-  return ProxyEvent::kNone;
-}
-
-struct ProxyEventSummary {
-  bool has_async{false};
-  bool has_generic{false};
+struct EventSummary {
+  bool generic = false;
+  bool async = false;
+  bool fence = false;
 };
 
-ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
-  ProxyEventSummary summary;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (summary.has_async && summary.has_generic) {
-      return;
-    }
-    if (const auto *store = node.as<BufferStoreNode>()) {
-      auto scope =
-          StorageScope::Create(GetPtrStorageScope(store->buffer->data));
-      if (scope.rank == StorageRank::kShared) {
-        summary.has_generic = true;
-      }
-      return;
-    }
-    if (const auto *eval = node.as<EvaluateNode>()) {
-      const auto *call = eval->value.as<CallNode>();
-      ProxyEvent event = ClassifyCallProxyEvent(call);
-      if (event == ProxyEvent::kAsync) {
-        summary.has_async = true;
-      } else if (event == ProxyEvent::kGeneric) {
-        summary.has_generic = true;
-      }
-      return;
+EventSummary Summarize(const ObjectRef &value) {
+  EventSummary summary;
+  PostOrderVisit(value, [&](const ObjectRef &object) {
+    if (const auto *store = object.as<TensorStoreNode>())
+      summary.generic |= Shared(store->dest->ty);
+    if (const auto *call = object.as<CallNode>()) {
+      ProxyEvent event = Classify(call);
+      summary.generic |= event == ProxyEvent::Generic;
+      summary.async |= event == ProxyEvent::Async;
+      summary.fence |= event == ProxyEvent::Fence;
     }
   });
   return summary;
 }
 
-inline void AppendFlattened(Array<Stmt> *out, const Stmt &stmt) {
-  if (!stmt.defined()) {
-    return;
-  }
-  if (const auto *seq = stmt.as<SeqStmtNode>()) {
-    for (const Stmt &s : seq->seq) {
-      out->push_back(s);
-    }
-    return;
-  }
-  out->push_back(stmt);
+Stmt Fence(const Location &location) {
+  return Evaluate(
+      Call(std::nullopt, fence_proxy_async(), {}, DictAttrs(), {}, location),
+      location);
 }
 
-inline Stmt MakeFenceProxyAsyncStmt() {
-  return Evaluate(Call(DataType::Handle(), fence_proxy_async(), {}));
-}
+struct RewriteResult {
+  Stmt statement;
+  unsigned fallthrough;
+  unsigned breaks = 0;
+  unsigned continues = 0;
+};
 
-/*!
- * \brief Stateful rewriter that injects fence.proxy.async.
- *
- * The key property is that we traverse statements in execution order and keep
- * a running (may-)state of the last proxy kind. Whenever we are about to issue
- * an async-proxy instruction with a possible preceding generic-proxy state, we
- * inject a fence.proxy.async right before that async instruction.
- */
-class ProxyFenceRewriter : public StmtExprMutator {
+class ProxyFenceRewriter {
 public:
-  static PrimFunc Apply(PrimFunc f) {
-    if (!f->body.defined()) {
-      return f;
+  RewriteResult Rewrite(const Stmt &statement, unsigned input) {
+    if (const auto *sequence = statement.as<SeqStmtNode>()) {
+      Array<Stmt> result;
+      unsigned state = input;
+      unsigned breaks = 0;
+      unsigned continues = 0;
+      for (const Stmt &child : sequence->seq) {
+        auto rewritten = Rewrite(child, state);
+        result.push_back(rewritten.statement);
+        state = rewritten.fallthrough;
+        breaks |= rewritten.breaks;
+        continues |= rewritten.continues;
+      }
+      return {SeqStmt(result, statement->loc), state, breaks, continues};
     }
-    ProxyFenceRewriter rewriter;
-    // Start in the reset/unknown proxy state.
-    auto res = rewriter.RewriteWithState(f->body, ProxyStateSet::None());
-    f.CopyOnWrite()->body = res.stmt;
-    return f;
+    if (statement.as<BreakNode>())
+      return {statement, 0, input};
+    if (statement.as<ContinueNode>())
+      return {statement, 0, 0, input};
+    if (const auto *branch = statement.as<IfNode>()) {
+      auto condition = Summarize(branch->condition);
+      TVM_FFI_CHECK(!condition.async && !condition.generic && !condition.fence,
+                    ValueError)
+          << "Proxy operations in an if condition must be bound before the "
+             "condition";
+      auto summary = Summarize(statement);
+      bool hoist = (input & kDirty) && summary.async && !summary.generic &&
+                   !summary.fence &&
+                   SideEffect(branch->condition) == CallEffectKind::kPure;
+      unsigned entry = hoist ? kClean : input;
+      auto then_result = Rewrite(branch->then_case, entry);
+      auto else_result = branch->else_case ? Rewrite(*branch->else_case, entry)
+                                           : RewriteResult{SeqStmt({}), entry};
+      Stmt conditional = If(
+          branch->condition, SeqStmt(then_result.statement),
+          branch->else_case ? Optional<SeqStmt>(SeqStmt(else_result.statement))
+                            : std::nullopt,
+          branch->loc);
+      if (hoist)
+        conditional = SeqStmt({Fence(branch->loc), conditional});
+      return {conditional, then_result.fallthrough | else_result.fallthrough,
+              then_result.breaks | else_result.breaks,
+              then_result.continues | else_result.continues};
+    }
+    if (const auto *loop = statement.as<ForNode>()) {
+      for (const PrimExpr &header : {loop->begin, loop->end, loop->step}) {
+        auto summary = Summarize(header);
+        TVM_FFI_CHECK(!summary.generic && !summary.async && !summary.fence,
+                      ValueError)
+            << "Proxy operations in loop bounds must be bound before the loop";
+      }
+      return RewriteLoop(statement, loop->body, input);
+    }
+    if (const auto *loop = statement.as<WhileNode>()) {
+      auto condition = Summarize(loop->condition);
+      TVM_FFI_CHECK(!condition.generic && !condition.async && !condition.fence,
+                    ValueError)
+          << "Proxy operations in a while condition must be expressed in the "
+             "loop body";
+      return RewriteLoop(statement, loop->body, input);
+    }
+    if (const auto *region = statement.as<RegionStmtNode>()) {
+      bool device = region->op->name == "tirx.device_scope";
+      auto body = Rewrite(region->body, device ? kClean : input);
+      return {RegionStmt(region->op, region->args, region->body_params,
+                         region->attrs, SeqStmt(body.statement),
+                         region->result_vars, region->loc),
+              device ? input : body.fallthrough, body.breaks, body.continues};
+    }
+    auto summary = Summarize(statement);
+    const auto *store = statement.as<TensorStoreNode>();
+    bool store_only_generic = store && !Summarize(store->value).generic;
+    TVM_FFI_CHECK(!summary.async || (!summary.fence &&
+                                     (!summary.generic || store_only_generic)),
+                  ValueError)
+        << "Mixed generic/async proxy calls must be split into separate "
+           "statements";
+    unsigned output = input;
+    bool inject = input && (input & kDirty) && summary.async;
+    if (summary.async || summary.fence)
+      output = input ? kClean : 0;
+    if (summary.generic)
+      output = input ? kDirty : 0;
+    if (statement.as<ReturnNode>())
+      output = 0;
+    return {inject ? Stmt(SeqStmt({Fence(statement->loc), statement},
+                                  statement->loc))
+                   : statement,
+            output};
   }
 
 private:
-  struct RewriteResult {
-    Stmt stmt;
-    ProxyStateSet out_state;
-  };
-
-  RewriteResult RewriteWithState(const Stmt &stmt, ProxyStateSet in_state) {
-    ProxyStateSet saved = current_state_;
-    current_state_ = in_state;
-    Stmt mutated = VisitStmt(stmt);
-    ProxyStateSet out_state = current_state_;
-    current_state_ = saved;
-    return {std::move(mutated), out_state};
-  }
-
-  RewriteResult RewriteLoopBodyFixpoint(const Stmt &body, ProxyStateSet entry) {
-    // Compute a conservative loop-header state that covers the first and all
-    // subsequent iterations: S = entry ∪ Transfer(body, S).
-    ProxyStateSet header = entry;
-    RewriteResult body_res{body, entry};
-
-    for (int iter = 0; iter < 8; ++iter) {
-      body_res = RewriteWithState(body, header);
-      ProxyStateSet next_header = entry.Union(body_res.out_state);
-      if (next_header == header) {
+  RewriteResult RewriteLoop(const Stmt &statement, const SeqStmt &body,
+                            unsigned input) {
+    EventSummary summary = Summarize(body);
+    bool hoist = (input & kDirty) && summary.async && !summary.generic;
+    unsigned entry = hoist ? kClean : input;
+    unsigned header = entry;
+    RewriteResult result{body, entry};
+    for (int iteration = 0; iteration < 4; ++iteration) {
+      result = Rewrite(body, header);
+      unsigned next = entry | result.fallthrough | result.continues;
+      if (next == header)
         break;
-      }
-      header = next_header;
+      header = next;
+      TVM_FFI_ICHECK_LT(iteration, 3);
     }
-
-    return body_res;
+    unsigned output =
+        entry | result.fallthrough | result.continues | result.breaks;
+    Stmt rewritten = statement;
+    if (const auto *loop = statement.as<ForNode>()) {
+      rewritten = For(loop->var, loop->begin, loop->end, loop->step, loop->kind,
+                      SeqStmt(result.statement), loop->annotations, loop->loc);
+    } else {
+      const auto *while_loop = statement.as<WhileNode>();
+      rewritten = While(while_loop->condition, SeqStmt(result.statement),
+                        while_loop->loc);
+    }
+    if (hoist)
+      rewritten = SeqStmt({Fence(statement->loc), rewritten}, statement->loc);
+    return {rewritten, output};
   }
-
-  Stmt InjectFenceIfNeededAndUpdateState(const Stmt &async_stmt) {
-    if (current_state_.MayBeGeneric()) {
-      // Transitioning from generic->async: insert a proxy fence.
-      Array<Stmt> seq{MakeFenceProxyAsyncStmt(), async_stmt};
-      current_state_ = ProxyStateSet::Async();
-      return SeqStmt(std::move(seq));
-    }
-    current_state_ = ProxyStateSet::Async();
-    return async_stmt;
-  }
-
-  Stmt ApplyProxyEvent(const Stmt &stmt, ProxyEvent event) {
-    switch (event) {
-    case ProxyEvent::kNone:
-      return stmt;
-    case ProxyEvent::kNeutral:
-      current_state_ = ProxyStateSet::None();
-      return stmt;
-    case ProxyEvent::kGeneric:
-      current_state_ = ProxyStateSet::Generic();
-      return stmt;
-    case ProxyEvent::kAsync:
-      return InjectFenceIfNeededAndUpdateState(stmt);
-    }
-    return stmt;
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> seq;
-    seq.reserve(op->seq.size());
-
-    for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
-      const Stmt &original = op->seq[i];
-      Stmt mutated = VisitStmt(original);
-      AppendFlattened(&seq, mutated);
-    }
-    if (seq.size() == 1) {
-      return seq[0];
-    }
-    return SeqStmt(std::move(seq));
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    const auto *eval = stmt.as<EvaluateNode>();
-    const auto *call = eval->value.as<CallNode>();
-
-    ProxyEvent event = ClassifyCallProxyEvent(call);
-    return ApplyProxyEvent(stmt, event);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-    if (scope.rank == StorageRank::kShared) {
-      current_state_ = ProxyStateSet::Generic();
-    }
-    return stmt;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = GetRef<SBlock>(op);
-    auto *n = block.CopyOnWrite();
-    // Block executes init (if any) before body.
-    if (op->init.defined()) {
-      n->init = VisitStmt(op->init.value());
-    }
-    n->body = VisitStmt(op->body);
-    return block;
-  }
-
-  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
-    // A block realize is conditional on its predicate.
-    ProxyStateSet entry = current_state_;
-    auto block_res = RewriteWithState(op->block, entry);
-    current_state_ = block_res.out_state;
-
-    // If the predicate can be false, the block may not execute.
-    PrimExpr predicate = VisitExpr(op->predicate);
-    if (!is_one(predicate)) {
-      current_state_ = current_state_.Union(entry);
-    }
-
-    Array<PrimExpr> iter_values;
-    iter_values.reserve(op->iter_values.size());
-    for (const PrimExpr &v : op->iter_values) {
-      iter_values.push_back(VisitExpr(v));
-    }
-    return SBlockRealize(iter_values, predicate,
-                         Downcast<SBlock>(block_res.stmt));
-  }
-
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    PrimExpr cond = VisitExpr(op->condition);
-    ProxyStateSet entry = current_state_;
-
-    if (entry.MayBeGeneric() && op->else_case.defined()) {
-      ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
-      ProxyEventSummary else_summary =
-          SummarizeProxyEvents(op->else_case.value());
-      if (then_summary.has_async && !then_summary.has_generic &&
-          else_summary.has_async && !else_summary.has_generic) {
-        // Both branches are pure async-proxy regions. If we enter the if in a
-        // possibly-generic state, rewriting each branch would otherwise insert
-        // a fence at the beginning of both branches. Hoist a single fence to
-        // the if preheader instead.
-        Stmt pre_fence = MakeFenceProxyAsyncStmt();
-        ProxyStateSet if_entry = ProxyStateSet::None();
-
-        auto then_res = RewriteWithState(op->then_case, if_entry);
-        auto else_res = RewriteWithState(op->else_case.value(), if_entry);
-
-        current_state_ = then_res.out_state.Union(else_res.out_state);
-        return SeqStmt(Array<Stmt>{
-            pre_fence,
-            IfThenElse(cond, then_res.stmt, else_res.stmt),
-        });
-      }
-    }
-
-    auto then_res = RewriteWithState(op->then_case, entry);
-
-    Stmt else_stmt;
-    ProxyStateSet else_out = entry;
-    if (op->else_case.defined()) {
-      auto else_res = RewriteWithState(op->else_case.value(), entry);
-      else_stmt = else_res.stmt;
-      else_out = else_res.out_state;
-    }
-
-    current_state_ = then_res.out_state.Union(else_out);
-    return IfThenElse(cond, then_res.stmt, else_stmt);
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    PrimExpr min = VisitExpr(op->min);
-    PrimExpr extent = VisitExpr(op->extent);
-
-    ProxyStateSet entry = current_state_;
-
-    // Determine whether the loop may execute zero times.
-    bool may_be_zero = true;
-    if (const auto *imm = extent.as<IntImmNode>()) {
-      may_be_zero = imm->value == 0;
-    }
-
-    ProxyEventSummary body_summary = SummarizeProxyEvents(op->body);
-
-    if (entry.MayBeGeneric() && body_summary.has_async &&
-        !body_summary.has_generic) {
-      // The loop body performs async-proxy work but never performs generic
-      // shared-memory writes. If we start the loop in a possibly-generic state,
-      // the fixed-point header analysis would otherwise inject a fence in the
-      // loop body and execute it on every iteration. Hoist a single fence to
-      // the loop preheader instead.
-      Stmt pre_fence = MakeFenceProxyAsyncStmt();
-      ProxyStateSet loop_entry = ProxyStateSet::None();
-      RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, loop_entry);
-
-      current_state_ = may_be_zero ? loop_entry.Union(body_res.out_state)
-                                   : body_res.out_state;
-
-      Stmt loop = For(op->loop_var, min, extent, op->kind, body_res.stmt,
-                      op->thread_binding, op->annotations, op->step, op->span);
-      return SeqStmt(Array<Stmt>{pre_fence, loop});
-    }
-
-    RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, entry);
-    current_state_ =
-        may_be_zero ? entry.Union(body_res.out_state) : body_res.out_state;
-
-    return For(op->loop_var, min, extent, op->kind, body_res.stmt,
-               op->thread_binding, op->annotations, op->step, op->span);
-  }
-
-  Stmt VisitStmt_(const WhileNode *op) final {
-    PrimExpr cond = VisitExpr(op->condition);
-    ProxyStateSet entry = current_state_;
-
-    ProxyEventSummary body_summary = SummarizeProxyEvents(op->body);
-    if (entry.MayBeGeneric() && body_summary.has_async &&
-        !body_summary.has_generic) {
-      // Similar to the for-loop case: when the loop body is a pure async-proxy
-      // region, a possibly-generic entry state would otherwise cause a fence to
-      // be inserted inside the loop body and executed on every iteration.
-      //
-      // Hoist a single fence to the loop preheader and start the loop in the
-      // reset state instead.
-      Stmt pre_fence = MakeFenceProxyAsyncStmt();
-      ProxyStateSet loop_entry = ProxyStateSet::None();
-      RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, loop_entry);
-
-      current_state_ = loop_entry.Union(body_res.out_state);
-      return SeqStmt(Array<Stmt>{pre_fence, While(cond, body_res.stmt)});
-    }
-
-    RewriteResult body_res = RewriteLoopBodyFixpoint(op->body, entry);
-    current_state_ = entry.Union(body_res.out_state);
-    return While(cond, body_res.stmt);
-  }
-
-  ProxyStateSet current_state_{ProxyStateSet::None()};
 };
-
 } // namespace
 
 tvm::transform::Pass InjectFenceProxy() {
-  auto pass_func = [](PrimFunc f, const IRModule &, const PassContext &) {
-    // fence.proxy.async is only meaningful on CUDA targets that expose the
-    // TMA / async-proxy programming model (sm_90+). On anything else the
-    // rewriter has no work to do, so skip it to keep the pipeline target-
-    // agnostic at its call sites.
-    auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!target_opt.defined() || !TargetHasBulkCopy(target_opt.value())) {
-      return f;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    auto target = function->GetAttr<Target>("target");
+    if (function->body && target && TargetHasBulkCopy(*target)) {
+      function.CopyOnWrite()->body = SeqStmt(
+          ProxyFenceRewriter().Rewrite(*function->body, kClean).statement);
     }
-    return ProxyFenceRewriter::Apply(f);
+    return function;
   };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                             "tl.InjectFenceProxy", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.cuda.InjectFenceProxy");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.InjectFenceProxy", InjectFenceProxy);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.InjectFenceProxy",
+                                   InjectFenceProxy);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

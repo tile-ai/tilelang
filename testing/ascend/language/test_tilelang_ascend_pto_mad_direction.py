@@ -7,6 +7,8 @@ import pytest
 import tilelang
 from tilelang import tvm
 from tilelang.ascend import language as T
+from tilelang._compat.tensor import TensorView
+from tvm_tirx import ir
 
 
 tirx = tvm.tirx
@@ -38,7 +40,7 @@ def _codegen(body_builder):
             )
         )
 
-    body = tirx.SeqStmt([tirx.AllocBuffer(buf) for buf in (a, b, c, value)] + body_builder(flag, value, mad))
+    body = tirx.SeqStmt([TensorView(buf).allocate() for buf in (a, b, c, value)] + body_builder(flag, value, mad))
     func = (
         tirx.PrimFunc([flag], body)
         .with_attr("global_symbol", "main")
@@ -98,7 +100,7 @@ def test_mutable_guards_are_not_correlated():
 @pytest.mark.parametrize("extent", [0, 1])
 def test_loop_reaches_codegen(extent):
     def body(flag, value, mad):
-        loop = tirx.For(tirx.Var("i", "int32"), 0, extent, tirx.ForKind.SERIAL, tirx.SeqStmt([mad(), _set("n")]))
+        loop = ir.For(ir.Var("iteration", "int32"), 0, extent, 1, ir.ForKind.DEFAULT, ir.SeqStmt([mad(), _set("n")]))
         return [loop, mad()]
 
     source = _codegen(body)
@@ -113,7 +115,7 @@ def test_loop_reaches_codegen(extent):
 
 def test_loop_backedge_conflict_is_rejected():
     def body(flag, value, mad):
-        return [tirx.For(tirx.Var("i", "int32"), 0, 2, tirx.ForKind.SERIAL, tirx.SeqStmt([mad(), _set("n")]))]
+        return [ir.For(ir.Var("iteration", "int32"), 0, 2, 1, ir.ForKind.DEFAULT, ir.SeqStmt([mad(), _set("n")]))]
 
     with pytest.raises(Exception, match="MAD direction depends on control flow"):
         _codegen(body)
@@ -121,7 +123,7 @@ def test_loop_backedge_conflict_is_rejected():
 
 def test_break_does_not_restore_unreachable_direction():
     def body(flag, value, mad):
-        loop_body = tirx.SeqStmt([_set("n"), tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))), _set("m")])
+        loop_body = tirx.SeqStmt([_set("n"), ir.Break(), _set("m")])
         return [tirx.While(tirx.const(True, "bool"), loop_body), mad()]
 
     assert _mad_directions(_codegen(body)) == [True]
@@ -137,7 +139,9 @@ def test_setter_only_control_flow_is_valid_python(kind):
         elif kind == "while":
             stmt = tirx.While(flag > 0, _set("m"))
         else:
-            stmt = tirx.For(tirx.Var("i", "int32"), 0, 1, tirx.ForKind.UNROLLED, _set("m"), annotations={"pragma_unroll_explicit": True})
+            stmt = ir.For(
+                ir.Var("iteration", "int32"), 0, 1, 1, ir.ForKind.UNROLLED, _set("m"), annotations={"pragma_unroll_explicit": True}
+            )
         return [stmt, mad()]
 
     _codegen(body)  # The shared verifier parses the generated Python source.

@@ -15,7 +15,7 @@ import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 def _widen(size):
@@ -50,7 +50,7 @@ def _unlegalized(mod) -> list[str]:
     def visit(node):
         if not isinstance(node, tirx.Cast):
             return
-        source, target = str(node.value.dtype), str(node.dtype)
+        source, target = str(node.value.ty.dtype), str(node.ty.dtype)
         bf16 = source.startswith("bfloat16") or target.startswith("bfloat16")
         bits = {source.split("x")[0], target.split("x")[0]} == {"uint16", "float32"}
         if bf16 or bits:

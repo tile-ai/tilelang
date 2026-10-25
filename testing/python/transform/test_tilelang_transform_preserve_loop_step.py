@@ -1,166 +1,153 @@
-import pytest
+import re
 
 import numpy as np
+import pytest
+import tvm_ffi
+from tvm_tirx import ir, runtime, tirx
+from tvm_tirx.ir import prim
+from tvm_tirx.target import Target
 
 import tilelang as tl
-from tilelang import tvm
+from tilelang._compat.tensor import TensorView
+
+
+def _run_loop(output_size, begin, end, step, kind, value, transform, annotations=None):
+    output = TensorView.create("output", [output_size], "int32")
+    index = ir.Var("index", "int32")
+    loop = ir.For(
+        index,
+        begin,
+        end,
+        step,
+        kind,
+        output.store(index, index if value is None else value),
+        annotations or {},
+    )
+    function = tirx.Function([output.tensor], loop).with_attr("global_symbol", "main")
+    module = transform(ir.IRModule({"main": function}))
+    assert tirx.analysis.check_well_formed(module)
+    executable = tirx.compile(module, target="c")
+    result = runtime.tensor(np.zeros(output_size, dtype="int32"))
+    executable(result)
+    return result.numpy()
 
 
 def test_lower_opaque_block_preserves_non_unit_loop_step():
-    output_buffer = tvm.tirx.decl_buffer((6,), "int32", name="output")
-    i = tvm.tirx.Var("i", "int32")
-    loop = tvm.tirx.For(
-        i,
-        1,
-        5,
-        tvm.tirx.ForKind.SERIAL,
-        tvm.tirx.BufferStore(output_buffer, 1, [i]),
-        step=tvm.tirx.IntImm("int32", 2),
-    )
-    before = tvm.tirx.PrimFunc(
-        [output_buffer.data],
-        loop,
-        buffer_map={output_buffer.data: output_buffer},
-    ).with_attr("global_symbol", "main")
-
-    mod = tl.transform.LowerOpaqueBlock()(tvm.IRModule.from_expr(before))
-    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
-
-    output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
-    executable["main"](output)
-
-    np.testing.assert_array_equal(
-        output.numpy(),
-        np.array([0, 1, 0, 1, 0, 1], dtype="int32"),
-    )
+    result = _run_loop(6, 1, 6, 2, ir.ForKind.DEFAULT, 1, tl.transform.LowerOpaqueBlock())
+    np.testing.assert_array_equal(result, np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
 
-@pytest.mark.parametrize("rng", [(0, 6, 2), (0, 5, 2)], ids=lambda v: f"rng=({v[0]},{v[1]},{v[2]})")
-@pytest.mark.parametrize("explicit", [False, True], ids=lambda v: f"explicit={v}")
+@pytest.mark.parametrize("rng", [(0, 6, 2), (0, 5, 2)])
+@pytest.mark.parametrize("explicit", [False, True])
 def test_unroll_loop_preserves_non_unit_loop_step(rng, explicit):
-    output_buffer = tvm.tirx.decl_buffer((8,), "int32", name="output")
-    i = tvm.tirx.Var("i", "int32")
-    start, stop, step = rng
-    loop = tvm.tirx.For(
-        i,
-        start,
-        stop,
-        tvm.tirx.ForKind.UNROLLED,
-        tvm.tirx.BufferStore(output_buffer, i, [i]),
-        step=tvm.tirx.IntImm("int32", step),
-        annotations={"pragma_unroll_explicit": explicit},
+    begin, end, step = rng
+    result = _run_loop(
+        8,
+        begin,
+        end,
+        step,
+        ir.ForKind.UNROLLED,
+        None,
+        tl.transform.UnrollLoop(),
+        {"pragma_unroll_explicit": explicit},
     )
-    before = tvm.tirx.PrimFunc(
-        [output_buffer.data],
-        loop,
-        buffer_map={output_buffer.data: output_buffer},
-    ).with_attr("global_symbol", "main")
-
-    mod = tl.transform.UnrollLoop()(tvm.IRModule.from_expr(before))
-    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
-
-    output = tvm.runtime.tensor(np.zeros(8, dtype="int32"))
-    executable["main"](output)
-
-    np.testing.assert_array_equal(
-        output.numpy(),
-        np.array([0, 0, 2, 0, 4, 0, 0, 0], dtype="int32"),
-    )
+    np.testing.assert_array_equal(result, np.array([0, 0, 2, 0, 4, 0, 0, 0], dtype="int32"))
 
 
 def test_unroll_loop_preserves_empty_non_unit_loop():
-    output_buffer = tvm.tirx.decl_buffer((1,), "int32", name="output")
-    i = tvm.tirx.Var("i", "int32")
-    loop = tvm.tirx.For(
-        i,
+    result = _run_loop(
+        1,
         0,
         0,
-        tvm.tirx.ForKind.UNROLLED,
-        tvm.tirx.BufferStore(output_buffer, 1, [0]),
-        step=tvm.tirx.IntImm("int32", 2),
-        annotations={"pragma_unroll_explicit": True},
+        2,
+        ir.ForKind.UNROLLED,
+        1,
+        tl.transform.UnrollLoop(),
+        {"pragma_unroll_explicit": True},
     )
-    before = tvm.tirx.PrimFunc(
-        [output_buffer.data],
-        loop,
-        buffer_map={output_buffer.data: output_buffer},
-    ).with_attr("global_symbol", "main")
-
-    mod = tl.transform.UnrollLoop()(tvm.IRModule.from_expr(before))
-    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
-
-    output = tvm.runtime.tensor(np.zeros(1, dtype="int32"))
-    executable["main"](output)
-
-    np.testing.assert_array_equal(output.numpy(), np.zeros(1, dtype="int32"))
+    np.testing.assert_array_equal(result, np.zeros(1, dtype="int32"))
 
 
 def _build_loop_source(backend, start, stop, step, kind, unroll_factor=None, lexical_scope=False):
-    i = tvm.tirx.Var("i", "int32")
-    output = tvm.tirx.decl_buffer((32,), "int32", name="output")
-    body = tvm.tirx.BufferStore(output, i, [i])
+    index = ir.Var("index", "int32")
+    output = TensorView.create("output_view", [32], "int32")
+    pointer = ir.Var("output", ir.PtrType("int32"))
+    body = output.store(index, index)
     if lexical_scope:
-        body = tvm.tirx.AttrStmt(0, "lexical_alloc_scope", 1, body)
-    # Construct raw For IR because TileLang's frontend normalizes loop steps.
-    body = tvm.tirx.For(i, start, stop - start, kind, body, step=step)
-    if unroll_factor is not None:
-        body = tvm.tirx.AttrStmt(i, "pragma_unroll_factor", unroll_factor, body)
-    params = [output.data]
-    params.extend(tvm.tirx.analysis.undefined_vars(body, params))
-    func = tvm.tirx.PrimFunc(params, body, buffer_map={output.data: output})
-    func = func.with_attr("global_symbol", "loop_step")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"loop_step": func})
-    build = tvm.get_global_func(f"target.build.tilelang_{backend}_without_compile", allow_missing=True)
+        body = ir.RegionStmt("tirx.scope", [], [], {}, body)
+    annotations = {} if unroll_factor is None else {"pragma_unroll_factor": unroll_factor}
+    body = ir.SeqStmt(
+        [
+            output.declare(pointer),
+            ir.For(index, start, stop, 1 if step is None else step, kind, body, annotations),
+        ]
+    )
+    parameters = [pointer]
+    parameters.extend(tirx.analysis.undefined_vars(body, parameters))
+    function = tirx.Function(parameters, body).with_attr("global_symbol", "loop_step")
+    function = function.with_attr("tirx.is_global_func", True)
+    build = tvm_ffi.get_global_func(f"target.build.tilelang_{backend}_without_compile", allow_missing=True)
     if build is None:
         pytest.skip(f"TileLang was built without the {backend} code generator")
-    target_config = {"kind": "cuda", "arch": "sm_80"} if backend == "cuda" else {"kind": "hip", "mcpu": "gfx942"}
-    return build(mod, tvm.target.Target(target_config)).inspect_source()
+    config = {"kind": "cuda", "arch": "sm_80"} if backend == "cuda" else {"kind": "rocm", "mcpu": "gfx942"}
+    target = Target(config)
+    module = ir.IRModule({"loop_step": function.with_attr("target", target)})
+    with target:
+        module = tirx.transform.LowerTensorLayouts()(module)
+        module = tirx.transform.FlattenTensor()(module)
+        return build(module, target).inspect_source()
+
+
+def _assert_loop(source, start, stop, step):
+    if isinstance(step, str):
+        condition = f"(({step}) > 0 && index < {stop}) || (({step}) < 0 && index > {stop})"
+    else:
+        condition = f"index {'<' if step > 0 else '>'} {stop}"
+    assert re.search(
+        rf"for \((?:int|int32_t) index = {start}; {re.escape(condition)}; (?:index \+= {step}|\+\+index)\)",
+        source,
+    )
+    if step != 1:
+        assert f"index += {step}" in source
 
 
 @pytest.mark.parametrize("backend", ["cuda", "hip"])
-@pytest.mark.parametrize("kind", [tvm.tirx.ForKind.SERIAL, tvm.tirx.ForKind.UNROLLED])
-@pytest.mark.parametrize(
-    "start, stop, step",
-    [(0, 8, None), (0, 8, 1), (0, 8, 2), (3, 13, 3)],
-)
+@pytest.mark.parametrize("kind", [ir.ForKind.DEFAULT, ir.ForKind.UNROLLED])
+@pytest.mark.parametrize("start,stop,step", [(0, 8, None), (0, 8, 1), (0, 8, 2), (3, 13, 3), (13, 3, -2)])
 def test_loop_step_codegen(backend, start, stop, step, kind):
     source = _build_loop_source(backend, start, stop, step, kind)
-
-    increment = "++i" if step is None else f"i += {step}"
-    assert f"for (int i = {start}; i < {stop}; {increment}) {{" in source
-    assert ("#pragma unroll\n" in source) == (kind == tvm.tirx.ForKind.UNROLLED)
+    _assert_loop(source, start, stop, 1 if step is None else step)
+    assert ("#pragma unroll\n" in source) == (kind == ir.ForKind.UNROLLED)
 
 
 @pytest.mark.parametrize("backend", ["cuda", "hip"])
 @pytest.mark.parametrize("start", [0, 3])
 def test_loop_codegen_simplifies_expressions(backend, start):
-    n = tvm.tirx.Var("n", "int32")
-    minimum = tvm.tirx.Add(tvm.tirx.IntImm("int32", start), tvm.tirx.IntImm("int32", 0))
-    stop = tvm.tirx.Add(n, tvm.tirx.IntImm("int32", 0))
-    step = tvm.tirx.Add(tvm.tirx.IntImm("int32", 1), tvm.tirx.IntImm("int32", 1))
-    source = _build_loop_source(backend, minimum, stop, step, tvm.tirx.ForKind.SERIAL)
-
-    assert f"for (int i = {start}; i < n; i += 2) {{" in source
+    extent = ir.Var("extent", "int32")
+    minimum = prim.Add(ir.const(start), ir.const(0))
+    stop = prim.Add(extent, ir.const(0))
+    step = prim.Add(ir.const(1), ir.const(1))
+    source = _build_loop_source(backend, minimum, stop, step, ir.ForKind.DEFAULT)
+    _assert_loop(source, start, "extent", 2)
 
 
 @pytest.mark.parametrize("backend", ["cuda", "hip"])
-@pytest.mark.parametrize("kind", [tvm.tirx.ForKind.SERIAL, tvm.tirx.ForKind.UNROLLED])
+@pytest.mark.parametrize("kind", [ir.ForKind.DEFAULT, ir.ForKind.UNROLLED])
 def test_symbolic_loop_step_codegen(backend, kind):
-    step = tvm.tirx.Var("step", "int32")
+    step = ir.Var("step", "int32")
     source = _build_loop_source(backend, 3, 13, step, kind)
-
-    assert "for (int i = 3; i < 13; i += step) {" in source
+    _assert_loop(source, 3, 13, "step")
 
 
 @pytest.mark.parametrize("backend", ["cuda", "hip"])
 def test_loop_step_preserves_lexical_scope(backend):
-    source = _build_loop_source(backend, 3, 13, 3, tvm.tirx.ForKind.UNROLLED, lexical_scope=True)
-
-    assert "#pragma unroll\n  for (int i = 3; i < 13; i += 3) {\n    output[i] = i;\n  }" in source
+    source = _build_loop_source(backend, 3, 13, 3, ir.ForKind.UNROLLED, lexical_scope=True)
+    _assert_loop(source, 3, 13, 3)
+    assert "#pragma unroll\n" in source
+    assert "[index] = index;" in source
 
 
 def test_cuda_loop_step_preserves_unroll_factor():
-    source = _build_loop_source("cuda", 3, 13, 3, tvm.tirx.ForKind.UNROLLED, unroll_factor=2)
-
-    assert "#pragma unroll 2\n  for (int i = 3; i < 13; i += 3) {\n    output[i] = i;\n  }" in source
+    source = _build_loop_source("cuda", 3, 13, 3, ir.ForKind.UNROLLED, unroll_factor=2)
+    _assert_loop(source, 3, 13, 3)
+    assert "#pragma unroll 2\n" in source

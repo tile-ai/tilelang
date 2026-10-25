@@ -8,9 +8,9 @@ from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import is_fragment, is_full_region
-from tvm import tirx
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 from .gemm_mma import GemmMMA
 
@@ -82,7 +82,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         layouts = super().infer_layout(target, thread_nums)
         emitter = self._make_mma_emitter(target, thread_nums)
         for matrix, region, rows in (("A", self.SFARegion, self.M), ("B", self.SFBRegion, self.N)):
-            buffer = region.buffer
+            buffer = region.source
             if is_fragment(buffer):
                 if self.sf_layout != "rowmajor":
                     raise ValueError("SM120 fragment scales currently require sf_layout='rowmajor'")
@@ -111,7 +111,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         self._validate_operands()
 
         thread_nums = thread_bounds.extent
-        local_thread_var = thread_index - thread_bounds.min
+        local_thread_var = thread_index - thread_bounds.begin
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
 
         a_dtype = self.a_dtype
@@ -125,7 +125,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = C_region.buffer
+        C_buf = C_region.source
         clear_accum = self.clear_accum
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
@@ -139,7 +139,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         sf_b_granularity_k = self.sf_b_granularity_k
 
         if self.is_gemm_rs():
-            A_buf = A_region.buffer
+            A_buf = A_region.source
 
             @T.prim_func
             def _gemm_rs_blockscaled() -> None:

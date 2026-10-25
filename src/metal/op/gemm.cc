@@ -8,7 +8,7 @@
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
 
-#include <tvm/runtime/logging.h>
+#include <tvm/ffi/error.h>
 
 #include <utility>
 
@@ -125,10 +125,10 @@ struct Gemm {
     if (op.isWgmma_ || op.isTcgen05_) {
       LOG(FATAL) << "Explicit CUDA GEMM instructions are not available for "
                     "Metal target "
-                 << target->str();
+                 << target;
     }
-    if (op.c_.scope() == "local.fragment" ||
-        op.c_.scope() == "metal.simdgroup") {
+    if (op.c_.scope().name() == "local.fragment" ||
+        op.c_.scope().name() == "metal.simdgroup") {
       return kMetalSIMDGroup;
     }
     int num_warps = block_size / TargetMetalGetWarpSize(target);

@@ -510,7 +510,7 @@ def test_tcgen05_ts_nonzero_c_m_n_origins_compile():
         pass_configs=PASS_CONFIGS,
     ).get_kernel_source()
     ts_line = next(line for line in source.splitlines() if "tl::tcgen05mma_ts<" in line)
-    assert "C_tmem" in ts_line and "+ 192" in ts_line
+    assert "C_tmem" in ts_line and "+ 192" in ts_line.replace("(uint)", "")
 
 
 @tilelang.testing.requires_cuda

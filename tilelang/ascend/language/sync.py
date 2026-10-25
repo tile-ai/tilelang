@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 def ascend_pipe_barrier(pipe_t: str) -> None:

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from tvm.base import py_str
+from tilelang._compat.utils import py_str
 
 from tilelang.env import TL_LIBS
 

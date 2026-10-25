@@ -3,7 +3,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import torch
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 import tilelang.testing
 
 

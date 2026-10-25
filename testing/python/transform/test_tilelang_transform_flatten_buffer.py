@@ -1,68 +1,43 @@
+import pytest
+
 import tilelang
 import tilelang.testing
 from tilelang import tvm
 import tilelang.language as T
 
 
-def _collect_tvm_access_ptr_offsets(func: tvm.tirx.PrimFunc):
-    offsets = []
+def _collect_address_indices(function):
+    indices = []
 
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name) == "tirx.tvm_access_ptr":
-            offsets.append(node.args[2])
+    def visit(node):
+        if isinstance(node, tvm.ir.Call) and node.op.name == "tirx.address_of":
+            indices.append(node.args[0].indices[0])
 
-    tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
-    return offsets
+    tvm.tirx.stmt_functor.post_order_visit(function.body, visit)
+    return indices
 
 
-def test_flatten_buffer_promotes_tvm_access_ptr_offset_to_int64():
+@pytest.mark.parametrize("extent,stride,expected_type", [(1 << 30, 4, "int64"), (1 << 20, 2, "int32")])
+def test_flattened_address_indices_use_overflow_safe_arithmetic(extent, stride, expected_type):
     @T.prim_func
-    def before(A: T.Buffer((1,), "float16")):
-        for i in T.serial(1 << 30):
-            T.evaluate(
-                T.tvm_access_ptr(
-                    T.type_annotation(T.float16),
-                    A.data,
-                    i * 4,
-                    1,
-                    1,
-                )
-            )
+    def before(source: T.Tensor((1,), T.float16)):
+        for index in T.serial(extent):
+            T.evaluate(T.address_of(source[index * stride]))
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    before_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
-    assert len(before_offsets) == 1
-    assert str(before_offsets[0].dtype) == "int32"
-
-    mod = tilelang.transform.FlattenBuffer()(mod)
-    after_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
-    assert len(after_offsets) == 1
-    assert str(after_offsets[0].dtype) == "int64"
-
-
-def test_flatten_buffer_keeps_safe_tvm_access_ptr_offset_int32():
-    @T.prim_func
-    def before(A: T.Buffer((1,), "float16")):
-        for i in T.serial(1 << 20):
-            T.evaluate(
-                T.tvm_access_ptr(
-                    T.type_annotation(T.float16),
-                    A.data,
-                    i * 2,
-                    1,
-                    1,
-                )
-            )
-
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    before_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
-    assert len(before_offsets) == 1
-    assert str(before_offsets[0].dtype) == "int32"
-
-    mod = tilelang.transform.FlattenBuffer()(mod)
-    after_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
-    assert len(after_offsets) == 1
-    assert str(after_offsets[0].dtype) == "int32"
+    module = tvm.IRModule({"main": before})
+    original = _collect_address_indices(module["main"])
+    assert len(original) == 1
+    assert original[0].ty == "int32"
+    with tvm.target.Target("c"):
+        module = tilelang.transform.FlattenBuffer()(module)
+    indices = _collect_address_indices(module["main"])
+    assert len(indices) == 1
+    assert indices[0].ty == expected_type
+    assert tvm.tirx.analysis.check_well_formed(module)
+    tvm.ir.assert_structural_equal(module, tvm.ir.load_json(tvm.ir.save_json(module)))
+    variables = tvm.tirx.analysis.undefined_vars(indices[0])
+    value = tvm.tirx.stmt_functor.substitute(indices[0], {variables[0]: tvm.ir.const(extent - 1)})
+    assert int(tvm.sym.Analyzer().simplify(value)) == (extent - 1) * stride
 
 
 if __name__ == "__main__":

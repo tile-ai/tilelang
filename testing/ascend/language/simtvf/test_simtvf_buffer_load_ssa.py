@@ -85,6 +85,7 @@ def overlapping_scalarized_store_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_cast_observes_each_mutation():
     dst = torch.empty((4,), dtype=torch.float16, device="npu")
     kernel = mutable_buffer_load_cast_kernel()
@@ -95,6 +96,7 @@ def test_cast_observes_each_mutation():
     assert torch.equal(dst.cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
 def test_misaligned_store_observes_each_mutation():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = mutable_scalarized_store_kernel()
@@ -105,6 +107,7 @@ def test_misaligned_store_observes_each_mutation():
     assert torch.equal(dst[1:5].cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
 def test_nested_expression_observes_each_mutation():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = mutable_nested_buffer_load_kernel()
@@ -115,6 +118,7 @@ def test_nested_expression_observes_each_mutation():
     assert torch.equal(dst[1:5].cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
 def test_overlapping_store_preserves_source_values():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = overlapping_scalarized_store_kernel()

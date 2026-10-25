@@ -63,7 +63,7 @@ def _compile_kernel(pad_elems: int, dtype: str, columns: int):
 
 def _dynamic_smem_offset(source: str, buffer_name: str) -> int:
     """Extract the byte offset of a dynamic shared-memory alias."""
-    pattern = rf"void\*\s+{re.escape(buffer_name)}\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\)"
+    pattern = rf"\b{re.escape(buffer_name)}\s*=\s*[^;\n]*\(\(char\*\)merged_shared_dyn_ptr\)\s*\+\s*(?:\(int64_t\))?(\d+)"
     match = re.search(pattern, source)
     assert match is not None, f"dynamic shared buffer {buffer_name!r} not found in source:\n{source}"
     return int(match.group(1))

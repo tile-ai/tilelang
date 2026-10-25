@@ -3,6 +3,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
 
 
@@ -27,6 +28,7 @@ def _copy_from_pointer_table(output_table, guarded):
 
 
 @pytest.mark.parametrize("output_table,guarded", [(False, False), (True, False), (False, True)], ids=["source", "both", "guarded-source"])
+@tilelang.testing.requires_ascend
 def test_dma_from_pointer_tables(output_table, guarded):
     kernel = tilelang.compile(_copy_from_pointer_table(output_table, guarded), target="ascend")
     src = torch.arange(64, dtype=torch.float32, device="npu")

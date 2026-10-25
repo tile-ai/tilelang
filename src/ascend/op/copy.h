@@ -35,10 +35,10 @@ public:
   int data_select{0};  // "data_select": GM->UB hardware right-padding
   // Canonical allocation buffer selected from alloc_l0*_sf's IR binding.
   // Leading indices already include any materialized physical versions.
-  Optional<Buffer> mx_sf_data;
-  PrimExpr unit_flag_ctl;          // "unit_flag_ctrl", defaults to 0
-  PrimExpr sub_blockid;            // "sub_blockid", defaults to 0
-  Optional<Integer> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
+  Optional<TensorVar> mx_sf_data;
+  PrimExpr unit_flag_ctl = PrimExpr(0); // "unit_flag_ctrl", defaults to 0
+  PrimExpr sub_blockid = PrimExpr(0);   // "sub_blockid", defaults to 0
+  Optional<int64_t> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
   Optional<PrimExpr> l0_pitch;  // "l0_pitch": L0 matrix pitch in fractal blocks
   Optional<PrimExpr> pad_value; // "pad_value": GM->UB pad fill value
 
@@ -47,8 +47,8 @@ public:
    *        UB->GM stores to NOTALLOC_KEEP).
    */
   int L2CacheCtrlOr(int default_value) const {
-    if (l2_cache_ctrl.defined()) {
-      return static_cast<int>(l2_cache_ctrl.value()->value);
+    if (l2_cache_ctrl.has_value()) {
+      return static_cast<int>(l2_cache_ctrl.value());
     }
     return default_value;
   }
@@ -57,13 +57,13 @@ public:
 
   static void RegisterReflection() { reflection::ObjectDef<AscendCopyNode>(); }
 
-  AscendCopyNode() = default;
+  explicit AscendCopyNode(ffi::UnsafeInit tag) : CopyNode(tag) {}
   /*! \brief Copy the base state verbatim; annotation decoding happens in
    *  AscendCopy(const CopyNode &). */
   explicit AscendCopyNode(const CopyNode &base) : CopyNode(base) {}
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
 
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
@@ -82,9 +82,9 @@ public:
    * \param args args[0]/args[1] are the source/destination regions.
    * \param annotations Annotations map from the Call node.
    */
-  TVM_DLL
-  AscendCopy(Array<PrimExpr> args,
-             Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL
+  AscendCopy(Array<Expr> args,
+             BlockAnnotations annotations = BlockAnnotations());
 
   /*!
    * \brief Upgrade a base copy into the typed Ascend node.
@@ -93,7 +93,7 @@ public:
    * ReducerPlanAndMaterialize) parse into the base CopyNode; this re-decodes
    * their annotations so both spellings converge on one implementation.
    */
-  TVM_DLL explicit AscendCopy(const CopyNode &base);
+  TILELANG_DLL explicit AscendCopy(const CopyNode &base);
 
   /*!
    * \brief Get the TVM Op handle for tl.tileop.ascend_copy.
@@ -106,24 +106,24 @@ public:
  *        dialect's tl.tileop.ascend_copy plus plain tl.tileop.copy calls
  *        synthesized by shared passes.
  */
-bool IsAscendCopyCall(const tirx::CallNode *call);
+bool IsAscendCopyCall(const CallNode *call);
 
 namespace ascend {
 
 // The concrete regions transferred by a local data copy. Pitch is retained
 // separately because a destination region can be larger than the transfer.
 struct L0CopyRegions {
-  BufferRegion source;
-  BufferRegion destination;
-  PrimExpr pitch;
+  TensorRegion source;
+  TensorRegion destination;
+  PrimExpr pitch = PrimExpr(0);
 };
 
 L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
                                    const LayoutMap &layouts,
-                                   arith::Analyzer *analyzer);
-BufferRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
+                                   sym::Analyzer analyzer);
+TensorRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
                                      const LayoutMap &layouts,
-                                     arith::Analyzer *analyzer);
+                                     sym::Analyzer analyzer);
 
 } // namespace ascend
 

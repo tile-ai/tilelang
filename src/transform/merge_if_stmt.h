@@ -5,8 +5,8 @@
 #ifndef TVM_TL_TRANSFORM_MERGE_IF_STMT_H_
 #define TVM_TL_TRANSFORM_MERGE_IF_STMT_H_
 
+#include <tvm/ir/stmt.h>
 #include <tvm/tirx/function.h>
-#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -37,7 +37,7 @@ class MergeIfStmtRewriter;
  * \param f The PrimFunc to transform
  * \return Transformed PrimFunc with merged if statements
  */
-PrimFunc MergeIfStmtSubstitute(PrimFunc &f);
+tirx::Function MergeIfStmtSubstitute(tirx::Function &function);
 
 /*!
  * \brief Apply MergeIfStmt transformation to a statement

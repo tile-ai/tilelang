@@ -6,7 +6,7 @@ namespace tvm {
 namespace tl {
 
 struct ROCmAsyncCopyInjectResult {
-  tvm::tirx::Stmt stmt;
+  tvm::Stmt stmt;
   bool injected_rocm_async_copy{false};
 };
 
@@ -18,7 +18,7 @@ struct ROCmAsyncCopyInjectResult {
  * a region should use async-copy lowering before invoking this helper.
  */
 ROCmAsyncCopyInjectResult
-InjectROCmAsyncCopy(const tvm::tirx::Stmt &body,
+InjectROCmAsyncCopy(const tvm::Stmt &body,
                     bool async_without_async_commit_wait = false);
 
 } // namespace tl

@@ -7,6 +7,11 @@ tensor reaches an executable.
 
 from __future__ import annotations
 
+import tvm_ffi
+
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+from tvm_tirx.codegen.executable import Executable
+
 from typing import Any
 from collections.abc import Callable
 import sys
@@ -14,15 +19,30 @@ import threading
 
 import torch
 from tilelang import tvm
-from tvm import runtime, tirx
-from tvm.target import Target
-from tvm.relax import TensorType
+from tilelang._compat.tvm import runtime, tirx
+from tvm_tirx.target import Target
 from tilelang.backend.target import determine_target
 from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
+import ctypes
+
+
+def _packed_storage_view(value, parameter):
+    logical = parameter.dtype
+    if str(logical) == "handle":
+        if isinstance(value, torch.Tensor):
+            return ctypes.c_void_p(value.data_ptr())
+        if isinstance(value, int):
+            return ctypes.c_void_p(value)
+    if not isinstance(value, torch.Tensor) or logical.bits >= 8 or str(logical) == "bool":
+        return value
+    storage = parameter.torch_dtype()
+    if value.dtype != storage and value.dtype in (torch.int8, torch.uint8):
+        return value.view(storage)
+    return value
 
 
 COMPILE_ARGS = {}
@@ -61,7 +81,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
     device_kernel_source: str | None = None
-    executable: tvm.runtime.Executable | tvm.runtime.Module | None = None
+    executable: Executable | tvm_ffi.Module | None = None
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
     # host_mod
@@ -131,10 +151,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
-    def _make_executable(self) -> tvm.runtime.Executable:
+    def _make_executable(self) -> Executable:
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
-        executable = runtime.Executable(self.rt_mod)
+        executable = Executable(self.rt_mod)
         compile_args = dict(COMPILE_ARGS)
         from tilelang.cpu.toolchain import get_compile_flags
 
@@ -148,7 +168,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             executable.jit(**compile_args)
         return executable
 
-    def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
+    def _get_executable(self) -> Executable | tvm_ffi.Module:
         executable = self.executable
         if executable is not None:
             return executable
@@ -160,7 +180,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 self.executable = executable
             return executable
 
-    def get_exportable_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
+    def get_exportable_executable(self) -> Executable | tvm_ffi.Module:
         """Return the lazy executable, or the runnable module loaded from disk cache."""
         return self._get_executable()
 
@@ -189,7 +209,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
             if isinstance(param, tirx.Var) and (param not in dynamic_symbolic_map):
@@ -213,7 +233,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 buffer = buffer_map[param]
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
-                for j, stride in enumerate(buffer.strides):
+                for j, stride in enumerate(tensor_strides(buffer)):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
@@ -250,7 +270,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         # Prepare helpers for friendly dtype error messages
         prim_func = self.prim_func
-        buffer_map = prim_func.buffer_map
+        buffer_map = tensor_parameter_map(prim_func)
         params = prim_func.params
         # Expected dtype string per parameter index (for buffers only)
         expected_dtype_strs: list[str | None] = []
@@ -345,7 +365,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if out_device is not None:
                 self._prepare_torch_device(out_device)
             executable = self._get_executable()
-            executable(*tensor_list)
+            executable(*(_packed_storage_view(value, parameter) for value, parameter in zip(tensor_list, self.params)))
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -358,6 +378,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """Create a Torch callable whose outputs are allocated by TVM-FFI."""
         current_device_functor = None
         expected_inputs = len(self.params) - len(self.result_idx)
+        input_parameters = [parameter for index, parameter in enumerate(self.params) if index not in self.result_idx]
 
         def func(*inputs: torch.Tensor | Any):
             nonlocal current_device_functor
@@ -385,7 +406,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable()(*inputs, allocator_anchor)
+            normalized = [_packed_storage_view(value, parameter) for value, parameter in zip(inputs, input_parameters)]
+            result = self._get_executable()(*normalized, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)
@@ -395,7 +417,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     @classmethod
     def from_database(
         cls,
-        params: list[TensorType],
+        params: list[KernelParam],
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,

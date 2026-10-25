@@ -15,9 +15,7 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     size = tvm.tirx.Var("size", "int64")
     a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
     b_buffer = tvm.tirx.decl_buffer((size,), "float32", name="B")
-    func = tvm.tirx.PrimFunc(
-        [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
-    )
+    func = tvm.tirx.PrimFunc([a_buffer, b_buffer], tvm.tirx.Evaluate(0))
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({"main": func})
     adapter.result_idx = []

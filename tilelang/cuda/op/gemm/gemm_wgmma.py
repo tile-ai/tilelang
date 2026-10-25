@@ -13,9 +13,9 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
 )
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
@@ -82,7 +82,7 @@ class GemmWGMMA(GemmBase):
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
         else:
-            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def lower(
         self,
@@ -94,7 +94,7 @@ class GemmWGMMA(GemmBase):
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
-        local_thread_var = thread_index - thread_bounds.min
+        local_thread_var = thread_index - thread_bounds.begin
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_WGMMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -163,7 +163,7 @@ class GemmWGMMA(GemmBase):
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
-        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
+        raise ValueError(f"Unsupported gemm combination for wgmma, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

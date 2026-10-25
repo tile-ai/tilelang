@@ -64,7 +64,7 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     adapter.rt_mod = object()
     adapter.target = tvm.target.Target("c")
     adapter.pass_configs = {"tl.cpu_parallel": True}
-    monkeypatch.setattr(tvm_ffi.runtime, "Executable", Executable)
+    monkeypatch.setattr(tvm_ffi, "Executable", Executable)
     monkeypatch.setattr(tvm_ffi, "COMPILE_ARGS", {"options": ["-existing"]})
     monkeypatch.setattr(toolchain, "get_compile_flags", flags)
     adapter._make_executable()

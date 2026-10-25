@@ -43,9 +43,11 @@ def warp_vote_kernel(
 
 
 @pytest.mark.parametrize("mask", [0x55555555, 0xAAAAAAAA], ids=["even_lanes", "odd_lanes"])
+@tilelang.testing.requires_ascend
 def test_ascend_warp_vote_correctness(mask):
     kernel = tilelang.compile(
         warp_vote_kernel,
+        target="ascend",
         out_idx=[1, 2, 3, 4, 5],
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False,

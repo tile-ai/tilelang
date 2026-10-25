@@ -2,8 +2,8 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
-from tvm.ir import Range
-from tvm.tirx import IterVar, Var
+from tvm_tirx.ir import Range, Var
+from ._utils import LayoutAxis
 from tilelang import _ffi_api
 from tilelang.layout.fragment import Fragment
 
@@ -45,7 +45,7 @@ class PartialFragment(Fragment):
             )
         forward_vars = []
         for idx, size in enumerate(shape):
-            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
+            iv = LayoutAxis(Range(0, size), Var(f"i{idx}", "int32"))
             forward_vars.append(iv)
         vars = [iv.var for iv in forward_vars]
 
@@ -54,21 +54,21 @@ class PartialFragment(Fragment):
         thread_replicate = None
         if forward_fn is not None:
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
-                forward_thread, forward_index = forward_fn(*vars, thread_replicate)
+                thread_replicate = LayoutAxis(Range(0, replicate), Var("rep", "int32"))
+                forward_thread, forward_index = forward_fn(*vars, thread_replicate.var)
             else:
                 forward_thread, forward_index = forward_fn(*vars)
         else:
             forward_index = forward_index_fn(*vars) if forward_index_fn else None
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
+                thread_replicate = LayoutAxis(Range(0, replicate), Var("rep", "int32"))
                 forward_thread = forward_thread_fn(*vars, thread_replicate.var)
             else:
                 forward_thread = forward_thread_fn(*vars)
 
         if forward_index is None:
             forward_index = []
-        elif not isinstance(forward_index, tvm_ffi.Array):
+        elif not isinstance(forward_index, (list, tuple, tvm_ffi.Array)):
             forward_index = [forward_index]
 
         self.__init_handle_by_constructor__(

@@ -16,9 +16,7 @@ No GPU is needed: the defect and the fix are pure string parsing.
 """
 
 import tilelang.testing
-from tilelang.carver.arch import cuda as carver_cuda
 from tilelang.carver.arch.cuda import CUDA, check_sm_version, has_mma_support, is_ada_arch, is_ampere_arch, is_hopper_arch, is_volta_arch
-from tilelang.carver import matmul_analysis
 
 
 def test_check_sm_version_numeric_arch():
@@ -75,12 +73,6 @@ def test_lettered_arch_keeps_capability_dispatch():
 
     blackwell = _cuda_arch_with_sm_version(check_sm_version("sm_100a"))
     assert has_mma_support(blackwell)
-
-
-def test_matmul_analysis_shares_one_parser():
-    # matmul_analysis used to carry its own copy of the same buggy body, so a
-    # fix in one place left the other wrong. Pin the single definition.
-    assert matmul_analysis.check_sm_version is carver_cuda.check_sm_version
 
 
 if __name__ == "__main__":

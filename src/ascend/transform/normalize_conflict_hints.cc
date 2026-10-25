@@ -51,7 +51,8 @@
 #include <vector>
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
-#include "ascend/transform/auto_schedule/scheduled_tir.h"
+#include "ascend/transform/native_visitor.h"
+#include "compat/expr.h"
 #include "op/utils.h"
 #include "support/check.h"
 
@@ -68,18 +69,20 @@ static constexpr const char *kConflictHintAnnotKey = "conflict_hint";
 static constexpr int kAllEnclosingScopes = -2;
 static constexpr int kRootSequence = -1;
 
-class ConflictHintNormalizer : public StmtExprMutator {
+class ConflictHintNormalizer : public NativeMutator {
 public:
-  static SBlock Rewrite(SBlock root) {
-    ConflictHintNormalizer m;
-    root.CopyOnWrite()->body = m(root->body);
+  static RegionStmt Rewrite(RegionStmt root) {
+    auto owner = make_object<ConflictHintNormalizer>();
+    auto &m = *owner;
+    root.CopyOnWrite()->body = m.VisitStmt(root->body);
     ICHECK(m.no_conflict_.stack.empty() && m.conflict_.stack.empty())
         << "unbalanced conflict-hint loop stack";
     m.CheckGroupsComplete(m.no_conflict_, HintKind::kNoConflict);
     m.CheckGroupsComplete(m.conflict_, HintKind::kConflict);
     if (!m.root_hints_.empty()) {
-      root.CopyOnWrite()->annotations.Set(kRootConflictHints,
-                                          std::move(m.root_hints_));
+      auto attrs = root->attrs->dict;
+      attrs.Set("tl.root_conflict_hints", std::move(m.root_hints_));
+      root.CopyOnWrite()->attrs = DictAttrs(attrs);
     }
     return root;
   }
@@ -134,15 +137,15 @@ private:
     Array<Any> entry;
     entry.push_back(a);
     entry.push_back(b);
-    entry.push_back(IntImm(DataType::Int(32), cross));
-    entry.push_back(Bool(kind == HintKind::kConflict));
+    entry.push_back(IntImm::Int32(cross));
+    entry.push_back(kind == HintKind::kConflict);
     return entry;
   }
 
   // Decode a marker operand: a bare buffer arrives as its data Var (a handle)
   // and is kept as a Var (matched by storage key downstream); a tl.region Call
   // is reconstructed into its (Simplify'd) BufferRegion.
-  static Any DecodeOperand(const PrimExpr &arg) {
+  static Any DecodeOperand(const Expr &arg) {
     if (arg.as<VarNode>())
       return arg;
     return NormalizeToBufferRegion(arg);
@@ -188,16 +191,17 @@ private:
     const auto &args = call->args;
     ICHECK_EQ(args.size(), 6u) << "conflict-hint marker expects 6 args";
     const auto *is_conflict = args[5].as<IntImmNode>();
-    ICHECK(is_conflict != nullptr && is_conflict->dtype.is_bool())
+    ICHECK(is_conflict != nullptr &&
+           GetRef<PrimExpr>(is_conflict).ty().MatchesCode(kDLBool))
         << "conflict-hint marker expects a constant boolean polarity";
     HintKind kind =
-        is_conflict->value ? HintKind::kConflict : HintKind::kNoConflict;
+        is_conflict->value != 0 ? HintKind::kConflict : HintKind::kNoConflict;
     HintState &state = State(kind);
     Any a = DecodeOperand(args[0]);
     Any b = DecodeOperand(args[1]);
-    int level = static_cast<int>(Downcast<IntImm>(args[2])->value);
-    int cross = static_cast<int>(Downcast<IntImm>(args[3])->value);
-    std::string group = Downcast<StringImm>(args[4])->value;
+    int level = static_cast<int>(GetConstInt(args[2]).value());
+    int cross = static_cast<int>(GetConstInt(args[3]).value());
+    std::string group = args[4].as_or_throw<StringImm>()->value;
     int depth = static_cast<int>(state.stack.size());
 
     if (group.empty()) {
@@ -247,7 +251,7 @@ private:
         return Evaluate(0); // drop; SeqStmt visitor flattens no-ops away
       }
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return NativeMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -267,15 +271,10 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    // Thread-binding loops (blockIdx/threadIdx) are not iteration loops the
-    // hint's `level` counts -- and they are materialized to thread_extent
-    // AttrStmts later anyway, so skip them for a consistent level numbering.
-    if (op->kind == ForKind::kThreadBinding)
-      return StmtExprMutator::VisitStmt_(op);
     no_conflict_.stack.emplace_back();
     conflict_.stack.emplace_back();
     loop_chain_.push_back(GetRef<For>(op));
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    Stmt stmt = NativeMutator::VisitStmt_(op);
     loop_chain_.pop_back();
     Array<Any> hints = std::move(no_conflict_.stack.back());
     Array<Any> conflict = std::move(conflict_.stack.back());
@@ -285,7 +284,7 @@ private:
       return stmt;
     for (const Any &entry : conflict)
       hints.push_back(entry);
-    For for_node = Downcast<For>(stmt);
+    For for_node = stmt.as_or_throw<For>();
     for_node.CopyOnWrite()->annotations.Set(kConflictHintAnnotKey, hints);
     return for_node;
   }
@@ -293,7 +292,8 @@ private:
 
 using namespace tirx::transform;
 tvm::transform::Pass NormalizeConflictHints() {
-  auto pass_func = [=](PrimFunc f, const IRModule &, const PassContext &) {
+  auto pass_func = [=](tirx::Function f, const IRModule &,
+                       const PassContext &) {
     return RewriteTilelangKernels(
         std::move(f), "NormalizeConflictHints",
         [](const TilelangKernelContext &context) {
@@ -301,7 +301,7 @@ tvm::transform::Pass NormalizeConflictHints() {
         },
         /*require_kernel=*/false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.NormalizeConflictHints", {});
+  return CreateFunctionPass(pass_func, 0, "tl.NormalizeConflictHints");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

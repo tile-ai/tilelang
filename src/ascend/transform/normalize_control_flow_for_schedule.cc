@@ -20,226 +20,138 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <string>
-#include <utility>
+#include <limits>
+#include <numeric>
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
-#include "ascend/transform/auto_schedule/task_analysis.h"
-#include "op/builtin.h"
+#include "compat/expr.h"
+#include "compat/visit.h"
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+namespace {
 
-using namespace tirx;
-using namespace ascend;
-using namespace ffi;
-
-class ControlFlowNormalizer : public StmtExprMutator {
-public:
-  static Stmt Rewrite(const Stmt &body) {
-    auto rewriter = ControlFlowNormalizer();
-    return rewriter(body);
+class ControlFlowNormalizer : public tirx::StmtExprMutator {
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->attrs->dict.count("tl.ascend_stage") ||
+        node->attrs->dict.count("tilelang_assume") ||
+        node->attrs->dict.count("tl.assume_requires_runtime_check"))
+      return StmtExprMutator::Mutate_(node, mode);
+    return ffi::Unchanged{};
   }
 
-private:
-  ControlFlowNormalizer() = default;
-
-  // counter to generate unique name for each IfStmt
-  int counter_ = 0;
-  // counter to generate unique loop var for each rewritten while
-  int while_counter_ = 0;
-  // counter to generate unique snapshots for buffer-dependent loop bounds
-  int loop_bound_counter_ = 0;
-
-  //! \brief Check if the expression is a simple variable.
-  bool IsSimpleVar(const PrimExpr &expr) {
-    return expr.as<VarNode>() != nullptr;
-  }
-
-  static int64_t Gcd(int64_t a, int64_t b) {
-    while (b != 0) {
-      int64_t t = a % b;
-      a = b;
-      b = t;
-    }
-    return a;
-  }
-
-  // Largest `num_stages` annotation among For loops inside `stmt` (default 1).
-  static int64_t MaxNumStages(const Stmt &stmt) {
+  ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
+                                 ffi::InplaceMode) final {
+    SeqStmt body = Mutate(node->body).ValueOrUnchanged(node->body);
     int64_t max_stages = 1;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *for_node = node.as<ForNode>()) {
-        auto ns = for_node->annotations.Get("num_stages");
-        if (ns.has_value()) {
-          max_stages =
-              std::max<int64_t>(max_stages, ns.value().cast<IntImm>()->value);
+    PostOrderVisit(body, [&](const ffi::ObjectRef &object) {
+      if (auto loop = object.as<ForNode>()) {
+        if (auto stages = loop->annotations.Get("num_stages")) {
+          auto count = GetIntAnnotation(*stages);
+          TVM_FFI_CHECK(count && *count > 0, ValueError)
+              << "num_stages must be a positive constant integer";
+          max_stages = std::max(max_stages, *count);
         }
       }
     });
-    return max_stages;
-  }
-
-  // while cond: BODY  ->  for w in range(0, W): { if (not cond) loop_break();
-  // BODY } The guard is routed back through VisitStmt so the IfThenElse visitor
-  // below hoists `not cond` into a Bind variable.
-  //
-  // Extent W = max(2, lcm(1..max_num_stages_in_body)):
-  //  - W never enters a buffer's version/flag subscript directly (the outermost
-  //    loop var's extent is a discarded final multiplier in
-  //    CalculateIterationCount). It does become the coefficient stride for any
-  //    loop enclosing this while. Choosing W = lcm(1..max_num_stages) makes the
-  //    stride M_inner * W divisible by every possible num_versions
-  //    (num_versions
-  //    <= num_stages <= max_num_stages), so an *enclosing* real for's loop var
-  //    vanishes from the while-body version subscripts after Simplify. This
-  //    keeps the while body's indices self-contained, so RestoreWhileLoops can
-  //    safely substitute w:=0.
-  //  - W >= 2 guarantees the cross-iteration dependency analysis sees a
-  //  distinct
-  //    producer/consumer iteration (w_c > w_p) for while-level dependencies.
-  // num_stages is left unset (=1) so the synthetic for is not itself pipelined.
-  Stmt VisitStmt_(const WhileNode *op) final {
-    Var loop_var("__while_w_" + std::to_string(while_counter_++),
-                 DataType::Int(32));
-    Stmt visited_body = VisitStmt(op->body);
-    int64_t max_stages = MaxNumStages(visited_body);
     int64_t extent = 1;
-    for (int64_t m = 1; m <= max_stages; ++m) {
-      extent = extent / Gcd(extent, m) * m;
+    for (int64_t count = 1; count <= max_stages; ++count) {
+      int64_t multiplier = count / std::gcd(extent, count);
+      TVM_FFI_CHECK(extent <= std::numeric_limits<int32_t>::max() / multiplier,
+                    ValueError)
+          << "While scheduling period exceeds int32";
+      extent *= multiplier;
     }
     extent = std::max<int64_t>(extent, 2);
-    Stmt body;
-    if (is_one(op->condition)) {
-      body = visited_body;
-    } else {
-      Stmt guard = VisitStmt(
-          IfThenElse(logical_not(op->condition),
-                     Evaluate(Call(DataType::Handle(), tl::loop_break(), {}))));
-      body = SeqStmt({guard, visited_body});
+    if (GetConstInt(node->condition) != 1) {
+      If guard(!node->condition, SeqStmt(Break(node->loc)), std::nullopt,
+               node->loc);
+      Stmt normalized_guard = Mutate(Stmt(guard)).ValueOrUnchanged(Stmt(guard));
+      body = SeqStmt({normalized_guard, body}, node->loc);
     }
-    Map<String, Any> annotations;
-    annotations.Set("synthetic_while", Integer(1));
-    return For(loop_var, IntImm(DataType::Int(32), 0),
-               IntImm(DataType::Int(32), extent), ForKind::kSerial, body,
-               /*thread_binding=*/std::nullopt, annotations);
+    PrimVar counter("__while_w_" + std::to_string(while_counter_++),
+                    PrimType::Int(32));
+    return For(counter, IntImm::Int32(0), IntImm::Int32(extent),
+               IntImm::Int32(1), ForKind::kDefault, body,
+               {{"synthetic_while", 1}}, node->loc);
   }
 
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    PrimExpr condition = VisitExpr(op->condition);
-    Stmt then_case = VisitStmt(op->then_case);
-    Optional<Stmt> else_case = op->else_case;
-    if (else_case.defined()) {
-      else_case = VisitStmt(else_case.value());
-    }
-
-    if (IsSimpleVar(condition)) {
-      // The condition is already a simple variable; keep the if as-is.
-      return IfThenElse(condition, then_case, else_case);
-    }
-
-    // Extract the complex condition into a temporary bind variable so its
-    // value is computed once and consumers see a flat var, but keep the
-    // if-then-else as a single node. The initial scheduled-TIR builder handles
-    // both branches natively.
-    std::string var_name = "__cond_" + std::to_string(counter_++);
-    Var cond_var(var_name, DataType::Bool());
-    Stmt new_if = IfThenElse(cond_var, then_case, else_case);
-    return SeqStmt({tirx::Bind(cond_var, condition), new_if});
+  ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto conditional = StmtExprMutator::Mutate_(node, mode)
+                           .ValueOrUnchanged(original)
+                           .as_or_throw<If>();
+    if (conditional->condition.as<VarNode>())
+      return conditional;
+    PrimVar snapshot("__cond_" + std::to_string(condition_counter_++),
+                     PrimType::Bool());
+    Bind binding(snapshot, conditional->condition, node->loc);
+    conditional.CopyOnWrite()->condition = snapshot;
+    return SeqStmt({binding, conditional}, node->loc);
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> seq;
-    for (auto stmt : op->seq) {
-      auto new_stmt = VisitStmt(stmt);
-      if (!new_stmt.defined())
-        continue;
-      if (auto seq_node = new_stmt.as<SeqStmtNode>()) {
-        seq.insert(seq.end(), seq_node->seq.begin(), seq_node->seq.end());
-      } else {
-        seq.push_back(new_stmt);
-      }
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->kind != ForKind::kDefault && node->kind != ForKind::kUnrolled) {
+      return ffi::Unchanged{};
     }
-    return SeqStmt(std::move(seq));
-  }
-
-  // Only descend through the same spine AutoSchedule's IRStructure tree walks:
-  // serial/unrolled ControlNode loops. The callback runs this visitor on
-  // tilelang_root's body. Everything else (Parallel / Vectorized loops,
-  // SIMT_VF / SIMD_VF / user blocks) becomes an opaque TaskNode leaf that is
-  // never scheduled, so a
-  // `while` nested inside it must NOT be rewritten (codegen emits it verbatim)
-  // and its conditions need no extraction. This mirrors the TaskNode leaf
-  // boundaries.
-  Stmt VisitStmt_(const ForNode *op) final {
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
-      return GetRef<For>(op);
-    }
-
-    PrimExpr min = VisitExpr(op->min);
-    PrimExpr extent = VisitExpr(op->extent);
-    Optional<PrimExpr> step = op->step;
-    if (step.defined())
-      step = VisitExpr(step.value());
-    Stmt body = VisitStmt(op->body);
-
-    Array<Stmt> sequence;
-    auto snapshot_buffer_access = [&](PrimExpr expr) {
-      if (!HasTaskBufferAccess(Evaluate(expr)))
-        return expr;
-      Var snapshot("__loop_bound_" + std::to_string(loop_bound_counter_++),
-                   expr.dtype());
-      sequence.push_back(Bind(snapshot, std::move(expr)));
-      return PrimExpr(snapshot);
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto loop = StmtExprMutator::Mutate_(node, mode)
+                    .ValueOrUnchanged(original)
+                    .as_or_throw<For>();
+    ffi::Array<Stmt> snapshots;
+    auto snapshot = [&](PrimExpr expression) -> PrimExpr {
+      if (SideEffect(expression) == CallEffectKind::kPure)
+        return expression;
+      PrimVar value("__loop_bound_" + std::to_string(bound_counter_++),
+                    expression.ty());
+      snapshots.push_back(Bind(value, expression, node->loc));
+      return value;
     };
-    min = snapshot_buffer_access(std::move(min));
-    extent = snapshot_buffer_access(std::move(extent));
-    if (step.defined())
-      step = snapshot_buffer_access(std::move(step.value()));
-
-    For loop = GetRef<For>(op);
-    ForNode *writer = loop.CopyOnWrite();
-    writer->min = std::move(min);
-    writer->extent = std::move(extent);
-    writer->step = std::move(step);
-    writer->body = std::move(body);
-    if (sequence.empty())
+    auto writer = loop.CopyOnWrite();
+    writer->begin = snapshot(writer->begin);
+    writer->end = snapshot(writer->end);
+    writer->step = snapshot(writer->step);
+    if (snapshots.empty())
       return loop;
-    sequence.push_back(std::move(loop));
-    return SeqStmt::Flatten(sequence);
+    snapshots.push_back(loop);
+    return SeqStmt(snapshots, node->loc);
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final { return GetRef<SBlock>(op); }
+private:
+  int condition_counter_{0};
+  int while_counter_{0};
+  int bound_counter_{0};
 };
 
-using namespace tirx::transform;
+} // namespace
+
 tvm::transform::Pass NormalizeControlFlowForSchedule() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return RewriteTilelangKernels(
-        std::move(f), "NormalizeControlFlowForSchedule",
-        [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
-          root.CopyOnWrite()->body = ControlFlowNormalizer::Rewrite(root->body);
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    return ascend::RewriteTilelangKernels(
+        function, "NormalizeControlFlowForSchedule",
+        [](const ascend::TilelangKernelContext &context) {
+          auto rewriter = ffi::make_object<ControlFlowNormalizer>();
+          RegionStmt root = context.root;
+          root.CopyOnWrite()->body =
+              rewriter->Mutate(root->body).ValueOrUnchanged(root->body);
           return root;
         },
-        /*require_kernel=*/false);
+        false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.NormalizeControlFlowForSchedule",
-                            {});
+  return tirx::transform::CreateFunctionPass(
+      pass, 0, "tl.NormalizeControlFlowForSchedule");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.NormalizeControlFlowForSchedule",
-                        NormalizeControlFlowForSchedule);
+  ffi::reflection::GlobalDef().def(
+      "tl.transform.NormalizeControlFlowForSchedule",
+      NormalizeControlFlowForSchedule);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

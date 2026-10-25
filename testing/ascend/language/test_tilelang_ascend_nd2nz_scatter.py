@@ -112,6 +112,7 @@ def test_manual_mixed_pipeline_shares_sub_block_id():
         pytest.param(torch.bfloat16, torch.float32, True, id="inside-simd-vf"),
     ],
 )
+@tilelang.testing.requires_ascend
 def test_nd2nz_scatter(sd, dd, inside_vf):
     # Prepare input: a recognizable pattern
     input_gm = torch.arange(ROWS * COLS, dtype=sd, device="npu").reshape(ROWS, COLS) + 1.0

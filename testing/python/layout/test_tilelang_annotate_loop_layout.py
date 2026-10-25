@@ -1,6 +1,23 @@
+import re
+
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+
+
+def _assert_replicated_vector_copy(kernel, rows, columns):
+    import torch
+
+    code = kernel.get_kernel_source()
+    copy = re.search(r"\*\(float4\*\)\(B(?:_ptr)? \+ (?P<offset>.*?)\) = \*\(float4\*\)\(A(?:_ptr)? \+ (?P=offset)\);", code)
+    assert copy is not None
+    assert re.search(r"\w+ \* 256", copy["offset"])
+    assert "if ((((int)threadIdx.x) >> 6) == 0)" in code
+    assert "(((int)threadIdx.x) * 4)" in copy["offset"]
+    values = torch.arange(rows * columns, dtype=torch.float32, device="cuda").reshape(rows, columns)
+    output = torch.empty_like(values)
+    kernel(values, output)
+    torch.testing.assert_close(output, values, atol=0, rtol=0)
 
 
 @tilelang.jit
@@ -28,7 +45,10 @@ def test_loop_layout_fragment_vec4():
     code = kernel.get_kernel_source()
 
     # Expect vectorized copy along innermost dimension (float4)
-    assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
+    copy = re.search(r"\*\(float4\*\)\(B(?:_ptr)? \+ (?P<offset>.*?)\) = \*\(float4\*\)\(A(?:_ptr)? \+ (?P=offset)\);", code)
+    assert copy is not None
+    assert re.search(r"\w+ \* 512", copy["offset"])
+    assert "(((int)threadIdx.x) * 4)" in copy["offset"]
 
 
 @tilelang.testing.requires_cuda
@@ -67,12 +87,7 @@ def test_copy_loop_layout_annotated_replicate_vec4():
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
     kernel = copy_with_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
-
-    assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
-        in code
-    )
+    _assert_replicated_vector_copy(kernel, M, N)
 
 
 @tilelang.jit
@@ -99,11 +114,7 @@ def test_annotate_replicate_loop_layout_vec4():
 
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
     kernel = replicate_loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
-    assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
-        in code
-    )
+    _assert_replicated_vector_copy(kernel, M, N)
 
 
 if __name__ == "__main__":

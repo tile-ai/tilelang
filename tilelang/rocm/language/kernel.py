@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 

@@ -7,7 +7,7 @@ import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 import tilelang.testing
 import torch
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import calls, nodes
 
 
@@ -69,6 +69,7 @@ def bound_buffer_load_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_vselr_reloads_mutated_local():
     src = torch.arange(1, 65, dtype=torch.float32, device="npu")
     dst = torch.empty_like(src)
@@ -82,6 +83,7 @@ def test_simdvf_vselr_reloads_mutated_local():
     torch.testing.assert_close(dst.cpu(), expected, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_simdvf_bind_materializes_buffer_load_snapshot():
     src = torch.arange(1, 65, dtype=torch.float32, device="npu")
     dst = torch.empty_like(src)

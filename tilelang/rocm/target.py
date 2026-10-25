@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.backend.target import TargetLike, register_target_detector, register_target_normalizer
 
@@ -39,7 +39,7 @@ def rocm_warp_size_for_arch(arch: str | None) -> int | None:
 
 
 def with_rocm_target_attrs(target: Target) -> Target:
-    if target.kind.name != "hip":
+    if target.kind.name != "rocm":
         return target
     arch = target_get_mcpu(target)
     if arch is None:
@@ -68,9 +68,9 @@ def _detect_rocm_arch() -> str | None:
 
 def _target_from_arch(arch: str | None) -> Target | str:
     if arch is None:
-        return "hip"
+        return "rocm"
     target_dict: dict[str, object] = {
-        "kind": "hip",
+        "kind": "rocm",
         "mcpu": arch,
         "mtriple": ROCM_MTRIPLE,
     }
@@ -106,16 +106,16 @@ def normalize_rocm_target(target: TargetLike) -> Target | None:
     if isinstance(target, Target):
         parsed_target = target
     elif isinstance(target, dict):
-        if target.get("kind") != "hip":
+        if target.get("kind") not in ("hip", "rocm"):
             return None
         try:
-            parsed_target = Target(target)
+            parsed_target = Target({**target, "kind": "rocm"})
         except Exception:
             return None
     else:
         return None
 
-    if parsed_target.kind.name != "hip":
+    if parsed_target.kind.name != "rocm":
         return None
     if target_get_mcpu(parsed_target) is None:
         return parsed_target if isinstance(target, Target) else None

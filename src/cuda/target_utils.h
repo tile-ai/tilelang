@@ -6,34 +6,36 @@
 #ifndef TVM_TL_CUDA_TARGET_UTILS_H_
 #define TVM_TL_CUDA_TARGET_UTILS_H_
 
-#include <tvm/runtime/data_type.h>
+#include <tvm/ir/type.h>
 #include <tvm/target/target.h>
+
+#include "support/base.h"
 
 namespace tvm {
 namespace tl {
 
-bool TargetIsCuda(Target target);
-bool TargetIsCuTeDSL(Target target);
+TILELANG_DLL bool TargetIsCuda(Target target);
+TILELANG_DLL bool TargetIsCuTeDSL(Target target);
 
-bool TargetIsVolta(Target target);
-bool TargetIsTuring(Target target);
-bool TargetIsAmpere(Target target);
-bool TargetIsHopper(Target target);
-bool TargetIsSm100(Target target);
-bool TargetIsSM120(Target target);
+TILELANG_DLL bool TargetIsVolta(Target target);
+TILELANG_DLL bool TargetIsTuring(Target target);
+TILELANG_DLL bool TargetIsAmpere(Target target);
+TILELANG_DLL bool TargetIsHopper(Target target);
+TILELANG_DLL bool TargetIsSm100(Target target);
+TILELANG_DLL bool TargetIsSM120(Target target);
 
-bool TargetCudaHasAsyncCopy(Target target);
-int TargetCudaGetWarpSize(Target target);
-bool TargetHasLdmatrix(Target target);
-bool TargetHasStmatrix(Target target, bool is_m16n8 = false);
-bool TargetHasTmem(Target target);
-bool TargetHasBulkCopy(Target target);
-bool TargetSupportsNamedBarrier(Target target);
-bool TargetSupportVectorize256(Target target);
-bool TargetHasSMVersionGE(Target target, int version);
+TILELANG_DLL bool TargetCudaHasAsyncCopy(Target target);
+TILELANG_DLL int TargetCudaGetWarpSize(Target target);
+TILELANG_DLL bool TargetHasLdmatrix(Target target);
+TILELANG_DLL bool TargetHasStmatrix(Target target, bool is_m16n8 = false);
+TILELANG_DLL bool TargetHasTmem(Target target);
+TILELANG_DLL bool TargetHasBulkCopy(Target target);
+TILELANG_DLL bool TargetSupportsNamedBarrier(Target target);
+TILELANG_DLL bool TargetSupportVectorize256(Target target);
+TILELANG_DLL bool TargetHasSMVersionGE(Target target, int version);
 
-bool IsCudaVectorizableFP8(DataType dtype);
-bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty);
+TILELANG_DLL bool IsCudaVectorizableFP8(PrimType dtype);
+TILELANG_DLL bool IsCudaVectorizableCast(PrimType from_ty, PrimType target_ty);
 
 } // namespace tl
 } // namespace tvm

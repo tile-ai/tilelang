@@ -32,9 +32,9 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/thread_storage_scope.h"
-#include "support/bytes_io.h"
 #include "support/check.h"
+#include <tvm/runtime/launch_param.h>
+#include <tvm/support/bytes_io.h>
 
 #if TILELANG_ASCEND_PROFILER
 #include "ascend_profiling.h"
@@ -639,7 +639,7 @@ public:
     ThreadWorkLoad workload = launch_param_config_.Extract(args);
     size_t num_blocks = 1;
     for (size_t axis = 0; axis < 3; ++axis) {
-      size_t extent = workload.grid_dim(axis);
+      size_t extent = workload.GridDim(axis);
       TVM_FFI_CHECK(extent > 0, RuntimeError)
           << "Ascend launch grid must be positive for kernel "
           << function_name_;

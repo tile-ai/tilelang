@@ -16,12 +16,16 @@ constexpr const char *HostMainBlockName = "root";
 
 constexpr const char *DeviceMainBlockName = "tilelang_root";
 
-inline bool IsHostMainBlock(const tirx::SBlockNode *node) {
-  return node->name_hint == HostMainBlockName;
+inline bool IsHostMainBlock(const RegionStmtNode *node) {
+  return (node->op->name == "tl.scope" || node->op->name == "tirx.scope") &&
+         node->attrs.GetAttr<ffi::String>("name_hint").value_or("") ==
+             HostMainBlockName;
 }
 
-inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
-  return node->name_hint == DeviceMainBlockName;
+inline bool IsDeviceMainBlock(const RegionStmtNode *node) {
+  return (node->op->name == "tl.scope" || node->op->name == "tirx.scope") &&
+         node->attrs.GetAttr<ffi::String>("name_hint").value_or("") ==
+             DeviceMainBlockName;
 }
 
 // The kernel-launch frame no longer needs a per-backend marker annotation:

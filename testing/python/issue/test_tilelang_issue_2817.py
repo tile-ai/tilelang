@@ -14,7 +14,7 @@ from tilelang import tvm
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang.env import env
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def _params():

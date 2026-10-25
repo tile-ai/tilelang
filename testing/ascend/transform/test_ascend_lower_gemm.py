@@ -3,11 +3,12 @@
 import math
 
 import pytest
+from tvm_tirx import ir
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_major_k_layout, make_ascend_l0c_layout
-from tvm import tirx
-from testing.ascend._ir import calls, allocated_buffer, kernel
+from tilelang._compat import tirx
+from testing.ascend._ir import calls, allocated_buffer, kernel, access_ptr_offset
 
 
 def _lower(m, n, k, *, blockscaled=False):
@@ -25,28 +26,27 @@ def _lower(m, n, k, *, blockscaled=False):
         sfa = tirx.decl_buffer((64, 2), "int16", name="sfa", scope="shared.l0a.sf")
         sfb = tirx.decl_buffer((64, 2), "int16", name="sfb", scope="shared.l0b.sf")
         alloc_buffers += [sfa, sfb]
-        bindings = {sfa.data: a.data, sfb.data: b.data}
+        bindings = {sfa: a, sfb: b}
         call = T.gemm_blockscaled(
             region(a, m, k), region(b, n, k), region(c, m, n), region(sfa, m, 2), region(sfb, n, 2), transpose_B=True, clear_accum=True
         )
     else:
         call = T.gemm(region(a, m, k), region(b, n, k), region(c, m, n), transpose_B=True, clear_accum=True)
-    body = tirx.Evaluate(call)
-    root = tirx.SBlock(
-        [],
-        [],
-        [],
-        "root",
+    layouts = {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)}
+    body = [
+        *[ir.Evaluate(ir.Call("tl.layout_hint", [tensor], attrs={"layout": layout})) for tensor, layout in layouts.items()],
+        tirx.Evaluate(call),
+    ]
+    module = kernel(
         body,
-        alloc_buffers=alloc_buffers,
+        buffers=alloc_buffers,
         annotations={
             "tl.l0_sf_bindings": bindings,
-            "layout_map": {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)},
         },
     )
     target = tvm.target.Target("ascend")
-    body = tirx.SBlockRealize([], True, root)
-    before = tirx.PrimFunc(tirx.analysis.undefined_vars(body), body).with_attr("target", target)
+    body = module["main"].body
+    before = tirx.PrimFunc(tirx.analysis.undefined_vars(body), body, ret_type=ir.TupleType([])).with_attr("target", target)
     with target:
         return transform.AscendLowerTileOp()(tvm.IRModule({"main": before}))
 
@@ -72,11 +72,11 @@ def _sf_gemm(case):
     c = tirx.decl_buffer((32, 32), "float32", name="c", scope="shared.l0c")
     sf = tirx.decl_buffer((2, 3, 32, 2), "uint16", name="sf", scope="shared.l0b.sf" if case == "scope" else "shared.l0a.sf")
     sb = tirx.decl_buffer((32, 2), "uint16", name="sb", scope="shared.l0b.sf")
-    bindings = {sf.data: a2.data if case == "wrong-data" else a.data, sb.data: b.data}
+    bindings = {sf: a2 if case == "wrong-data" else a, sb: b}
     if case == "missing":
-        del bindings[sf.data]
+        del bindings[sf]
     if case == "duplicate":
-        bindings[tirx.decl_buffer(sf.shape, sf.dtype, scope="shared.l0a.sf").data] = a.data
+        bindings[tirx.decl_buffer(sf.shape, sf.dtype, scope="shared.l0a.sf")] = a
 
     def region(buf, mins, extents):
         return tirx.BufferRegion(buf, [tvm.ir.Range.from_min_extent(m, e) for m, e in zip(mins, extents)])
@@ -87,12 +87,15 @@ def _sf_gemm(case):
     cr = region(c, [0, 0], [17, 32])
     sbr = region(sb, [0, 0], [32, 1 if case == "compact" else 2])
     call = T.gemm_blockscaled(ar, br, cr, sr, sbr, transpose_B=True, clear_accum=True)
+    layouts = {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)}
     return kernel(
-        tirx.Evaluate(call),
+        [
+            *[ir.Evaluate(ir.Call("tl.layout_hint", [tensor], attrs={"layout": layout})) for tensor, layout in layouts.items()],
+            tirx.Evaluate(call),
+        ],
         buffers=[a, a2, b, c, sf, sb],
         annotations={
             "tl.l0_sf_bindings": bindings,
-            "layout_map": {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)},
         },
     )
 
@@ -110,7 +113,7 @@ def _sf_gemm(case):
     ],
 )
 def test_invalid_binding_and_slice_are_rejected(case, diagnostic):
-    with pytest.raises(tvm.error.InternalError, match=diagnostic):
+    with pytest.raises(RuntimeError, match=diagnostic):
         transform.AscendLowerTileOp()(_sf_gemm(case))
 
 
@@ -119,10 +122,10 @@ def test_matching_leading_indices_and_compact_regions(case):
     after = transform.AscendLowerTileOp()(_sf_gemm(case))
     (mad,) = calls(after, "tl.ascend_mad_mx")
     analyzer = tvm.arith.Analyzer()
-    assert analyzer.can_prove_equal(mad.args[1].args[2], 5 * 32 * 128)
+    assert analyzer.can_prove_equal(access_ptr_offset(mad.args[1]), 5 * 32 * 128)
     assert analyzer.can_prove_equal(mad.args[4], 64 if case == "compact" else 128)
 
 
 def test_mismatched_sf_binding_fails_before_layout_inference():
-    with pytest.raises(tvm.error.InternalError, match="is bound to"):
+    with pytest.raises(RuntimeError, match="is bound to"):
         transform.AscendLayoutInference()(_sf_gemm("wrong-data"))

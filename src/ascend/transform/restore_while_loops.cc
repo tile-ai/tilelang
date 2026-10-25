@@ -20,102 +20,113 @@
  * restoration.
  */
 
-#include <string>
-#include <utility>
-
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-namespace tvm {
-namespace tl {
+#include "compat/expr.h"
+#include "compat/visit.h"
 
-using namespace tirx;
-using namespace ffi;
+namespace tvm::tl {
+namespace {
 
-class ExpressionSimplifier : public StmtExprMutator {
+class ExpressionSimplifier : public tirx::StmtExprMutator {
 public:
-  static Stmt Simplify(Stmt stmt) {
-    ExpressionSimplifier simplifier;
-    return simplifier(std::move(stmt));
+  using StmtExprMutator::Mutate;
+  ffi::UnchangedOr<ffi::Any> Mutate(ffi::AnyView input,
+                                    ffi::InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate(input, mode);
+    if (def_region_kind() != kTVMFFIDefRegionKindNone || !input.as<PrimExpr>())
+      return result;
+    auto expression =
+        std::move(result).ValueOrUnchanged(input).as_or_throw<PrimExpr>();
+    return analyzer_->Simplify(expression);
   }
 
 private:
-  PrimExpr VisitExpr(const PrimExpr &expr) final {
-    PrimExpr visited = StmtExprMutator::VisitExpr(expr);
-    return analyzer_.Simplify(visited);
-  }
-
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_;
 };
 
-class WhileLoopRestorer : public StmtExprMutator {
+class ContinueCounter : public tirx::StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
-    auto rewriter = WhileLoopRestorer();
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+  explicit ContinueCounter(Stmt increment) : increment_(std::move(increment)) {}
+
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const ContinueNode *node,
+                                 ffi::InplaceMode) final {
+    return SeqStmt({increment_, ffi::GetRef<Stmt>(node)});
+  }
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *, ffi::InplaceMode) final {
+    return ffi::Unchanged{};
+  }
+  ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *, ffi::InplaceMode) final {
+    return ffi::Unchanged{};
   }
 
 private:
-  WhileLoopRestorer() = default;
+  Stmt increment_;
+};
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Recurse first so nested synthetic-while fors are restored bottom-up.
-    For for_node = Downcast<For>(StmtExprMutator::VisitStmt_(op));
-    auto tag = for_node->annotations.Get("synthetic_while");
-    if (!tag.has_value()) {
-      return for_node;
-    }
-    Var loop_var = for_node->loop_var;
-    auto uses_loop_var = [loop_var](const Stmt &stmt) {
-      return tirx::UsesVar(stmt, [loop_var](const VarNode *var) {
-        return loop_var.same_as(GetRef<Var>(var));
+class WhileLoopRestorer : public tirx::StmtExprMutator {
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto loop = StmtExprMutator::Mutate_(node, mode)
+                    .ValueOrUnchanged(original)
+                    .as_or_throw<For>();
+    if (!loop->annotations.count("synthetic_while"))
+      return loop;
+    auto uses_counter = [&](const Stmt &body) {
+      bool found = false;
+      PostOrderVisit(body, [&](const ffi::ObjectRef &object) {
+        if (auto variable = object.as<VarNode>())
+          found = found || variable == loop->var.get();
       });
+      return found;
     };
-    Stmt body = for_node->body;
-    if (!uses_loop_var(body)) {
-      return While(IntImm(DataType::Bool(), 1), body);
-    }
-    body = ExpressionSimplifier::Simplify(std::move(body));
-    if (!uses_loop_var(body)) {
-      return While(IntImm(DataType::Bool(), 1), body);
-    }
-
-    PrimExpr zero_index = IntImm(DataType::Int(32), 0);
-    Buffer counter =
-        decl_buffer({IntImm(DataType::Int(32), 1)}, loop_var.dtype(),
-                    loop_var->name_hint + "_counter", "local.var");
-    PrimExpr counter_value = BufferLoad(counter, {zero_index});
-    body = tirx::Substitute(std::move(body),
-                            Map<Var, PrimExpr>{{loop_var, counter_value}});
-    PrimExpr next_value = counter_value + make_const(loop_var.dtype(), 1);
-    Stmt increment = BufferStore(counter, next_value, {zero_index});
-    Stmt loop = While(IntImm(DataType::Bool(), 1),
-                      SeqStmt({body, std::move(increment)}));
-    Stmt initialize = BufferStore(counter, for_node->min, {zero_index});
+    auto simplifier = ffi::make_object<ExpressionSimplifier>();
+    SeqStmt body = simplifier->Mutate(loop->body).ValueOrUnchanged(loop->body);
+    auto condition = IntImm(PrimType::Bool(), 1);
+    if (!uses_counter(body))
+      return While(condition, body, loop->loc);
+    tirx::TensorVar counter(
+        loop->var->name + "_counter",
+        tirx::TensorType({PrimExpr(1)}, loop->var.ty(),
+                         runtime::MemoryScope("local.var")));
+    TensorLoad value(counter, {PrimExpr(0)});
+    Stmt substituted = tl::Substitute(body, {{loop->var, value}});
+    TensorStore increment(counter, {PrimExpr(0)}, value + loop->step);
+    auto continue_counter = ffi::make_object<ContinueCounter>(increment);
+    substituted =
+        continue_counter->Mutate(substituted).ValueOrUnchanged(substituted);
+    Bind allocation(counter, Call(std::nullopt, tirx::alloc_tensor_op(), {},
+                                  std::nullopt, {counter.ty()}));
     return SeqStmt(
-        {AllocBuffer(counter), std::move(initialize), std::move(loop)});
+        {allocation, TensorStore(counter, {PrimExpr(0)}, loop->begin),
+         While(condition, SeqStmt({substituted, increment}), loop->loc)});
   }
 };
+} // namespace
 
-using namespace tirx::transform;
 tvm::transform::Pass RestoreWhileLoops() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return WhileLoopRestorer::Substitute(f);
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (!function->body)
+      return function;
+    auto rewriter = ffi::make_object<WhileLoopRestorer>();
+    SeqStmt original = function->body.value();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.RestoreWhileLoops", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.RestoreWhileLoops");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.RestoreWhileLoops", RestoreWhileLoops);
+  ffi::reflection::GlobalDef().def("tl.transform.RestoreWhileLoops",
+                                   RestoreWhileLoops);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

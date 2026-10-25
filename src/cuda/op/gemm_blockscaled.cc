@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <utility>
 
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/expr.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/op/attr.h>
 
 #include "cuda/target_utils.h"
 #include "op/tcgen5_meta.h"
@@ -27,19 +27,17 @@ namespace cuda {
 constexpr const char *kCudaTCGEN05BlockScaled = "cuda.tcgen05.blockscaled";
 constexpr const char *kCudaMMABlockScaled = "cuda.mma.blockscaled";
 
-TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_blockscaled")
-    .set_attr<tirx::TScriptPrinterName>("TScriptPrinterName",
-                                        "tcgen05_gemm_blockscaled")
-    .set_attr<OpBuilderFunc>(
-        "TLOpBuilder",
-        [](ffi::Array<PrimExpr> args,
-           ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
-          annotations.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
-          return GemmBlockScaled(std::move(args), std::move(annotations));
-        })
-    .set_num_inputs(-1)
-    .set_attr<tirx::TCallEffectKind>("TCallEffectKind",
-                                     Integer(tirx::CallEffectKind::kOpaque));
+TVM_FFI_STATIC_INIT_BLOCK() {
+  const String name = "tl.tileop.tcgen05_gemm_blockscaled";
+  RegisterBuiltin<16>(name, CallEffectKind::kOpaque);
+  OpDef(name)
+      .set_attr(tvm::op_attr::kFixedReturnType, TupleType(Array<Type>{}))
+      .set_attr<OpBuilderFunc>(
+          "TLOpBuilder", [](Array<Expr> args, BlockAnnotations annotations) {
+            annotations.Set("is_tcgen05", true);
+            return GemmBlockScaled(std::move(args), std::move(annotations));
+          });
+}
 
 namespace {
 
@@ -48,21 +46,22 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
                                       const Target &target) {
   if (op->isWgmma_) {
     LOG(FATAL) << "Block-scaled GEMM does not support WGMMA lowering."
-               << SpanHintSuffix({op->a_->span, op->b_->span, op->c_->span});
+               << SpanHintSuffix({op->a_->loc, op->b_->loc, op->c_->loc});
   }
 
   bool use_2cta = false;
   if (auto value = op->annotations_.Get("use_2cta")) {
-    const auto *imm = value.value().as<tirx::IntImmNode>();
-    ICHECK(imm) << "use_2cta annotation must be an IntImmNode";
-    use_2cta = imm->value != 0;
+    auto integer = GetIntAnnotation(*value);
+    TVM_FFI_CHECK(integer.has_value(), TypeError)
+        << "use_2cta annotation must be boolean";
+    use_2cta = *integer != 0;
   }
 
   // The block-scaled TCGEN05 emitter implements shared/shared operands only;
   // dense TCGEN05 also accepts TMEM A and therefore has a different contract.
   bool shared_operands = IsSharedBuffer(op->a_) && IsSharedBuffer(op->b_);
   if (TargetIsSm100(target) && shared_operands && IsTmemBuffer(op->c_) &&
-      GetTCGEN5MMAMeta(op->m_, op->n_, op->k_, op->a_->dtype, op->c_->dtype)
+      GetTCGEN5MMAMeta(op->m_, op->n_, op->k_, op->a_.dtype(), op->c_.dtype())
           .first) {
     return kCudaTCGEN05BlockScaled;
   }
@@ -88,7 +87,7 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
              << ", but got target=" << target << ", A scope=" << op->a_.scope()
              << ", B scope=" << op->b_.scope() << ", C scope=" << op->c_.scope()
              << ", M=" << op->m_ << ", N=" << op->n_ << ", K=" << op->k_ << "."
-             << SpanHintSuffix({op->a_->span, op->b_->span, op->c_->span});
+             << SpanHintSuffix({op->a_->loc, op->b_->loc, op->c_->loc});
   return {};
 }
 
@@ -114,13 +113,13 @@ const bool cuda_gemm_blockscaled_registered = RegisterCudaGemmBlockScaled();
 TVM_FFI_STATIC_INIT_BLOCK() {
   ffi::reflection::GlobalDef().def(
       "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
+      [](int atom_m, int atom_n, PrimType a_dtype, PrimType b_dtype,
          bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
          int a_sf_id, int b_sf_id) {
         uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
             atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
             scale_in_a, scale_in_b, a_sf_id, b_sf_id);
-        return Integer(static_cast<int64_t>(desc));
+        return IntImm(PrimType::Int(64), static_cast<int64_t>(desc));
       });
 }
 

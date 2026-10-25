@@ -1,7 +1,6 @@
 """Hint definition for schedule"""
 
-from tvm import DataType
-from . import PrimFuncNode
+from tilelang._compat.tvm import DataType
 import numpy as np
 from .rasterization import *
 
@@ -249,7 +248,7 @@ class Hint:
     def __repr__(self) -> str:
         return str(self.to_dict())
 
-    def complete_config(self, node: PrimFuncNode):
+    def complete_config(self, node=None):
         # analysis pass context, for int8 mma, we should merge static shared memory
         merge_static_smem = False
         # int32 and float32 accum may take too much shared memory

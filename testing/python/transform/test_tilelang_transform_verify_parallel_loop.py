@@ -15,8 +15,8 @@ def _make_parallel_store(*, injective_indices: bool, varying_value: bool = True)
     value = ti * 128 + tj if varying_value else 1
     store = tvm.tirx.BufferStore(output, value, indices)
     body = tvm.tirx.SeqStmt([tvm.tirx.Bind(i, ti), tvm.tirx.Bind(j, tj), store])
-    body = tvm.tirx.For(tj, 0, 128, tvm.tirx.ForKind.PARALLEL, body)
-    body = tvm.tirx.For(ti, 0, 32, tvm.tirx.ForKind.PARALLEL, body)
+    body = tvm.tirx.For(tj, 0, 128, 1, tvm.tirx.ForKind.PARALLEL, body)
+    body = tvm.tirx.For(ti, 0, 32, 1, tvm.tirx.ForKind.PARALLEL, body)
     return tvm.IRModule.from_expr(tvm.tirx.PrimFunc([output], body))
 
 
@@ -50,7 +50,7 @@ def _make_two_racy_stores():
     store_a = tvm.tirx.BufferStore(out_a, ti, [0])
     store_b = tvm.tirx.BufferStore(out_b, ti, [0])
     body = tvm.tirx.SeqStmt([store_a, store_b])
-    body = tvm.tirx.For(ti, 0, 32, tvm.tirx.ForKind.PARALLEL, body)
+    body = tvm.tirx.For(ti, 0, 32, 1, tvm.tirx.ForKind.PARALLEL, body)
     mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([out_a, out_b], body))
     return mod, store_a, store_b
 

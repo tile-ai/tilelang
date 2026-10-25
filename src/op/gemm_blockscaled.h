@@ -20,7 +20,10 @@ namespace tl {
  */
 class GemmBlockScaledNode : public GemmNode {
 public:
-  tirx::BufferRegion sfaRegion_, sfbRegion_;
+  explicit GemmBlockScaledNode(ffi::UnsafeInit tag)
+      : GemmNode(tag), sfaRegion_(tag), sfbRegion_(tag), sfKStart_(tag) {}
+
+  TensorRegion sfaRegion_, sfbRegion_;
   PrimExpr sfKStart_;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmBlockScaled", GemmBlockScaledNode,
@@ -34,7 +37,7 @@ public:
   }
 
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<TensorRegion> GetReadBeforeWriteRegions() const override;
   TileOperator Clone() const override;
 
   // Calls the backend's dedicated block-scaled instruction selector, or
@@ -48,9 +51,8 @@ class GemmBlockScaled : public Gemm {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmBlockScaled, Gemm,
                                              GemmBlockScaledNode);
-  TVM_DLL
-  GemmBlockScaled(ffi::Array<PrimExpr> args,
-                  ffi::Map<ffi::String, ffi::ObjectRef> annotations = {});
+  TILELANG_DLL
+  GemmBlockScaled(ffi::Array<Expr> args, BlockAnnotations annotations = {});
   static const Op &Get();
 };
 

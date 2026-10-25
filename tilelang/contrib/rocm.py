@@ -25,11 +25,11 @@ import os
 from os.path import join, exists
 
 import tvm_ffi
-from tvm.base import py_str
-import tvm.runtime
-import tvm.target
+from tilelang._compat.utils import py_str
+import tvm_tirx as tvm
+from tvm_tirx.codegen import llvm
 
-from tvm.contrib import utils
+from tvm_tirx.support import utils
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def find_lld(required=True):
     matches the major llvm version that built with tvm
     """
     lld_list = []
-    major = tvm.target.codegen.llvm_version_major(allow_none=True)
+    major = llvm.version_major(allow_none=True)
     if major is not None:
         lld_list += [f"ld.lld-{major}.0"]
         lld_list += [f"ld.lld-{major}"]
@@ -177,7 +177,7 @@ def callback_rocm_bitcode_path(rocdl_dir=None):
         elif "isa_version" not in n and n not in {"irif"}:
             raise RuntimeError("could not find bitcode " + n)
 
-    return tvm.runtime.convert(bitcode_files)
+    return tvm_ffi.Array(bitcode_files)
 
 
 def parse_compute_version(compute_version):

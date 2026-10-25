@@ -4,9 +4,8 @@ from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout, PartialFragment
 from tilelang.utils.language import is_fragment, is_reducer
-from tvm.tirx import FloatImm, IntImm, tvm_tuple
-from tvm.tirx.script.parser import attr
-from tvm.tirx.script.builder.ir import sblock_attr
+from tilelang._compat.tirx import FloatImm, IntImm, convert, tvm_tuple
+from tilelang._compat.builder import attr, scope_attr, storage_identity
 
 __all__ = [
     "WSID",
@@ -57,30 +56,30 @@ def annotate_layout(layout_map: dict):
         elif is_fragment(buffer):
             assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
-            _layout_map[buffer.data] = layout
+            _layout_map[buffer] = layout
         elif isinstance(layout, Callable):
-            _layout_map[buffer.data] = Layout(buffer.shape, layout)
+            _layout_map[buffer] = Layout(buffer.shape, layout)
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return sblock_attr({"layout_map": _layout_map})
+    return scope_attr({"layout_map": _layout_map})
 
 
 def annotate_safe_value(safe_value_map: dict):
     """Annotate the safe value of the buffer."""
     _safe_value_map = {}
     for buffer, safe_value in safe_value_map.items():
-        _safe_value_map[buffer.data] = safe_value
-    return sblock_attr({"safe_value_map": _safe_value_map})
+        _safe_value_map[buffer] = convert(safe_value)
+    return scope_attr({"safe_value_map": _safe_value_map})
 
 
 def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     """Annotate the L2 hit ratio of the buffer."""
     _l2_hit_ratio_map = {}
     for buffer, hit_ratio in l2_hit_ratio_map.items():
-        assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
-        _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
-    return sblock_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+        assert buffer.scope().name == "global", "persistent L2 can only be applied to global buffers"
+        _l2_hit_ratio_map[buffer] = FloatImm("float32", float(hit_ratio))
+    return scope_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
 
 
 def annotate_min_blocks_per_sm(n: int):
@@ -102,7 +101,7 @@ def annotate_min_blocks_per_sm(n: int):
     ...         ...
     """
     assert isinstance(n, int) and n > 0, "n must be a positive integer"
-    return attr(None, "tl.min_blocks_per_sm", n)
+    return scope_attr({"tl.min_blocks_per_sm": n})
 
 
 def annotate_restrict_buffers(*buffers):
@@ -126,11 +125,11 @@ def annotate_restrict_buffers(*buffers):
     data_vars = []
     for buf in buffers:
         try:
-            data_vars.append(buf.data)
+            data_vars.append(storage_identity(buf))
         except Exception as e:
             raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
     # Also return as block attribute (root block exists by default) for readability/tools.
-    return sblock_attr({"tl.non_restrict_params": data_vars})
+    return scope_attr({"tl.non_restrict_params": data_vars})
 
 
 def annotate_ws_pipeline_depth(depth_map: dict):
@@ -144,8 +143,8 @@ def annotate_ws_pipeline_depth(depth_map: dict):
     _map = {}
     for buffer, depth in depth_map.items():
         assert isinstance(depth, int) and depth >= 1, f"pipeline depth must be a positive int, got {depth!r}"
-        _map[buffer.data] = IntImm("int32", depth)
-    return attr(_map, "tl.ws_pipeline_depth", 0)
+        _map[buffer] = IntImm("int32", depth)
+    return scope_attr({"tl.ws_pipeline_depth": _map})
 
 
 def annotate_ws_schedule(schedule):
@@ -161,7 +160,7 @@ def annotate_ws_schedule(schedule):
     from tilelang.language.warp_specialize import WSSchedule
 
     assert isinstance(schedule, WSSchedule), f"annotate_ws_schedule expects a T.WSSchedule object, got {type(schedule)}"
-    return sblock_attr({"tl.ws_schedule": schedule})
+    return scope_attr({"tl.ws_schedule": schedule})
 
 
 def ws_op(op_id: str):

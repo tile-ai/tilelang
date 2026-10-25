@@ -33,8 +33,8 @@ def run_alloc_var(
     program = alloc_var(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
-    code = kernel.get_kernel_source()
-    assert "tmp =" in code or "tmp[0] =" in code
+    source = torch.randn(N, dtype=dtype.as_torch(), device="cuda")
+    torch.testing.assert_close(kernel(source), source)
 
 
 def test_alloc_var():
@@ -73,8 +73,8 @@ def run_alloc_var_add(
     program = alloc_var_add(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
-    code = kernel.get_kernel_source()
-    assert "tmp =" in code or "tmp[0] =" in code
+    source = torch.randn(N, dtype=dtype.as_torch(), device="cuda")
+    torch.testing.assert_close(kernel(source), source + 1)
 
 
 def test_alloc_var_add():
@@ -233,7 +233,6 @@ def test_alloc_global():
 
 
 def alloc_barrier_kernel(arrive_count):
-
     @T.prim_func
     def main(A: T.Tensor((128,), T.float16)):
         with T.Kernel(1, threads=128):

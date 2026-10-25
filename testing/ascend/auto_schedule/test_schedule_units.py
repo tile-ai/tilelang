@@ -1,12 +1,13 @@
 """Schedule units contracts."""
 
 import pytest
+from tvm_tirx import ir
 import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
 from tilelang import tvm
-from tvm import tirx
-from testing.ascend._ir import copy, kernel, nodes, seq
-from testing.ascend.auto_schedule._scheduled_ir import unit
+from tilelang._compat import tirx
+from testing.ascend._ir import root_scope, copy, kernel, nodes, seq, simd_scope, unseq
+from testing.ascend.auto_schedule._scheduled_ir import _marker, unit
 from testing.ascend.auto_schedule._task_utils import (
     _bind_target,
     _collect_schedule_units,
@@ -47,9 +48,9 @@ def _make_partially_staged_program():
 def _direct_schedule_unit_stages(stmt):
     statements = stmt.seq if isinstance(stmt, tirx.SeqStmt) else [stmt]
     return [
-        int(statement.node["stage"])
+        int(statement.attrs["tl.schedule_unit"]["stage"])
         for statement in statements
-        if isinstance(statement, tirx.AttrStmt) and statement.attr_key == "tl.schedule_unit"
+        if isinstance(statement, ir.RegionStmt) and "tl.schedule_unit" in statement.attrs
     ]
 
 
@@ -59,19 +60,26 @@ def test_materialize_schedule_units_builds_trivial_guarded_schedule():
     task_metadata = _collect_task_metadata(mod)
 
     assert schedule_units
-    assert all(int(unit.node["stage"]) == -1 for unit in schedule_units)
-    assert all(len(unit.node) == 1 for unit in schedule_units)
-    assert sum(isinstance(unit.body, tirx.IfThenElse) for unit in schedule_units) >= 2
+    assert all(int(unit.attrs["tl.schedule_unit"]["stage"]) == -1 for unit in schedule_units)
+    assert all(len(unit.attrs["tl.schedule_unit"]) == 1 for unit in schedule_units)
+    conditions = [region.attrs["tl.schedule_condition"] for region in nodes(mod, ir.RegionStmt) if "tl.schedule_condition" in region.attrs]
+    assert len(conditions) == 2
+    (launch,) = [region for region in nodes(mod, ir.RegionStmt) if region.op.name == "tl.launch_grid"]
+    for core in range(2):
+        active = [
+            tvm.sym.Analyzer().simplify(tirx.stmt_functor.substitute(condition, {launch.body_params[0]: core})) for condition in conditions
+        ]
+        assert sum(bool(condition) for condition in active) == 1
     assert task_metadata["latency"] == []
     assert task_metadata["ii"] == []
 
 
 def test_materialize_schedule_units_normalizes_partial_manual_stages():
     mod = _materialize_schedule_units(_bind_target(_make_partially_staged_program()))
-    loop_units = [unit for unit in _collect_schedule_units(mod) if isinstance(unit.body, tirx.For)]
+    loop_units = [unit for unit in _collect_schedule_units(mod) if isinstance(unseq(unit.body), tirx.For)]
 
     assert len(loop_units) == 1
-    assert _direct_schedule_unit_stages(loop_units[0].body.body) == [1, 0]
+    assert _direct_schedule_unit_stages(unseq(loop_units[0].body).body) == [1, 0]
 
 
 def _scheduled_copies(*, cost=(1, 1), malformed=False, staged=False):
@@ -82,11 +90,11 @@ def _scheduled_copies(*, cost=(1, 1), malformed=False, staged=False):
     producer = unit(copy(a, ub, src_indices=[i, 0], src_shape=[1, 64]), core=0, cost=cost)
     consumer = unit(copy(ub, c, dst_indices=[i, 0], dst_shape=[1, 64]), core=0, stage=1 if staged else 0, cost=cost)
     if malformed:
-        body = tirx.AttrStmt({"stage": 0}, "tl.schedule_unit", 1, seq(producer.body, consumer.body))
+        body = _marker("tl.schedule_unit", {"stage": 0}, seq(producer.body, consumer.body))
     else:
         body = seq(consumer, producer) if staged else seq(producer, consumer)
     loop = tirx.For(
-        i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"enable_offset": staged, "num_stages": 2, "multi_buffer_eligible": [ub.data]}
+        i, 0, 4, 1, tirx.ForKind.DEFAULT, body, annotations={"enable_offset": staged, "num_stages": 2, "multi_buffer_eligible": [ub]}
     )
     return kernel(unit(loop, core=None), buffers=[ub], params=[a, c])
 
@@ -94,10 +102,10 @@ def _scheduled_copies(*, cost=(1, 1), malformed=False, staged=False):
 def test_auto_schedule_preserves_explicit_stage_dependencies():
     before = _scheduled_copies(staged=True)
     after = ascend_transform.AutoSchedule()(before)
-    (loop_unit,) = [node for node in _collect_schedule_units(after) if isinstance(node.body, tirx.For)]
+    (loop_unit,) = [node for node in _collect_schedule_units(after) if isinstance(unseq(node.body), tirx.For)]
     # Stage order is explicitly requested by this input. Other scheduling
     # choices are deliberately left unasserted.
-    assert _direct_schedule_unit_stages(loop_unit.body.body) == [0, 1]
+    assert _direct_schedule_unit_stages(unseq(loop_unit.body).body) == [0, 1]
 
 
 @pytest.mark.parametrize(
@@ -113,7 +121,7 @@ def test_auto_schedule_requires_its_input_contract(case, message):
         before = _bind_target(_make_program())
     else:
         before = _scheduled_copies(cost=None if case == "missing-cost" else (1, 1), malformed=case == "multiple-tasks")
-    with pytest.raises(tvm.error.InternalError, match=message):
+    with pytest.raises(ValueError if case == "missing-units" else RuntimeError, match=message):
         ascend_transform.AutoSchedule()(before)
 
 
@@ -127,28 +135,28 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
         i = tirx.Var(f"owner{index}", "int32")
         write = tirx.BufferStore(ub, index + 1, [0])
         if index == 0:
-            write = tirx.SBlock([], [], [], "SIMD_VF", write)
+            write = simd_scope(write)
         # The shared MTE2 pipe fixes physical owner order. Without it, the
         # ordinary dependency can be satisfied by reversing modulo phases.
         body = seq(unit(copy(a, ub), core=0, stage=-1, cost=(1, 1)), unit(write, core=0, stage=-1, cost=(1, 1)))
-        owner = tirx.For(i, 0, 1, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]} if eligible else {})
+        owner = tirx.For(i, 0, 1, 1, tirx.ForKind.DEFAULT, body, annotations={"multi_buffer_eligible": [ub]} if eligible else {})
         owners.append(unit(owner, core=None, stage=second_stage if index else 0))
     outer = tirx.For(
-        tirx.Var("outer", "int32"), 0, 4, tirx.ForKind.SERIAL, seq(*owners), annotations={"num_stages": 2, "enable_offset": True}
+        tirx.Var("outer", "int32"), 0, 4, 1, tirx.ForKind.DEFAULT, seq(*owners), annotations={"num_stages": 2, "enable_offset": True}
     )
-    before = kernel(unit(outer, core=None, stage=-1), buffers=[ub], params=[a], annotations={"tl.buffer_versions_map": {ub.data: 1}})
+    before = kernel(unit(outer, core=None, stage=-1), buffers=[ub], params=[a], annotations={"tl.buffer_versions_map": {ub: 1}})
     if not eligible and second_stage:
         with pytest.raises(RuntimeError, match="Manual schedule constraints are infeasible"):
             ascend_transform.AutoSchedule()(before)
         return
     after = ascend_transform.AutoSchedule()(before)
-    (scheduled_outer,) = [loop for loop in nodes(after, tirx.For) if loop.loop_var.same_as(outer.loop_var)]
+    (scheduled_outer,) = [loop for loop in nodes(after, tirx.For) if loop.var.same_as(outer.var)]
     assert _direct_schedule_unit_stages(scheduled_outer.body) == [0, second_stage]
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    versions = root.annotations.get("tl.buffer_versions_map", {})
-    assert (ub.data in versions) == eligible
+    root = root_scope(after)
+    versions = root.attrs.get("tl.buffer_versions_map", {})
+    assert (ub in versions) == eligible
     if eligible:
-        assert int(versions[ub.data]) == 1
+        assert int(versions[ub]) == 1
 
 
 @pytest.mark.parametrize(
@@ -166,23 +174,24 @@ def test_ss_versions_share_capacity_across_aivs(fixed, size):
         i,
         0,
         4,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         seq(*tasks),
-        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [buffer.data for buffer in buffers]},
+        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [buffer for buffer in buffers]},
     )
     annotations = {"tl.split_subcores": True}
     if fixed:
-        annotations["tl.buffer_versions_map"] = {buffer.data: 2 for buffer in buffers}
+        annotations["tl.buffer_versions_map"] = {buffer: 2 for buffer in buffers}
     before = kernel(unit(loop, core=None), buffers=buffers, params=[out], annotations=annotations)
     if size == 100:
         with pytest.raises(RuntimeError, match="shared.ss|Manual schedule constraints are infeasible"):
             ascend_transform.AutoSchedule()(before)
         return
     after = ascend_transform.AutoSchedule()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    versions = root.annotations["tl.buffer_versions_map"]
+    root = root_scope(after)
+    versions = root.attrs["tl.buffer_versions_map"]
     # Both AIVs consume the same 3 KiB pool. Two versions of each fit exactly.
-    assert all(int(versions[buffer.data]) == 2 for buffer in buffers)
+    assert all(int(versions[buffer]) == 2 for buffer in buffers)
 
 
 def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():
@@ -203,20 +212,21 @@ def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():
         i,
         0,
         4,
-        tirx.ForKind.SERIAL,
+        1,
+        tirx.ForKind.DEFAULT,
         tasks,
-        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [data.data, sf.data]},
+        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [data, sf]},
     )
     before = kernel(
         unit(loop, core=None),
         buffers=[data, sf, source, scale_source],
         params=[out],
         annotations={
-            "tl.l0_sf_bindings": {sf.data: data.data},
-            "tl.buffer_versions_map": {sf.data: 3},
+            "tl.l0_sf_bindings": {sf: data},
+            "tl.buffer_versions_map": {sf: 3},
         },
     )
     after = ascend_transform.AutoSchedule()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    versions = root.annotations["tl.buffer_versions_map"]
-    assert int(versions[data.data]) == int(versions[sf.data]) == 3
+    root = root_scope(after)
+    versions = root.attrs["tl.buffer_versions_map"]
+    assert int(versions[data]) == int(versions[sf]) == 3

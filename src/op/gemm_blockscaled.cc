@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/op/attr.h>
 
 #include "span_utils.h"
 #include "utils.h"
@@ -41,21 +41,20 @@ const GemmBlockScaledImpl *ResolveGemmBlockScaledImpl(const Target &target) {
       ICHECK(matched == nullptr)
           << "tl.gemm_blockscaled found multiple target-specific "
              "implementations for "
-          << target->str() << ": " << matched->name << " and " << impl.name;
+          << target << ": " << matched->name << " and " << impl.name;
       matched = &impl;
     }
   }
   return matched;
 }
 
-GemmBlockScaled::GemmBlockScaled(
-    ffi::Array<PrimExpr> args,
-    ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+GemmBlockScaled::GemmBlockScaled(ffi::Array<Expr> args,
+                                 BlockAnnotations annotations) {
   ICHECK_EQ(args.size(), 16)
       << "tl.tileop.gemm_blockscaled expects the 13 dense GEMM slots followed "
          "by SFA, SFB and k_start, but got "
       << args.size() << " arguments.";
-  auto node = ffi::make_object<GemmBlockScaledNode>();
+  auto node = ffi::make_object<GemmBlockScaledNode>(ffi::UnsafeInit{});
   GemmNode::InitFromDenseArgs(node.get(), args, annotations);
   node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
   node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
@@ -72,9 +71,9 @@ AccessRegions GemmBlockScaledNode::GetAccessRegions() const {
   return result;
 }
 
-ffi::Array<tirx::BufferRegion>
+ffi::Array<TensorRegion>
 GemmBlockScaledNode::GetReadBeforeWriteRegions() const {
-  ffi::Array<tirx::BufferRegion> result = GemmNode::GetReadBeforeWriteRegions();
+  ffi::Array<TensorRegion> result = GemmNode::GetReadBeforeWriteRegions();
   result.push_back(sfaRegion_);
   result.push_back(sfbRegion_);
   return result;
@@ -91,21 +90,18 @@ ffi::String GemmBlockScaledNode::GetGemmInstructionKey(int block_size,
   if (impl == nullptr) {
     // Name the dense backend that owns this target so the message says which
     // backend lacks block-scaled support.
-    LOG(FATAL) << "Block-scaled GEMM is not supported by the "
-               << ResolveGemmImpl(target).name
-               << " backend (target=" << target->str()
-               << "); a dense GEMM lowering would silently drop the SFA/SFB "
-                  "scale factors."
-               << SpanHintSuffix({a_->span, b_->span, c_->span});
+    TVM_FFI_THROW(ValueError)
+        << "Block-scaled GEMM is not supported by the "
+        << ResolveGemmImpl(target).name << " backend (target=" << target
+        << "); a dense GEMM lowering would silently drop the SFA/SFB "
+           "scale factors."
+        << SpanHintSuffix({a_->loc, b_->loc, c_->loc});
   }
   return impl->select_inst(ffi::GetRef<GemmBlockScaled>(this), block_size,
                            target);
 }
 
-TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled)
-    .set_num_inputs(-1)
-    .set_attr<tirx::TCallEffectKind>("TCallEffectKind",
-                                     Integer(tirx::CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled, 16)
 
 TVM_FFI_STATIC_INIT_BLOCK() { GemmBlockScaledNode::RegisterReflection(); }
 

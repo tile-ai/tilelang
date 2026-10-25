@@ -7,6 +7,13 @@ BindTarget and MaterializeKernelLaunch. The target is pinned so the tests
 are independent of the machine and of the production pipeline.
 """
 
+from dataclasses import dataclass
+import re
+
+from _native_ir import allocations
+
+
+from tvm_ffi import structural_equal
 import pytest
 
 import tilelang
@@ -14,7 +21,7 @@ import tilelang.testing
 from tilelang import language as T
 from tilelang import tvm
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
-from tvm import tirx
+from tilelang._compat import tirx
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
@@ -28,50 +35,70 @@ def _materialize(func):
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     transformed = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
     _assert_no_ws_annotations(transformed)
+    assert tvm.tirx.analysis.check_well_formed(transformed)
+    tvm.ir.assert_structural_equal(transformed, tvm.ir.load_json(tvm.ir.save_json(transformed)))
     return transformed
 
 
 def _assert_no_ws_annotations(func):
     markers = {"tl.ws_schedule", "tl.ws_op_id"}
     assert markers.isdisjoint(func.attrs.keys() if func.attrs else ())
-    for node in collect_nodes(func, tvm.runtime.Object):
-        assert markers.isdisjoint(getattr(node, "annotations", {}))
-        if isinstance(node, tirx.AttrStmt):
-            assert node.attr_key not in markers
+    for node in collect_nodes(func, tvm.ffi.Object):
+        if isinstance(node, tvm.ir.For):
+            assert markers.isdisjoint(node.annotations)
+        elif isinstance(node, (tvm.ir.RegionStmt, tvm.ir.Call)):
+            assert markers.isdisjoint(node.attrs.keys() if node.attrs else ())
 
 
-def _buffer(root, name):
-    buffers = [buf for block in collect_nodes(root, tirx.SBlock) for buf in block.alloc_buffers]
-    buffers.extend(node.buffer for node in collect_nodes(root, tirx.AllocBuffer))
+def _buffer(root, name, used_in=None):
+    buffers = list(allocations(root))
     if isinstance(root, tirx.PrimFunc):
-        buffers.extend(root.buffer_map.values())
-    matches = [buf for buf in buffers if buf.name == name]
+        buffers.extend(parameter for parameter in root.params if isinstance(parameter.ty, tirx.TensorType))
+    matches = [buf for buf in buffers if re.fullmatch(re.escape(name) + r"(?:_pipeline)*", str(buf.name))]
+    if used_in is not None:
+        used = set(collect_nodes(used_in, tvm.ir.Var))
+        matches = [buf for buf in matches if buf in used]
     assert len(matches) == 1, f"Expected one buffer {name}, got {len(matches)}"
     return matches[0]
 
 
+@dataclass(frozen=True)
+class _BarrierHalf:
+    tensor: tvm.ir.Var
+    depth: int
+    offset: int
+
+    def load(self, index):
+        return tvm.ir.TensorLoad(self.tensor, [self.offset + index])
+
+
 def _barrier(func, name, counts=None):
-    buffer = _buffer(func, name)
-    assert buffer.scope() == "shared.barrier"
-    initializers = [
-        block.annotations["barrier_init"][buffer.data]
-        for block in collect_nodes(func, tirx.SBlock)
-        if "barrier_init" in block.annotations and buffer.data in block.annotations["barrier_init"]
-    ]
+    pipeline, side = name.rsplit("_", 1)
+    assert side in ("full", "empty")
+    buffer = _buffer(func, "ws_barrier_" + pipeline)
+    assert buffer.ty.scope.name == "shared.barrier"
+    initializers = [binding.value.attrs["barrier_init"] for binding in collect_nodes(func, tvm.ir.Bind) if binding.var.same_as(buffer)]
     assert len(initializers) == 1, f"Missing or duplicated barrier initialization for {name}"
     values = initializers[0]
-    assert len(buffer.shape) == 1 and int(buffer.shape[0]) == len(values)
-    assert all(isinstance(value, tirx.IntImm) and value.dtype == "int32" for value in values)
+    assert len(buffer.ty.shape) == 1 and int(buffer.ty.shape[0]) == len(values)
+    assert len(values) % 2 == 0
+    assert all(isinstance(value, tirx.IntImm) and str(value.ty) == "int32" for value in values)
+    depth = len(values) // 2
+    offset = 0 if side == "full" else depth
     if counts is not None:
-        assert [int(value) for value in values] == counts
-    return buffer
+        assert [int(value) for value in values[offset : offset + depth]] == counts
+    return _BarrierHalf(buffer, depth, offset)
 
 
 def _barrier_calls(root, op, buffer):
+    analyzer = tvm.sym.Analyzer()
     return [
         call
         for call in collect_calls(root, op=op)
-        if call.args and isinstance(call.args[0], tirx.BufferLoad) and call.args[0].buffer.data.same_as(buffer.data)
+        if call.args
+        and isinstance(call.args[0], tvm.ir.TensorLoad)
+        and call.args[0].source.same_as(buffer.tensor)
+        and analyzer.can_prove(call.args[0].indices[0] // buffer.depth == buffer.offset // buffer.depth)
     ]
 
 
@@ -83,26 +110,24 @@ def _nreg_args(root):
 
 def _role_branches(func):
     (launch,) = [
-        attr
-        for attr in collect_nodes(func, tirx.AttrStmt)
-        if attr.attr_key == "thread_extent" and isinstance(attr.node, tirx.IterVar) and attr.node.thread_tag == "threadIdx.x"
+        region
+        for region in collect_nodes(func, tvm.ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
     ]
-    (custom,) = [attr for attr in collect_nodes(launch.body, tirx.AttrStmt) if attr.attr_key == "kCustomWarpSpecialization"]
-    assert int(custom.value) == 1
+    (custom,) = [region for region in collect_nodes(launch.body, tvm.ir.RegionStmt) if region.attrs.get("tl.ws_concurrent", False)]
+    thread = launch.body_params[0]
     branches = []
-    lo = 0
-    body = custom.body
-    while isinstance(body, tirx.IfThenElse):
-        condition = body.condition
-        assert isinstance(condition, tirx.LT) and condition.a.same_as(launch.node.var)
-        assert isinstance(condition.b, tirx.IntImm)
-        hi = int(condition.b)
-        assert lo < hi <= int(launch.value)
-        branches.append((lo, hi, body.then_case))
-        lo, body = hi, body.else_case
-        assert body is not None
-    branches.append((lo, int(launch.value), body))
-    return branches
+    for branch in custom.body.seq:
+        assert isinstance(branch, tvm.ir.If) and branch.else_case is None
+        condition = branch.condition
+        assert isinstance(condition, tvm.ir.prim.And)
+        lower, upper = condition.a, condition.b
+        assert isinstance(lower, tvm.ir.prim.GE) and isinstance(upper, tvm.ir.prim.LT)
+        assert lower.a.same_as(thread) and upper.a.same_as(thread)
+        lo, hi = int(lower.b), int(upper.b)
+        assert 0 <= lo < hi <= int(launch.args[1])
+        branches.append((lo, hi, branch.then_case))
+    return sorted(branches, key=lambda branch: branch[0])
 
 
 def _role_body(func, first_thread):
@@ -111,9 +136,16 @@ def _role_body(func, first_thread):
 
 
 def _assert_stmt_order(root, *statements):
-    """Require direct siblings in one lexical scope, in execution order."""
+    """Require siblings in one lexical scope, through transparent sequences."""
+
+    def flatten(stmt):
+        if isinstance(stmt, tvm.ir.SeqStmt):
+            return [child for item in stmt.seq for child in flatten(item)]
+        return [stmt]
+
     for seq in collect_nodes(root, tirx.SeqStmt):
-        positions = [next((i for i, child in enumerate(seq.seq) if child.same_as(stmt)), -1) for stmt in statements]
+        children = flatten(seq)
+        positions = [next((i for i, child in enumerate(children) if child.same_as(stmt)), -1) for stmt in statements]
         if positions and positions[0] >= 0 and all(a < b for a, b in zip(positions, positions[1:])):
             return
     raise AssertionError("Expected ordered siblings in one SeqStmt")
@@ -125,10 +157,15 @@ def _call_stmt(root, call):
 
 
 def _assert_versioned_access(root, buffer, version):
-    loads = [load for load in collect_nodes(root, tirx.BufferLoad) if load.buffer.data.same_as(buffer.data)]
+    loads = [load for load in collect_nodes(root, tvm.ir.TensorLoad) if load.source.same_as(buffer)]
+    loads.extend(
+        tvm.ir.TensorLoad(region.source, [axis.begin for axis in region.region])
+        for region in collect_nodes(root, tvm.ir.TensorRegion)
+        if region.source.same_as(buffer)
+    )
     assert loads, f"Missing accesses to {buffer.name}"
     for load in loads:
-        assert len(load.indices) == len(load.buffer.shape)
+        assert len(load.indices) == len(load.source.ty.shape)
         tvm.ir.assert_structural_equal(load.indices[0], version)
     return loads
 
@@ -138,43 +175,88 @@ def _copy_region_loads(call):
     loads = []
     for region in call.args:
         assert isinstance(region, tirx.Call) and region.op.same_as(tvm.ir.Op.get("tl.region"))
-        assert isinstance(region.args[0], tirx.BufferLoad)
-        loads.append(region.args[0])
+        assert isinstance(region.args[0], tvm.ir.TensorRegion)
+        native = region.args[0]
+        loads.append(tvm.ir.TensorLoad(native.source, [axis.begin for axis in native.region]))
     return loads
 
 
-def _assert_counter_updates(root, buffer, updates):
-    assert isinstance(root, tirx.SeqStmt)
-    stores = [store for store in collect_nodes(root, tirx.BufferStore) if store.buffer.data.same_as(buffer.data)]
-    initializers = [store for store in stores if isinstance(store.value, tirx.IntImm) and int(store.value) == 0]
-    assert len(initializers) == 1 and len(stores) == updates + 1
+def _copy_row_trace(func, first_thread):
+    role = _role_body(func, first_thread)
+    (loop,) = collect_nodes(role, tvm.ir.For)
+    source = _buffer(func, "A")
+    analyzer = tvm.sym.Analyzer()
+    result = {}
+
+    def evaluate(expression, clock):
+        value = analyzer.simplify(tirx.stmt_functor.substitute(expression, {loop.var: tvm.ir.const(clock, loop.var.ty)}))
+        assert isinstance(value, tvm.ir.IntImm)
+        return int(value)
+
+    def visit(stmt, clock):
+        if not collect_calls(stmt, op="tl.tileop.copy"):
+            return
+        if isinstance(stmt, tvm.ir.SeqStmt):
+            for child in stmt.seq:
+                visit(child, clock)
+        elif isinstance(stmt, tvm.ir.RegionStmt):
+            visit(stmt.body, clock)
+        elif isinstance(stmt, tvm.ir.If):
+            branch = stmt.then_case if evaluate(stmt.condition, clock) else stmt.else_case
+            if branch is not None:
+                visit(branch, clock)
+        elif isinstance(stmt, tvm.ir.Evaluate):
+            source_load, destination = _copy_region_loads(stmt.value)
+            if source_load.source.same_as(source):
+                result.setdefault(str(destination.source.name), []).append(evaluate(source_load.indices[0], clock))
+        else:
+            raise AssertionError(f"Unexpected copy-trace statement: {type(stmt).__name__}")
+
+    for clock in range(int(loop.begin), int(loop.end), int(loop.step)):
+        visit(loop.body, clock)
+    return result
+
+
+def _phase(func, pipeline="buf"):
+    return tvm.ir.TensorLoad(_buffer(func, "ws_phase_" + pipeline), [0])
+
+
+def _assert_counter_updates(root, buffer, updates, *, initializer_root=None):
+    all_stores = [
+        store
+        for store in collect_nodes(root if initializer_root is None else initializer_root, tvm.ir.TensorStore)
+        if store.dest.same_as(buffer)
+    ]
+    initializers = [store for store in all_stores if isinstance(store.value, tvm.ir.IntImm) and int(store.value) == 0]
+    assert len(initializers) == 1
     initializer = initializers[0]
-    assert initializer.value.dtype == buffer.dtype
-    (position,) = [i for i, stmt in enumerate(root.seq) if stmt.same_as(initializer)]
-    for stmt in root.seq[:position]:
-        assert not any(load.buffer.data.same_as(buffer.data) for load in collect_nodes(stmt, tirx.BufferLoad))
-    expected = tirx.BufferLoad(buffer, [0]) + 1
+    assert str(initializer.value.ty) == str(buffer.ty.dtype)
+    stores = [store for store in collect_nodes(root, tvm.ir.TensorStore) if store.dest.same_as(buffer) and not store.same_as(initializer)]
+    assert len(stores) == updates
+    expected = tvm.ir.TensorLoad(buffer, [0]) + 1
     for store in stores:
         assert len(store.indices) == 1 and int(store.indices[0]) == 0
-        if not store.same_as(initializer):
-            tvm.ir.assert_structural_equal(store.value, expected)
+        tvm.ir.assert_structural_equal(store.value, expected)
     return initializer
 
 
 def _assert_phase_counter(func, role, *, pipeline="buf", updates=1):
-    counter = _buffer(role, pipeline + "_phase")
-    assert counter.scope() == "local" and counter.dtype == "int32" and [int(dim) for dim in counter.shape] == [1]
-    _assert_counter_updates(role, counter, updates)
+    counter = _buffer(func, "ws_phase_" + pipeline)
+    assert counter.ty.scope.name == "local" and str(counter.ty.dtype) == "int64" and [int(dim) for dim in counter.ty.shape] == [1]
+    _assert_counter_updates(role, counter, updates, initializer_root=func.body)
     barriers = [_barrier(func, pipeline + suffix) for suffix in ("_full", "_empty")]
-    waits = [call for barrier in barriers for call in _barrier_calls(role, "tl.mbarrier_wait_parity", barrier)]
+    waits = []
+    for barrier in barriers:
+        phase = (_phase(func, pipeline) // barrier.depth % 2).astype("int32")
+        for call in _barrier_calls(role, "tl.mbarrier_wait_parity", barrier):
+            waits.append(call)
+            tvm.ir.assert_structural_equal(call.args[0], barrier.load(_phase(func, pipeline) % barrier.depth))
+            tvm.ir.assert_structural_equal(call.args[1], 1 - phase if barrier.offset else phase)
     assert waits
-    for call in waits:
-        tvm.ir.assert_structural_equal(call.args[0].indices[0], tirx.BufferLoad(counter, [0]) % int(call.args[0].buffer.shape[0]))
 
 
 def _assert_no_undefined_vars(func):
-    bound = [*func.params, *(buf.data for buf in func.buffer_map.values())]
-    assert not tirx.analysis.undefined_vars(func.body, bound)
+    assert not tirx.analysis.undefined_vars(func.body, list(func.params))
 
 
 def _smem_pipeline_kernel(
@@ -313,7 +395,7 @@ def test_buffer_multi_versioning():
     assert [int(dim) for dim in shared.shape] == [3, 64, 64]
     for first_thread in (0, 128):
         (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
-        loads = _assert_versioned_access(loop.body, shared, loop.loop_var % 3)
+        loads = _assert_versioned_access(loop.body, shared, _phase(func) % 3)
         for load in loads:
             assert [int(index) for index in load.indices[1:]] == [0, 0]
 
@@ -321,8 +403,7 @@ def test_buffer_multi_versioning():
 @tilelang.testing.requires_cuda
 def test_barrier_counts_tma_and_threads():
     func = _materialize(_smem_pipeline_kernel())
-    # TMA's elected arrive and all 128 synchronous consumer threads.
-    _barrier(func, "buf_full", [1, 1])
+    _barrier(func, "buf_full", [32, 32])
     _barrier(func, "buf_empty", [128, 128])
 
 
@@ -331,11 +412,12 @@ def test_tma_copy_conversion_carries_barrier():
     func = _materialize(_smem_pipeline_kernel())
     producer = _role_body(func, 0)
     (loop,) = collect_nodes(producer, tirx.For)
-    (copy,) = collect_calls(producer, op="tl.tileop.tma_copy")
+    (copy,) = collect_calls(producer, op="tl.tileop.copy")
     full = _barrier(func, "buf_full")
-    tvm.ir.assert_structural_equal(copy.annotations["barrier"], tirx.BufferLoad(full, [loop.loop_var % 2]))
-    assert isinstance(copy.annotations["emit_arrive"], tirx.IntImm) and int(copy.annotations["emit_arrive"]) == 1
-    assert not _barrier_calls(func, "tirx.ptx_arrive_barrier", full)
+    tvm.ir.assert_structural_equal(copy.attrs["barrier"], full.load(_phase(func) % 2))
+    assert copy.attrs["is_tma_copy"] and int(copy.attrs["leader_scope_threads"]) == 32
+    assert "emit_arrive" not in copy.attrs
+    assert len(_barrier_calls(loop.body, "tl.mbarrier_arrive", full)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -389,14 +471,17 @@ def test_guarded_tma_copy_keeps_unconditional_syncs():
     full = _barrier(func, "buf_full", [32, 32])
     producer = _role_body(func, 0)
     (loop,) = collect_nodes(producer, tirx.For)
-    (copy,) = collect_calls(loop.body, op="tl.tileop.tma_copy")
-    assert "emit_arrive" not in copy.annotations
-    (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
-    tvm.ir.assert_structural_equal(guard.condition, loop.loop_var < 3)
-    assert_call_count(guard.then_case, op="tl.tileop.tma_copy", count=1)
+    (copy,) = collect_calls(loop.body, op="tl.tileop.copy")
+    assert "emit_arrive" not in copy.attrs
+    (guard,) = [guard for guard in collect_nodes(loop.body, tvm.ir.If) if collect_calls(guard.then_case, op="tl.tileop.copy")]
+    tvm.ir.assert_structural_equal(guard.condition, loop.var < 3)
+    assert_call_count(guard.then_case, op="tl.tileop.copy", count=1)
     (wait,) = collect_calls(loop.body, op="tl.mbarrier_wait_parity")
-    (arrive,) = _barrier_calls(loop.body, "tirx.ptx_arrive_barrier", full)
-    _assert_stmt_order(loop.body, _call_stmt(loop.body, wait), guard, _call_stmt(loop.body, arrive))
+    (arrive,) = _barrier_calls(loop.body, "tl.mbarrier_arrive", full)
+    (acquire,) = [branch for branch in collect_nodes(loop.body, tvm.ir.If) if collect_calls(branch.then_case, op="tl.mbarrier_wait_parity")]
+    _assert_stmt_order(loop.body, acquire, guard, _call_stmt(loop.body, arrive))
+    assert not collect_calls(guard, op="tl.mbarrier_arrive")
+    assert _call_stmt(acquire, wait) is not None
 
 
 @tilelang.testing.requires_cuda
@@ -451,7 +536,7 @@ def test_cp_async_with_sync_work_keeps_both_arrives():
     full = _barrier(func, "buf_full", [64, 64])
     producer = _role_body(func, 0)
     assert len(_barrier_calls(producer, "tl.ptx_cp_async_barrier_noinc", full)) == 1
-    assert len(_barrier_calls(producer, "tirx.ptx_arrive_barrier", full)) == 1
+    assert len(_barrier_calls(producer, "tl.mbarrier_arrive", full)) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -507,10 +592,10 @@ def test_prefer_instruction_cp_async_selects_cp_async_atom():
     func = _materialize(kernel)
     producer = _role_body(func, 0)
     (copy,) = collect_calls(producer, op="tl.tileop.copy")
-    assert int(copy.annotations["no_implicit_async_commit_wait"]) == 1
+    assert int(copy.attrs["no_implicit_async_commit_wait"]) == 1
     full = _barrier(func, "buf_full", [32, 32])
     assert len(_barrier_calls(producer, "tl.ptx_cp_async_barrier_noinc", full)) == 1
-    assert not _barrier_calls(func, "tirx.ptx_arrive_barrier", full)
+    assert not _barrier_calls(func, "tl.mbarrier_arrive", full)
 
 
 @tilelang.testing.requires_cuda
@@ -527,10 +612,10 @@ def test_consumer_wait_parity():
         (loop,) = collect_nodes(role, tirx.For)
         barrier = _barrier(func, name)
         (wait,) = _barrier_calls(loop.body, "tl.mbarrier_wait_parity", barrier)
-        parity = tirx.bitwise_and(loop.loop_var // 2, 1)
+        parity = (_phase(func) // 2 % 2).astype("int32")
         if first_thread == 0:
-            parity = tirx.bitwise_xor(parity, 1)
-        tvm.ir.assert_structural_equal(wait.args, tvm.runtime.convert([tirx.BufferLoad(barrier, [loop.loop_var % 2]), parity]))
+            parity = 1 - parity
+        tvm.ir.assert_structural_equal(wait.args, tvm.ffi.Array([barrier.load(_phase(func) % 2), parity]))
 
 
 @tilelang.testing.requires_cuda
@@ -540,8 +625,11 @@ def test_uniform_stages_cancel():
     func = _materialize(_smem_pipeline_kernel(consumer_wait_stage=1, consumer_release_stage=1))
     for first_thread in (0, 128):
         (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
-        assert loop.kind == tirx.ForKind.SERIAL and int(loop.min) == 0 and int(loop.extent) == 4
-        assert not collect_nodes(loop.body, tirx.IfThenElse)
+        assert loop.kind == tirx.ForKind.DEFAULT and int(loop.begin) == 0 and int(loop.end - loop.begin) == 4
+        guards = collect_nodes(loop.body, tvm.ir.If)
+        assert len(guards) == (1 if first_thread == 0 else 0)
+        if guards:
+            tvm.ir.assert_structural_equal(guards[0].condition, _phase(func) >= 2)
 
 
 def _stage_offset_kernel(extent):
@@ -605,43 +693,34 @@ def _stage_offset_kernel(extent):
 
 
 @tilelang.testing.requires_cuda
-def test_stage_offset_unrolls_prologue_epilogue():
-    """The shifted body unrolls into an explicit prologue step, a
-    steady-state loop with no per-iteration boundary checks, and an
-    explicit epilogue step."""
+def test_stage_offset_covers_prologue_steady_state_and_epilogue():
+    """A native guarded clock executes every stage's logical iteration once."""
     func = _materialize(_stage_offset_kernel(4))
     producer = _role_body(func, 0)
     (loop,) = collect_nodes(producer, tirx.For)
-    assert loop.kind == tirx.ForKind.SERIAL and int(loop.min) == 1 and int(loop.extent) == 3
-    assert not collect_nodes(loop.body, tirx.IfThenElse)
-    _assert_versioned_access(loop.body, _buffer(func, "C_shared"), (loop.loop_var - 1) % 2)
-    prologue, epilogue = [stmt for stmt in producer.seq if isinstance(stmt, tirx.IfThenElse)]
-    _assert_stmt_order(producer, prologue, loop, epilogue)
-    for step, name, index, parity in ((prologue, "a_empty", 0, 1), (epilogue, "c_empty", 1, 0)):
-        assert isinstance(step.condition, tirx.IntImm) and int(step.condition) == 1
-        barrier = _barrier(func, name)
-        (wait,) = _barrier_calls(step.then_case, "tl.mbarrier_wait_parity", barrier)
-        tvm.ir.assert_structural_equal(wait.args, tvm.runtime.convert([tirx.BufferLoad(barrier, [index]), tirx.IntImm("int32", parity)]))
+    assert loop.kind == tirx.ForKind.DEFAULT and int(loop.begin) == 0 and int(loop.end) == 5
+    _assert_versioned_access(loop.body, _buffer(func, "C_shared"), _phase(func, "c") % 2)
+    assert _copy_row_trace(func, 0) == {str(_buffer(func, name).name): [0, 32, 64, 96] for name in ("A_shared", "C_shared")}
+    for first_thread in (0, 128):
+        for pipeline in ("a", "c"):
+            _assert_phase_counter(func, _role_body(func, first_thread), pipeline=pipeline)
 
 
 @tilelang.testing.requires_cuda
-def test_short_static_loop_folds_to_prologue_epilogue():
-    """A loop shorter than its stage shift: the unrolled prologue and
-    epilogue steps cover every iteration under constant bounds, and the
-    pipeline's Simplify pass folds them away together with the empty
-    steady-state loop."""
-    func = _materialize(_stage_offset_kernel(1))
+@pytest.mark.parametrize("extent", [0, 1])
+def test_short_static_loop_does_not_execute_inactive_stages(extent):
+    func = _materialize(_stage_offset_kernel(extent))
+    expected = {str(_buffer(func, name).name): [0] for name in ("A_shared", "C_shared")} if extent else {}
+    assert _copy_row_trace(func, 0) == expected
     mod = tilelang.transform.Simplify()(tvm.IRModule.from_expr(func))
-    producer = _role_body(mod["main"], 0)
-    for name in ("a_empty", "c_empty"):
-        assert len(_barrier_calls(producer, "tl.mbarrier_wait_parity", _barrier(mod["main"], name))) == 1
-    assert not collect_nodes(producer, tirx.For)
-    assert not collect_nodes(producer, tirx.IfThenElse)
+    assert tvm.tirx.analysis.check_well_formed(mod)
+    if not extent:
+        assert not collect_calls(mod["main"], op="tl.tileop.copy")
 
 
 @tilelang.testing.requires_cuda
 def test_mismatched_pair_stages_rejected():
-    with pytest.raises(Exception, match="pairs must share one stage"):
+    with pytest.raises(ValueError, match="Synchronization\\ closes\\ an\\ absent\\ span\\ or\\ changes\\ its\\ stage"):
         _materialize(_smem_pipeline_kernel(consumer_wait_stage=0, consumer_release_stage=1))
 
 
@@ -651,7 +730,7 @@ def test_missing_commit_rejected():
     def drop_commit(bodies):
         bodies["Producer"] = [e for e in bodies["Producer"] if not isinstance(e, T.WSSync) or e.kind.same_as(T.WSSyncKind.PRODUCER_ACQUIRE)]
 
-    with pytest.raises(Exception, match="has no producer"):
+    with pytest.raises(ValueError, match="Every\\ acquired\\ pipeline\\ span\\ must\\ be\\ closed\\ within\\ its\\ role\\ iteration"):
         _materialize(_smem_pipeline_kernel(schedule_edit=drop_commit))
 
 
@@ -661,7 +740,7 @@ def test_unclosed_span_rejected():
     def extra_acquire(bodies):
         bodies["Producer"].append(T.WSSync.producer_acquire("buf"))
 
-    with pytest.raises(Exception, match="acquired at the end of a scope body"):
+    with pytest.raises(ValueError, match="Every\\ acquired\\ pipeline\\ span\\ must\\ be\\ closed\\ within\\ its\\ role\\ iteration"):
         _materialize(_smem_pipeline_kernel(schedule_edit=extra_acquire))
 
 
@@ -691,7 +770,7 @@ def test_role_both_producer_and_consumer_rejected():
         ]
         bodies["Consumer"] = ["copy_out"]
 
-    with pytest.raises(Exception, match="both a producer and a consumer"):
+    with pytest.raises(ValueError, match="Each\\ pipeline\\ requires\\ two\\ distinct\\ producer\\ and\\ consumer\\ roles"):
         _materialize(_smem_pipeline_kernel(schedule_edit=self_handshake))
 
 
@@ -709,7 +788,7 @@ def test_missing_op_rejected():
     def add_ghost_op(bodies):
         bodies["Producer"].append("ghost_op")
 
-    with pytest.raises(Exception, match="no statement in the kernel carries this id"):
+    with pytest.raises(ValueError, match="Operation\\ ghost_op\\ does\\ not\\ belong\\ to\\ scope\\ loop_k"):
         _materialize(_smem_pipeline_kernel(schedule_edit=add_ghost_op))
 
 
@@ -718,7 +797,7 @@ def test_unscheduled_statement_rejected():
     def drop_consumer_op(bodies):
         bodies["Consumer"] = [e for e in bodies["Consumer"] if e != "copy_frag"]
 
-    with pytest.raises(Exception, match="carries no ws op id|never places it"):
+    with pytest.raises(ValueError, match="Unplaced\\ statement\\ without\\ tl\\.ws_op_id:\\ Evaluate"):
         _materialize(_smem_pipeline_kernel(schedule_edit=drop_consumer_op, kernel_edit="unannotated_consumer"))
 
 
@@ -791,17 +870,18 @@ def test_empty_defs_op_duplicated_across_roles():
             T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
-    probe = _buffer(func, "probe")
-    # The same fill node is shared by both role bodies; query each role's
-    # lexical occurrence rather than counting unique nodes in the function.
+    probes = []
     for first_thread in (0, 128):
         role = _role_body(func, first_thread)
+        probe = _buffer(func, "probe", used_in=role)
+        probes.append(probe)
         assert_call_count(role, op="tl.tileop.fill", count=1)
-        (store,) = [store for store in collect_nodes(role, tirx.BufferStore) if store.buffer.data.same_as(probe.data)]
+        (store,) = [store for store in collect_nodes(role, tirx.BufferStore) if store.dest.same_as(probe)]
         (loop,) = [loop for loop in collect_nodes(role, tirx.For) if loop.kind == tirx.ForKind.PARALLEL]
-        assert int(loop.extent) == 64
-        tvm.ir.assert_structural_equal(store.indices, tvm.runtime.convert([loop.loop_var]))
+        assert int(loop.end - loop.begin) == 64
+        tvm.ir.assert_structural_equal(store.indices, tvm.ffi.Array([loop.var]))
         tvm.ir.assert_structural_equal(store.value, tirx.BufferLoad(probe, store.indices) + tirx.FloatImm("float16", 1.0))
+    assert not probes[0].same_as(probes[1])
 
 
 @tilelang.testing.requires_cuda
@@ -863,17 +943,18 @@ def test_raw_ptx_cp_async_is_opaque():
     func = _materialize(kernel)
     producer = _role_body(func, 0)
     assert_call_count(func, op="tl.ptx_cp_async_barrier_noinc", count=0)
-    assert_call_count(producer, op="tirx.ptx_commit_group", count=1)
-    (wait,) = collect_calls(producer, op="tirx.ptx_wait_group")
-    assert len(wait.args) == 1 and int(wait.args[0]) == 0
+    assert_call_count(producer, op="tirx.ptx.cp_async_commit_group", count=1)
+    (wait,) = collect_calls(producer, op="tirx.ptx.cp_async_wait_group")
+    assert len(wait.args) == 4 and int(wait.args[0]) == 0
+    assert [arg.value for arg in wait.args[1:]] == ["async", "wait_group", ""]
     full = _barrier(func, "buf_full", [32, 32])
     _barrier(func, "buf_empty", [128, 128])
-    assert len(_barrier_calls(producer, "tirx.ptx_arrive_barrier", full)) == 1
+    assert len(_barrier_calls(producer, "tl.mbarrier_arrive", full)) == 1
     shared = _buffer(func, "B_shared")
     for first_thread in (0, 128):
         (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
-        for load in _assert_versioned_access(loop.body, shared, loop.loop_var % 2):
-            tvm.ir.assert_structural_equal(load.indices, tvm.runtime.convert([loop.loop_var % 2, tirx.IntImm("int32", 0)]))
+        for load in _assert_versioned_access(loop.body, shared, _phase(func) % 2):
+            tvm.ir.assert_structural_equal(load.indices, tvm.ffi.Array([_phase(func) % 2, tvm.ir.const(0)]))
 
 
 def _guarded_scope_kernel(guard_on_pipeline_buffer=False):
@@ -942,7 +1023,7 @@ def test_guarded_scope_loop():
     flag = _buffer(func, "flag")
     for first_thread in (0, 128):
         role = _role_body(func, first_thread)
-        (guard,) = collect_nodes(role, tirx.IfThenElse)
+        (guard,) = [branch for branch in collect_nodes(role, tvm.ir.If) if collect_nodes(branch.then_case, tvm.ir.For)]
         tvm.ir.assert_structural_equal(guard.condition, tirx.BufferLoad(flag, [0]) > 0)
         assert len(collect_nodes(guard.then_case, tirx.For)) == 1
 
@@ -1047,34 +1128,40 @@ def test_while_scope_counter_phases():
     state ops are duplicated per role, and each role re-evaluates the
     uniform condition."""
     func = _materialize(_while_scope_kernel())
-    linear = _buffer(func, "sched_linear_idx")
-    current = _buffer(func, "sched_current_iter")
+    states = []
     for first_thread in (0, 128):
         role = _role_body(func, first_thread)
+        linear = _buffer(func, "sched_linear_idx", used_in=role)
+        current = _buffer(func, "sched_current_iter", used_in=role)
+        states.append(linear)
         (loop,) = collect_nodes(role, tirx.While)
         tvm.ir.assert_structural_equal(loop.condition, tirx.BufferLoad(linear, [0]) < 4)
         _assert_counter_updates(role, current, 1)
         _assert_phase_counter(func, role)
+    assert not states[0].same_as(states[1])
 
 
 @tilelang.testing.requires_cuda
-def test_while_scope_stage_offset_prologue_epilogue():
-    """A stage shift under a while scope unrolls into an explicit
-    prologue step (the early-stage entries under the loop condition) and
-    an epilogue step (the late-stage entries, guarded by the completed
-    trip count) instead of per-iteration boundary guards."""
+def test_while_scope_stage_offset_uses_independent_control_state():
+    """Each delayed stage advances its own scheduler state and drains it."""
     func = _materialize(_while_scope_kernel(shifted=True))
     consumer = _role_body(func, 128)
     (loop,) = collect_nodes(consumer, tirx.While)
-    prologue, drain = [stmt for stmt in consumer.seq if isinstance(stmt, tirx.IfThenElse)]
-    _assert_stmt_order(consumer, prologue, loop, drain)
-    tvm.ir.assert_structural_equal(prologue.condition, loop.condition)
-    trips = _buffer(consumer, "loop_wave_trips")
-    initializer = _assert_counter_updates(consumer, trips, 2)
-    _assert_stmt_order(consumer, initializer, prologue, loop, drain)
-    tvm.ir.assert_structural_equal(drain.condition, tirx.LE(tirx.IntImm("int32", 1), tirx.BufferLoad(trips, [0])))
-    for part in (prologue.then_case, loop.body):
-        assert len([store for store in collect_nodes(part, tirx.BufferStore) if store.buffer.data.same_as(trips.data)]) == 1
+    linear = _buffer(func, "sched_linear_idx", used_in=consumer)
+    delayed = _buffer(consumer, "ws_state_loop_wave_Consumer_1_sched_linear_idx")
+    assert not delayed.same_as(linear)
+    tvm.ir.assert_structural_equal(
+        loop.condition,
+        tvm.ir.prim.Or(tvm.ir.TensorLoad(linear, [0]) < 4, tvm.ir.TensorLoad(delayed, [0]) < 4),
+    )
+    clock = _buffer(consumer, "ws_clock_loop_wave_Consumer")
+    _assert_counter_updates(consumer, clock, 1)
+    for pipeline in ("buf", "cbuf"):
+        _assert_phase_counter(func, consumer, pipeline=pipeline)
+    for state in (linear, delayed):
+        stores = [store for store in collect_nodes(loop.body, tvm.ir.TensorStore) if store.dest.same_as(state)]
+        assert len(stores) == 1
+        tvm.ir.assert_structural_equal(stores[0].value, tvm.ir.TensorLoad(state, [0]) + 4)
 
 
 @tilelang.testing.requires_cuda
@@ -1186,7 +1273,7 @@ def test_distinct_guards_stay_distinct():
     guards = collect_nodes(loop.body, tirx.IfThenElse)
     assert len(guards) == 2
     for guard, bound in zip(guards, (1, 2)):
-        tvm.ir.assert_structural_equal(guard.condition, loop.loop_var < bound)
+        tvm.ir.assert_structural_equal(guard.condition, loop.var < bound)
         assert_call_count(guard.then_case, op="tl.tileop.copy", count=1)
     _assert_stmt_order(loop.body, *guards)
 
@@ -1243,9 +1330,9 @@ def test_ws_op_wrapper_groups_statements():
     read_src, read_dst = _copy_region_loads(read)
     write_src, write_dst = _copy_region_loads(write)
     shared, frag, output = (_buffer(func, name) for name in ("A_shared", "A_frag", "B"))
-    assert read_src.buffer.data.same_as(shared.data) and read_dst.buffer.data.same_as(frag.data)
-    assert write_src.buffer.data.same_as(frag.data) and write_dst.buffer.data.same_as(output.data)
-    tvm.ir.assert_structural_equal(read_src.indices[0], loop.loop_var % 2)
+    assert read_src.source.same_as(shared) and read_dst.source.same_as(frag)
+    assert write_src.source.same_as(frag) and write_dst.source.same_as(output)
+    tvm.ir.assert_structural_equal(read_src.indices[0], _phase(func) % 2)
     _assert_stmt_order(loop.body, _call_stmt(loop.body, read), _call_stmt(loop.body, write))
 
 
@@ -1254,7 +1341,7 @@ def test_unannotated_global_store_rejected():
     """A statement whose only effect is a global write must be placed by
     the schedule like any other op; unannotated it would silently vanish
     from every role body."""
-    with pytest.raises(Exception, match="carries no ws op id"):
+    with pytest.raises(ValueError, match="Unplaced\\ statement\\ without\\ tl\\.ws_op_id:\\ TensorStore"):
         _materialize(_smem_pipeline_kernel(kernel_edit="unannotated_global_store"))
 
 
@@ -1315,7 +1402,7 @@ def _bind_guard_kernel(bind_in_consumer):
 def test_var_use_requires_defining_op_in_role():
     """A guard using a var whose defining Bind op runs only in the other
     role would reference an undefined variable in the emitted branch."""
-    with pytest.raises(Exception, match="does not run earlier in that role"):
+    with pytest.raises(ValueError, match="A\\ scalar\\ definition\\ must\\ be\\ replicated\\ into\\ every\\ role\\ that\\ uses\\ it"):
         _materialize(_bind_guard_kernel(bind_in_consumer=False))
     # Placing the Bind in both roles (it has no pipeline operands) is legal.
     func = _materialize(_bind_guard_kernel(bind_in_consumer=True))
@@ -1324,7 +1411,7 @@ def test_var_use_requires_defining_op_in_role():
         role = _role_body(func, first_thread)
         (loop,) = collect_nodes(role, tirx.For)
         (bind,) = collect_nodes(loop.body, tirx.Bind)
-        assert isinstance(bind.value, tirx.BufferLoad) and bind.value.buffer.data.same_as(_buffer(func, "A").data)
+        assert isinstance(bind.value, tirx.BufferLoad) and bind.value.source.same_as(_buffer(func, "A"))
         if first_thread == 128:
             (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
             assert isinstance(guard.condition, tirx.GT) and guard.condition.a.same_as(bind.var)
@@ -1392,30 +1479,21 @@ def test_bind_under_stage_shift_freshens_per_slice():
                 T.copy(C_shared, C_frag, annotations={T.WSID: "read_c"})
 
     func = _materialize(kernel)
-    assert tirx.analysis.verify_ssa(func)
     _assert_no_undefined_vars(func)
     producer = _role_body(func, 0)
-    binds = collect_nodes(producer, tirx.Bind)
-    assert len(binds) == 2 and not binds[0].var.same_as(binds[1].var)
-    for bind in binds:
-        assert isinstance(bind.value, tirx.BufferLoad) and bind.value.buffer.data.same_as(_buffer(func, "A").data)
+    scalar = _buffer(producer, "ws_scalar_loop_k_Producer_v")
+    (store,) = [store for store in collect_nodes(producer, tvm.ir.TensorStore) if store.dest.same_as(scalar)]
+    assert isinstance(store.value, tvm.ir.TensorLoad) and store.value.source.same_as(_buffer(func, "A"))
     guards = [guard for guard in collect_nodes(producer, tirx.IfThenElse) if isinstance(guard.condition, tirx.GT)]
-    assert len(guards) == 2
-    for bind, guard in zip(binds, guards):
-        assert guard.condition.a.same_as(bind.var)
-    # The prologue Bind is emitted under a constant-true step guard. Its
-    # enclosing step executes before the source guard using that Bind.
-    (prologue,) = [
-        stmt
-        for stmt in producer.seq
-        if isinstance(stmt, tirx.IfThenElse)
-        and isinstance(stmt.condition, tirx.IntImm)
-        and int(stmt.condition) == 1
-        and any(bind.same_as(binds[0]) for bind in collect_nodes(stmt.then_case, tirx.Bind))
-    ]
-    _assert_stmt_order(producer, prologue, guards[0])
+    assert len(guards) == 1
+    tvm.ir.assert_structural_equal(guards[0].condition.a, tvm.ir.TensorLoad(scalar, [0]))
     (loop,) = collect_nodes(producer, tirx.For)
-    _assert_stmt_order(loop.body, binds[1], guards[1])
+    (definition_guard,) = [
+        branch for branch in loop.body.seq if any(node.same_as(store) for node in collect_nodes(branch, tvm.ir.TensorStore))
+    ]
+    (use_guard,) = [branch for branch in loop.body.seq if any(node.same_as(guards[0]) for node in collect_nodes(branch, tvm.ir.If))]
+    tvm.ir.assert_structural_equal(definition_guard.condition, use_guard.condition)
+    _assert_stmt_order(loop.body, definition_guard, use_guard)
 
 
 @tilelang.testing.requires_cuda
@@ -1537,9 +1615,21 @@ def test_versions_reshape_and_view_aliases_by_storage():
         _barrier(func, "shared_pipe_full")
         shared = _buffer(func, "shared")
         assert [int(dim) for dim in shared.shape] == [2, 64]
-        for first_thread in (0, 128):
+        (declaration,) = [
+            binding
+            for binding in collect_nodes(func, tvm.ir.Bind)
+            if isinstance(binding.value, tvm.ir.Call)
+            and binding.value.op.name == "tirx.decl_tensor"
+            and binding.var.ty.scope.name.startswith("shared")
+        ]
+        alias = declaration.var
+        assert [int(dim) for dim in alias.ty.shape] == [2, 8, 8]
+        (origin,) = collect_nodes(declaration.value, tvm.ir.TensorLoad)
+        assert origin.source.same_as(shared)
+        assert all(int(index) == 0 for index in origin.indices)
+        for first_thread, tensor in ((0, alias), (128, shared)):
             (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
-            _assert_versioned_access(loop.body, shared, loop.loop_var % 2)
+            _assert_versioned_access(loop.body, tensor, _phase(func, "shared_pipe") % 2)
 
 
 @tilelang.testing.requires_cuda
@@ -1590,7 +1680,7 @@ def test_duplicated_op_global_write_rejected():
                 with T.ws_op("mark_global"):
                     B[0, 0] = T.float16(1)
 
-    with pytest.raises(Exception, match="every role would repeat the write"):
+    with pytest.raises(ValueError, match="Operation\\ mark_global\\ cannot\\ be\\ duplicated\\ across\\ roles"):
         _materialize(kernel)
 
 
@@ -1647,16 +1737,13 @@ def test_async_copy_in_consumer_role_rejected():
 
 @tilelang.testing.requires_cuda
 def test_kernel_metadata_attrs_preserved():
-    """Kernel-level metadata AttrStmts (T.use_swizzle,
-    T.annotate_min_blocks_per_sm) wrap the statements that follow them:
-    the pass schedules through them and re-wraps the rebuilt body."""
+    """Kernel metadata remains attached to the enclosing native scope."""
     func = _materialize(_smem_pipeline_kernel(kernel_edit="metadata_attrs"))
-    (swizzle,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "threadblock_swizzle_pattern"]
-    (min_blocks,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "tl.min_blocks_per_sm"]
-    (custom,) = [attr for attr in collect_nodes(func, tirx.AttrStmt) if attr.attr_key == "kCustomWarpSpecialization"]
-    assert swizzle.body.same_as(min_blocks) and min_blocks.body.same_as(custom)
-    assert int(min_blocks.value) == 2
-    assert_call_count(func, op="tl.tileop.tma_copy", count=1)
+    (scope,) = [region for region in collect_nodes(func, tvm.ir.RegionStmt) if "threadblock_swizzle_pattern" in region.attrs]
+    assert int(scope.attrs["tl.min_blocks_per_sm"]) == 2
+    assert scope.attrs["warp_specialize"]
+    assert len([call for call in collect_calls(scope, op="tl.tileop.copy") if call.attrs.get("is_tma_copy", False)]) == 1
+    assert len([region for region in collect_nodes(scope, tvm.ir.RegionStmt) if region.attrs.get("tl.ws_concurrent", False)]) == 1
 
 
 @tilelang.testing.requires_cuda
@@ -1712,11 +1799,11 @@ def test_nonzero_loop_base_phase():
     shared = _buffer(func, "A_shared")
     for first_thread in (0, 128):
         (loop,) = collect_nodes(_role_body(func, first_thread), tirx.For)
-        assert int(loop.min) == 3 and int(loop.extent) == 4
-        version = (loop.loop_var - 3) % 2
+        assert int(loop.begin) == 0 and int(loop.end) == 4
+        version = _phase(func) % 2
         _assert_versioned_access(loop.body, shared, version)
-        for wait in collect_calls(loop.body, op="tl.mbarrier_wait_parity"):
-            tvm.ir.assert_structural_equal(wait.args[0].indices[0], version)
+        _assert_phase_counter(func, _role_body(func, first_thread))
+    assert _copy_row_trace(func, 0) == {str(shared.name): [0, 64, 128, 192]}
 
 
 @tilelang.testing.requires_cuda
@@ -1733,7 +1820,7 @@ def test_release_before_use_rejected():
             "copy_out",
         ]
 
-    with pytest.raises(Exception, match="outside an open span"):
+    with pytest.raises(ValueError, match="Operation\\ copy_frag\\ accesses\\ buf\\ outside\\ an\\ acquired\\ span"):
         _materialize(_smem_pipeline_kernel(schedule_edit=release_early))
 
 
@@ -1750,7 +1837,7 @@ def test_unbracketed_producer_rejected():
             T.WSSync.producer_commit("buf"),
         ]
 
-    with pytest.raises(Exception, match="outside an open span"):
+    with pytest.raises(ValueError, match="Operation\\ copy_in\\ accesses\\ buf\\ outside\\ an\\ acquired\\ span"):
         _materialize(_smem_pipeline_kernel(schedule_edit=op_outside_bracket))
 
 
@@ -1768,7 +1855,7 @@ def test_cycle_imbalance_rejected():
             T.WSSync.producer_commit("buf"),
         ]
 
-    with pytest.raises(Exception, match="parity diverges"):
+    with pytest.raises(ValueError, match="Pipeline\\ acquire,\\ commit,\\ wait,\\ and\\ release\\ counts\\ must\\ balance"):
         _materialize(_smem_pipeline_kernel(schedule_edit=double_producer_cycle))
 
 
@@ -1901,7 +1988,7 @@ def test_op_writing_two_pipelines_rejected():
                 T.copy(Y_shared, A_frag, annotations={T.WSID: "copy_frag_y"})
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
-    with pytest.raises(Exception, match="can only trigger one pipeline"):
+    with pytest.raises(ValueError, match="A\\ scheduled\\ operation\\ can\\ produce\\ at\\ most\\ one\\ pipeline\\ per\\ scope"):
         _materialize(kernel)
 
 
@@ -1910,7 +1997,7 @@ def test_unknown_role_body_rejected():
     def add_role_body(bodies):
         bodies["Ghost"] = []
 
-    with pytest.raises(Exception, match="unknown role"):
+    with pytest.raises(ValueError, match="Unknown\\ schedule\\ role:\\ Ghost"):
         _materialize(_smem_pipeline_kernel(schedule_edit=add_role_body))
 
 
@@ -1996,12 +2083,12 @@ def test_sequential_scope_loop_kinds():
     loop whose num_stages this pass consumes; a T.unroll scope keeps its
     unroll kind); T.Parallel loops cannot."""
     # A plain T.serial scope materializes like a T.Pipelined one.
-    for ctor, kind in ((T.serial, tirx.ForKind.SERIAL), (T.unroll, tirx.ForKind.UNROLLED)):
+    for ctor, kind in ((T.serial, tirx.ForKind.DEFAULT), (T.unroll, tirx.ForKind.UNROLLED)):
         func = _materialize(_scope_kind_kernel(ctor))
         for first_thread in (0, 128):
             role = _role_body(func, first_thread)
             (loop,) = collect_nodes(role, tirx.For)
-            assert loop.kind == kind and int(loop.extent) == 4
+            assert loop.kind == kind and int(loop.end - loop.begin) == 4
             assert "num_stages" not in loop.annotations
             assert_call_count(loop.body, op="tl.mbarrier_wait_parity", count=1)
     with pytest.raises(Exception, match="must be a sequential loop"):
@@ -2058,14 +2145,12 @@ def test_op_node_loop():
 
     func = _materialize(kernel)
     consumer = _role_body(func, 128)
-    (outer,) = [loop for loop in collect_nodes(consumer, tirx.For) if loop.kind == tirx.ForKind.SERIAL]
+    (outer,) = [loop for loop in collect_nodes(consumer, tirx.For) if loop.kind == tirx.ForKind.DEFAULT]
     (inner,) = [loop for loop in collect_nodes(outer.body, tirx.For) if loop.kind == tirx.ForKind.UNROLLED]
-    assert int(inner.extent) == 2
+    assert int(inner.end - inner.begin) == 2
     shared = _buffer(func, "A_shared")
-    for load in _assert_versioned_access(inner.body, shared, outer.loop_var % 2):
-        tvm.ir.assert_structural_equal(
-            load.indices, tvm.runtime.convert([outer.loop_var % 2, tirx.IntImm("int32", 0), inner.loop_var * 32])
-        )
+    for load in _assert_versioned_access(inner.body, shared, _phase(func) % 2):
+        tvm.ir.assert_structural_equal(load.indices, tvm.ffi.Array([_phase(func) % 2, tvm.ir.const(0), inner.var * 32]))
 
 
 @tilelang.testing.requires_cuda
@@ -2094,7 +2179,7 @@ def test_unscheduled_kernel_untouched():
     mod = tvm.tirx.transform.BindTarget(_TARGET)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     out = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
-    assert tvm.ir.structural_equal(out, mod["main"])
+    assert structural_equal(out, mod["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -2205,12 +2290,12 @@ def test_tcgen05_async_arrive_count(blockscaled):
     # Scheduling converts each GEMM to its explicit asynchronous CUDA op.
     explicit_op = "tcgen05_gemm_blockscaled" if blockscaled else "tcgen05_gemm"
     assert call.op.name == "tl.tileop." + explicit_op
-    gemm = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    gemm = call.op.get_attr("TLOpBuilder")(call.args, dict(call.attrs))
     assert gemm.isTcgen05
     assert gemm.mbar is None
     if blockscaled:
-        assert gemm.sfaRegion.buffer.name == "SFA"
-        assert gemm.sfbRegion.buffer.name == "SFB"
+        assert gemm.sfaRegion.source.name == "SFA"
+        assert gemm.sfbRegion.source.name == "SFB"
 
     # The scheduled op must lower without a per-op barrier or an implicit
     # wait/arrival: the schedule's synchronization points publish completion.
@@ -2229,23 +2314,20 @@ def test_tcgen05_async_arrive_count(blockscaled):
     # The MMA-side releases are tcgen05 commits.
     arrives = collect_calls(func, op="tl.tcgen05_mma_arrive")
     assert len(arrives) == 2
-    for barrier in (smem_empty, acc_full):
+    for pipeline, barrier in (("smem", smem_empty), ("acc", acc_full)):
         pointers = [
             call.args[0]
             for call in arrives
             if len(call.args) == 1
             and isinstance(call.args[0], tirx.Call)
-            and call.args[0].op.same_as(tvm.ir.Op.get("tirx.tvm_access_ptr"))
-            and len(call.args[0].args) == 5
-            and call.args[0].args[1].same_as(barrier.data)
+            and call.args[0].op.name == "tirx.address_of"
+            and len(call.args[0].args) == 1
+            and isinstance(call.args[0].args[0], tvm.ir.TensorLoad)
+            and call.args[0].args[0].source.same_as(barrier.tensor)
         ]
         assert len(pointers) == 1
         pointer = pointers[0]
-        assert int(pointer.args[4]) == 3
-        analyzer = tvm.arith.Analyzer()
-        assert analyzer.can_prove(pointer.args[2] >= 0)
-        assert analyzer.can_prove(pointer.args[2] < barrier.shape[0])
-        assert analyzer.can_prove(pointer.args[3] >= 1)
+        tvm.ir.assert_structural_equal(pointer.args[0], barrier.load(_phase(func, pipeline) % barrier.depth))
 
 
 @tilelang.testing.requires_cuda
@@ -2373,7 +2455,7 @@ def test_pipeline_synced_in_two_scopes_rejected():
                 T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
-    with pytest.raises(Exception, match="synchronizes exactly one scope"):
+    with pytest.raises(ValueError, match="A\\ pipeline\\ must\\ be\\ owned\\ by\\ exactly\\ one\\ scope"):
         _materialize(kernel)
 
 
@@ -2475,7 +2557,7 @@ def test_nested_pipelines_on_one_storage():
 def test_nested_pipeline_producer_must_bracket_scope():
     """The outer pipeline's producer must hold its span across the nested
     scope: its writes inside publish through the outer commit."""
-    with pytest.raises(Exception, match="enclosing pipeline"):
+    with pytest.raises(ValueError, match="Operation\\ loop_k\\ accesses\\ buf_outer\\ outside\\ an\\ acquired\\ span"):
         _materialize(_nested_pipeline_kernel(accum_brackets_loop=False))
 
 
@@ -2663,7 +2745,7 @@ def test_nested_pipeline_access_after_sync_rejected():
     """Once the role's sync entries of the outer pipeline have run, its
     phase names the next cycle, so a later unheld access can no longer
     derive the in-production slot."""
-    with pytest.raises(Exception, match="after this role's sync"):
+    with pytest.raises(ValueError, match="Role\\ schedule\\ reverses\\ a\\ source\\-program\\ dependency"):
         _materialize(_nested_ring_kernel(rescale_syncs_before_loop=True))
 
 
@@ -2753,35 +2835,29 @@ def test_op_referenced_twice_rejected():
     def duplicate_ref(bodies):
         bodies["Producer"].insert(2, "copy_in")
 
-    with pytest.raises(Exception, match="referenced more than once in the body"):
+    with pytest.raises(ValueError, match="Operation\\ copy_in\\ is\\ placed\\ twice\\ in\\ one\\ role"):
         _materialize(_smem_pipeline_kernel(schedule_edit=duplicate_ref))
 
 
 @tilelang.testing.requires_cuda
-def test_scope_loop_nonunit_step_rejected():
-    """Phases count iterations as (loop_var - min), which a non-unit step
-    breaks. The eager frontend desugars T.serial(..., step) into a
-    unit-step loop plus a Bind, so stamp the For node's step field
-    directly to pin the IR-level rejection."""
+@pytest.mark.parametrize("step", [2, -1])
+def test_scope_loop_nonunit_steps_use_iteration_counters(step):
+    """Native loop steps change source coordinates, not barrier phases."""
     func = _smem_pipeline_kernel()
 
     def add_step(stmt):
         if isinstance(stmt, tvm.tirx.For) and T.WSID in stmt.annotations:
-            return tvm.tirx.For(
-                stmt.loop_var,
-                stmt.min,
-                stmt.extent,
-                stmt.kind,
-                stmt.body,
-                stmt.thread_binding,
-                stmt.annotations,
-                step=tvm.tirx.IntImm("int32", 2),
-            )
+            begin, end = (0, 4) if step > 0 else (3, -1)
+            return tvm.ir.For(stmt.var, begin, end, step, stmt.kind, stmt.body, stmt.annotations)
         return None
 
-    stepped = func.with_body(tvm.tirx.stmt_functor.ir_transform(func.body, None, add_step, ["tirx.For"]))
-    with pytest.raises(Exception, match="non-unit loop step"):
-        _materialize(stepped)
+    stepped = func.with_body(tvm.tirx.stmt_functor.ir_transform(func.body, None, add_step, ["ir.For"]))
+    transformed = _materialize(stepped)
+    shared = _buffer(transformed, "A_shared")
+    expected = [0, 128] if step > 0 else [192, 128, 64, 0]
+    assert _copy_row_trace(transformed, 0) == {str(shared.name): expected}
+    for first_thread in (0, 128):
+        _assert_phase_counter(transformed, _role_body(transformed, first_thread))
 
 
 @tilelang.testing.requires_cuda
@@ -2832,7 +2908,7 @@ def test_guard_read_outside_span_rejected():
                 if A_shared[0, 0] > T.float16(0.0):
                     T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
-    with pytest.raises(Exception, match="outside an open span"):
+    with pytest.raises(ValueError, match="Operation\\ copy_out\\ accesses\\ buf\\ outside\\ an\\ acquired\\ span"):
         _materialize(kernel)
 
 
@@ -2887,7 +2963,7 @@ def test_unbalanced_scope_cycles_rejected():
                 T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
                 T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
-    with pytest.raises(Exception, match="parity diverges"):
+    with pytest.raises(ValueError, match="Pipeline\\ acquire,\\ commit,\\ wait,\\ and\\ release\\ counts\\ must\\ balance"):
         _materialize(kernel)
 
 
@@ -2952,12 +3028,16 @@ def test_source_guard_follows_shifted_iteration():
     func = _materialize(kernel)
     producer = _role_body(func, 0)
     (loop,) = collect_nodes(producer, tirx.For)
-    assert int(loop.min) == 1 and int(loop.extent) == 3
-    (guard,) = collect_nodes(loop.body, tirx.IfThenElse)
-    tvm.ir.assert_structural_equal(guard.condition, loop.loop_var - 1 < 3)
-    (copy,) = collect_calls(guard.then_case, op="tl.tileop.tma_copy")
+    assert int(loop.begin) == 0 and int(loop.end) == 5
+    (guard,) = [branch for branch in collect_nodes(loop.body, tvm.ir.If) if isinstance(branch.condition, tvm.ir.prim.LT)]
+    tvm.ir.assert_structural_equal(guard.condition, loop.var - 1 < 3)
+    (copy,) = collect_calls(guard.then_case, op="tl.tileop.copy")
     _, dest = _copy_region_loads(copy)
-    assert dest.buffer.data.same_as(_buffer(func, "C_shared").data)
+    assert dest.source.same_as(_buffer(func, "C_shared"))
+    assert _copy_row_trace(func, 0) == {
+        str(_buffer(func, "A_shared").name): [0, 32, 64, 96],
+        str(_buffer(func, "C_shared").name): [0, 32, 64],
+    }
 
 
 @tilelang.testing.requires_cuda
@@ -2981,7 +3061,7 @@ def test_warpgroup_nreg_conflict_rejected():
             )
             T.copy(A, B, annotations={T.WSID: "cp"})
 
-    with pytest.raises(Exception, match="allocates per warpgroup"):
+    with pytest.raises(ValueError, match="Roles\\ in\\ one\\ warpgroup\\ cannot\\ request\\ conflicting\\ register\\ budgets"):
         _materialize(kernel)
 
 
@@ -3067,11 +3147,11 @@ def test_two_scheduled_kernels_in_one_function():
 
     func = _materialize(kernel)
     launches = [
-        attr
-        for attr in collect_nodes(func, tirx.AttrStmt)
-        if attr.attr_key == "thread_extent" and isinstance(attr.node, tirx.IterVar) and attr.node.thread_tag == "threadIdx.x"
+        region
+        for region in collect_nodes(func, tvm.ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
     ]
-    assert sorted(int(launch.value) for launch in launches) == [128, 256]
+    assert sorted(int(launch.args[1]) for launch in launches) == [128, 256]
     for launch in launches:
         assert _nreg_args(launch.body).count((224, 1)) == 1
 
@@ -3094,7 +3174,7 @@ def test_multi_dim_thread_launch_rejected():
             )
             T.copy(A, B, annotations={T.WSID: "cp"})
 
-    with pytest.raises(Exception, match="one\\s+dimension"):
+    with pytest.raises(ValueError, match="Warp\\-specialization\\ schedules\\ support\\ one\\ thread\\ dimension"):
         _materialize(kernel)
 
 
@@ -3113,7 +3193,7 @@ def test_negative_warp_range_rejected():
             )
             T.copy(A, B, annotations={T.WSID: "cp"})
 
-    with pytest.raises(Exception, match="negative warp range"):
+    with pytest.raises(ValueError, match="Warp\\ roles\\ must\\ have\\ unique\\ names\\ and\\ disjoint\\ in\\-bounds\\ ranges"):
         _materialize(kernel)
 
 
@@ -3280,7 +3360,7 @@ def test_pipeline_on_private_storage_rejected():
             T.copy(A[0, 0], A_frag, annotations={T.WSID: "cp_in"})
             T.copy(A_frag, B[0, 0], annotations={T.WSID: "cp_out"})
 
-    with pytest.raises(Exception, match="must live in shared or tensor memory"):
+    with pytest.raises(ValueError, match="Pipeline\\ buffers\\ must\\ be\\ kernel\\-owned\\ shared\\ or\\ tensor\\-memory\\ allocations"):
         _materialize(kernel)
 
 
@@ -3312,7 +3392,9 @@ def test_duplicate_pipeline_name_rejected():
             )
             T.copy(A[0, 0], B[0, 0], annotations={T.WSID: "cp"})
 
-    with pytest.raises(Exception, match="duplicate pipeline name"):
+    with pytest.raises(
+        ValueError, match="Pipelines\\ require\\ unique\\ names,\\ nonempty\\ buffers,\\ and\\ depths\\ in\\ \\[1,\\ 1024\\]"
+    ):
         _materialize(kernel)
 
 
@@ -3361,7 +3443,7 @@ def test_scope_body_role_never_entering_rejected():
                 T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
-    with pytest.raises(Exception, match="never enters it from the parent scope"):
+    with pytest.raises(ValueError, match="Scope\\ loop_k\\ schedules\\ a\\ role\\ that\\ never\\ enters\\ it"):
         _materialize(kernel)
 
 

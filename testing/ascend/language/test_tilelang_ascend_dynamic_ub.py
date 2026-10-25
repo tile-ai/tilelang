@@ -60,6 +60,7 @@ def _tail_fill():
     return _tail_fill
 
 
+@tilelang.testing.requires_ascend
 def test_tail_fill_with_dynamic_ub_region():
     e, ntile, seq_len = 32, 2, 17
     device = torch.device("npu")
@@ -76,6 +77,7 @@ def test_tail_fill_with_dynamic_ub_region():
     torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_ascend
 def test_dynamic_ub_allocation():
     kernel = _dynamic_allocation()
     for size in (1, 65):

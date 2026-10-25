@@ -4,52 +4,43 @@
  *
  */
 
+#include "builtin_registry.h"
 #include "support/check.h"
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/op/abi.h>
 
-namespace tvm {
-namespace tl {
-using namespace tirx;
+namespace tvm::tl {
 
-PrimExpr any_of_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 2);
-  PrimExpr buffer_address = arg[0];
-  PrimExpr elems = arg[1];
-  return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm("tl::Any"), buffer_address, elems});
+PrimExpr LowerLogicalReduction(PrimExpr expression, const char *symbol) {
+  const CallNode *call = expression.as<CallNode>();
+  ICHECK(call);
+  ICHECK_EQ(call->args.size(), 2);
+  TVM_FFI_CHECK(call->args[0]->ty.as<PtrTypeNode>(), TypeError)
+      << "Logical reduction requires a typed tensor pointer";
+  TVM_FFI_CHECK(call->args[1]->ty.as<PrimTypeNode>(), TypeError)
+      << "Logical reduction requires a scalar element count";
+  return Call(PrimType::Bool(), tirx::call_extern_op(),
+              {StringImm(symbol), call->args[0], call->args[1]}, std::nullopt,
+              {}, call->loc)
+      .as_or_throw<PrimExpr>();
 }
 
-PrimExpr all_of_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 2);
-  PrimExpr buffer_address = arg[0];
-  PrimExpr elems = arg[1];
-  return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm("tl::All"), buffer_address, elems});
+TVM_FFI_STATIC_INIT_BLOCK() {
+  for (const char *name : {"tl.any_of", "tl.all_of"}) {
+    RegisterBuiltin<2>(name, CallEffectKind::kReadState);
+    OpDef(name).set_attr(tvm::op_attr::kFixedReturnType, PrimType::Bool());
+  }
+  for (const char *backend : {"cuda", "hip", "rocm"}) {
+    OpDef("tl.any_of")
+        .set_attr<tirx::FLowerIntrinsic>(
+            std::string(backend) + ".FLowerIntrinsic", [](PrimExpr expression) {
+              return LowerLogicalReduction(expression, "tl::Any");
+            });
+    OpDef("tl.all_of")
+        .set_attr<tirx::FLowerIntrinsic>(
+            std::string(backend) + ".FLowerIntrinsic", [](PrimExpr expression) {
+              return LowerLogicalReduction(expression, "tl::All");
+            });
+  }
 }
 
-TVM_REGISTER_OP("tl.any_of")
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "any_of")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", any_of_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", any_of_op);
-
-TVM_REGISTER_OP("tl.all_of")
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "all_of")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", all_of_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", all_of_op);
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

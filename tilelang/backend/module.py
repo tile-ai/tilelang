@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, TypeVar
 
-from tvm import IRModule
-from tvm.target import Target
+from tilelang._compat.tvm import IRModule
+from tvm_tirx.target import Target
 
 if TYPE_CHECKING:
     from tilelang.backend.device_codegen import DeviceCodegen
@@ -211,7 +211,8 @@ class BackendContext:
     def lower(self, mod: IRModule) -> IRModule:
         """Run the selected backend's lowering pipeline."""
 
-        return self.module.lower(mod, self.target)
+        with self.target:
+            return self.module.lower(mod, self.target)
 
     def codegen_device(self, mod: IRModule, *, compile_device: bool | None = None) -> IRModule:
         """Generate device code using the selected execution policy by default."""
@@ -322,7 +323,10 @@ def create_backend_context(
     normalized_target = normalize_target_for_execution(normalized_target, execution_backend)
 
     if target_host is None:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+        if normalized_target.kind.name in ("c", "llvm"):
+            target_host = normalized_target.host or normalized_target
+        else:
+            target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
     normalized_target_host = Target(target_host)
     normalized_target = Target(normalized_target, normalized_target_host)
 

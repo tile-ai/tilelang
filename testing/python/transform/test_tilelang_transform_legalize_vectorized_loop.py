@@ -1,3 +1,5 @@
+from testing.python.transform._native_ir import make_function
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -26,7 +28,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             A_shared = T.alloc_shared((M, N, vec_len), dtype=dtype)
             tid = T.get_thread_binding()
-            for j, v_2 in T.grid(M, vec_len // 4):
+            for j, v_2 in T.grid(N, vec_len // 4):
                 for vec in T.vectorized(4):
                     A_shared[tid, j, v_2 * 4 + vec] = A[tid, j, v_2 * 4 + vec]
 
@@ -38,7 +40,8 @@ def assert_vectorize_access(M: int = 64, N: int = 64):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     with tvm.target.Target("cuda"):
         transformed = tl.transform.LegalizeVectorizedLoop()(mod)
-    tvm.ir.assert_structural_equal(transformed["main"].body, expected.body)
+    tvm.ir.assert_structural_equal(transformed["main"].body, expected.body, map_free_vars=True)
+    assert tvm.tirx.analysis.check_well_formed(transformed)
 
 
 def test_vectorize_access():
@@ -67,7 +70,10 @@ def test_vectorized_nonzero_min_uses_aligned_vector_width():
     mod = tvm.IRModule.from_expr(before)
     with tvm.target.Target("cuda"):
         transformed = tl.transform.LegalizeVectorizedLoop()(mod)
-    tvm.ir.assert_structural_equal(transformed["before"].body, expected.body)
+    transformed = tvm.tirx.transform.StmtSimplify()(transformed)
+    reference = tvm.tirx.transform.StmtSimplify()(tvm.IRModule.from_expr(expected))
+    tvm.ir.assert_structural_equal(transformed["before"].body, reference["expected"].body, map_free_vars=True)
+    assert tvm.tirx.analysis.check_well_formed(transformed)
 
 
 @tilelang.testing.requires_cuda
@@ -77,15 +83,18 @@ def test_vectorized_split_preserves_large_int64_extent():
     a = tir.decl_buffer((start + extent,), "int32", name="A")
     i = tir.Var("i", "int64")
     body = tir.BufferStore(a, a[i] + 1, [i])
-    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, body)
-    func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a})
+    loop = tir.For(i, start, start + extent, 1, tir.ForKind.VECTORIZED, body)
+    func = make_function([a.data], loop, buffer_map={a.data: a})
     with tvm.target.Target("cuda"):
         mod = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
     loops = []
     tir.stmt_functor.post_order_visit(mod["main"].body, lambda node: loops.append(node) if isinstance(node, tir.For) else None)
     assert len(loops) == 2
-    assert all(loop.loop_var.dtype == "int64" for loop in loops)
-    assert int(loops[0].extent) * int(loops[1].extent) == extent
+    assert all(loop.var.ty == "int64" for loop in loops)
+    assert int(loops[0].end) * int(loops[1].end) == extent
+    assert all(int(loop.begin) == 0 and int(loop.step) == 1 for loop in loops)
+    assert tvm.tirx.analysis.check_well_formed(mod)
+    tvm.ir.assert_structural_equal(mod, tvm.ir.load_json(tvm.ir.save_json(mod)))
 
 
 if __name__ == "__main__":

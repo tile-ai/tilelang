@@ -50,6 +50,7 @@ def strided_copy_kernel():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_explicit_strided_view_rank_change():
     device = torch.device("npu")
     kernel = rank_changed_scalar_store_kernel()
@@ -67,6 +68,7 @@ def test_explicit_strided_view_rank_change():
         assert int(torch.count_nonzero(storage)) == 1
 
 
+@tilelang.testing.requires_ascend
 def test_strided_view_copy():
     device = torch.device("npu")
     src = torch.randint(1, 127, (ROWS, COLS_I8), dtype=torch.int8, device=device)

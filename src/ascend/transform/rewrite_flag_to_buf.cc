@@ -32,11 +32,11 @@
  * MergeUBAllocations.
  */
 
-#include <tvm/arith/analyzer.h>
+#include "ascend/transform/native_visitor.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "ascend/op/builtin.h"
+#include "support/check.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
@@ -120,11 +121,11 @@ using FlagCallRanges =
 // and assumptions.
 EventIdBounds EventIdRange(const ConstrSet &constraints, const std::string &he,
                            const PrimExpr &event_id) {
-  arith::Analyzer analyzer;
-  constraints.Populate(analyzer);
-  arith::ConstIntBound bound = analyzer.const_int_bound(event_id);
-  ICHECK(bound->min_value != arith::ConstIntBound::kNegInf &&
-         bound->max_value != arith::ConstIntBound::kPosInf)
+  sym::Analyzer analyzer;
+  auto scope = constraints.Populate(analyzer);
+  sym::ConstIntBound bound = analyzer->const_int_bound(event_id);
+  ICHECK(bound->min_value != sym::ConstIntBound::kNegInf &&
+         bound->max_value != sym::ConstIntBound::kPosInf)
       << "RewriteFlagToBuf: cannot bound event_id for hard_event '" << he
       << "'";
   ICHECK_GE(bound->min_value, 0)
@@ -145,9 +146,10 @@ public:
   // Highest buf_id reserved by gemm_l1 + 1 (0 if no gemm_l1 present).
   int64_t reserved_hwm = 0;
 
-  void VisitExpr_(const CallNode *op) final {
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallNode *op) final {
     if (std::optional<std::string> he = GetFlagHardEvent(op)) {
-      EventIdBounds range = EventIdRange(GetConstrSet(), *he, op->args[1]);
+      EventIdBounds range = EventIdRange(GetConstrSet(), *he,
+                                         op->args[1].as_or_throw<PrimExpr>());
       call_ranges[op].push_back(range);
       auto it = ranges.find(*he);
       if (it == ranges.end()) {
@@ -159,7 +161,7 @@ public:
     } else {
       ReserveGemmL1Bufs(op);
     }
-    ConstrVisitor::VisitExpr_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
 private:
@@ -177,7 +179,8 @@ private:
         << "RewriteFlagToBuf: gemm_l1 call missing buf_offset arg";
     const auto *off = op->args[arg_idx].as<IntImmNode>();
     ICHECK(off) << "RewriteFlagToBuf: gemm_l1 buf_offset must be a constant";
-    reserved_hwm = std::max(reserved_hwm, off->value + kGemmL1BufSlots);
+    reserved_hwm = std::max(reserved_hwm,
+                            off->value.as<int64_t>().value() + kGemmL1BufSlots);
   }
 };
 
@@ -236,7 +239,7 @@ std::vector<bool> KnapsackKeep(const std::vector<Block> &blocks) {
 }
 
 // Phase B: rewrite each flag call per its block assignment.
-class FlagToBufRewriter : public StmtExprMutator {
+class FlagToBufRewriter : public ascend::NativeMutator {
 public:
   explicit FlagToBufRewriter(
       std::unordered_map<std::string, std::vector<BlockAssign>> assign,
@@ -246,19 +249,19 @@ public:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const auto *call = op->value.as<CallNode>();
     if (call == nullptr)
-      return StmtExprMutator::VisitStmt_(op);
+      return ascend::NativeMutator::VisitStmt_(op);
     bool is_set = call->op.same_as(ascend_set_flag());
     bool is_wait = call->op.same_as(ascend_wait_flag());
     if (!is_set && !is_wait)
-      return StmtExprMutator::VisitStmt_(op);
+      return ascend::NativeMutator::VisitStmt_(op);
 
-    const std::string &he = Downcast<StringImm>(call->args[0])->value;
+    const std::string &he = call->args[0].as_or_throw<StringImm>()->value;
     auto it = assign_.find(he);
     // hard_events that fit within 8 flag slots are untouched.
     if (it == assign_.end())
-      return StmtExprMutator::VisitStmt_(op);
+      return ascend::NativeMutator::VisitStmt_(op);
 
-    PrimExpr event_id = call->args[1];
+    PrimExpr event_id = call->args[1].as_or_throw<PrimExpr>();
     auto range_it = call_ranges_.find(call);
     ICHECK(range_it != call_ranges_.end())
         << "RewriteFlagToBuf: missing collected range for flag call";
@@ -277,14 +280,13 @@ public:
                          << "," << range.second
                          << "] not covered by any block for '" << he << "'";
 
-    PrimExpr new_id = b->delta == 0
-                          ? event_id
-                          : event_id + IntImm(event_id.dtype(), b->delta);
+    PrimExpr new_id =
+        b->delta == 0 ? event_id : event_id + IntImm(event_id.ty(), b->delta);
 
     if (b->kept) {
       // Stay as a flag, only renumbered into [0,8).
       Op op_id = is_set ? ascend_set_flag() : ascend_wait_flag();
-      return Evaluate(Call(DataType::Handle(), op_id, {StringImm(he), new_id}));
+      return Evaluate(Call(PrimType::Void(), op_id, {StringImm(he), new_id}));
     }
     // Spill to the mutex pool as a back-to-back asc_lock/asc_unlock pair.
     auto pipes = SplitHardEvent(he);
@@ -298,8 +300,8 @@ private:
   static Stmt MakeBufOp(const Op &op, const std::string &pipe,
                         const PrimExpr &buf_id, int mode) {
     return Evaluate(
-        Call(DataType::Handle(), op,
-             {StringImm(pipe), buf_id, IntImm(DataType::Int(32), mode)}));
+        Call(PrimType::Void(), op,
+             {StringImm(pipe), buf_id, IntImm(PrimType::Int(32), mode)}));
   }
 
   std::unordered_map<std::string, std::vector<BlockAssign>> assign_;
@@ -307,9 +309,12 @@ private:
   std::unordered_map<const CallNode *, size_t> call_range_indices_;
 };
 
-PrimFunc RewriteFlagToBufFn(PrimFunc f) {
-  FlagUsageCollector collector;
-  collector(f->body);
+tirx::Function RewriteFlagToBufFn(tirx::Function f) {
+  if (!f->body)
+    return f;
+  auto owner = make_object<FlagUsageCollector>();
+  auto &collector = *owner;
+  collector.Visit(f->body.value());
   if (collector.order.empty())
     return f;
 
@@ -366,9 +371,9 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
         << ") exceed the shared pool of " << kMaxBufId << "." << layout.str();
   }
 
-  FlagToBufRewriter rewriter(std::move(assign),
-                             std::move(collector.call_ranges));
-  f.CopyOnWrite()->body = rewriter(f->body);
+  auto rewriter = make_object<FlagToBufRewriter>(
+      std::move(assign), std::move(collector.call_ranges));
+  f.CopyOnWrite()->body = rewriter->VisitStmt(f->body.value());
   return f;
 }
 
@@ -377,10 +382,11 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
 using namespace tirx::transform;
 
 tvm::transform::Pass RewriteFlagToBuf() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+  auto pass_func = [=](tirx::Function f, const IRModule &m,
+                       const PassContext &ctx) {
     return RewriteFlagToBufFn(f);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.RewriteFlagToBuf", {});
+  return CreateFunctionPass(pass_func, 0, "tl.RewriteFlagToBuf");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

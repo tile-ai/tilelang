@@ -25,19 +25,19 @@ project(TILE_LANG C CXX)
 # run after project() so that an enabled language is available -- FindCUDAToolkit's
 # imported-target setup calls find_package(Threads REQUIRED), which hard-errors
 # otherwise. CMAKE_CUDA_COMPILER is published as a cache entry, so subprojects
-# configured further down (add_subdirectory(${TVM_SOURCE}) below) still see it.
+# configured further down (add_subdirectory(${TVM_TIRX_SOURCE}) below) still see it.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
 _tilelang_get_native_windows_arch(_tilelang_native_windows_arch)
 
 # MSVC-specific build configuration. Must run after project() so MSVC is
-# defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
+# defined, but before add_subdirectory(${TVM_TIRX_SOURCE}) below so subprojects
 # inherit these settings. CMake also sets MSVC=1 when the compiler is
 # clang-cl (it simulates MSVC), so the same block applies to both toolchains.
 if(MSVC)
   # Force CMP0141 NEW for every subdirectory regardless of its own
-  # cmake_minimum_required. The bundled TVM declares 3.18; without this,
-  # CMake injects /Zi into the legacy CMAKE_*_FLAGS_DEBUG default there
+  # cmake_minimum_required. Older dependency policy defaults can cause
+  # CMake to inject /Zi into the legacy CMAKE_*_FLAGS_DEBUG default there
   # rather than via the generator expression, polluting cached flags and
   # also overriding the Embedded format we set just below.
   set(CMAKE_POLICY_DEFAULT_CMP0141 NEW)
@@ -356,13 +356,7 @@ option(TILELANG_USE_ASCEND_STUBS
 unset(_TILELANG_USE_ASCEND_STUBS_DEFAULT)
 # Configs end
 
-include(cmake/load_tvm.cmake)
-
-if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
-  include(${TVM_SOURCE}/cmake/config.cmake)
-else()
-  message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
-endif()
+include(cmake/load_tirx.cmake)
 # Re-apply TileLang's preferred backend settings after TVM's config may have
 # overridden the USE_* cache entries.
 foreach(BACKEND IN LISTS TILELANG_BACKENDS)
@@ -377,10 +371,9 @@ set(USE_GTEST OFF)
 # TileLang is built as a separate shared library on POSIX and subclasses / calls
 # TVM C++ internals. TVM 0.25 defaults to hiding private symbols, which makes
 # those out-of-DSO references unresolved when libtilelang.so is dlopened.
-set(HIDE_PRIVATE_SYMBOLS OFF CACHE BOOL "Compile TVM with -fvisibility=hidden." FORCE)
 
 # Include directories for TileLang
-set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
+set(TILE_LANG_INCLUDES ${TVM_TIRX_INCLUDES})
 # Add TileLang's own src/ to include path so cross-directory includes
 # can use paths relative to src/ (e.g. "backend/common/target_utils.h", "op/builtin.h").
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -397,6 +390,7 @@ file(GLOB TILE_LANG_SRCS
   src/backend/common/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
+  src/backend/common/codegen/native_codegen.cc
   src/backend/common/codegen/codegen_py.cc
 )
 
@@ -424,7 +418,10 @@ endif()
 
 # Enable custom logging so we control the output format (e.g. strip build paths
 # from __FILE__ so wheel users don't see CI machine paths in warnings).
-set(USE_CUSTOM_LOGGING ON CACHE BOOL "Use custom logging implementation" FORCE)
+if(NOT TILELANG_USE_INSTALLED_TIRX)
+  set(TVM_TIRX_USE_CUSTOM_LOGGING ON CACHE BOOL "Use custom logging implementation" FORCE)
+  set(TVM_TIRX_EXPORT_ALL_SYMBOLS ON CACHE BOOL "Export compiler extension symbols" FORCE)
+endif()
 
 # Detect release (wheel) builds: in CI (cibuildwheel) or scikit-build-core wheel builds,
 # we strip source paths from LOG(WARNING) etc. for a cleaner user experience.
@@ -437,13 +434,30 @@ endif()
 option(TILELANG_RELEASE_BUILD "Strip source paths from log messages (for wheel releases)" ${TILELANG_RELEASE_BUILD_DEFAULT})
 
 # Include tvm after configs have been populated
-add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+if(NOT TILELANG_USE_INSTALLED_TIRX)
+  foreach(BACKEND IN ITEMS LLVM CUDA ROCM METAL OPENCL VULKAN)
+    if(DEFINED USE_${BACKEND})
+      set(TVM_TIRX_USE_${BACKEND} "${USE_${BACKEND}}" CACHE STRING "TIRx ${BACKEND} backend" FORCE)
+    endif()
+  endforeach()
+  set(TVM_TIRX_USE_Z3 "${USE_Z3}" CACHE STRING "TIRx symbolic solver" FORCE)
+  block(SCOPE_FOR VARIABLES)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    if(USE_CUDA AND TARGET CUDA::cudart AND TARGET CUDA::cuda_driver)
+      set(CUDA_CUDART_LIBRARY CUDA::cudart)
+      set(CUDA_CUDA_LIBRARY CUDA::cuda_driver)
+    endif()
+    add_subdirectory("${TVM_TIRX_SOURCE}" tvm_tirx EXCLUDE_FROM_ALL)
+  endblock()
+endif()
 
 # Strip the hardcoded /Zi PRIVATE option that tvm-ffi attaches in its
 # tvm_ffi_add_msvc_flags() helper. It overrides our Embedded debug info
 # format and forces a side-channel vc140.pdb that races under parallel
 # builds (C1041) and breaks compiler caches. Done via target property
-# rewrite so 3rdparty/tvm-ffi remains pristine.
+# rewrite so the independent TIRx dependency's tvm-ffi checkout remains pristine.
 if(MSVC)
   foreach(_tilelang_ffi_tgt IN ITEMS
       tvm_ffi_objs tvm_ffi_shared tvm_ffi_static tvm_ffi_testing)
@@ -474,20 +488,20 @@ endif()
 
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
-target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
-if(TILELANG_RELEASE_BUILD)
-  target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+if(NOT TILELANG_USE_INSTALLED_TIRX)
+  target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+  if(TILELANG_RELEASE_BUILD)
+    target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
+  endif()
 endif()
 
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
-if(MSVC)
-  # Keep the wider project on its current baseline, but let TileLang's C++
-  # sources use C++20 so designated initializers compile under MSVC.
-  target_compile_features(tilelang_objs PRIVATE cxx_std_20)
-endif()
+target_compile_features(tilelang_objs PRIVATE cxx_std_20)
+target_compile_definitions(tilelang_objs PRIVATE TILELANG_EXPORTS=1)
+target_link_libraries(tilelang_objs PRIVATE tvm_tirx::header tvm_ffi::header)
 
 # A direct single-config CMake build with no selected build type otherwise
 # compiles TileLang without optimization. Layout validation includes bounded
@@ -507,7 +521,186 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
-target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
+if(NOT TILELANG_USE_INSTALLED_TIRX)
+  target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
+endif()
+
+add_library(tilelang_tirx_test_passes SHARED EXCLUDE_FROM_ALL
+  src/backend/common/codegen/codegen_py.cc
+  src/backend/common/codegen/codegen_utils.cc
+  src/cuda/codegen/codegen_cutedsl.cc
+  src/cuda/codegen/rt_mod_cutedsl.cc
+  src/cuda/transform/auto_schedule.cc
+  src/cuda/transform/auto_schedule/role_based_scheduler.cc
+  src/cuda/transform/materialize_ws_schedule.cc
+  src/cuda/transform/producer_consumer_ws.cc
+  src/cuda/transform/multi_version_buffer_rewriter.cc
+  src/transform/inject_pipeline.cc
+  src/transform/pipeline_planning.cc
+  src/metal/codegen/codegen_metal.cc
+  src/cuda/transform/lower_shared_tmem.cc
+  src/cuda/transform/auto_schedule/preprocess_ir.cc
+  src/cuda/transform/ws_analysis.cc
+  src/transform/merge_shared_memory_allocations.cc
+  src/transform/thread_storage_sync.cc
+  src/ascend/layout/ascend_layouts.cc
+  src/backend/common/codegen/native_codegen.cc
+  src/backend/common/codegen/codegen_c_host.cc
+  src/cpu/codegen/codegen_c.cc
+  src/cpu/codegen/rt_mod_c.cc
+  src/cuda/codegen/codegen_cuda.cc
+  src/cuda/codegen/rt_mod_cuda.cc
+  src/transform/lower_thread_allreduce.cc
+  src/ir.cc
+  src/transform/materialize_kernel_launch.cc
+  src/transform/layout_inference/layout_cost_model.cc
+  src/transform/layout_inference/layout_inference.cc
+  src/transform/lower_tile_op.cc
+  src/op/builtin.cc
+  src/op/math.cc
+  src/op/logical.cc
+  src/op/operator.cc
+  src/op/utils.cc
+  src/op/fill.cc
+  src/op/copy.cc
+  src/op/transpose.cc
+  src/op/parallel.cc
+  src/op/reducer.cc
+  src/op/reduce.cc
+  src/op/scan.cc
+  src/op/atomic_reduce.cc
+  src/op/atomic_add.cc
+  src/op/gemm.cc
+  src/op/gemm_sp.cc
+  src/op/gemm_blockscaled.cc
+  src/cpu/op/gemm.cc
+  src/cpu/op/builtin.cc
+  src/cpu/transform/mark_cpu_atomics.cc
+  src/cpu/transform/lower_cpu_kernel_launch.cc
+  src/cpu/transform/lower_cpu_atomics.cc
+  src/cuda/op/gemm.cc
+  src/cuda/op/gemm_sp.cc
+  src/cuda/op/gemm_blockscaled.cc
+  src/cuda/op/finalize_reducer.cc
+  src/metal/op/gemm.cc
+  src/metal/op/fill.cc
+  src/metal/op/copy.cc
+  src/metal/op/transpose.cc
+  src/webgpu/op/copy.cc
+  src/cuda/transform/annotate_device_bound_tma_copies.cc
+  src/cuda/transform/annotate_warp_group_reg_alloc.cc
+  src/cuda/transform/lower_ldg_stg.cc
+  src/transform/verify_reducer_consumed.cc
+  src/transform/verify_reducer_epoch.cc
+  src/transform/verify_buffer_init.cc
+  src/transform/reducer_plan_materialize.cc
+  src/transform/canonicalize_legacy_reducer.cc
+  src/transform/legalize_negative_index.cc
+  src/transform/flatten_buffer.cc
+  src/transform/lower_opaque_block.cc
+  src/transform/unroll_loop.cc
+  src/transform/constr_set_analysis.cc
+  src/transform/verify_parallel_loop.cc
+  src/transform/inject_assumes.cc
+  src/transform/simplify.cc
+  src/transform/hoist_nonrestrict_params.cc
+  src/transform/annotate_device_regions.cc
+  src/transform/hoist_global_buffer_allocations.cc
+  src/transform/lower_intrin.cc
+  src/transform/loop_unswitching.cc
+  src/transform/make_packed_api.cc
+  src/transform/if_stmt_binding.cc
+  src/transform/storage_rewrite.cc
+  src/transform/plan_update_buffer_allocation_location.cc
+  src/cpu/transform/materialize_cpu_parallel_grid.cc
+  src/cuda/transform/lower_l2_persistent_annotation.cc
+  src/ascend/ir.cc
+  src/transform/legalize_safe_memory_access.cc
+  src/cuda/codegen/intrin_rule_cuda.cc
+  src/rocm/codegen/intrin_rule_hip.cc
+  src/transform/split_host_device.cc
+  src/transform/lower_device_kernel_launch.cc
+  src/transform/common/assume.cc
+  src/cuda/transform/lower_pdl.cc
+  src/cuda/transform/fuse_mbarrier_arrive_expect_tx.cc
+  src/cuda/transform/lower_blackwell_2sm.cc
+  src/cuda/transform/inject_tcgen05_fence.cc
+  src/cuda/transform/inject_fence_proxy.cc
+  src/cuda/transform/persist_threadblock.cc
+  src/runtime/error_helpers.cc
+  src/cpu/op/atomic_reduce.cc
+  src/cpu/op/atomic_add.cc
+  src/cuda/op/atomic_reduce.cc
+  src/cuda/op/atomic_add.cc
+  src/cuda/op/copy_analysis.cc
+  src/cuda/op/copy.cc
+  src/cuda/op/tma_layout.cc
+  src/cuda/op/tma_plan.cc
+  src/cuda/transform/lower_hopper_intrin.cc
+  src/cuda/transform/lower_shared_barrier.cc
+  src/cuda/transform/ptx_async_copy_injector.cc
+  src/rocm/op/atomic_reduce.cc
+  src/cuda/op/scan.cc
+  src/rocm/op/scan.cc
+  src/cpu/op/fill.cc
+  src/cpu/op/copy.cc
+  src/cpu/op/transpose.cc
+  src/cpu/op/reduce.cc
+  src/cuda/op/reduce.cc
+  src/rocm/op/reduce.cc
+  src/cuda/op/transpose.cc
+  src/rocm/op/transpose.cc
+  src/webgpu/op/transpose.cc
+  src/cuda/op/fill.cc
+  src/rocm/op/fill.cc
+  src/webgpu/op/fill.cc
+  testing/python/tirx/native_operator_helpers.cc
+  src/cuda/op/builtin.cc
+  src/rocm/op/builtin.cc
+  src/metal/op/builtin.cc
+  src/ascend/op/builtin.cc
+  src/backend/common/target_utils.cc
+  src/cpu/target_utils.cc
+  src/cuda/target_utils.cc
+  src/rocm/target_utils.cc
+  src/metal/target_utils.cc
+  src/ascend/target_utils.cc
+  src/span_utils.cc
+  src/transform/annotate_read_only_params.cc
+  src/transform/merge_if_stmt.cc
+  src/transform/lower_access_ptr.cc
+  src/transform/loop_partition.cc
+  src/transform/loop_vectorize.cc
+  src/transform/lower_parallel_loop.cc
+  src/transform/legalize_vectorized_loop.cc
+  src/transform/vectorize_loop.cc
+  src/transform/config_index_bitwidth.cc
+  src/transform/frontend_legalize.cc
+  src/transform/common/int64_promoter.cc
+  src/transform/pass_config.cc
+  src/layout/swizzle_mode.cc
+  src/layout/layout.cc
+  src/layout/utils.cc
+  src/layout/gemm_layouts.cc
+  src/layout/cute_layout.cc
+  src/layout/tcgen05_layout.cc
+)
+target_include_directories(tilelang_tirx_test_passes PRIVATE ${TILE_LANG_INCLUDES})
+target_compile_features(tilelang_tirx_test_passes PRIVATE cxx_std_20)
+target_compile_definitions(tilelang_tirx_test_passes PRIVATE TILELANG_EXPORTS=1)
+target_link_libraries(tilelang_tirx_test_passes PRIVATE ${TILELANG_TIRX_COMPILER} tvm_tirx::header tvm_ffi::shared)
+if(TARGET cuda_stub)
+  target_sources(tilelang_tirx_test_passes PRIVATE src/cuda/runtime.cc)
+  target_link_libraries(tilelang_tirx_test_passes PRIVATE cuda_stub)
+endif()
+if(UNIX AND NOT APPLE)
+  target_link_options(tilelang_tirx_test_passes PRIVATE "LINKER:--no-undefined")
+endif()
+set_target_properties(tilelang_tirx_test_passes PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+
 if(WIN32)
   # Some TVM headers define inline/template members behind TVM_DLL. MSVC
   # rejects those definitions when TVM_DLL expands to dllimport in TileLang's
@@ -518,36 +711,25 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
-if(WIN32)
-  # Windows ships tvm_runtime.dll and tvm_compiler.dll. The compiler DLL also
-  # carries TileLang's native registration/object code: TileLang uses TVM
-  # compiler-side C++ internals that are not consistently exported from a
-  # separate tilelang.dll, while exporting every TVM compiler object would exceed
-  # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
-  # DLL names without falling back to the old unified tvm.dll.
-  target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
-else()
-  add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-  target_link_libraries(tilelang PUBLIC tvm_compiler)
-
-  # Place dev build outputs under build/lib for consistency
-  set_target_properties(tilelang PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  )
-  list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
+add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
+target_link_libraries(tilelang PRIVATE ${TILELANG_TIRX_COMPILER} tvm_ffi::shared)
+if(NOT TILELANG_USE_INSTALLED_TIRX)
+  get_directory_property(TILELANG_TIRX_RUNTIME_TARGETS
+    DIRECTORY "${TVM_TIRX_SOURCE}" DEFINITION TVM_RUNTIME_BACKEND_LIBS)
+  if(TILELANG_TIRX_RUNTIME_TARGETS)
+    add_dependencies(tilelang ${TILELANG_TIRX_RUNTIME_TARGETS})
+  endif()
 endif()
-
-if(WIN32)
-  # TVM is added with EXCLUDE_FROM_ALL above. The split Windows build ships the
-  # same native target set as POSIX, so make sure default builds materialize all
-  # DLLs needed by Python import and wheel installation.
-  foreach(_tilelang_win_target IN LISTS TILELANG_OUTPUT_TARGETS)
-    set_property(TARGET ${_tilelang_win_target} PROPERTY EXCLUDE_FROM_ALL FALSE)
-  endforeach()
-endif()
+add_library(tilelang_tirx_test_helpers SHARED EXCLUDE_FROM_ALL
+  testing/python/tirx/native_operator_helpers.cc)
+target_include_directories(tilelang_tirx_test_helpers PRIVATE ${TILE_LANG_INCLUDES})
+target_compile_features(tilelang_tirx_test_helpers PRIVATE cxx_std_20)
+target_link_libraries(tilelang_tirx_test_helpers PRIVATE
+  tilelang ${TILELANG_TIRX_COMPILER} tvm_tirx::header tvm_ffi::shared)
+set_target_properties(tilelang_tirx_test_helpers PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+set(TILELANG_OUTPUT_TARGETS tilelang)
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -722,14 +904,14 @@ unset(PATCHELF_EXECUTABLE CACHE)
 set(TILELANG_BUILD_RPATH "")
 if(APPLE)
   set(TILELANG_BUILD_RPATH "@loader_path")
-  set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_ffi/lib")
+  set(TILELANG_INSTALL_RPATH "@loader_path;@loader_path/../../tvm_tirx/lib;@loader_path/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     # Some z3 is placed in lib/ and some in bin/, we add both in rpath
     string(APPEND TILELANG_INSTALL_RPATH ";@loader_path/../../z3/lib;@loader_path/../../z3/bin")
   endif()
 elseif(UNIX)
   set(TILELANG_BUILD_RPATH "\$ORIGIN")
-  set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_ffi/lib")
+  set(TILELANG_INSTALL_RPATH "\$ORIGIN:\$ORIGIN/../../tvm_tirx/lib:\$ORIGIN/../../tvm_ffi/lib")
   if(USE_Z3 AND USE_PYPI_Z3)
     string(APPEND TILELANG_INSTALL_RPATH ":\$ORIGIN/../../z3/lib")
   endif()

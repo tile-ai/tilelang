@@ -40,7 +40,7 @@ CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected p
 ", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
+TVM_LIBRARY_NOT_FOUND_MESSAGE = "apache-tvm-tirx is not installed or found in the expected path"
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
 # Only expose the internal lib directory to sys.path to avoid shadowing
@@ -57,7 +57,7 @@ if not os.path.exists(THIRD_PARTY_ROOT):
     dev_lib_root = os.path.join(tl_dev_root, "build")
     # In dev builds, place artifacts under build/lib and point search path there
     # to avoid adding the entire build root to sys.path.
-    TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
+    TL_LIBS = [os.path.join(dev_lib_root, "lib")]
     THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
     logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
 else:
@@ -66,10 +66,8 @@ else:
     except ImportError:
         logger.error("Failed to import z3, consider to reinstall tilelang.")
 
-assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
-
 for lib in TL_LIBS:
-    if lib not in sys.path:
+    if os.path.isdir(lib) and lib not in sys.path:
         sys.path.insert(0, lib)
 
 
@@ -550,7 +548,7 @@ class Environment:
         """Return True if we are running in light import mode."""
         # means we are running under `python -m tilelang.autodd` or some
         # other scripts that only require the minimal environment variables.
-        return self.is_running_autodd()
+        return os.environ.get("TILELANG_LIGHT_IMPORT", "0") == "1" or self.is_running_autodd()
 
     def is_span_enable(self) -> bool:
         return self.TILELANG_ENABLE_IR_SPAN.lower() in ("1", "true", "yes", "on")
@@ -593,7 +591,7 @@ def get_cuda_dll_search_dirs() -> list[str]:
 def get_runtime_library_dirs() -> list[str]:
     """Return library directories shipped with sibling Python packages.
 
-    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their libraries resolve
+    Locates ``tvm_tirx``, ``tvm_ffi`` and ``z3`` directories so their libraries resolve
     when TileLang is imported. Each lookup is best-effort; failures are ignored.
     """
     dirs: list[str] = []
@@ -603,6 +601,18 @@ def get_runtime_library_dirs() -> list[str]:
         dirs.append(os.path.dirname(tvm_ffi_libinfo.find_libtvm_ffi()))
     except Exception:
         pass
+    if native_library_path := os.environ.get("TVM_TIRX_LIBRARY_PATH"):
+        dirs.append(native_library_path)
+    try:
+        import importlib.util
+
+        native_spec = importlib.util.find_spec("tvm_tirx")
+    except (ImportError, AttributeError, ValueError):
+        native_spec = None
+    if native_spec and native_spec.submodule_search_locations:
+        for root in native_spec.submodule_search_locations:
+            package = pathlib.Path(root)
+            dirs.extend((str(package / "lib"), str(package.parent.parent / "build" / "lib")))
     try:
         import importlib.util
 
@@ -615,7 +625,7 @@ def get_runtime_library_dirs() -> list[str]:
             z3_lib = os.path.join(z3_root, "lib")
             if os.path.isdir(z3_lib):
                 dirs.append(z3_lib)
-    return dirs
+    return list(dict.fromkeys(os.path.abspath(directory) for directory in dirs if os.path.isdir(directory)))
 
 
 def prepend_pythonpath(path):
@@ -627,18 +637,18 @@ def prepend_pythonpath(path):
     sys.path.insert(0, path)
 
 
-# Initialize TVM paths
-if env.TVM_IMPORT_PYTHON_PATH is not None:
-    prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
-else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm", "python")
-    assert os.path.exists(tvm_path), tvm_path
-    if tvm_path not in sys.path:
-        prepend_pythonpath(tvm_path)
-        env.TVM_IMPORT_PYTHON_PATH = tvm_path
-# By default, the built TVM-related libraries are stored in TL_LIBS.
-if os.environ.get("TVM_LIBRARY_PATH") is None:
-    os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+if tirx_source := os.environ.get("TVM_TIRX_SOURCE"):
+    tirx_source = pathlib.Path(tirx_source).expanduser().resolve()
+    tirx_python = tirx_source / "python"
+    if not (tirx_python / "tvm_tirx" / "__init__.py").is_file():
+        raise ValueError(f"TVM_TIRX_SOURCE is not a standalone TIRx checkout: {tirx_source}")
+    prepend_pythonpath(str(tirx_python))
+    if "TVM_TIRX_LIBRARY_PATH" not in os.environ:
+        candidates = [*(pathlib.Path(directory) for directory in TL_LIBS), tirx_source / "build" / "lib", tirx_source / "build_cpp" / "lib"]
+        for directory in candidates:
+            if any(directory.glob("*tvm_tirx_compiler*")):
+                os.environ["TVM_TIRX_LIBRARY_PATH"] = str(directory)
+                break
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:

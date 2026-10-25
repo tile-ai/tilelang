@@ -14,7 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from tvm.ir.instrument import pass_instrument
+from tvm_tirx.ir.transform.instrument import pass_instrument
 
 
 _current_pass_phase: ContextVar[str | None] = ContextVar("tilelang_pass_phase", default=None)

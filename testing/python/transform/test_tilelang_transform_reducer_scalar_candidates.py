@@ -31,8 +31,10 @@ def infer_reducer(model="register-count", factory=make_reducer, **kwargs):
     layouts = {}
 
     def visit(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            for buffer, layout in node.annotations.get("layout_map", {}).items():
+        if isinstance(node, tvm.ir.Call) and node.op.name == "tl.layout_hint":
+            layouts[node.args[0].name] = node.attrs["layout"]
+        if isinstance(node, tvm.ir.RegionStmt):
+            for buffer, layout in node.attrs.get("layout_map", {}).items():
                 layouts[buffer.name] = layout
 
     tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, visit)

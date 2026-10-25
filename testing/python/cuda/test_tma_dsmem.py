@@ -223,7 +223,9 @@ def test_store_cluster_multi_tma_barrier():
     assert "tl::tma_store_cluster" in src, f"Expected tl::tma_store_cluster for multi-TMA row decomposition.\nKernel source:\n{src}"
     assert "map_shared_rank" not in src, f"Multi-TMA path must NOT fall back to map_shared_rank.\nKernel source:\n{src}"
     # The barrier must be initialised with arrive_count == M (one per TMA call).
-    assert f"s_barrier[0].init({M})" in src, f"Expected barrier arrive_count={M} for {M}-row decomposition.\nKernel source:\n{src}"
+    assert f"tl::mbarrier_init(s_barrier_ptr[0], {M})" in src, (
+        f"Expected barrier arrive_count={M} for {M}-row decomposition.\nKernel source:\n{src}"
+    )
     # Exactly M tma_store_cluster calls should appear in the source.
     assert src.count("tl::tma_store_cluster") == M, (
         f"Expected exactly {M} tma_store_cluster calls, got {src.count('tl::tma_store_cluster')}.\nKernel source:\n{src}"
@@ -251,7 +253,7 @@ def test_store_cluster_non_16b_row_fallback(capfd):
     src = mod.get_kernel_source()
     assert "tl::tma_store_cluster" not in src, f"Non-16B rows must not emit tma_store_cluster.\nKernel source:\n{src}"
     assert "map_shared_rank" in src, f"Expected SIMT cluster-copy fallback.\nKernel source:\n{src}"
-    assert "s_barrier[0].init(1)" in src, f"SIMT fallback must keep a single remote arrival.\nKernel source:\n{src}"
+    assert "tl::mbarrier_init(s_barrier_ptr[0], 1)" in src, f"SIMT fallback must keep a single remote arrival.\nKernel source:\n{src}"
     captured = capfd.readouterr()
     assert "Cluster bulk copy row size is not a multiple of 16 bytes" in (captured.out + captured.err)
 
@@ -325,7 +327,7 @@ def test_store_cluster_3d_multi_tma():
     src = mod.get_kernel_source()
     n_expected = D * M
     assert "tl::tma_store_cluster" in src, f"Expected tl::tma_store_cluster for 3-D multi-TMA.\nKernel source:\n{src}"
-    assert f"s_barrier[0].init({n_expected})" in src, (
+    assert f"tl::mbarrier_init(s_barrier_ptr[0], {n_expected})" in src, (
         f"Expected barrier arrive_count={n_expected} for {D}x{M} decomposition.\nKernel source:\n{src}"
     )
     assert src.count("tl::tma_store_cluster") == n_expected, (

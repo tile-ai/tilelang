@@ -150,16 +150,6 @@ bool TvmLogDebugSettings::VerboseEnabledImpl(const std::string &filename,
   return false;
 }
 
-std::string VLogContext::str() const {
-  std::stringstream result;
-  for (const auto *entry : context_stack_) {
-    ICHECK_NOTNULL(entry);
-    result << entry->str();
-    result << ": ";
-  }
-  return result.str();
-}
-
 } // namespace detail
 } // namespace runtime
 } // namespace tvm

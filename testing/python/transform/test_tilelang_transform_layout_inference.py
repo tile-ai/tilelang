@@ -1,3 +1,4 @@
+from tvm_ffi import structural_equal
 import re
 
 from tilelang import tvm as tvm
@@ -7,6 +8,7 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+from tilelang.testing.ir import collect_nodes
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -16,114 +18,59 @@ def _assert_launch_bounds(kernel_source: str, threads: int) -> None:
     assert re.search(rf"__launch_bounds__\({threads}\b", kernel_source)
 
 
-@pytest.mark.parametrize(
-    "block_M, block_N, block_K, threads, vec_load_b, dtype",
-    [
-        (64, 64, 32, 128, 8, T.float16),
-    ],
-)
-def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
-    N = tvm.te.var("n")
-    K = tvm.te.var("k")
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("rows_count,columns_count", [(64, 128), (67, 131), (65, 63)])
+def test_loop_tail_split(rows_count, columns_count):
+    rows, columns = T.dynamic("rows columns")
+    block_rows, block_columns, threads, vector_width = 32, 64, 128, 8
 
-    def before():
-        @T.prim_func
-        def main(
-            B: T.Tensor((K, N), dtype),
-        ):
-            with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
-                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                    t = thread_bindings
-                    for i in T.unroll(0, block_N * block_K // (threads * vec_load_b)):
-                        for vec in T.Parallel(vec_load_b):
-                            B_shared[
-                                i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                            ] = T.if_then_else(
-                                k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b) < K
-                                and bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                B[
-                                    k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                    bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                ],
-                                T.float16(0),
-                            )
-
-        return tvm.IRModule({"main": main})
-
-    def after():
-        @T.prim_func
-        def main(
-            B: T.Tensor((K, N), dtype),
-        ):
-            with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
-                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                    t = thread_bindings
-                    for i in T.unroll(0, block_N * block_K // (threads * vec_load_b)):
-                        if (k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b)) * N % vec_load_b == 0:
-                            for vec in T.vectorized(vec_load_b):
-                                B_shared[
-                                    i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                ] = T.if_then_else(
-                                    k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b) < K
-                                    and bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                    B[
-                                        k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                        bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                    ],
-                                    T.float16(0),
-                                )
-                        else:
-                            for vec in T.serial(vec_load_b):
-                                B_shared[
-                                    i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                ] = T.if_then_else(
-                                    k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b) < K
-                                    and bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                    B[
-                                        k * block_K + i * (threads * vec_load_b // block_N) + t // (block_N // vec_load_b),
-                                        bx * block_N + t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
-                                    ],
-                                    T.float16(0),
-                                )
-
-        return tvm.IRModule({"main": main})
+    @T.prim_func
+    def main(source: T.Tensor((rows, columns), "float16"), output: T.Tensor((rows, columns), "float16")):
+        with T.Kernel(T.ceildiv(columns, block_columns), threads=threads) as block:
+            shared = T.alloc_shared((block_rows, block_columns), "float16")
+            thread = T.get_thread_binding()
+            for tile in T.serial(T.ceildiv(rows, block_rows)):
+                for partition in T.unroll(block_rows * block_columns // (threads * vector_width)):
+                    for lane in T.vectorized(vector_width):
+                        row = partition * (threads * vector_width // block_columns) + thread // (block_columns // vector_width)
+                        column = thread % (block_columns // vector_width) * vector_width + lane
+                        shared[row, column] = T.if_then_else(
+                            tile * block_rows + row < rows and block * block_columns + column < columns,
+                            source[tile * block_rows + row, block * block_columns + column],
+                            T.float16(0),
+                        )
+                for row, column in T.Parallel(block_rows, block_columns):
+                    if tile * block_rows + row < rows and block * block_columns + column < columns:
+                        output[tile * block_rows + row, block * block_columns + column] = shared[row, column]
 
     with tvm.target.Target(auto_target):
-        mod = tvm.tirx.transform.BindTarget(auto_target)(before())
-        mod = tl.transform.MaterializeKernelLaunch()(mod)
-        mod = tl.transform.LayoutInference()(mod)
-        mod = tvm.tirx.transform.Simplify()(mod)
-        ref_mod = tvm.tirx.transform.BindTarget(auto_target)(after())
-        ref_mod = tl.transform.MaterializeKernelLaunch()(ref_mod)
-        ref_mod = tvm.tirx.transform.Simplify()(ref_mod)
-        # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
-        # This loop is "for vec in T.parallel(1)",
-        # Since the loop var "vec" is never used in the loop body, it does not affect the correctness
-        tvm.ir.structural_equal(mod, ref_mod)
-        # tvm.ir.assert_structural_equal(mod, ref_mod)
+        module = tvm.tirx.transform.BindTarget(auto_target)(tvm.IRModule({"main": main}))
+        module = tl.transform.MaterializeKernelLaunch()(module)
+        module = tl.transform.LayoutInference()(module)
+    assert tvm.tirx.analysis.check_well_formed(module)
+    assert any("parallel_loop_layout" in loop.annotations for loop in collect_nodes(module, tvm.ir.For))
+    kernel = tl.compile(main, target=auto_target, out_idx=[1])
+    source = torch.randn(rows_count, columns_count, device="cuda", dtype=torch.float16)
+    torch.testing.assert_close(kernel(source), source, rtol=0, atol=0)
 
 
 def test_register_count_is_default_layout_cost_model():
     @T.prim_func
-    def main(
-        S: T.Tensor((2,), T.float32),
-        Out: T.Tensor((2, 2560), T.float32),
-    ):
-        with T.Kernel(1, threads=256):
-            s_frag = T.alloc_fragment((2,), T.float32)
-            for i in T.Parallel(2):
-                s_frag[i] = S[i]
-            for i, j in T.Parallel(2, 2560):
-                Out[i, j] = s_frag[i] * 2.0
+    def main(source: T.Tensor((8, 128), T.float32), output: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((8, 128), T.float32)
+            values = T.alloc_fragment((8, 128), T.float32)
+            accumulator = T.alloc_reducer((128,), T.float32)
+            result = T.alloc_fragment((128,), T.float32)
+            T.copy(source, shared)
+            T.copy(shared, values)
+            T.reducer_init(accumulator)
+            for row, column in T.Parallel(8, 128):
+                T.reducer_update(accumulator[column], values[row, column])
+            T.finalize_reducer(accumulator, result)
+            T.copy(result, output)
 
-    target = auto_target
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
 
     def infer(pass_configs=None):
         with target, tvm.transform.PassContext(config=pass_configs or {}):
@@ -137,7 +84,7 @@ def test_register_count_is_default_layout_cost_model():
     io_aware = infer({"tl.layout_cost_model": "io-aware"})
 
     tvm.ir.assert_structural_equal(default, register_count)
-    assert not tvm.ir.structural_equal(default, io_aware)
+    assert not structural_equal(default, io_aware)
 
 
 def test_static_ragged_copy_minimizes_full_thread_padding():
@@ -157,7 +104,7 @@ def test_static_ragged_copy_minimizes_full_thread_padding():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 128)
-    assert "for (int i = 0; i < 5; ++i)" in kernel_source
+    assert re.search(r"for \(int (\w+) = 0; \1 < 5; \+\+\1\)", kernel_source)
     assert "threadIdx.x) >> 1)) < 257" in kernel_source
     assert "float2" not in kernel_source
     assert "threadIdx.x) < 1" not in kernel_source
@@ -169,10 +116,12 @@ def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
 
     @T.prim_func
     def main(
+        A: T.Tensor((n,), T.float8_e4m3),
         B: T.Tensor((n,), T.float8_e4m3),
     ):
         with T.Kernel(1, threads=threads):
             S = T.alloc_shared((n,), T.float8_e4m3)
+            T.copy(A, S, disable_tma=True)
             T.copy(S, B, disable_tma=True)
 
     with tvm.target.Target(auto_target):
@@ -180,9 +129,9 @@ def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 128)
-    assert "for (int i = 0; i < 3; ++i)" in kernel_source
-    assert "fp8_e4_8_t" in kernel_source
-    assert "fp8_e4_16_t" not in kernel_source
+    assert re.search(r"for \(int (\w+) = 0; \1 < 3; \+\+\1\)", kernel_source)
+    assert "*(uint2*)" in kernel_source
+    assert "*(uint4*)" not in kernel_source
 
 
 def test_static_ragged_copy_allows_1024_elements_384_threads():
@@ -202,8 +151,8 @@ def test_static_ragged_copy_allows_1024_elements_384_threads():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 384)
-    assert "for (int i = 0; i < 3; ++i)" in kernel_source
-    assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
+    assert re.search(r"for \(int (\w+) = 0; \1 < 3; \+\+\1\)", kernel_source)
+    assert re.search(r"B_ptr\[\(\(\w+ \* 384\) \+ \(\(int\)threadIdx.x\)\)\]", kernel_source)
     assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
     assert "threadIdx.x) < 128" not in kernel_source
 

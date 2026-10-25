@@ -7,6 +7,7 @@
 #define TVM_TL_OP_TRANSPOSE_H_
 
 #include "operator.h"
+#include "parallel.h"
 #include "support/check.h"
 
 namespace tvm {
@@ -18,7 +19,9 @@ using namespace ffi;
 /// Node class for transpose operations over the final two axes.
 class TransposeNode : public TileOperatorNode {
 public:
-  Buffer src, dst;
+  explicit TransposeNode(ffi::UnsafeInit tag) : src(tag), dst(tag) {}
+
+  TensorVar src, dst;
   Array<Range> src_range, dst_range;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Transpose", TransposeNode,
@@ -34,26 +37,26 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::Analyzer analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   TileOperator Clone() const override;
 
   /// Build a SIMT-style nested parallel loop implementing the transpose.
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeSIMTLoop(sym::Analyzer analyzer) const;
 
 private:
   /// Create iterator variables for dimensions with extent > 1.
-  Array<IterVar> MakeIterVars() const;
+  Array<LayoutAxis> MakeIterVars() const;
 
   /// Generate source (src_dst=0) or destination (src_dst=1) index expressions.
   /// For the destination side, the final two source axes are exchanged.
-  Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
+  Array<PrimExpr> MakeIndices(const Array<LayoutAxis> &ivs, int src_dst) const;
 
   /// Build a boundary predicate for generated buffer indices.
-  PrimExpr MakePredicate(arith::Analyzer *analyzer,
-                         const Array<PrimExpr> &indices,
-                         const Array<PrimExpr> &extents) const;
+  Optional<PrimExpr> MakePredicate(sym::Analyzer analyzer,
+                                   const Array<PrimExpr> &indices,
+                                   const Array<PrimExpr> &extents) const;
 };
 
 using TransposeTargetPredicate = bool (*)(Target target);
@@ -63,7 +66,7 @@ struct TransposeImpl {
   TransposeTargetPredicate match_target;
 
   Stmt (*lower)(const TransposeNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterTransposeImpl(TransposeImpl impl);
@@ -73,9 +76,9 @@ class Transpose : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Transpose, TileOperator,
                                              TransposeNode);
-  TVM_DLL
-  Transpose(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TILELANG_DLL
+  Transpose(Array<Expr> args,
+            BlockAnnotations annotations = BlockAnnotations());
   static const Op &Get();
 };
 

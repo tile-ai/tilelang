@@ -6,13 +6,15 @@
 #ifndef TVM_TL_LAYOUT_CUTE_LAYOUT_H_
 #define TVM_TL_LAYOUT_CUTE_LAYOUT_H_
 
+#include "axis.h"
+#include "compat/expr.h"
+#include "support/base.h"
 #include "support/check.h"
 #include "swizzle_mode.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/object.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/base.h>
-#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/expr.h>
 
 #include <cstdint>
 #include <utility>
@@ -97,20 +99,20 @@ public:
 
 class Swizzle : public ObjectRef {
 public:
-  TVM_DLL Swizzle(int b_bits, int m_base, int s_shift);
+  TILELANG_DLL Swizzle(int b_bits, int m_base, int s_shift);
 
   // A non-swizzle.
   static Swizzle Identity() { return Swizzle(0, 0, 0); }
 
   // Reinterpret the swizzle when the underlying buffer is viewed as a different
   // element type.
-  TVM_DLL Swizzle Recast(int old_bits, int new_bits) const;
+  TILELANG_DLL Swizzle Recast(int old_bits, int new_bits) const;
 
   // Parse the CuTe spelling "Sw<b,m,s>" (the inverse of Print).
-  TVM_DLL static Swizzle Parse(const ffi::String &text);
+  TILELANG_DLL static Swizzle Parse(const ffi::String &text);
 
   // Print in the CuTe spelling "Sw<b,m,s>".
-  TVM_DLL void Print(std::ostream &os) const;
+  TILELANG_DLL void Print(std::ostream &os) const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Swizzle, ObjectRef, SwizzleNode);
 };
@@ -130,23 +132,23 @@ public:
 class IntTuple : public ObjectRef {
 public:
   // Creates a static integer.
-  TVM_DLL IntTuple(int64_t value);
+  TILELANG_DLL IntTuple(int64_t value);
 
   // Creates a either static or dynamic integer, based on the PrimExpr's value.
-  TVM_DLL IntTuple(PrimExpr value);
+  TILELANG_DLL IntTuple(PrimExpr value);
 
   // The i-th child. A leaf has rank 1 and only index 0 is allowed.
-  TVM_DLL IntTuple operator[](int64_t index) const;
+  TILELANG_DLL IntTuple operator[](int64_t index) const;
 
   // Element-wise sum.
-  TVM_DLL friend IntTuple operator+(const IntTuple &a, const IntTuple &b);
+  TILELANG_DLL friend IntTuple operator+(const IntTuple &a, const IntTuple &b);
   IntTuple &operator+=(const IntTuple &other) {
     *this = *this + other;
     return *this;
   }
 
   // The product. The product of two tuples is dot-product.
-  TVM_DLL friend IntTuple operator*(const IntTuple &a, const IntTuple &b);
+  TILELANG_DLL friend IntTuple operator*(const IntTuple &a, const IntTuple &b);
   IntTuple &operator*=(const IntTuple &other) {
     *this = *this * other;
     return *this;
@@ -155,10 +157,10 @@ public:
   // Parse the CuTe spelling (the inverse of Print): nested "(a,b,...)"
   // tuples, integer leaves, and scaled bases "v@m@..." with the mode path
   // innermost-first (E<1,0> is spelled 1@0@1).
-  TVM_DLL static IntTuple Parse(const ffi::String &text);
+  TILELANG_DLL static IntTuple Parse(const ffi::String &text);
 
   // Print in the CuTe spelling.
-  TVM_DLL void Print(std::ostream &os) const;
+  TILELANG_DLL void Print(std::ostream &os) const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntTuple, ObjectRef, IntTupleNode);
 };
@@ -187,6 +189,9 @@ public:
 // A dynamic (runtime-valued) integer, carrying a PrimExpr.
 class IntTuplePrimExprNode : public IntTupleNode {
 public:
+  explicit IntTuplePrimExprNode(PrimExpr expression)
+      : value(std::move(expression)) {}
+  explicit IntTuplePrimExprNode(ffi::UnsafeInit tag) : value(tag) {}
   PrimExpr value;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.cute.IntTuplePrimExpr",
@@ -225,7 +230,7 @@ public:
 class IntTupleScaledBasis : public IntTuple {
 public:
   // Pre: `value` is a scalar leaf (IsConst or IsPrimExpr), not a tuple.
-  TVM_DLL IntTupleScaledBasis(IntTuple value, Array<int64_t> basis);
+  TILELANG_DLL IntTupleScaledBasis(IntTuple value, Array<int64_t> basis);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntTupleScaledBasis, IntTuple,
                                              IntTupleScaledBasisNode);
 };
@@ -251,7 +256,7 @@ public:
 
 class IntTupleTuple : public IntTuple {
 public:
-  TVM_DLL explicit IntTupleTuple(Array<IntTuple> fields);
+  TILELANG_DLL explicit IntTupleTuple(Array<IntTuple> fields);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntTupleTuple, IntTuple,
                                              IntTupleTupleNode);
 };
@@ -279,11 +284,11 @@ inline PrimExpr AsPrimExpr(const IntTuple &t) {
   ICHECK(e != nullptr) << "AsPrimExpr on a non-PrimExpr leaf";
   return e->value;
 }
-inline PrimExpr AsConstOrPrimExpr(const IntTuple &t, const DataType &dtype) {
+inline PrimExpr AsConstOrPrimExpr(const IntTuple &t, const PrimType &dtype) {
   if (const auto *c = t.as<IntTupleConstNode>())
     return IntImm(dtype, c->value);
   const auto *e = t.as<IntTuplePrimExprNode>();
-  ICHECK(e != nullptr) << "AsConstOrPrimExpr on a non-leaf";
+  ICHECK(e != nullptr) << "AsConstOrPrimExpr on a non-leaf: " << t;
   return e->value;
 }
 inline IntTupleScaledBasis AsScaledBasis(const IntTuple &t) {
@@ -307,30 +312,30 @@ inline Array<IntTuple> TupleFields(const IntTuple &t) {
 }
 
 // Select a child by a basis (ScaledBasis indexing).
-TVM_DLL IntTuple BasisGet(const Array<int64_t> &path, const IntTuple &t);
+TILELANG_DLL IntTuple BasisGet(const Array<int64_t> &path, const IntTuple &t);
 
 // The rank, or number of children, of an IntTuple. For a leaf, the rank is 1.
-TVM_DLL int64_t Rank(const IntTuple &t);
+TILELANG_DLL int64_t Rank(const IntTuple &t);
 
 /// Product of all leaf values.
-TVM_DLL IntTuple Product(const IntTuple &t);
+TILELANG_DLL IntTuple Product(const IntTuple &t);
 
 /// Flatten a tree into a IntTupleTuple of leaves.
 /// A leaf flattens to itself.
 /// @post depth <= 1.
-TVM_DLL IntTuple Flatten(const IntTuple &t);
+TILELANG_DLL IntTuple Flatten(const IntTuple &t);
 
 /// Wrap an IntTuple into a tuple.
 /// @post IsTuple(result).
-TVM_DLL IntTupleTuple Wrap(const IntTuple &t);
+TILELANG_DLL IntTupleTuple Wrap(const IntTuple &t);
 
 // Checks if two IntTuple's are congruent: whether their tree structure
 // matches -- same nesting and same rank at every branch.
-TVM_DLL bool Congruent(const IntTuple &a, const IntTuple &b);
+TILELANG_DLL bool Congruent(const IntTuple &a, const IntTuple &b);
 
 /// CuTe shape compatibility (`a <= b`): `a` and `b` have the same total size,
 /// and every coordinate into `a` is also a valid coordinate into `b`.
-TVM_DLL bool Compatible(const IntTuple &a, const IntTuple &b);
+TILELANG_DLL bool Compatible(const IntTuple &a, const IntTuple &b);
 
 // Higher-order function mapping each leaf by `f`.
 template <class F> IntTuple TransformLeaf(const IntTuple &t, F &&f) {
@@ -380,114 +385,114 @@ public:
 class Layout : public ObjectRef {
 public:
   // Convenience constructor: static shape, static stride.
-  TVM_DLL Layout(Array<int64_t> shape, Array<int64_t> stride);
+  TILELANG_DLL Layout(Array<int64_t> shape, Array<int64_t> stride);
   // Convenience constructor: static shape, dynamic stride.
-  TVM_DLL Layout(Array<int64_t> shape, Array<IntTuple> stride);
+  TILELANG_DLL Layout(Array<int64_t> shape, Array<IntTuple> stride);
   // Convenience constructor: dynamic shape, dynamic stride.
-  TVM_DLL Layout(Array<IntTuple> shape, Array<IntTuple> stride);
+  TILELANG_DLL Layout(Array<IntTuple> shape, Array<IntTuple> stride);
   // Canonical constructor.
-  TVM_DLL Layout(IntTuple shape, IntTuple stride);
+  TILELANG_DLL Layout(IntTuple shape, IntTuple stride);
 
   // Sub-layout.
-  TVM_DLL Layout operator[](int64_t index) const;
+  TILELANG_DLL Layout operator[](int64_t index) const;
 
   /// Map a single coordinate to a physical index.
   /// @return a const or an expression; when stride has scaled basis, the result
   ///         is a tuple.
-  TVM_DLL IntTuple operator()(const IntTuple &coord) const;
+  TILELANG_DLL IntTuple operator()(const IntTuple &coord) const;
 
   // Compose with a column-major layout of this shape.
-  TVM_DLL Layout WithShape(const IntTuple &shape) const;
+  TILELANG_DLL Layout WithShape(const IntTuple &shape) const;
 
   // Parse the CuTe spelling "shape:stride" (the inverse of Print).
-  TVM_DLL static Layout Parse(const ffi::String &text);
+  TILELANG_DLL static Layout Parse(const ffi::String &text);
 
   // Print in the CuTe spelling "shape:stride".
-  TVM_DLL void Print(std::ostream &os) const;
+  TILELANG_DLL void Print(std::ostream &os) const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ObjectRef, LayoutNode);
 };
 
 /// Same with IntTuple.
 /// @return the rank of the shape (and stride).
-TVM_DLL int64_t Rank(const Layout &layout);
+TILELANG_DLL int64_t Rank(const Layout &layout);
 
 /// Same with IntTuple.
 /// @return the flattened shape and stride.
-TVM_DLL Layout Flatten(const Layout &layout);
+TILELANG_DLL Layout Flatten(const Layout &layout);
 
 /// The domain size of the shape.
 /// @return Product(layout->shape).
-TVM_DLL IntTuple Size(const Layout &layout);
+TILELANG_DLL IntTuple Size(const Layout &layout);
 
 /// Flatten, and merge adjacent modes that can be composed into one.
 /// A fully collapsed layout is returned as CuTe's scalar mode (1):(0)
 /// @return result(i) == layout(i) for all i < size(result).
 /// @post depth <= 1, no need to flatten again.
-TVM_DLL Layout Coalesce(const Layout &layout);
+TILELANG_DLL Layout Coalesce(const Layout &layout);
 
 /// Right-inverse of a layout.
 /// @return layout(result(i)) == i for all i < size(result).
-TVM_DLL Layout RightInverse(const Layout &layout);
+TILELANG_DLL Layout RightInverse(const Layout &layout);
 
 /// Left-inverse of an injective layout (CuTe left_inverse):
 /// @return result(layout(i)) == i for all i < size(layout).
 /// Like CuTe, ICHECKs when the sorted strides do not form the divisibility
 /// chain the inverse requires (an injective layout with irregular gaps).
-TVM_DLL Layout LeftInverse(const Layout &layout);
+TILELANG_DLL Layout LeftInverse(const Layout &layout);
 
 /// Composition lhs o rhs.
 /// @return result(c) == lhs(rhs(c)) for all c in the domain of rhs.
 /// @post size(result) == size(rhs).
 /// @note a ScaledBasis rhs stride (value * E<path>) reroutes into the matching
 /// lhs axis.
-TVM_DLL Layout Composition(const Layout &lhs, const Layout &rhs);
+TILELANG_DLL Layout Composition(const Layout &lhs, const Layout &rhs);
 
 /// Same with Coalesce, but caps each merged run at `max_extent`. A run wider
 /// than the cap stays split instead of fusing into one oversized mode.
 /// @post depth <= 1.
-TVM_DLL Layout Coalesce(const Layout &layout, int64_t max_extent);
+TILELANG_DLL Layout Coalesce(const Layout &layout, int64_t max_extent);
 
 /// Take a given number of modes from a layout.
-TVM_DLL Layout Take(const Layout &layout, int64_t n);
+TILELANG_DLL Layout Take(const Layout &layout, int64_t n);
 
 /// Drop stride-0 and size-1 modes, then coalesce.
-TVM_DLL Layout Filter(const Layout &layout);
+TILELANG_DLL Layout Filter(const Layout &layout);
 
 /// Codomain shape of a layout (CuTe coshape): the per-axis extents
 /// 1 + inner_product(shape - 1, |stride|), e.g.
 /// coshape((128,32):(1@0,1@1)) == (128,32).
-TVM_DLL IntTuple Coshape(const Layout &layout);
+TILELANG_DLL IntTuple Coshape(const Layout &layout);
 
 /// Codomain size of a layout (CuTe cosize): size(coshape(layout)).
 /// @post for all `0 <= i < size(layout)`, layout(i) < result.
-TVM_DLL IntTuple Cosize(const Layout &layout);
+TILELANG_DLL IntTuple Cosize(const Layout &layout);
 
 /// Complement of a layout.
-TVM_DLL Layout Complement(const Layout &layout, int64_t cotarget);
+TILELANG_DLL Layout Complement(const Layout &layout, int64_t cotarget);
 
 /// Complement against the layout's own cosize.
-TVM_DLL Layout Complement(const Layout &layout);
+TILELANG_DLL Layout Complement(const Layout &layout);
 
 /// Logical divide of `layout` by `tiler`.
 /// Splits each tiled mode into (tile, rest).
 /// @pre `tiler` and `Size(layout)` must be static.
-TVM_DLL Layout LogicalDivide(const Layout &layout, const Layout &tiler);
+TILELANG_DLL Layout LogicalDivide(const Layout &layout, const Layout &tiler);
 
 /// Logical product of a block layout and a tiler layout.
 /// Repeats `block` according to `tiler`, returning `(block, rest)`.
 /// @pre `Size(block)` and `Cosize(tiler)` must be static.
-TVM_DLL Layout LogicalProduct(const Layout &block, const Layout &tiler);
+TILELANG_DLL Layout LogicalProduct(const Layout &block, const Layout &tiler);
 
 /// Tiled product convenience form: keep `block` as the first mode and unpack
 /// the actual repeated mode of the logical product after it.
-TVM_DLL Layout TiledProduct(const Layout &block, const Layout &tiler);
+TILELANG_DLL Layout TiledProduct(const Layout &block, const Layout &tiler);
 
 /// Blocked product: repeat `block` over `tiler` and zip the per-mode pairs, so
 /// mode i of the result is ((block_i, rest_i)) and accepts a flat coordinate
 /// covering block extent x tiler extent along that mode.
 /// @post Rank(result) == max(Rank(block), Rank(tiler)).
-TVM_DLL Layout BlockedProduct(const Layout &block, const Layout &tiler);
+TILELANG_DLL Layout BlockedProduct(const Layout &block, const Layout &tiler);
 
 // Column major layout over `shape`.  Size-1 modes take stride 0 and leave
 // the running product untouched (CuTe compact_col_major, stride.hpp:302).
@@ -544,16 +549,16 @@ inline Layout MakeIdentityLayout(const Container &shape) {
 }
 
 // Column major layout over `shape`.
-TVM_DLL Layout MakeColumnMajorLayout(const IntTuple &shape);
+TILELANG_DLL Layout MakeColumnMajorLayout(const IntTuple &shape);
 
 // Row major layout over `shape`.
-TVM_DLL Layout MakeRowMajorLayout(const IntTuple &shape);
+TILELANG_DLL Layout MakeRowMajorLayout(const IntTuple &shape);
 
 // Identity layout over `shape`: per-axis unit ScaledBases.
-TVM_DLL Layout MakeIdentityLayout(const IntTuple &shape);
+TILELANG_DLL Layout MakeIdentityLayout(const IntTuple &shape);
 
 // Concatenate layouts.
-TVM_DLL Layout MakeLayout(const Array<Layout> &layouts);
+TILELANG_DLL Layout MakeLayout(const Array<Layout> &layouts);
 
 // A CuTe ComposedLayout of the form Swizzle o offset o Layout.
 // Evaluating at x yields swizzle.apply(offset + layout(x)).
@@ -585,11 +590,11 @@ public:
 
 class ComposedLayout : public ObjectRef {
 public:
-  TVM_DLL ComposedLayout(Swizzle swizzle, int64_t offset, Layout layout);
+  TILELANG_DLL ComposedLayout(Swizzle swizzle, int64_t offset, Layout layout);
 
   // Recast into a different element width: the swizzle's m_base shifts (see
   // Swizzle::Recast) and the strides/offset scale by old_bits/new_bits.
-  TVM_DLL ComposedLayout Recast(int old_bits, int new_bits) const;
+  TILELANG_DLL ComposedLayout Recast(int old_bits, int new_bits) const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ComposedLayout, ObjectRef,
                                              ComposedLayoutNode);
@@ -623,8 +628,8 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout,
 /// Restrict the layout to a sublayout defined by a region.
 /// @return result.sublayout(coords_in_region) + result.offset
 //            == layout(range.min + coords_in_region)
-Tuple<IntTuple, Layout> Restrict(const Layout &layout,
-                                 const Array<Range> &range);
+ffi::Tuple<IntTuple, Layout> Restrict(const Layout &layout,
+                                      const Array<Range> &range);
 
 } // namespace cute
 } // namespace tl

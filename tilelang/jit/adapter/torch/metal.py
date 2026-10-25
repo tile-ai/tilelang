@@ -3,7 +3,7 @@ from functools import wraps
 from collections.abc import Callable
 
 import torch
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang import tvm as tvm
 

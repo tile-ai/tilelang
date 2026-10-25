@@ -1,7 +1,7 @@
 from tilelang import tvm as tvm
 import tilelang
 import tilelang.testing
-from tvm.script import tirx as T
+import tilelang.language as T
 
 
 def _run_if_stmt_binding(func, config=None):
@@ -65,7 +65,7 @@ def test_if_stmt_binding_replays_condition_disjoint_from_body_writes():
         if A[0] >= T.float32(0):
             B[1] = T.float32(2)
 
-    after = _run_if_stmt_binding(before)
+    after = _run_if_stmt_binding(before.with_attr("tirx.noalias", True))
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
@@ -107,7 +107,7 @@ def test_if_stmt_binding_inlines_replayable_bind_by_default():
         if A[0] >= T.float32(0):
             B[1] = A[1] + T.float32(2) + T.float32(1)
 
-    after = _run_if_stmt_binding(before)
+    after = _run_if_stmt_binding(before.with_attr("tirx.noalias", True))
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
@@ -167,7 +167,7 @@ def test_if_stmt_binding_keeps_side_effecting_bind():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter.access_ptr("rw"),
+                    T.access_ptr(counter[0], "rw", 1),
                     1,
                 )
             )
@@ -181,7 +181,7 @@ def test_if_stmt_binding_keeps_side_effecting_bind():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter.access_ptr("rw"),
+                    T.access_ptr(counter[0], "rw", 1),
                     1,
                 )
             )
@@ -206,7 +206,7 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter_tvm.access_ptr("rw"),
+                    T.address_of(counter_tvm[0]),
                     1,
                 )
             )
@@ -244,7 +244,7 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter_tvm.access_ptr("rw"),
+                    T.address_of(counter_tvm[0]),
                     1,
                 )
             )

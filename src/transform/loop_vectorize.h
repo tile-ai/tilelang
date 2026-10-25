@@ -26,9 +26,9 @@
 #define TVM_TL_LOOP_VECTORIZE_H_
 
 #include "../op/operator.h"
-#include <tvm/arith/analyzer.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/op.h>
 
 namespace tvm {
 namespace tl {
@@ -45,34 +45,34 @@ int MaxVectorLoadBits(const Target &target, bool global_only_access);
 
 // Extract an existing BufferLoad, optionally wrapped in address_of/access_ptr.
 // tvm_access_ptr carries a flat offset instead and must be handled separately.
-ffi::Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr);
+ffi::Optional<TensorLoad> ExtractBufferLoadForAtomic(const Expr &expr);
 
 // Target/dtype/address-space capability; access legality is checked separately.
-int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
+int GetMaxAtomicVectorSize(PrimType dtype, const ffi::String &storage_scope,
                            const Target &target);
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+int GetVectorizeSize(const For &loop, sym::Analyzer analyzer,
                      const LayoutMap &layout_map = {});
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);
 
-For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+For VectorizeLoop(const For &loop, sym::Analyzer analyzer,
                   const LayoutMap &layout_map = {}, int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
 // when var changes
-bool CanProveIndependent(const PrimExpr &expr, Var var,
-                         arith::Analyzer *analyzer);
+bool CanProveIndependent(const PrimExpr &expr, PrimVar var,
+                         sym::Analyzer analyzer);
 
 // Check if expr is invariant within groups of consecutive unit-step iterations.
 // The minimum defaults to zero.
-bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const PrimVar &var,
                                      const PrimExpr &extent,
                                      int target_vectorized_size,
-                                     arith::Analyzer *analyzer,
+                                     sym::Analyzer analyzer,
                                      const PrimExpr &min = 0);
 
 /*!
@@ -95,9 +95,9 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
  * The flag applies only to the analyzed address; an atomic's source value may
  * still broadcast. If the check fails, the planner can try a smaller width.
  */
-bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
+bool IndicesCanVectorize(const PrimExpr &expr, const PrimVar &var,
                          const PrimExpr &extent, int target_vectorized_size,
-                         arith::Analyzer *analyzer, bool allow_broadcast = true,
+                         sym::Analyzer analyzer, bool allow_broadcast = true,
                          const PrimExpr &min = 0);
 
 } // namespace tl

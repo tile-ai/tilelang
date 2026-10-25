@@ -12,8 +12,8 @@
 #include "op/utils.h"
 #include "span_utils.h"
 
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -37,28 +37,36 @@ constexpr const char *kCudaWGMMASP = "cuda.wgmma.sp";
 constexpr const char *kCudaTCGEN05SP = "cuda.tcgen05.sp";
 
 bool CheckWGMMA(const GemmSPNode &op) {
-  if (op.B.scope() != "shared.dyn" && op.B.scope() != "shared") {
+  if (op.B.scope().name() != "shared.dyn" && op.B.scope().name() != "shared") {
     return false;
   }
 
-  if (op.C->dtype == DataType::Float(16) ||
-      op.C->dtype == DataType::Float(32)) {
-    if (op.A->dtype == DataType::Float(16) &&
-        op.B->dtype == DataType::Float(16))
+  if (op.C.dtype() == PrimType::Float(16) ||
+      op.C.dtype() == PrimType::Float(32)) {
+    if (op.A.dtype() == PrimType::Float(16) &&
+        op.B.dtype() == PrimType::Float(16))
       return op.K % 32 == 0;
-    else if (op.A->dtype == DataType::BFloat(16) &&
-             op.B->dtype == DataType::BFloat(16))
+    else if (op.A.dtype() == PrimType::BFloat(16) &&
+             op.B.dtype() == PrimType::BFloat(16))
       return op.K % 32 == 0;
-    else if (op.A->dtype == DataType::Float(32) &&
-             op.B->dtype == DataType::Float(32))
+    else if (op.A.dtype() == PrimType::Float(32) &&
+             op.B.dtype() == PrimType::Float(32))
       return (!op.trans_A) && op.trans_B && op.K % 16 == 0;
-    else if (op.A->dtype.is_float8() && op.B->dtype.is_float8())
+    else if (op.A.dtype().MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3,
+                                      kDLFloat8_e4m3b11fnuz, kDLFloat8_e4m3fn,
+                                      kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                                      kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu) &&
+             op.B.dtype().MatchesCode(kDLFloat8_e3m4, kDLFloat8_e4m3,
+                                      kDLFloat8_e4m3b11fnuz, kDLFloat8_e4m3fn,
+                                      kDLFloat8_e4m3fnuz, kDLFloat8_e5m2,
+                                      kDLFloat8_e5m2fnuz, kDLFloat8_e8m0fnu))
       return (!op.trans_A) && op.trans_B && op.K % 64 == 0;
     else
       return false;
-  } else if (op.C->dtype == DataType::Int(32)) {
-    if ((op.A->dtype == DataType::Int(8) || op.A->dtype == DataType::UInt(8)) &&
-        (op.B->dtype == DataType::Int(8) || op.B->dtype == DataType::UInt(8)))
+  } else if (op.C.dtype() == PrimType::Int(32)) {
+    if ((op.A.dtype() == PrimType::Int(8) ||
+         op.A.dtype() == PrimType::UInt(8)) &&
+        (op.B.dtype() == PrimType::Int(8) || op.B.dtype() == PrimType::UInt(8)))
       return (!op.trans_A) && op.trans_B && op.K % 64 == 0;
     else
       return false;
@@ -73,8 +81,8 @@ bool AllowTcgen5Mma(const GemmSPNode &op, Target target) {
                   IsSharedBuffer(op.B) && IsTmemBuffer(op.C);
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype = IsTmemBuffer(op.A) ? op.B->dtype : op.A->dtype;
-  return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C->dtype).first;
+  PrimType ab_dtype = IsTmemBuffer(op.A) ? op.B.dtype() : op.A.dtype();
+  return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C.dtype()).first;
 }
 
 bool AllowWgmma(const GemmSPNode &op, int block_size, Target target) {
@@ -82,7 +90,7 @@ bool AllowWgmma(const GemmSPNode &op, int block_size, Target target) {
 
   int warp_size = TargetCudaGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
+  return !ctxt->GetConfig<bool>(kDisableWGMMA).value_or(false) &&
          TargetIsHopper(target) && op.M >= 64 && num_warps % 4 == 0 &&
          CheckWGMMA(op);
 }
@@ -91,11 +99,11 @@ void FatalWgmmaUnavailable(const GemmSPNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
              << target << ", A(scope=" << op.A.scope()
-             << ", dtype=" << op.A->dtype << "), B(scope=" << op.B.scope()
-             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
+             << ", dtype=" << op.A.dtype() << "), B(scope=" << op.B.scope()
+             << ", dtype=" << op.B.dtype() << "), C(scope=" << op.C.scope()
+             << ", dtype=" << op.C.dtype() << "), M=" << op.M << ", N=" << op.N
              << ", K=" << op.K << "."
-             << SpanHintSuffix({op.A->span, op.B->span, op.C->span});
+             << SpanHintSuffix({op.A->loc, op.B->loc, op.C->loc});
 }
 
 void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
@@ -103,13 +111,12 @@ void FatalTcgen5Unavailable(const GemmSPNode &op, Target target) {
                 "lowering, but sparse TCGEN5MMA lowering is not yet available. "
                 "Got target="
              << target << ", A(scope=" << op.A.scope()
-             << ", dtype=" << op.A->dtype << "), E(scope=" << op.E.scope()
-             << ", dtype=" << op.E->dtype << "), B(scope=" << op.B.scope()
-             << ", dtype=" << op.B->dtype << "), C(scope=" << op.C.scope()
-             << ", dtype=" << op.C->dtype << "), M=" << op.M << ", N=" << op.N
+             << ", dtype=" << op.A.dtype() << "), E(scope=" << op.E.scope()
+             << ", dtype=" << op.E.dtype() << "), B(scope=" << op.B.scope()
+             << ", dtype=" << op.B.dtype() << "), C(scope=" << op.C.scope()
+             << ", dtype=" << op.C.dtype() << "), M=" << op.M << ", N=" << op.N
              << ", K=" << op.K << "."
-             << SpanHintSuffix(
-                    {op.A->span, op.E->span, op.B->span, op.C->span});
+             << SpanHintSuffix({op.A->loc, op.E->loc, op.B->loc, op.C->loc});
 }
 
 std::pair<int, int>
@@ -338,33 +345,33 @@ const bool cuda_gemm_registered = RegisterCudaGemmSP();
 // TVM_FFI_STATIC_INIT_BLOCK() {
 //   namespace refl = tvm::ffi::reflection;
 //   refl::GlobalDef().def(
-//       "tl.get_tcgen5_mma_meta", [](int M, int N, int K, DataType ab_dtype,
-//                                    DataType c_dtype, bool disable_2cta) {
+//       "tl.get_tcgen5_mma_meta", [](int M, int N, int K, PrimType ab_dtype,
+//                                    PrimType c_dtype, bool disable_2cta) {
 //         auto [success, meta] =
 //             GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype, disable_2cta);
-//         Array<Integer> result;
+//         Array<PrimExpr> result;
 //         if (success) {
-//           result.push_back(Integer(meta.atom_m));
-//           result.push_back(Integer(meta.atom_n));
-//           result.push_back(Integer(meta.atom_k));
-//           result.push_back(Integer(meta.enable_ws));
-//           result.push_back(Integer(meta.enable_2cta));
+//           result.push_back(IntImm(PrimType::Int(64), meta.atom_m));
+//           result.push_back(IntImm(PrimType::Int(64), meta.atom_n));
+//           result.push_back(IntImm(PrimType::Int(64), meta.atom_k));
+//           result.push_back(IntImm(PrimType::Int(64), meta.enable_ws));
+//           result.push_back(IntImm(PrimType::Int(64), meta.enable_2cta));
 //         }
 //         return result;
 //       });
 //   refl::GlobalDef().def(
 //       "tl.get_tcgen5_instr_desc",
-//       [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
-//          DataType c_dtype, bool a_is_k_major, bool b_is_k_major, int
+//       [](int atom_m, int atom_n, int atom_k, PrimType ab_dtype,
+//          PrimType c_dtype, bool a_is_k_major, bool b_is_k_major, int
 //          scale_in_a, int scale_in_b) {
 //         uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
 //                                            c_dtype, a_is_k_major,
 //                                            b_is_k_major, scale_in_a,
 //                                            scale_in_b);
-//         return Integer(static_cast<int64_t>(desc));
+//         return IntImm(PrimType::Int(64), static_cast<int64_t>(desc));
 //       });
 //   refl::GlobalDef().def("tl.get_tcgen5_blockscaled_instr_desc",
-//                         [](int atom_m, int atom_n, DataType ab_dtype,
+//                         [](int atom_m, int atom_n, PrimType ab_dtype,
 //                            bool a_is_k_major, bool b_is_k_major, int
 //                            scale_in_a, int scale_in_b, int a_sf_id, int
 //                            b_sf_id) {
@@ -372,7 +379,8 @@ const bool cuda_gemm_registered = RegisterCudaGemmSP();
 //                               atom_m, atom_n, ab_dtype, a_is_k_major,
 //                               b_is_k_major, scale_in_a, scale_in_b, a_sf_id,
 //                               b_sf_id);
-//                           return Integer(static_cast<int64_t>(desc));
+//                           return IntImm(PrimType::Int(64),
+//                           static_cast<int64_t>(desc));
 //                         });
 // }
 

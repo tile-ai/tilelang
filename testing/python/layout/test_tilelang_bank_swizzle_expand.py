@@ -1,7 +1,7 @@
 import pytest
 
 import tilelang.testing
-from tvm import tirx
+from tilelang._compat import tirx
 
 from tilelang.layout.swizzle import (
     make_full_bank_swizzled_layout,

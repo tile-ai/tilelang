@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from tvm import tirx
-from tvm.tirx.script.builder import frame
+from tilelang._compat.tvm import tirx
+from tvm_tirx.tirx.script.ir_builder import frame
 
 from tilelang.language.loop import (
     Parallel as _common_Parallel,

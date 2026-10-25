@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def _make_vector_not_module(lanes, bitwise=False):
@@ -26,16 +26,16 @@ def _build_vector_not_source(lanes):
 
 @pytest.mark.parametrize(
     ("lanes", "carrier_type"),
-    [(2, "ushort2"), (3, "ushort3"), (4, "ushort4")],
+    [(2, "tvm_boolx2"), (3, "tvm_boolx3"), (4, "tvm_boolx4")],
 )
 def test_vector_not_is_scalarized(lanes, carrier_type):
     source = _build_vector_not_source(lanes)
 
-    declarations = [line for line in source.splitlines() if line.startswith(f"  {carrier_type} __")]
+    declarations = [line for line in source.splitlines() if line.startswith(f"  {carrier_type} logical_not")]
     assert len(declarations) == 1
-    assignments = [line for line in source.splitlines() if "!bool(" in line]
+    assignments = [line for line in source.splitlines() if " = !(" in line]
     assert len(assignments) == lanes
-    assert all(f".{member}" in assignment for member, assignment in zip("xyzw", assignments))
+    assert all(f"[{lane}]" in assignment for lane, assignment in enumerate(assignments))
     # The base CodeGenC path negates the whole carrier, which is invalid.
     assert "!__" not in source
 

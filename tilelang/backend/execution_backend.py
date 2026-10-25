@@ -6,8 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from tvm.target import Target
-from tvm.tirx import PrimFunc
+from tvm_tirx.target import Target
+from tilelang._compat.tirx import PrimFunc
 
 TargetPredicate = Callable[[Target], bool]
 AvailabilityCheck = Callable[[], bool]

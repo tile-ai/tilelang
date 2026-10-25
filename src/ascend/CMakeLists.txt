@@ -15,6 +15,7 @@
 file(GLOB TILE_LANG_ASCEND_ALWAYS_SRCS
   src/ascend/target_utils.cc
   src/ascend/ir.cc
+  src/ascend/op/builtin.cc
   src/ascend/layout/ascend_layouts.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_ALWAYS_SRCS})

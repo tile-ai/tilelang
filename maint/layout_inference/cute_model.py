@@ -32,11 +32,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import tvm.error
-from tilelang import tvm
 from tilelang.layout import Layout as TLLayout
 from tilelang.layout import cute
-from tvm.tirx.stmt_functor import substitute
+from tilelang._compat.stmt_functor import substitute
 
 from oracle import placeholder_vars
 
@@ -97,7 +95,7 @@ def score_statement_cute(
 
     try:
         flat = cute.Layout.from_tilelang(pack_fragment(frag))
-    except tvm.error.InternalError as exc:
+    except RuntimeError as exc:
         return Unconvertible(f"conversion crashed: {exc}")
     if flat is None:
         return Unconvertible("from_tilelang returned None (non-affine/swizzle)")
@@ -105,7 +103,7 @@ def score_statement_cute(
 
     try:
         inv = cute.right_inverse(flat)
-    except tvm.error.InternalError as exc:
+    except RuntimeError as exc:
         return Unconvertible(f"right_inverse crashed: {exc}")
     if int(cute.size(inv)) != int(cute.size(flat)):
         return Unconvertible(f"non-bijective: size(inv)={cute.size(inv)} != {cute.size(flat)}")
@@ -122,7 +120,7 @@ def score_statement_cute(
         G = cute.Layout.parse(g_text)
         A = cute.composition(G, inv)  # cell -> byte address
         A2 = A.with_shape((S, T))  # (slot, thread) split
-    except tvm.error.InternalError as exc:
+    except RuntimeError as exc:
         return Unconvertible(f"composition failed: {exc}")
     notes.append(f"A2 = {A2}")
 

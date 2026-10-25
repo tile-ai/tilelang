@@ -3,13 +3,12 @@ from __future__ import annotations
 from numbers import Integral
 from typing import Any
 
-import tvm
-from tvm.ir import PrimExpr
-from tvm.ir.base import Span
-from tvm.runtime import const
-from tvm.tirx import Buffer
-from tvm.tirx.expr import IntImm, Shuffle as Shuffle
-import tvm.tirx.op as _tvm_op
+import tilelang._compat.tvm as tvm
+from tilelang._compat.tirx import PrimExpr, expr_dtype
+from tvm_tirx.ir import Location as Span, const
+from tilelang._compat.tirx import Buffer
+from tilelang._compat.tirx import IntImm, Shuffle as Shuffle
+import tilelang._compat.tirx as _tvm_op
 
 from tilelang.language.dtypes import _is_any_dtype
 from tilelang.utils.deprecated import deprecated_warning
@@ -38,13 +37,8 @@ tvm_stack_make_shape = _tvm_op.tvm_stack_make_shape
 tvm_stack_make_array = _tvm_op.tvm_stack_make_array
 assume = _tvm_op.assume
 undef = _tvm_op.undef
-start_profile_intrinsic = _tvm_op.start_profile_intrinsic
-end_profile_intrinsic = _tvm_op.end_profile_intrinsic
 tvm_tuple = _tvm_op.tvm_tuple
-tvm_struct_get = _tvm_op.tvm_struct_get
-tvm_struct_set = _tvm_op.tvm_struct_set
 address_of = _tvm_op.address_of
-lookup_param = _tvm_op.lookup_param
 tvm_thread_allreduce = _tvm_op.tvm_thread_allreduce
 tvm_thread_invariant = _tvm_op.tvm_thread_invariant
 tvm_storage_sync = _tvm_op.tvm_storage_sync
@@ -52,7 +46,6 @@ tvm_warp_shuffle = _tvm_op.tvm_warp_shuffle
 tvm_warp_shuffle_up = _tvm_op.tvm_warp_shuffle_up
 tvm_warp_shuffle_down = _tvm_op.tvm_warp_shuffle_down
 tvm_warp_activemask = _tvm_op.tvm_warp_activemask
-tvm_throw_last_error = _tvm_op.tvm_throw_last_error
 tvm_load_matrix_sync = _tvm_op.tvm_load_matrix_sync
 tvm_mma_sync = _tvm_op.tvm_mma_sync
 tvm_bmma_sync = _tvm_op.tvm_bmma_sync
@@ -63,11 +56,9 @@ ptx_wait_group = _tvm_op.ptx_wait_group
 ptx_cp_async_barrier = _tvm_op.ptx_cp_async_barrier
 ptx_init_barrier_thread_count = _tvm_op.ptx_init_barrier_thread_count
 ptx_arrive_barrier = _tvm_op.ptx_arrive_barrier
-create_barriers = _tvm_op.create_barriers
 vectorlow = _tvm_op.vectorlow
 vectorhigh = _tvm_op.vectorhigh
 vectorcombine = _tvm_op.vectorcombine
-ret = _tvm_op.ret
 min_value = _tvm_op.min_value
 max_value = _tvm_op.max_value
 exp = _tvm_op.exp
@@ -114,8 +105,6 @@ isnullptr = _tvm_op.isnullptr
 isfinite = _tvm_op.isfinite
 isinf = _tvm_op.isinf
 popcount = _tvm_op.popcount
-q_multiply_shift = _tvm_op.q_multiply_shift
-q_multiply_shift_per_axis = _tvm_op.q_multiply_shift_per_axis
 shift_left = _tvm_op.shift_left
 shift_right = _tvm_op.shift_right
 fmod = _tvm_op.fmod
@@ -127,10 +116,6 @@ floormod = _tvm_op.floormod
 ceildiv = _tvm_op.ceildiv
 TVMBackendAllocWorkspace = _tvm_op.TVMBackendAllocWorkspace
 TVMBackendFreeWorkspace = _tvm_op.TVMBackendFreeWorkspace
-anylist_getitem = _tvm_op.anylist_getitem
-anylist_resetitem = _tvm_op.anylist_resetitem
-anylist_setitem_call_packed = _tvm_op.anylist_setitem_call_packed
-anylist_setitem_call_cpacked = _tvm_op.anylist_setitem_call_cpacked
 vscale = _tvm_op.vscale
 
 
@@ -156,9 +141,9 @@ def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None)
     if not isinstance(vector, PrimExpr):
         raise TypeError(f"extract_lane expects a PrimExpr, but got {type(vector).__name__}")
 
-    lanes = vector.dtype.lanes
+    lanes = expr_dtype(vector).lanes
     if lanes <= 1:
-        raise ValueError(f"extract_lane expects a vector expression, but got dtype {vector.dtype}")
+        raise ValueError(f"extract_lane expects a vector expression, but got dtype {expr_dtype(vector)}")
 
     if isinstance(lane, IntImm):
         lane = lane.value
@@ -167,7 +152,7 @@ def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None)
 
     lane = int(lane)
     if lane < 0 or lane >= lanes:
-        raise IndexError(f"Lane index {lane} is out of bounds for dtype {vector.dtype} with {lanes} lanes")
+        raise IndexError(f"Lane index {lane} is out of bounds for dtype {expr_dtype(vector)} with {lanes} lanes")
 
     return Shuffle([vector], [lane], span)
 
@@ -436,10 +421,10 @@ def round(x, rounding_mode="ties-to-even", span=None):
         rounding_mode = "ties-to-even"
 
     if rounding_mode == "ties-to-even":
-        return _tvm_op.round(x, span)
+        return _tvm_op.round(x) if span is None else _tvm_op.round(x, loc=span)
     if rounding_mode == "ties-away-from-zero":
         x = tvm.tirx.convert(x)
-        return call_intrin(x.dtype, _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
+        return call_intrin(expr_dtype(x), _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
     raise ValueError(f"Unsupported T.round rounding_mode {rounding_mode!r}; expected 'ties-to-even' or 'ties-away-from-zero'.")
 
 
@@ -451,7 +436,7 @@ def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
         y (int): Exponent value
     """
     return call_intrin(
-        x.dtype,
+        expr_dtype(x),
         tvm.tirx.op.Op.get("tl.pow_of_int"),
         x,
         y,
@@ -481,7 +466,7 @@ def pow(x, y, span=None):
         # pow_of_int's `for (i = 1; i < y; ...)` loop only computes x**y for y >= 1.
         yv = int(y)
         if yv == 0:
-            return const(1, dtype=x.dtype)
+            return const(1, dtype=expr_dtype(x))
         if yv >= 1:
             return pow_of_int(x, yv)
         return _tvm_op.pow(x, yv, span)

@@ -5,10 +5,10 @@ import warnings
 
 import tilelang.language as T
 from tilelang.layout import PartialFragment
-from tvm import tirx
-from tvm.tirx import PyStmtExprVisitor
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import PyStmtExprVisitor
 
-from tvm.tirx.transform import prim_func_pass
+from tvm_tirx.tirx.transform import function_pass as prim_func_pass
 from tilelang.tools.plot_layout import plot_layout
 
 
@@ -34,8 +34,8 @@ def print_fragment_format(layout: T.Fragment) -> None:
         rep_suffix = " (partials)" if isinstance(layout, PartialFragment) else ""
         lines = [
             f"  Shape: {input_shape} -> {output_shape}",
-            f"  Thread: {layout.forward_thread}",
-            f"  Index:  {layout.forward_index}",
+            f"  Thread: {layout.thread}",
+            f"  Index:  {layout.index}",
             f"  Replicate:  {layout.replicate_size}{rep_suffix}",
         ]
         print("\n".join(lines))
@@ -85,9 +85,9 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
             parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
 
-    def visit_sblock_(self, op: tirx.SBlock) -> None:
-        if "layout_map" in op.annotations:
-            layout_map = op.annotations["layout_map"]
+    def visit_region_stmt_(self, op: tirx.RegionStmt) -> None:
+        if "layout_map" in op.attrs:
+            layout_map = op.attrs["layout_map"]
 
             for key, layout in layout_map.items():
                 if isinstance(layout, T.Fragment):
@@ -102,6 +102,7 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
                             )
                             continue
                         plot_layout(layout, name=f"{key}_layout", formats=fmt)
+        super().visit_region_stmt_(op)
 
 
 def LayoutVisual(formats: str | Sequence[str] = ""):

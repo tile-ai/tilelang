@@ -62,8 +62,8 @@ DEFINE_PRINT_TRAIT(half_t, "half_t", "%f", float);
 DEFINE_PRINT_TRAIT(bfloat16_t, "bfloat16_t", "%f", float);
 
 #if __CUDA_ARCH_LIST__ >= 890
-DEFINE_PRINT_TRAIT(fp8_e4_t, "fp8_e4_t", "%f", float);
-DEFINE_PRINT_TRAIT(fp8_e5_t, "fp8_e5_t", "%f", float);
+DEFINE_PRINT_TRAIT(tl::fp8_e4_t, "fp8_e4_t", "%f", float);
+DEFINE_PRINT_TRAIT(tl::fp8_e5_t, "fp8_e5_t", "%f", float);
 #endif
 
 template <> struct PrintTraits<bool> {

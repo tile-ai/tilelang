@@ -1,7 +1,6 @@
 from __future__ import annotations
-from tilelang import tvm as tvm
-from tvm import IRModule
-from tvm.tirx import PrimFunc
+from tvm_tirx import IRModule
+from tvm_tirx.tirx import Function as PrimFunc
 from collections.abc import Callable
 from . import _ffi_api
 

@@ -6,6 +6,9 @@ Pass configurations:
 - tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering (default: OFF)
 """
 
+from tilelang._compat.tensor import tensor_parameter_map
+
+
 import pytest
 
 from tilelang import tvm as tvm
@@ -14,7 +17,8 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.transform import PassConfigKey
-from tvm import tirx
+from tilelang._compat import tirx
+from testing.python.transform._native_ir import expand_bindings, storage_root
 
 
 def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
@@ -46,14 +50,14 @@ def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
     is_load = direction == "ldg"
     assert len(call.args) == (1 if is_load else 2) + (predicate is not None)
     packed_dtype = "uint32" if bits == 32 else f"uint32x{bits // 32}"
-    assert (call.dtype if is_load else call.args[1].dtype) == packed_dtype
+    assert (call.ty.dtype if is_load else call.args[1].ty.dtype) == packed_dtype
     ptr = call.args[0]
-    assert isinstance(ptr, tirx.Call) and ptr.op.same_as(tvm.ir.Op.get("tirx.tvm_access_ptr"))
-    buffer = func.buffer_map[func.params[buffer_index]]
-    assert ptr.args[1].same_as(buffer.data)
-    assert ptr.args[4].value == (1 if is_load else 2)
+    assert isinstance(ptr, tirx.Call) and ptr.op.same_as(tvm.ir.Op.get("tirx.address_of"))
+    buffer = tensor_parameter_map(func)[func.params[buffer_index]]
+    assert isinstance(ptr.ty, tvm.ir.PtrType) and ptr.ty.scope.name == "global"
+    assert storage_root(func, ptr).same_as(buffer)
     if predicate is not None:
-        tvm.ir.assert_structural_equal(call.args[-1], predicate)
+        tvm.ir.assert_structural_equal(expand_bindings(func, call.args[-1]), predicate)
     return call
 
 
@@ -76,7 +80,7 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
         for i in T.thread_binding(128 // lanes, "threadIdx.x"):
             for j in iterator(lanes):
                 if enclosing_store:
-                    with T.If(outer > 0), T.Then():
+                    if outer > 0:
                         B[i * lanes + j] = T.if_then_else(inner > 0, A[i * lanes + j], T.float32(0))
                 else:
                     B[i * lanes + j] = T.if_then_else(inner > 0, A[i * lanes + j], T.float32(0))
@@ -88,10 +92,10 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
     assert len(loads) == 1
     outer, inner = func.params[2:]
     expected = tirx.And(outer > 0, inner > 0) if enclosing_store else inner > 0
-    tvm.ir.assert_structural_equal(loads[0].args[-1], expected)
+    tvm.ir.assert_structural_equal(expand_bindings(lowered["main"], loads[0].args[-1]), expected)
     if enclosing_store:
         assert len(stores) == 1
-        tvm.ir.assert_structural_equal(stores[0].args[-1], outer > 0)
+        tvm.ir.assert_structural_equal(expand_bindings(lowered["main"], stores[0].args[-1]), outer > 0)
 
 
 @tilelang.testing.requires_cuda
@@ -101,7 +105,7 @@ def test_nested_predicated_load_does_not_leak_store_guard():
     @T.prim_func
     def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), outer: T.int32, inner: T.int32):
         for i in T.thread_binding(128, "threadIdx.x"):
-            with T.If(outer > 0), T.Then():
+            if outer > 0:
                 B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
             B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
 
@@ -110,7 +114,7 @@ def test_nested_predicated_load_does_not_leak_store_guard():
     predicates = [call.args[-1] for call in collect_calls(lowered, op="tl.ldg32", function="main")]
     assert len(predicates) == 2
     outer, inner = func.params[2:]
-    tvm.ir.assert_structural_equal(predicates[0], tirx.And(outer > 0, inner > 0))
+    tvm.ir.assert_structural_equal(expand_bindings(lowered["main"], predicates[0]), tirx.And(outer > 0, inner > 0))
     tvm.ir.assert_structural_equal(predicates[1], inner > 0)
 
 
@@ -227,7 +231,7 @@ def test_lower_stg32_predicated():
     def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
         for i in T.thread_binding(128, "threadIdx.x"):
             # Predicate doesn't depend on loop var, so it can be lowered
-            with T.If(pred > 0), T.Then():
+            if pred > 0:
                 B[i] = A[i]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
@@ -264,7 +268,7 @@ def test_lower_stg128_predicated():
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 # Predicate doesn't depend on vectorized loop var
-                with T.If(pred > 0), T.Then():
+                if pred > 0:
                     B[i * 4 + j] = A[i * 4 + j]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
@@ -287,7 +291,7 @@ def test_predicated_store_with_load():
     def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
-                with T.If(pred > 0), T.Then():
+                if pred > 0:
                     B[i * 4 + j] = A[i * 4 + j]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
@@ -310,7 +314,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
         S = T.alloc_buffer((128,), dtype=T.float32, scope="shared")
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
-                with T.If(pred > 0), T.Then():
+                if pred > 0:
                     B[i * 4 + j] = S[i * 4 + j]
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
@@ -323,7 +327,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     assert len(guards) == 1
     guard = guards[0]
     tvm.ir.assert_structural_equal(guard.condition, func.params[-1] > 0)
-    shared_loads = [load for load in collect_nodes(func, tirx.BufferLoad) if load.buffer.scope() == "shared"]
+    shared_loads = [load for load in collect_nodes(func, tirx.BufferLoad) if load.source.ty.scope.name == "shared"]
     assert shared_loads, "Expected a shared-memory load"
     guarded_loads = collect_nodes(guard.then_case, tirx.BufferLoad)
     assert all(any(load.same_as(guarded) for guarded in guarded_loads) for load in shared_loads)
@@ -332,7 +336,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     assert len(stores) == len(guarded_stores) == 1
     assert stores[0].same_as(guarded_stores[0])
     # FlattenBuffer can create a new Buffer handle for the same storage.
-    assert stores[0].buffer.data.same_as(func.buffer_map[func.params[0]].data)
+    assert storage_root(func, stores[0].dest).same_as(tensor_parameter_map(func)[func.params[0]])
     _assert_no_global_intrinsics(mod["main"])
 
 

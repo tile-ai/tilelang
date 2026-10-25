@@ -1,9 +1,9 @@
 from tilelang import tvm as tvm
-from tvm import tirx
-from tvm.target import Target
-from tvm.ir.base import Node
-from tvm.ir import Range
-from tvm.runtime import Scriptable
+from tilelang._compat.tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir.base import Node
+from tvm_tirx.ir import Range
+from tvm_tirx.ir import Scriptable
 import tvm_ffi
 from .registry import resolve_gemm_impl
 from tilelang import _ffi_api

@@ -5,7 +5,7 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import calls, schedule, nodes
 
 

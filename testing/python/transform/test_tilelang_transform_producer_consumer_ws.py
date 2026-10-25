@@ -2,10 +2,14 @@
 
 import re
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
+from tvm_tirx import ir, tirx, sym
+from tilelang.testing.ir import collect_calls, collect_nodes
+from tilelang._compat import stmt_functor
 from tilelang.layout import make_swizzled_layout
 from tilelang.backend.target import determine_target
 
@@ -375,6 +379,54 @@ def _find_after(src, needle, start=0):
     return pos
 
 
+def _tma_copies(body):
+    return [call for call in collect_calls(body, op="tl.tileop.copy") if call.attrs and bool(call.attrs.get("is_tma_copy", False))]
+
+
+def _automatic_ws(function):
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    module = tvm.IRModule.from_expr(function.with_attr("global_symbol", "main"))
+    module = tirx.transform.BindTarget(target)(module)
+    module = tilelang.transform.MaterializeKernelLaunch()(module)
+    return tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(module)["main"]
+
+
+def _ws_roles(function):
+    assert bool(function.attrs.get("tl_tiled_ws_applied", False))
+    assert tirx.analysis.check_well_formed(function)
+    tvm.ir.assert_structural_equal(function, tvm.ir.load_json(tvm.ir.save_json(function)))
+    (concurrent,) = [region for region in collect_nodes(function.body, ir.RegionStmt) if bool(region.attrs.get("tl.ws_concurrent", False))]
+    branches = list(concurrent.body.seq)
+    assert len(branches) >= 2 and all(isinstance(branch, ir.If) for branch in branches)
+    (launch,) = [
+        region
+        for region in collect_nodes(function.body, ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
+    ]
+    thread = launch.body_params[0]
+    analyzer = sym.Analyzer()
+    used = set()
+    for branch in branches:
+        active = {
+            index
+            for index in range(int(launch.args[1]))
+            if bool(int(analyzer.simplify(stmt_functor.substitute(branch.condition, {thread: ir.const(index)}))))
+        }
+        assert active and not used.intersection(active)
+        used.update(active)
+    assert used == set(range(int(launch.args[1])))
+    worker, producer = branches[:2]
+    assert not _tma_copies(worker.then_case)
+    assert _tma_copies(producer.then_case)
+    assert not collect_calls(producer.then_case, op="tl.tileop.gemm")
+    return worker.then_case, producer.then_case
+
+
+def _role_scalar(role, name):
+    (binding,) = [binding for binding in collect_nodes(role, ir.Bind) if re.fullmatch(rf"{re.escape(name)}(?:_\d+)?", binding.var.name)]
+    return binding
+
+
 def _count_device_bound_copy_annotations(func):
     annotated = 0
     total = 0
@@ -390,8 +442,8 @@ def _count_device_bound_copy_annotations(func):
         }:
             return
         total += 1
-        value = node.annotations.get("tma_descriptor_base_is_device_bound") if node.annotations else None
-        if isinstance(value, tvm.tirx.IntImm) and int(value.value) != 0:
+        value = node.attrs.get("tma_descriptor_base_is_device_bound") if node.attrs else None
+        if isinstance(value, (bool, int, tvm.tirx.IntImm)) and int(value) != 0:
             annotated += 1
 
     tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
@@ -424,8 +476,8 @@ def test_tiled_ws_skips_device_bound_tma_descriptor_base():
 
 
 @tilelang.testing.requires_cuda
-def test_tiled_ws_places_producer_in_first_warp_group():
-    """Auto-WS should put the producer in the low threadIdx.x partition."""
+def test_tiled_ws_uses_disjoint_worker_and_producer_partitions():
+    """Native automatic scheduling separates consumer and TMA producer warps."""
 
     func = matmul_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
@@ -435,14 +487,10 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
 
-    assert "tl_tiled_ws_applied" in script
-    branch = _find_after(script, "if tx < 128:")
-    producer_tma = _find_after(script, "T.tma_copy", branch)
-    consumer_branch = _find_after(script, "else:", producer_tma)
-    consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
-
-    assert branch < producer_tma < consumer_branch < consumer_gemm
-    assert "if 128 <= tx:" not in script
+    worker, producer = _ws_roles(mod["main"])
+    assert len(_tma_copies(producer)) == 2
+    assert len(collect_calls(worker, op="tl.tileop.gemm")) == 1
+    assert len(collect_calls(worker, op="tl.mbarrier_wait_parity")) == 2
 
 
 @tilelang.testing.requires_cuda
@@ -467,7 +515,7 @@ def test_tiled_ws_accepts_int64_pipeline_indices():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    assert "T.tma_copy" in script
+    assert _tma_copies(mod["main"].body)
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
@@ -502,7 +550,7 @@ def test_tiled_ws_stage1_dynamic_loop_start():
     kernel = tilelang.compile(func, target=target, out_idx=[2])
     source = kernel.get_kernel_source()
 
-    assert "__launch_bounds__(256, 1)" in source
+    assert re.search(r"__launch_bounds__\(256(?:, 1)?\)", source)
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
     B = torch.randn(K, N, dtype=torch.float16, device="cuda")
@@ -564,7 +612,8 @@ def test_tiled_ws_stage3():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
-def test_tiled_ws_dual_gemm_shared_accumulator_correctness():
+@pytest.mark.parametrize("warp_specialized", [False, True])
+def test_tiled_ws_dual_gemm_shared_accumulator_correctness(warp_specialized):
     """Regression test for #2547.
 
     A prelude GEMM and a pipelined-loop GEMM accumulate into the same
@@ -581,7 +630,7 @@ def test_tiled_ws_dual_gemm_shared_accumulator_correctness():
     block_M, block_N, block_K = 64, 64, 64
     func = dual_gemm_shared_accumulator(M, N, K0, K1, block_M, block_N, block_K, num_stages=2)
     target = determine_target()
-    kernel = tilelang.compile(func, target=target, out_idx=[4])
+    kernel = tilelang.compile(func, target=target, out_idx=[4], pass_configs={"tl.disable_warp_specialized": not warp_specialized})
 
     A0 = torch.randn(M, K0, dtype=torch.float16, device="cuda")
     B0 = torch.randn(K0, N, dtype=torch.float16, device="cuda")
@@ -679,7 +728,7 @@ def test_tiled_ws_swizzled_layout_allows_ws():
     src = kernel.get_kernel_source()
 
     # WS should be applied: launch bounds should include producer warp group
-    assert "__launch_bounds__(256, 1)" in src
+    assert re.search(r"__launch_bounds__\(256(?:, 1)?\)", src)
     # TMA loads should be present
     assert "tl::tma_load" in src
 
@@ -728,7 +777,7 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
     src = kernel.get_kernel_source()
 
     # WS should NOT be applied: no producer/consumer split
-    assert "__launch_bounds__(256, 1)" not in src
+    assert re.search(r"__launch_bounds__\(128(?:, 1)?\)", src)
 
 
 @tilelang.testing.requires_cuda
@@ -740,13 +789,14 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     kernel = _compile_tvm_ffi(prelude_tma_wait_sink(), pass_configs, out_idx=[3])
     src = kernel.get_kernel_source()
 
-    k_load = src.find("tl::tma_load(K_in_desc")
-    v_load = src.find("tl::tma_load(V_in_desc")
-    branch = src.find("if (((int)threadIdx.x) < 128)")
-    first_wait = src.find(".wait(0)")
-
-    assert min(k_load, v_load, branch, first_wait) >= 0
-    assert k_load < v_load < branch < first_wait
+    worker, producer = _ws_roles(_automatic_ws(prelude_tma_wait_sink()))
+    sources = [copy.args[0].args[0].source.name for copy in _tma_copies(producer)]
+    assert sources[:2] == ["K_in", "V_in"]
+    operations = collect_nodes(worker, ir.Call)
+    gemm_position = next(index for index, call in enumerate(operations) if call.op.name == "tl.tileop.gemm")
+    waits = [index for index, call in enumerate(operations) if call.op.name == "tl.mbarrier_wait_parity"]
+    assert len(waits) >= 2 and waits[0] < waits[1] < gemm_position
+    assert "tl::tma_load" in src and "tl::mbarrier_wait" in src
 
 
 @tilelang.testing.requires_cuda
@@ -762,36 +812,44 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    assert "T.ptx_cp_async" in script
-    assert "T.tma_copy" in script
-
-    consumer_branch = _find_after(script, "else:")
-    wait = _find_after(script, "T.mbarrier_wait_parity", consumer_branch)
-    cp_async_read = _find_after(script, "B_out[ko] = B_shared[0]", consumer_branch)
-    tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
-
-    assert wait < cp_async_read < tma_read
+    worker, producer = _ws_roles(mod["main"])
+    assert collect_calls(producer, op="tl.ptx_cp_async")
+    assert collect_calls(producer, op="tirx.ptx.cp_async_commit_group")
+    events = []
+    stmt_functor.post_order_visit(worker, lambda node: events.append(node) if isinstance(node, (ir.Evaluate, ir.TensorStore)) else None)
+    positions = {}
+    for index, statement in enumerate(events):
+        if isinstance(statement, ir.TensorStore) and statement.dest.name in ("A_out", "B_out"):
+            positions[statement.dest.name] = index
+        if (
+            isinstance(statement, ir.Evaluate)
+            and isinstance(statement.value, ir.Call)
+            and statement.value.op.name == "tl.mbarrier_wait_parity"
+        ):
+            positions[statement.value.args[0].source.name] = index
+    assert positions["ws_barrier_B_shared"] < positions["B_out"] < positions["ws_barrier_A_shared"] < positions["A_out"]
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
-    """Scalar binds used by common pre-loop TMA copies must stay before WS."""
+    """Role-local scalar replay must dominate pre-loop TMA and consumer uses."""
 
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(prelude_tma_bound_index(), pass_configs, out_idx=[3])
     src = kernel.get_kernel_source()
 
-    start_bind = _find_after(src, "int start =")
-    k_load = _find_after(src, "tl::tma_load(K_in_desc")
-    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
-
-    assert start_bind < k_load < branch
+    worker, producer = _ws_roles(_automatic_ws(prelude_tma_bound_index()))
+    worker_start = _role_scalar(worker, "start")
+    producer_start = _role_scalar(producer, "start")
+    tvm.ir.assert_structural_equal(worker_start.value, producer_start.value)
+    assert any(variable.same_as(producer_start.var) for variable in tirx.analysis.undefined_vars(_tma_copies(producer)[0]))
+    assert "tl::tma_load" in src
 
 
 @tilelang.testing.requires_cuda
 def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
-    """Outer scalar binds used by nested post-loop consumers must stay shared."""
+    """Guarded outer scalars must remain available in both scheduled roles."""
 
     func = guarded_prelude_tma_postloop_scalar().with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
@@ -802,42 +860,44 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    shared_base = _find_after(script, "base: T.int32 = idx[0]")
-    guard = _find_after(script, "if base < 64:")
-    branch = _find_after(script, 'T.attr([128, 128], "kWarpSpecializationScope", 0)')
-    producer_base = script.find("base = idx[0]", branch)
-
-    assert shared_base < guard < branch
-    assert producer_base < 0
+    worker, producer = _ws_roles(mod["main"])
+    bases = [_role_scalar(role, "base") for role in (worker, producer)]
+    tvm.ir.assert_structural_equal(bases[0].value, bases[1].value)
+    for role, binding in zip((worker, producer), bases):
+        assert any(
+            any(variable.same_as(binding.var) for variable in tirx.analysis.undefined_vars(guard.condition))
+            for guard in collect_nodes(role, ir.If)
+        )
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm():
-    """Shared-prelude grouped-gemm indices must stay outside WS branches."""
+    """Grouped GEMM replays role-local indices without duplicating storage."""
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
-    branch = _find_after(src, "if (((int)threadIdx.x) < 128)")
-    cur_batch_idx_loop = _find_after(src, "for (int i = 0; i < 2; ++i)")
-    m_start = _find_after(src, "int m_start =")
-    actual_rows = _find_after(src, "int actual_rows =")
-
-    assert cur_batch_idx_loop < m_start < actual_rows < branch
+    function = _automatic_ws(grouped_gemm_padded_pipelined(batch_sizes, 128, 128, 64, 64, 32))
+    worker, producer = _ws_roles(function)
+    for role in (worker, producer):
+        _role_scalar(role, "m_start")
+    _role_scalar(worker, "actual_rows")
+    assert len(re.findall(r"\bint\s+cur_batch_idx_ptr\[1\];", src)) == 1
     _run_grouped_gemm_ws(kernel, batch_sizes)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_does_not_clone_local_var_into_producer_branch():
-    """Producer branch should reuse shared local.var state instead of cloning it."""
+    """Producer and worker roles must reference one private-state allocation."""
     kernel, batch_sizes = _compile_grouped_gemm_ws()
     src = kernel.get_kernel_source()
 
     assert "cur_batch_idx_producer_ws" not in src
     assert "cur_batch_size_producer_ws" not in src
-    assert "tl::tma_load(B_desc" in src
-    assert "cur_batch_idx);" in src
+    assert "tl::tma_load" in src
+    assert len(re.findall(r"\bint\s+cur_batch_idx_ptr\[1\];", src)) == 1
+    assert "cur_batch_idx_ptr[0]" in src
     _run_grouped_gemm_ws(kernel, batch_sizes)
 
 
@@ -917,7 +977,7 @@ def test_tiled_ws_wide_linear_smem_three_stages():
 
 if __name__ == "__main__":
     test_tiled_ws_skips_device_bound_tma_descriptor_base()
-    test_tiled_ws_places_producer_in_first_warp_group()
+    test_tiled_ws_uses_disjoint_worker_and_producer_partitions()
     test_tiled_ws_accepts_int64_pipeline_indices()
     test_tiled_ws_stage1_dynamic_loop_start()
     test_tiled_ws_correctness()

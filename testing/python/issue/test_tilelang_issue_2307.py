@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def _get_issue_2307_source() -> str:
@@ -33,7 +33,7 @@ def test_fragment_read_assert_parallel_loop_is_partitioned():
     assert_idx = next(i for i, line in enumerate(lines) if "device_assert_with_msg" in line)
     context = "\n".join(lines[max(0, assert_idx - 4) : assert_idx + 1])
     assert "threadIdx.x) < 16" in context
-    assert "isfinite(score_fragment[0])" in context
+    assert "isfinite(score_fragment_ptr[0])" in context
 
 
 if __name__ == "__main__":

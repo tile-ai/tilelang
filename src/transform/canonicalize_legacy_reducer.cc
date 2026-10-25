@@ -1,472 +1,251 @@
-/*!
- * \file canonicalize_legacy_reducer.cc
- * \brief Rewrite legacy (v1) reducer syntax into first-class reducer v2 ops.
- *
- * Legacy form (deprecated):
- *   acc = T.alloc_reducer(shape, dtype, op, replication="all"/"none")
- *   T.clear(acc)                      # or T.fill(acc, value)
- *   acc[i] += v                       # sum; T.max/T.min RMW for max/min
- *   T.finalize_reducer(acc)           # in-place
- *   ... reads of acc ...
- *
- * The same legacy syntax is also accepted on a v2 allocation
- * (T.alloc_reducer without `replication`, the pre-v2 default): a
- * `local.reducer` buffer that is never touched by any first-class v2 op
- * is canonicalized under the same whitelist, keeping code written against
- * the old default compiling. Mixing v2 ops and legacy syntax on one buffer
- * is not canonicalized and fails in VerifyReducerEpoch.
- *
- * Canonical v2 form produced by this pass:
- *   local.reducer allocation + reducer_info_v2 annotation
- *   tl.reducer_init(acc)
- *   tl.reducer_update(acc[i], v)
- *   tl.finalize_reducer_v2(acc, dst)  # fresh dst fragment
- *   ... reads redirected to dst ...
- *
- * Mapping rules (strict whitelist — anything else is a compile error, never
- * silently accepted):
- *   - the fill value must be the combine identity (plain init), except for
- *     idempotent combines (max/min) where a non-identity fill is equivalent
- *     to a one-time seed and is forwarded as such. A non-zero sum fill is
- *     rejected: its v1 behavior was participant-count-dependent.
- *   - an update store must be exactly `combine(acc[idx], value)` with the
- *     declared combine op and identical load/store indices.
- *   - `T.finalize_reducer(acc)`'s batch annotation is forwarded.
- *   - accesses to the reducer after finalize read the new destination
- *     fragment; writes after finalize are rejected.
- *
- * This pass runs before VerifyReducerEpoch, so converted programs are then
- * verified under the same rules as native v2 code. It is a deprecation shim:
- * once legacy syntax is removed, this file is deleted with it.
- */
+#include "common/reducer.h"
 
-#include "support/check.h"
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "compat/visit.h"
+#include "op/fill.h"
+
 #include <tvm/tirx/transform.h>
 
-#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
-#include "../op/builtin.h"
-#include "../op/fill.h"
-#include "../op/reducer.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-/*! \brief Build a tl.region(...) call for `buffer[mins]` with unit extents
- *  (point region) or full extents. */
-PrimExpr MakeRegionCall(const Buffer &buffer, const Array<PrimExpr> &mins,
-                        const Array<PrimExpr> &extents, int access_mask) {
-  Array<PrimExpr> args;
-  args.push_back(BufferLoad(buffer, mins));
-  args.push_back(IntImm(DataType::Int(32), access_mask));
-  for (const auto &extent : extents) {
-    args.push_back(extent);
-  }
-  return Call(DataType::Handle(), region(), args);
-}
+enum class LegacyPhase { kAllocated, kActive, kFinalized };
 
-PrimExpr MakeFullRegionCall(const Buffer &buffer, int access_mask) {
-  Array<PrimExpr> zeros;
-  for (size_t i = 0; i < buffer->shape.size(); ++i) {
-    zeros.push_back(make_zero(DataType::Int(32)));
-  }
-  return MakeRegionCall(buffer, zeros, buffer->shape, access_mask);
-}
-
-/*! \brief Evaluate a (possibly cast-wrapped) constant expression as double. */
-std::optional<double> TryConstValue(PrimExpr e) {
-  while (const auto *cast = e.as<CastNode>()) {
-    e = cast->value;
-  }
-  if (const auto *i = e.as<IntImmNode>()) {
-    return static_cast<double>(i->value);
-  }
-  if (const auto *f = e.as<FloatImmNode>()) {
-    return f->value;
-  }
-  return std::nullopt;
-}
-
-/*! \brief Collect the buffer vars referenced by any first-class v2 reducer
- *  op. A v2-allocated reducer outside this set only ever appears in legacy
- *  syntax and is eligible for canonicalization. */
-class ReducerV2OpUseCollector : public StmtExprVisitor {
-public:
-  static std::unordered_set<const VarNode *> Collect(const Stmt &body) {
-    ReducerV2OpUseCollector collector;
-    collector.VisitStmt(body);
-    return std::move(collector.used_);
-  }
-
-private:
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(ReducerInitOp::Get()) ||
-        op->op.same_as(FinalizeReducerV2Op::Get())) {
-      if (auto call = op->args[0].as<CallNode>()) {
-        if (call->op.same_as(region())) {
-          if (auto load = call->args[0].as<BufferLoadNode>()) {
-            used_.insert(load->buffer->data.get());
-          }
-        }
-      }
-    } else if (op->op.same_as(reducer_update())) {
-      if (auto load = op->args[0].as<BufferLoadNode>()) {
-        used_.insert(load->buffer->data.get());
-      }
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  std::unordered_set<const VarNode *> used_;
+struct LegacyReducer {
+  LegacyReducer(TensorVar tensor, ReducerV2OpType operation)
+      : original(tensor),
+        accumulator(ReducerTensor(tensor, tensor->name, "local.reducer")),
+        destination(
+            ReducerTensor(tensor, tensor->name + "_result", "local.fragment")),
+        operation(operation) {}
+  TensorVar original;
+  TensorVar accumulator;
+  TensorVar destination;
+  ReducerV2OpType operation;
+  LegacyPhase phase = LegacyPhase::kAllocated;
 };
 
 class LegacyReducerCanonicalizer : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    LegacyReducerCanonicalizer canonicalizer;
-    canonicalizer.v2_op_used_ = ReducerV2OpUseCollector::Collect(f->body);
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = canonicalizer.VisitStmt(f->body);
-    return f;
+  tirx::Function Run(tirx::Function function) {
+    if (!function->body)
+      return function;
+    PostOrderVisit(*function->body, [&](const ObjectRef &object) {
+      const auto *call = object.as<CallNode>();
+      if (call && (call->op.same_as(ReducerInitOp::Get()) ||
+                   call->op.same_as(reducer_update()) ||
+                   call->op.same_as(FinalizeReducerV2Op::Get()))) {
+        first_class_.insert(ReducerRegionTensor(call->args[0]).get());
+      }
+    });
+    SeqStmt body = *function->body;
+    function.CopyOnWrite()->body = Mutate(body).ValueOrUnchanged(body);
+    for (const auto &[tensor, reducer] : reducers_) {
+      TVM_FFI_CHECK(reducer.phase == LegacyPhase::kFinalized, ValueError)
+          << "legacy reducer `" << tensor->name << "` has no finalize_reducer";
+    }
+    return function;
   }
 
 private:
-  enum class Phase : int { kAllocated, kActive, kFinalized };
-
-  struct LegacyReducer {
-    Buffer old_buffer;
-    Buffer acc; // new local.reducer handle
-    Buffer dst; // out-of-place finalize destination
-    ReducerV2OpType op;
-    Optional<PrimExpr> seed;
-    Phase phase{Phase::kAllocated};
-    bool was_v2{false}; // v2 allocation used with legacy syntax only
-  };
-
-  // ---- allocation & annotation rewrite ------------------------------------
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    if (auto anno = op->annotations.Get(tl::attr::kReducerInfo)) {
-      auto map = anno.value().as<Map<Var, Map<String, String>>>();
-      ICHECK(map) << "malformed reducer_info annotation";
-      for (const auto &[var, info] : map.value()) {
-        legacy_op_.emplace(var.get(),
-                           ParseReducerV2OpType(info.Get("op").value()));
-      }
+  UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
+    auto tensor = node->var.as<TensorVar>();
+    const auto *allocation = node->value.as<CallNode>();
+    auto operation = ReducerOperation(allocation);
+    if (!tensor || !allocation || !allocation->op.same_as(alloc_tensor_op()) ||
+        !operation || first_class_.count(tensor->get())) {
+      return StmtExprMutator::Mutate_(node, mode);
     }
-    // A v2 allocation never touched by a first-class v2 op carries the old
-    // default of pre-v2 T.alloc_reducer: canonicalize its legacy syntax too.
-    if (auto anno = op->annotations.Get(attr::kReducerInfoV2)) {
-      auto map = anno.value().as<Map<Var, Map<String, Any>>>();
-      ICHECK(map) << "malformed reducer_info_v2 annotation";
-      for (const auto &[var, info] : map.value()) {
-        if (v2_op_used_.count(var.get())) {
-          continue;
-        }
-        auto op_str = info.Get("op");
-        ICHECK(op_str) << "reducer_info_v2 for `" << var
-                       << "` is missing the combine op";
-        legacy_v2_op_.emplace(
-            var.get(), ParseReducerV2OpType(op_str.value().cast<String>()));
-      }
-    }
-    for (const auto &buffer : op->alloc_buffers) {
-      LegacyReducer entry;
-      auto it = legacy_op_.find(buffer->data.get());
-      if (it != legacy_op_.end()) {
-        // v1 allocation: retype the handle into the local.reducer scope.
-        entry.op = it->second;
-        Var acc_var(buffer->data->name_hint,
-                    PointerType(PrimType(buffer->dtype), "local.reducer"));
-        entry.acc =
-            Buffer(acc_var, buffer->dtype, buffer->shape, buffer->strides,
-                   buffer->elem_offset, buffer->name, buffer->data_alignment,
-                   buffer->offset_factor, buffer->buffer_type);
-      } else {
-        auto v2_it = legacy_v2_op_.find(buffer->data.get());
-        if (v2_it == legacy_v2_op_.end()) {
-          continue;
-        }
-        // v2 allocation used with legacy syntax only: keep the buffer.
-        entry.op = v2_it->second;
-        entry.acc = buffer;
-        entry.was_v2 = true;
-      }
-      entry.old_buffer = buffer;
-      Var dst_var(buffer->data->name_hint + "_result",
-                  PointerType(PrimType(buffer->dtype), "local.fragment"));
-      entry.dst = Buffer(dst_var, buffer->dtype, buffer->shape, buffer->strides,
-                         buffer->elem_offset, buffer->name + "_result",
-                         buffer->data_alignment, buffer->offset_factor,
-                         buffer->buffer_type);
-      reducers_.emplace(buffer->data.get(), std::move(entry));
-    }
-
-    auto result = StmtExprMutator::VisitStmt_(op).as<SBlock>().value();
-    auto *p_result = result.CopyOnWrite();
-
-    bool changed = false;
-    Array<Buffer> new_allocs;
-    Map<Var, Map<String, Any>> v2_info;
-    if (auto anno = p_result->annotations.Get(attr::kReducerInfoV2)) {
-      if (auto as_map = anno.value().as<Map<Var, Map<String, Any>>>()) {
-        v2_info = as_map.value();
-      }
-    }
-    for (const auto &buffer : p_result->alloc_buffers) {
-      auto it = reducers_.find(buffer->data.get());
-      if (it == reducers_.end()) {
-        new_allocs.push_back(buffer);
-        continue;
-      }
-      const LegacyReducer &entry = it->second;
-      ICHECK(entry.phase == Phase::kFinalized)
-          << "legacy reducer `" << buffer
-          << "` has no T.finalize_reducer; cannot canonicalize.";
-      new_allocs.push_back(entry.acc);
-      new_allocs.push_back(entry.dst);
-      changed = true;
-      if (entry.was_v2) {
-        // The allocation and its reducer_info_v2 entry are already correct;
-        // only the finalize destination is new.
-        continue;
-      }
-      Map<String, Any> info;
-      switch (entry.op) {
-      case ReducerV2OpType::kSum:
-        info.Set("op", String("sum"));
-        break;
-      case ReducerV2OpType::kMax:
-        info.Set("op", String("max"));
-        break;
-      case ReducerV2OpType::kMin:
-        info.Set("op", String("min"));
-        break;
-      default:
-        LOG(FATAL) << "legacy (v1) reducers only support sum/max/min";
-      }
-      v2_info.Set(entry.acc->data, info);
-    }
-    if (changed) {
-      p_result->alloc_buffers = new_allocs;
-      p_result->annotations.Set(attr::kReducerInfoV2, v2_info);
-      p_result->annotations.erase(tl::attr::kReducerInfo);
-    }
-    return result;
+    auto [position, inserted] = reducers_.emplace(
+        tensor->get(),
+        LegacyReducer(*tensor, ParseReducerV2OpType(*operation)));
+    TVM_FFI_CHECK(inserted, ValueError)
+        << "Legacy reducer allocation appears more than once";
+    const LegacyReducer &reducer = position->second;
+    auto attributes = allocation->attrs.value().as_or_throw<DictAttrs>();
+    attributes.CopyOnWrite()->dict.erase(kLegacyReducer);
+    return SeqStmt({AllocateReducerTensor(reducer.accumulator, attributes),
+                    AllocateReducerTensor(reducer.destination)});
   }
 
-  // ---- epoch statement rewrites --------------------------------------------
+  LegacyReducer *Find(const Expr &expression) {
+    TensorVar tensor = ReducerRegionTensor(expression);
+    auto found = reducers_.find(tensor.get());
+    return found == reducers_.end() ? nullptr : &found->second;
+  }
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    const auto *call = op->value.as<CallNode>();
-    if (call == nullptr) {
-      return StmtExprMutator::VisitStmt_(op);
+  bool SameIndices(const Array<PrimExpr> &first,
+                   const Array<PrimExpr> &second) {
+    if (first.size() != second.size())
+      return false;
+    for (size_t index = 0; index < first.size(); ++index) {
+      if (!analyzer_->CanProveEqual(first[index], second[index]))
+        return false;
     }
-    // T.clear / T.fill on a legacy reducer opens the epoch.
+    return true;
+  }
+
+  Optional<PrimExpr> Contribution(const LegacyReducer &reducer,
+                                  const TensorStoreNode *store) {
+    auto self = [&](const PrimExpr &expression) {
+      const auto *load = expression.as<TensorLoadNode>();
+      return load && load->source.same_as(reducer.original) &&
+             SameIndices(load->indices, store->indices);
+    };
+    auto match = [&](const PrimExpr &first,
+                     const PrimExpr &second) -> Optional<PrimExpr> {
+      if (self(first))
+        return second;
+      if (self(second))
+        return first;
+      return std::nullopt;
+    };
+    if (reducer.operation == ReducerV2OpType::kSum) {
+      if (const auto *add = store->value.as<prim::AddNode>())
+        return match(add->a, add->b);
+    } else if (reducer.operation == ReducerV2OpType::kMax) {
+      if (const auto *maximum = store->value.as<prim::MaxNode>())
+        return match(maximum->a, maximum->b);
+    } else if (reducer.operation == ReducerV2OpType::kMin) {
+      if (const auto *minimum = store->value.as<prim::MinNode>())
+        return match(minimum->a, minimum->b);
+    } else if (const auto *call = store->value.as<CallNode>();
+               call && call->args.size() == 2) {
+      PrimVar left("left", reducer.original.dtype());
+      PrimVar right("right", reducer.original.dtype());
+      auto expected =
+          ReducerV2Combine(reducer.operation, left, right).as<Call>();
+      if (expected && expected.value()->op.same_as(call->op)) {
+        return match(call->args[0].as_or_throw<PrimExpr>(),
+                     call->args[1].as_or_throw<PrimExpr>());
+      }
+    }
+    return std::nullopt;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
+    const auto *call = node->value.as<CallNode>();
+    if (!call || call->args.empty())
+      return StmtExprMutator::Mutate_(node, mode);
+    if (call->op.same_as(Op::Get("tl.layout_hint"))) {
+      auto found = reducers_.find(call->args[0].as_or_throw<TensorVar>().get());
+      if (found != reducers_.end()) {
+        auto arguments = call->args;
+        arguments.Set(0, found->second.destination);
+        return Evaluate(Call(call->ty, call->op, arguments, call->attrs,
+                             call->ty_args, call->loc),
+                        node->loc);
+      }
+    }
     if (call->op.same_as(Fill::Get())) {
-      if (LegacyReducer *entry = FindReducerInRegionArg(call->args[0])) {
-        ICHECK(entry->phase == Phase::kAllocated)
-            << "second T.clear/T.fill on legacy reducer `" << entry->old_buffer
-            << "`: one allocation supports exactly one reduction epoch.";
-        DataType dtype = entry->old_buffer->dtype;
-        PrimExpr identity = ReducerV2Identity(entry->op, dtype);
-        auto fill_const = TryConstValue(call->args[1]);
-        auto identity_const = TryConstValue(identity);
-        bool is_identity = fill_const.has_value() &&
-                           identity_const.has_value() &&
-                           *fill_const == *identity_const;
+      if (LegacyReducer *reducer = Find(call->args[0])) {
+        TVM_FFI_CHECK(reducer->phase == LegacyPhase::kAllocated, ValueError)
+            << "second clear/fill on a legacy reducer; each allocation "
+               "supports one epoch";
+        PrimExpr value = call->args[1].as_or_throw<PrimExpr>();
+        PrimExpr identity =
+            ReducerV2Identity(reducer->operation, reducer->original.dtype());
+        bool is_identity = analyzer_->CanProveEqual(value, identity);
+        if (const auto *first = value.as<FloatImmNode>()) {
+          if (const auto *second = identity.as<FloatImmNode>())
+            is_identity = first->value == second->value;
+        }
+        Array<Expr> arguments{NormalizeToBufferRegion(reducer->accumulator)};
         if (!is_identity) {
-          if (entry->op == ReducerV2OpType::kSum) {
-            LOG(FATAL) << "legacy reducer `" << entry->old_buffer
-                       << "` (op=sum) is filled with a non-zero value; its v1 "
-                          "behavior depended on the physical thread count. Use "
-                          "T.reducer_init(acc, value) with the v2 API "
-                          "instead.";
-          }
-          // max/min are idempotent: a per-partial clamp equals a one-time
-          // seed, so the v1 fill value is forwarded as the epoch seed
-          // (normalized to the reducer dtype).
-          if (fill_const.has_value()) {
-            entry->seed = make_const(dtype, *fill_const);
-          } else if (call->args[1].dtype() == dtype) {
-            entry->seed = call->args[1];
-          } else {
-            entry->seed = Cast(dtype, call->args[1]);
-          }
+          TVM_FFI_CHECK(reducer->operation != ReducerV2OpType::kSum, ValueError)
+              << "legacy sum reducer is filled with a non-zero value; use "
+                 "reducer_init for a logical seed";
+          arguments.push_back(
+              prim::cast(Mutate(value, mode).ValueOrUnchanged(value),
+                         reducer->original.dtype()));
         }
-        entry->phase = Phase::kActive;
-        // The non-identity fill value (idempotent combines only) rides as
-        // the epoch's logical init value on the synthesized reducer_init.
-        Array<PrimExpr> init_args = {
-            MakeFullRegionCall(entry->acc, kAccessWrite)};
-        if (entry->seed.defined()) {
-          init_args.push_back(entry->seed.value());
-        }
-        return Evaluate(
-            Call(DataType::Handle(), ReducerInitOp::Get(), init_args));
+        reducer->phase = LegacyPhase::kActive;
+        return Evaluate(Call(PrimType::Void(), ReducerInitOp::Get(), arguments),
+                        node->loc);
       }
     }
-    // In-place T.finalize_reducer(acc) becomes out-of-place v2 finalize.
     if (call->op.same_as(FinalizeReducerOp::Get()) && call->args.size() == 1) {
-      if (LegacyReducer *entry = FindReducerInRegionArg(call->args[0])) {
-        ICHECK(entry->phase == Phase::kActive)
-            << "T.finalize_reducer on legacy reducer `" << entry->old_buffer
-            << "` without a preceding T.clear/T.fill.";
-        entry->phase = Phase::kFinalized;
-        return Evaluate(Call(DataType::Handle(), FinalizeReducerV2Op::Get(),
-                             {MakeFullRegionCall(entry->acc, kAccessReadWrite),
-                              MakeFullRegionCall(entry->dst, kAccessWrite)},
-                             call->annotations)); // forwards batch
+      if (LegacyReducer *reducer = Find(call->args[0])) {
+        TVM_FFI_CHECK(reducer->phase == LegacyPhase::kActive, ValueError)
+            << "legacy finalize_reducer requires a preceding clear/fill";
+        reducer->phase = LegacyPhase::kFinalized;
+        return Evaluate(Call(PrimType::Void(), FinalizeReducerV2Op::Get(),
+                             {NormalizeToBufferRegion(reducer->accumulator),
+                              NormalizeToBufferRegion(reducer->destination)},
+                             call->attrs),
+                        node->loc);
       }
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(node, mode);
   }
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto it = reducers_.find(op->buffer->data.get());
-    if (it == reducers_.end()) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-    LegacyReducer &entry = it->second;
-    ICHECK(entry.phase == Phase::kActive)
-        << "store to legacy reducer `" << entry.old_buffer
-        << (entry.phase == Phase::kFinalized ? "` after T.finalize_reducer."
-                                             : "` before T.clear/T.fill.");
-    PrimExpr contribution = MatchUpdate(entry, op);
-    ICHECK(contribution.defined())
-        << "unsupported store to legacy reducer `" << entry.old_buffer
-        << "`: expected `acc[i] += v` (sum) or "
-           "`acc[i] = T.max/T.min(acc[i], v)` matching the declared op, got "
-        << GetRef<Stmt>(op)
-        << ". Rewrite with the v2 API (T.reducer_update) if this is a "
-           "different access pattern.";
-    contribution = VisitExpr(contribution);
-    return Evaluate(Call(DataType::Handle(), reducer_update(),
-                         {BufferLoad(entry.acc, op->indices), contribution}));
+  UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                            InplaceMode mode) final {
+    auto tensor = node->dest.as<TensorVar>();
+    auto found = tensor ? reducers_.find(tensor->get()) : reducers_.end();
+    if (found == reducers_.end())
+      return StmtExprMutator::Mutate_(node, mode);
+    const LegacyReducer &reducer = found->second;
+    TVM_FFI_CHECK(reducer.phase == LegacyPhase::kActive, ValueError)
+        << "legacy reducer store must be between initialization and "
+           "finalization";
+    auto contribution = Contribution(reducer, node);
+    TVM_FFI_CHECK(contribution, ValueError)
+        << "legacy reducer store must combine its current element with one "
+           "contribution";
+    PrimExpr value =
+        Mutate(*contribution, mode).ValueOrUnchanged(*contribution);
+    return Evaluate(
+        Call(PrimType::Void(), reducer_update(),
+             {TensorLoad(reducer.accumulator, node->indices), value}),
+        node->loc);
   }
 
-  // ---- post-finalize redirection & opaqueness ------------------------------
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto it = reducers_.find(op->buffer->data.get());
-    if (it == reducers_.end()) {
-      return StmtExprMutator::VisitExpr_(op);
-    }
-    const LegacyReducer &entry = it->second;
-    ICHECK(entry.phase == Phase::kFinalized)
-        << "read of legacy reducer `" << entry.old_buffer
-        << "` before T.finalize_reducer; partial values are not readable.";
-    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    return BufferLoad(entry.dst, load->indices);
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
+                                InplaceMode mode) final {
+    auto tensor = node->source.as<TensorVar>();
+    auto found = tensor ? reducers_.find(tensor->get()) : reducers_.end();
+    if (found == reducers_.end())
+      return StmtExprMutator::Mutate_(node, mode);
+    TVM_FFI_CHECK(found->second.phase == LegacyPhase::kFinalized, ValueError)
+        << "legacy reducer may be read only after finalize_reducer";
+    Array<PrimExpr> indices;
+    for (const PrimExpr &index : node->indices)
+      indices.push_back(Mutate(index, mode).ValueOrUnchanged(index));
+    return TensorLoad(found->second.destination, indices, node->loc);
   }
 
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = reducers_.find(op);
-    if (it != reducers_.end()) {
-      const LegacyReducer &entry = it->second;
-      ICHECK(entry.phase == Phase::kFinalized)
-          << "unsupported use of legacy reducer handle `" << op->name_hint
-          << "` inside its reduction epoch.";
-      return entry.dst->data;
-    }
-    return StmtExprMutator::VisitExpr_(op);
+  UnchangedOr<Expr> Mutate_(const VarNode *node, InplaceMode mode) final {
+    auto found = reducers_.find(node);
+    if (found == reducers_.end())
+      return StmtExprMutator::Mutate_(node, mode);
+    TVM_FFI_CHECK(found->second.phase == LegacyPhase::kFinalized, ValueError)
+        << "legacy reducer pointer access is forbidden before finalization";
+    return found->second.destination;
   }
 
-  // ---- helpers --------------------------------------------------------------
-
-  LegacyReducer *FindReducerInRegionArg(const PrimExpr &arg) {
-    if (auto call = arg.as<CallNode>()) {
-      if (call->op.same_as(region())) {
-        if (auto load = call->args[0].as<BufferLoadNode>()) {
-          auto it = reducers_.find(load->buffer->data.get());
-          if (it != reducers_.end()) {
-            return &it->second;
-          }
-        }
-      }
-    } else if (auto load = arg.as<BufferLoadNode>()) {
-      auto it = reducers_.find(load->buffer->data.get());
-      if (it != reducers_.end()) {
-        return &it->second;
-      }
-    }
-    return nullptr;
-  }
-
-  /*! \brief Match `combine(acc[idx], v)` against the declared combine op and
-   *  return the contribution `v`, or an undefined PrimExpr on mismatch. */
-  PrimExpr MatchUpdate(const LegacyReducer &entry, const BufferStoreNode *op) {
-    auto is_self_load = [&](const PrimExpr &expr) {
-      const auto *load = expr.as<BufferLoadNode>();
-      return load != nullptr &&
-             load->buffer->data.get() == entry.old_buffer->data.get() &&
-             StructuralEqual()(load->indices, op->indices);
-    };
-    auto match_binary = [&](const PrimExpr &a, const PrimExpr &b) -> PrimExpr {
-      if (is_self_load(a)) {
-        return b;
-      }
-      if (is_self_load(b)) {
-        return a;
-      }
-      return PrimExpr();
-    };
-    switch (entry.op) {
-    case ReducerV2OpType::kSum:
-      if (const auto *add = op->value.as<AddNode>()) {
-        return match_binary(add->a, add->b);
-      }
-      break;
-    case ReducerV2OpType::kMax:
-      if (const auto *max = op->value.as<MaxNode>()) {
-        return match_binary(max->a, max->b);
-      }
-      break;
-    case ReducerV2OpType::kMin:
-      if (const auto *min = op->value.as<MinNode>()) {
-        return match_binary(min->a, min->b);
-      }
-      break;
-    default:
-      break; // legacy (v1) reducers only support sum/max/min
-    }
-    return PrimExpr();
-  }
-
-  std::unordered_map<const VarNode *, ReducerV2OpType> legacy_op_;
-  std::unordered_map<const VarNode *, ReducerV2OpType> legacy_v2_op_;
-  std::unordered_set<const VarNode *> v2_op_used_;
+  sym::Analyzer analyzer_;
   std::unordered_map<const VarNode *, LegacyReducer> reducers_;
+  std::unordered_set<const VarNode *> first_class_;
 };
-
 } // namespace
 
-using namespace tirx::transform;
-
 tvm::transform::Pass CanonicalizeLegacyReducer() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return LegacyReducerCanonicalizer::Substitute(std::move(f));
-  };
-  return CreatePrimFuncPass(pass_func, 0, "tl.CanonicalizeLegacyReducer", {});
+  return tirx::transform::CreateFunctionPass(
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext) -> Optional<tirx::Function> {
+        return ffi::make_object<LegacyReducerCanonicalizer>()->Run(
+            std::move(function));
+      },
+      0, "tl.CanonicalizeLegacyReducer");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.CanonicalizeLegacyReducer",
-                        CanonicalizeLegacyReducer);
+  ffi::reflection::GlobalDef().def("tl.transform.CanonicalizeLegacyReducer",
+                                   CanonicalizeLegacyReducer);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

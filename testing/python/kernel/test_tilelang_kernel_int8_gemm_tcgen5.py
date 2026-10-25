@@ -1,4 +1,5 @@
 import torch
+import pytest
 import tilelang.testing
 import tilelang.language as T
 
@@ -72,8 +73,24 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_assert_matmul():
+    capability = torch.cuda.get_device_capability()
+    if capability not in {(10, 0), (10, 1), (11, 0)}:
+        pytest.skip(f"tcgen05.mma.kind::i8 requires SM100a/SM101a/SM110a, not SM{capability[0]}{capability[1]}")
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.int8, T.int32, T.int32)
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.uint8, T.int32, T.int32)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("in_dtype", [T.int8, T.uint8])
+def test_tcgen05_i8_cross_compile_sm100(in_dtype):
+    function = matmul_nt(128, 128, 128, 128, 128, 128, in_dtype, T.int32, T.int32)
+    kernel = tilelang.compile(
+        function,
+        target={"kind": "cuda", "arch": "sm_100a"},
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    assert "tl::tcgen05mma" in kernel.get_kernel_source()
 
 
 if __name__ == "__main__":

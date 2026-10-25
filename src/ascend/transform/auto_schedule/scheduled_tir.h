@@ -22,7 +22,6 @@
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
@@ -37,7 +36,6 @@
 #include "../buffer_version.h"
 #include "../core_mask.h"
 #include "./ir_structure.h"
-#include "./multi_buffer.h"
 #include "ascend/transform/attr.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
@@ -53,32 +51,22 @@ namespace ascend {
 // ownership always lives on the task, including compiler-generated sync tasks.
 // Buffer version counts live once on each kernel's tilelang_root block under
 // tl.buffer_versions_map.
-constexpr const char *kScheduleUnitStage = "stage";
-constexpr int kUnscheduledStage = -1;
 constexpr const char *kUnlimitMemoryScopes = "tl.unlimit_memory_scopes";
 constexpr const char *kVectorCount = "vector_count";
 constexpr const char *kRootConflictHints = "tl.root_conflict_hints";
 
-inline bool IsScheduleGuardAttribute(const ffi::String &key) {
-  return key == tirx::attr::tilelang_assume ||
-         key == tl::attr::kAssumeRequiresRuntimeCheck;
-}
-
-inline tirx::Stmt WrapScheduledGuards(tirx::Stmt body,
-                                      const GuardList &guards) {
+inline Stmt WrapScheduledGuards(Stmt body, const GuardList &guards) {
   for (auto it = guards.rbegin(); it != guards.rend(); ++it)
     body = (*it)->Wrap(std::move(body));
   return body;
 }
-
-using ScheduleUnitMetadata = ffi::Map<ffi::String, ffi::Any>;
 
 // Kernel-level state that is part of scheduled TIR but cannot live on an
 // IRStructure node. The codec preserves this state exactly; each pass owns any
 // semantic transition between input and output snapshots.
 struct ScheduledTIRMetadata {
   // Kernel root shell carrying fields that are not represented by IRStructure.
-  tirx::SBlock kernel_root;
+  RegionStmt kernel_root{ffi::UnsafeInit{}};
   // Frontend overrides before AutoSchedule; selected versions afterward.
   BufferVersionMap buffer_versions;
   // User-declared physical versions before MaterializeMultiBuffer; all
@@ -107,32 +95,13 @@ struct ScheduledTIR {
 
 using ScheduledExtraInfoFactory = std::unique_ptr<IRExtraInfo> (*)();
 
-tirx::SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir);
+RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir);
 
 ScheduledTIR
-DecodeScheduledTIR(const tirx::SBlock &root, const ConstrSet &outer_ctx,
+DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer_ctx,
                    ScheduledExtraInfoFactory make_extra_info = nullptr);
 
-inline std::optional<int64_t> GetScheduleUnitInt(const tirx::AttrStmtNode *op,
-                                                 const char *key) {
-  if (op->attr_key != attr::kScheduleUnit)
-    return std::nullopt;
-  const auto *metadata = op->node.as<ffi::MapObj>();
-  if (metadata == nullptr)
-    return std::nullopt;
-  for (const auto &[metadata_key, value] : *metadata) {
-    if (metadata_key.cast<ffi::String>() != key)
-      continue;
-    PrimExpr expr = value.cast<PrimExpr>();
-    const auto *integer = expr.as<IntImmNode>();
-    ICHECK(integer != nullptr) << "Scheduled metadata `" << key
-                               << "` must be an integer, got " << expr;
-    return integer->value;
-  }
-  return std::nullopt;
-}
-
-inline int64_t RequireScheduleUnitInt(const tirx::AttrStmtNode *op,
+inline int64_t RequireScheduleUnitInt(const RegionStmtNode *op,
                                       const char *key) {
   std::optional<int64_t> value = GetScheduleUnitInt(op, key);
   ICHECK(value.has_value())
@@ -140,21 +109,10 @@ inline int64_t RequireScheduleUnitInt(const tirx::AttrStmtNode *op,
   return value.value();
 }
 
-inline bool IsScheduleUnit(const tirx::AttrStmtNode *op) {
-  return op->attr_key == attr::kScheduleUnit;
-}
-
-inline int GetScheduleUnitStage(const tirx::AttrStmtNode *op) {
-  int64_t stage = RequireScheduleUnitInt(op, kScheduleUnitStage);
-  ICHECK_GE(stage, std::numeric_limits<int>::min());
-  ICHECK_LE(stage, std::numeric_limits<int>::max());
-  return static_cast<int>(stage);
-}
-
 std::optional<CoreMask>
-GetScheduledCoreMask(const tirx::AttrStmtNode *schedule_unit);
+GetScheduledCoreMask(const RegionStmtNode *schedule_unit);
 
-CoreMask RequireScheduledCoreMask(const tirx::AttrStmtNode *schedule_unit);
+CoreMask RequireScheduledCoreMask(const RegionStmtNode *schedule_unit);
 
 } // namespace ascend
 } // namespace tl

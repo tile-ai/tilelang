@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import threading
 
-from tvm import tirx
-from tvm.tirx import Var
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import Var
 
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError

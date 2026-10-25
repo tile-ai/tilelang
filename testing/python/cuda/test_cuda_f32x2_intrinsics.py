@@ -225,7 +225,9 @@ _BINARY_OPS = [
 _DTYPES = ["float32", "bfloat16", "float16"]
 
 # Native cast types expected in codegen for 16-bit packed types
-_NATIVE_CAST_TYPE = {"bfloat16": "__nv_bfloat162", "float16": "__half2"}
+_NATIVE_CAST_TYPE = {"bfloat16": "nv_bfloat162", "float16": "__half2"}
+_NATIVE_FP32_OPS = {"add2": "__fadd2_rn", "sub2": "sub.rn.f32x2", "mul2": "__fmul2_rn", "fma2": "__ffma2_rn"}
+_NATIVE_HALF_OPS = {"add2": "__hadd2", "sub2": "__hsub2", "mul2": "__hmul2", "fma2": "__hfma2"}
 
 # Torch reference functions
 _TORCH_REFS = {
@@ -339,7 +341,7 @@ def test_codegen_auto_vec_f32(op_key):
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
-    assert f"tl::{tl_func}" in src, f"Expected tl::{tl_func} in SM100 auto-vectorised CUDA source for float32 {op_key}"
+    assert _NATIVE_FP32_OPS[tl_func] in src, f"Expected packed native float32 {op_key} on SM100"
 
 
 @tilelang.testing.requires_cuda
@@ -350,10 +352,10 @@ def test_codegen_auto_vec_f32_width8(op_key):
     func = _make_auto_vec_binary_kernel(py_op, T.float32, width=8)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
     assert "\x00" not in src, "Generated CUDA source should not contain embedded NUL bytes"
-    for field in "xyzw":
-        assert f".{field})) = tl::{tl_func}(" in src, (
-            f"Expected {field}-field packed tl::{tl_func} emission in width-8 float32 auto-vectorised source"
-        )
+    assignments = [line for line in src.splitlines() if _NATIVE_FP32_OPS[tl_func] in line]
+    assert len(assignments) == 4
+    for pair, assignment in enumerate(assignments):
+        assert f")[{pair}]" in assignment
 
 
 # float32: auto-vectorization should NOT emit tl::<op>2 before SM100
@@ -363,14 +365,15 @@ def test_codegen_auto_vec_f32_no_sm80(op_key):
     py_op, tl_func = _AUTO_VEC_OPS[op_key]
     func = _make_auto_vec_binary_kernel(py_op, T.float32)
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
-    assert f"tl::{tl_func}" not in src, f"tl::{tl_func} should NOT appear in SM80 auto-vectorised CUDA source for float32 {op_key}"
+    assert f"tl::{tl_func}" not in src
+    assert _NATIVE_FP32_OPS[tl_func] not in src, f"Packed float32 {op_key} is unsupported on SM80"
 
 
 @tilelang.testing.requires_cuda
 def test_codegen_auto_vec_fma_f32():
     func = _make_auto_vec_fma_kernel(T.float32)
     src = _lower_to_cuda_source(func, target=SM100_TARGET)
-    assert "tl::fma2" in src, "Expected tl::fma2 in SM100 auto-vectorised CUDA source for float32 mul+add"
+    assert "__ffma2_rn" in src, "Expected packed native FMA on SM100"
 
 
 @tilelang.testing.requires_cuda
@@ -453,7 +456,7 @@ def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
 @pytest.mark.parametrize("reduce_func", [T.reduce_max, T.reduce_min, T.reduce_absmax])
 def test_codegen_auto_vec_reduce_f32_rejects_nan_mode(reduce_func):
     func = _make_auto_vec_reduce_kernel(reduce_func, nan_propagate=True)
-    with pytest.raises(ValueError, match="nan_propagate=True requires float16 or bfloat16 output, got float32"):
+    with pytest.raises(ValueError, match=r"nan_propagate=True requires float16 or bfloat16 output, got T\.float32"):
         _lower_to_cuda_source(func, target=SM100_TARGET)
 
 
@@ -463,7 +466,7 @@ def test_codegen_auto_vec_fma_half_types(dtype_name):
     dtype_tl, _ = _DTYPE_MAP[dtype_name]
     func = _make_auto_vec_fma_kernel(dtype_tl, width=8)
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
-    assert "tl::fma2" in src, f"Expected tl::fma2 in CUDA source for {dtype_name} mul+add"
+    assert "__hfma2" in src, f"Expected packed native FMA for {dtype_name}"
     assert _NATIVE_CAST_TYPE[dtype_name] in src, f"Expected {_NATIVE_CAST_TYPE[dtype_name]} cast in CUDA source for {dtype_name}"
 
 
@@ -477,7 +480,7 @@ def test_codegen_auto_vec_half_types(op_key, dtype_name):
     dtype_tl, _ = _DTYPE_MAP[dtype_name]
     func = _make_auto_vec_binary_kernel(py_op, dtype_tl)
     src = _lower_to_cuda_source(func, target=SM80_TARGET)
-    assert f"tl::{tl_func}" in src, f"Expected tl::{tl_func} in auto-vectorised CUDA source for {dtype_name} {op_key}"
+    assert _NATIVE_HALF_OPS[tl_func] in src, f"Expected packed native {dtype_name} {op_key}"
     # Verify correct native-type cast
     assert _NATIVE_CAST_TYPE[dtype_name] in src, (
         f"Expected {_NATIVE_CAST_TYPE[dtype_name]} cast in auto-vectorised CUDA source for {dtype_name} {op_key}"
@@ -584,7 +587,7 @@ def test_correctness_auto_vec_batched_reduce_f32_workspace():
     source = kernel.get_kernel_source()
     allreduce_call = next(line for line in source.splitlines() if "AllReduce<" in line)
     assert "make_int2" not in allreduce_call
-    assert "(&(workspace[0]))" in allreduce_call
+    assert "(&(workspace_ptr[0]))" in allreduce_call
 
     a = torch.randn((4, 512), device="cuda", dtype=torch.float32)
     result = kernel(a)

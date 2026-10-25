@@ -5,12 +5,11 @@
  */
 
 #include "fill.h"
+#include "compat/visit.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
 
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/attr.h>
 
 #include "utils.h"
 
@@ -36,15 +35,14 @@ const FillImpl &ResolveFillImpl(Target target) {
     if (impl.match_target(target)) {
       ICHECK(matched_impl == nullptr)
           << "tl.fill found multiple target-specific implementations for "
-          << target->str() << ": " << matched_impl->name << " and "
-          << impl.name;
+          << target << ": " << matched_impl->name << " and " << impl.name;
       matched_impl = &impl;
     }
   }
   ICHECK(matched_impl != nullptr)
       << "tl.fill requires a target-specific implementation, but no fill "
          "implementation is registered for "
-      << target->str();
+      << target;
   return *matched_impl;
 }
 
@@ -65,7 +63,7 @@ void RegisterFillImpl(FillImpl impl) {
  * `data_`.
  *
  * Detailed behavior:
- * - If `args[0]` is a `BufferLoad`, the loaded buffer becomes the destination
+ * - If `args[0]` is a `TensorLoad`, the loaded buffer becomes the destination
  * and the load indices are converted to per-dimension ranges:
  *   - `Ramp(base, lanes, stride)` is converted to `Range(base, lanes)`. Only
  * stride == 1 and constant `lanes` are supported.
@@ -83,7 +81,7 @@ void RegisterFillImpl(FillImpl impl) {
  * Parameters:
  * @param args Call arguments: expected layout is [dst_access_or_bufferload,
  * value].
- *             - args[0]: destination access (BufferLoad or pointer expression).
+ *             - args[0]: destination access (TensorLoad or pointer expression).
  *             - args[1]: value to fill (scalar or vector).
  *
  * Notes:
@@ -91,39 +89,26 @@ void RegisterFillImpl(FillImpl impl) {
  * lanes) and will terminate (via ICHECK) if inputs are unsupported or out
  * of bounds.
  */
-Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<FillNode> node = make_object<FillNode>();
-
+Fill::Fill(Array<Expr> args, BlockAnnotations annotations) {
+  TVM_FFI_CHECK_EQ(args.size(), 2U, ValueError);
+  ObjectPtr<FillNode> node = make_object<FillNode>(ffi::UnsafeInit{});
   AccessRegion dst_access = NormalizeToAccessRegion(args[0], kAccessWrite);
-  node->dst = dst_access.region->buffer;
+  node->dst = dst_access.region->source.as_or_throw<TensorVar>();
   node->region = dst_access.region->region;
   node->SetAccessRegions({dst_access});
-
-  if (args[1]->dtype != node->dst->dtype) {
-    node->value = Cast(node->dst->dtype, args[1]);
-  } else {
-    node->value = args[1];
-  }
-
-  ICHECK(node->region.size() == node->dst->shape.size())
-      << "region size = " << node->region.size()
-      << " != " << node->dst->shape.size();
-  for (int i = 0; i < node->region.size(); i++) {
-    // bound check if region is static
-    if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
-      int64_t min = min_imm->value;
-      ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
-    }
-    if (const auto *extent_imm = node->region[i]->extent.as<IntImmNode>()) {
-      // Only perform the upper-bound check when the destination shape
-      // extent is also statically known. If the shape is symbolic (e.g., Var),
-      // skip this static check to avoid invalid downcasts.
-      if (const auto *shape_imm = node->dst->shape[i].as<IntImmNode>()) {
-        ICHECK_LE(extent_imm->value, shape_imm->value)
-            << "region[" << i << "] = " << extent_imm->value << " > "
-            << node->dst->shape[i];
-      }
-    }
+  node->value = Cast(node->dst.dtype(), args[1].as_or_throw<PrimExpr>());
+  ICHECK_EQ(node->region.size(), node->dst.shape().size());
+  sym::Analyzer analyzer;
+  for (size_t axis = 0; axis < node->region.size(); ++axis) {
+    const Range &domain = node->region[axis];
+    TVM_FFI_CHECK(!analyzer->CanProve(domain->begin < 0), ValueError)
+        << "Fill region must start within the destination tensor";
+    TVM_FFI_CHECK(!analyzer->CanProve(domain->extent < 0), ValueError)
+        << "Fill region must have nonnegative extents";
+    TVM_FFI_CHECK(!analyzer->CanProve(domain->begin + domain->extent >
+                                      node->dst.shape()[axis]),
+                  ValueError)
+        << "Fill region exceeds the destination tensor";
   }
   data_ = std::move(node);
 }
@@ -146,29 +131,33 @@ TileOperator FillNode::Clone() const {
  * buffer.
  *
  * Constructs per-dimension data-parallel loop iterators matching this node's
- * region extents, emits a BufferStore that writes the node's `value` into `dst`
+ * region extents, emits a TensorStore that writes the node's `value` into `dst`
  * at the loop indices, and nests the loops (innermost to outermost) as parallel
  * `For` nodes. Returns the outermost `For` loop representing the complete
  * multi-dimensional fill kernel.
  *
  * @return For Outermost parallel `For` loop of the generated nested SIMT loop.
  */
-For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
-  int ndim = dst->shape.size();
-  Array<IterVar> loop_vars;
-  Array<PrimExpr> dst_indices;
-  for (int i = 0; i < ndim; i++) {
-    Var var = Var(std::string{char('i' + i)}, region[i]->extent->dtype);
-    loop_vars.push_back({region[i], var, IterVarType::kDataPar});
-    // Offset the loop induction variable by region min to honor sliced regions
-    dst_indices.push_back(region[i]->min + var);
+For FillNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
+  Array<PrimVar> loop_vars;
+  Array<PrimExpr> indices;
+  for (size_t axis = 0; axis < region.size(); ++axis) {
+    PrimVar variable("fill_axis_" + std::to_string(axis),
+                     region[axis]->extent.ty());
+    loop_vars.push_back(variable);
+    indices.push_back(analyzer->Simplify(region[axis]->begin + variable));
   }
-  Stmt body = BufferStore(dst, value, dst_indices);
-  for (int i = ndim - 1; i >= 0; i--) {
-    body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body);
+  Stmt body = TensorStore(dst, indices, value, dst->loc);
+  if (region.empty()) {
+    return For(PrimVar("fill_scalar"), 0, 1, 1, ForKind::kParallel,
+               SeqStmt(body));
   }
-  return Downcast<For>(body);
+  for (size_t axis = region.size(); axis-- > 0;) {
+    PrimType type = loop_vars[axis].ty();
+    body = For(loop_vars[axis], MakeConst(type, 0), region[axis]->extent,
+               MakeConst(type, 1), ForKind::kParallel, SeqStmt(body));
+  }
+  return body.as_or_throw<For>();
 }
 
 /**
@@ -191,7 +180,7 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &lower_args,
-                     arith::Analyzer *analyzer) const {
+                     sym::Analyzer analyzer) const {
   return ResolveFillImpl(lower_args.target).lower(*this, lower_args, analyzer);
 }
 
@@ -211,10 +200,7 @@ LayoutMap FillNode::InferLayout(const LayoutInferArgs &layout_args,
   return {};
 }
 
-TIR_REGISTER_TL_TILE_OP(Fill, fill)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(Fill, fill, 2);
 
 TVM_FFI_STATIC_INIT_BLOCK() { FillNode::RegisterReflection(); }
 

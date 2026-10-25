@@ -182,7 +182,7 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
         Non-empty ``CompiledArtifact.kernel_source`` from existing ``lower()``.
     """
     import tilelang
-    from tvm.target import Target
+    from tvm_tirx.target import Target
 
     if isinstance(target, str):
         target = resolve_target(target)

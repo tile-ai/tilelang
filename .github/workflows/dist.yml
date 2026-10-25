@@ -21,6 +21,10 @@ on:
       - version_provider.py
       - .github/workflows/dist.yml
       - .github/scripts/**
+      - .github/actions/setup-tirx/**
+      - testing/tools/*tirx*.py
+      - TVM_TIRX_COMMIT
+      - TVM_TIRX_VERSION
       # Exercised by the GPU wheel-test job below.
       - maint/scripts/smoke_test_wheel.py
       # Type aliases can affect package import/build behavior.
@@ -37,6 +41,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  TVM_TIRX_REPOSITORY: ${{ vars.TVM_TIRX_REPOSITORY }}
+  TVM_TIRX_WHEEL: ${{ vars.TVM_TIRX_WHEEL }}
+  TVM_TIRX_REVISION: ${{ vars.TVM_TIRX_REVISION }}
+  TVM_TIRX_CMAKE_DEFINES: ${{ vars.TVM_TIRX_CMAKE_DEFINES || '{}' }}
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   COLUMNS: "100"
@@ -94,12 +102,15 @@ jobs:
             sdist-${{ runner.os }}-${{ runner.arch }}
             ${{ runner.os }}-${{ runner.arch }}
 
+      - name: Prepare paired standalone TIRx
+        uses: ./.github/actions/setup-tirx
+
       - name: Test SDist buildable
         run: |
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
-          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL uv pip install -v --no-build-isolation dist/*.tar.gz
           env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
@@ -153,6 +164,13 @@ jobs:
         with:
           python-version: ${{ matrix.target.python_version }}
           activate-environment: true
+
+      - name: Prepare paired-wheel search directory
+        shell: bash
+        run: |
+          mkdir -p dist/tirx
+          echo "PIP_FIND_LINKS=${GITHUB_WORKSPACE}/dist/tirx" >> "${GITHUB_ENV}"
+          echo "UV_FIND_LINKS=${GITHUB_WORKSPACE}/dist/tirx" >> "${GITHUB_ENV}"
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
@@ -255,10 +273,14 @@ jobs:
           if ($extra.Count) {
             uv pip install --python $python @extra
           }
+          & $python testing/tools/prepare_tirx.py --python $python --repair --github-env
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TILELANG_USE_INSTALLED_TIRX = 'ON'
           uv build --wheel --no-build-isolation --python $python --out-dir raw-wheelhouse `
             -C cmake.build-type=Release -C "cmake.define.Python3_EXECUTABLE=$python"
           Get-ChildItem raw-wheelhouse -Filter *.whl | ForEach-Object {
-            uvx delvewheel repair -w wheelhouse $_.FullName
+            & $python testing/tools/repair_tirx_wheel.py --output-dir wheelhouse $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
       - name: Windows wheel build summary
@@ -448,6 +470,14 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+      - name: Upload standalone dependency wheels
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        uses: actions/upload-artifact@v7
+        with:
+          name: tirx-wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          path: dist/tirx/*.whl
+          if-no-files-found: error
+
   test-wheels-gpu:
     name: Test built wheels with ${{ matrix.target.toolkit }} (on ${{ matrix.target.name }})
     # The build runners have no GPU, so nothing above proves the built wheels
@@ -563,11 +593,19 @@ jobs:
           path: wheelhouse
           merge-multiple: true
 
+      - name: Download paired standalone dependency
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tirx-wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          path: dist/tirx
+          merge-multiple: true
+
       - name: Test built wheels on GPU
         run: |
           # Always exercise real kernel compilation: a warm kernel cache on a
           # persistent self-hosted runner must not mask a broken wheel.
           export TILELANG_DISABLE_CACHE=1
+          export UV_FIND_LINKS="${PWD}/dist/tirx"
 
           ls -lh wheelhouse/
           for WHEEL in wheelhouse/*.whl; do
@@ -618,6 +656,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download paired standalone dependencies
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tirx-wheels-*
+          path: dist/tirx
+          merge-multiple: true
+
       - name: List distributions
         run: ls -lh dist/*
 
@@ -630,7 +675,7 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: github.event_name == 'release' && github.event.action == 'published' && vars.TVM_TIRX_RELEASE_READY == 'true'
     runs-on: ubuntu-latest
     needs: [list-artifacts]
     timeout-minutes: 15
@@ -652,6 +697,16 @@ jobs:
             echo "Release tag ${TAG} does not match VERSION v${VERSION}"
             exit 1
           fi
+
+      - name: Require a separately published standalone dependency
+        run: |
+          TIRX_VERSION="$(cat TVM_TIRX_VERSION)"
+          if [[ -z "${TIRX_VERSION}" || "${TIRX_VERSION}" == *+* ]]; then
+            echo "Publish a public paired TIRx version and update the dependency pins before releasing TileLang."
+            exit 1
+          fi
+          curl --fail --silent --show-error --retry 3 \
+            "https://pypi.org/pypi/apache-tvm-tirx/${TIRX_VERSION}/json" --output /dev/null
 
       - name: Download release artifacts
         uses: actions/download-artifact@v8

@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
-from tvm.tirx.script.builder.frame import TIRFrame
-from tvm.ffi import register_object
+from tvm_tirx.script.ir_builder.frame import StmtFrame as TIRFrame
+from tvm_ffi import register_object
 from tilelang import _ffi_api
 from tilelang.language.kernel import get_thread_bindings, get_thread_extents
 

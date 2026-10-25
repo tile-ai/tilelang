@@ -184,9 +184,11 @@ if not env.is_light_import():
                 if (path := Path(directory) / ("libz3.dylib" if sys.platform == "darwin" else "libz3.so")).is_file()
             ]
 
-        import tvm
-        import tvm.base  # noqa: F401
-        from tvm import DataType  # noqa: F401
+        import tvm_tirx
+        import tvm_tirx.base  # noqa: F401
+        from tvm_ffi import dtype as DataType  # noqa: F401
+
+        tvm = tvm_tirx
 
         def _load_tile_lang_lib():
             """Load Tile Lang lib"""
@@ -196,6 +198,12 @@ if not env.is_light_import():
         # only load once here
         if env.SKIP_LOADING_TILELANG_SO == "0":
             _LIB, _LIB_PATH = _load_tile_lang_lib()
+
+    from ._compat import cuda_codegen as _cuda_codegen
+    from ._compat import ws as _ws
+
+    del _cuda_codegen, _ws
+    from ._compat import tvm as tvm
 
     from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
     from .profiler import Profiler  # noqa: F401

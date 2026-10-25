@@ -2,11 +2,11 @@ import tilelang
 import tilelang.language as T
 import torch
 import tilelang.testing
-import tvm
+from tilelang import tvm
 import pytest
-from tvm.script.ir_builder.base import IRBuilderFrame
-from tvm.tirx.expr import IntImm, Var, Not, Or
-from tvm import tirx
+from tvm_tirx.script.ir_builder.base import IRBuilderFrame
+from tilelang._compat.tirx import IntImm, Var, Not, Or
+from tilelang._compat.tvm import tirx
 from tilelang.language.dtypes import _all_dtypes
 
 ALL_DTYPE_NAMES = tuple(_all_dtypes)
@@ -434,7 +434,7 @@ def test_buffer_slice_step():
                 B[0:5:2] = A[0:10:2]
 
         raise AssertionError("Expect to report an error, buffer slice with step is not supported")
-    except RuntimeError:
+    except ValueError:
         pass
 
 

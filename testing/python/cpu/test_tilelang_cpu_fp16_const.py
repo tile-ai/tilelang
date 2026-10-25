@@ -64,7 +64,7 @@ def test_fp16_finite_constant_arithmetic():
 
     # The generated source must use the legal cast form, not the 'h' suffix.
     src = _source(main)
-    assert "(half)" in src, f"expected (half) cast form in source:\n{src}"
+    assert "(_Float16)" in src, f"expected native half cast in source:\n{src}"
     assert not re.search(r"[0-9]h\b", src), f"source must not contain an 'h' literal suffix (MSL-only):\n{src}"
 
     a = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float16)

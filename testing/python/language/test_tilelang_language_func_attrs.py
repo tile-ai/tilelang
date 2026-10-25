@@ -1,11 +1,13 @@
 """Test T.annotate_compile_flags, T.annotate_pass_configs, and out_idx via PrimFunc attrs."""
 
 import pytest
+import tvm_ffi
 import torch
 import tilelang
 import tilelang.testing
 from tilelang import language as T
 from tilelang.transform import PassConfigKey
+from tvm_tirx.codegen.executable import Executable
 
 
 def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
@@ -44,10 +46,10 @@ def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
 
         executable = compiled.adapter.get_exportable_executable()
         if disk_cache_hit:
-            assert isinstance(executable, tilelang.tvm.runtime.Module)
+            assert isinstance(executable, tvm_ffi.Module)
         else:
-            assert isinstance(executable, tilelang.tvm.runtime.Executable)
-        rt_mod = executable.jit() if isinstance(executable, tilelang.tvm.runtime.Executable) else executable
+            assert isinstance(executable, Executable)
+        rt_mod = executable.jit() if isinstance(executable, Executable) else executable
         assert rt_mod.get_function(str(kernel.attrs["global_symbol"]), query_imports=True) is not None
         with pytest.raises(AttributeError):
             rt_mod.get_function(f"{kernel.attrs['global_symbol']}_auto_output", query_imports=True)

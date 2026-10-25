@@ -7,7 +7,7 @@
 # evaluates eagerly, exactly like Bind) and the guard fact was lost.
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 _prove_raw = tvm.get_global_func("tl.analysis.ConstrSetsProve")
 

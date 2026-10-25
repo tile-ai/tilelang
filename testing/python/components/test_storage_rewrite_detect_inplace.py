@@ -10,12 +10,12 @@ def _compile_kernel_without_inplace():
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
         with T.Kernel(num_tokens, threads=32) as pid:
-            read = T.alloc_var(T.int)
-            read = x[pid]
+            read = T.alloc_local((1,), T.int)
+            read[0] = x[pid]
 
-            write = T.alloc_var(T.int)
-            write = read * 2
-            x[pid] = write
+            write = T.alloc_local((1,), T.int)
+            write[0] = read[0] * 2
+            x[pid] = write[0]
 
     return buggy_kernel
 
@@ -31,12 +31,12 @@ def _compile_kernel_with_inplace():
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), T.float]):
         with T.Kernel(num_tokens, threads=32) as pid:
-            read = T.alloc_var(T.int)
-            read = x[pid]
+            read = T.alloc_local((1,), T.int)
+            read[0] = x[pid]
 
-            write = T.alloc_var(T.int)
-            write = read * 2
-            x[pid] = write
+            write = T.alloc_local((1,), T.int)
+            write[0] = read[0] * 2
+            x[pid] = write[0]
 
     return buggy_kernel
 
@@ -56,8 +56,8 @@ def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
 
-    pattern_on = "read = (read * 2);"
-    pattern_off = "write = (read * 2);"
+    pattern_on = "read_ptr[0] = (read_ptr[0] * 2);"
+    pattern_off = "write_ptr[0] = (read_ptr[0] * 2);"
     assert script_off.count(pattern_on) == 0, f"inplace pattern found when disabled:\n{script_off}"
     assert script_on.count(pattern_on) > 0, f"inplace pattern not found when enabled:\n{script_on}"
     assert script_off.count(pattern_off) > 0, f"separate-write pattern not found when disabled:\n{script_off}"

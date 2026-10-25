@@ -19,6 +19,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  USE_CUDA: 'OFF'
+  USE_ROCM: 'OFF'
+  USE_ASCEND: 'OFF'
+  TVM_TIRX_REPOSITORY: ${{ vars.TVM_TIRX_REPOSITORY }}
+  TVM_TIRX_WHEEL: ${{ vars.TVM_TIRX_WHEEL }}
+  TVM_TIRX_REVISION: ${{ vars.TVM_TIRX_REVISION }}
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
@@ -293,6 +299,9 @@ jobs:
             requirements*.txt
             .pre-commit-config.yaml
 
+      - name: Prepare paired standalone TIRx
+        uses: ./.github/actions/setup-tirx
+
       - name: Setup venv
         id: setup-venv
         run: |
@@ -348,7 +357,7 @@ jobs:
 
       - name: Install project (wheel form)
         run: |
-          uv pip install -v .
+          uv pip install -v --no-build-isolation .
 
       - name: Show ccache stats
         if: always()
@@ -512,8 +521,9 @@ jobs:
           PY
 
           python -m pip install --upgrade pip setuptools wheel
+          python testing/tools/prepare_tirx.py --github-env
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
-          python -m pip install -v .
+          TILELANG_USE_INSTALLED_TIRX=ON python -m pip install -v --no-build-isolation .
 
       - name: Run AscendC examples
         id: ascendc-examples
@@ -674,6 +684,9 @@ jobs:
             requirements*.txt
             .pre-commit-config.yaml
 
+      - name: Prepare paired standalone TIRx
+        uses: ./.github/actions/setup-tirx
+
       - name: Setup venv
         id: setup-venv
         run: |
@@ -700,7 +713,7 @@ jobs:
 
       - name: Install project (wheel form)
         run: |
-          uv pip install -v .
+          uv pip install -v --no-build-isolation .
 
       - name: Show ccache stats
         if: always()

@@ -10,8 +10,10 @@ from tilelang.utils.language import (
 )
 from tilelang.utils.deprecated import deprecated
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region, _normalize_annotations
-import tvm
-from tvm import ir, tirx
+from tilelang.language.dtypes import is_float4_e2m1_unpacked
+from tilelang._compat.tensor import tensor_strides
+import tilelang._compat.tvm as tvm
+from tilelang._compat.tvm import ir, tirx
 
 
 def _normalize_copy_regions(
@@ -123,9 +125,9 @@ def copy(
         # in copy.cc; cast to the load dtype, which is what BufferStore checks
         # once index lanes are folded in.
         value = src
-        if src.dtype != dst.dtype:
-            value = tirx.Cast(dst.dtype, src)
-        return tirx.BufferStore(dst.buffer, value, dst.indices)
+        if src.ty != dst.ty:
+            value = tirx.Cast(dst.ty, src)
+        return tirx.BufferStore(dst.source, value, dst.indices)
 
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
@@ -218,7 +220,7 @@ def async_copy(
         ann["parallel_loop_layout"] = loop_layout
 
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
-        return tirx.BufferStore(dst.buffer, src, dst.indices)
+        return tirx.BufferStore(dst.source, src, dst.indices)
 
     return tirx.call_intrin(
         "handle",
@@ -371,10 +373,10 @@ def tma_gather4(
         raise TypeError("tma_gather4 src must be a tirx.Buffer (global)")
     if not isinstance(dst, tirx.Buffer):
         raise TypeError("tma_gather4 dst must be a tirx.Buffer (shared)")
-    if src.scope() != "global":
-        raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope()}")
-    if dst.scope() not in ("shared", "shared.dyn"):
-        raise ValueError(f"tma_gather4 dst must be a shared buffer, got scope={dst.scope()}")
+    if src.scope().name != "global":
+        raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope().name}")
+    if dst.scope().name not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_gather4 dst must be a shared buffer, got scope={dst.scope().name}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
@@ -383,8 +385,9 @@ def tma_gather4(
         raise ValueError(f"tma_gather4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
     if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
         raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
-    if src.strides:
-        inner = src.strides[1]
+    strides = tensor_strides(src)
+    if strides:
+        inner = strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -416,8 +419,8 @@ def tma_gather4(
     ann.update(
         {
             "is_gather4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
+            "gather4_rows": [tirx.convert(row) for row in rows],
+            "gather4_col": tirx.convert(col),
             "barrier": bar_load,
             "eviction_policy": ep,
         }
@@ -438,7 +441,7 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
     if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
     dt = tvm.DataType(dtype)
-    if dt.is_float4_e2m1_unpacked():
+    if is_float4_e2m1_unpacked(dtype):
         elem_bits = 4
     else:
         elem_bits = dt.bits
@@ -469,10 +472,10 @@ def tma_scatter4(
         raise TypeError("tma_scatter4 src must be a tirx.Buffer (shared)")
     if not isinstance(dst, tirx.Buffer):
         raise TypeError("tma_scatter4 dst must be a tirx.Buffer (global)")
-    if src.scope() not in ("shared", "shared.dyn"):
-        raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope()}")
-    if dst.scope() != "global":
-        raise ValueError(f"tma_scatter4 dst must be a global buffer, got scope={dst.scope()}")
+    if src.scope().name not in ("shared", "shared.dyn"):
+        raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope().name}")
+    if dst.scope().name != "global":
+        raise ValueError(f"tma_scatter4 dst must be a global buffer, got scope={dst.scope().name}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
     if len(dst.shape) != 2:
@@ -481,8 +484,9 @@ def tma_scatter4(
         raise ValueError(f"tma_scatter4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
     if not (isinstance(src.shape[0], int) and src.shape[0] == 4) and not (hasattr(src.shape[0], "value") and int(src.shape[0].value) == 4):
         raise ValueError(f"tma_scatter4 shared tile leading dim must be 4, got {src.shape[0]}")
-    if dst.strides:
-        inner = dst.strides[1]
+    strides = tensor_strides(dst)
+    if strides:
+        inner = strides[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -508,8 +512,8 @@ def tma_scatter4(
     ann.update(
         {
             "is_scatter4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
+            "gather4_rows": [tirx.convert(row) for row in rows],
+            "gather4_col": tirx.convert(col),
             "eviction_policy": ep,
         }
     )

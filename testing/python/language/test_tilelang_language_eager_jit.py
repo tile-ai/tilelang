@@ -74,7 +74,7 @@ def test_jit2_gemm_ptr():
                 T.gemm(A_shared, B_shared, C_local)
             T.copy(C_local, C[bx * block_M, by * block_N])
 
-    prod = product([T.float16, T.tfloat32], [T.float32])
+    prod = list(product([T.float16, T.tfloat32], [T.float32]))
     gemm_ptr.par_compile(
         [
             {"A": T.ptr(), "B": T.ptr(), "C": T.ptr(), "M": 1024, "N": 1024, "K": 1024, "dtype": in_dtype, "out_dtype": out_dtype}
@@ -82,12 +82,13 @@ def test_jit2_gemm_ptr():
         ]
     )
     for in_dtype, out_dtype in prod:
-        in_dtype = in_dtype.as_torch()
-        out_dtype = out_dtype.as_torch()
-        A = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
-        B = torch.randn(1024, 1024, dtype=in_dtype, device="cuda")
-        C_ref = out_dtype(A @ B)
-        C = torch.empty(1024, 1024, dtype=out_dtype, device="cuda")
+        A = torch.randn(1024, 1024, dtype=in_dtype.as_torch(), device="cuda")
+        B = torch.randn(1024, 1024, dtype=in_dtype.as_torch(), device="cuda")
+        if in_dtype == T.tfloat32:
+            A = (A.view(torch.int32) & -8192).view(torch.float32)
+            B = (B.view(torch.int32) & -8192).view(torch.float32)
+        C_ref = (A.float() @ B.float()).to(out_dtype.as_torch())
+        C = torch.empty(1024, 1024, dtype=out_dtype.as_torch(), device="cuda")
         gemm_ptr(A, B, C, 1024, 1024, 1024, in_dtype, out_dtype)
         torch.testing.assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
 

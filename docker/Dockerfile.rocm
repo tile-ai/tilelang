@@ -26,12 +26,16 @@ RUN pip install 'numpy<2.0' --force-reinstall
 
 # Copy local tilelang directory instead of cloning from git
 # Build from tilelang root: docker build -f docker/Dockerfile.rocm -t tilelang_rocm:latest .
+ARG TVM_TIRX_WHEEL
+ARG TVM_TIRX_REPOSITORY
 COPY . /root/tilelang
 
 RUN cd /root/tilelang && \
     cp pyproject.toml pyproject.toml.bak && \
     sed -i '/^[[:space:]]*\"torch/d' pyproject.toml && \
-    USE_ROCM=1 USE_CUDA=0 pip install -e . -v && \
+    USE_ASCEND=OFF python testing/tools/prepare_tirx.py && \
+    TILELANG_USE_INSTALLED_TIRX=ON USE_ROCM=1 USE_CUDA=0 USE_ASCEND=OFF \
+    PIP_FIND_LINKS=/root/tilelang/dist/tirx pip install --no-build-isolation -e . -v && \
     mv pyproject.toml.bak pyproject.toml
 
 SHELL ["/bin/bash", "-l", "-c"]

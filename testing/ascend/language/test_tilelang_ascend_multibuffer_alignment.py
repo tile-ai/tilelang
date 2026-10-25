@@ -1,12 +1,19 @@
 """Runtime regression for 32-byte alignment between physical UB versions."""
 
+import pytest
 import torch
-import torch_npu  # noqa: F401
 
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.layout import make_ascend_nz_layout
+
+
+@pytest.fixture(autouse=True)
+def require_ascend_device():
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("Ascend NPU required")
 
 
 @tilelang.jit(target="ascend")

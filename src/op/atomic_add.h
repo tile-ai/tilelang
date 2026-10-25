@@ -21,11 +21,12 @@ using namespace tirx;
  */
 class AtomicAddNode : public AtomicOpBaseNode {
 public:
+  using AtomicOpBaseNode::AtomicOpBaseNode;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
                                     TileOperatorNode);
 
   /// Override Lower to add TMA support
-  Stmt Lower(const LowerArgs &lower_args, arith::Analyzer *analyzer) const;
+  Stmt Lower(const LowerArgs &lower_args, sym::Analyzer analyzer) const;
 
   /// Override InferLayout to add TMA layout inference
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
@@ -58,7 +59,7 @@ struct AtomicAddImpl {
                             InferLevel level);
 
   Stmt (*lower)(const AtomicAddNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::Analyzer analyzer);
 };
 
 void RegisterAtomicAddImpl(AtomicAddImpl impl);
@@ -68,10 +69,8 @@ class AtomicAdd : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
                                              AtomicAddNode);
-  TVM_DLL
-  AtomicAdd(ffi::Array<PrimExpr> args,
-            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                ffi::Map<ffi::String, ffi::ObjectRef>());
+  TILELANG_DLL AtomicAdd(ffi::Array<Expr> args,
+                         BlockAnnotations annotations = {});
   static const Op &Get();
 };
 

@@ -16,7 +16,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 from tilelang.utils.device import device_synchronize
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 def _synchronize_tensor_devices(*values: Any) -> None:

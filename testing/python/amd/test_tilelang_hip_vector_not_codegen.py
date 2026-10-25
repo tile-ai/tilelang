@@ -3,7 +3,7 @@ import tilelang
 import tilelang.testing
 
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def _make_vector_not_module(lanes):

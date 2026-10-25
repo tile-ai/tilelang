@@ -9,8 +9,8 @@ from ..layout.mma_sm100_layout import (
     make_tmem_frg_c,
     validate_tcgen05_ts_instruction,
 )
-from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion, handle_add_byte_offset
+from tilelang._compat.tvm import DataType
+from tilelang._compat.tirx import PrimExpr, Buffer, Var, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
@@ -20,7 +20,7 @@ from tilelang.layout import (
     SwizzleMode,
     cute,
 )
-from tvm.runtime import convert
+from tilelang._compat.tirx import convert
 
 lift = convert
 
@@ -107,7 +107,7 @@ class TCGEN05TensorMemoryParams:
         column)`` plus the sliced sublayout, and each atom origin is then one
         evaluation of that sublayout.
         """
-        buffer, ranges = region.buffer, list(region.region)
+        buffer, ranges = region.source, list(region.region)
         assert cute.rank(fragment) == len(ranges), (
             f"TCGEN5MMA region rank {len(ranges)} does not match its TMEM fragment rank {cute.rank(fragment)}"
         )
@@ -356,7 +356,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if a_dtype.bits == 6 or a_dtype.is_float4():
+        if a_dtype.bits == 6 or T.is_float4(a_dtype):
             if self.chunk % 32 != 0:
                 raise ValueError(f"TCGEN5MMA FP{a_dtype.bits} requires chunk to be a multiple of 32, got {self.chunk}")
             self.k_dim = 32
@@ -366,7 +366,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     @staticmethod
     def _as_buffer(buf_or_region):
         if isinstance(buf_or_region, BufferRegion):
-            return buf_or_region.buffer
+            return buf_or_region.source
         return buf_or_region
 
     def validate_tcgen05_operand_regions(
@@ -407,8 +407,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             row_range, col_range = ranges[-2:]
             mn_range, k_range = (col_range, row_range) if transposed else (row_range, col_range)
             for mode_name, mode_range, atom in ((mn_axis_name, mn_range, mn_atom), (k_axis_name, k_range, k_atom)):
-                assert analyzer.can_prove_equal(mode_range.min % atom, 0), (
-                    f"TCGEN5MMA {operand} {mode_name} origin {mode_range.min} must be aligned to the selected atom {atom}"
+                assert analyzer.can_prove_equal(mode_range.begin % atom, 0), (
+                    f"TCGEN5MMA {operand} {mode_name} origin {mode_range.begin} must be aligned to the selected atom {atom}"
                 )
                 assert analyzer.can_prove_equal(mode_range.extent % atom, 0), (
                     f"TCGEN5MMA {operand} {mode_name} extent {mode_range.extent} must be a multiple of the selected atom {atom}"
@@ -757,32 +757,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     @staticmethod
     def _access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
         """Resolve an access pointer from a Buffer, BufferLoad, or BufferRegion."""
-        if isinstance(buffer_or_load_or_region, Buffer):
-            return buffer_or_load_or_region.access_ptr(access_type)
-        elif isinstance(buffer_or_load_or_region, BufferLoad):
-            buffer_load = buffer_or_load_or_region
-            offset, stride = 0, 1
-            buffer = buffer_load.buffer
-            for i, shape in enumerate(reversed(buffer.shape)):
-                indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                if isinstance(indice, tvm.tirx.Ramp):
-                    offset += indice.base * stride
-                elif isinstance(indice, (tvm.tirx.IntImm, tvm.tirx.PrimExpr)):
-                    offset += indice * stride
-                else:
-                    raise ValueError(f"Unsupported index type: {type(indice)}")
-                stride *= shape
-            return buffer.access_ptr(access_type, offset=offset)
-        elif isinstance(buffer_or_load_or_region, BufferRegion):
-            buffer_region = buffer_or_load_or_region
-            buffer = buffer_region.buffer
-            offset, stride = 0, 1
-            for i, shape in enumerate(reversed(buffer.shape)):
-                offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                stride *= shape
-            return buffer.access_ptr(access_type, offset=offset)
-        else:
-            raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        return T.access_ptr(buffer_or_load_or_region, access_type)
 
     # -- Descriptor parameter computation (pure Python, no TIR) --
 
@@ -799,7 +774,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.b_shared_layout is not None, "TCGEN05 B operand has no shared layout to decode"
         return compute_umma_descriptor(
             self.b_shared_layout,
-            B_buf.buffer if isinstance(B_buf, BufferRegion) else B_buf,
+            B_buf.source if isinstance(B_buf, BufferRegion) else B_buf,
             transposed=not self.b_transposed,
             micro_size_k=self.micro_size_k,
             region=list(B_buf.region) if isinstance(B_buf, BufferRegion) else None,
@@ -817,7 +792,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.a_shared_layout is not None, "TCGEN05 A operand has no shared layout to decode"
         return compute_umma_descriptor(
             self.a_shared_layout,
-            A_buf.buffer if isinstance(A_buf, BufferRegion) else A_buf,
+            A_buf.source if isinstance(A_buf, BufferRegion) else A_buf,
             transposed=self.a_transposed,
             micro_size_k=self.micro_size_k,
             region=list(A_buf.region) if isinstance(A_buf, BufferRegion) else None,
@@ -841,7 +816,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = b_params.slice_byte_offset
-        B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
+        B_base_ptr = T.access_ptr(self._as_buffer(B_buf), "r")
         if not isinstance(slice_byte_offset, int):
             # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
             is_sliced = True
@@ -877,7 +852,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = a_params.slice_byte_offset
-        A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
+        A_base_ptr = T.access_ptr(self._as_buffer(A_buf), "r")
         if not isinstance(slice_byte_offset, int):
             is_sliced = True
         elif slice_byte_offset != 0:

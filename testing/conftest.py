@@ -51,6 +51,11 @@ def pytest_addoption(parser):
     )
 
 
+def pytest_configure(config):
+    for backend in ("cuda", "rocm", "metal", "llvm", "ascend", "gpu"):
+        config.addinivalue_line("markers", f"{backend}: requires {backend} compiler or runtime support")
+
+
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--run-perf"):
         config._perf_items_filtered = 0

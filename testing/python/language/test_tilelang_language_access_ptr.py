@@ -1,10 +1,11 @@
 import tilelang
-import tvm
-from tvm import arith
-from tvm import tirx
-from tvm.tirx import op
+from tilelang import tvm
+from tilelang._compat.tvm import arith
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import op
 import tilelang.language as T
 import tilelang.transform
+from tvm_tirx import tirx as native_tirx
 
 
 def test_access_ptr_builds_tl_access_ptr_from_bufferload_1d():
@@ -55,37 +56,38 @@ def test_access_ptr_multiplies_extents_for_2d_load():
     assert int(ptr.args[2].value) == 2
 
 
-def test_lower_access_ptr_rewrites_to_tvm_access_ptr():
+def test_lower_access_ptr_rewrites_to_native_address():
     buf = tirx.decl_buffer((8, 8), "float16", name="A")
     load = tirx.BufferLoad(buf, [tirx.IntImm("int32", 2), tirx.IntImm("int32", 3)])
     ptr = T.access_ptr(load, "w", 4, 5)
 
-    func = tirx.PrimFunc([buf.data], tirx.Evaluate(ptr), buffer_map={buf.data: buf})
+    func = tirx.PrimFunc([buf], tirx.Evaluate(ptr))
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = tilelang.transform.LowerAccessPtr()(mod)
+    with tvm.target.Target("c"):
+        lowered = native_tirx.transform.LowerTensorLayouts()(lowered)
 
     calls: list[tirx.Call] = []
 
-    def _collect(e):
-        if isinstance(e, tirx.Call):
-            calls.append(e)
+    def _collect(expression):
+        if isinstance(expression, tirx.Call):
+            calls.append(expression)
 
     tirx.stmt_functor.post_order_visit(lowered["main"].body, _collect)
-    assert any(c.op.same_as(op.Op.get("tirx.tvm_access_ptr")) for c in calls)
-    assert not any(c.op.same_as(op.Op.get("tl.access_ptr")) for c in calls)
+    assert any(call.op.same_as(op.Op.get("tirx.address_of")) for call in calls)
+    assert not any(call.op.same_as(op.Op.get("tl.access_ptr")) for call in calls)
 
-    # Check the lowered tvm_access_ptr carries the expected linear offset/extents.
-    acc = [c for c in calls if c.op.same_as(op.Op.get("tirx.tvm_access_ptr"))][0]
-    assert len(acc.args) == 5
+    acc = [call for call in calls if call.op.same_as(op.Op.get("tirx.address_of"))][0]
+    assert len(acc.args) == 1
     analyzer = arith.Analyzer()
-    offset = analyzer.simplify(acc.args[2])
-    extent = analyzer.simplify(acc.args[3])
+    offset = analyzer.simplify(acc.args[0].indices[0])
+    extent = analyzer.simplify(acc.attrs["tl.access_extent"])
     assert isinstance(offset, tirx.IntImm)
     assert int(offset.value) == 19
     assert isinstance(extent, tirx.IntImm)
     assert int(extent.value) == 20
-    assert isinstance(acc.args[4], tirx.IntImm)
-    assert int(acc.args[4].value) == 2
+    assert isinstance(acc.attrs["tl.access_mask"], tirx.IntImm)
+    assert int(acc.attrs["tl.access_mask"].value) == 2
 
 
 def test_lower_access_ptr_preserves_buffer_element_offset():
@@ -94,16 +96,19 @@ def test_lower_access_ptr_preserves_buffer_element_offset():
     load = tirx.BufferLoad(buf, [tirx.IntImm("int32", 2), tirx.IntImm("int32", 3)])
     ptr = T.access_ptr(load, "r", 1)
 
-    func = tirx.PrimFunc([buf.data], tirx.Evaluate(ptr), buffer_map={buf.data: buf})
+    func = tirx.PrimFunc([buf], tirx.Evaluate(ptr))
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = tilelang.transform.LowerAccessPtr()(mod)
+    with tvm.target.Target("c"):
+        lowered = native_tirx.transform.LowerTensorLayouts()(lowered)
 
     calls = []
     tirx.stmt_functor.post_order_visit(
         lowered["main"].body,
         lambda expr: calls.append(expr) if isinstance(expr, tirx.Call) else None,
     )
-    acc = [call for call in calls if call.op.same_as(op.Op.get("tirx.tvm_access_ptr"))][0]
-    offset = arith.Analyzer().simplify(acc.args[2])
+    acc = [call for call in calls if call.op.same_as(op.Op.get("tirx.address_of"))][0]
+    load = acc.args[0]
+    offset = arith.Analyzer().simplify(load.source.ty.layout.apply(*load.indices, shape=load.source.shape)["m"])
     assert isinstance(offset, tirx.IntImm)
     assert int(offset.value) == 24

@@ -14,6 +14,8 @@ import tilelang.testing
 
 
 def make_kernel(reduce_threads, dtype, reduce_op, reduce_id):
+    combine = T.Lambda([getattr(T, dtype), getattr(T, dtype)], reduce_op)
+
     @tl.jit(pass_configs={tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True, tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True})
     def kernel(A):
         K = T.const("K")
@@ -24,9 +26,9 @@ def make_kernel(reduce_threads, dtype, reduce_op, reduce_id):
             v = T.alloc_local((1,), dtype)
             v[0] = A[tk]
             Cr = T.alloc_local((1,), dtype)
-            with T.attr(T.comm_reducer(reduce_op, [T.cast(reduce_id, dtype)]), "reduce_scope", T.reinterpret(T.uint64(0), dtype="handle")):
-                T.evaluate(T.tvm_thread_allreduce(T.uint32(1), v[0], True, Cr[0], tk, dtype="handle"))
-            C[0] = Cr[0]
+            T.gpu_thread_allreduce(combine, (T.cast(reduce_id, dtype),), (v[0],), True, (Cr[0],), (tk,))
+            if tk == 0:
+                C[0] = Cr[0]
         return C
 
     return kernel

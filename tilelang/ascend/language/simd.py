@@ -10,14 +10,17 @@ SFU algorithms also retain their wrappers, including the default exact FP32
 division and the ``ftz_false`` variants of ``vexp``, ``vln``, and ``vsqrt``.
 """
 
-from tvm import tirx
-from tvm.tirx import BufferLoad
-from tvm.tirx.script.builder.ir import bind as _bind, sblock_attr
-from tvm.script.ir_builder import IRBuilder
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import BufferLoad, expr_dtype
+from tilelang._compat.builder import bind as _bind, scope_attr
+from tvm_tirx import ir
+from tvm_tirx.tirx import reinterpret as native_reinterpret
+from tvm_tirx.script.ir_builder import IRBuilder
 from tilelang import tvm
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import alloc_var as _alloc_var, alloc_local as _alloc_local
 from tilelang.language.builtin import access_ptr
+from tilelang.language.frame import is_mutable_scalar, register_mutable_scalar
 
 _Op = tirx.op.Op.get
 
@@ -38,7 +41,7 @@ class SimdPair:
     def __init__(self, pair, dtype=None):
         self._pair = pair
         if dtype is None:
-            dtype = (pair.dtype, pair.dtype)
+            dtype = (expr_dtype(pair), expr_dtype(pair))
         if not isinstance(dtype, (tuple, list)):
             raise TypeError(f"SimdPair `dtype` must be a tuple or list, got {type(dtype).__name__}")
         if len(dtype) != 2:
@@ -66,6 +69,18 @@ def _pair_index(index) -> int:
     if index not in (0, 1):
         raise IndexError(f"SIMD pair index must be 0 or 1, got {index}")
     return index
+
+
+class _PointerUpdatePair(SimdPair):
+    def __init__(self, pair, vector_dtype):
+        super().__init__(pair, (vector_dtype, "uint64"))
+
+    def __getitem__(self, index):
+        index = _pair_index(index)
+        if index == 0:
+            return super().__getitem__(index)
+        pointer = ir.Call(_Op("tl.simd.pair_get"), [self._pair, index], ty=ir.PtrType("void"))
+        return native_reinterpret(pointer, ty=ir.PrimType("uint64"))
 
 
 _ELEM_BITS = {
@@ -237,7 +252,9 @@ def alloc_var(dtype: DType):
     Uses ``local.var`` scope and behaves as one vector register value. For an
     addressable array of registers (``v[i]``), use :func:`alloc_local`.
     """
-    return _alloc_var(_vec_dtype(dtype), scope="local.var")
+    buffer = _alloc_local((1,), _vec_dtype(dtype), scope="local.var")
+    register_mutable_scalar(buffer)
+    return buffer
 
 
 def alloc_local(shape: ShapeType, dtype: DType):
@@ -276,7 +293,7 @@ def _validate_predicate_dist(name: str, dist: str, allowed: tuple[str, ...]) -> 
 def _predicate_access_ptr(addr, access_type: str, dist: str):
     if not isinstance(addr, BufferLoad):
         return addr
-    elem_dtype = str(addr.buffer.dtype)
+    elem_dtype = str(expr_dtype(addr.source))
     if elem_dtype not in _ELEM_BITS:
         raise ValueError(f"Predicate load/store does not support buffer dtype {elem_dtype!r}")
     payload_bits = _PREDICATE_PAYLOAD_BYTES[dist] * 8
@@ -349,7 +366,7 @@ def vld(addr, dist="NORM", *, post_inc=None):
     must agree with it.
     """
     if post_inc is not None:
-        if not (isinstance(addr, BufferLoad) and addr.buffer.scope() == "local.var" and str(addr.dtype) == "handle"):
+        if _ubuf_ptr_dtype(addr, required=False) is None:
             raise ValueError("vld post_inc requires a mutable pointer from make_ubuf_ptr")
         elem_dtype = _ubuf_ptr_dtype(addr)
         bits = _ELEM_BITS.get(elem_dtype)
@@ -365,13 +382,14 @@ def vld(addr, dist="NORM", *, post_inc=None):
             if not -(1 << 31) <= post_inc < (1 << 31):
                 raise ValueError("vld post_inc element increment must fit int32")
             post_inc = tirx.const(post_inc, "int32")
-        if not isinstance(post_inc, tirx.PrimExpr) or str(post_inc.dtype) != "int32":
+        if not isinstance(post_inc, tirx.PrimExpr) or str(expr_dtype(post_inc)) != "int32":
             raise TypeError("vld post_inc must be a signed int32 element increment")
         vec_dtype = _vec_dtype(elem_dtype)
-        pair = tirx.call_intrin(vec_dtype, _Op("tl.simd.vld"), addr, dist, post_inc)
-        return SimdPair(_bind(pair), (vec_dtype, "handle"))
+        pointer = native_reinterpret(addr, ty=ir.PtrType("void"))
+        pair = tirx.call_intrin(vec_dtype, _Op("tl.simd.vld"), pointer, dist, post_inc)
+        return _PointerUpdatePair(_bind(pair), vec_dtype)
     if isinstance(addr, BufferLoad):
-        elem_dtype = str(addr.buffer.dtype)
+        elem_dtype = str(expr_dtype(addr.source))
         elem_bits = _ELEM_BITS.get(elem_dtype)
         lanes = _vreg_lanes(elem_dtype)
         extent = lanes
@@ -406,7 +424,7 @@ def vld(addr, dist="NORM", *, post_inc=None):
         vec_dtype = f"{elem_dtype}x{lanes}"
     else:
         inner_load = addr.args[0]
-        vec_dtype = _vec_dtype(inner_load.buffer.dtype)
+        vec_dtype = _vec_dtype(expr_dtype(inner_load.source))
 
     return tirx.call_intrin(vec_dtype, _Op("tl.simd.vld"), addr, dist)
 
@@ -430,7 +448,7 @@ def vld2(addr, dist="DINTLV_B16", off=None):
     if isinstance(dist, str) and dist not in _VLD2_DISTS:
         raise ValueError(f"vld2 only supports dist in {_VLD2_DISTS}, got {dist!r}")
     if isinstance(addr, BufferLoad):
-        elem_dtype = str(addr.buffer.dtype)
+        elem_dtype = str(expr_dtype(addr.source))
         lanes = _vreg_lanes(elem_dtype)
         # Dual-dest deinterleave always consumes 2x vector width from UB.
         extent = lanes * 2
@@ -440,7 +458,7 @@ def vld2(addr, dist="DINTLV_B16", off=None):
         # Pre-wrapped access_ptr: this path does not auto-double the footprint
         # (same as vld). Callers must size extent to 2x vector width themselves.
         inner_load = addr.args[0]
-        vec_dtype = _vec_dtype(inner_load.buffer.dtype)
+        vec_dtype = _vec_dtype(expr_dtype(inner_load.source))
 
     args = [addr, dist]
     if off is not None:
@@ -463,9 +481,9 @@ def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     a dense PAT_VL8 NORM_B16 recip pack).
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
+        mask = _default_mask(expr_dtype(src))
     if isinstance(addr, BufferLoad):
-        lanes = _vreg_lanes(addr.buffer.dtype)
+        lanes = _vreg_lanes(expr_dtype(addr.source))
         if extent is None:
             extent = lanes
             if isinstance(dist, str):
@@ -487,11 +505,11 @@ def vst2(addr, src0, src1):
     dtype. The destination must be 32-byte aligned. There is no mask;
     a pre-wrapped access_ptr must cover both vectors.
     """
-    dtype = tvm.DataType(src0.dtype)
-    if str(src0.dtype) != str(src1.dtype) or dtype.bits not in (8, 16, 32) or dtype.lanes != 2048 // dtype.bits:
+    dtype = tvm.DataType(expr_dtype(src0))
+    if str(expr_dtype(src0)) != str(expr_dtype(src1)) or dtype.bits not in (8, 16, 32) or dtype.lanes != 2048 // dtype.bits:
         raise TypeError("vst2 requires two matching full vectors with 8/16/32-bit elements")
     if isinstance(addr, BufferLoad):
-        if str(addr.buffer.dtype) != str(src0.dtype).split("x")[0]:
+        if str(expr_dtype(addr.source)) != str(expr_dtype(src0)).split("x")[0]:
             raise TypeError("vst2 destination element dtype must match the source vectors")
         addr = access_ptr(addr, "w", extent=dtype.lanes * 2)
     return tirx.call_intrin("void", _Op("tl.simd.vst2"), addr, src0, src1)
@@ -509,34 +527,35 @@ def vsstb(src, base, stride, mask=None, update=False):
         dst_ptr = T.simd.vsstb(src, dst_ptr, stride, mask, update=True)
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
-    mutable_pointer = isinstance(base, BufferLoad) and base.buffer.scope() == "local.var" and str(base.dtype) == "handle"
+        mask = _default_mask(expr_dtype(src))
+    mutable_pointer = _ubuf_ptr_dtype(base, required=False) is not None
     if update:
         if not mutable_pointer:
             raise ValueError("vsstb update=True base must be a pointer from make_ubuf_ptr")
-        if _ubuf_ptr_dtype(base) != str(src.dtype).split("x")[0]:
+        if _ubuf_ptr_dtype(base) != str(expr_dtype(src)).split("x")[0]:
             raise ValueError("vsstb source element dtype must match the pointer dtype")
     if isinstance(base, BufferLoad) and not mutable_pointer:
-        base = access_ptr(base, "w", extent=_vreg_lanes(base.buffer.dtype))
+        base = access_ptr(base, "w", extent=_vreg_lanes(expr_dtype(base.source)))
+    elif mutable_pointer:
+        base = native_reinterpret(base, ty=ir.PtrType("void"))
     args = [src, base, stride, mask]
     if update:
         args.append("POST_UPDATE")
-    return tirx.call_intrin(
-        "handle" if update else "void",
-        _Op("tl.simd.vsstb"),
-        *args,
-    )
+    result = ir.Call(_Op("tl.simd.vsstb"), args, ty=ir.PtrType("void") if update else ir.PrimType("void"))
+    return native_reinterpret(result, ty=ir.PrimType("uint64")) if update else result
 
 
-def _ubuf_ptr_dtype(addr):
-    if IRBuilder.is_in_scope():
+def _ubuf_ptr_dtype(addr, *, required=True):
+    if isinstance(addr, BufferLoad) and is_mutable_scalar(addr.source) and IRBuilder.is_in_scope():
         for frame in reversed(IRBuilder.current().frames):
-            annotations = getattr(frame, "annotations", None)
+            annotations = getattr(frame, "attrs", None)
             if annotations is not None:
-                dtype = annotations.get("tl.simd_pointer_dtypes", {}).get(addr.buffer.data)
+                dtype = annotations.get("tl.simd_pointer_dtypes", {}).get(addr.source)
                 if dtype is not None:
                     return str(dtype)
-    raise ValueError("SIMD pointer must be declared with make_ubuf_ptr in the current IRBuilder")
+    if required:
+        raise ValueError("SIMD pointer must be declared with make_ubuf_ptr in the current IRBuilder")
+    return None
 
 
 def make_ubuf_ptr(buf_access, dtype):
@@ -544,25 +563,25 @@ def make_ubuf_ptr(buf_access, dtype):
 
     ``dtype`` declares the pointee element type used by :func:`vld` and checked
     against the source vector by :func:`vsstb`. It is stored in the enclosing
-    block's IR annotations; the mutable carrier remains a ``handle`` buffer.
+    scope's IR annotations; a native ``uint64`` tensor carries the pointer bits.
 
-    The pointer is carried by a ``local.var`` handle buffer. Assigning the
-    advanced handle returned by :func:`vld` or :func:`vsstb` writes it back
-    into the same mutable carrier::
+    Intrinsics receive explicit native pointers. Assigning the advanced address
+    returned by :func:`vld` or :func:`vsstb` writes its bits back into the same
+    mutable carrier::
 
         dst_ptr = T.simd.make_ubuf_ptr(dst_ub[0], "bfloat16")
         dst_ptr = T.simd.vsstb(src, dst_ptr, stride, mask, update=True)
     """
     if isinstance(buf_access, BufferLoad):
         buf_access = access_ptr(buf_access, "rw")
-    elif str(buf_access.dtype) != "handle":
+    elif str(expr_dtype(buf_access)) != "handle":
         raise ValueError("make_ubuf_ptr expects a buffer access or handle expression")
 
     dtype = tvm.DataType(dtype)
     if dtype.lanes != 1 or str(dtype) not in _ELEM_BITS:
         raise ValueError("make_ubuf_ptr requires a scalar numeric element dtype")
-    pointer = _alloc_var("handle", buf_access, scope="local.var")
-    sblock_attr({"tl.simd_pointer_dtypes": {pointer.data: str(dtype)}})
+    pointer = _alloc_var("uint64", native_reinterpret(buf_access, ty=ir.PrimType("uint64")), scope="local.var")
+    scope_attr({"tl.simd_pointer_dtypes": {pointer: str(dtype)}})
     return pointer
 
 
@@ -571,8 +590,8 @@ def make_ubuf_ptr(buf_access, dtype):
 
 def vadd(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vadd"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vadd"), src0, src1, mask, mode)
 
 
 def vaddc(src0, src1, mask=None):
@@ -583,12 +602,12 @@ def vaddc(src0, src1, mask=None):
     supports full-register ``int32x64`` and ``uint32x64`` operands.
     """
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
 
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vaddc"), src0, src1, mask)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vaddc"), src0, src1, mask)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vaddc requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), ("boolx256", src0.dtype))
+    return SimdPair(_bind(pair), ("boolx256", expr_dtype(src0)))
 
 
 def vsubc(src0, src1, mask=None):
@@ -597,63 +616,63 @@ def vsubc(src0, src1, mask=None):
     ``carry`` is 1 where the subtraction completes without borrow.
     """
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
 
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vsubc"), src0, src1, mask)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vsubc"), src0, src1, mask)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vsubc requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), ("boolx256", src0.dtype))
+    return SimdPair(_bind(pair), ("boolx256", expr_dtype(src0)))
 
 
 def vaddcs(src0, src1, carrysrcp, mask=None):
     """Add int32/uint32 with carry-in predicate and return ``(carry, result)``."""
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
 
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vaddcs"), src0, src1, carrysrcp, mask)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vaddcs"), src0, src1, carrysrcp, mask)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vaddcs requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), ("boolx256", src0.dtype))
+    return SimdPair(_bind(pair), ("boolx256", expr_dtype(src0)))
 
 
 def vsubcs(src0, src1, carrysrcp, mask=None):
     """Subtract int32/uint32 with carry-in predicate and return ``(carry, result)``."""
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
 
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vsubcs"), src0, src1, carrysrcp, mask)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vsubcs"), src0, src1, carrysrcp, mask)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vsubcs requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), ("boolx256", src0.dtype))
+    return SimdPair(_bind(pair), ("boolx256", expr_dtype(src0)))
 
 
 def vmull(src0, src1, mask=None):
     """Widening 32x32->64 multiply returning ``(lo, hi)`` (int32/uint32)."""
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
 
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vmull"), src0, src1, mask)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vmull"), src0, src1, mask)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vmull requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), (src0.dtype, src0.dtype))
+    return SimdPair(_bind(pair), (expr_dtype(src0), expr_dtype(src0)))
 
 
 def vsub(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vsub"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vsub"), src0, src1, mask, mode)
 
 
 def vmul(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vmul"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vmul"), src0, src1, mask, mode)
 
 
 def vmula(dst, src0, src1, mask=None, mode="MODE_ZEROING"):
     """Fused multiply-add: dst = dst + src0 * src1."""
     if mask is None:
-        mask = _default_mask(dst.dtype)
+        mask = _default_mask(expr_dtype(dst))
     if not isinstance(dst, BufferLoad):
         raise ValueError(
             "vmula: `dst` must be a buffer access (e.g. c[0]) allocated with "
@@ -667,7 +686,7 @@ def vmula(dst, src0, src1, mask=None, mode="MODE_ZEROING"):
 def vmadd(dst, src0, src1, mask=None, mode="MODE_ZEROING"):
     """Fused multiply-add: dst = dst * src0 + src1."""
     if mask is None:
-        mask = _default_mask(dst.dtype)
+        mask = _default_mask(expr_dtype(dst))
     if not isinstance(dst, BufferLoad):
         raise ValueError(
             "vmadd: `dst` must be a buffer access (e.g. c[0]) allocated with "
@@ -681,7 +700,7 @@ def vmadd(dst, src0, src1, mask=None, mode="MODE_ZEROING"):
 def vaxpy(dst, src, scalar, mask=None, mode="MODE_ZEROING"):
     """Fused scalar multiply-add: dst = src * scalar + dst."""
     if mask is None:
-        mask = _default_mask(dst.dtype)
+        mask = _default_mask(expr_dtype(dst))
     if not isinstance(dst, BufferLoad):
         raise ValueError(
             "vaxpy: `dst` must be a buffer access (e.g. c[0]) allocated with "
@@ -742,12 +761,12 @@ def _histogram(op_name, dst, src, mask, bin):  # noqa: A002
             "T.simd.alloc_local()/alloc_var(), not an immutable register value. "
             f"Got {type(dst).__name__} {dst}."
         )
-    if str(dst.dtype) != "uint16x128":
-        raise TypeError(f"{op_name}: `dst` must be a uint16 vector, got {dst.dtype}")
-    if str(src.dtype) != "uint8x256":
-        raise TypeError(f"{op_name}: `src` must be a uint8 vector, got {src.dtype}")
+    if str(expr_dtype(dst)) != "uint16x128":
+        raise TypeError(f"{op_name}: `dst` must be a uint16 vector, got {expr_dtype(dst)}")
+    if str(expr_dtype(src)) != "uint8x256":
+        raise TypeError(f"{op_name}: `src` must be a uint8 vector, got {expr_dtype(src)}")
     if mask is None:
-        mask = _default_mask(src.dtype)
+        mask = _default_mask(expr_dtype(src))
     dst = access_ptr(dst, "rw")
     return tirx.call_intrin("void", _Op(f"tl.simd.{op_name}"), dst, src, mask, _histogram_bin(bin))
 
@@ -823,53 +842,53 @@ def vdiv(src0, src1, mask=None, mode="MODE_ZEROING", precision=None):
     Requires float32 for precise paths.
     """
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
     annotations = None
     if precision is not None:
-        annotations = _precision_annotation("vdiv", precision, dtype=src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vdiv"), src0, src1, mask, mode, annotations=annotations)
+        annotations = _precision_annotation("vdiv", precision, dtype=expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vdiv"), src0, src1, mask, mode, annotations=annotations)
 
 
 def vmax(src0, src1, mask=None, mode="MODE_ZEROING"):  # noqa: A001
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vmax"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vmax"), src0, src1, mask, mode)
 
 
 def vmin(src0, src1, mask=None, mode="MODE_ZEROING"):  # noqa: A001
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vmin"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vmin"), src0, src1, mask, mode)
 
 
 def vand(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vand"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vand"), src0, src1, mask, mode)
 
 
 def vor(src0, src1, mask=None, mode="MODE_ZEROING"):  # codespell:ignore
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vor"), src0, src1, mask, mode)  # codespell:ignore
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vor"), src0, src1, mask, mode)  # codespell:ignore
 
 
 def vxor(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vxor"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vxor"), src0, src1, mask, mode)
 
 
 def vshl(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vshl"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vshl"), src0, src1, mask, mode)
 
 
 def vshr(src0, src1, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vshr"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vshr"), src0, src1, mask, mode)
 
 
 # -- Unary ------------------------------------------------------------------------
@@ -877,61 +896,61 @@ def vshr(src0, src1, mask=None, mode="MODE_ZEROING"):
 
 def vexp(src, mask=None, mode="MODE_ZEROING", precision=None):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    annotations = None if precision is None else _precision_annotation("vexp", precision, dtype=src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vexp"), src, mask, mode, annotations=annotations)
+        mask = _default_mask(expr_dtype(src))
+    annotations = None if precision is None else _precision_annotation("vexp", precision, dtype=expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vexp"), src, mask, mode, annotations=annotations)
 
 
 def vln(src, mask=None, mode="MODE_ZEROING", precision=None):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    annotations = None if precision is None else _precision_annotation("vln", precision, dtype=src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vln"), src, mask, mode, annotations=annotations)
+        mask = _default_mask(expr_dtype(src))
+    annotations = None if precision is None else _precision_annotation("vln", precision, dtype=expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vln"), src, mask, mode, annotations=annotations)
 
 
 def vsqrt(src, mask=None, mode="MODE_ZEROING", precision=None):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    annotations = None if precision is None else _precision_annotation("vsqrt", precision, dtype=src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vsqrt"), src, mask, mode, annotations=annotations)
+        mask = _default_mask(expr_dtype(src))
+    annotations = None if precision is None else _precision_annotation("vsqrt", precision, dtype=expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vsqrt"), src, mask, mode, annotations=annotations)
 
 
 def vabs(src, mask=None, mode="MODE_ZEROING"):  # noqa: A001
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vabs"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vabs"), src, mask, mode)
 
 
 def vneg(src, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vneg"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vneg"), src, mask, mode)
 
 
 def vrelu(src, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vrelu"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vrelu"), src, mask, mode)
 
 
 def vlrelu(src, alpha, mask=None):
     """Leaky ReLU with scalar slope (f16/f32): dst = src >= 0 ? src : alpha * src."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vlrelu"), src, alpha, mask)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vlrelu"), src, alpha, mask)
 
 
 def vprelu(src0, src1, mask=None):
     """Parametric ReLU with per-lane slope vector (f16/f32)."""
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vprelu"), src0, src1, mask)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vprelu"), src0, src1, mask)
 
 
 def vnot(src, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vnot"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vnot"), src, mask, mode)
 
 
 # -- Broadcast --------------------------------------------------------------------
@@ -954,8 +973,8 @@ def vdupv(src, mask=None, pos="POS_LOWEST", mode="MODE_ZEROING"):
     pos: "POS_LOWEST" (lane 0) or "POS_HIGHEST" (lane N).
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vdupv"), src, mask, pos, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vdupv"), src, mask, pos, mode)
 
 
 # -- Cross-lane reduction ---------------------------------------------------------
@@ -968,62 +987,62 @@ def vcpadd(src, mask=None, mode="MODE_ZEROING"):
     result vector. Supported types: float32, float16.
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcpadd"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcpadd"), src, mask, mode)
 
 
 def vcadd(src, mask=None, mode="MODE_ZEROING"):
     """Pairwise add reduction: dst = vcadd(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    src_elem = str(src.dtype).split("x", 1)[0]
+        mask = _default_mask(expr_dtype(src))
+    src_elem = str(expr_dtype(src)).split("x", 1)[0]
     out_dtype = {
         "int16": _vec_dtype("int32"),
         "uint16": _vec_dtype("uint32"),
-    }.get(src_elem, str(src.dtype))
+    }.get(src_elem, str(expr_dtype(src)))
     return tirx.call_intrin(out_dtype, _Op("tl.simd.vcadd"), src, mask, mode)
 
 
 def vcmax(src, mask=None, mode="MODE_ZEROING"):
     """Pairwise max reduction: dst = vcmax(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcmax"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcmax"), src, mask, mode)
 
 
 def vcmin(src, mask=None, mode="MODE_ZEROING"):
     """Pairwise min reduction: dst = vcmin(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcmin"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcmin"), src, mask, mode)
 
 
 def vcgadd(src, mask=None, mode="MODE_ZEROING"):
     """Grouped add reduction: dst = vcgadd(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcgadd"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcgadd"), src, mask, mode)
 
 
 def vcgmax(src, mask=None, mode="MODE_ZEROING"):
     """Grouped max reduction: dst = vcgmax(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcgmax"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcgmax"), src, mask, mode)
 
 
 def vcgmin(src, mask=None, mode="MODE_ZEROING"):
     """Grouped min reduction: dst = vcgmin(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcgmin"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vcgmin"), src, mask, mode)
 
 
 def vsqz(src, mask=None, mode="MODE_STORED"):
     """Squeeze selected lanes toward the low lanes: dst = vsqz(src, mask)."""
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vsqz"), src, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vsqz"), src, mask, mode)
 
 
 def vusqz(mask, dtype="int32"):
@@ -1050,7 +1069,7 @@ def vcmp(src0, src1, mask=None, op="eq"):
     op: eq/ne/gt/ge/lt/le.
     """
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmp"), src0, src1, mask, op)
 
 
@@ -1060,7 +1079,7 @@ def vcmps(src, scalar, mask=None, op="lt"):
     op: eq/ne/gt/ge/lt/le.
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
+        mask = _default_mask(expr_dtype(src))
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmps"), src, scalar, mask, op)
 
 
@@ -1076,10 +1095,10 @@ def vintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vintlv"), src0, src1)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vintlv requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), (src0.dtype, src0.dtype))
+    return SimdPair(_bind(pair), (expr_dtype(src0), expr_dtype(src0)))
 
 
 def vdintlv(src0, src1):
@@ -1091,10 +1110,10 @@ def vdintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
-    pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vdintlv"), src0, src1)
+    pair = tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vdintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vdintlv requires an active IRBuilder to bind the pair")
-    return SimdPair(_bind(pair), (src0.dtype, src0.dtype))
+    return SimdPair(_bind(pair), (expr_dtype(src0), expr_dtype(src0)))
 
 
 def pair_get(pair, index):
@@ -1102,7 +1121,7 @@ def pair_get(pair, index):
     if isinstance(pair, SimdPair):
         return pair[index]
     index = _pair_index(index)
-    return tirx.call_intrin(str(pair.dtype), _Op("tl.simd.pair_get"), pair, index)
+    return tirx.call_intrin(str(expr_dtype(pair)), _Op("tl.simd.pair_get"), pair, index)
 
 
 def vpack(src, part=0):
@@ -1114,8 +1133,8 @@ def vpack(src, part=0):
         part = int(part.value)
     if isinstance(part, int):
         part = ("LOWER", "HIGHER")[part]
-    src_elem = str(src.dtype).split("x", 1)[0]
-    src_lanes = src.dtype.lanes
+    src_elem = str(expr_dtype(src)).split("x", 1)[0]
+    src_lanes = expr_dtype(src).lanes
     pack_map = {
         "float32": "float16",
         "int32": "int16",
@@ -1134,7 +1153,7 @@ def vunpack(src, part=0):
         part = int(part.value)
     if isinstance(part, int):
         part = ("LOWER", "HIGHER")[part]
-    src_elem = str(src.dtype).split("x", 1)[0]
+    src_elem = str(expr_dtype(src)).split("x", 1)[0]
     widen_map = {"uint8": "uint16", "int8": "int16", "uint16": "uint32", "int16": "int32"}
     if src_elem not in widen_map:
         raise ValueError(f"vunpack does not support {src_elem}")
@@ -1144,12 +1163,12 @@ def vunpack(src, part=0):
 def vgatherb(base, index, mask=None):
     """Gather 32B blocks from base using vector_u32 block offsets. Returns a vector."""
     if isinstance(base, BufferLoad):
-        elem_dtype = base.buffer.dtype
+        elem_dtype = expr_dtype(base.source)
         base = access_ptr(base, "r", extent=_vreg_lanes(elem_dtype))
         vec_dtype = _vec_dtype(elem_dtype)
     else:
         inner_load = base.args[0]
-        vec_dtype = _vec_dtype(inner_load.buffer.dtype)
+        vec_dtype = _vec_dtype(expr_dtype(inner_load.source))
     args = [base, index]
     if mask is not None:
         args.append(mask)
@@ -1159,11 +1178,11 @@ def vgatherb(base, index, mask=None):
 def vgather2(base, index, mask=None):
     """Gather elements from base using per-lane offsets."""
     if isinstance(base, BufferLoad):
-        elem_dtype = str(base.buffer.dtype)
+        elem_dtype = str(expr_dtype(base.source))
         base = access_ptr(base, "r", extent=_vreg_lanes(elem_dtype))
     else:
         inner_load = base.args[0]
-        elem_dtype = str(inner_load.buffer.dtype)
+        elem_dtype = str(expr_dtype(inner_load.source))
     if mask is None:
         # gather reads source elements, so the predicate aligns to the source (low-lane)
         # width -- e.g. an int8 gather widens the output to int16 but masks with asc_create_mask_b8.
@@ -1188,9 +1207,9 @@ def vscatter(src, base, index, mask=None):
     per-lane element offsets (uint32 for 32-bit elements, uint16 for 8/16-bit).
     """
     if mask is None:
-        mask = _default_mask(src.dtype)
+        mask = _default_mask(expr_dtype(src))
     if isinstance(base, BufferLoad):
-        base = access_ptr(base, "w", extent=_vreg_lanes(base.buffer.dtype))
+        base = access_ptr(base, "w", extent=_vreg_lanes(expr_dtype(base.source)))
     return tirx.call_intrin("void", _Op("tl.simd.vscatter"), src, base, index, mask)
 
 
@@ -1204,12 +1223,12 @@ def vexpdif(src0, src1, mask=None):
     inputs to float32 requires separate even/odd results and is not represented
     by this API.
     """
-    src0_dtype = str(src0.dtype)
-    src1_dtype = str(src1.dtype)
+    src0_dtype = str(expr_dtype(src0))
+    src1_dtype = str(expr_dtype(src1))
     if src0_dtype != src1_dtype or src0_dtype.split("x", 1)[0] != "float32":
         raise TypeError("T.simd.vexpdif requires matching float32 vectors")
     if mask is None:
-        mask = _default_mask(src0.dtype)
+        mask = _default_mask(expr_dtype(src0))
     return tirx.call_intrin(src0_dtype, _Op("tl.simd.vexpdif"), src0, src1, mask)
 
 
@@ -1220,8 +1239,8 @@ def vabsdif(src0, src1, mask=None, mode="MODE_ZEROING"):
     Supported types: float32, float16.
     """
     if mask is None:
-        mask = _default_mask(src0.dtype)
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vabsdif"), src0, src1, mask, mode)
+        mask = _default_mask(expr_dtype(src0))
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vabsdif"), src0, src1, mask, mode)
 
 
 def vcvt(
@@ -1289,10 +1308,10 @@ def vcvt(
         # vcvt masks by the narrower (low-lane) element: source when widening, target
         # when narrowing. So the predicate width is min(src, target), e.g. u8<->u16 both
         # use asc_create_mask_b8 and u16<->u32 both use asc_create_mask_b16.
-        mask = _default_mask_bits(min(_mask_bits(src.dtype), _mask_bits(target_dtype)))
+        mask = _default_mask_bits(min(_mask_bits(expr_dtype(src)), _mask_bits(target_dtype)))
 
     target_dtype = str(target_dtype)
-    src_dtype = str(src.dtype).split("x", 1)[0]
+    src_dtype = str(expr_dtype(src)).split("x", 1)[0]
     fp16_dtypes = ("float16", "bfloat16")
     fp8_dtypes = ("float8_e4m3", "float8_e4m3fn", "float8_e5m2")
     fp4_dtypes = ("float4_e2m1fn",)
@@ -1446,13 +1465,13 @@ def vcvt(
 
 def vsel(src0, src1, mask):
     """Bitwise select: mask ? src0 : src1."""
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vsel"), src0, src1, mask)
+    return tirx.call_intrin(str(expr_dtype(src0)), _Op("tl.simd.vsel"), src0, src1, mask)
 
 
 def vselr(src, index):
     """Select lanes from src using per-lane indices."""
-    src_dtype = str(src.dtype)
-    index_dtype = str(index.dtype)
+    src_dtype = str(expr_dtype(src))
+    index_dtype = str(expr_dtype(index))
     # The index must be an unsigned integer vector.
     if index_dtype.startswith("int"):
         index = tirx.reinterpret("u" + index_dtype, index)
@@ -1467,38 +1486,38 @@ def vselr(src, index):
 
 def vmaxs(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vmaxs"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vmaxs"), src, scalar, mask, mode)
 
 
 def vmins(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vmins"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vmins"), src, scalar, mask, mode)
 
 
 def vmuls(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vmuls"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vmuls"), src, scalar, mask, mode)
 
 
 def vadds(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vadds"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vadds"), src, scalar, mask, mode)
 
 
 def vshls(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vshls"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vshls"), src, scalar, mask, mode)
 
 
 def vshrs(src, scalar, mask=None, mode="MODE_ZEROING"):
     if mask is None:
-        mask = _default_mask(src.dtype)
-    return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vshrs"), src, scalar, mask, mode)
+        mask = _default_mask(expr_dtype(src))
+    return tirx.call_intrin(str(expr_dtype(src)), _Op("tl.simd.vshrs"), src, scalar, mask, mode)
 
 
 def mem_bar(mem_type):

@@ -4,8 +4,9 @@ import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.backend.target import determine_target
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat import tirx
+from tilelang._compat.stmt_functor import post_order_visit
+from tvm_tirx import ir
 
 
 def _make_program(latency=None, ii=None):
@@ -29,14 +30,21 @@ def _materialize_schedule_units(mod):
     return ascend_transform.MaterializeScheduleUnits()(mod)
 
 
-def _collect_task_metadata(mod):
+def _collect_task_metadata(mod, *, include_allocations=True):
     metadata = {"latency": [], "ii": [], "core_mask": []}
 
     def visit(node):
-        if isinstance(node, tirx.AttrStmt) and node.attr_key == "tl.ascend_task":
+        if isinstance(node, ir.RegionStmt) and "tl.ascend_task" in node.attrs.dict:
+            if not include_allocations:
+                body = node.body
+                while isinstance(body, ir.SeqStmt) and len(body.seq) == 1:
+                    body = body.seq[0]
+                if isinstance(body, ir.Bind) and isinstance(body.value, ir.Call) and body.value.op.name == "tirx.alloc_tensor":
+                    return
+            attributes = node.attrs.dict["tl.ascend_task"]
             for key in metadata:
-                if key in node.node:
-                    metadata[key].append(int(node.node[key]))
+                if key in attributes:
+                    metadata[key].append(int(attributes[key]))
 
     post_order_visit(mod["main"].body, visit)
     return metadata
@@ -46,7 +54,7 @@ def _collect_schedule_units(mod):
     units = []
 
     def visit(node):
-        if isinstance(node, tirx.AttrStmt) and node.attr_key == "tl.schedule_unit":
+        if isinstance(node, ir.RegionStmt) and "tl.schedule_unit" in node.attrs.dict:
             units.append(node)
 
     post_order_visit(mod["main"].body, visit)

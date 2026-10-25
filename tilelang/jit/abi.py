@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tvm.tirx import PrimFunc
+    from tilelang._compat.tirx import PrimFunc
 
 # Declarative attribute: which parameters are outputs (mirrors out_idx).
 OUT_IDX_ATTR = "tilelang_out_idx"

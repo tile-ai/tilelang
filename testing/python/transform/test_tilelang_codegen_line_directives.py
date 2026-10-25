@@ -113,7 +113,7 @@ def test_line_directives_cuda_source():
 @tilelang.testing.requires_rocm
 def test_line_directives_hip_source():
     """HIP source (compile-only path, no GPU/hipcc) also maps statements."""
-    target = {"kind": "hip"}
+    target = {"kind": "rocm"}
     config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: True}
     with tvm.transform.PassContext(opt_level=3, config=config), tvm.target.Target(target):
         artifact = tilelang.lower(vec_add_hip, target=target)
@@ -161,10 +161,10 @@ def test_host_and_metal_line_directives(codegen, target, emit):
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
     source_name = tvm.ir.SourceName(__file__)
-    entry_span = tvm.ir.Span(source_name, 10, 10, 0, 1)
-    stmt_span = tvm.ir.Span(source_name, 20, 20, 0, 1)
-    body = tvm.tirx.SeqStmt([tvm.tirx.Evaluate(tvm.tirx.call_extern("int32", "consume", value), span=stmt_span) for value in (1, 2)])
-    func = tvm.tirx.PrimFunc([], body, span=entry_span).with_attr("global_symbol", "line_kernel")
+    entry_span = tvm.ir.SourceLoc(source_name, 10, 1, 10, 2)
+    stmt_span = tvm.ir.SourceLoc(source_name, 20, 1, 20, 2)
+    body = tvm.tirx.SeqStmt([tvm.tirx.Evaluate(tvm.tirx.call_extern("int32", "consume", value), loc=stmt_span) for value in (1, 2)])
+    func = tvm.tirx.PrimFunc([], body, loc=entry_span).with_attr("global_symbol", "line_kernel")
     if target == "metal":
         func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
         func = func.with_attr("tirx.kernel_launch_params", [])

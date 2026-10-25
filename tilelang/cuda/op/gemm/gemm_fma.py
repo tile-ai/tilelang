@@ -12,9 +12,9 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.utils.language import is_fragment, is_full_region
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 
 
 GEMM_INST_FMA = "cuda.fma"
@@ -79,9 +79,9 @@ class GemmFMA(GemmBase):
         B_region = self.BRegion
         C_region = self.CRegion
 
-        A_buf = A_region.buffer
-        B_buf = B_region.buffer
-        C_buf = C_region.buffer
+        A_buf = A_region.source
+        B_buf = B_region.source
+        C_buf = C_region.source
 
         assert len(A_region.region) >= 2, "FMA GEMM requires at least 2D A"
         assert len(B_region.region) >= 2, "FMA GEMM requires at least 2D B"
@@ -99,15 +99,15 @@ class GemmFMA(GemmBase):
         a_cols = A_region.region[-1].extent
         b_rows = B_region.region[-2].extent
         b_cols = B_region.region[-1].extent
-        A_other = [r.min for r in A_region.region[:-2]]
-        B_other = [r.min for r in B_region.region[:-2]]
-        C_other = [r.min for r in C_region.region[:-2]]
-        a0 = A_region.region[-2].min
-        a1 = A_region.region[-1].min
-        b0 = B_region.region[-2].min
-        b1 = B_region.region[-1].min
-        c0 = C_region.region[-2].min
-        c1 = C_region.region[-1].min
+        A_other = [r.begin for r in A_region.region[:-2]]
+        B_other = [r.begin for r in B_region.region[:-2]]
+        C_other = [r.begin for r in C_region.region[:-2]]
+        a0 = A_region.region[-2].begin
+        a1 = A_region.region[-1].begin
+        b0 = B_region.region[-2].begin
+        b1 = B_region.region[-1].begin
+        c0 = C_region.region[-2].begin
+        c1 = C_region.region[-1].begin
 
         trans_A = self.trans_A
         trans_B = self.trans_B

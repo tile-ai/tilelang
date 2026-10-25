@@ -9,7 +9,7 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform as ascend_transform
-from tvm import tirx
+from tilelang._compat import tirx
 from testing.ascend._ir import calls, schedule, statements
 
 
@@ -306,7 +306,7 @@ def _event_ranges(mod, operation, hard_event):
         analyzer = tvm.arith.Analyzer()
         for ancestor in ancestors:
             if isinstance(ancestor, tirx.For):
-                analyzer.bind(ancestor.loop_var, tvm.ir.Range.from_min_extent(ancestor.min, ancestor.extent))
+                analyzer.bind(ancestor.var, tvm.ir.Range(ancestor.begin, ancestor.end))
         bound = analyzer.const_int_bound(call.args[1])
         ranges.append((bound.min_value, bound.max_value))
     return sorted(ranges)

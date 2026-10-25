@@ -1,160 +1,142 @@
-/*!
- * \file tl/backend/common/op/atomic_reduce.h
- * \brief Shared tl.atomicmax/tl.atomicmin lowering for GPU backends.
- */
-
 #ifndef TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 
 #include "op/atomic_reduce.h"
-#include "support/check.h"
-#include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/ir/cast.h>
-
-#include "layout/layout.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
-#include <cstddef>
-#include <optional>
-#include <string>
-#include <vector>
-
-namespace tvm {
-namespace tl {
-namespace backend {
-
-using namespace tirx;
-using namespace ffi;
+namespace tvm::tl::backend {
 
 namespace atomic_reduce {
 
-inline Array<IterVar> MakeIterVars(const AtomicOpBaseNode &op) {
-  Array<IterVar> loop_vars;
-  size_t idx = 0;
-  for (size_t i = 0; i < op.dst_range.size(); i++) {
-    if (is_one(op.dst_range[i]->extent)) {
-      continue;
-    }
-    Var var = Var(std::string{char('i' + idx)}, op.dst_range[i]->extent->dtype);
-    idx++;
-    loop_vars.push_back(
-        {Range(0, op.dst_range[i]->extent), var, IterVarType::kDataPar});
+struct AtomicIteration {
+  Array<LayoutAxis> loops;
+  Array<PrimExpr> destination_indices;
+  PrimExpr value;
+  PrimExpr predicate;
+};
+
+inline Array<PrimExpr> RemapIndices(const TensorVar &tensor,
+                                    Array<PrimExpr> indices,
+                                    const LowerArgs *lower_args) {
+  if (lower_args && lower_args->buffer_remap.count(tensor) &&
+      lower_args->layout_map.count(tensor)) {
+    return lower_args->layout_map[tensor]->Forward(indices);
   }
-
-  if (loop_vars.empty()) {
-    Var var = Var("i");
-    loop_vars.push_back({Range(0, 1), var, IterVarType::kDataPar});
-  }
-
-  return loop_vars;
-}
-
-inline Array<PrimExpr> MakeIndices(const AtomicOpBaseNode &op,
-                                   const Array<IterVar> &ivs, int src_dst) {
-  Array<PrimExpr> indices;
-  Array<Range> ranges = src_dst == 0 ? op.src_range : op.dst_range;
-  size_t idx = 0;
-  for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent)) {
-      indices.push_back(ranges[i]->min);
-    } else {
-      indices.push_back(ranges[i]->min + ivs[idx]->var);
-      idx++;
-    }
-  }
-
-  ICHECK(idx == ivs.size() || (idx == 0 && ivs.size() == 1))
-      << "Unmatched indices: idx = " << idx << ", ivs.size() = " << ivs.size()
-      << ", dst name = " << op.dst->name;
   return indices;
 }
 
-inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
-  Array<IterVar> loop_vars = MakeIterVars(op);
-  ICHECK(!loop_vars.empty()) << "MakeIterVars in AtomicOp should not return "
-                                "empty vars (at least 1 var)";
+inline TensorVar RemapTensor(const TensorVar &tensor,
+                             const LowerArgs *lower_args) {
+  return lower_args ? lower_args->buffer_remap.Get(tensor).value_or(tensor)
+                    : tensor;
+}
 
-  for (const auto &iv : loop_vars) {
-    analyzer->Bind(iv->var, iv->dom);
+inline AtomicIteration MakeIteration(const AtomicOpBaseNode &op,
+                                     sym::Analyzer analyzer,
+                                     const LowerArgs *lower_args = nullptr) {
+  Array<LayoutAxis> loops;
+  for (const Range &range : op.dst_range) {
+    if (!IsOne(range->extent)) {
+      PrimVar variable("atomic_axis_" + std::to_string(loops.size()),
+                       range->extent.ty());
+      loops.push_back(LayoutAxis(
+          Range::FromMinExtent(MakeConst(variable.ty(), 0), range->extent),
+          variable));
+      analyzer->Bind(variable, loops.back()->dom);
+    }
   }
-
-  ICHECK(loop_vars.size() <= op.dst_range.size())
-      << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << op.dst_range.size()
-      << ", dst = " << op.dst->name;
-
-  Array<PrimExpr> dst_indices = MakeIndices(op, loop_vars, 1);
-  Array<PrimExpr> new_args;
-
-  PrimExpr src_value_arg;
-
-  if (!op.src_value.defined()) {
-    ICHECK(loop_vars.size() <= op.src_range.size())
-        << "loop_vars.size() = " << loop_vars.size()
-        << ", src_range.size() = " << op.src_range.size()
-        << ", src = " << op.src->name << ", dst = " << op.dst->name;
-
-    Array<PrimExpr> src_indices = MakeIndices(op, loop_vars, 0);
-    src_value_arg = BufferLoad(op.src, src_indices);
-  } else {
-    src_value_arg = op.src_value;
-  }
-
-  if (src_value_arg->dtype != op.dst->dtype) {
-    src_value_arg = Cast(op.dst->dtype, src_value_arg);
-  }
-
-  DataType idx_dtype =
-      dst_indices.empty() ? DataType::Int(32) : dst_indices[0].dtype();
-  PrimExpr dst_ptr =
-      Call(DataType::Handle(), tl::access_ptr(),
-           {BufferLoad(op.dst, dst_indices), make_const(idx_dtype, 1),
-            make_const(DataType::Int(32), 3)});
-
-  new_args.push_back(dst_ptr);
-  new_args.push_back(src_value_arg);
-  new_args.push_back(op.GetMemoryOrder());
-
-  Call atomic_call =
-      tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, op.annotations);
-
-  Stmt body = tvm::tirx::Evaluate(atomic_call);
-
-  for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> loop_annotations;
-    if (i == 0) {
-      if (op.annotations.count(attr::kCoalescedWidth)) {
-        loop_annotations.Set(attr::kCoalescedWidth,
-                             op.annotations.Get(attr::kCoalescedWidth).value());
+  auto make_indices = [&](const Array<Range> &ranges) {
+    Array<PrimExpr> indices;
+    size_t axis = 0;
+    for (const Range &range : ranges) {
+      if (IsOne(range->extent)) {
+        indices.push_back(range->begin);
+      } else {
+        TVM_FFI_CHECK_LT(axis, loops.size(), ValueError)
+            << "Atomic region extent mismatch";
+        indices.push_back(range->begin + loops[axis++]->var);
       }
     }
-
-    body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, loop_annotations);
+    return indices;
+  };
+  PrimExpr predicate = MakeConst(PrimType::Bool(), true);
+  auto add_bounds = [&](const TensorVar &tensor,
+                        const Array<PrimExpr> &indices) {
+    for (size_t axis = 0; axis < indices.size(); ++axis) {
+      PrimExpr condition =
+          indices[axis] >= 0 && indices[axis] < tensor.shape()[axis];
+      if (!analyzer->CanProve(condition)) {
+        predicate = predicate && condition;
+      }
+    }
+  };
+  auto destination_indices = make_indices(op.dst_range);
+  add_bounds(op.dst, destination_indices);
+  destination_indices = RemapIndices(op.dst, destination_indices, lower_args);
+  PrimExpr value = op.src_value.value_or(MakeConst(op.dst.dtype(), 0));
+  if (op.src.has_value()) {
+    TensorVar source = op.src.value();
+    auto source_indices = make_indices(op.src_range);
+    add_bounds(source, source_indices);
+    value = TensorLoad(RemapTensor(source, lower_args),
+                       RemapIndices(source, source_indices, lower_args));
   }
-  return Downcast<For>(body);
+  value = Cast(op.dst.dtype(), value);
+  return {loops, destination_indices, value, analyzer->Simplify(predicate)};
+}
+
+inline For MakeSIMTLoop(const AtomicOpBaseNode &op, sym::Analyzer analyzer) {
+  auto iteration = MakeIteration(op, analyzer);
+  if (iteration.loops.empty()) {
+    iteration.loops.push_back(
+        LayoutAxis(Range(0, 1), PrimVar("atomic_scalar")));
+  }
+  Expr pointer = MakeAccessPtrFromBufferLoad(
+      TensorLoad(op.dst, iteration.destination_indices), kAccessReadWrite);
+  Call update(TupleType(Array<Type>{}), op.GetElemOp(),
+              {pointer, iteration.value, PrimExpr(op.GetMemoryOrder())},
+              DictAttrs(op.annotations));
+  Stmt body = Evaluate(update);
+  if (!IsOne(iteration.predicate)) {
+    body = If(iteration.predicate, SeqStmt(body));
+  }
+  for (size_t axis = iteration.loops.size(); axis-- > 0;) {
+    const auto &loop = iteration.loops[axis];
+    BlockAnnotations annotations;
+    if (axis == 0) {
+      if (auto width = op.annotations.Get(attr::kCoalescedWidth)) {
+        annotations.Set(attr::kCoalescedWidth, width.value());
+      }
+    }
+    body = For(loop->var, MakeConst(loop->var.ty(), 0), loop->dom->extent,
+               MakeConst(loop->var.ty(), 1), ForKind::kParallel, SeqStmt(body),
+               annotations);
+  }
+  return body.as_or_throw<For>();
+}
+
+inline bool IsEmpty(const AtomicOpBaseNode &op, sym::Analyzer analyzer) {
+  for (const Range &range : op.dst_range) {
+    if (analyzer->CanProve(range->extent == 0)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
                                  const LayoutInferArgs &layout_args,
-                                 InferLevel) {
-  if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-    if (layout_args.layout_map.count(op.src) &&
-        layout_args.layout_map.count(op.dst)) {
-      Layout src_layout = layout_args.layout_map.at(op.src);
-      Layout dst_layout = layout_args.layout_map.at(op.dst);
-      ICHECK(StructuralEqual()(src_layout, dst_layout))
-          << "Atomic reduce requires src and dst to have the same layout, but "
-             "got "
-          << "src layout: " << src_layout << ", dst layout: " << dst_layout
-          << " for src buffer: " << op.src->name
-          << ", dst buffer: " << op.dst->name;
-    }
+                                 InferLevel level) {
+  if (IsEmpty(op, layout_args.analyzer)) {
+    return {};
   }
-  return {};
+  if (!op.par_op_.defined()) {
+    auto loop = MakeSIMTLoop(op, layout_args.analyzer);
+    op.par_op_ = ParallelOp(ParallelLoopFuser::Fuse(loop).as_or_throw<For>());
+  }
+  return op.par_op_->InferLayout(layout_args, level);
 }
 
 } // namespace atomic_reduce
@@ -167,31 +149,30 @@ struct AtomicReduce {
   }
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
-    auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-    auto par_op = ParallelOp(fused_loop);
-    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                      InferLevel::kFree};
-    for (auto level : levels) {
-      par_op->InferLayout({lower_args.target,
-                           lower_args.thread_bounds,
-                           lower_args.layout_map,
-                           analyzer,
-                           lower_args.buffer_remap,
-                           {}},
-                          level);
+                    sym::Analyzer analyzer) {
+    if (atomic_reduce::IsEmpty(op, analyzer)) {
+      return SeqStmt(Array<Stmt>{});
     }
-    auto loop_layout = par_op->GetLoopLayout();
+    for (auto level :
+         {InferLevel::kCommon, InferLevel::kStrict, InferLevel::kFree}) {
+      InferLayout(op,
+                  {lower_args.target,
+                   lower_args.thread_bounds,
+                   lower_args.layout_map,
+                   analyzer,
+                   lower_args.buffer_remap,
+                   {}},
+                  level);
+    }
+    auto loop_layout = op.par_op_->GetLoopLayout();
     return LowerParallelLoop(
-        fused_loop, loop_layout, lower_args.thread_index, analyzer,
-        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+        op.par_op_->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+        lower_args.layout_map,
+        op.par_op_->GetPredicate(lower_args.thread_index), true,
+        op.par_op_->LoopLayoutRequiresPaddingGuard());
   }
 };
 
-} // namespace backend
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl::backend
 
-#endif // TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
+#endif

@@ -319,12 +319,12 @@ def test_cutedsl_pdl_codegen_and_launcher_support():
 
     sync_artifact, sync_wrapper = _lower_cutedsl_for_pdl(kernels_with_pdl_sync(64, block_size=64))
     assert "tl.griddepcontrol_wait()" in sync_artifact.kernel_source
-    assert "use_pdl=True" in sync_wrapper.host_func
-    assert "--gpu-arch=sm_90" in sync_wrapper.host_func
+    from tilelang.jit.adapter.cutedsl.runtime import _compilation_source
 
-    launcher_cpp = sync_wrapper.get_launcher_cpp_code()
-    assert "CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION" in launcher_cpp
-    assert "cuLaunchKernelEx" in launcher_cpp
+    assert sync_wrapper.architecture == "sm_90"
+    assert any(plan["fields"].get("programmatic_stream_serialization") == 1 for plan in sync_wrapper.kernel_plans)
+    assert "use_pdl=1" in _compilation_source(sync_wrapper.lib_code, sync_wrapper.kernel_plans)
+    assert "CuTeHostProgram" in sync_wrapper.host_func
 
     import tilelang.contrib.cutedsl as tl
 
@@ -342,9 +342,10 @@ def test_cutedsl_pdl_runtime_pipeline():
 
     with torch.cuda.device(device):
         _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64))
+        major, minor = torch.cuda.get_device_capability(device)
         kernel = tilelang.compile(
             kernels_with_pdl_pipeline(N, block_size=64),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target={"kind": "cutedsl", "arch": f"sm_{major}{minor}"},
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         b = torch.empty_like(a)

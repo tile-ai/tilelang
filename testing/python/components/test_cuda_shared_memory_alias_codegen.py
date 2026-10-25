@@ -2,12 +2,51 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tvm_tirx import ir, sym
+
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 def _get_dynamic_shared_memory_bytes(artifact):
-    device_funcs = list(artifact.device_mod.functions.values())
-    assert len(device_funcs) == 1
-    return int(device_funcs[0].attrs["dyn_shared_memory_buf"])
+    requirements = []
+
+    def collect(node):
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == "tirx.call_ffi_kernel":
+            fields = list(node.attrs.launch_fields)
+            if "dynamic_smem_bytes" in fields:
+                index = 1 + int(node.attrs.num_kernel_args) + fields.index("dynamic_smem_bytes")
+                requirements.append(node.args[index])
+            elif "tirx.use_dyn_shared_memory" in node.attrs.launch_params:
+                parameters = list(node.attrs.launch_params)
+                index = len(node.args) - len(parameters) + parameters.index("tirx.use_dyn_shared_memory")
+                requirements.append(node.args[index])
+
+    post_order_visit(artifact.host_mod, collect)
+    assert len(requirements) == 1
+    return int(sym.Analyzer().simplify(requirements[0]))
+
+
+def _get_shared_alias_offsets(artifact):
+    offsets = {}
+
+    def collect(node):
+        if not isinstance(node, ir.Bind) or not isinstance(node.value, ir.Call):
+            return
+        if node.value.op.name != "tirx.decl_tensor":
+            return
+        values = []
+        post_order_visit(
+            node.value,
+            lambda value: values.append(value.args[1])
+            if isinstance(value, ir.Call) and isinstance(value.op, ir.Op) and value.op.name == "tirx.ptr_byte_offset"
+            else None,
+        )
+        if values:
+            assert len(values) == 1
+            offsets[node.var.name] = int(sym.Analyzer().simplify(values[0]))
+
+    post_order_visit(artifact.device_mod, collect)
+    return offsets
 
 
 @tilelang.testing.requires_cuda
@@ -29,9 +68,8 @@ def test_dynamic_shared_memory_merge_emits_named_aliases():
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
-    assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
-    assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
+    assert "extern __shared__" in source
+    assert _get_shared_alias_offsets(artifact) == {"A_shared": 0, "B_shared": 64}
     assert "A_shared" in source
     assert "B_shared" in source
     assert "((half_t*)buf_dyn_shmem)" not in source
@@ -50,8 +88,8 @@ def test_static_and_local_fp4_allocations_use_packed_extents():
 
     source = tilelang.lower(kernel, target="cuda").kernel_source
 
-    assert "fp4_e2_t A_shared[64];" in source
-    assert "fp4_e2_2_t A_local_packed[64];" in source
+    assert "__nv_fp4_e2m1 A_shared_ptr[64];" in source
+    assert "__nv_fp4_e2m1 A_local_ptr[64];" in source
 
 
 @tilelang.testing.requires_cuda
@@ -64,7 +102,8 @@ def test_single_dynamic_fp4_allocation_uses_packed_size():
 
     artifact = tilelang.lower(kernel, target="cuda")
 
-    assert "extern __shared__ __align__(1024) fp4_e2_t A_shared[];" in artifact.kernel_source
+    assert "extern __shared__" in artifact.kernel_source
+    assert "__nv_fp4_e2m1 A_shared_ptr[];" in artifact.kernel_source
     assert _get_dynamic_shared_memory_bytes(artifact) == 64
 
 
@@ -83,16 +122,16 @@ def test_merged_dynamic_fp4_allocations_use_packed_sizes_and_offsets():
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
-    assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
-    assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
+    assert "extern __shared__" in source
+    assert "A_shared" in source and "B_shared" in source
+    assert _get_shared_alias_offsets(artifact) == {"A_shared": 0, "B_shared": 64}
     assert _get_dynamic_shared_memory_bytes(artifact) == 128
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "dtype,storage_type",
-    [(T.int4, "signed char"), (T.dtype("uint4"), "uchar")],
+    [(T.int4, "int8_t"), (T.dtype("uint4"), "uint8_t")],
 )
 def test_static_packed_int4_allocation_uses_packed_extent(dtype, storage_type):
     @T.prim_func
@@ -103,7 +142,7 @@ def test_static_packed_int4_allocation_uses_packed_extent(dtype, storage_type):
 
     source = tilelang.lower(kernel, target="cuda").kernel_source
 
-    assert f"{storage_type} A_shared[64];" in source
+    assert f"{storage_type} A_shared_ptr[64];" in source
 
 
 @tilelang.testing.requires_cuda
@@ -136,8 +175,8 @@ def test_merged_dynamic_packed_int4_allocations_use_packed_sizes_and_offsets(dty
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
-    assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
+    assert "A_shared" in source and "B_shared" in source
+    assert _get_shared_alias_offsets(artifact) == {"A_shared": 0, "B_shared": 64}
     assert _get_dynamic_shared_memory_bytes(artifact) == 128
 
 

@@ -1,291 +1,282 @@
-/*!
- * \file tl/transform/lower_hopper_intrin.cc
- * \brief Lower Hopper intrinsics cuda GPU(sm90+)
- */
+#include "compat/visit.h"
+#include "cuda/op/builtin.h"
+#include "cuda/runtime.h"
+#include "op/utils.h"
 
-#include "support/check.h"
+#include <tvm/backend/cuda/op/tensormap.h>
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <unordered_map>
-#include <vector>
+#include <unordered_set>
 
-#include "cuda/op/builtin.h"
-#include "cuda/runtime.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
 using namespace ffi;
+using namespace tirx;
 
-#if (CUDA_MAJOR_VERSION >= 12)
-class LowerHopperIntrin : public StmtExprMutator {
+bool IsDescriptor(const CallNode *call) {
+  return call->op.same_as(create_tma_descriptor()) ||
+         call->op.same_as(create_tma_im2col_descriptor());
+}
+
+int64_t ConstantArgument(const Expr &value, const char *name) {
+  auto result = GetConstInt(value);
+  TVM_FFI_CHECK(result.has_value(), ValueError)
+      << "TMA " << name << " must be a constant integer";
+  return *result;
+}
+
+Call EncodeTiled(const Call &call, const Var &descriptor) {
+  TVM_FFI_CHECK_GE(call->args.size(), 3U, ValueError)
+      << "Malformed TMA descriptor";
+  int64_t rank = ConstantArgument(call->args[1], "rank");
+  TVM_FFI_CHECK(rank >= 1 && rank <= 5 &&
+                    call->args.size() == static_cast<size_t>(4 * rank + 7),
+                ValueError)
+      << "TMA descriptor requires rank 1..5 and 4 * rank + 7 operands";
+  const auto *pointer = call->args[2]->ty.as<PtrTypeNode>();
+  TVM_FFI_CHECK(pointer && pointer->element_type.as<PrimTypeNode>(), TypeError)
+      << "TMA descriptor requires a typed data pointer";
+  auto attributes = make_object<tvm::backend::cuda::TensorMapEncodeTiledAttr>();
+  PrimType descriptor_type = pointer->element_type.as_or_throw<PrimType>();
+  if (IsTensorFloat32(descriptor_type))
+    descriptor_type = PrimType::Float(32);
+  attributes->descriptor_dtype = descriptor_type->dtype;
+  attributes->rank = rank;
+  int64_t descriptor_encoding = ConstantArgument(call->args[0], "dtype");
+  attributes->force_cu_dtype =
+      !descriptor_type.MatchesCode(kDLFloat4_e2m1fn) &&
+              descriptor_encoding == to_CUtensorMapDataType(descriptor_type)
+          ? -1
+          : descriptor_encoding;
+  attributes->interleave =
+      ConstantArgument(call->args[3 + 4 * rank], "interleave");
+  attributes->swizzle = ConstantArgument(call->args[4 + 4 * rank], "swizzle");
+  attributes->l2_promotion =
+      ConstantArgument(call->args[5 + 4 * rank], "l2 promotion");
+  attributes->oob_fill =
+      ConstantArgument(call->args[6 + 4 * rank], "out-of-bounds fill");
+  Array<Expr> arguments{descriptor, call->args[2]};
+  for (int64_t axis = 0; axis < rank; ++axis) {
+    arguments.push_back(call->args[3 + axis]);
+  }
+  for (int64_t axis = 1; axis < rank; ++axis) {
+    arguments.push_back(call->args[3 + rank + axis]);
+  }
+  for (int64_t axis = 0; axis < 2 * rank; ++axis) {
+    arguments.push_back(call->args[3 + 2 * rank + axis]);
+  }
+  return Call(PrimType::Int(32),
+              tvm::backend::cuda::tensormap_encode_tiled_op(), arguments,
+              Attrs(attributes), {}, call->loc);
+}
+
+class DeviceDescriptorLowerer : public tirx::StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerHopperIntrin substituter(disable_shuffle_elect);
-    fptr->body = substituter.VisitStmt(f->body);
-    // Collect prologue/epilogue statements for host-side setup/teardown
-    Array<Stmt> prologue_stmts;
-    Array<Stmt> epilogue_stmts;
-    for (const auto &desc_init : substituter.desc_inits_) {
-      if (!desc_init.emitted) {
-        prologue_stmts.push_back(desc_init.stmt);
+  DeviceDescriptorLowerer(const Array<Var> &host_variables,
+                          bool disable_shuffle_elect)
+      : disable_shuffle_elect_(disable_shuffle_elect) {
+    for (const Var &variable : host_variables)
+      host_variables_.insert(variable.get());
+  }
+
+  RegionStmt Lower(const RegionStmt &region) {
+    SeqStmt body = Mutate(region->body)
+                       .ValueOrUnchanged(region->body)
+                       .as_or_throw<SeqStmt>();
+    if (!prefetch_.empty()) {
+      PrimExpr condition =
+          Call(PrimType::Bool(), tl_shuffle_elect(), {PrimExpr(0)})
+              .as_or_throw<PrimExpr>();
+      if (disable_shuffle_elect_) {
+        PrimExpr thread =
+            Call(PrimType::Int(32), Op::Get("tirx.cuda.thread_idx"),
+                 {StringImm("x")})
+                .as_or_throw<PrimExpr>();
+        condition = thread == 0;
       }
+      body = SeqStmt({If(condition, SeqStmt(prefetch_)), body});
     }
-    f = WithAttr(std::move(f), "tma_descriptor_args",
-                 substituter.init_desc_arg_map_);
-
-    // Additionally, if L2 persistent cache annotations were lowered earlier,
-    // materialize TVM FFI calls to set the stream access policy window.
-    if (f->attrs.defined() && f->attrs->dict.count("l2_persistent_map")) {
-      auto l2_map =
-          f->GetAttr<Map<String, Array<PrimExpr>>>("l2_persistent_map");
-      if (l2_map.defined()) {
-        // Build a lookup from buffer name to Buffer object
-        std::unordered_map<std::string, Buffer> name2buf;
-        for (const auto &kv : f->buffer_map) {
-          name2buf.emplace(kv.second->name, kv.second);
-        }
-        for (const auto &kv : l2_map.value()) {
-          const std::string buf_name = kv.first;
-          const Array<PrimExpr> &args = kv.second;
-          if (name2buf.count(buf_name) == 0) {
-            continue;
-          }
-          const Buffer &buf = name2buf.at(buf_name);
-          // Build base pointer expression.
-          //
-          // We only need the base address for CUDA stream access policy window
-          // configuration. Using `Buffer::access_ptr` would materialize a
-          // typed pointer cast based on `buf->dtype` (e.g. float16 -> `half*`)
-          // in the generated C host stubs, which then requires a `half`
-          // definition during host compilation. Since the runtime API treats
-          // the pointer as opaque, keep it as `void*`/handle and adjust by
-          // `elem_offset` in bytes when needed.
-          PrimExpr base_ptr = buf->data;
-          if (buf->elem_offset.defined() && !is_zero(buf->elem_offset)) {
-            PrimExpr byte_offset =
-                buf->elem_offset *
-                IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
-            base_ptr =
-                Call(DataType::Handle(), builtin::handle_add_byte_offset(),
-                     {base_ptr, byte_offset});
-          }
-          // Args packed: func_name, base_ptr, num_bytes, hit_ratio
-          Array<PrimExpr> packed_args;
-          packed_args.push_back(
-              StringImm(tvm_cuda_stream_set_access_policy_window));
-          packed_args.push_back(base_ptr);
-          // size_in_bytes (args[1]) then hit_ratio (args[0])
-          ICHECK_GE(args.size(), 2);
-          packed_args.push_back(args[1]);
-          packed_args.push_back(args[0]);
-          prologue_stmts.push_back(Evaluate(Call(
-              DataType::Int(32), builtin::tvm_call_packed(), packed_args)));
-        }
-        // Add a single epilogue call to reset the access policy window and
-        // restore L2 limit
-        Array<PrimExpr> reset_args;
-        reset_args.push_back(
-            StringImm(tvm_cuda_stream_reset_access_policy_window));
-        epilogue_stmts.push_back(Evaluate(
-            Call(DataType::Int(32), builtin::tvm_call_packed(), reset_args)));
-      }
-    }
-
-    // Stitch prologue statements before the original body
-    if (!prologue_stmts.empty()) {
-      // Chain the Let/Evaluate statements sequentially
-      Stmt seq = prologue_stmts.size() == 1 ? prologue_stmts[0]
-                                            : SeqStmt(prologue_stmts);
-      fptr->body = SeqStmt({seq, fptr->body});
-    }
-    if (!epilogue_stmts.empty()) {
-      Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
-                                                : SeqStmt(epilogue_stmts);
-      fptr->body = SeqStmt({fptr->body, seq_end});
-    }
-    return f;
+    RegionStmt result = region;
+    result.CopyOnWrite()->body = body;
+    return result;
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> visited;
-    visited.reserve(op->seq.size());
-    for (const Stmt &stmt : op->seq) {
-      visited.push_back(StmtExprMutator::VisitStmt(stmt));
-    }
-
-    Array<Stmt> result;
-    for (const Stmt &stmt : visited) {
-      result.push_back(stmt);
-      AppendDescInitsAfterAlloc(stmt, &result);
-    }
-    return SeqStmt(result);
-  }
-
-  Stmt VisitStmt_(const AllocBufferNode *op) final {
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  void AppendDescInitsAfterAlloc(const Stmt &stmt, Array<Stmt> *result) {
-    const auto *alloc = stmt.as<AllocBufferNode>();
-    if (alloc == nullptr) {
-      return;
-    }
-    for (auto &desc_init : desc_inits_) {
-      if (!desc_init.emitted &&
-          desc_init.base_var == alloc->buffer->data.get()) {
-        result->push_back(desc_init.stmt);
-        desc_init.emitted = true;
-      }
-    }
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        auto body = StmtExprMutator::VisitStmt(op->body);
-        if (prefetch_calls_.empty()) {
-          return AttrStmt(op->node, op->attr_key, op->value, body);
-        } else {
-          Array<Stmt> stmt_seq;
-          PrimExpr condition;
-          if (!disable_shuffle_elect_) {
-            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
-          } else {
-            condition = EQ(iv->var, 0);
-          }
-          auto stmts = prefetch_calls_;
-          auto stmt_ = IfThenElse(condition,
-                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
-          stmt_seq.push_back(stmt_);
-          stmt_seq.push_back(body);
-          Stmt result = SeqStmt(stmt_seq);
-          prefetch_calls_.clear();
-          return AttrStmt(op->node, op->attr_key, op->value, result);
-        }
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(create_tma_descriptor()) ||
-        call->op.same_as(create_tma_im2col_descriptor())) {
-      Var var;
-      auto iter = desc_map_.find(GetRef<Call>(call));
-      if (iter != desc_map_.end()) {
-        var = iter->second;
-      } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
-        var = Var(name + "_desc",
-                  PointerType(PrimType(CuTensorMapType()), "grid_constant"));
-        Call call_ref = GetRef<Call>(call);
-        desc_map_[call_ref] = var;
-        Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
-        init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
-                               MakeInitDescStmt(var, init_desc_args), false});
-        prefetch_calls_.push_back(Evaluate(
-            Call(DataType::Handle(), prefetch_tma_descriptor(), {var})));
-      }
-      return var;
-    } else {
-      return StmtExprMutator::VisitExpr_(call);
-    }
-  }
-
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
-    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
-      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
-                                         IsNoOp(if_node->else_case.value()))) {
-        return Evaluate(0);
-      }
-    }
-    return new_stmt;
-  }
-
-  bool IsNoOp(const Stmt &stmt) {
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      return is_const_int(eval->value, 0);
-    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const auto &s : seq->seq) {
-        if (!IsNoOp(s))
-          return false;
-      }
-      return true;
-    }
-    return false;
-  }
+  const Array<Stmt> &initializers() const { return initializers_; }
 
 private:
-  struct DescInit {
-    const VarNode *base_var;
-    Stmt stmt;
-    bool emitted;
-  };
-
-  static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
-    Array<PrimExpr> init_desc_args;
-    if (call->op.same_as(create_tma_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
-    } else {
-      ICHECK(0) << call->op;
+  UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                            InplaceMode inplace_mode) final {
+    const auto *call = node->value.as<CallNode>();
+    auto tensor = node->var.as<TensorVar>();
+    if (call && call->op.same_as(decl_tensor_op()) && tensor &&
+        IsGlobalBuffer(*tensor)) {
+      bool host_evaluable = true;
+      for (const Var &variable : UndefinedVars(node->value)) {
+        host_evaluable &= host_variables_.count(variable.get()) != 0;
+      }
+      PostOrderVisit(node->value, [&](const ObjectRef &object) {
+        if (object.as<TensorLoadNode>())
+          host_evaluable = false;
+        if (const auto *operation = object.as<CallNode>()) {
+          host_evaluable &= operation->op.same_as(decl_tensor_op()) ||
+                            operation->op.same_as(tensor_data_ptr_op()) ||
+                            operation->op.same_as(ptr_byte_offset_op()) ||
+                            operation->op.same_as(reinterpret_op());
+        }
+      });
+      if (host_evaluable) {
+        initializers_.push_back(GetRef<Stmt>(node));
+        host_variables_.insert(node->var.get());
+        return SeqStmt({});
+      }
     }
-    init_desc_args.push_back(var);
-    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                          call->args.end());
-    return init_desc_args;
+    return StmtExprMutator::Mutate_(node, inplace_mode);
   }
 
-  static Stmt MakeInitDescStmt(const Var &var,
-                               const Array<PrimExpr> &init_desc_args) {
-    // Should allocate 128 bytes for TensorMap on stack.
-    Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                           {StringImm("tvm_ffi_any"), 16});
-    Call init_desc =
-        Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-    return SeqStmt({tirx::Bind(var, alloc_desc), Evaluate(init_desc)});
+  UnchangedOr<Expr> Mutate_(const CallNode *node,
+                            InplaceMode inplace_mode) final {
+    Expr original = GetRef<Expr>(node);
+    Expr visited =
+        StmtExprMutator::Mutate_(node, inplace_mode).ValueOrUnchanged(original);
+    Call call = visited.as_or_throw<Call>();
+    if (!IsDescriptor(call.get()))
+      return visited;
+    for (const Var &variable : UndefinedVars(call)) {
+      TVM_FFI_CHECK(host_variables_.count(variable.get()), ValueError)
+          << "TMA descriptor depends on device-bound variable "
+          << variable->name;
+    }
+    if (auto found = descriptors_.find(call); found != descriptors_.end())
+      return found->second;
+    Var descriptor("tma_descriptor_" + std::to_string(descriptors_.size()),
+                   PtrType(TensorMapType()));
+    descriptors_.emplace(call, descriptor);
+    initializers_.push_back(
+        Bind(descriptor, Call(descriptor->ty, stack_alloca_op(),
+                              {StringImm("tensormap"), PrimExpr(1)})));
+    if (call->op.same_as(create_tma_descriptor())) {
+      initializers_.push_back(Evaluate(EncodeTiled(call, descriptor)));
+    } else {
+#if CUDA_MAJOR_VERSION >= 12
+      Array<Expr> arguments{StringImm(tvm_tensormap_create_im2col), descriptor};
+      for (const Expr &argument : call->args)
+        arguments.push_back(argument);
+      initializers_.push_back(
+          Evaluate(Call(PrimType::Int(32), call_packed_op(), arguments)));
+#else
+      TVM_FFI_THROW(ValueError)
+          << "TMA im2col descriptors require CUDA 12 or newer";
+#endif
+    }
+    prefetch_.push_back(Evaluate(Call(
+        TupleType(Array<Type>{}), prefetch_tma_descriptor(), {descriptor})));
+    return descriptor;
   }
 
-  Array<Stmt> prefetch_calls_;
-  std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
-  std::vector<DescInit> desc_inits_;
-  Map<Var, Array<PrimExpr>> init_desc_arg_map_;
-  LowerHopperIntrin(bool disable_shuffle_elect)
+  bool disable_shuffle_elect_;
+  std::unordered_set<const VarNode *> host_variables_;
+  std::unordered_map<Call, Var, StructuralHash, StructuralEqual> descriptors_;
+  Array<Stmt> initializers_;
+  Array<Stmt> prefetch_;
+};
+
+class HopperLowerer : public tirx::StmtExprMutator {
+public:
+  explicit HopperLowerer(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
+
+private:
+  UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                            InplaceMode inplace_mode) final {
+    const auto &name = node->op->name;
+    if (name != "tirx.device_entry" && name != "tirx.launch_thread") {
+      return StmtExprMutator::Mutate_(node, inplace_mode);
+    }
+    RegionStmt region = GetRef<RegionStmt>(node);
+    auto lowerer = make_object<DeviceDescriptorLowerer>(UndefinedVars(region),
+                                                        disable_shuffle_elect_);
+    RegionStmt lowered = lowerer->Lower(region);
+    Array<Stmt> statements = lowerer->initializers();
+    if (statements.empty())
+      return lowered;
+    statements.push_back(lowered);
+    return SeqStmt(statements);
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallNode *node,
+                            InplaceMode inplace_mode) final {
+    TVM_FFI_CHECK(!IsDescriptor(node), ValueError)
+        << "TMA descriptor construction requires an enclosing device region";
+    return StmtExprMutator::Mutate_(node, inplace_mode);
+  }
+
   bool disable_shuffle_elect_;
 };
 
-using namespace tirx::transform;
+tirx::Function LowerHopper(tirx::Function function,
+                           bool disable_shuffle_elect) {
+  if (!function->body.has_value())
+    return function;
+  auto lowerer = make_object<HopperLowerer>(disable_shuffle_elect);
+  SeqStmt body = function->body.value();
+  body = lowerer->Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+  if (auto settings = function->GetAttr<Map<String, Array<PrimExpr>>>(
+          "l2_persistent_map")) {
+    std::unordered_map<std::string, TensorVar> tensors;
+    for (const Var &parameter : function->params) {
+      if (auto tensor = parameter.as<TensorVar>())
+        tensors.emplace(parameter->name, tensor.value());
+    }
+    Array<Stmt> statements;
+    for (const auto &[name, arguments] : settings.value()) {
+      auto found = tensors.find(name);
+      TVM_FFI_CHECK(found != tensors.end() && arguments.size() >= 2, ValueError)
+          << "Invalid L2 persistence configuration for tensor " << name;
+      const TensorVar &tensor = found->second;
+      Array<PrimExpr> origin(tensor.shape().size(), PrimExpr(0));
+      Expr pointer = Call(tensor.ty()->DataPtrType(), address_of_op(),
+                          {TensorLoad(tensor, origin)});
+      statements.push_back(
+          Evaluate(Call(PrimType::Int(32), call_packed_op(),
+                        {StringImm(tvm_cuda_stream_set_access_policy_window),
+                         pointer, arguments[1], arguments[0]})));
+    }
+    if (!statements.empty()) {
+      statements.push_back(body);
+      statements.push_back(Evaluate(
+          Call(PrimType::Int(32), call_packed_op(),
+               {StringImm(tvm_cuda_stream_reset_access_policy_window)})));
+      body = SeqStmt(statements);
+    }
+  }
+  function.CopyOnWrite()->body = body;
+  return function;
+}
+
+} // namespace
 
 tvm::transform::Pass LowerHopperIntrin() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    bool disable_shuffle_elect =
-        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
-    return LowerHopperIntrin::Substitute(f, disable_shuffle_elect);
+  auto pass =
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext context) -> ffi::Optional<tirx::Function> {
+    return LowerHopper(
+        std::move(function),
+        context->GetConfig<bool>(kDisableShuffleElect).value_or(false));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LowerHopperIntrin");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerHopperIntrin",
-                        LowerHopperIntrin);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerHopperIntrin",
+                                   LowerHopperIntrin);
 }
-#endif // (CUDA_MAJOR_VERSION >= 12)
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

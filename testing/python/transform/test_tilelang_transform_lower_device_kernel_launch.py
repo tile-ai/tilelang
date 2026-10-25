@@ -12,7 +12,7 @@ def test_same_device_cross_target_call_uses_callee_global_symbol():
     caller = (
         tvm.tirx.PrimFunc(
             [],
-            tvm.tirx.Evaluate(tvm.tirx.Call("int32", callee_gvar, [])),
+            tvm.ir.Evaluate(tvm.ir.Call(callee_gvar, [], ty=tvm.ir.TupleType([]))),
         )
         .with_attr("target", tvm.target.Target({"kind": "llvm", "mcpu": "generic"}))
         .with_attr("global_symbol", "caller")
@@ -20,7 +20,7 @@ def test_same_device_cross_target_call_uses_callee_global_symbol():
     mod = tvm.IRModule({callee_gvar: callee, "caller": caller})
 
     after = tilelang.transform.LowerDeviceKernelLaunch()(mod)
-    call = after["caller"].body.value
+    call = after["caller"].body.seq[0].value
 
     assert call.op.same_as(tvm.ir.Op.get("tirx.call_extern"))
     assert call.args[0].value == "actual_callee"

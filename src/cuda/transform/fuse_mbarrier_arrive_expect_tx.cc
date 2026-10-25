@@ -1,193 +1,208 @@
-/*!
- * \file fuse_mbarrier_arrive_expect_tx.cc
- * \brief Fuse simple expect_tx -> TMA issue -> arrive sequences back into
- *        arrive_and_expect_tx before LowerOpaqueBlock.
- */
-
-#include "support/check.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
-#include <tvm/tirx/transform.h>
-
+#include "compat/expr.h"
 #include "cuda/op/builtin.h"
 #include "transform/merge_if_stmt.h"
 
-namespace tvm {
-namespace tl {
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/tirx/op/gpu.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/transform.h>
 
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-class MBarrierArriveExpectTxFuser : public StmtExprMutator {
-public:
-  static PrimFunc Rewrite(PrimFunc f) {
-    Stmt merged = ApplyMergeIfStmt(f->body);
-    f.CopyOnWrite()->body = MBarrierArriveExpectTxFuser().VisitStmt(merged);
-    return f;
+const CallNode *EvaluateCall(const Stmt &statement) {
+  const auto *evaluation = statement.as<EvaluateNode>();
+  return evaluation ? evaluation->value.as<CallNode>() : nullptr;
+}
+
+Expr BarrierReference(Expr expression) {
+  while (const auto *call = expression.as<CallNode>()) {
+    const auto *operation = call->op.as<OpNode>();
+    if (!operation || call->args.size() != 1 ||
+        (operation->name != "tirx.cuda.cvta_generic_to_shared" &&
+         operation->name != "tirx.address_of" &&
+         operation->name != "tirx.reinterpret"))
+      break;
+    expression = call->args[0];
   }
+  return expression;
+}
 
+bool NativeUnitArrival(const CallNode *call) {
+  const auto *operation = call ? call->op.as<OpNode>() : nullptr;
+  if (!operation || operation->name != "tirx.ptx.mbarrier_arrive_nocount" ||
+      call->args.size() != 7)
+    return false;
+  const auto *space = call->args[4].as<StringImmNode>();
+  const auto *predicate = call->args[6].as<StringImmNode>();
+  return space && space->value != "shared::cluster" && predicate &&
+         predicate->value.empty();
+}
+
+bool StableBarrier(const Expr &expression) {
+  if (const auto *load = expression.as<TensorLoadNode>()) {
+    if (!load->source.as<TensorVar>())
+      return false;
+    for (const PrimExpr &index : load->indices) {
+      if (SideEffect(index) != CallEffectKind::kPure)
+        return false;
+    }
+    return true;
+  }
+  return SideEffect(expression) == CallEffectKind::kPure;
+}
+
+bool StableArgument(const Expr &expression) {
+  if (SideEffect(expression) == CallEffectKind::kPure)
+    return true;
+  const auto *call = expression.as<CallNode>();
+  if (!call)
+    return false;
+  static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
+  if (effects.get(call->op, CallEffectKind::kOpaque) != CallEffectKind::kPure)
+    return false;
+  bool address =
+      call->op.same_as(access_ptr()) || call->op.same_as(address_of_op());
+  for (size_t index = 0; index < call->args.size(); ++index) {
+    if (address && index == 0 && call->args[index].as<TensorLoadNode>()) {
+      if (!StableBarrier(call->args[index]))
+        return false;
+    } else if (!StableArgument(call->args[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Optional<size_t> TmaBarrierIndex(const CallNode *call) {
+  if (call->op.same_as(tma_load_im2col()) ||
+      call->op.same_as(tma_load_gather4())) {
+    return call->args.size() > 1 ? Optional<size_t>(1) : std::nullopt;
+  }
+  if (!call->op.same_as(tma_load()) || call->args.size() < 3)
+    return std::nullopt;
+  if (const auto *descriptor = call->args[0].as<CallNode>()) {
+    if (descriptor->op.same_as(create_tma_descriptor()) ||
+        descriptor->op.same_as(create_tma_im2col_descriptor()))
+      return 1;
+  }
+  Type type = call->args[0]->ty;
+  if (const auto *pointer = type.as<PtrTypeNode>())
+    type = pointer->element_type;
+  return type.as<TensorMapTypeNode>() ? 1 : 2;
+}
+
+bool TransparentIssue(const Stmt &statement, const Expr &barrier,
+                      bool *saw_load) {
+  if (const auto *sequence = statement.as<SeqStmtNode>()) {
+    for (const Stmt &child : sequence->seq) {
+      if (!TransparentIssue(child, barrier, saw_load))
+        return false;
+    }
+    return true;
+  }
+  if (const auto *loop = statement.as<ForNode>()) {
+    if (SideEffect(loop->begin) != CallEffectKind::kPure ||
+        SideEffect(loop->end) != CallEffectKind::kPure ||
+        SideEffect(loop->step) != CallEffectKind::kPure)
+      return false;
+    return TransparentIssue(loop->body, barrier, saw_load);
+  }
+  const CallNode *call = EvaluateCall(statement);
+  if (!call)
+    return false;
+  if (call->op.same_as(fence_proxy_async()))
+    return call->args.empty();
+  auto barrier_index = TmaBarrierIndex(call);
+  if (!barrier_index ||
+      !StructuralEqual::Equal(call->args[*barrier_index], barrier))
+    return false;
+  for (size_t index = 0; index < call->args.size(); ++index) {
+    if (index != *barrier_index && !StableArgument(call->args[index]))
+      return false;
+  }
+  *saw_load = true;
+  return true;
+}
+
+class BarrierFuser : public StmtExprMutator {
 private:
-  static bool Is1DTmaLoad(const CallNode *op) {
-    if (!op->op.same_as(tma_load())) {
-      return false;
-    }
-    auto arg0 = op->args[0].as<Call>();
-    return arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-           !arg0.value()->op.same_as(create_tma_im2col_descriptor());
-  }
-
-  static Optional<Call> GetEvaluateCall(const Stmt &stmt) {
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      if (const auto *call = eval->value.as<CallNode>()) {
-        return GetRef<Call>(call);
-      }
-    }
-    return std::nullopt;
-  }
-
-  static Optional<PrimExpr> GetTmaBarrier(const Call &call) {
-    if (call->op.same_as(tma_load())) {
-      return call->args[Is1DTmaLoad(call.get()) ? 2 : 1];
-    }
-    if (call->op.same_as(tma_load_im2col())) {
-      return call->args[1];
-    }
-    return std::nullopt;
-  }
-
-  static bool MatchExpectTx(const Stmt &stmt, PrimExpr *barrier,
-                            PrimExpr *bytes) {
-    Optional<Call> call = GetEvaluateCall(stmt);
-    if (!call.defined() || !call.value()->op.same_as(mbarrier_expect_tx())) {
-      return false;
-    }
-    *barrier = call.value()->args[0];
-    *bytes = call.value()->args[1];
-    return true;
-  }
-
-  static bool MatchArrive(const Stmt &stmt, const PrimExpr &barrier) {
-    Optional<Call> call = GetEvaluateCall(stmt);
-    return call.defined() &&
-           (call.value()->op.same_as(builtin::ptx_arrive_barrier()) ||
-            call.value()->op.same_as(tl::ptx_arrive_cluster_barrier())) &&
-           ExprDeepEqual()(call.value()->args[0], barrier);
-  }
-
-  static bool IsTransparentTmaIssueStmt(const Stmt &stmt,
-                                        const PrimExpr &barrier,
-                                        bool *saw_tma_load) {
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &sub_stmt : seq->seq) {
-        if (!IsTransparentTmaIssueStmt(sub_stmt, barrier, saw_tma_load)) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    if (const auto *loop = stmt.as<ForNode>()) {
-      return IsTransparentTmaIssueStmt(loop->body, barrier, saw_tma_load);
-    }
-
-    Optional<Call> call = GetEvaluateCall(stmt);
-    if (!call.defined()) {
-      return false;
-    }
-
-    if (call.value()->op.same_as(fence_proxy_async())) {
-      return true;
-    }
-
-    if (call.value()->op.same_as(builtin::tvm_storage_sync())) {
-      if (call.value()->args.size() == 1) {
-        if (const auto *scope = call.value()->args[0].as<StringImmNode>()) {
-          return scope->value == "shared" || scope->value == "shared.dyn";
-        }
-      }
-      return false;
-    }
-
-    Optional<PrimExpr> load_barrier = GetTmaBarrier(call.value());
-    if (!load_barrier.defined() ||
-        !ExprDeepEqual()(load_barrier.value(), barrier)) {
-      return false;
-    }
-
-    *saw_tma_load = true;
-    return true;
-  }
-
-  void FlattenAppend(const Stmt &stmt, Array<Stmt> *out) {
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &sub_stmt : seq->seq) {
-        FlattenAppend(sub_stmt, out);
-      }
-      return;
-    }
-    out->push_back(stmt);
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> flat_seq;
-    for (const Stmt &stmt : op->seq) {
-      FlattenAppend(this->VisitStmt(stmt), &flat_seq);
-    }
-
-    Array<Stmt> new_seq;
-    for (int i = 0, n = flat_seq.size(); i < n; ++i) {
-      PrimExpr barrier;
-      PrimExpr bytes;
-      if (!MatchExpectTx(flat_seq[i], &barrier, &bytes)) {
-        new_seq.push_back(flat_seq[i]);
+  UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
+    SeqStmt original = GetRef<SeqStmt>(node);
+    SeqStmt visited = StmtExprMutator::Mutate_(node, mode)
+                          .ValueOrUnchanged(original)
+                          .as_or_throw<SeqStmt>();
+    Array<Stmt> result;
+    for (size_t index = 0; index < visited->seq.size(); ++index) {
+      const Stmt &statement = visited->seq[index];
+      const CallNode *expect = EvaluateCall(statement);
+      if (!expect || !expect->op.same_as(mbarrier_expect_tx()) ||
+          expect->args.size() != 2 || !StableBarrier(expect->args[0]) ||
+          SideEffect(expect->args[1]) != CallEffectKind::kPure) {
+        result.push_back(statement);
         continue;
       }
-
-      int j = i + 1;
-      bool saw_tma_load = false;
-      while (j < n &&
-             IsTransparentTmaIssueStmt(flat_seq[j], barrier, &saw_tma_load)) {
-        ++j;
-      }
-
-      if (!saw_tma_load || j >= n || !MatchArrive(flat_seq[j], barrier)) {
-        new_seq.push_back(flat_seq[i]);
+      bool saw_load = false;
+      size_t end = index + 1;
+      while (end < visited->seq.size() &&
+             TransparentIssue(visited->seq[end], expect->args[0], &saw_load))
+        ++end;
+      const CallNode *arrive =
+          end < visited->seq.size() ? EvaluateCall(visited->seq[end]) : nullptr;
+      bool native_arrival = NativeUnitArrival(arrive);
+      if (!saw_load || !arrive ||
+          (!native_arrival && (!arrive->op.same_as(mbarrier_arrive()) ||
+                               arrive->args.size() != 1)) ||
+          !StructuralEqual::Equal(BarrierReference(expect->args[0]),
+                                  BarrierReference(arrive->args[0]))) {
+        result.push_back(statement);
         continue;
       }
-
-      new_seq.push_back(Evaluate(Call(DataType::Handle(),
-                                      builtin::ptx_arrive_barrier_expect_tx(),
-                                      {barrier, bytes})));
-      for (int k = i + 1; k < j; ++k) {
-        new_seq.push_back(flat_seq[k]);
+      Call fused = Call(std::nullopt, mbarrier_arrive_expect_tx(), expect->args,
+                        expect->attrs, {}, expect->loc);
+      if (native_arrival) {
+        Array<Expr> arguments{
+            arrive->args[0],
+            prim::cast(expect->args[1].as_or_throw<PrimExpr>(),
+                       PrimType::UInt(32)),
+            arrive->args[1], StringImm("expect_tx")};
+        for (size_t argument = 2; argument < arrive->args.size(); ++argument)
+          arguments.push_back(arrive->args[argument]);
+        fused =
+            Call(std::nullopt, Op::Get("tirx.ptx.mbarrier_arrive_expect_tx"),
+                 arguments, arrive->attrs, {}, expect->loc);
       }
-      i = j;
+      result.push_back(Evaluate(fused, statement->loc));
+      for (size_t issue = index + 1; issue < end; ++issue)
+        result.push_back(visited->seq[issue]);
+      index = end;
     }
-
-    return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
+    return SeqStmt(result, node->loc);
   }
 };
-
 } // namespace
 
 tvm::transform::Pass FuseMBarrierArriveExpectTx() {
-  auto pass_func = [](PrimFunc f, const IRModule &,
-                      const tvm::transform::PassContext &) {
-    return MBarrierArriveExpectTxFuser::Rewrite(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (function->body) {
+      SeqStmt body =
+          ApplyMergeIfStmt(function->body.value()).as_or_throw<SeqStmt>();
+      auto fuser = ffi::make_object<BarrierFuser>();
+      function.CopyOnWrite()->body =
+          fuser->Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+    }
+    return function;
   };
-  return tirx::transform::CreatePrimFuncPass(
-      pass_func, 0, "tl.FuseMBarrierArriveExpectTx", {});
+  return tirx::transform::CreateFunctionPass(
+      pass, 0, "tl.cuda.FuseMBarrierArriveExpectTx");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.FuseMBarrierArriveExpectTx",
-                        FuseMBarrierArriveExpectTx);
+  ffi::reflection::GlobalDef().def(
+      "tl.cuda.transform.FuseMBarrierArriveExpectTx",
+      FuseMBarrierArriveExpectTx);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

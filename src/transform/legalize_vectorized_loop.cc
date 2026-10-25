@@ -22,95 +22,72 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include "loop_vectorize.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+
+#include <tvm/target/target.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt_functor_with_analyzer.h>
 #include <tvm/tirx/transform.h>
 
-#include <queue>
+#include <optional>
 
-#include "../op/parallel.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "loop_partition.h"
-#include "loop_vectorize.h"
+namespace tvm::tl {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using arith::IRMutatorWithAnalyzer;
-
-// Class to legalize vectorized loops by transforming them appropriately
-class LoopVectorizedLegalizer : IRMutatorWithAnalyzer {
+class LoopVectorizedLegalizer : public tirx::StmtExprMutatorWithAnalyzer {
 public:
-  // Static method to substitute and transform the given PrimFunc
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    // Create an instance of the legalizer with the analyzer
-    LoopVectorizedLegalizer substituter(&analyzer);
-    // Get a mutable copy of the function node
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    // Apply the legalizer to the function body
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
-  }
+  explicit LoopVectorizedLegalizer(sym::Analyzer analyzer, bool cpu)
+      : StmtExprMutatorWithAnalyzer(analyzer),
+        analyzer_context_(std::move(analyzer)), cpu_(cpu) {}
 
 private:
-  // Constructor initializing the base class with the analyzer
-  LoopVectorizedLegalizer(arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer) {}
-
-  bool IsNonTrivialVectorizedLoop(const For &loop) {
-    PrimExpr extent = analyzer_->Simplify(loop->extent);
-    auto extent_as_int = as_const_int(extent);
-    return !extent_as_int || *extent_as_int > 1;
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    For loop = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+                   .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
+                   .as_or_throw<For>();
+    bool explicit_vectorization = loop->kind == ForKind::kVectorized;
+    if (!explicit_vectorization && !(cpu_ && loop->kind == ForKind::kParallel))
+      return loop;
+    loop.CopyOnWrite()->kind = ForKind::kDefault;
+    int width = GetVectorizeSize(loop, analyzer_context_);
+    auto extent = GetConstInt(analyzer_->Simplify(loop->end - loop->begin));
+    if (explicit_vectorization && width == 1 &&
+        (!extent || extent.value() > 1)) {
+      LOG(WARNING) << "T.vectorized loop over `" << loop->var
+                   << "` with extent " << loop->end - loop->begin
+                   << " is lowered as a serial loop because no legal "
+                      "vectorization plan exists";
+    }
+    return VectorizeLoop(loop, analyzer_context_, {}, width);
   }
 
-  // Override the VisitStmt_ method to handle ForNode (loop statements)
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Visit and potentially modify the loop node
-    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    // If the loop is not vectorized, proceed with the default behavior
-    if (for_node->kind != ForKind::kVectorized) {
-      return for_node;
-    }
-    // Change the loop kind from vectorized to serial
-    for_node.CopyOnWrite()->kind = ForKind::kSerial;
-    int vectorize_size = GetVectorizeSize(for_node, analyzer_);
-    if (vectorize_size <= 1 && IsNonTrivialVectorizedLoop(for_node)) {
-      LOG(WARNING) << "T.vectorized loop over `" << for_node->loop_var
-                   << "` with extent " << for_node->extent
-                   << " is lowered as a serial loop because TileLang could "
-                   << "not find a valid vectorization plan. Scalar accumulator "
-                   << "updates inside the loop are a common cause; move "
-                   << "reductions to T.unroll or T.serial if this is intended.";
-    }
-    // Apply vectorization transformation to the loop
-    return VectorizeLoop(for_node, analyzer_, {}, vectorize_size);
-  }
+  sym::Analyzer analyzer_context_;
+  bool cpu_;
 };
 
-// Create a pass that legalizes vectorized loops in the IRModule
 tvm::transform::Pass LegalizeVectorizedLoop() {
-  using namespace tirx::transform;
-  // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LoopVectorizedLegalizer::Substitute(std::move(f));
+  auto transform = [](tirx::Function function, const IRModule &,
+                      const tvm::transform::PassContext &) {
+    auto target = function->attrs.GetAttr<Target>(tvm::attr::kTarget);
+    std::optional<With<Target>> target_scope;
+    if (target)
+      target_scope.emplace(target.value());
+    function.CopyOnWrite()->body =
+        ffi::make_object<LoopVectorizedLegalizer>(
+            sym::Analyzer(), target && (target.value()->kind->name == "c" ||
+                                        target.value()->kind->name == "llvm"))
+            ->Mutate(function->body, ffi::InplaceMode::kDisallow)
+            .ValueOrUnchanged(function->body);
+    return function;
   };
-  // Create and return a PrimFunc pass with the transformation function
-  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeVectorizedLoop", {});
+  return tirx::transform::CreateFunctionPass(transform, 0,
+                                             "tl.LegalizeVectorizedLoop");
 }
 
-// Register the pass globally so it can be used in the compilation pipeline
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
-                        LegalizeVectorizedLoop);
+  ffi::reflection::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
+                                   LegalizeVectorizedLoop);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

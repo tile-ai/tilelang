@@ -53,11 +53,12 @@ def test_source_kernel_inline_codegen():
 
 
 @tilelang.testing.requires_cuda
-def test_source_kernel_run():
+@pytest.mark.parametrize("size", [128, 257])
+def test_source_kernel_run(size):
     kernel = tilelang.compile(make_source_kernel(CUDA_SOURCE, entry_name="external_copy"), target="cuda")
     print(kernel.get_kernel_source())
     print(kernel.get_host_source())
-    a = torch.randn(128, dtype=torch.float32, device="cuda")
+    a = torch.randn(size, dtype=torch.float32, device="cuda")
     b = torch.empty_like(a)
     kernel(a, b)
     torch.testing.assert_close(b, a)

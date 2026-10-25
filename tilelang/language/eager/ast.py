@@ -284,7 +284,7 @@ class BaseBuilder:
     def ret(self, value: Any) -> Any:
         return value
 
-    def ctx_with(self, ctx: AbstractContextManager[Any]) -> AbstractContextManager[Any]:
+    def ctx_with(self, ctx: AbstractContextManager[Any], unpack=False) -> AbstractContextManager[Any]:
         return ctx
 
     def assert_expr(self, cond: Any, msg: Any):
@@ -731,7 +731,12 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+            expr.context_expr = quote_expr(
+                "__tb.ctx_with(e, unpack=unpack)",
+                e=expr.context_expr,
+                unpack=ast.Constant(isinstance(expr.optional_vars, (ast.Tuple, ast.List))),
+                span=expr,
+            )
         if is_kernel_ctx:
             return [quote1("if __tb.skip_kernel_ctx(): return"), node]
         return node
@@ -801,6 +806,7 @@ class IRGenerator(Generic[_P, _T]):
     gen: Callable[[BaseBuilder], Callable[_P, _T]]
     source: str
     extra_type_hints: dict[str, Any] = field(default_factory=dict)
+    source_location: tuple[str, int] | None = None
 
 
 def has_internal_prim_func(func: Callable[_P, _T]) -> bool:
@@ -846,6 +852,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
 
     tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
+    entry_line = next(node.lineno for node in tree.body if isinstance(node, ast.FunctionDef))
     nonlocals = utils.get_func_nonlocals(func)
 
     # DSLMutator generates a function named `make_closure`
@@ -871,4 +878,9 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
         func.__globals__,  # use the original globalns
     )
     fn = make_closure(**nonlocals)
-    return IRGenerator(gen=fn, source=ast.unparse(tree), extra_type_hints=mut.extra_type_hints)
+    return IRGenerator(
+        gen=fn,
+        source=ast.unparse(tree),
+        extra_type_hints=mut.extra_type_hints,
+        source_location=(str(Path(filename).absolute()), entry_line),
+    )

@@ -4,7 +4,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from tvm.target import Target
+from tvm_tirx.target import Target
+
+from tilelang._compat.target import normalize_target
 
 TargetConfig = dict[str, object]
 TargetInput = str | Mapping[str, object] | Target
@@ -124,7 +126,7 @@ def _validate_manual_target(target: TargetLike) -> TargetInput:
         return target
     if isinstance(target, dict):
         try:
-            Target(target)
+            normalize_target(target)
         except Exception as err:
             raise AssertionError(f"Target {target} is not supported. Pass a valid target config dict.") from err
         return target
@@ -133,7 +135,7 @@ def _validate_manual_target(target: TargetLike) -> TargetInput:
         if not normalized_target:
             raise AssertionError(f"Target {target} is not supported")
         try:
-            Target(normalized_target)
+            normalize_target(normalized_target)
         except Exception as err:
             raise AssertionError(
                 f"Target {target} is not supported. Pass target options as a dict when the target needs attributes."
@@ -148,7 +150,7 @@ def _finalize_target(target: TargetInput, *, return_object: bool) -> str | Mappi
         if normalized is not None:
             target = normalized
     if return_object and not isinstance(target, Target):
-        return Target(target)
+        return normalize_target(target)
     return target
 
 

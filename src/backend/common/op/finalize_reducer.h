@@ -1,171 +1,153 @@
-/*!
- * \file tl/backend/common/op/finalize_reducer.h
- * \brief Shared tl.finalize_reducer lowering for GPU backends.
- */
-
 #ifndef TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
 #include "backend/common/op/reduce.h"
+#include "compat/expr.h"
 #include "op/reducer.h"
-#include "support/check.h"
 
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
 
 #include <array>
-#include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace tvm {
-namespace tl {
-namespace backend {
-
+namespace tvm::tl::backend {
 using namespace tirx;
 using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
-  static Stmt Lower(const FinalizeReducerOpNode &op,
-                    const LowerArgs &lower_args, arith::Analyzer *) {
-    auto buffer = lower_args.buffer_remap[op.reducer];
-    auto opt_layout = lower_args.layout_map.Get(op.reducer);
-    ICHECK(opt_layout);
-    ICHECK(opt_layout->as<Fragment>());
-    auto layout = opt_layout->as<Fragment>().value();
-    Array<PrimExpr> indices_0;
-    indices_0.reserve(layout->OutputDim());
-    for (int i = 0; i < layout->OutputDim(); ++i) {
-      indices_0.push_back(Var("__finred_" + std::to_string(i)));
+  static Stmt Lower(const FinalizeReducerOpNode &op, const LowerArgs &arguments,
+                    sym::Analyzer analyzer) {
+    TensorVar storage = arguments.buffer_remap.at(op.reducer);
+    Fragment layout =
+        arguments.layout_map.at(op.reducer).template as_or_throw<Fragment>();
+    Array<PrimExpr> indices;
+    for (int axis = 0; axis < layout->OutputDim(); ++axis) {
+      indices.push_back(PrimVar("finalize_index_" + std::to_string(axis),
+                                layout->OutputShape()[axis].ty()));
     }
-
-    // Collective steps: explicit narrow plan when present, otherwise the
-    // legacy wide plan (one participant-extent step derived from the
-    // storage layout's replicate extent).
     std::vector<std::pair<int, int>> steps;
     if (op.explicit_plan) {
-      for (size_t i = 0; i + 1 < op.plan_steps.size(); i += 2) {
-        steps.emplace_back(static_cast<int>(op.plan_steps[i]->value),
-                           static_cast<int>(op.plan_steps[i + 1]->value));
+      TVM_FFI_CHECK_EQ(op.plan_steps.size() % 2, 0, ValueError);
+      for (size_t index = 0; index < op.plan_steps.size(); index += 2) {
+        steps.emplace_back(
+            static_cast<int64_t>(op.plan_steps[index]->value),
+            static_cast<int64_t>(op.plan_steps[index + 1]->value));
       }
     } else {
-      const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
-      ICHECK(p_extent);
-      int extent = *p_extent;
-      ICHECK(extent == 1 ||
-             extent == *as_const_int(lower_args.thread_bounds->extent))
-          << "Illegal finalize_reducer: extent=" << extent
-          << "; T.thread_bounds=" << lower_args.thread_bounds;
-
-      if (extent > 1) {
-        steps.emplace_back(extent, 1);
-      }
+      auto extent = GetConstInt(layout->ReplicateExtent());
+      auto participants = GetConstInt(arguments.thread_bounds->extent);
+      TVM_FFI_CHECK(extent && participants &&
+                        (*extent == 1 || *extent == *participants),
+                    ValueError)
+          << "finalize_reducer requires either one replica or a replica per "
+             "participant";
+      if (*extent > 1)
+        steps.emplace_back(*extent, 1);
     }
-
-    std::array op_names{"tl::SumOp",    "tl::MaxOp",   "tl::MinOp",
-                        "tl::BitAndOp", "tl::BitOrOp", "tl::BitXorOp"};
-    auto op_str = op_names[static_cast<int>(op.op)];
-    auto thread_offset = lower_args.thread_bounds->min;
-
-    int64_t layout_batch_size = 1;
-    for (int i = 0; i < layout->OutputDim(); ++i) {
-      const int64_t *p = as_const_int(layout->OutputShape()[i]);
-      if (p == nullptr) {
-        layout_batch_size = -1;
+    constexpr std::array names{"tl::SumOp",    "tl::MaxOp",   "tl::MinOp",
+                               "tl::BitAndOp", "tl::BitOrOp", "tl::BitXorOp"};
+    const char *operation = names.at(static_cast<int>(op.op));
+    PrimExpr offset = arguments.thread_bounds->begin;
+    PrimExpr participants = arguments.thread_bounds->extent;
+    int64_t elements = 1;
+    for (const PrimExpr &dimension : layout->OutputShape()) {
+      auto extent = GetConstInt(dimension);
+      if (!extent) {
+        elements = -1;
         break;
       }
-      layout_batch_size *= *p;
+      TVM_FFI_CHECK(*extent > 0 &&
+                        elements <=
+                            std::numeric_limits<int64_t>::max() / *extent,
+                    ValueError)
+          << "Invalid finalize_reducer physical shape";
+      elements *= *extent;
     }
-
-    int64_t effective_batch = static_cast<int64_t>(op.batch);
-
-    if (effective_batch > 1 && layout_batch_size > 0) {
-      ICHECK_LE(effective_batch, layout_batch_size)
-          << "finalize_reducer: batch (" << effective_batch
-          << ") exceeds total output elements (" << layout_batch_size << ")";
-      ICHECK_EQ(layout_batch_size % effective_batch, 0)
-          << "finalize_reducer: batch (" << effective_batch
-          << ") must evenly divide total output elements (" << layout_batch_size
-          << ")";
+    int64_t batch = op.batch;
+    TVM_FFI_CHECK(batch >= 1, ValueError)
+        << "finalize_reducer batch must be positive";
+    if (batch > 1 && elements > 0) {
+      TVM_FFI_CHECK(batch <= elements, ValueError)
+          << "finalize_reducer batch exceeds total output elements";
+      TVM_FFI_CHECK(elements % batch == 0, ValueError)
+          << "finalize_reducer batch must evenly divide total output elements";
     }
-
-    Array<Stmt> step_stmts;
-    for (const auto &[reducing_threads, scale] : steps) {
-      reduce::CheckAllReduceWidth(reducing_threads, scale,
-                                  "tl.finalize_reducer");
-
-      bool use_batch = effective_batch > 1 && layout_batch_size > 0 &&
-                       reducing_threads > Impl::WarpSize(lower_args.target);
-
-      if (use_batch) {
-        int workspace_stride =
-            static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
-        std::string allreduce = Impl::MakeBatchAllReduce(
-            op_str, reducing_threads, scale, thread_offset,
-            lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
-            workspace_stride, lower_args.target);
-        int ws_size = workspace_stride * static_cast<int>(effective_batch);
-        PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
-
-        // The remapped buffer has compact physical storage.
-        Buffer flat_buffer = buffer.GetFlattenedBuffer();
-        for (int64_t offset = 0; offset < layout_batch_size;
-             offset += effective_batch) {
-          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                              {BufferLoad(flat_buffer, {Integer(offset)})});
-          Array<PrimExpr> args = {StringImm(allreduce), ptr, workspace};
-          step_stmts.push_back(
-              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+    auto loop_nest = [&](Stmt body) {
+      Array<PrimVar> variables;
+      Map<PrimVar, PrimExpr> substitutions;
+      for (const PrimExpr &index : indices) {
+        PrimVar original = index.as_or_throw<PrimVar>();
+        PrimVar variable(original->name, original.ty());
+        variables.push_back(variable);
+        substitutions.Set(original, variable);
+      }
+      body = tl::Substitute(body, substitutions);
+      for (int axis = layout->OutputDim() - 1; axis >= 0; --axis) {
+        PrimType index_type = indices[axis].ty();
+        body = For(variables[axis], MakeConst(index_type, 0),
+                   layout->OutputShape()[axis], MakeConst(index_type, 1),
+                   ForKind::kParallel, SeqStmt(body));
+      }
+      return body;
+    };
+    Array<Stmt> result;
+    for (const auto &[width, scale] : steps) {
+      reduce::CheckAllReduceWidth(width, scale, "tl.finalize_reducer");
+      if (batch > 1 && elements > 0 &&
+          width > Impl::WarpSize(arguments.target)) {
+        auto stride = GetConstInt(participants);
+        TVM_FFI_CHECK(stride && *stride > 0 &&
+                          batch <= std::numeric_limits<int>::max() / *stride,
+                      ValueError)
+            << "finalize_reducer workspace requires static participant bounds";
+        std::string helper = Impl::MakeBatchAllReduce(
+            operation, width, scale, offset, participants, batch, *stride,
+            arguments.target);
+        Expr workspace =
+            arguments.add_workspace(*stride * batch, storage.dtype());
+        for (int64_t start = 0; start < elements; start += batch) {
+          Array<PrimExpr> coordinates;
+          int64_t remaining = start;
+          for (int axis = layout->OutputDim() - 1; axis >= 0; --axis) {
+            int64_t extent = *GetConstInt(layout->OutputShape()[axis]);
+            coordinates.insert(coordinates.begin(),
+                               IntImm::Int64(remaining % extent));
+            remaining /= extent;
+          }
+          Expr pointer = Call(std::nullopt, address_of_op(),
+                              {TensorLoad(storage, coordinates)});
+          result.push_back(
+              Evaluate(Call(PrimType::Void(), call_extern_op(),
+                            {StringImm(helper), pointer, workspace})));
         }
-        continue;
+      } else {
+        std::string helper = Impl::MakeScalarAllReduce(
+            operation, width, scale, offset, participants, arguments.target);
+        Array<Expr> operands{StringImm(helper), TensorLoad(storage, indices)};
+        if (width > Impl::WarpSize(arguments.target)) {
+          auto count = GetConstInt(participants);
+          TVM_FFI_CHECK(count && *count > 0, ValueError)
+              << "finalize_reducer workspace requires static participant "
+                 "bounds";
+          operands.push_back(arguments.add_workspace(*count, storage.dtype()));
+        }
+        PrimExpr value = Call(storage.dtype(), call_extern_op(), operands)
+                             .template as_or_throw<PrimExpr>();
+        result.push_back(loop_nest(TensorStore(storage, indices, value)));
       }
-
-      std::string allreduce = Impl::MakeScalarAllReduce(
-          op_str, reducing_threads, scale, thread_offset,
-          lower_args.thread_bounds->extent, lower_args.target);
-      Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
-                                            BufferLoad(buffer, indices_0)};
-      if (reducing_threads > Impl::WarpSize(lower_args.target)) {
-        PrimExpr workspace = lower_args.add_workspace(
-            *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
-        thread_reduce_args.push_back(workspace);
-      }
-      auto call =
-          Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-      Stmt body = BufferStore(buffer, call, indices_0);
-
-      for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-        body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                   ForKind::kParallel, body);
-      }
-      step_stmts.push_back(body);
     }
-
-    // Optional logical seed: after the collective every physical slot holds
-    // the final combined value (replicas are equal), so combining the seed
-    // uniformly into each slot applies it exactly once per logical output.
-    if (op.seed.defined()) {
-      Stmt body =
-          BufferStore(buffer,
-                      ReducerV2Combine(op.op, BufferLoad(buffer, indices_0),
-                                       op.seed.value()),
-                      indices_0);
-      for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-        body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                   ForKind::kParallel, body);
-      }
-      step_stmts.push_back(body);
+    if (op.seed) {
+      result.push_back(loop_nest(TensorStore(
+          storage, indices,
+          ReducerV2Combine(op.op, TensorLoad(storage, indices), *op.seed))));
     }
-
-    if (step_stmts.empty()) {
-      return Evaluate(0);
-    }
-    return step_stmts.size() == 1 ? step_stmts[0] : SeqStmt(step_stmts);
+    return SeqStmt(result);
   }
 };
+} // namespace tvm::tl::backend
 
-} // namespace backend
-} // namespace tl
-} // namespace tvm
-
-#endif // TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
+#endif

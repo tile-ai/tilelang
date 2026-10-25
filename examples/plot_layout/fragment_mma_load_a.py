@@ -1,7 +1,7 @@
 import tilelang.language as T
 from typing import Literal, Callable
-from tvm import DataType
-from tvm.tirx import IndexMap
+from tvm_ffi import dtype as DataType
+from tvm_tirx.tirx import IndexMap
 from tilelang.cuda.intrinsics.layout.utils import get_mma_micro_size
 
 

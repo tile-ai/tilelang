@@ -18,7 +18,7 @@
 #include "ascend/op/copy.h"
 #include "layout/layout.h"
 
-#include <tvm/arith/analyzer.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
@@ -50,14 +50,14 @@ enum class DMAPath {
  * \return The matching Ascend DMA route, or DMAPath::kNone when the copy is
  * not handled by an Ascend DMA instruction.
  */
-DMAPath GetDMAPath(const Buffer &src, const Buffer &dst);
+DMAPath GetDMAPath(const TensorVar &src, const TensorVar &dst);
 
 /*!
  * \brief Look up a buffer's inferred Layout in a layout map, matching either
  * the buffer object or its underlying data Var. Returns nullopt if absent.
  */
 Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
-                                     const Buffer &buffer);
+                                     const TensorVar &buffer);
 
 /*!
  * \brief Result of clamping a DMA copy's ranges to stay in bounds.
@@ -89,7 +89,7 @@ struct BoundedDMACopyRanges {
  * shape structure is unsupported.
  */
 BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
-                                      arith::Analyzer *analyzer);
+                                      sym::Analyzer analyzer);
 
 /*!
  * \brief Build a target-neutral tl.fill for an L1 buffer region.
@@ -98,7 +98,7 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
  * exact write footprint. Ascend fill lowering converts it to
  * ascend_fill_l1 after scheduling, which codegen emits as asc_fill_l1.
  */
-Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
+Stmt MakeL1Fill(const TensorVar &dst, const Array<Range> &region,
                 const PrimExpr &value);
 
 /*!
@@ -109,7 +109,7 @@ Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
  */
 Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
-                                arith::Analyzer *analyzer,
+                                sym::Analyzer analyzer,
                                 const PrimExpr &valid_cols);
 
 /*!
@@ -121,7 +121,7 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
  */
 Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
-                                arith::Analyzer *analyzer,
+                                sym::Analyzer analyzer,
                                 const PrimExpr &valid_rows);
 
 } // namespace ascend

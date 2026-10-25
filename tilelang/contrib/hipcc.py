@@ -11,10 +11,10 @@ import os
 import subprocess
 import tempfile
 
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
 from tilelang.env import env
-from tvm.contrib import utils
-from tvm.base import py_str
+from tvm_tirx.support import utils
+from tilelang._compat.utils import py_str
 
 from .rocm import find_hipcc, find_rocm_path, get_rocm_arch
 
@@ -66,7 +66,7 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
     file_name = "my_kernel"
     if target_format not in ["hsaco"]:
         raise ValueError("target_format must be hsaco")
-    pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
+    pass_context = tvm.ir.transform.PassContext.current()
     kernels_output_dir = pass_context.config.get("hip.kernels_output_dir", None)
     temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)
 

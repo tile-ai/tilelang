@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm.ir import Range
-from tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Range
+from tilelang._compat.tvm import tirx
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.language.dtypes import validate_gemm_ab_dtypes
-from tvm.ir.base import Node
-from tvm.ir import PrimExpr
+from tvm_tirx.ir.base import Node
+from tilelang._compat.tirx import PrimExpr
 
 
 @dataclass
@@ -183,7 +183,7 @@ class GemmBase:
         """
         if region is None:
             return []
-        return [r.min for r in region.region]
+        return [r.begin for r in region.region]
 
     @property
     def A_base_offsets(self):

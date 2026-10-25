@@ -1,9 +1,9 @@
 import tilelang.testing
 import tilelang.language as T
-from tvm.arith import Analyzer
-from tvm.ir.expr import Range
-from tvm.tirx.expr import Not, Or
-from tvm import tirx
+from tvm_tirx.sym import Analyzer
+from tvm_tirx.ir import Range
+from tvm_tirx.ir.prim import Not, Or
+from tilelang._compat import tirx
 
 
 def implies(x, y):

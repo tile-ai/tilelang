@@ -5,7 +5,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from examples.dequantize_gemm.quantize.quantization import _tir_packed_to_unsigned_convert_with_zeros
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 @tilelang.testing.requires_cuda

@@ -1,5 +1,5 @@
 """Core helpers for the pass visualizer: load a user TileLang kernel, capture
-real compiler-pass executions, and render a PrimFunc's SBlock structure tree.
+real compiler-pass executions, and render a native function's region structure tree.
 
 ``StructureTreePassInstrument`` observes the canonical CUDA lowering prologue
 through TVM's ``PassInstrument`` API.  The visualizer therefore follows the
@@ -20,9 +20,11 @@ import logging
 from dataclasses import dataclass
 
 from tilelang import tvm as tvm
-from tvm import tirx
-from tvm.tirx import PrimFunc, SBlock
-from tvm.target import Target
+from tilelang._compat.tvm import tirx
+from tvm_tirx import ir
+from tvm_tirx.tirx import Function as PrimFunc
+from tilelang._compat.tensor import tensor_parameter_map
+from tvm_tirx.target import Target
 
 from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
@@ -100,20 +102,20 @@ def _fmt_shape(shape) -> list:
 
 
 def _fmt_buffer(buf) -> str:
-    return f"Buffer({buf.name}, shape={_fmt_shape(buf.shape)}, dtype={buf.dtype}, scope={buf.scope()})"
+    return f"Buffer({buf.name}, shape={_fmt_shape(buf.shape)}, dtype={buf.dtype}, scope={buf.scope().name})"
 
 
 def _layout_fields(obj) -> list[tuple[str, object]] | None:
     """If obj is a Layout/Fragment/Target, return its (field, value) pairs, else None."""
     cls = type(obj).__name__
     if cls == "Layout":
-        return [("input_size", obj.input_size), ("forward_index", obj.forward_index)]
+        return [("input_size", obj.get_input_shape()), ("forward_index", obj.index)]
     if cls in ("Fragment", "PartialFragment"):
         rep_field = "replicate_size (partials)" if cls == "PartialFragment" else "replicate_size"
         return [
-            ("input_size", obj.input_size),
-            ("forward_index", obj.forward_index),
-            ("forward_thread", obj.forward_thread),
+            ("input_size", obj.get_input_shape()),
+            ("forward_index", obj.index),
+            ("forward_thread", obj.thread),
             (rep_field, obj.replicate_size),
             ("thread_range", obj.thread_range),
         ]
@@ -150,37 +152,17 @@ def _print_annotation_value(val, indent: str) -> None:
     print(f"{indent}{val}")
 
 
-def _print_sblock(blk: SBlock, indent: str) -> None:
-    """Print one SBlock's stored fields, then recurse into its body."""
-    print(f"{indent}SBlock({blk.name_hint!r})")
+def _print_region(region: ir.RegionStmt, indent: str) -> None:
+    """Print a native region's operands, bound variables, attributes, and body."""
+    print(f"{indent}RegionStmt({region.op.name!r})")
     inner = indent + "    "
-    print(f"{inner}├─ iter_vars    → {[iv.var.name for iv in blk.iter_vars]}")
-    print(f"{inner}├─ reads        → {[r.buffer.name for r in blk.reads]}")
-    print(f"{inner}├─ writes       → {[w.buffer.name for w in blk.writes]}")
-    if blk.alloc_buffers:
-        print(f"{inner}├─ alloc_buffers → ({len(blk.alloc_buffers)})")
-        for buf in blk.alloc_buffers:
-            print(f"{inner}│      {_fmt_buffer(buf)}")
-    else:
-        print(f"{inner}├─ alloc_buffers → []")
-    print(f"{inner}├─ match_buffers → {[m.buffer.name for m in blk.match_buffers]}")
-    print(f"{inner}├─ init?        → {blk.init is not None}")
-    if blk.annotations:
-        print(f"{inner}├─ annotations  →")
-        items = list(blk.annotations.items())
-        for j, (k, v) in enumerate(items):
-            last = j == len(items) - 1
-            conn = "└─" if last else "├─"
-            # Map / Layout / Fragment values expand; scalars stay inline.
-            if (hasattr(v, "items") and not isinstance(v, str)) or _layout_fields(v):
-                print(f"{inner}│   {conn} {k} →")
-                _print_annotation_value(v, inner + ("│       " if not last else "│       "))
-            else:
-                print(f"{inner}│   {conn} {k} = {v}")
-    else:
-        print(f"{inner}├─ annotations  → {{}}")
+    print(f"{inner}├─ args         → {list(region.args)}")
+    print(f"{inner}├─ body_params  → {[parameter.name for parameter in region.body_params]}")
+    print(f"{inner}├─ result_vars  → {[variable.name for variable in region.result_vars]}")
+    print(f"{inner}├─ attrs")
+    _print_annotation_value(region.attrs, inner + "│      ")
     print(f"{inner}└─ body")
-    _walk_stmt(blk.body, inner + "       ")
+    _walk_stmt(region.body, inner + "       ")
 
 
 # Positional-arg -> field-name schema for each tile op, taken from the C++
@@ -247,31 +229,14 @@ def _print_tileop(call, opname: str, indent: str) -> None:
 
 
 def _walk_stmt(node, indent: str) -> None:
-    """Descend the Stmt tree, printing structural nodes and recursing into SBlocks.
-
-    Only nesting-bearing nodes are expanded; leaf statements are summarized on one
-    line so the SBlock nesting stays the visible backbone of the tree.
-    """
-    from tvm import tirx
-
-    if isinstance(node, tirx.SBlockRealize):
-        _walk_stmt(node.block, indent)
-    elif isinstance(node, SBlock):
-        _print_sblock(node, indent)
-    elif isinstance(node, tirx.AttrStmt):
-        # launch_thread / sblock_attr / kWarpSpecializationScope ... — show key+value, descend.
-        if node.attr_key == "thread_extent":
-            label = f"launch_thread {node.node.var.name} (extent={node.value})"
-            print(f"{indent}AttrStmt[{label}]")
-        else:
-            print(f"{indent}AttrStmt[{node.attr_key}]")
-            print(f"{indent}    └─ value = {node.value}")
-        _walk_stmt(node.body, indent + "    ")
+    """Descend native statement regions and summarize leaves."""
+    if isinstance(node, ir.RegionStmt):
+        _print_region(node, indent)
     elif isinstance(node, tirx.SeqStmt):
         for s in node.seq:
             _walk_stmt(s, indent)
     elif isinstance(node, tirx.For):
-        head = f"For({node.loop_var.name} in {node.min}..{node.min + node.extent}, kind={node.kind})"
+        head = f"For({node.var.name} in {node.begin}..{node.end}, step={node.step}, kind={node.kind})"
         print(f"{indent}{head}")
         if node.annotations:
             for k, v in node.annotations.items():
@@ -305,24 +270,26 @@ def _walk_stmt(node, indent: str) -> None:
                 print(f"{indent}    {'└─' if last else '├─'} arg{i} = {a}")
         else:
             print(f"{indent}Evaluate: {call}")
-    elif isinstance(node, tirx.BufferStore):
+    elif isinstance(node, ir.Bind):
+        print(f"{indent}Bind: {node.var.name}: {node.var.ty} = {node.value}")
+    elif isinstance(node, ir.TensorStore):
         idx = ", ".join(str(i) for i in node.indices)
-        print(f"{indent}BufferStore: {node.buffer.name}[{idx}]")
+        print(f"{indent}TensorStore: {node.dest.name}[{idx}]")
         print(f"{indent}    └─ value = {node.value}")
     else:
         print(f"{indent}{type(node).__name__}")
 
 
 def inspect_structure(mod: tvm.IRModule) -> None:
-    """Print each PrimFunc top-down: params → buffer_map → attrs → body (SBlock tree)."""
+    """Print each PrimFunc top-down: params → tensor contracts → attrs → body (region tree)."""
     for gv, func in mod.functions.items():
         if not isinstance(func, PrimFunc):
             continue
         print(f"PrimFunc `{gv.name_hint}`")
         print(f"├─ params       → {[p.name for p in func.params]}")
         print(f"├─ ret_type     → {func.ret_type}")
-        print("├─ buffer_map   →")
-        for var, buf in func.buffer_map.items():
+        print("├─ tensors      →")
+        for var, buf in tensor_parameter_map(func).items():
             print(f"│      {var.name:<12} : {_fmt_buffer(buf)}")
         print("├─ attrs        →")
         if func.attrs:

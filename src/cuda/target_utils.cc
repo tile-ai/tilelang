@@ -142,126 +142,142 @@ bool TargetHasSMVersionGE(Target target, int version) {
   return arch >= version;
 }
 
-bool IsCudaVectorizableFP8(DataType dtype) {
+bool IsCudaVectorizableFP8(PrimType dtype) {
   // NOTE: E8M0 is a special type of FP8 which is not handled here.
   // We only handle FP8 types which can be represented with
   // __nv_fp8_interpretation_t here.
-  return dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn() ||
-         dtype.is_float8_e5m2();
+  return dtype.MatchesCode(kDLFloat8_e4m3) ||
+         dtype.MatchesCode(kDLFloat8_e4m3fn) ||
+         dtype.MatchesCode(kDLFloat8_e5m2);
 }
 
-bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
+bool IsCudaVectorizableCast(PrimType from_ty, PrimType target_ty) {
   // float16 -> float32
-  if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32)
+  if (from_ty.MatchesElementType(kDLFloat, 16) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32)
     return true;
 
   // float32 -> float16
-  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_float16())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesElementType(kDLFloat, 16))
     return true;
 
   // bfloat16 -> float32
-  if (from_ty.is_bfloat16() && target_ty.is_float() && target_ty.bits() == 32)
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32)
     return true;
 
   // float32 -> bfloat16
-  if (from_ty.is_float() && from_ty.bits() == 32 && target_ty.is_bfloat16())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesElementType(kDLBfloat, 16))
     return true;
 
   // float32 -> float8 (E4M3/E5M2)
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
       IsCudaVectorizableFP8(target_ty))
     return true;
 
   // float8 (E4M3/E5M2) -> float32
-  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
+  if (IsCudaVectorizableFP8(from_ty) && target_ty.MatchesCode(kDLFloat) &&
       target_ty.bits() == 32)
     return true;
 
   // float8 (E4M3/E5M2) -> float16
-  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float16())
+  if (IsCudaVectorizableFP8(from_ty) &&
+      target_ty.MatchesElementType(kDLFloat, 16))
     return true;
 
   // float8 (E4M3/E5M2) -> bfloat16
-  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_bfloat16())
+  if (IsCudaVectorizableFP8(from_ty) &&
+      target_ty.MatchesElementType(kDLBfloat, 16))
     return true;
 
   // float16 -> float8 (E4M3/E5M2)
-  if (from_ty.is_float16() && IsCudaVectorizableFP8(target_ty))
+  if (from_ty.MatchesElementType(kDLFloat, 16) &&
+      IsCudaVectorizableFP8(target_ty))
     return true;
 
   // bfloat16 -> float8 (E4M3/E5M2)
-  if (from_ty.is_bfloat16() && IsCudaVectorizableFP8(target_ty))
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      IsCudaVectorizableFP8(target_ty))
     return true;
 
   // Not implemented for now
 
   // float64(double) -> float8 (E4M3/E5M2)
-  // if (from_ty.is_float() && from_ty.bits() == 64 &&
+  // if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 64 &&
   //     IsCudaVectorizableFP8(target_ty))
   //   return true;
 
   // float8 (E4M3/E5M2) -> float64(double)
-  // if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
+  // if (IsCudaVectorizableFP8(from_ty) && target_ty.MatchesCode(kDLFloat) &&
   //     target_ty.bits() == 64)
   //   return true;
 
   // float8 (E8M0) -> bfloat16
-  if (from_ty.is_float8_e8m0fnu() && target_ty.is_bfloat16())
+  if (from_ty.MatchesCode(kDLFloat8_e8m0fnu) &&
+      target_ty.MatchesElementType(kDLBfloat, 16))
     return true;
 
   // bfloat16 -> float8 (E8M0)
-  if (from_ty.is_bfloat16() && target_ty.is_float8_e8m0fnu())
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      target_ty.MatchesCode(kDLFloat8_e8m0fnu))
     return true;
 
   // float32 -> float8 (E8M0)
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
-      target_ty.is_float8_e8m0fnu())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesCode(kDLFloat8_e8m0fnu))
     return true;
 
   // float64(double) -> float8 (E8M0)
-  if (from_ty.is_float() && from_ty.bits() == 64 &&
-      target_ty.is_float8_e8m0fnu())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 64 &&
+      target_ty.MatchesCode(kDLFloat8_e8m0fnu))
     return true;
 
   // float4_e2m1fn -> float16
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float16())
+  if (from_ty.MatchesElementType(kDLFloat4_e2m1fn, 4) &&
+      target_ty.MatchesElementType(kDLFloat, 16))
     return true;
 
   // float16 -> float4_e2m1fn
-  if (from_ty.is_float16() && target_ty.is_float4_e2m1fn())
+  if (from_ty.MatchesElementType(kDLFloat, 16) &&
+      target_ty.MatchesElementType(kDLFloat4_e2m1fn, 4))
     return true;
 
   // float4_e2m1fn -> float32
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 32)
+  if (from_ty.MatchesElementType(kDLFloat4_e2m1fn, 4) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 32)
     return true;
 
   // float32 -> float4_e2m1fn
-  if (from_ty.is_float() && from_ty.bits() == 32 &&
-      target_ty.is_float4_e2m1fn())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 32 &&
+      target_ty.MatchesElementType(kDLFloat4_e2m1fn, 4))
     return true;
 
   // float4_e2m1fn -> float64(double)
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_float() &&
-      target_ty.bits() == 64)
+  if (from_ty.MatchesElementType(kDLFloat4_e2m1fn, 4) &&
+      target_ty.MatchesCode(kDLFloat) && target_ty.bits() == 64)
     return true;
 
   // float64(double) -> float4_e2m1fn
-  if (from_ty.is_float() && from_ty.bits() == 64 &&
-      target_ty.is_float4_e2m1fn())
+  if (from_ty.MatchesCode(kDLFloat) && from_ty.bits() == 64 &&
+      target_ty.MatchesElementType(kDLFloat4_e2m1fn, 4))
     return true;
 
   // float4_e2m1fn -> bfloat16
-  if (from_ty.is_float4_e2m1fn() && target_ty.is_bfloat16())
+  if (from_ty.MatchesElementType(kDLFloat4_e2m1fn, 4) &&
+      target_ty.MatchesElementType(kDLBfloat, 16))
     return true;
 
   // bfloat16 -> float4_e2m1fn
-  if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn())
+  if (from_ty.MatchesElementType(kDLBfloat, 16) &&
+      target_ty.MatchesElementType(kDLFloat4_e2m1fn, 4))
     return true;
 
   // float4_e2m1fn -> float8 (E4M3)
-  if (from_ty.is_float4_e2m1fn() &&
-      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn()))
+  if (from_ty.MatchesElementType(kDLFloat4_e2m1fn, 4) &&
+      (target_ty.MatchesCode(kDLFloat8_e4m3) ||
+       target_ty.MatchesCode(kDLFloat8_e4m3fn)))
     return true;
 
   return false;
@@ -270,6 +286,11 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
+      .def("tl.IsCudaVectorizableFP8", IsCudaVectorizableFP8)
+      .def("tl.IsCudaVectorizableCast", IsCudaVectorizableCast)
+      .def("tl.TargetIsSm100", TargetIsSm100)
+      .def("tl.TargetIsCuTeDSL", TargetIsCuTeDSL)
+      .def("tl.TargetHasSMVersionGE", TargetHasSMVersionGE)
       .def("tl.TargetIsCuda",
            [](Target target) { return TargetIsCuda(target); })
       .def("tl.TargetIsVolta",

@@ -661,6 +661,31 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert f"void* SFB_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes + sf_tile_bytes}));" in src
 
 
+@pytest.mark.parametrize("reduction_extent", [64, 128])
+def test_nvf4_mma_block_scale_offline_compilation(reduction_extent):
+    import shutil
+
+    from tilelang.contrib import nvcc
+
+    if shutil.which("nvcc") is None:
+        pytest.skip("Offline SM120 validation requires NVCC")
+    if tuple(map(int, nvcc.get_cuda_version())) < (12, 8):
+        pytest.skip("SM120 requires CUDA 12.8 or newer")
+    root = Path(__file__).resolve().parents[3]
+    program = _make_nvf4_matmul_codegen_kernel(128, 128, reduction_extent)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
+    with target:
+        artifact = tilelang.lower(program, target=target)
+    assert "tl::sm120_mma_sync_blockscaled<" in artifact.kernel_source
+    binary = nvcc.compile_cuda(
+        artifact.kernel_source,
+        target_format="cubin",
+        arch="sm_120a",
+        options=["-std=c++17", f"-I{root / 'src'}", f"-I{root / '3rdparty' / 'cutlass' / 'include'}"],
+    )
+    assert len(binary) > 0
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(12, 0)
 @tilelang.testing.requires_cuda_compute_version_lt(13, 0)
@@ -753,11 +778,23 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
 
-    src = mod.script()
-    # Three logical FP4 values use two physical bytes. After 16-byte alignment,
-    # the next buffer starts at logical FP4 offset 32, not byte offset 16.
-    assert "b[32]" in src
-    assert "b[16]" not in src
+    from tvm_tirx import ir
+    from tilelang._compat.stmt_functor import post_order_visit
+
+    bindings = {}
+    post_order_visit(mod, lambda node: bindings.update({node.var.name: node}) if isinstance(node, ir.Bind) else None)
+    first_view, second_view = bindings["a"], bindings["b"]
+    first_pointer, second_pointer = first_view.value.args[0], second_view.value.args[0]
+    assert first_pointer.op.name == second_pointer.op.name == "tirx.ptr_byte_offset"
+    ir.assert_structural_equal(first_pointer.args[0], second_pointer.args[0])
+    alignment = max(16, first_view.var.ty.data_alignment, second_view.var.ty.data_alignment)
+    first_bytes = (3 * T.float4_e2m1fn.bits + 7) // 8
+    second_offset = (first_bytes + alignment - 1) // alignment * alignment
+    assert int(first_pointer.args[1]) == 0
+    assert int(second_pointer.args[1]) == second_offset
+    backing = first_pointer.args[0].args[0]
+    assert backing.dtype == "uint8"
+    assert int(backing.shape[0]) == second_offset + 2
 
 
 @tilelang.testing.requires_cuda

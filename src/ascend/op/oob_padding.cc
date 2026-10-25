@@ -43,7 +43,7 @@ MakeFractalFillRegion(const CopyNode &op, const AscendFractalLayoutInfo &layout,
 
 } // namespace
 
-DMAPath GetDMAPath(const Buffer &src, const Buffer &dst) {
+DMAPath GetDMAPath(const TensorVar &src, const TensorVar &dst) {
   if (IsGlobalBuffer(src) && IsSharedBuffer(dst))
     return DMAPath::kGMToUB;
   if (IsSharedBuffer(src) && IsGlobalBuffer(dst))
@@ -68,12 +68,12 @@ DMAPath GetDMAPath(const Buffer &src, const Buffer &dst) {
 }
 
 Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
-                                     const Buffer &buffer) {
+                                     const TensorVar &buffer) {
   if (layout_map.count(buffer)) {
     return layout_map[buffer];
   }
   for (const auto &kv : layout_map) {
-    if (kv.first->data.same_as(buffer->data)) {
+    if (kv.first.same_as(buffer)) {
       return kv.second;
     }
   }
@@ -81,10 +81,10 @@ Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
 }
 
 BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
-                                      arith::Analyzer *analyzer) {
+                                      sym::Analyzer analyzer) {
   BoundedDMACopyRanges result{op.src_range, op.dst_range, false};
-  if (op.src_range.size() != op.src->shape.size() ||
-      op.dst_range.size() != op.dst->shape.size()) {
+  if (op.src_range.size() != op.src.shape().size() ||
+      op.dst_range.size() != op.dst.shape().size()) {
     return result;
   }
 
@@ -125,7 +125,7 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     auto collect_non_singleton_axes = [](const Array<Range> &ranges) {
       std::vector<size_t> axes, singleton_axes;
       for (size_t i = 0; i < ranges.size(); ++i) {
-        if (!is_one(ranges[i]->extent))
+        if (!IsOne(ranges[i]->extent))
           axes.push_back(i);
         else
           singleton_axes.push_back(i);
@@ -155,10 +155,12 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
           !analyzer->CanProve(src->extent <= dst->extent))
         return result;
     }
-    if (!analyzer->CanProve(src->min + src->extent <= op.src->shape[src_axis],
-                            arith::ProofStrength::kSymbolicBound) ||
-        !analyzer->CanProve(dst->min + dst->extent <= op.dst->shape[dst_axis],
-                            arith::ProofStrength::kSymbolicBound)) {
+    if (!analyzer->CanProve(src->begin + src->extent <=
+                                op.src.shape()[src_axis],
+                            sym::ProofStrength::kSymbolicBound) ||
+        !analyzer->CanProve(dst->begin + dst->extent <=
+                                op.dst.shape()[dst_axis],
+                            sym::ProofStrength::kSymbolicBound)) {
       needs_clamp = true;
     }
   }
@@ -168,14 +170,14 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                                     const std::vector<size_t> &singleton_axes) {
     for (auto &i : singleton_axes) {
       const Range &range = ranges[i];
-      if (!analyzer->CanProve(range->min + range->extent <= shape[i],
-                              arith::ProofStrength::kSymbolicBound)) {
+      if (!analyzer->CanProve(range->begin + range->extent <= shape[i],
+                              sym::ProofStrength::kSymbolicBound)) {
         needs_clamp = true;
       }
     }
   };
-  analyze_singleton_axes(op.src_range, op.src->shape, src_singleton_axes);
-  analyze_singleton_axes(op.dst_range, op.dst->shape, dst_singleton_axes);
+  analyze_singleton_axes(op.src_range, op.src.shape(), src_singleton_axes);
+  analyze_singleton_axes(op.dst_range, op.dst.shape(), dst_singleton_axes);
   if (!needs_clamp) {
     return result;
   }
@@ -186,16 +188,16 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   for (size_t i = 0; i < src_axes.size(); ++i) {
     size_t src_axis = src_axes[i];
     size_t dst_axis = dst_axes[i];
-    DataType dtype = op.src_range[src_axis]->extent.dtype();
+    PrimType dtype = op.src_range[src_axis]->extent.ty();
     auto cast_to_dtype = [dtype](PrimExpr value) {
-      return value.dtype() == dtype ? value : cast(dtype, value);
+      return value.ty() == dtype ? value : Cast(dtype, value);
     };
-    PrimExpr zero = make_zero(dtype);
+    PrimExpr zero = MakeConst(dtype, 0);
     PrimExpr extent = cast_to_dtype(op.src_range[src_axis]->extent);
-    PrimExpr src_remaining = cast_to_dtype(op.src->shape[src_axis]) -
-                             cast_to_dtype(op.src_range[src_axis]->min);
-    PrimExpr dst_remaining = cast_to_dtype(op.dst->shape[dst_axis]) -
-                             cast_to_dtype(op.dst_range[dst_axis]->min);
+    PrimExpr src_remaining = cast_to_dtype(op.src.shape()[src_axis]) -
+                             cast_to_dtype(op.src_range[src_axis]->begin);
+    PrimExpr dst_remaining = cast_to_dtype(op.dst.shape()[dst_axis]) -
+                             cast_to_dtype(op.dst_range[dst_axis]->begin);
     PrimExpr src_valid_extent = Min(extent, Max(src_remaining, zero));
     PrimExpr dst_valid_extent = Min(extent, Max(dst_remaining, zero));
     PrimExpr valid_extent = Min(src_valid_extent, dst_valid_extent);
@@ -208,9 +210,9 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     // in-bounds source extent while the destination carries valid_extent.
     PrimExpr src_transfer_extent =
         preserve_l0c_source_geometry ? src_valid_extent : valid_extent;
-    src_range.Set(src_axis, Range::FromMinExtent(op.src_range[src_axis]->min,
+    src_range.Set(src_axis, Range::FromMinExtent(op.src_range[src_axis]->begin,
                                                  src_transfer_extent));
-    dst_range.Set(dst_axis, Range::FromMinExtent(op.dst_range[dst_axis]->min,
+    dst_range.Set(dst_axis, Range::FromMinExtent(op.dst_range[dst_axis]->begin,
                                                  valid_extent));
   }
 
@@ -218,27 +220,28 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   // 0/1 extent. LowerDMACopy consumes that information to build the final
   // in-bounds guard after AutoSchedule, then normalizes a possibly-empty unit
   // axis to extent 1 only for hardware DMA geometry.
-  auto clamp_singleton_axes =
-      [&](const Array<Range> &original, const Array<PrimExpr> &shape,
-          const std::vector<size_t> &axes, Array<Range> *clamped) {
-        for (size_t axis : axes) {
-          const Range &range = original[axis];
-          DataType dtype = range->extent.dtype();
-          auto cast_to_dtype = [dtype](PrimExpr value) {
-            return value.dtype() == dtype ? value : cast(dtype, value);
-          };
-          PrimExpr zero = make_zero(dtype);
-          PrimExpr remaining =
-              cast_to_dtype(shape[axis]) - cast_to_dtype(range->min);
-          PrimExpr valid_extent =
-              Min(cast_to_dtype(range->extent), Max(remaining, zero));
-          clamped->Set(axis, Range::FromMinExtent(
-                                 range->min, analyzer->Simplify(valid_extent)));
-        }
+  auto clamp_singleton_axes = [&](const Array<Range> &original,
+                                  const Array<PrimExpr> &shape,
+                                  const std::vector<size_t> &axes,
+                                  Array<Range> *clamped) {
+    for (size_t axis : axes) {
+      const Range &range = original[axis];
+      PrimType dtype = range->extent.ty();
+      auto cast_to_dtype = [dtype](PrimExpr value) {
+        return value.ty() == dtype ? value : Cast(dtype, value);
       };
-  clamp_singleton_axes(op.src_range, op.src->shape, src_singleton_axes,
+      PrimExpr zero = MakeConst(dtype, 0);
+      PrimExpr remaining =
+          cast_to_dtype(shape[axis]) - cast_to_dtype(range->begin);
+      PrimExpr valid_extent =
+          Min(cast_to_dtype(range->extent), Max(remaining, zero));
+      clamped->Set(axis, Range::FromMinExtent(
+                             range->begin, analyzer->Simplify(valid_extent)));
+    }
+  };
+  clamp_singleton_axes(op.src_range, op.src.shape(), src_singleton_axes,
                        &src_range);
-  clamp_singleton_axes(op.dst_range, op.dst->shape, dst_singleton_axes,
+  clamp_singleton_axes(op.dst_range, op.dst.shape(), dst_singleton_axes,
                        &dst_range);
 
   result.src = std::move(src_range);
@@ -247,34 +250,34 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   return result;
 }
 
-Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
+Stmt MakeL1Fill(const TensorVar &dst, const Array<Range> &region,
                 const PrimExpr &value) {
-  ICHECK_EQ(region.size(), dst->shape.size());
+  ICHECK_EQ(region.size(), dst.shape().size());
   Array<PrimExpr> mins;
-  Array<PrimExpr> region_args;
+  Array<Expr> region_args;
   for (const Range &range : region)
-    mins.push_back(range->min);
-  region_args.push_back(BufferLoad(dst, mins));
-  region_args.push_back(IntImm(DataType::Int(32), kAccessWrite));
+    mins.push_back(range->begin);
+  region_args.push_back(TensorLoad(dst, mins));
+  region_args.push_back(IntImm(PrimType::Int(32), kAccessWrite));
   for (const Range &range : region)
     region_args.push_back(range->extent);
 
-  PrimExpr dst_region =
-      Call(DataType::Handle(), ::tvm::tl::region(), std::move(region_args));
-  return Evaluate(Call(DataType::Handle(), Fill::Get(), {dst_region, value}));
+  Expr dst_region =
+      Call(std::nullopt, ::tvm::tl::region(), std::move(region_args));
+  return Evaluate(Call(std::nullopt, Fill::Get(), {dst_region, value}));
 }
 
 Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
-                                arith::Analyzer *analyzer,
+                                sym::Analyzer analyzer,
                                 const PrimExpr &valid_cols) {
-  auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
+  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
   size_t dst_ndim = op.dst_range.size();
   ICHECK_GE(dst_ndim, 2U);
   PrimExpr dst_rows = op.dst_range[dst_ndim - 2]->extent;
   PrimExpr dst_cols = op.dst_range[dst_ndim - 1]->extent;
-  PrimExpr dst_row_min = op.dst_range[dst_ndim - 2]->min;
-  PrimExpr dst_col_min = op.dst_range[dst_ndim - 1]->min;
+  PrimExpr dst_row_min = op.dst_range[dst_ndim - 2]->begin;
+  PrimExpr dst_col_min = op.dst_range[dst_ndim - 1]->begin;
   PrimExpr tail_cols = dst_cols - valid_cols;
   if (analyzer->CanProve(tail_cols <= I(0))) {
     return std::nullopt;
@@ -302,21 +305,21 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
   Array<Range> fill_region =
       MakeFractalFillRegion(op, layout, valid_c0_blocks * layout.c0,
                             tail_c0_blocks * layout.c0, I(0), dst_n);
-  PrimExpr fill_value = op.pad_value.value_or(make_zero(op.dst->dtype));
+  PrimExpr fill_value = op.pad_value.value_or(MakeConst(op.dst.dtype(), 0));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 
 Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
-                                arith::Analyzer *analyzer,
+                                sym::Analyzer analyzer,
                                 const PrimExpr &valid_rows) {
-  auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
+  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
   size_t dst_ndim = op.dst_range.size();
   ICHECK_GE(dst_ndim, 2U);
   PrimExpr dst_rows = op.dst_range[dst_ndim - 2]->extent;
   PrimExpr dst_cols = op.dst_range[dst_ndim - 1]->extent;
-  PrimExpr dst_row_min = op.dst_range[dst_ndim - 2]->min;
-  PrimExpr dst_col_min = op.dst_range[dst_ndim - 1]->min;
+  PrimExpr dst_row_min = op.dst_range[dst_ndim - 2]->begin;
+  PrimExpr dst_col_min = op.dst_range[dst_ndim - 1]->begin;
   PrimExpr tail_rows = dst_rows - valid_rows;
   // A full-row tail is outside the non-singleton tile-origin contract rather
   // than padding work for a valid partial tail.
@@ -341,7 +344,7 @@ Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
   PrimExpr dst_c0_blocks = FloorDiv(dst_cols + layout.c0 - I(1), layout.c0);
   Array<Range> fill_region = MakeFractalFillRegion(
       op, layout, I(0), dst_c0_blocks * layout.c0, valid_rows, tail_rows);
-  PrimExpr fill_value = op.pad_value.value_or(make_zero(op.dst->dtype));
+  PrimExpr fill_value = op.pad_value.value_or(MakeConst(op.dst.dtype(), 0));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 

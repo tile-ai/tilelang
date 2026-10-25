@@ -36,7 +36,7 @@ def test_u8_to_f4_to_bf16_traces_symbolic_exponent_clamp(use_buffer_scale):
     )
 
     assert len(min_nodes) == 1
-    assert min_nodes[0].dtype == T.uint16
+    assert tvm.tirx.expr_dtype(min_nodes[0]) == T.uint16
 
 
 if __name__ == "__main__":

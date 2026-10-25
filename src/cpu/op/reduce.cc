@@ -14,10 +14,11 @@
  */
 
 #include "op/reduce.h"
+#include "op/reducer.h"
 
 #include <tvm/runtime/logging.h>
 
-#include "backend/common/op/reduce.h"
+#include "backend/common/op/reduce_value.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
 #include "support/check.h"
@@ -32,123 +33,114 @@ namespace cpu {
 
 struct Reduce {
   static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
-    (void)analyzer;
-
-    // 1. nan_propagate guard: CPU codegen has no __hmax_nan/__hmin_nan
-    //    equivalent for fp16/bf16 max/min/absmax.
-    if (op.nan_propagate &&
-        (op.dst->dtype.is_float16() || op.dst->dtype.is_bfloat16())) {
-      LOG(FATAL) << "CPU reduce does not support nan_propagate=True for "
-                    "float16/bfloat16 max/min/absmax: the CPU codegen has no "
-                    "__hmax_nan/__hmin_nan equivalent intrinsics (CUDA-only). "
-                    "Target was: "
-                 << lower_args.target->str();
-    }
-
-    // 2. buffer_remap resolution (mirror backend/common/op/reduce.h:753-756).
-    auto get_buffer = [&](const Buffer &buffer) {
-      auto it = lower_args.buffer_remap.find(buffer);
-      return it == lower_args.buffer_remap.end() ? buffer : (*it).second;
+                    sym::Analyzer analyzer) {
+    TVM_FFI_CHECK(!backend::reduce::UseNanOp(op, op.dst.dtype()), ValueError)
+        << "CPU reduce does not support nan_propagate for float16/bfloat16";
+    TVM_FFI_CHECK(IsLocalBuffer(op.src) && IsLocalBuffer(op.dst, true),
+                  ValueError)
+        << "CPU reduce requires local source and local/local.var destination "
+           "tensors";
+    TVM_FFI_CHECK_EQ(op.batch, 1, ValueError)
+        << "CPU reduce does not support GPU AllReduce batching";
+    TVM_FFI_CHECK(op.src.dtype() == op.dst.dtype(), ValueError)
+        << "CPU reduce source and destination element types must match";
+    auto get_tensor = [&](const TensorVar &tensor) {
+      return lower_args.buffer_remap.Get(tensor).value_or(tensor);
     };
-    Buffer src_buffer = get_buffer(op.src);
-    Buffer dst_buffer = get_buffer(op.dst);
-
-    // 3. Scope guard: only local src and local/local.var dst are accepted.
-    //    The frontend only emits this combination on CPU; give a readable
-    //    error for anything else instead of silently producing wrong code.
-    if (!IsLocalBuffer(op.src) || !IsLocalBuffer(op.dst, /*allow_var=*/true)) {
-      LOG(FATAL) << "CPU reduce only supports local src and "
-                    "local/local.var dst buffers, got src scope `"
-                 << op.src.scope() << "` and dst scope `" << op.dst.scope()
-                 << "`.";
-    }
-
-    // 4. Constraint checks.
-    //    batch is a GPU AllReduce barrier batching concept; CPU has no
-    //    thread-level reduction so batch > 1 is rejected.
-    ICHECK_EQ(op.batch, 1)
-        << "CPU reduce: batch > 1 is a GPU AllReduce barrier concept and "
-           "is not supported on CPU (no thread-level reduction).";
-    int src_dim = static_cast<int>(op.src->shape.size());
-    int dst_dim = static_cast<int>(op.dst->shape.size());
-    // dim should already be legalized to >= 0 by the frontend
-    // (_legalize_dim in reduce_op.py:12-15), but defend in depth.
-    ICHECK_GE(op.dim, 0) << "CPU reduce: dim must be non-negative";
-    ICHECK_LT(op.dim, src_dim) << "CPU reduce: dim " << op.dim
-                               << " out of range for src ndim " << src_dim;
-    ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
-        << "CPU reduce: dst ndim must be src_ndim-1 (no keepdim) or "
-           "src_ndim (keepdim), got src_ndim="
-        << src_dim << ", dst_ndim=" << dst_dim;
-    ICHECK(src_buffer->dtype == dst_buffer->dtype)
-        << "CPU reduce: src and dst dtypes must match, got "
-        << src_buffer->dtype << " vs " << dst_buffer->dtype;
-
-    // 5. Index construction (mirror backend LowerLocal reduce.h:651-671).
-    Array<Var> dst_vars;
-    Array<PrimExpr> dst_indices;
-    for (int i = 0; i < dst_dim; ++i) {
-      Var var("i" + std::to_string(i));
-      dst_vars.push_back(var);
-      dst_indices.push_back(var);
-    }
-
-    auto make_src_indices = [&](PrimExpr reduce_index) {
-      Array<PrimExpr> indices;
-      for (int i = 0; i < src_dim; ++i) {
-        if (i == op.dim) {
-          indices.push_back(reduce_index);
-        } else if (dst_dim == src_dim) {
-          // keepdim: dst has a size-1 axis at op.dim
-          indices.push_back(dst_vars[i]);
-        } else {
-          indices.push_back(dst_vars[i < op.dim ? i : i - 1]);
-        }
+    auto get_indices = [&](const TensorVar &tensor,
+                           const Array<PrimExpr> &indices) {
+      if (lower_args.buffer_remap.count(tensor) &&
+          lower_args.layout_map.count(tensor)) {
+        return lower_args.layout_map[tensor]->Forward(indices);
       }
       return indices;
     };
-
-    Array<Stmt> stmts;
-
-    // 6. Optional init using the type/dtype-correct identity value
-    //    (backend::reduce::MakeInitValue covers all 8 types x dtype split).
+    TensorVar source = get_tensor(op.src);
+    TensorVar destination = get_tensor(op.dst);
+    const auto &source_ranges = op.srcRegion_->region;
+    const auto &destination_ranges = op.dstRegion_->region;
+    Array<PrimVar> destination_vars;
+    Array<PrimExpr> destination_indices;
+    for (size_t axis = 0; axis < destination_ranges.size(); ++axis) {
+      PrimVar variable("reduce_output_" + std::to_string(axis),
+                       destination_ranges[axis]->extent.ty());
+      destination_vars.push_back(variable);
+      destination_indices.push_back(destination_ranges[axis]->begin + variable);
+    }
+    destination_indices = get_indices(op.dst, destination_indices);
+    PrimVar reduce_variable("reduce_axis", source_ranges[op.dim]->extent.ty());
+    Array<PrimExpr> source_indices;
+    bool keep_dimension = destination_ranges.size() == source_ranges.size();
+    for (size_t axis = 0; axis < source_ranges.size(); ++axis) {
+      PrimExpr coordinate = reduce_variable;
+      if (axis != static_cast<size_t>(op.dim)) {
+        coordinate = destination_vars[keep_dimension ||
+                                              axis < static_cast<size_t>(op.dim)
+                                          ? axis
+                                          : axis - 1];
+      }
+      source_indices.push_back(source_ranges[axis]->begin + coordinate);
+    }
+    source_indices = get_indices(op.src, source_indices);
+    Array<Stmt> statements;
     if (op.clear) {
-      stmts.push_back(BufferStore(
-          dst_buffer, backend::reduce::MakeInitValue(op), dst_indices));
+      statements.push_back(TensorStore(destination, destination_indices,
+                                       backend::reduce::MakeInitValue(op)));
     }
-
-    // 7. Inner reduce loop along op.dim. kSerial (NOT kUnrolled) to avoid
-    //    code-size blowup for large reduce extents compounded by JIT -O0.
-    //    clear=False accumulation falls out naturally: init is skipped and
-    //    MakeReduce reads the existing dst value as the accumulator.
-    Var rv("rv");
-    Stmt reduce_body =
-        BufferStore(dst_buffer,
-                    backend::reduce::MakeReduce(
-                        op, /*vsize=*/1, BufferLoad(dst_buffer, dst_indices),
-                        BufferLoad(src_buffer, make_src_indices(rv))),
-                    dst_indices);
-    stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kSerial,
-                        reduce_body, std::nullopt));
-
-    // 8. Outer dst-dim loops. Built as kSerial then wrapped with
-    //    PragmaUnrollLoop to match the fill.cc CPU op convention.
-    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc)
-    //    only retags the outermost kSerial For it meets and returns without
-    //    recursing into the body, so the inner kSerial reduce loop above is
-    //    left untouched. Under the default UnrollLoopConfig
-    //    (explicit_unroll=false) this is a no-op (no loop body replication);
-    //    the tag is an intent marker consistent with other CPU ops.
-    Stmt body = SeqStmt::Flatten(stmts);
-    for (int i = dst_dim - 1; i >= 0; --i) {
-      body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kSerial, body,
-                 std::nullopt);
+    PrimExpr value = backend::reduce::MakeReduce(
+        op, 1, TensorLoad(destination, destination_indices),
+        TensorLoad(source, source_indices));
+    Stmt reduction = TensorStore(destination, destination_indices, value);
+    PrimType reduce_type = reduce_variable.ty();
+    statements.push_back(For(reduce_variable, MakeConst(reduce_type, 0),
+                             source_ranges[op.dim]->extent,
+                             MakeConst(reduce_type, 1), ForKind::kDefault,
+                             SeqStmt(reduction)));
+    Stmt body = SeqStmt(statements);
+    for (size_t axis = destination_vars.size(); axis-- > 0;) {
+      PrimType type = destination_vars[axis].ty();
+      body = For(destination_vars[axis], MakeConst(type, 0),
+                 destination_ranges[axis]->extent, MakeConst(type, 1),
+                 ForKind::kDefault, SeqStmt(body));
     }
-    if (dst_dim >= 1) {
-      body = PragmaUnrollLoop(Downcast<For>(body));
+    if (!destination_vars.empty()) {
+      body = PragmaUnrollLoop(body.as_or_throw<For>());
     }
     return body;
+  }
+};
+
+struct FinalizeReducer {
+  static Stmt Lower(const FinalizeReducerOpNode &operation,
+                    const LowerArgs &arguments, sym::Analyzer analyzer) {
+    TVM_FFI_CHECK(analyzer->CanProveEqual(arguments.thread_bounds->extent, 1),
+                  ValueError)
+        << "CPU reducers require one logical participant per grid iteration";
+    for (size_t index = 0; index < operation.plan_steps.size(); index += 2) {
+      TVM_FFI_CHECK(analyzer->CanProveEqual(operation.plan_steps[index], 1),
+                    ValueError)
+          << "A GPU collective plan cannot be lowered as a CPU reducer";
+    }
+    if (!operation.seed)
+      return SeqStmt({});
+    TensorVar storage = arguments.buffer_remap.Get(operation.reducer)
+                            .value_or(operation.reducer);
+    Array<PrimExpr> indices;
+    for (size_t axis = 0; axis < storage.shape().size(); ++axis) {
+      indices.push_back(PrimVar("finalize_index_" + std::to_string(axis),
+                                storage.shape()[axis].ty()));
+    }
+    Stmt result =
+        TensorStore(storage, indices,
+                    ReducerV2Combine(operation.op, TensorLoad(storage, indices),
+                                     *operation.seed));
+    for (size_t axis = indices.size(); axis-- > 0;) {
+      PrimVar index = indices[axis].as_or_throw<PrimVar>();
+      result =
+          For(index, MakeConst(index.ty(), 0), storage.shape()[axis],
+              MakeConst(index.ty(), 1), ForKind::kDefault, SeqStmt(result));
+    }
+    return result;
   }
 };
 
@@ -164,6 +156,9 @@ bool RegisterCPUReduce() {
       MatchCPUReduceTarget,
       cpu::Reduce::Lower,
   });
+  RegisterFinalizeReducerImpl(FinalizeReducerImpl{"cpu.FinalizeReducer",
+                                                  MatchCPUReduceTarget,
+                                                  cpu::FinalizeReducer::Lower});
   return true;
 }
 

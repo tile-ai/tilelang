@@ -1,111 +1,88 @@
-/*!
- * \file target/codegen.h
- * \brief Utility to generate code
- */
 #ifndef TVM_TL_TARGET_CODEGEN_HIP_H_
 #define TVM_TL_TARGET_CODEGEN_HIP_H_
 
+#include "backend/common/codegen/codegen_c_base.h"
 #include "support/check.h"
-#include <tvm/target/codegen.h>
+
+#include <tvm/codegen/codegen.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 
 #include <string>
 #include <unordered_map>
 
-#include "backend/common/codegen/codegen_c_base.h"
-
-namespace tvm {
-namespace codegen {
+namespace tvm::codegen {
 
 class CodeGenTileLangHIP final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangHIP();
+  using CodeGenC::Dispatch_;
+  using CodeGenC::PrintType;
   void SetTarget(Target target) { target_ = std::move(target); }
-  // override behavior
-  void PrintFuncPrefix(std::ostream &os) final;
-  void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
-  void VisitStmt_(const ForNode *op) final;
-  void PrintStorageSync(const CallNode *op) final;
-  void PrintStorageScope(const std::string &scope,
-                         std::ostream &os) final; // NOLINT(*)
-  void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
-                        PrimExpr rhs,
-                        std::ostream &os) final;      // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintVecElemLoad(const std::string &vec, DataType t, int i,
-                        std::ostream &os) final; // NOLINT(*)
-  void PrintVecElemStore(const std::string &vec, DataType t, int i,
-                         const std::string &value) final;
-  void BindThreadIndex(const IterVar &iv) final; // NOLINT(*)
-  void PrintVecElemLoadExpr(DataType t, int i, const std::string &value,
-                            std::ostream &os) final;
-  std::string CastFromTo(std::string value, DataType from,
-                         DataType target) final;
-  // overload visitor
-  void VisitExpr_(const RampNode *op, std::ostream &os) final;      // NOLINT(*)
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
-  void VisitExpr_(const CallNode *op, std::ostream &os) final;
-  void VisitExpr_(const CastNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
-  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitStmt_(const AllocBufferNode *op) final;
-  void VisitStmt_(const AttrStmtNode *op) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
-
-  // Override this as a work around for __grid_constant__ parameter
-  void AddFunction(const PrimFunc &f);
+  void PrintFuncPrefix(std::ostream &stream) final;
+  void PrintExtraAttrs(const tirx::Function &function,
+                       std::ostream &stream) final;
+  void Dispatch_(const ForNode *node) final;
+  void PrintStorageSync(const CallNode *node) final;
+  void PrintStorageScope(const runtime::MemoryScope &scope,
+                         std::ostream &stream) final;
+  void PrintVecBinaryOp(const std::string &operation, const PrimType &type,
+                        PrimExpr left, PrimExpr right,
+                        std::ostream &stream) final;
+  void PrintType(const PrimType &type, std::ostream &stream) final;
+  void PrintVecElemLoad(const std::string &vector, const PrimType &type,
+                        int lane, std::ostream &stream) final;
+  void PrintVecElemStore(const std::string &vector, const PrimType &type,
+                         int lane, const std::string &value) final;
+  void BindThreadIndex(const PrimVar &variable,
+                       const ffi::String &thread_tag) final;
+  void PrintVecElemLoadExpr(const PrimType &type, int lane,
+                            const std::string &value,
+                            std::ostream &stream) final;
+  std::string CastFromTo(std::string value, const PrimType &source,
+                         const PrimType &destination) final;
+  void Dispatch_(const prim::RampNode *node, std::ostream &stream) final;
+  void Dispatch_(const prim::BroadcastNode *node, std::ostream &stream) final;
+  void Dispatch_(const FloatImmNode *node, std::ostream &stream) final;
+  void Dispatch_(const CallNode *node, std::ostream &stream) final;
+  void Dispatch_(const prim::CastNode *node, std::ostream &stream) final;
+  void Dispatch_(const prim::NotNode *node, std::ostream &stream) final;
+  void Dispatch_(const prim::SelectNode *node, std::ostream &stream) final;
+  void Dispatch_(const prim::ShuffleNode *node, std::ostream &stream) final;
+  void Dispatch_(const BindNode *node) final;
+  void Dispatch_(const RegionStmtNode *node) final;
+  void Dispatch_(const TensorStoreNode *node) final;
+  void AddFunction(const GlobalVar &global,
+                   const tirx::Function &function) final;
 
 protected:
-  void EmitPreamble_(std::ostream &os) const final;
-  virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
-                                   PrimExpr index) final;
-  void PrintCallExtern(Type ret_type, ffi::String global_symbol,
-                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
-                       std::ostream &os) final; // NOLINT(*)
+  void EmitPreamble_(std::ostream &stream) const final;
+  std::string GetBufferRef(const PrimType &type, const VarNode *buffer,
+                           PrimExpr index) final;
+  void PrintCallExtern(Type return_type, ffi::String symbol,
+                       const ffi::Array<Expr> &arguments,
+                       bool skip_first_argument, std::ostream &stream) final;
 
 private:
-  // Handle volatile loads
-  void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
-                           std::ostream &os) final;
-
-  // Whether scope such as "__shared__" or "__constant__"  is part of type.
+  void HandleVolatileLoads(const std::string &value, const TensorLoadNode *node,
+                           std::ostream &stream) final;
   bool IsScopePartOfType() const final { return false; }
+  friend void PrintConst(const FloatImmNode *node, std::ostream &stream,
+                         CodeGenTileLangHIP *codegen);
 
-  friend void PrintConst(const FloatImmNode *op, std::ostream &os,
-                         CodeGenTileLangHIP *p);
-
-  // whether need hip_cooperative_groups.h
   bool need_cooperative_groups_{false};
-  // whether need math_constants.h
   bool need_math_constants_h_{false};
-  // whether need mfma.h
   bool need_wmma_h_{false};
-  // whether need fp8.h
   bool enable_fp8_{false};
-  // whether need hip_fp4.h (gfx950 only)
   bool enable_fp4_{false};
-  // Map from FP4 buffer Var to packed buffer variable name (gfx950)
   std::unordered_map<Var, std::string> fp4_packed_buffers_;
-  // The size of the barrier array in shared memory
   int barrier_count_ = -1;
-  // whether need mma.h
   bool need_mma_h_{false};
-  // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
-  // The name of the barrier array in shared memory
   const std::string barrier_name_ = "barrier";
-  // The alignment of the barrier array in shared memory
-  // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
-  // Target
-  Target target_;
+  ffi::Optional<Target> target_;
 };
 
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::codegen
 
-#endif // TVM_TL_TARGET_CODEGEN_HIP_H_
+#endif

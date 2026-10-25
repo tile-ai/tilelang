@@ -15,9 +15,9 @@ from tilelang.utils.language import (
     is_global,
     is_shared,
 )
-from tvm import tirx as tir
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang._compat.tvm import tirx as tir
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 
 GEMM_INST_METAL = "metal.simdgroup"
@@ -84,18 +84,18 @@ class GemmMetalSimdGroup(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = C_region.buffer
+        C_buf = C_region.source
         clear_accum = self.clear_accum
         c_in_register = is_fragment(C_buf) or is_metal_simdgroup(C_buf)
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert is_full_region(C_region), "Fragment output C must be a full region"
         assert c_in_register or is_shared(C_buf), (
-            f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {C_buf.scope()}"
+            f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {C_buf.scope().name}"
         )
 
         if not self.is_gemm_ss():
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
         if c_in_register:
 
@@ -269,13 +269,13 @@ class GemmMetal(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = C_region.buffer
+        C_buf = C_region.source
         clear_accum = self.clear_accum
         c_in_cooperative_tensor = is_metal_cooperative_tensor(C_buf) or is_fragment(C_buf)
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         if not (self.is_gemm_ss() or self.is_gemm_gg()):
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope().name}, B: {self.B.scope().name}")
 
         if c_in_cooperative_tensor:
             assert is_full_region(C_region), "Fragment output C must be a full region"

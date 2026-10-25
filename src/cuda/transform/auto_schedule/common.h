@@ -22,8 +22,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using SchedulerFn = ffi::Optional<WSSchedule> (*)(const tirx::SBlock &block,
-                                                  const tirx::Stmt &body,
+using SchedulerFn = ffi::Optional<WSSchedule> (*)(const RegionStmt &block,
+                                                  const Stmt &body,
                                                   int worker_threads,
                                                   const Target &target);
 
@@ -32,10 +32,32 @@ using SchedulerFn = ffi::Optional<WSSchedule> (*)(const tirx::SBlock &block,
 inline ffi::String ExtractOpId(const ffi::Any &value) {
   if (auto string = value.try_cast<ffi::String>())
     return string.value();
-  if (const auto *imm = value.as<tirx::StringImmNode>())
+  if (const auto *imm = value.as<StringImmNode>())
     return imm->value;
   TVM_FFI_THROW(ValueError) << "AutoWarpSpecialization op id must be a string";
   return "";
+}
+
+inline ffi::Optional<ffi::String> GetWSOpId(const Stmt &statement) {
+  if (const auto *region = statement.as<RegionStmtNode>()) {
+    if (auto value = region->attrs->dict.Get(kWSOpIdKey))
+      return ExtractOpId(*value);
+  }
+  if (const auto *loop = statement.as<ForNode>()) {
+    if (auto value = loop->annotations.Get(kWSOpIdKey))
+      return ExtractOpId(*value);
+  }
+  const CallNode *call = nullptr;
+  if (const auto *binding = statement.as<BindNode>())
+    call = binding->value.as<CallNode>();
+  if (const auto *evaluation = statement.as<EvaluateNode>())
+    call = evaluation->value.as<CallNode>();
+  if (call && call->attrs) {
+    if (auto attributes = call->attrs.value().as<DictAttrs>())
+      if (auto value = attributes.value()->dict.Get(kWSOpIdKey))
+        return ExtractOpId(*value);
+  }
+  return std::nullopt;
 }
 
 } // namespace cuda

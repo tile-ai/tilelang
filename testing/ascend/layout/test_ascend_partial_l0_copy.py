@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
 
 
@@ -85,6 +86,7 @@ def _partial_copy_kernel(mode, dtype, versions):
         ("partial-drain", "float16", 2),
     ],
 )
+@tilelang.testing.requires_ascend
 def test_partial_copies_feed_full_gemm_across_versions(mode, dtype, versions):
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU unavailable")
@@ -115,6 +117,7 @@ def test_partial_copies_feed_full_gemm_across_versions(mode, dtype, versions):
 
 
 @pytest.mark.parametrize("v_layout", [False, True], ids=["ordinary", "v-transpose"])
+@tilelang.testing.requires_ascend
 def test_manual_partial_copies_with_branch_specific_gemm_pitch(v_layout):
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU unavailable")

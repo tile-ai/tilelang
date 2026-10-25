@@ -4,6 +4,8 @@ import torch
 import tilelang.testing
 from tilelang import tvm
 from tilelang.layout import make_gemm_fragment_8x8_transposed
+from tilelang._compat.stmt_functor import post_order_visit
+from tvm_tirx import ir
 
 print(torch.__version__)
 
@@ -54,11 +56,14 @@ def test_scalar_copy_annotations_preserved():
             T.copy(A[0], B[0], annotations={"test.copy": "sync"})
             T.async_copy(A[0], A_shared[0], annotations={"test.copy": "async"})
 
-    lines = main.script().splitlines()
-    copy_line = next(line for line in lines if "T.copy(" in line)
-    async_line = next(line for line in lines if "T.async_copy(" in line)
-    assert 'test.copy="sync"' in copy_line
-    assert 'test.copy="async"' in async_line
+    annotations = {}
+
+    def collect(node):
+        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.attrs and "test.copy" in node.attrs:
+            annotations[node.op.name] = node.attrs["test.copy"]
+
+    post_order_visit(main.body, collect)
+    assert annotations == {"tl.tileop.copy": "sync", "tl.tileop.async_copy": "async"}
 
 
 def run_tilelang_copy_cross_dtype(M=256, N=256, block_M=128, block_N=128, src_dtype=T.float16, dst_dtype=T.bfloat16):
@@ -196,13 +201,9 @@ def tilelang_copy_oob_safe_value_lexical_scope():
         with T.Kernel(1, threads=128):
             inner = T.alloc_shared((BM, BN), "int32")
             outer = T.alloc_shared((BM, BN), "int32")
-            with T.sblock("outer"):
-                T.reads()
-                T.writes()
+            with T.scope():
                 T.annotate_safe_value({A: -1})
-                with T.sblock("inner"):
-                    T.reads()
-                    T.writes()
+                with T.scope():
                     T.annotate_safe_value({A: -99})
                     T.copy(A[0:BM, 0:BN], inner)
                 T.copy(A[0:BM, 0:BN], outer)
@@ -414,12 +415,18 @@ def run_tilelang_copy_fp4(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.
         out_idx=[1],
     )
     source = kernel.get_kernel_source()
-    assert "fp4_e2_t" in source
+    assert "__nv_fp4_e2m1* __restrict__ A_ptr" in source
     # For FP4, use same shape as kernel expects, since int8 is used as storage type
     dummy_input = torch.randint(0, 100, (M, N // 2), device="cuda", dtype=torch.int8)
     output = kernel(dummy_input)
     if src_dtype == dst_dtype:
         assert torch.allclose(output.view(torch.int8), dummy_input)
+    else:
+        encoded = dummy_input.view(torch.uint8)
+        nibbles = torch.stack((encoded & 15, encoded >> 4), dim=-1).reshape(M, N).long()
+        magnitudes = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
+        expected = magnitudes[nibbles & 7] * torch.where(nibbles < 8, 1, -1)
+        torch.testing.assert_close(output.float(), expected, rtol=0, atol=0)
     assert output is not None
 
 

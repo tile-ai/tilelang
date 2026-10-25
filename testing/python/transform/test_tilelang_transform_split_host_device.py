@@ -2,11 +2,12 @@
 """Tests for SplitHostDevice pass."""
 # ruff: noqa
 
+from tvm_ffi import structural_equal
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def run_split_host_device_passes(func: tvm.tirx.PrimFunc):
@@ -17,6 +18,8 @@ def run_split_host_device_passes(func: tvm.tirx.PrimFunc):
     mod = tl.transform.InjectAssumes()(mod)
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tl.transform.SplitHostDevice()(mod)
+    assert tvm.tirx.analysis.check_well_formed(mod)
+    tvm.ir.assert_structural_equal(mod, tvm.ir.load_json(tvm.ir.save_json(mod)))
     return mod
 
 
@@ -39,14 +42,7 @@ def get_host_func(mod: tvm.IRModule):
 def collect_assume_vars(func: tvm.tirx.PrimFunc):
     """Collect all variables used in assume statements."""
     assume_vars = set()
-    in_assume = [False]  # Use list to allow mutation in nested function
-    assume_nodes = []
-
-    def collect_assumes(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.assume":
-            assume_nodes.append(stmt.node)
-
-    tirx.stmt_functor.post_order_visit(func.body, collect_assumes)
+    assume_nodes = collect_assume_conditions(func)
 
     # Now collect variables from assume nodes
     def collect_vars_from_expr(expr):
@@ -64,15 +60,25 @@ def collect_attr_conditions(func: tvm.tirx.PrimFunc, attr_key: str):
     conditions = []
 
     def collect_attrs(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == attr_key:
-            conditions.append(stmt.node)
+        if isinstance(stmt, tvm.ir.RegionStmt) and attr_key in stmt.attrs:
+            conditions.append(stmt.attrs[attr_key])
+        if attr_key == "tl.assume_requires_runtime_check" and isinstance(stmt, tvm.ir.AssertStmt):
+            if any("Assume:" in str(part) for part in stmt.message_parts):
+                conditions.append(stmt.condition)
 
     tirx.stmt_functor.post_order_visit(func.body, collect_attrs)
     return conditions
 
 
 def collect_assume_conditions(func: tvm.tirx.PrimFunc):
-    return collect_attr_conditions(func, "tl.assume")
+    conditions = []
+    tirx.stmt_functor.post_order_visit(
+        func.body,
+        lambda node: conditions.append(node.args[0])
+        if isinstance(node, tvm.ir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == "prim.assume"
+        else None,
+    )
+    return conditions
 
 
 def collect_runtime_check_conditions(func: tvm.tirx.PrimFunc):
@@ -132,7 +138,7 @@ def test_split_host_device_with_user_assume():
 
     # Check that device function has assume statements
     device_str = str(device_func)
-    assert "tl.assume" in device_str, "Device function should have assume statements"
+    assert collect_assume_conditions(device_func), "Device function should have assume statements"
 
     # Check that assume variables are the same objects as function parameters
     # (not dangling variables like n_1)
@@ -175,7 +181,7 @@ def test_split_host_device_with_buffer_shape_assume():
 
     # Check that assumes exist
     device_str = str(device_func)
-    assert "tl.assume" in device_str, "Device function should have assume statements"
+    assert collect_assume_conditions(device_func), "Device function should have assume statements"
 
     # Check that assume variables match parameters
     assume_vars = collect_assume_vars(device_func)
@@ -210,7 +216,7 @@ def test_split_host_device_multiple_assumes():
 
     device_str = str(device_func)
     # Should have multiple assume statements
-    assert device_str.count("tl.assume") >= 3, "Should have at least 3 assume statements"
+    assert len(collect_assume_conditions(device_func)) >= 3, "Should have at least 3 assume statements"
 
     # All assumes should use the parameter, not dangling variables
     assume_vars = collect_assume_vars(device_func)
@@ -291,9 +297,9 @@ def test_split_host_device_lifts_host_evaluable_device_assume():
     assert device_func is not None
 
     expected = main.params[1] % 4 == 0
-    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_assume_conditions(host_func))
-    assert any(tvm.ir.structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
-    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_runtime_check_conditions(host_func))
+    assert len(collect_runtime_check_conditions(host_func)) == 1
+    assert any(structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
+    assert any(structural_equal(condition, expected) for condition in collect_runtime_check_conditions(host_func))
     assert not collect_runtime_check_conditions(device_func)
 
 

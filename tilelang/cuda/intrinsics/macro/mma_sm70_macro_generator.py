@@ -2,12 +2,12 @@ from __future__ import annotations
 import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
-from tvm import DataType
-from tvm import tirx
-from tvm.ir import Range
-from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
+from tilelang._compat.tvm import DataType
+from tilelang._compat.tvm import tirx
+from tvm_tirx.ir import Range
+from tilelang._compat.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
 from tilelang import tvm as tvm
-from tvm.runtime import convert
+from tilelang._compat.tirx import convert
 from tilelang.utils import is_fragment, get_buffer_region_from_load
 from tilelang.cuda.intrinsics.layout.mma_sm70_layout import (
     shared_16x4_to_mma_a_32x4_layout,
@@ -205,10 +205,10 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
+        A_other = [r.begin for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -244,10 +244,10 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
+        B_other = [r.begin for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -379,7 +379,7 @@ class TensorCoreIntrinEmitter:
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
-        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope().name}"
 
         if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
@@ -526,5 +526,5 @@ class TensorCoreIntrinEmitter:
             mins = [idx for idx in obj.indices]
             ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
+            return BufferRegion(obj.source, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")

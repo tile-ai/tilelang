@@ -1,130 +1,115 @@
-import tilelang
 import pytest
-from tilelang import tvm
-from tvm.script import ir as I
-from tvm.script import tirx as T
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
+
+import tilelang
+import tilelang.testing
+from tilelang._compat.stmt_functor import post_order_visit
+from tilelang._compat.tensor import TensorView
+
+
+def _lower(body, parameters):
+    function = tirx.Function(parameters, body).with_attr("global_symbol", "main")
+    module = tilelang.transform.UnrollLoop()(ir.IRModule({"main": function}))
+    assert tirx.analysis.check_well_formed(module)
+    ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
+    return module["main"]
+
+
+def _collect(function, kind):
+    nodes = []
+    post_order_visit(function, lambda node: nodes.append(node) if isinstance(node, kind) else None)
+    return nodes
+
+
+def _unroll(index, extent, body, explicit=False, factor=None):
+    annotations = {"pragma_unroll_explicit": explicit}
+    if factor is not None:
+        annotations["pragma_unroll_factor"] = factor
+    return ir.For(index, 0, extent, 1, ir.ForKind.UNROLLED, body, annotations)
 
 
 def test_unroll_decl_buffer_defs_are_fresh():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((16,), "float32")):
-            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
-                A_flat = T.decl_buffer((16,), "float32", data=A.data)
-                A_flat[0] = T.float32(i)
-
-    after = tilelang.transform.UnrollLoop()(Before)
-    body = after["main"].body
-
-    decls = [stmt for stmt in body.seq if isinstance(stmt, tvm.tirx.DeclBuffer)]
-    stores = [stmt for stmt in body.seq if isinstance(stmt, tvm.tirx.BufferStore)]
-
-    assert len(decls) == 2
-    assert len(stores) == 2
-    assert not decls[0].buffer.same_as(decls[1].buffer)
-    assert decls[0].buffer.data.same_as(decls[1].buffer.data)
-    assert stores[0].buffer.same_as(decls[0].buffer)
-    assert stores[1].buffer.same_as(decls[1].buffer)
+    output = TensorView.create("output", [16], "float32")
+    alias = TensorView.create("alias", [16], "float32")
+    index = ir.Var("index", "int32")
+    body = [alias.declare(output.data), alias.store(0, prim.Cast("float32", index))]
+    result = _lower(_unroll(index, 2, body, explicit=True), [output.tensor])
+    declarations = _collect(result, ir.Bind)
+    stores = _collect(result, ir.TensorStore)
+    assert len(declarations) == len(stores) == 2
+    assert not declarations[0].var.same_as(declarations[1].var)
+    assert declarations[0].value.op.name == declarations[1].value.op.name == "tirx.decl_tensor"
+    ir.assert_structural_equal(declarations[0].value.args[0], declarations[1].value.args[0])
+    assert stores[0].dest.same_as(declarations[0].var)
+    assert stores[1].dest.same_as(declarations[1].var)
 
 
 def test_unroll_explicit_loops_only():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((4,), "int32")):
-            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
-                A[i] = i
-            for j in T.unroll(2, annotations={"pragma_unroll_explicit": False}):
-                A[j + 2] = j
-
-    after = tilelang.transform.UnrollLoop()(Before)
-    body = after["main"].body
-
-    assert isinstance(body, tvm.tirx.SeqStmt)
-    assert isinstance(body.seq[0], tvm.tirx.BufferStore)
-    assert isinstance(body.seq[1], tvm.tirx.BufferStore)
-    assert isinstance(body.seq[2], tvm.tirx.For)
-    assert body.seq[2].kind == tvm.tirx.ForKind.UNROLLED
+    output = TensorView.create("output", [4], "int32")
+    first = ir.Var("first", "int32")
+    second = ir.Var("second", "int32")
+    result = _lower(
+        [_unroll(first, 2, output.store(first, first), explicit=True), _unroll(second, 2, output.store(second + 2, second))],
+        [output.tensor],
+    )
+    assert len(_collect(result, ir.TensorStore)) == 3
+    loops = _collect(result, ir.For)
+    assert len(loops) == 1
+    assert loops[0].kind == ir.ForKind.UNROLLED
+    assert loops[0].var.name == "second"
 
 
 def test_unroll_explicit_loops_preserves_dynamic_and_factor_loops():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(n: T.int32, A: T.Buffer((16,), "int32")):
-            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
-                A[i] = i
-            for j in T.unroll(n):
-                A[j] = j
-            for k in T.unroll(8, annotations={"pragma_unroll_factor": 4}):
-                A[k + 8] = k
-
-    after = tilelang.transform.UnrollLoop()(Before)
-    loops = []
-    post_order_visit(
-        after["main"].body,
-        lambda node: loops.append(node) if isinstance(node, tvm.tirx.For) else None,
+    output = TensorView.create("output", [16], "int32")
+    extent = ir.Var("extent", "int32")
+    first = ir.Var("first", "int32")
+    second = ir.Var("second", "int32")
+    third = ir.Var("third", "int32")
+    result = _lower(
+        [
+            _unroll(first, 2, output.store(first, first), explicit=True),
+            _unroll(second, extent, output.store(second, second)),
+            _unroll(third, 8, output.store(third + 8, third), factor=4),
+        ],
+        [output.tensor, extent],
     )
-
-    assert [loop.loop_var.name for loop in loops] == ["j", "k"]
-    assert loops[0].kind == tvm.tirx.ForKind.UNROLLED
+    loops = _collect(result, ir.For)
+    assert [loop.var.name for loop in loops] == ["second", "third"]
+    assert all(loop.kind == ir.ForKind.UNROLLED for loop in loops)
     assert int(loops[1].annotations["pragma_unroll_factor"]) == 4
 
 
 def test_explicit_unroll_rejects_break_targeting_loop():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((2,), "int32")):
-            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
-                A[i] = i
-                if A[i] != 0:
-                    T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
-
+    output = TensorView.create("output", [2], "int32")
+    index = ir.Var("index", "int32")
+    body = [output.store(index, index), ir.If(output.load(index) != 0, ir.Break(), None)]
     with pytest.raises(ValueError, match="cannot be fully expanded"):
-        tilelang.transform.UnrollLoop()(Before)
+        _lower(_unroll(index, 2, body, explicit=True), [output.tensor])
 
 
 def test_non_explicit_unroll_allows_break():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((2,), "int32")):
-            for i in T.unroll(2):
-                A[i] = i
-                if A[i] != 0:
-                    T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
-
-    after = tilelang.transform.UnrollLoop()(Before)
-    assert isinstance(after["main"].body, tvm.tirx.For)
-    assert after["main"].body.kind == tvm.tirx.ForKind.UNROLLED
+    output = TensorView.create("output", [2], "int32")
+    index = ir.Var("index", "int32")
+    body = [output.store(index, index), ir.If(output.load(index) != 0, ir.Break(), None)]
+    result = _lower(_unroll(index, 2, body), [output.tensor])
+    assert len(_collect(result, ir.For)) == 1
+    assert _collect(result, ir.For)[0].kind == ir.ForKind.UNROLLED
+    assert len(_collect(result, ir.Break)) == 1
 
 
 def test_explicit_unroll_allows_break_targeting_nested_loop():
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((4,), "int32")):
-            for i in T.unroll(2, annotations={"pragma_unroll_explicit": True}):
-                for j in T.serial(2):
-                    A[i * 2 + j] = j
-                    if A[i * 2 + j] != 0:
-                        T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.loop_break")))
-
-    after = tilelang.transform.UnrollLoop()(Before)
-    loops = []
-    post_order_visit(
-        after["main"].body,
-        lambda node: loops.append(node) if isinstance(node, tvm.tirx.For) else None,
-    )
-
+    output = TensorView.create("output", [4], "int32")
+    outer = ir.Var("outer", "int32")
+    inner = ir.Var("inner", "int32")
+    body = [output.store(outer * 2 + inner, inner), ir.If(output.load(outer * 2 + inner) != 0, ir.Break(), None)]
+    inner_loop = ir.For(inner, 0, 2, 1, ir.ForKind.DEFAULT, body)
+    result = _lower(_unroll(outer, 2, inner_loop, explicit=True), [output.tensor])
+    loops = _collect(result, ir.For)
     assert len(loops) == 2
-    assert all(loop.kind == tvm.tirx.ForKind.SERIAL for loop in loops)
+    assert all(loop.kind == ir.ForKind.DEFAULT for loop in loops)
+    assert all(len(_collect(loop, ir.Break)) == 1 for loop in loops)
 
 
 if __name__ == "__main__":
-    test_unroll_decl_buffer_defs_are_fresh()
-    test_unroll_explicit_loops_only()
-    test_unroll_explicit_loops_preserves_dynamic_and_factor_loops()
+    tilelang.testing.main()

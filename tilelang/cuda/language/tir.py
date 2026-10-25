@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import tvm
-import tvm.tirx.op as _tvm_op
-from tvm.tirx.expr import IntImm
+import tilelang._compat.tvm as tvm
+import tilelang._compat.tirx as _tvm_op
+from tilelang._compat.tirx import IntImm
 
 from tilelang.language.tir.exports import CUDA_ONLY_TIR_EXPORTS, SHARED_LEGACY_TIR_EXPORTS
+from tvm_tirx.tirx.script import ptx_legacy as ptx_legacy
 from tilelang.language.tir.ir import (
     _dtype_forward,
     _op_wrapper,

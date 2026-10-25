@@ -1,10 +1,13 @@
+import re
+
 import pytest
 import torch
+from tvm_tirx import ir, tirx as native_tirx
 
 import tilelang
 import tilelang.testing
 from tilelang import language as T, tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 @pytest.fixture(autouse=True)
@@ -16,12 +19,41 @@ def _disable_tilelang_cache():
         tilelang.enable_cache()
 
 
-def _generated_call_lines(source, function):
-    return [line for line in source.splitlines() if f"{function}(" in line and not line.lstrip().startswith("TL_DEVICE")]
+def _assert_packed_lane_loads(source, dtype, lanes):
+    loads = [line for line in source.splitlines() if re.search(r"reinterpret_cast<const unsigned char\*>\(\w+\)", line)]
+    assert len(loads) == lanes
+    for lane, line in enumerate(loads):
+        assert f"bytes[{lane // 2}] =" in line
+        assert f"<< {(lane % 2) * 4}" in line
+        assert "& 15U" in line
+        assert ("^ 8U) - 8" in line) == (dtype == "int4")
 
 
-def _generated_call_count(source, function):
-    return sum(line.count(f"{function}(") for line in _generated_call_lines(source, function))
+def _assert_packed_x2_construction(source):
+    if "sizeof...(values) == 2" in source:
+        assert "bytes[lane / 2] |= (elements[lane] & 15U) << ((lane % 2) * 4)" in source
+    else:
+        stores = [line for line in source.splitlines() if "bytes[0] =" in line]
+        assert len(stores) == 2
+        assert "<< 0" in stores[0]
+        assert "(bytes[0] & 15U)" in stores[1] and "<< 4" in stores[1]
+
+
+def _device_source(func):
+    params = []
+    bindings = []
+    for param in func.params:
+        if isinstance(param.ty, native_tirx.TensorType):
+            pointer = ir.Var(f"{param.name}_ptr", ir.PtrType(param.ty.dtype, param.ty.scope))
+            params.append(pointer)
+            bindings.append(ir.Bind(param, ir.Call("tirx.decl_tensor", [pointer], ty_args=[param.ty])))
+        else:
+            params.append(param)
+    body = ir.SeqStmt([*bindings, func.body]) if bindings else func.body
+    device = native_tirx.Function(params, body, func.ret_type, attrs=func.attrs)
+    mod = ir.IRModule({str(func.attrs["global_symbol"]): device})
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
 def _packed_input(dtype, n):
@@ -48,9 +80,7 @@ def _packed_x2_select_source(dtype):
     func = tirx.PrimFunc([on_true, on_false], tirx.Evaluate(selected))
     func = func.with_attr("global_symbol", "packed_x2_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"packed_x2_select": func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return _device_source(func)
 
 
 def _packed_x2_constructor_source(dtype, constructor):
@@ -62,9 +92,8 @@ def _packed_x2_constructor_source(dtype, constructor):
         buffer = tirx.decl_buffer((4,), dtype=dtype, name="input")
         index = tirx.Ramp(tirx.const(0, "int32"), tirx.const(2, "int32"), 2)
         func = tirx.PrimFunc(
-            [buffer.data],
+            [buffer],
             tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
-            buffer_map={buffer.data: buffer},
         )
     elif constructor == "shuffle":
         low = tirx.Var("low", dtype)
@@ -78,9 +107,7 @@ def _packed_x2_constructor_source(dtype, constructor):
 
     func = func.with_attr("global_symbol", name)
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return _device_source(func)
 
 
 def _packed_vector_load_source(
@@ -94,7 +121,7 @@ def _packed_vector_load_source(
 ):
     name = f"packed_{dtype}_x{lanes}_load"
     buffer = tirx.decl_buffer((64,), dtype=dtype, name="input")
-    params = [buffer.data]
+    params = [buffer]
 
     if dynamic_base:
         dynamic = tirx.Var("base", "int32")
@@ -114,16 +141,13 @@ def _packed_vector_load_source(
     func = tirx.PrimFunc(
         params,
         tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
-        buffer_map={buffer.data: buffer},
     )
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
         "calling_conv",
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
-    mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return _device_source(func)
 
 
 def _packed_vector_store_source(
@@ -138,7 +162,7 @@ def _packed_vector_store_source(
     name = f"packed_{dtype}_x{lanes}_store"
     buffer = tirx.decl_buffer((64,), dtype=dtype, name="output")
     value = tirx.Var("value", f"{dtype}x{lanes}")
-    params = [buffer.data, value]
+    params = [buffer, value]
 
     if dynamic_base:
         dynamic = tirx.Var("base", "int32")
@@ -158,16 +182,13 @@ def _packed_vector_store_source(
     func = tirx.PrimFunc(
         params,
         tirx.BufferStore(buffer, value, [index]),
-        buffer_map={buffer.data: buffer},
     )
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
         "calling_conv",
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
-    mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return _device_source(func)
 
 
 def _packed_x2_broadcast_kernel(dtype, value):
@@ -259,13 +280,13 @@ def test_packed_int4x2_lane_select_codegen(dtype):
     assignments = [line for line in source.splitlines() if "on_true" in line and "on_false" in line and "=" in line]
 
     assert len(assignments) == 2
-    assert all("((const unsigned char*)" in line for line in assignments)
-    assert all(line.startswith("  ((unsigned char*)") for line in assignments)
+    assert all("reinterpret_cast<const unsigned char*>" in line for line in assignments)
+    assert all("bytes[0] =" in line for line in assignments)
     assert all(f"on_true.{lane}" not in source for lane in "xy")
     assert all(f"on_false.{lane}" not in source for lane in "xy")
     assert ">> 0" in assignments[0] and "<< 0" in assignments[0]
     assert ">> 4" in assignments[1] and "<< 4" in assignments[1]
-    assert all(("^ 8) - 8" in line) == (dtype == "int4") for line in assignments)
+    assert all(("^ 8U) - 8" in line) == (dtype == "int4") for line in assignments)
 
 
 @tilelang.testing.requires_cuda
@@ -273,10 +294,7 @@ def test_packed_int4x2_lane_select_codegen(dtype):
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_packed_int4x2_constructor_codegen(dtype, constructor):
     source = _packed_x2_constructor_source(dtype, constructor)
-    helper = "tl_pack_uint4x2" if dtype == "uint4" else "tl_pack_int4x2"
-    calls = [line for line in source.splitlines() if f"{helper}(" in line and not line.lstrip().startswith("TL_DEVICE")]
-
-    assert len(calls) == 1
+    _assert_packed_x2_construction(source)
     assert "make_int8_t(" not in source
     assert "make_uint8_t(" not in source
 
@@ -304,12 +322,8 @@ def test_packed_int4x2_gather_uses_logical_indices(
         dynamic_base=dynamic_base,
     )
 
-    pack_lines = _generated_call_lines(source, f"tl_pack_{dtype}x2")
-    assert _generated_call_count(source, f"tl_{dtype}_packed_load") == 2
-    assert len(pack_lines) == 1
-    pack_line = pack_lines[0]
-    assert pack_line.count("v_.x") == 1
-    assert pack_line.count("v_.y") == 1
+    _assert_packed_lane_loads(source, dtype, 2)
+    _assert_packed_x2_construction(source)
 
 
 @tilelang.testing.requires_cuda
@@ -323,9 +337,9 @@ def test_packed_int4x2_gather_uses_logical_indices(
 def test_packed_int4x2_aligned_load_keeps_direct_path(dtype, storage_type):
     source = _packed_vector_load_source(dtype, base=2, stride=1)
 
-    assert f"*((({storage_type}*)input) + 1);" in source
-    assert f"tl_{dtype}_packed_load(" not in source
-    assert f"tl_pack_{dtype}x2(" not in source
+    assert f"*((({storage_type}*)input_ptr) + 2 / 2);" in source
+    assert "packed_load" not in source
+    assert "bytes[0]" not in source
 
 
 @tilelang.testing.requires_cuda
@@ -345,9 +359,9 @@ def test_packed_int4x2_symbolic_aligned_load_keeps_direct_path(dtype, storage_ty
         dynamic_scale=2,
     )
 
-    assert f"(({storage_type}*)input)" in source
-    assert not _generated_call_lines(source, f"tl_{dtype}_packed_load")
-    assert not _generated_call_lines(source, f"tl_pack_{dtype}x2")
+    assert f"(({storage_type}*)input_ptr)" in source
+    assert "packed_load" not in source
+    assert "bytes[0]" not in source
 
 
 @tilelang.testing.requires_cuda
@@ -381,8 +395,8 @@ def test_packed_int4x2_aligned_store_keeps_direct_path(
         dynamic_scale=dynamic_scale,
     )
 
-    assert f"(({storage_type}*)output)" in source
-    assert f"tl_{dtype}_packed_store(" not in source
+    assert f"(({storage_type}*)output_ptr)" in source
+    assert "bytes[0]" not in source
 
 
 @tilelang.testing.requires_cuda
@@ -403,7 +417,7 @@ def test_packed_int4x2_unsafe_store_rejected(
     dynamic_base,
     dynamic_scale,
 ):
-    with pytest.raises(tvm.TVMError, match="provably divisible by the vector lane count"):
+    with pytest.raises((ValueError, RuntimeError), match="provably divisible by the vector lane count"):
         _packed_vector_store_source(
             dtype,
             base,
@@ -463,19 +477,19 @@ def test_packed_int4_wide_aligned_access_keeps_direct_path(
         ("int4", 32): "int4",
         ("uint4", 32): "uint4",
     }[(dtype, lanes)]
-    buffer_name = "input" if access == "load" else "output"
-    expected_access = f"*((({carrier_type}*){buffer_name}) + 1)"
+    buffer_name = "input_ptr" if access == "load" else "output_ptr"
+    expected_access = f"*((({carrier_type}*){buffer_name}) + {lanes} / {lanes})"
 
     if access == "load":
         assert f"{expected_access};" in constant_source
     else:
         assert f"{expected_access} = value;" in constant_source
-    assert f"tl_{dtype}_packed_load(" not in constant_source
-    assert f"tl_{dtype}_packed_store(" not in constant_source
+    assert "packed_load" not in constant_source
+    assert "bytes[0]" not in constant_source
 
-    helper = f"tl_{dtype}_packed_load" if access == "load" else f"tl_{dtype}_packed_store"
     assert f"(({carrier_type}*){buffer_name})" in symbolic_source
-    assert not _generated_call_lines(symbolic_source, helper)
+    assert "packed_load" not in symbolic_source
+    assert "bytes[0]" not in symbolic_source
 
 
 @tilelang.testing.requires_cuda
@@ -490,7 +504,7 @@ def test_packed_int4_wide_unsafe_store_rejected(dtype, lanes):
     ]
     for base, stride, dynamic_base, dynamic_scale in unsafe_cases:
         with pytest.raises(
-            tvm.TVMError,
+            (ValueError, RuntimeError),
             match="provably divisible by the vector lane count",
         ):
             _packed_vector_store_source(
@@ -529,7 +543,7 @@ def test_packed_int4_wide_unaligned_load_uses_logical_indices(
         lanes=lanes,
     )
 
-    assert _generated_call_count(source, f"tl_{dtype}_packed_load") == lanes
+    _assert_packed_lane_loads(source, dtype, lanes)
 
 
 @tilelang.testing.requires_cuda
@@ -557,7 +571,7 @@ def test_packed_int4_wide_strided_gather_runtime(dtype, lanes):
     )
 
     assert torch.equal(result.view(torch.uint8), expected)
-    assert _generated_call_count(compiled.get_kernel_source(), f"tl_{dtype}_packed_load") == lanes
+    _assert_packed_lane_loads(compiled.get_kernel_source(), dtype, lanes)
 
 
 @tilelang.testing.requires_cuda
@@ -577,8 +591,8 @@ def test_packed_int4x2_strided_gather_runtime(dtype, values, expected):
     result = compiled(source)
     kernel_source = compiled.get_kernel_source()
 
-    assert _generated_call_count(kernel_source, f"tl_{dtype}_packed_load") == 2
-    assert len(_generated_call_lines(kernel_source, f"tl_pack_{dtype}x2")) == 1
+    _assert_packed_lane_loads(kernel_source, dtype, 2)
+    _assert_packed_x2_construction(kernel_source)
     assert result.view(torch.uint8).item() == expected
 
 
@@ -636,7 +650,7 @@ def test_packed_int4x2_broadcast_runtime(dtype, value):
     compiled(output)
 
     assert output.view(torch.uint8).item() == 0xDD
-    assert f"tl_pack_{dtype}x2(" in compiled.get_kernel_source()
+    _assert_packed_x2_construction(compiled.get_kernel_source())
 
 
 @tilelang.testing.requires_cuda
@@ -649,7 +663,7 @@ def test_packed_int4x2_distinct_lane_runtime(dtype, offset, expected):
     compiled(output)
 
     assert output.view(torch.uint8).item() == expected
-    assert f"tl_pack_{dtype}x2(" in compiled.get_kernel_source()
+    _assert_packed_x2_construction(compiled.get_kernel_source())
 
 
 if __name__ == "__main__":

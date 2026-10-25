@@ -7,129 +7,134 @@
  * deduplicated result back to the PrimFunc attrs. This makes annotation
  * placement within the function body flexible for frontends.
  */
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/transform.h>
-#include <tvm/tirx/function.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "compat/expr.h"
+#include "op/builtin.h"
+#include "op/operator.h"
+
 #include <tvm/tirx/transform.h>
 
-#include "../op/builtin.h"
+#include <set>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+namespace {
 
-using namespace ffi;
-using namespace tvm::tirx;
-
-class NonRestrictCollector : public StmtVisitor {
+class NonRestrictCollector : public tirx::StmtExprMutator {
 public:
-  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
+  explicit NonRestrictCollector(ffi::Array<Var> parameters)
+      : parameters_(std::move(parameters)) {}
 
-  Array<Var> Result() const {
-    Array<Var> out;
-    out.reserve(collected_.size());
-    for (const Var &v : collected_)
-      out.push_back(v);
-    return out;
+  void Collect(const ffi::Any &annotation) {
+    for (const ffi::Any &item : annotation.cast<ffi::Array<ffi::Any>>()) {
+      if (auto index = GetIntAnnotation(item)) {
+        TVM_FFI_CHECK(*index >= 0 &&
+                          *index < static_cast<int64_t>(parameters_.size()),
+                      ValueError)
+            << "Non-restrict parameter index is out of range";
+        indices_.insert(*index);
+        continue;
+      }
+      auto value = item.cast<Expr>();
+      Var variable = GetVarFromAccessPtr(value);
+      if (auto index = FindParameter(variable)) {
+        indices_.insert(index.value());
+        continue;
+      }
+      std::string name = Normalize(variable->name);
+      ffi::Optional<int> matched;
+      for (size_t index = 0; index < parameters_.size(); ++index) {
+        if (Normalize(parameters_[index]->name) == name) {
+          TVM_FFI_CHECK(!matched, ValueError)
+              << "Ambiguous non-restrict parameter name: " << name;
+          matched = static_cast<int>(index);
+        }
+      }
+      TVM_FFI_CHECK(matched.has_value(), ValueError)
+          << "Non-restrict annotation must refer to a function parameter: "
+          << name;
+      indices_.insert(matched.value());
+    }
+  }
+
+  ffi::Array<IntImm> Result() const {
+    ffi::Array<IntImm> result;
+    for (int index : indices_) {
+      result.push_back(IntImm::Int32(index));
+    }
+    return result;
   }
 
 private:
-  static std::string NormalizeName(const std::string &s) {
-    if (s.size() >= 8 && s.rfind("_handle") == s.size() - 7) {
-      return s.substr(0, s.size() - 7);
+  static std::string Normalize(std::string name) {
+    if (name.size() > 7 && name.ends_with("_handle")) {
+      name.resize(name.size() - 7);
     }
-    return s;
+    return name;
   }
 
-  void MaybeInsert(const Var &v) {
-    if (!v.defined())
-      return;
-    const VarNode *p = v.get();
-    if (seen_ptr_.count(p))
-      return;
-    // Also dedup by normalized name to be robust w.r.t recreated Vars
-    std::string norm = NormalizeName(v->name_hint);
-    if (seen_name_.count(norm))
-      return;
-    seen_ptr_.insert(p);
-    seen_name_.insert(std::move(norm));
-    collected_.push_back(v);
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    auto it = op->annotations.find(attr::kNonRestrictParams);
-    if (it != op->annotations.end()) {
-      if (const auto *arr = (*it).second.as<ArrayObj>()) {
-        // Downcast directly to Array<Var> for convenience
-        Array<Var> vars = tvm::Downcast<Array<Var>>((*it).second);
-        for (const Var &v : vars) {
-          MaybeInsert(v);
-        }
+  ffi::Optional<int> FindParameter(const Var &variable) const {
+    for (size_t index = 0; index < parameters_.size(); ++index) {
+      if (parameters_[index].same_as(variable)) {
+        return static_cast<int>(index);
       }
     }
-    // Recurse into child statements
-    StmtVisitor::VisitStmt_(op);
+    return std::nullopt;
   }
 
-  std::vector<Var> collected_;
-  std::unordered_set<const VarNode *> seen_ptr_;
-  std::unordered_set<std::string> seen_name_;
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto region = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(original)
+                      .as_or_throw<RegionStmt>();
+    if (auto annotation = region->attrs->dict.Get(attr::kNonRestrictParams)) {
+      Collect(annotation.value());
+      auto attributes = region->attrs->dict;
+      attributes.erase(attr::kNonRestrictParams);
+      region.CopyOnWrite()->attrs = DictAttrs(attributes);
+    }
+    return region;
+  }
+
+  ffi::Array<Var> parameters_;
+  std::set<int> indices_;
 };
 
-static PrimFunc HoistNonRestrictParams(PrimFunc f) {
-  if (!f.defined())
-    return f;
-
-  NonRestrictCollector collector;
-  collector.Collect(f->body);
-  Array<Var> from_blocks = collector.Result();
-
-  // Merge with any existing PrimFunc-level attribute if present
-  if (auto opt_existing = f->GetAttr<Array<Var>>(attr::kNonRestrictParams)) {
-    for (const Var &v : opt_existing.value()) {
-      // Reuse the collector's dedup logic by temporarily constructing a new
-      // collector Alternatively, do a small inline dedup mirroring MaybeInsert
-      // Here we inline a simplified pointer-based dedup plus name-based
-      // fallback
-      bool exists = false;
-      for (const Var &cur : from_blocks) {
-        if (cur.get() == v.get() || cur->name_hint == v->name_hint) {
-          exists = true;
-          break;
-        }
-      }
-      if (!exists)
-        from_blocks.push_back(v);
-    }
-  }
-
-  if (from_blocks.empty())
-    return f;
-
-  return WithAttr(std::move(f), attr::kNonRestrictParams,
-                  std::move(from_blocks));
-}
+} // namespace
 
 namespace transform {
 
 tvm::transform::Pass HoistNonRestrictParams() {
-  auto pass_func = [](PrimFunc f, const IRModule &,
-                      const tvm::transform::PassContext &) {
-    return tvm::tl::HoistNonRestrictParams(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    auto collector = ffi::make_object<NonRestrictCollector>(function->params);
+    if (auto existing =
+            function->attrs->dict.Get("tl.non_restrict_param_indices")) {
+      collector->Collect(existing.value());
+    }
+    if (auto legacy = function->attrs->dict.Get(attr::kNonRestrictParams)) {
+      collector->Collect(legacy.value());
+      function = WithoutAttr(std::move(function), attr::kNonRestrictParams);
+    }
+    if (function->body) {
+      SeqStmt body = function->body.value();
+      function.CopyOnWrite()->body =
+          collector->Mutate(body).ValueOrUnchanged(body);
+    }
+    auto indices = collector->Result();
+    if (!indices.empty()) {
+      function = WithAttr(std::move(function), "tl.non_restrict_param_indices",
+                          indices);
+    }
+    return function;
   };
-  return tvm::tirx::transform::CreatePrimFuncPass(
-      pass_func, 0, "tl.HoistNonRestrictParams", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.HoistNonRestrictParams");
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("tl.transform.HoistNonRestrictParams",
+                                   HoistNonRestrictParams);
 }
 
 } // namespace transform
-
-} // namespace tl
-} // namespace tvm
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.HoistNonRestrictParams",
-                        tvm::tl::transform::HoistNonRestrictParams);
-}
+} // namespace tvm::tl

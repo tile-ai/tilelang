@@ -6,23 +6,22 @@ from itertools import chain
 from typing import Union
 from collections.abc import Sequence
 
-import tvm
 import tvm_ffi
-from tvm.ir import PrimExpr, Range
-from tvm.ir.base import Node
-from tvm.runtime import Scriptable
+from tvm_tirx.ir import Expr, Range
+from tvm_tirx.ir import Node
+from tvm_tirx.ir import Scriptable
 
-from tilelang._typing import BufferLikeType
+from ._utils import BufferLikeType
 from . import _cute_ffi_api
 from .swizzle_mode import SwizzleMode
 
-PyIntTuple = Union[int, PrimExpr, "ScaledBasis", tuple]
-IntTupleLike = Union[int, PrimExpr, "ScaledBasis", Sequence, "IntTuple"]
+PyIntTuple = Union[int, Expr, "ScaledBasis", tuple]
+IntTupleLike = Union[int, Expr, "ScaledBasis", Sequence, "IntTuple"]
 ModeLike = int | Sequence[int]
 
 
 def to_python(t: IntTuple) -> PyIntTuple:
-    """Unpack an :class:`IntTuple` into Python: a branch becomes a nested ``tuple``, and each leaf becomes a plain ``int`` (static), a PrimExpr (dynamic), or a :class:`ScaledBasis` (basis stride)."""
+    """Unpack an :class:`IntTuple` into Python: a branch becomes a nested ``tuple``, and each leaf becomes a plain ``int`` (static), a Expr (dynamic), or a :class:`ScaledBasis` (basis stride)."""
     if isinstance(t, IntTupleTuple):
         return tuple(to_python(c) for c in t.fields)
     if isinstance(t, IntTupleConst):
@@ -35,14 +34,14 @@ def to_python(t: IntTuple) -> PyIntTuple:
 
 
 def from_python(value: IntTupleLike) -> IntTuple:
-    """Convert a Python value to an FFI :class:`IntTuple` (the inverse of :func:`to_python`): a nested tuple/list becomes an :class:`IntTupleTuple` branch; an int becomes :class:`IntTupleConst`; a PrimExpr becomes :class:`IntTuplePrimExpr`; a :class:`ScaledBasis` becomes :class:`IntTupleScaledBasis`; an already-built :class:`IntTuple` passes through."""
+    """Convert a Python value to an FFI :class:`IntTuple` (the inverse of :func:`to_python`): a nested tuple/list becomes an :class:`IntTupleTuple` branch; an int becomes :class:`IntTupleConst`; a Expr becomes :class:`IntTuplePrimExpr`; a :class:`ScaledBasis` becomes :class:`IntTupleScaledBasis`; an already-built :class:`IntTuple` passes through."""
     if isinstance(value, IntTuple):
         return value
     if isinstance(value, (tuple, list)):
         return _cute_ffi_api.make_int_tuple_tuple([from_python(v) for v in value])
     if isinstance(value, int):
         return _cute_ffi_api.make_int_const(int(value))
-    if isinstance(value, PrimExpr):
+    if isinstance(value, Expr):
         return _cute_ffi_api.make_int_expr(value)
     if isinstance(value, ScaledBasis):
         return _cute_ffi_api.make_scaled_basis(from_python(value.value), list(value.mode))
@@ -96,7 +95,7 @@ class IntTupleConst(IntTuple):
 
 @tvm_ffi.register_object("tl.cute.IntTuplePrimExpr")
 class IntTuplePrimExpr(IntTuple):
-    value: PrimExpr
+    value: Expr
 
 
 @tvm_ffi.register_object("tl.cute.IntTupleScaledBasis")
@@ -304,7 +303,7 @@ class ComposedLayout(Node, Scriptable):
         from tilelang.layout.swizzle import _get_buffer_info
 
         _, _, dtype = _get_buffer_info(buffer)
-        return mode.recast(int(tvm.DataType(dtype).bits), 8)
+        return mode.recast(int(tvm_ffi.dtype(dtype).bits), 8)
 
 
 def restrict(layout: Layout, region: Sequence[Range]) -> tuple[PyIntTuple, Layout]:

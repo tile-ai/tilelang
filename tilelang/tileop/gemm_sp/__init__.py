@@ -1,10 +1,10 @@
 from tilelang import tvm as tvm
 from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
-from tvm import tirx
-from tvm.target import Target
-from tvm.ir.base import Node
-from tvm.ir import Range
-from tvm.runtime import Scriptable
+from tilelang._compat.tvm import tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir.base import Node
+from tvm_tirx.ir import Range
+from tvm_tirx.ir import Scriptable
 import tvm_ffi
 from tilelang import _ffi_api
 from tilelang.ir import GemmSPWarpPolicy
@@ -40,7 +40,7 @@ class GemmSP(Node, Scriptable):
         return self.infer_layout(target, thread_nums)
 
     @tvm_ffi.register_global_func("tl.gemm_sp.lower")
-    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def gemm_sp_lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: tirx.PrimExpr):
         stmt = self.lower(target, layout_map, thread_bounds, thread_index)
         return stmt
 

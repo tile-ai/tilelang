@@ -10,7 +10,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.layout import Layout
 
-REJECT_MATCH = r"Shared buffer `shared` has symbolic extent"
+REJECT_MATCH = r"Shared tensor `shared` with a layout requires positive compile-time extents"
 
 
 @tilelang.testing.requires_cuda

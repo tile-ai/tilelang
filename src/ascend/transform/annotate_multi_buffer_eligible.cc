@@ -30,10 +30,9 @@
  */
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/ir/transform.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -45,6 +44,7 @@
 #include <vector>
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
+#include "ascend/transform/auto_schedule/memory_detector.h"
 #include "ascend/transform/auto_schedule/multi_buffer.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/buffer_version.h"
@@ -67,15 +67,13 @@ using ControlStorageClaims =
 Array<Var> NormalizeEligibleStorages(const Any &annotation) {
   Array<Var> result;
   StorageSet seen;
-  for (const Any &item : Downcast<Array<Any>>(annotation)) {
-    Var storage;
-    if (auto buffer = item.try_cast<Buffer>()) {
-      storage = buffer.value()->data;
-    } else if (auto var = item.try_cast<Var>()) {
+  for (const Any &item : annotation.as_or_throw<Array<Any>>()) {
+    Var storage{ffi::UnsafeInit{}};
+    if (auto var = item.try_cast<Var>()) {
       storage = var.value();
     } else {
       LOG(FATAL) << "'" << kMultiBufferEligible
-                 << "' entries must be Buffer or Var objects, got " << item;
+                 << "' entries must be native storage Vars, got " << item;
     }
     if (seen.insert(storage).second)
       result.push_back(storage);
@@ -170,36 +168,49 @@ AccessOrder AssumeForExecutes(AccessOrder body) {
                                                : body;
 }
 
-class WriteFirstClassifier : public StmtExprVisitor {
+class WriteFirstClassifier : public AnalysisVisitor {
 public:
+  explicit WriteFirstClassifier(const StorageAliasAnalysis *analysis)
+      : analysis_(analysis) {}
+
   AccessOrder Classify(const Stmt &s, const Var &storage) {
     target_storage_ = storage;
     result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitStmt(s);
+    AnalysisVisitor::VisitStmt(s);
     return result_;
   }
 
   AccessOrder Classify(const PrimExpr &e, const Var &storage) {
     target_storage_ = storage;
     result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitExpr(e);
+    AnalysisVisitor::VisitExpr(e);
     return result_;
   }
 
 private:
-  Var target_storage_;
+  Var target_storage_{ffi::UnsafeInit{}};
+  const StorageAliasAnalysis *analysis_;
+
+  bool Matches(const Expr &expression) const {
+    if (expression.same_as(target_storage_))
+      return true;
+    if (analysis_)
+      if (auto access = analysis_->Resolve(expression))
+        return access->root.same_as(target_storage_);
+    return false;
+  }
   AccessOrder result_ = AccessOrder::kUntouched;
 
   // Dispatch short-circuit: skip further work once a terminal is reached.
-  void VisitStmt(const Stmt &s) final {
+  void VisitStmt(const Stmt &s) {
     if (IsTerminal(result_))
       return;
-    StmtExprVisitor::VisitStmt(s);
+    AnalysisVisitor::VisitStmt(s);
   }
-  void VisitExpr(const PrimExpr &e) final {
+  void VisitExpr(const Expr &e) {
     if (IsTerminal(result_))
       return;
-    StmtExprVisitor::VisitExpr(e);
+    AnalysisVisitor::VisitExpr(e);
   }
 
   template <typename F> AccessOrder ClassifyLocal(F f) {
@@ -211,17 +222,17 @@ private:
     return local;
   }
 
-  void VisitExpr_(const BufferLoadNode *op) final {
+  void VisitExpr_(const TensorLoadNode *op) final {
     for (const auto &idx : op->indices) {
       VisitExpr(idx);
       if (IsTerminal(result_))
         return;
     }
-    if (target_storage_.same_as(op->buffer->data))
+    if (Matches(op->source))
       result_ = AccessOrder::kReadFirst;
   }
 
-  void VisitStmt_(const BufferStoreNode *op) final {
+  void VisitStmt_(const TensorStoreNode *op) final {
     // value first, then indices, then the store itself.
     VisitExpr(op->value);
     if (IsTerminal(result_))
@@ -231,7 +242,7 @@ private:
       if (IsTerminal(result_))
         return;
     }
-    if (target_storage_.same_as(op->buffer->data))
+    if (Matches(op->dest))
       result_ = AccessOrder::kWriteFirst;
   }
 
@@ -246,22 +257,20 @@ private:
   void VisitStmt_(const EvaluateNode *op) final { VisitExpr(op->value); }
 
   void VisitStmt_(const ForNode *op) final {
-    VisitExpr(op->min);
+    VisitExpr(op->begin);
     if (IsTerminal(result_))
       return;
-    VisitExpr(op->extent);
+    VisitExpr(op->end);
     if (IsTerminal(result_))
       return;
-    if (op->step.has_value()) {
-      VisitExpr(op->step.value());
-      if (IsTerminal(result_))
-        return;
-    }
+    VisitExpr(op->step);
+    if (IsTerminal(result_))
+      return;
     auto body = ClassifyLocal([&] { VisitStmt(op->body); });
     result_ = SeqCompose(result_, AssumeForExecutes(body));
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
+  void VisitStmt_(const IfNode *op) final {
     VisitExpr(op->condition);
     if (IsTerminal(result_))
       return;
@@ -278,15 +287,22 @@ private:
 
   void VisitStmt_(const BindNode *op) final { VisitExpr(op->value); }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (CanRewriteMultiBufferAttrNode(op->attr_key, op->node)) {
-      VisitExpr(Downcast<PrimExpr>(op->node));
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitExpr(op->value);
-    if (IsTerminal(result_))
+  void VisitStmt_(const RegionStmtNode *op) final {
+    auto key = ScheduleMarkerKey(op);
+    if (!key.empty()) {
+      if (CanRewriteMultiBufferAttrNode(key, ScheduleMarkerPayload(op)) ||
+          key == kScheduleCondition) {
+        VisitExpr(ScheduleMarkerPayload(op).as_or_throw<PrimExpr>());
+        if (IsTerminal(result_))
+          return;
+      }
+      auto body = ClassifyLocal([&] { VisitStmt(UnwrapScheduleMarker(op)); });
+      result_ = SeqCompose(
+          result_, key == kScheduleCondition ? MergeIfThenOnly(body) : body);
       return;
+    }
+    for (const Expr &argument : op->args)
+      VisitExpr(argument);
     VisitStmt(op->body);
   }
 
@@ -299,127 +315,46 @@ private:
                          DemoteIfNotMustExecute(body, /*must_execute=*/false));
   }
 
-  void VisitStmt_(const SBlockNode *op) final {
-    // Reduce-init runs only on the first iteration of the surrounding loop;
-    // its writes are not guaranteed across iterations -> kMaybeWriteFirst.
-    if (op->init.defined()) {
-      auto init = ClassifyLocal([&] { VisitStmt(op->init.value()); });
-      AccessOrder init_eff = init;
-      if (init == AccessOrder::kWriteFirst)
-        init_eff = AccessOrder::kMaybeWriteFirst;
-      result_ = SeqCompose(result_, init_eff);
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitStmt(op->body);
+  void VisitStmt_(const BreakNode *) final {
+    result_ = AccessOrder::kReadFirst;
   }
-
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    VisitExpr(op->predicate);
-    if (IsTerminal(result_))
-      return;
-    bool must_execute = false;
-    if (const auto *imm = op->predicate.as<IntImmNode>())
-      must_execute = (imm->value != 0);
-    auto body = ClassifyLocal([&] { VisitStmt(op->block); });
-    result_ = SeqCompose(result_, DemoteIfNotMustExecute(body, must_execute));
+  void VisitStmt_(const ContinueNode *) final {
+    result_ = AccessOrder::kReadFirst;
+  }
+  void VisitStmt_(const ReturnNode *) final {
+    result_ = AccessOrder::kReadFirst;
   }
 
   void VisitExpr_(const CallNode *op) final {
-    static const Op &region_op = region();
-    static const auto access_ptr_op = Op::Get("tl.access_ptr");
-
-    if (op->op.same_as(region_op)) {
-      HandleRegionCall(op);
-      return;
-    }
-    if (op->op.same_as(access_ptr_op)) {
-      HandleAccessPtrCall(op);
-      return;
-    }
-    for (const auto &arg : op->args) {
-      VisitExpr(arg);
-      if (IsTerminal(result_))
-        return;
-    }
-  }
-
-  // tl.region(BufferLoad(buf, indices...), access_type, extents...)
-  //   access_type: bit 0 = read, bit 1 = write.
-  void HandleRegionCall(const CallNode *op) {
-    if (op->args.size() < 2) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
+    for (const Expr &argument : op->args) {
+      if (const auto *region = argument.as<TensorRegionNode>()) {
+        for (const Range &range : region->region) {
+          VisitExpr(range->begin);
+          VisitExpr(range->extent);
+        }
+      } else {
+        VisitExpr(argument);
       }
-      return;
-    }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mode = op->args[1].as<IntImmNode>();
-    if (!bl || !mode) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
       if (IsTerminal(result_))
         return;
     }
-    for (size_t i = 2; i < op->args.size(); ++i) {
-      VisitExpr(op->args[i]);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int m = mode->value;
-      if (m & 1)
+    MemoryAccessDetector detector;
+    detector.Analyze(Evaluate(ffi::GetRef<Call>(op)));
+    for (const TensorRegion &region : detector.GetReadRegions())
+      if (Matches(region->source)) {
         result_ = AccessOrder::kReadFirst;
-      else if (m & 2)
-        result_ = AccessOrder::kWriteFirst;
-    }
-  }
-
-  // tl.access_ptr(BufferLoad(buf, indices...), extent, rw_mask)
-  //   rw_mask: bit 0 = read, bit 1 = write.
-  void HandleAccessPtrCall(const CallNode *op) {
-    if (op->args.size() < 3) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mask = op->args[2].as<IntImmNode>();
-    if (!bl || !mask) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
-    }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
         return;
-    }
-    VisitExpr(op->args[1]);
-    if (IsTerminal(result_))
-      return;
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int rw = mask->value;
-      if (rw & 1)
+      }
+    for (const Var &variable : detector.GetOpaqueAccessVars())
+      if (Matches(variable)) {
         result_ = AccessOrder::kReadFirst;
-      else if (rw & 2)
+        return;
+      }
+    for (const TensorRegion &region : detector.GetWriteRegions())
+      if (Matches(region->source)) {
         result_ = AccessOrder::kWriteFirst;
-    }
+        return;
+      }
   }
 };
 
@@ -464,7 +399,7 @@ public:
     }
     if (!state.touched)
       return AccessOrder::kUntouched;
-    return IsCovered(Bool(true), state.written_guard, outer_ctx)
+    return IsCovered(IntImm::Bool(true), state.written_guard, outer_ctx)
                ? AccessOrder::kWriteFirst
                : AccessOrder::kMaybeWriteFirst;
   }
@@ -473,7 +408,7 @@ private:
   struct State {
     bool touched{false};
     bool unsafe{false};
-    PrimExpr written_guard{Bool(false)};
+    PrimExpr written_guard{IntImm::Bool(false)};
   };
 
   static bool IsCovered(const PrimExpr &access_guard,
@@ -485,9 +420,10 @@ private:
 
   static PrimExpr MergeWriteGuard(const PrimExpr &known, const PrimExpr &added,
                                   const ConstrSet &outer_ctx) {
-    if (is_zero(known))
+    if ((GetConstInt(known) == 0))
       return added;
-    if (is_zero(added) || GuardsEquivalent(known, added, outer_ctx) ||
+    if ((GetConstInt(added) == 0) ||
+        GuardsEquivalent(known, added, outer_ctx) ||
         GuardImplies(added, known, outer_ctx)) {
       return known;
     }
@@ -514,14 +450,15 @@ private:
 
   static AccessOrder ClassifyPayload(const IRStructure *node,
                                      const Var &storage) {
-    WriteFirstClassifier classifier;
+    auto classifier =
+        ffi::make_object<WriteFirstClassifier>(node->GetStorageAnalysis());
     if (node->IsTask()) {
-      return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
-                                 storage);
+      return classifier->Classify(static_cast<const TaskNode *>(node)->stmt,
+                                  storage);
     }
 
     const auto *control = static_cast<const ControlNode *>(node);
-    AccessOrder header = classifier.Classify(control->task->stmt, storage);
+    AccessOrder header = classifier->Classify(control->task->stmt, storage);
     if (header == AccessOrder::kReadFirst ||
         header == AccessOrder::kWriteFirst) {
       return header;
@@ -534,22 +471,24 @@ private:
 
   static void ProcessNode(const IRStructure *node, const Var &storage,
                           const ConstrSet &outer_ctx, State *state) {
-    PrimExpr active_guard = Bool(true);
-    WriteFirstClassifier classifier;
+    PrimExpr active_guard = IntImm::Bool(true);
+    auto classifier =
+        ffi::make_object<WriteFirstClassifier>(node->GetStorageAnalysis());
     for (const auto &guard : node->GetGuards()) {
       if (guard->IsCondition()) {
         const PrimExpr &condition =
             static_cast<const ConditionGuard *>(guard.get())->condition;
-        ProcessAccess(classifier.Classify(condition, storage), active_guard,
+        ProcessAccess(classifier->Classify(condition, storage), active_guard,
                       outer_ctx, state);
-        active_guard =
-            is_one(active_guard) ? condition : active_guard && condition;
+        active_guard = (GetConstInt(active_guard) == 1)
+                           ? condition
+                           : active_guard && condition;
         continue;
       }
 
       const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
       if (auto node_expr = attribute->node.try_cast<PrimExpr>()) {
-        ProcessAccess(classifier.Classify(node_expr.value(), storage),
+        ProcessAccess(classifier->Classify(node_expr.value(), storage),
                       active_guard, outer_ctx, state);
       }
     }
@@ -630,9 +569,10 @@ private:
     for (const Var &storage : members) {
       if (!task->TouchesStorage(storage))
         continue;
-      bool broadcast_fill = members.size() == 1 &&
-                            !task->GuardsTouchStorage(storage) &&
-                            CanBroadcastFillToStorage(task->stmt, storage);
+      bool broadcast_fill =
+          members.size() == 1 && !task->GuardsTouchStorage(storage) &&
+          CanBroadcastFillToStorage(task->stmt, storage,
+                                    task->GetStorageAnalysis());
       if (!broadcast_fill)
         result.AddUncoveredAccess();
       else if (result.coverage == Coverage::kUntouched)
@@ -697,6 +637,17 @@ public:
       }
     }
     CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
+    std::vector<TaskNode *> tasks;
+    CollectAllTaskNodes(scheduled_tir->tree, tasks);
+    for (const TaskNode *task : tasks) {
+      auto binding = GetFlatTaskBind(task->stmt);
+      if (!binding || task->GetParent() == nullptr)
+        continue;
+      const auto *call = binding.value()->value.as<CallNode>();
+      if (call && call->op.same_as(tirx::alloc_tensor_op()))
+        excluded_storages.insert(
+            task->StorageOf(binding.value()->var.as_or_throw<TensorVar>()));
+    }
     StorageSet expanded;
     for (const Var &storage : excluded_storages)
       for (const Var &member : groups.Members(storage))
@@ -761,7 +712,7 @@ private:
         if (manual_buffers_.count(storage)) {
           if (warned_excluded_storages_.insert(storage).second) {
             LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
-                         << "' claim for storage " << storage->name_hint
+                         << "' claim for storage " << storage->name
                          << " because it is already manually multi-buffered";
           }
           continue;
@@ -769,7 +720,7 @@ private:
         if (single_version_buffers_.count(storage)) {
           if (warned_excluded_storages_.insert(storage).second) {
             LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
-                         << "' claim for storage " << storage->name_hint
+                         << "' claim for storage " << storage->name
                          << " because T.annotate_buffer_versions({buf: 1}) "
                             "disables multi-buffer eligibility; use "
                             "{buf: (1, \"auto\")} to retain eligibility with "
@@ -802,14 +753,41 @@ private:
 using namespace tirx::transform;
 
 tvm::transform::Pass AnnotateMultiBufferEligible() {
-  auto pass_func = [=](PrimFunc f, const IRModule &, const PassContext &) {
+  auto pass_func =
+      [](tirx::Function function, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     return RewriteTilelangKernels(
-        std::move(f), "AnnotateMultiBufferEligible",
+        std::move(function), "AnnotateMultiBufferEligible",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(context.root, context.outer_ctx);
           L0StorageGroups groups(CollectL0SFBindings(context.root));
           auto &metadata = scheduled_tir.metadata;
+          auto storage = scheduled_tir.tree.empty()
+                             ? nullptr
+                             : scheduled_tir.tree.front()->GetStorageAnalysis();
+          auto canonicalize = [&]<typename Value>(ffi::Map<Var, Value> values,
+                                                  const char *description) {
+            ffi::Map<Var, Value> result;
+            for (const auto &[variable, value] : values) {
+              Var root = variable;
+              if (storage)
+                if (auto access = storage->Resolve(variable))
+                  root = access->root;
+              if (auto previous = result.Get(root))
+                ICHECK(previous.value() == value)
+                    << "Conflicting " << description << " for storage "
+                    << root->name;
+              result.Set(root, value);
+            }
+            return result;
+          };
+          metadata.buffer_versions =
+              canonicalize(metadata.buffer_versions, "version counts");
+          metadata.manual_buffer_versions = canonicalize(
+              metadata.manual_buffer_versions, "manual version counts");
+          metadata.buffer_version_modes =
+              canonicalize(metadata.buffer_version_modes, "version modes");
           metadata.buffer_versions = ExpandL0StorageGroupValues(
               metadata.buffer_versions, groups, "version counts");
           metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
@@ -827,7 +805,8 @@ tvm::transform::Pass AnnotateMultiBufferEligible() {
         },
         /*require_kernel=*/false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateMultiBufferEligible", {});
+  return tirx::transform::CreateFunctionPass(pass_func, 0,
+                                             "tl.AnnotateMultiBufferEligible");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

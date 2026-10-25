@@ -1,10 +1,13 @@
+from testing.python.transform._native_ir import make_function
+from tilelang._compat.tensor import tensor_parameter_map
+
 import pytest
 
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang._compat.stmt_functor import post_order_visit
 
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
@@ -43,12 +46,8 @@ def test_nested_vectorized_loop_uses_inner_min():
     outer, inner = tir.Var("j", "int32"), tir.Var("i", "int32")
     index = outer * 8 + inner
     body = tir.BufferStore(b, tir.BufferLoad(a, [index]) + 1, [index])
-    inner_loop = tir.For(inner, 2, 4, tir.ForKind.SERIAL, body)
-    main = tir.PrimFunc(
-        [a.data, b.data],
-        tir.For(outer, 0, 2, tir.ForKind.VECTORIZED, inner_loop),
-        buffer_map={a.data: a, b.data: b},
-    )
+    inner_loop = tir.For(inner, 2, 2 + 4, 1, tir.ForKind.DEFAULT, body)
+    main = make_function([a.data, b.data], tir.For(outer, 0, 2, 1, tir.ForKind.VECTORIZED, inner_loop), buffer_map={a.data: a, b.data: b})
 
     transformed = _run_vectorized_loop_legalizer(main)
     assert _vectorized_extents(transformed["main"]) == [2]
@@ -78,8 +77,7 @@ def _loop_kinds(func):
 
 
 def _undefined_local_vars(func):
-    defined_vars = [*func.params, *(buffer.data for buffer in func.buffer_map.values())]
-    return tvm.tirx.analysis.undefined_vars(func.body, defined_vars)
+    return tvm.tirx.analysis.undefined_vars(func.body, list(func.params))
 
 
 def test_fp32_shared_atomic_stays_scalar_on_sm90():
@@ -92,7 +90,7 @@ def test_fp32_shared_atomic_stays_scalar_on_sm90():
     transformed = _run_vectorize_loop(main)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
+    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.DEFAULT]
     assert not _undefined_local_vars(transformed["main"])
 
 
@@ -105,7 +103,7 @@ def test_fp32_atomic_stays_scalar_on_sm89():
     transformed = _run_vectorize_loop(main, _SM89_TARGET)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
+    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.DEFAULT]
     assert not _undefined_local_vars(transformed["main"])
 
 
@@ -137,7 +135,7 @@ def _vectorized_extents(func):
 
     def collect(node):
         if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED:
-            extents.append(int(node.extent))
+            extents.append(int(tvm.arith.Analyzer().simplify(tvm.tirx.ceildiv(node.end - node.begin, node.step))))
 
     post_order_visit(func.body, collect)
     return extents
@@ -162,15 +160,16 @@ def _plan_atomic_loop(
         ptr = tir.call_intrin("handle", tvm.ir.Op.get("tirx.address_of"), load)
     else:
         assert len(indices) == 1
-        ptr = tir.tvm_access_ptr(tir.type_annotation(dtype), output.data, indices[0], 1, 3)
+        region = tir.BufferRegion(output, [tvm.ir.Range.from_min_extent(indices[0], 1)])
+        ptr = tir.call_intrin("handle", tvm.ir.Op.get("tl.access_ptr"), region, 1, 3)
     atomic = tir.call_intrin("handle", tvm.ir.Op.get("tl.atomic_add_elem_op"), ptr, source[i - loop_min], 0)
-    body = tir.For(i, loop_min, 8, tir.ForKind.VECTORIZED, tir.Evaluate(atomic))
+    body = tir.For(i, loop_min, loop_min + 8, 1, tir.ForKind.VECTORIZED, tir.Evaluate(atomic))
     func = tir.PrimFunc([source, output, offset], body).with_attr("global_symbol", "main")
     return tvm.IRModule({"main": func})
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
+@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "region_access_ptr"])
 @pytest.mark.parametrize(
     "loop_min,index,width",
     [(2, lambda i, _: i, 2), (-2, lambda i, _: i + 2, 4)],
@@ -196,7 +195,7 @@ def test_vector_group_boundary_is_relative_to_min(access):
         body = tir.BufferStore(b, a[i // 4], [i - 2])
     else:
         body = tir.IfThenElse(i // 4 == 0, tir.BufferStore(b, i, [i - 2]), None)
-    func = tir.PrimFunc([a, b], tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body))
+    func = tir.PrimFunc([a, b], tir.For(i, 2, 2 + 4, 1, tir.ForKind.VECTORIZED, body))
     with tvm.target.Target("c"):
         planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
     # At width 4 the lane values of i // 4 are [0, 0, 1, 1], not uniform.
@@ -204,7 +203,7 @@ def test_vector_group_boundary_is_relative_to_min(access):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
+@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "region_access_ptr"])
 @pytest.mark.parametrize(
     "index,width",
     [
@@ -236,7 +235,7 @@ def test_atomic_destination_width_is_planned(index, width, pointer_form):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
+@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "region_access_ptr"])
 @pytest.mark.parametrize(
     "dtype,scope,target,width",
     [
@@ -363,13 +362,7 @@ def test_large_int32_bounded_residual_access_ptr_does_not_abort():
                     T.call_intrin(
                         "float32",
                         tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
-                        T.tvm_access_ptr(
-                            T.type_annotation("float32"),
-                            A.data,
-                            (i - (i // group_size) * group_size) * stride,
-                            1,
-                            3,
-                        ),
+                        T.access_ptr(A[(i - (i // group_size) * group_size) * stride], "rw"),
                         T.float32(1),
                         T.int32(0),
                     )
@@ -393,20 +386,9 @@ def test_overflow_promotion_preserves_let_var_binding():
         tvm.tirx.BufferLoad(input_buffer, [index]),
         [loop_var],
     )
-    loop = tvm.tirx.For(
-        loop_var,
-        0,
-        extent,
-        tvm.tirx.ForKind.VECTORIZED,
-        body,
-    )
-    func = tvm.tirx.PrimFunc(
-        [input_buffer.data, output_buffer.data],
-        loop,
-        buffer_map={
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
+    loop = tvm.tirx.For(loop_var, 0, extent, 1, tvm.tirx.ForKind.VECTORIZED, body)
+    func = make_function(
+        [input_buffer.data, output_buffer.data], loop, buffer_map={input_buffer.data: input_buffer, output_buffer.data: output_buffer}
     )
 
     transformed = _run_vectorized_loop_legalizer(func)
@@ -437,7 +419,7 @@ def test_large_int32_affine_index_under_int64_cast_does_not_abort():
     bindings = []
 
     def collect(node):
-        if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name == "A":
+        if isinstance(node, tvm.tirx.BufferLoad) and node.source.name == "A":
             load_indices.append(node.indices[0])
         elif isinstance(node, tvm.tirx.Bind):
             bindings.append((node.var, node.value))
@@ -448,8 +430,8 @@ def test_large_int32_affine_index_under_int64_cast_does_not_abort():
     cast_values = [value for var, value in bindings if var.same_as(load_indices[0])]
     assert len(cast_values) == 1
     assert isinstance(cast_values[0], tvm.tirx.Cast)
-    assert str(cast_values[0].dtype) == "int64"
-    assert str(cast_values[0].value.dtype) == "int32"
+    assert str(cast_values[0].ty.dtype) == "int64"
+    assert str(cast_values[0].value.ty.dtype) == "int32"
 
     _run_layout_inference(main)
 

@@ -37,16 +37,14 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -62,8 +60,7 @@
 #include "ascend/transform/attr.h"
 #include "buffer_alias.h"
 #include "buffer_version.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
+#include "compat/visit.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -74,6 +71,8 @@ using namespace ascend;
 using ffi::GetRef;
 
 namespace {
+
+inline bool IsOne(const PrimExpr &value) { return GetConstInt(value) == 1; }
 
 // ============================================================================
 // Synchronization site/edge model, collection, and lookup
@@ -86,7 +85,7 @@ struct SyncInsertionSite {
   CoreMask core;
   std::string pipe;
   int domain_id;
-  PrimExpr guard{Bool(true)};
+  PrimExpr guard{IntImm::Bool(true)};
 
   SyncInsertionSite(IRStructure *path_begin, TaskNode *task, bool at_beginning,
                     CoreMask core, const EpochDomain &domain)
@@ -106,10 +105,10 @@ struct SyncInsertionSite {
           << "Lexical-domain site must be a direct child of its owner";
     }
     PrimExpr active_guard = domain.active_guard;
-    bool active_guard_is_enclosed = is_one(active_guard);
+    bool active_guard_is_enclosed = IsOne(active_guard);
     bool path_begin_guard_matches_active = false;
     auto append = [&](PrimExpr term) {
-      guard = is_one(guard) ? std::move(term) : guard && term;
+      guard = IsOne(guard) ? std::move(term) : guard && term;
     };
     std::vector<IRStructure *> path = task->PathFrom(path_begin);
     for (size_t path_index = 0; path_index < path.size(); ++path_index) {
@@ -117,7 +116,7 @@ struct SyncInsertionSite {
       bool has_conditions = path_end->HasConditions();
       if (has_conditions) {
         // Only a guard scope's direct child may absorb its active guard.
-        if (path_end != path_begin || is_one(active_guard) ||
+        if (path_end != path_begin || IsOne(active_guard) ||
             path_begin->GetParent() != domain.owner)
           break;
         PrimExpr condition_guard = path_end->GetConditionGuard();
@@ -133,23 +132,24 @@ struct SyncInsertionSite {
       auto *control = static_cast<ControlNode *>(path_end);
       if (control->BodyHasLoopBreak())
         break;
-      PrimExpr nonempty = control->control->extent >
-                          make_zero(control->control->extent.dtype());
+      const auto &loop = control->control;
+      PrimExpr nonempty = (loop->step > 0 && loop->begin < loop->end) ||
+                          (loop->step < 0 && loop->begin > loop->end);
       bool can_enter = control->task->outer_ctx.CanProve(nonempty);
       if (!can_enter)
         break;
       if (path_end == path_begin && has_conditions)
         active_guard_is_enclosed = path_begin_guard_matches_active;
       const ForNode *for_node = control->control.get();
-      PrimExpr loop_var = for_node->loop_var;
-      PrimExpr min = for_node->min;
-      PrimExpr extent = for_node->extent;
-      PrimExpr step = for_node->step.has_value() ? for_node->step.value()
-                                                 : IntImm(DataType::Int(32), 1);
+      PrimExpr loop_var = for_node->var;
+      PrimExpr min = for_node->begin;
+      PrimExpr end = for_node->end;
+      PrimExpr step = for_node->step;
       if (at_beginning) {
         append(loop_var == min);
       } else {
-        append(((loop_var - min) / step + 1) * step >= extent);
+        append((step > 0 && loop_var + step >= end) ||
+               (step < 0 && loop_var + step <= end));
       }
     }
     ICHECK(path_end != nullptr) << "Failed to find a sync insertion node";
@@ -732,13 +732,13 @@ struct SyncAnalysisResult {
 // Check if any operation in stmt has unit_flag_ctl/ctrl != 0. This walks the
 // whole statement because a T.PerCoreTask leaf may hold a compound body.
 bool HasUnitFlagCtrl(const Stmt &stmt) {
-  class Detector : public StmtExprVisitor {
+  class Detector : public AnalysisVisitor {
   public:
     bool found{false};
 
   private:
     void VisitExpr_(const CallNode *op) final {
-      if (auto ann = op->annotations.Get("unit_flag_ctrl")) {
+      if (auto ann = AscendCallAnnotations(op).Get("unit_flag_ctrl")) {
         if (const auto *imm = ann->as<IntImmNode>()) {
           found = imm->value != 0;
         } else {
@@ -746,11 +746,12 @@ bool HasUnitFlagCtrl(const Stmt &stmt) {
         }
       }
       if (!found)
-        StmtExprVisitor::VisitExpr_(op);
+        AnalysisVisitor::VisitExpr_(op);
     }
-  } detector;
-  detector(stmt);
-  return detector.found;
+  };
+  auto detector = ffi::make_object<Detector>();
+  detector->Visit(stmt);
+  return detector->found;
 }
 
 std::string GetHardEvent(const std::string &producer_pipe,
@@ -807,10 +808,9 @@ public:
   SyncAnalyzer &operator=(const SyncAnalyzer &) = delete;
 
   void Analyze(const std::vector<std::shared_ptr<IRStructure>> &root) {
-    disable_buffer_reuse_ =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(kDisableSharedMemoryReuse, Bool(false))
-            .value();
+    disable_buffer_reuse_ = tvm::transform::PassContext::Current()
+                                ->GetConfig<bool>(kDisableSharedMemoryReuse)
+                                .value_or(false);
     std::vector<IRStructure *> nodes;
     nodes.reserve(root.size());
     for (const std::shared_ptr<IRStructure> &child : root)
@@ -933,8 +933,8 @@ private:
       return std::nullopt;
     const EpochDomain &domain = site_registry_.Domain(sites[src]);
     if (domain.IsCounter() || domain.owner != scope ||
-        UsesVar(domain.active_guard, [&](const VarNode *var) {
-          return scope->control->loop_var.same_as(GetRef<Var>(var));
+        ScheduleExprUsesVar(domain.active_guard, [&](const VarNode *var) {
+          return scope->control->var.same_as(GetRef<Var>(var));
         }))
       return std::nullopt;
     auto order = lifetime_orders_.find(scope);
@@ -1304,7 +1304,12 @@ private:
     std::vector<SyncPoint> sync_points;
     for (const DepInfo &dep : deps) {
       if (dep.storage.has_value()) {
-        std::string storage_scope = GetPtrStorageScope(dep.storage.value());
+        ffi::String storage_scope;
+        const Var &storage = dep.storage.value();
+        if (auto tensor = storage.as<TensorVar>())
+          storage_scope = tensor->scope().name();
+        else if (const auto *pointer = storage->ty.as<PtrTypeNode>())
+          storage_scope = pointer->scope.name();
         if (storage_scope == "local" || storage_scope == "local.var" ||
             storage_scope == "local.fragment") {
           continue;
@@ -1403,8 +1408,8 @@ private:
                                      consumer_core, pair_domain_id});
             DepEdge edge(producer_site, consumer_site, distance, true);
             if (counter_info != nullptr) {
-              PrimExpr iteration = BufferLoad(counter_info->counter,
-                                              {IntImm(DataType::Int(32), 0)});
+              PrimExpr iteration = TensorLoad(counter_info->counter,
+                                              {IntImm(PrimType::Int(32), 0)});
               sync_points.emplace_back(std::move(edge), dep.kind, num_versions,
                                        iteration, counter_owner->loop,
                                        counter_info->counter_group_id);
@@ -1594,14 +1599,18 @@ private:
       // reused.
       if (loop != nullptr) {
         const ForNode *inner = loop->control.get();
-        PrimExpr step = inner->step.has_value()
-                            ? inner->step.value()
-                            : IntImm(inner->extent.dtype(), 1);
+        PrimExpr step = inner->step;
+        PrimExpr trip_count =
+            prim::Max(IntImm(step.ty(), 0),
+                      FloorDiv(inner->end - inner->begin + step -
+                                   prim::Select(step > 0, IntImm(step.ty(), 1),
+                                                IntImm(step.ty(), -1)),
+                               step));
         // Bound only this loop's trip count; outer context may help prove its
         // symbolic extent without flattening any enclosing iterations.
         if (loop->task->outer_ctx.CanProve(
-                inner->extent <=
-                IntImm(inner->extent.dtype(), innermost_num_versions) * step)) {
+                trip_count <=
+                IntImm(trip_count.ty(), innermost_num_versions))) {
           continue;
         }
       }
@@ -1814,29 +1823,29 @@ struct FlagAllocation {
 class ExplicitCrossCoreFlagCollector : public TaskAwareConstrVisitor {
 public:
   CrossCoreFlagReservation Collect(const Stmt &stmt) {
-    operator()(stmt);
+    Visit(stmt);
     return std::move(reservation_);
   }
 
 private:
-  void VisitExpr_(const CallNode *op) final {
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallNode *op) final {
     if (op->op.same_as(tl::ascend_cross_core_set_flag()) ||
         op->op.same_as(tl::ascend_cross_core_wait_flag())) {
       ICHECK_EQ(op->args.size(), 3)
           << "ascend_cross_core_set_flag/wait_flag expects exactly 3 "
              "arguments";
 
-      const PrimExpr &flag_id = op->args[2];
-      arith::Analyzer analyzer;
-      GetConstrSet().Populate(analyzer);
-      arith::ConstIntBound bound = analyzer.const_int_bound(flag_id);
-      arith::Analyzer unconstrained_analyzer;
-      Var unconstrained_flag_id("unconstrained_cross_core_flag_id",
-                                flag_id.dtype());
-      arith::ConstIntBound unconstrained_bound =
-          unconstrained_analyzer.const_int_bound(unconstrained_flag_id);
-      if (bound->min_value == arith::ConstIntBound::kNegInf ||
-          bound->max_value == arith::ConstIntBound::kPosInf ||
+      PrimExpr flag_id = op->args[2].as_or_throw<PrimExpr>();
+      sym::Analyzer analyzer;
+      auto constraints = GetConstrSet().Populate(analyzer);
+      sym::ConstIntBound bound = analyzer->const_int_bound(flag_id);
+      sym::Analyzer unconstrained_analyzer;
+      PrimVar unconstrained_flag_id("unconstrained_cross_core_flag_id",
+                                    flag_id.ty());
+      sym::ConstIntBound unconstrained_bound =
+          unconstrained_analyzer->const_int_bound(unconstrained_flag_id);
+      if (bound->min_value == sym::ConstIntBound::kNegInf ||
+          bound->max_value == sym::ConstIntBound::kPosInf ||
           (bound->min_value == unconstrained_bound->min_value &&
            bound->max_value == unconstrained_bound->max_value)) {
         reservation_.has_unbounded_id = true;
@@ -1849,7 +1858,7 @@ private:
                                                      bound->max_value);
       }
     }
-    ConstrVisitor::VisitExpr_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
   CrossCoreFlagReservation reservation_;
@@ -1857,8 +1866,8 @@ private:
 
 CrossCoreFlagReservation
 CollectExplicitCrossCoreFlags(const Stmt &kernel_body) {
-  ExplicitCrossCoreFlagCollector collector;
-  return collector.Collect(kernel_body);
+  auto collector = ffi::make_object<ExplicitCrossCoreFlagCollector>();
+  return collector->Collect(kernel_body);
 }
 
 class FlagAllocator {
@@ -2141,24 +2150,24 @@ private:
 
     if (!site_registry_.IsCrossCore(sync_point)) {
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), hard_event, 0});
+        flag_infos_.push_back(FlagInfo{
+            src.core, IntImm::Int32(base_id + version), hard_event, 0});
       }
       return;
     }
 
     if (src.core != kCoreCube) {
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), producer_pipe, 1});
+        flag_infos_.push_back(FlagInfo{
+            src.core, IntImm::Int32(base_id + version), producer_pipe, 1});
       }
       for (int sid = 0; sid < 2; ++sid) {
         if (!HasCore(src.core | dst.core, VectorCore(sid)))
           continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         consumer_pipe, 2});
+          flag_infos_.push_back(
+              FlagInfo{kCoreCube, IntImm::Int32(base_id + sid * 16 + version),
+                       consumer_pipe, 2});
         }
       }
     } else {
@@ -2166,14 +2175,14 @@ private:
         if (!HasCore(src.core | dst.core, VectorCore(sid)))
           continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         producer_pipe, 1});
+          flag_infos_.push_back(
+              FlagInfo{kCoreCube, IntImm::Int32(base_id + sid * 16 + version),
+                       producer_pipe, 1});
         }
       }
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{dst.core, Integer(base_id + version), consumer_pipe, 2});
+        flag_infos_.push_back(FlagInfo{
+            dst.core, IntImm::Int32(base_id + version), consumer_pipe, 2});
       }
     }
   }
@@ -2221,7 +2230,7 @@ public:
       for (auto &[_, statements] : *insertions)
         for (SyncInsertion &insertion : statements)
           insertion.statement =
-              Substitute(insertion.statement, {{old_var, new_var}});
+              RemapScheduleVariables(insertion.statement, {{old_var, new_var}});
   }
 
 private:
@@ -2241,8 +2250,9 @@ Stmt MakeSyncTask(const Stmt &body, CoreMask core_mask) {
   ICHECK(IsCoreLocalMask(core_mask));
   TaskMetadata metadata;
   metadata.core_mask = core_mask;
-  return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
-                  attr::kAscendTask, Integer(1), body, body->span);
+  return MakeScheduleMarker(attr::kAscendTask,
+                            MergeTaskMetadata(metadata, IntImm::Int32(0)), body,
+                            body->loc);
 }
 
 std::shared_ptr<TaskNode> MakeSyncTaskNode(const Stmt &body, CoreMask core_mask,
@@ -2255,7 +2265,7 @@ std::shared_ptr<TaskNode> MakeSyncTaskNode(const Stmt &body, CoreMask core_mask,
   return task;
 }
 
-class PerCoreTaskSyncMigrator : public StmtMutator {
+class PerCoreTaskSyncMigrator : public NativeMutator {
 public:
   PerCoreTaskSyncMigrator(std::vector<Stmt> before, std::vector<Stmt> after,
                           CoreMask core_mask)
@@ -2272,12 +2282,11 @@ public:
   }
 
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != attr::kAscendTask)
-      return StmtMutator::VisitStmt_(op);
-    Stmt candidate_body = VisitStmt(op->body);
-    Stmt candidate =
-        AttrStmt(op->node, op->attr_key, op->value, candidate_body, op->span);
+  Stmt VisitStmt_(const RegionStmtNode *op) final {
+    auto candidate = NativeMutator::VisitStmt_(op).as_or_throw<RegionStmt>();
+    if (ScheduleMarkerKey(op) != attr::kAscendTask)
+      return candidate;
+    Stmt candidate_body = candidate->body;
     if (!HasTaskBufferAccess(candidate_body))
       return candidate;
     ++num_candidates_;
@@ -2288,7 +2297,7 @@ private:
     sequence.push_back(std::move(candidate));
     for (const Stmt &stmt : after_)
       sequence.push_back(MakeSyncTask(stmt, core_mask_));
-    return SeqStmt::Flatten(sequence);
+    return SeqStmt(sequence);
   }
 
   std::vector<Stmt> before_;
@@ -2320,46 +2329,49 @@ void AppendSyncTaskNodes(std::vector<std::shared_ptr<IRStructure>> *result,
 
 inline Stmt MakeAscendSetFlag(const std::string &hard_event,
                               PrimExpr event_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_set_flag(),
+  return Evaluate(Call(TupleType(ffi::Array<Type>{}), ascend_set_flag(),
                        {StringImm(hard_event), event_id}));
 }
 
 inline Stmt MakeAscendWaitFlag(const std::string &hard_event,
                                PrimExpr event_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_wait_flag(),
+  return Evaluate(Call(TupleType(ffi::Array<Type>{}), ascend_wait_flag(),
                        {StringImm(hard_event), event_id}));
 }
 
 inline Stmt MakeAscendPipeBarrier(const std::string &pipe) {
-  return Evaluate(
-      Call(DataType::Handle(), ascend_pipe_barrier(), {StringImm(pipe)}));
+  return Evaluate(Call(TupleType(ffi::Array<Type>{}), ascend_pipe_barrier(),
+                       {StringImm(pipe)}));
 }
 
 inline Stmt MakeAscendCrossCoreSetFlag(int mode_id, const std::string &pipe,
                                        PrimExpr flag_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_cross_core_set_flag(),
-                       {Integer(mode_id), StringImm(pipe), flag_id}));
+  return Evaluate(Call(TupleType(ffi::Array<Type>{}),
+                       ascend_cross_core_set_flag(),
+                       {IntImm::Int32(mode_id), StringImm(pipe), flag_id}));
 }
 
 inline Stmt MakeAscendCrossCoreWaitFlag(int mode_id, const std::string &pipe,
                                         PrimExpr flag_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_cross_core_wait_flag(),
-                       {Integer(mode_id), StringImm(pipe), flag_id}));
+  return Evaluate(Call(TupleType(ffi::Array<Type>{}),
+                       ascend_cross_core_wait_flag(),
+                       {IntImm::Int32(mode_id), StringImm(pipe), flag_id}));
 }
 
 PrimExpr MakeFlagEventId(const PrimExpr &iteration, int num_versions,
                          int base_id) {
-  DataType dtype = iteration.dtype();
+  PrimType dtype = iteration.ty();
   PrimExpr event_id = num_versions == 1
                           ? IntImm(dtype, base_id)
-                          : indexmod(iteration, IntImm(dtype, num_versions)) +
+                          : FloorMod(iteration, IntImm(dtype, num_versions)) +
                                 IntImm(dtype, base_id);
-  return dtype == DataType::Int(32) ? event_id
-                                    : cast(DataType::Int(32), event_id);
+  return dtype == PrimType::Int(32) ? event_id
+                                    : prim::cast(event_id, PrimType::Int(32));
 }
 
 void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
-                     CoreMask core, const PrimExpr &guard = PrimExpr()) {
+                     CoreMask core,
+                     const ffi::Optional<PrimExpr> &guard = std::nullopt) {
   ICHECK(node != nullptr);
   ICHECK(IsCoreLocalMask(core));
   bool at_candidate = false;
@@ -2369,7 +2381,7 @@ void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
     if (task->IsPerCoreTask() && task->GetCoreMask() == core) {
       ConstrSet outer_ctx = task->GetContextBeforeConditionGuards();
       PrimExpr task_guard = task->GetConditionGuard();
-      PrimExpr sync_guard = guard.defined() ? guard : Bool(true);
+      PrimExpr sync_guard = guard.value_or(IntImm::Bool(true));
       // Projection can make a PerCoreTask optional on a block while its
       // storage protocol remains shared. Keep wider events outside the group
       // so candidate selection cannot suppress a required wait or set.
@@ -2378,8 +2390,8 @@ void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
           at_candidate && GuardsEquivalent(sync_guard, task_guard, outer_ctx);
     }
   }
-  if (guard.defined() && !elide_guard)
-    stmt = WrapWithGuard(std::move(stmt), guard);
+  if (guard.has_value() && !elide_guard)
+    stmt = WrapWithGuard(std::move(stmt), guard.value());
   SyncInsertionExtraInfo *insertions = GetSyncInsertionExtraInfo(node);
   if (at_beginning) {
     std::vector<SyncInsertion> &before = insertions->Before()[core];
@@ -2501,9 +2513,9 @@ private:
           std::vector<Stmt> after =
               GetCoreStatements(after_insertions, core_mask);
           if (!before.empty() || !after.empty()) {
-            task->stmt = PerCoreTaskSyncMigrator(std::move(before),
-                                                 std::move(after), core_mask)
-                             .Rewrite(std::move(task->stmt));
+            auto migrator = ffi::make_object<PerCoreTaskSyncMigrator>(
+                std::move(before), std::move(after), core_mask);
+            task->stmt = migrator->Rewrite(std::move(task->stmt));
           }
         }
       }
@@ -2528,7 +2540,8 @@ private:
 // ============================================================================
 // Kernel-level validation and scheduled-TIR rewrite
 // ============================================================================
-SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
+RegionStmt InsertKernelSync(const Stmt &kernel_body,
+                            ScheduledTIR scheduled_tir) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
   CoreMask vector_mask = VectorCoreMask(num_aiv_subcores);
@@ -2567,6 +2580,32 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   analyzer.Analyze(root);
   analyzer.ValidateSyncPoints();
   scheduled_tir.metadata.buffer_aliases = analyzer.BufferAliases();
+  std::vector<TaskNode *> all_tasks;
+  CollectAllTaskNodes(root, all_tasks);
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> nested_allocations;
+  for (const TaskNode *task : all_tasks) {
+    if (task->GetParent() == nullptr)
+      continue;
+    auto binding = GetFlatTaskBind(task->stmt);
+    if (!binding)
+      continue;
+    const auto *call = binding.value()->value.as<CallNode>();
+    if (call && call->op.same_as(tirx::alloc_tensor_op()))
+      nested_allocations.insert(
+          task->StorageOf(binding.value()->var.as_or_throw<TensorVar>()));
+  }
+  BufferAliasMap visible_aliases;
+  for (const auto &[storage, compatible] :
+       scheduled_tir.metadata.buffer_aliases) {
+    if (nested_allocations.count(storage))
+      continue;
+    ffi::Array<Var> visible;
+    for (const Var &other : compatible)
+      if (!nested_allocations.count(other))
+        visible.push_back(other);
+    visible_aliases.Set(storage, visible);
+  }
+  scheduled_tir.metadata.buffer_aliases = std::move(visible_aliases);
   scheduled_tir.metadata.has_buffer_aliases = true;
 
   CrossCoreFlagReservation cross_core_flag_reservation =
@@ -2615,8 +2654,9 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
 // ============================================================================
 tvm::transform::Pass InsertSync() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func =
+      [](tirx::Function func, IRModule,
+         tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
     return RewriteTilelangKernels(
         std::move(func), "InsertSync",
         [](const TilelangKernelContext &context) {
@@ -2625,7 +2665,7 @@ tvm::transform::Pass InsertSync() {
           return InsertKernelSync(context.root->body, std::move(scheduled_tir));
         });
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.InsertSync", {});
+  return CreateFunctionPass(pass_func, 0, "tl.InsertSync");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

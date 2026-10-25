@@ -27,6 +27,7 @@ def kernel_tl(use_a: bool, use_b: bool) -> Any:
     return kernel
 
 
+@tilelang.testing.requires_ascend
 def test_dynamic_none():
     n_val = 64
     a = torch.randn((n_val,), device="npu", dtype=torch.float16)

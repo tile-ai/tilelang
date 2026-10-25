@@ -88,8 +88,8 @@ def test_cast_default_unchanged():
 
     kernel = default_cast_kernel(M)
     code = kernel.get_kernel_source()
-    assert "__nv_cvt_float2_to_fp8x2" in code, (
-        f"Default cast should use __nv_cvt_float2_to_fp8x2 for backward compatibility.\nGenerated code:\n{code}"
+    assert "__nv_cvt_float2_to_fp8x2" in code or "__nv_fp8x2_e4m3(" in code, (
+        f"Default cast should use a packed native FP8 conversion.\nGenerated code:\n{code}"
     )
 
 
@@ -152,7 +152,6 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
 
 
 def _make_rs_prim_func(target_dtype: str, M: int = 128, threads: int = 128):
-
     @T.prim_func
     def main(
         A: T.Tensor[(M,), "float32"],  # noqa: F821
@@ -604,7 +603,7 @@ def test_vectorized_cast_without_round_still_lowers():
     with tvm.target.Target(_RS_TARGET):
         artifact = tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode=None), target=_RS_TARGET)
 
-    assert "__tl_cvt_half2_to_fp8x2" in artifact.kernel_source, artifact.kernel_source
+    assert "__tl_cvt_half2_to_fp8x2" in artifact.kernel_source or "__nv_fp8x2_e4m3(" in artifact.kernel_source, artifact.kernel_source
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ struct AtomicReduce {
   }
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::Analyzer analyzer) {
     (void)analyzer;
     AtomicCombine combine;
     if (op.GetElemOp().same_as(atomic_max_elem_op())) {

@@ -2,7 +2,7 @@
 
 from enum import Enum
 import torch
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 import numpy as np
 
 

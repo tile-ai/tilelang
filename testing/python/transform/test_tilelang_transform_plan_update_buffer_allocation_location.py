@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+from tvm_tirx import ir, tirx
 
 
 def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:
@@ -16,16 +17,21 @@ def _apply_plan_update(func: tvm.tirx.PrimFunc) -> tvm.IRModule:
     return mod
 
 
-def _find_block(stmt: tvm.tirx.Stmt, name_hint: str) -> tvm.tirx.SBlock:
-    blocks = []
+def _local_allocations(stmt):
+    allocations = set()
 
     def _visit(node):
-        if isinstance(node, tvm.tirx.SBlock) and str(node.name_hint) == name_hint:
-            blocks.append(node)
+        if (
+            isinstance(node, ir.Bind)
+            and tirx.is_tensor_var(node.var)
+            and node.var.ty.scope.name in ("local", "local.var")
+            and isinstance(node.value, ir.Call)
+            and node.value.op.name == "tirx.alloc_tensor"
+        ):
+            allocations.add(node.var.name)
 
     tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
-    assert len(blocks) == 1, f"Expected exactly one block named {name_hint}, got {len(blocks)}"
-    return blocks[0]
+    return allocations
 
 
 def _find_first_for(stmt: tvm.tirx.Stmt) -> tvm.tirx.For:
@@ -51,20 +57,10 @@ def test_plan_update_keeps_loop_header_local_var_outside_loop_body():
     mod = _apply_plan_update(func)
     main = mod["main"]
 
-    tilelang_root = _find_block(main.body, "tilelang_root")
-    root_local_vars = {buf.name for buf in tilelang_root.alloc_buffers if buf.scope() == "local.var"}
-    assert {"a", "b"} <= root_local_vars
+    assert {"a", "b"} <= _local_allocations(main.body)
 
     loop = _find_first_for(main.body)
-    loop_body_local_vars = set()
-
-    def _visit_loop_body(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            for buf in node.alloc_buffers:
-                if buf.scope() == "local.var":
-                    loop_body_local_vars.add(buf.name)
-
-    tvm.tirx.stmt_functor.post_order_visit(loop.body, _visit_loop_body)
+    loop_body_local_vars = _local_allocations(loop.body)
     assert "b" not in loop_body_local_vars
 
 

@@ -8,7 +8,7 @@ from tilelang.ascend import transform
 from tilelang.layout import make_ascend_nz_layout
 from testing.ascend._ir import calls, copy, kernel, schedule, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 def _events(program, disable_reuse=False, auto_schedule=False):
@@ -93,7 +93,7 @@ def test_pointer_store_past_view_keeps_scalar_read_dependency(disable_reuse, str
             if strided:
                 view = T.StridedTensor((80,), (2,), "float32", data=allocation.data, scope="shared.dyn")
             else:
-                view = tvm.tirx.decl_buffer((96,), "float32", data=allocation.data, scope="shared.dyn")
+                view = T.Tensor((96,), "float32", data=allocation.data, scope="shared.dyn")
             with T.Stage(0):
                 with T.SimdVF():
                     T.simd.vsts(view[64], T.simd.vdup(T.float32(1), "float32"))
@@ -208,7 +208,7 @@ def test_physical_pointer_write_orders_control_expression_reads(control, disable
     def main(out: T.Tensor((1,), "int32")):
         with T.Kernel(1):
             allocation = T.alloc_shared((256,), "int32")
-            view = tvm.tirx.decl_buffer((96,), "int32", data=allocation.data, scope="shared.dyn")
+            view = T.Tensor((96,), "int32", data=allocation.data, scope="shared.dyn")
             with T.Stage(0):
                 with T.SimdVF():
                     T.simd.vsts(view[64], T.simd.vdup(T.int32(1), "int32"))

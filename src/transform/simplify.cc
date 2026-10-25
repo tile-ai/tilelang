@@ -4,789 +4,637 @@
  * of TL PrimFunc.
  */
 
-#include "support/check.h"
-#include <tvm/ffi/reflection/accessor.h>
-#include <tvm/ir/cast.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "compat/expr.h"
+#include "compat/visit.h"
+#include "transform/common/warp_specialize.h"
+
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/ir/with_context.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor_with_analyzer.h>
 #include <tvm/tirx/transform.h>
 
-#include <optional>
+#include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
-#include <utility>
 
-#include "arith/const_fold.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "common/attr.h"
-#include "tir/analysis/control_flow_graph.h"
-#include "tir/analysis/var_use_def_analysis.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using namespace arith;
-
-struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
-  bool transitively_prove_inequalities{};
-  bool propagate_knowns_to_prove_conditional{};
-  bool propagate_knowns_to_simplify_expressions{};
-  bool convert_boolean_to_and_of_ors{};
-  bool apply_constraints_to_boolean_branches{};
-  bool enable_simplify_let_inline{true};
+struct SimplifyConfigNode : public ffi::Object {
+  bool transitively_prove_inequalities;
+  bool propagate_knowns_to_prove_conditional;
+  bool propagate_knowns_to_simplify_expressions;
+  bool convert_boolean_to_and_of_ors;
+  bool apply_constraints_to_boolean_branches;
+  bool enable_simplify_let_inline;
 
   static void RegisterReflection() {
-    namespace refl = reflection;
+    namespace refl = ffi::reflection;
     refl::ObjectDef<SimplifyConfigNode>()
         .def_ro("transitively_prove_inequalities",
                 &SimplifyConfigNode::transitively_prove_inequalities,
-                "If true, simplify conditionals with transitive combinations "
-                "of scoped constraints",
                 refl::DefaultValue(false))
         .def_ro("propagate_knowns_to_prove_conditional",
                 &SimplifyConfigNode::propagate_knowns_to_prove_conditional,
-                "If true, known buffer values are propagated and used to "
-                "statically prove conditionals",
                 refl::DefaultValue(false))
         .def_ro("propagate_knowns_to_simplify_expressions",
                 &SimplifyConfigNode::propagate_knowns_to_simplify_expressions,
-                "If true, known buffer values are propagated and used to "
-                "replace BufferLoad wherever "
-                "possible",
                 refl::DefaultValue(false))
         .def_ro("convert_boolean_to_and_of_ors",
                 &SimplifyConfigNode::convert_boolean_to_and_of_ors,
-                "If true, simplify conditionals into an AND of ORs",
                 refl::DefaultValue(false))
         .def_ro("apply_constraints_to_boolean_branches",
                 &SimplifyConfigNode::apply_constraints_to_boolean_branches,
-                "If true, simplify each branch of AND/OR under a constraints "
-                "provided by the other "
-                "branch",
                 refl::DefaultValue(false))
         .def_ro("enable_simplify_let_inline",
                 &SimplifyConfigNode::enable_simplify_let_inline,
-                "If true, inline let statements when possible",
                 refl::DefaultValue(true));
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig",
-                                    SimplifyConfigNode, BaseAttrsNode);
-
-  RewriteSimplifier::Extension GetEnabledExtensions() const {
-    RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
-    if (transitively_prove_inequalities) {
-      flags = RewriteSimplifier::Extension(
-          flags | RewriteSimplifier::kTransitivelyProveInequalities);
-    }
-    if (convert_boolean_to_and_of_ors) {
-      flags = RewriteSimplifier::Extension(
-          flags | RewriteSimplifier::kConvertBooleanToAndOfOrs);
-    }
-    if (apply_constraints_to_boolean_branches) {
-      flags = RewriteSimplifier::Extension(
-          flags | RewriteSimplifier::kApplyConstraintsToBooleanBranches);
-    }
-    return flags;
-  }
+                                    SimplifyConfigNode, ffi::Object);
 };
 
-std::unordered_set<const BufferNode *>
-CollectUsedBuffers(const PrimFunc &func) {
-  struct Visitor : StmtExprVisitor {
-    using StmtExprVisitor::VisitExpr_;
-    using StmtExprVisitor::VisitStmt_;
-
-    Visitor(PrimFunc func) : func(std::move(func)) {}
-
-    void VisitExpr_(const CallNode *op) override {
-      for (const auto &arg : op->args) {
-        for (const auto &it : func->buffer_map) {
-          if (Downcast<PrimExpr>(it.second.get()->data).same_as(arg)) {
-            used_in_buffer_def_.insert(it.second.get());
-          }
-        }
-      }
-      StmtExprVisitor::VisitExpr_(op);
-    }
-    void VisitExpr_(const BufferLoadNode *op) override {
-      VisitBuffer(op->buffer);
-      StmtExprVisitor::VisitExpr_(op);
-    }
-    void VisitStmt_(const BufferStoreNode *op) override {
-      VisitBuffer(op->buffer);
-      StmtExprVisitor::VisitStmt_(op);
-    }
-    void VisitStmt_(const SBlockNode *op) override {
-      for (const auto &buffer : op->alloc_buffers) {
-        for (const auto &it : func->buffer_map) {
-          if (it.second.get()->data.same_as(buffer.get()->data)) {
-            used_in_buffer_def_.insert(it.second.get());
-          }
-        }
-      }
-      for (const auto &buffer : op->reads) {
-        for (const auto &it : func->buffer_map) {
-          if (it.second.get()->data.same_as(buffer->buffer.get()->data)) {
-            used_in_buffer_def_.insert(it.second.get());
-          }
-        }
-      }
-      for (const auto &buffer : op->writes) {
-        for (const auto &it : func->buffer_map) {
-          if (it.second.get()->data.same_as(buffer->buffer.get()->data)) {
-            used_in_buffer_def_.insert(it.second.get());
-          }
-        }
-      }
-      StmtExprVisitor::VisitStmt_(op);
-    }
-
-    void VisitBuffer(const Buffer &buf) {
-      // Collect buffers that should remain defined
-      VarUseDefAnalyzer usage(Array<Var>{});
-      usage(buf->data);
-      for (const auto &dim : buf->shape) {
-        usage(dim);
-      }
-      for (const auto &dim : buf->strides) {
-        usage(dim);
-      }
-      usage(buf->elem_offset);
-
-      for (const auto &buffer : usage.buffer_use_count_) {
-        if (buffer.second >= 1) {
-          used_in_buffer_def_.insert(buffer.first);
-        }
-      }
-      for (const auto &buffer : usage.undefined_buffers_) {
-        used_in_buffer_def_.insert(buffer.get());
-      }
-    }
-    PrimFunc func;
-    std::unordered_set<const BufferNode *> used_in_buffer_def_;
-  };
-
-  Visitor visitor(func);
-  visitor(func->body);
-  return visitor.used_in_buffer_def_;
-}
-
-/* \brief Collect variables referenced by buffer definitions. */
-std::unordered_set<const VarNode *>
-CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
-  struct Visitor : StmtExprVisitor {
-    using StmtExprVisitor::VisitExpr_;
-    using StmtExprVisitor::VisitStmt_;
-
-    void VisitExpr_(const BufferLoadNode *op) override {
-      VisitBuffer(op->buffer);
-      StmtExprVisitor::VisitExpr_(op);
-    }
-    void VisitStmt_(const BufferStoreNode *op) override {
-      VisitBuffer(op->buffer);
-      StmtExprVisitor::VisitStmt_(op);
-    }
-
-    void VisitBuffer(const Buffer &buf) {
-      // Collect variables that should remain defined
-      VarUseDefAnalyzer usage(Array<Var>{});
-      usage(buf->data);
-      for (const auto &dim : buf->shape) {
-        usage(dim);
-      }
-      for (const auto &dim : buf->strides) {
-        usage(dim);
-      }
-      usage(buf->elem_offset);
-
-      // Track for use in BindNode mutator
-      for (const auto &var : usage.undefined_) {
-        used_in_buffer_def_.insert(var.get());
-      }
-    }
-    std::unordered_set<const VarNode *> used_in_buffer_def_;
-  };
-
-  Visitor visitor;
-  visitor(stmt);
-  return visitor.used_in_buffer_def_;
-}
-
-namespace {
-
-struct BindUseInfo {
-  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-  VarSet used_vars;
-  VarSet volatile_buffers;
-};
-
-class BindUseCollector : public StmtExprVisitor {
+class SimplifyConfig : public ffi::ObjectRef {
 public:
-  static BindUseInfo Collect(const PrimFunc &func) {
-    BindUseCollector collector;
-    collector.VisitObject_(func);
-    return std::move(collector.info_);
-  }
-
-private:
-  // IR children and metadata share the same deduplication entry point.
-  void VisitStmt(const Stmt &stmt) final { VisitObject_(stmt); }
-  void VisitExpr(const PrimExpr &expr) final { VisitObject_(expr); }
-
-  void VisitExpr_(const VarNode *op) final {
-    info_.used_vars.insert(GetRef<Var>(op));
-    VisitObject_(op->type_annotation);
-  }
-
-  void VisitStmt_(const BindNode *op) final {
-    // Skip the definition without marking its Var visited: metadata may use it
-    // later.
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->var->type_annotation);
-  }
-
-  void VisitStmt_(const AllocBufferNode *op) final {
-    if (op->annotations.count(tirx::attr::kVolatile)) {
-      info_.volatile_buffers.insert(op->buffer->data);
-    }
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->annotations);
-  }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tl::attr::volatile_scope) {
-      if (auto var = op->node.as<Var>()) {
-        info_.volatile_buffers.insert(var.value());
-      } else if (auto buffer = op->node.as<Buffer>()) {
-        info_.volatile_buffers.insert(buffer.value()->data);
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->node);
-  }
-
-  void VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
-    VisitObject_(buffer);
-  }
-
-  void VisitBufferUse(const Buffer &buffer) final {
-    // Liveness must retain references in buffer descriptors even when there is
-    // no explicit DeclBuffer in the body. It does not enforce lexical scope.
-    VisitObject_(buffer);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->predicate);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->predicate);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->loop_var);
-    VisitObject_(op->thread_binding);
-    VisitObject_(op->annotations);
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-    VisitObject_(op->iter_vars);
-    VisitObject_(op->annotations);
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->op);
-    VisitObject_(op->annotations);
-  }
-
-  void VisitExpr_(const CastNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->annotations);
-  }
-
-  void VisitExpr_(const LetNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->var);
-  }
-
-  void VisitExpr_(const ReduceNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->combiner);
-    VisitObject_(op->axis);
-  }
-
-  void VisitExpr_(const ProducerLoadNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitObject_(op->producer);
-  }
-
-  void VisitExpr_(const RampNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitExpr(op->lanes);
-  }
-
-  void VisitExpr_(const BroadcastNode *op) final {
-    StmtExprVisitor::VisitExpr_(op);
-    VisitExpr(op->lanes);
-  }
-
-  // Use ordinary IR visitors for statements and expressions. Reflection is
-  // only needed for containers and metadata objects such as Buffer and Layout.
-  void VisitObject_(const Any &value) {
-    auto obj = value.as<ObjectRef>();
-    if (!obj || !obj->defined() || !visited_.insert(*obj).second) {
-      return;
-    }
-    if (auto expr = obj->as<PrimExpr>()) {
-      StmtExprVisitor::VisitExpr(expr.value());
-    } else if (auto stmt = obj->as<Stmt>()) {
-      StmtExprVisitor::VisitStmt(stmt.value());
-    } else if (auto array = obj->as<ArrayObj>()) {
-      for (const Any &item : *array) {
-        VisitObject_(item);
-      }
-    } else if (auto map = obj->as<MapObj>()) {
-      for (const auto &item : *map) {
-        VisitObject_(item.first);
-        VisitObject_(item.second);
-      }
-    } else {
-      auto visit_field = [&](const TVMFFIFieldInfo *field) {
-        VisitObject_(reflection::FieldGetter(field)(*obj));
-      };
-      reflection::ForEachFieldInfo(TVMFFIGetTypeInfo((*obj)->type_index()),
-                                   visit_field);
-    }
-  }
-
-  BindUseInfo info_;
-  std::unordered_set<ObjectRef, ObjectPtrHash, ObjectPtrEqual> visited_;
-};
-
-class UnusedBindRemover : public StmtMutator {
-public:
-  static PrimFunc Apply(PrimFunc func) {
-    bool removed;
-    // Recompute after removing consumers to handle chains and shared nodes.
-    do {
-      UnusedBindRemover remover;
-      remover.uses_ = BindUseCollector::Collect(func);
-      func.CopyOnWrite()->body = remover(func->body);
-      removed = remover.removed_;
-    } while (removed);
-    return func;
-  }
-
-private:
-  bool CanDiscard_(const PrimExpr &value) const {
-    bool discard = SideEffect(value) <= CallEffectKind::kReadState &&
-                   !UsesVar(value, [&](const VarNode *var) {
-                     return uses_.volatile_buffers.count(GetRef<Var>(var));
-                   });
-    // SideEffect and UsesVar do not visit BufferLoad predicates.
-    PostOrderVisit(value, [&](const ObjectRef &node) {
-      if (const auto *load = node.as<BufferLoadNode>();
-          load && load->predicate) {
-        discard &= CanDiscard_(load->predicate.value());
-      }
-    });
-    return discard;
-  }
-
-  Stmt VisitStmt_(const BindNode *op) final {
-    if (!uses_.used_vars.count(op->var) && CanDiscard_(op->value)) {
-      removed_ = true;
-      return Evaluate(Integer(0));
-    }
-    return GetRef<Stmt>(op);
-  }
-
-  BindUseInfo uses_;
-  bool removed_{false};
-};
-
-} // namespace
-
-class SimplifyConfig : public Attrs {
-public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, ffi::ObjectRef,
                                                 SimplifyConfigNode);
 };
-TVM_FFI_STATIC_INIT_BLOCK() { SimplifyConfigNode::RegisterReflection(); }
 
-TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
-
-class StmtSimplifier : public IRMutatorWithAnalyzer {
-public:
-  static PrimFunc
-  Apply(PrimFunc func, Analyzer *analyzer,
-        const Optional<SimplifyConfig> &config_opt = std::nullopt,
-        bool simplify_arguments = false) {
-    auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
-    analyzer->rewrite_simplify.SetEnabledExtensions(
-        config->GetEnabledExtensions());
-
-    std::optional<ControlFlowGraph> touch_pattern = std::nullopt;
-    if (config->propagate_knowns_to_prove_conditional ||
-        config->propagate_knowns_to_simplify_expressions) {
-      touch_pattern = ControlFlowGraph(func->body);
-    }
-
-    std::unordered_set<const VarNode *> used_in_buffer_def =
-        CollectVarsUsedInBufferDefinition(func->body);
-    StmtSimplifier simplifier(analyzer, config, std::move(touch_pattern),
-                              std::move(used_in_buffer_def));
-    simplifier.MarkBufferMapShapes(func);
-    func.CopyOnWrite()->body = simplifier(func->body);
-    func = UnusedBindRemover::Apply(std::move(func));
-
-    // Optionally remove unused buffer parameters
-    if (simplify_arguments) {
-      // First get used buffers
-      simplifier.used_buffers_ = CollectUsedBuffers(func);
-
-      bool param_updated = false;
-      Array<Var> new_params;
-      Map<Var, Buffer> new_buffer_map;
-      // Check whether each buffer is used
-      for (const auto &var : func->params) {
-        if (func->buffer_map.find(var) != func->buffer_map.end()) {
-          if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
-              simplifier.used_buffers_.end()) {
-            new_params.push_back(var);
-            new_buffer_map.Set(var, func->buffer_map[var]);
-          } else if (simplifier.used_in_buffer_def_.find(
-                         func->buffer_map[var]->data.get()) !=
-                     simplifier.used_in_buffer_def_.end()) {
-            new_params.push_back(var);
-            new_buffer_map.Set(var, func->buffer_map[var]);
-          } else {
-            param_updated = true;
-          }
-        } else {
-          // Non-buffer parameters (e.g., scalars) are always retained
-          new_params.push_back(var);
+std::unordered_set<const VarNode *>
+UsedVariables(const ffi::ObjectRef &object) {
+  std::unordered_set<const VarNode *> used;
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+      object,
+      [&](const Var &variable,
+          TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::WalkResult> {
+        if (kind == kTVMFFIDefRegionKindNone) {
+          used.insert(variable.get());
         }
-      }
+        return ffi::WalkResult::Advance();
+      });
+  return used;
+}
 
-      if (param_updated) {
-        return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
-                        new_buffer_map, func->attrs, func->span);
+bool ContainsVolatileStorage(const tirx::Function &function) {
+  bool found = function->attrs->dict.count("tirx.volatile");
+  PostOrderVisit(function, [&](const ffi::ObjectRef &object) {
+    if (const auto *call = object.as<CallNode>(); call && call->attrs) {
+      if (const auto *attributes = call->attrs.value().as<DictAttrsNode>())
+        found |= attributes->dict.count("tirx.volatile");
+    }
+    if (const auto *region = object.as<RegionStmtNode>())
+      found |= region->attrs->dict.count("volatile_scope") ||
+               region->attrs->dict.count("tirx.volatile");
+  });
+  return found;
+}
+
+class UnusedBindRemover : public tirx::StmtExprMutator {
+public:
+  UnusedBindRemover(std::unordered_set<const VarNode *> used,
+                    bool volatile_storage)
+      : used_(std::move(used)), volatile_storage_(volatile_storage) {}
+  bool changed{false};
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                                 ffi::InplaceMode mode) final {
+    const auto *call = node->value.as<CallNode>();
+    bool tensor_view = call && call->op.same_as(tirx::decl_tensor_op());
+    bool removable = node->var.as<PrimVar>() ||
+                     node->var->ty.as<PtrTypeNode>() || tensor_view;
+    auto allowed_effect = node->var.as<PrimVar>() && !volatile_storage_
+                              ? CallEffectKind::kReadState
+                              : CallEffectKind::kPure;
+    bool scheduled =
+        call && call->attrs && call->attrs.value().as<DictAttrsNode>() &&
+        call->attrs.value().as<DictAttrsNode>()->dict.count(kWSOpIdKey);
+    if (!scheduled && removable && !used_.count(node->var.get()) &&
+        SideEffect(node->value) <= allowed_effect) {
+      changed = true;
+      return SeqStmt({}, node->loc);
+    }
+    return StmtExprMutator::Mutate_(node, mode);
+  }
+  std::unordered_set<const VarNode *> used_;
+  bool volatile_storage_;
+};
+
+class StmtSimplifier : public tirx::StmtExprMutatorWithAnalyzer {
+public:
+  using Parent = tirx::StmtExprMutatorWithAnalyzer;
+  using Parent::Mutate;
+
+  StmtSimplifier(sym::Analyzer analyzer, SimplifyConfig config,
+                 const tirx::Function &function)
+      : Parent(analyzer), config_(std::move(config)),
+        propagate_now_(config_->propagate_knowns_to_simplify_expressions),
+        noalias_(function->GetAttr<bool>("tirx.noalias").value_or(false)),
+        volatile_storage_(ContainsVolatileStorage(function)) {
+    MarkTensorParamShapes(function);
+    PostOrderVisit(function, [&](const ffi::ObjectRef &object) {
+      if (const auto *region = object.as<RegionStmtNode>())
+        preserve_ws_schedule_ |= region->attrs->dict.count(kWSScheduleKey);
+    });
+    for (const Var &parameter : function->params) {
+      if (parameter.as<tirx::TensorVar>()) {
+        origins_.emplace(parameter, parameter);
       }
     }
-    // Either no change to params or argument simplification disabled
-    return func;
   }
 
 private:
-  // TileLang-local post-simplification: TVM's rewrite simplifier can prove
-  // singleton bounds for floor-div expressions, but does not always rewrite the
-  // expression to that singleton constant.  Keep this scoped to tl.Simplify so
-  // internal lowering passes are not affected by a global arithmetic rewrite.
-  class ContextSingletonFloorDivFolder : public StmtExprMutator {
-  public:
-    explicit ContextSingletonFloorDivFolder(Analyzer *analyzer)
-        : analyzer_(analyzer) {}
-
-    PrimExpr Fold(const PrimExpr &expr) { return VisitExpr(expr); }
-
-  private:
-    using StmtExprMutator::VisitExpr_;
-
-    PrimExpr VisitExpr_(const FloorDivNode *op) final {
-      PrimExpr expr = StmtExprMutator::VisitExpr_(op);
-      expr = analyzer_->Simplify(expr);
-      if (const auto *div = expr.as<FloorDivNode>();
-          div && IsIndexType(div->dtype)) {
-        // Example: under thread_extent tx in [0, 256) and else(tx < 128),
-        // const_int_bound(tx // 128) is [1, 1], so the div is constant.
-        ConstIntBound bound = analyzer_->const_int_bound(expr);
-        if (bound.defined() && bound->min_value == bound->max_value) {
-          return make_const(div->dtype, bound->min_value);
-        }
-      }
-      return expr;
-    }
-
-    Analyzer *analyzer_;
+  struct KnownValue {
+    tirx::TensorVar tensor;
+    ffi::Array<PrimExpr> indices;
+    PrimExpr value;
   };
 
-  explicit StmtSimplifier(
-      Analyzer *analyzer, SimplifyConfig config,
-      std::optional<ControlFlowGraph> touch_pattern,
-      std::unordered_set<const VarNode *> used_in_buffer_def)
-      : IRMutatorWithAnalyzer(analyzer), config_(std::move(config)),
-        touch_pattern_(std::move(touch_pattern)),
-        used_in_buffer_def_(std::move(used_in_buffer_def)) {}
-
-  using Parent = IRMutatorWithAnalyzer;
-  using Parent::VisitExpr_;
-  using Parent::VisitStmt;
-  using Parent::VisitStmt_;
-
-  PrimExpr VisitExpr(const PrimExpr &expr) final {
-    PrimExpr simplified;
-    if (config_->propagate_knowns_to_simplify_expressions) {
-      simplified = touch_pattern_->SimplifyInContext(
-          expr, current_stmt_.value(), analyzer_);
-    } else {
-      simplified = analyzer_->Simplify(expr);
+  PrimExpr SimplifyBoolean(const PrimExpr &expression) {
+    PrimExpr simplified = analyzer_->Simplify(expression);
+    if (analyzer_->CanProve(simplified)) {
+      return IntImm::Bool(true);
     }
-
-    ContextSingletonFloorDivFolder folder(analyzer_);
-    PrimExpr folded = folder.Fold(simplified);
-    if (!folded.same_as(simplified)) {
-      // Clean up arithmetic exposed by singleton folding, e.g.
-      // 1 * 64 + i - 64 -> i.
-      return analyzer_->Simplify(folded);
+    if (analyzer_->CanProve(!simplified)) {
+      return IntImm::Bool(false);
     }
     return simplified;
   }
 
-  Stmt Simplify(Stmt stmt) { return operator()(std::move(stmt)); }
-
-  Stmt VisitStmt(const Stmt &stmt) override {
-    Optional<Stmt> cache = this->current_stmt_;
-    this->current_stmt_ = stmt;
-    Stmt output = Parent::VisitStmt(stmt);
-    this->current_stmt_ = std::move(cache);
-    return output;
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    if (analyzer_->CanProve(op->extent <= 0)) {
-      // Remove loops with non-positive extent
-      return Evaluate(0);
-    }
-    With<ConstraintContext> ctx1(analyzer_, op->loop_var >= op->min);
-    With<ConstraintContext> ctx2(analyzer_,
-                                 op->loop_var < op->min + op->extent);
-    return Parent::VisitStmt_(op);
-  }
-
-  bool CanInlineBind(const BindNode *op) {
-    if (!config_->enable_simplify_let_inline)
-      return false;
-    if (is_const_number(op->value))
-      return true;
-    if (op->value.as<VarNode>())
-      return true;
-    // Won't face the deep expression explosion problem as in Let expression.
-    // attempt to inline as much as possible if the value integer type(can be
-    // index).
-    if (!op->value.dtype().is_int())
-      return false;
-    return SideEffect(op->value) <= CallEffectKind::kPure;
-  }
-
-  Stmt VisitStmt_(const BindNode *op) override {
-    PrimExpr value = this->VisitExpr(op->value);
-    bool remove_buffer_alias = false;
-    // TileLang emits aliases like `X_shared = buffer[0:128, 0:32]` to annotate
-    // fragment types. TVM currently reinterprets vectorized/shared accesses as
-    // Let-bound BufferLoad/BufferRegion nodes. If these bindings survive, later
-    // passes (Layout rewrite, FlattenBuffer) substitute them with vector lanes
-    // that our layout can't handle. Force-inline (by dropping the let) whenever
-    // the alias spans more than 2 dims or carries vector lanes.
-    auto get_ranges = [&](const PrimExpr &expr) -> Array<Range> {
-      Array<Range> ranges;
-      if (const auto *load = expr.as<BufferLoadNode>()) {
-        for (const PrimExpr &index : load->indices) {
-          if (const auto *ramp = index.as<RampNode>()) {
-            ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
-          } else {
-            ranges.push_back(Range::FromMinExtent(index, Integer(1)));
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    return constraint_scope_.WithNewScope([&]() -> ffi::UnchangedOr<Stmt> {
+      ffi::Array<Stmt> statements;
+      for (const Stmt &statement : node->seq) {
+        Stmt result = Mutate(statement, mode).ValueOrUnchanged(statement);
+        statements.push_back(result);
+        if (const auto *evaluate = result.as<EvaluateNode>()) {
+          if (const auto *call = evaluate->value.as<CallNode>();
+              call && call->op.same_as(prim::assume_op())) {
+            PrimExpr predicate = call->args[0].as_or_throw<PrimExpr>();
+            if (SideEffect(predicate) == CallEffectKind::kPure) {
+              constraint_scope_.Current().Emplace(analyzer_, predicate, true);
+            }
           }
         }
-      } else if (const auto *region = expr.as<BufferRegionNode>()) {
-        for (const Range &range : region->region) {
-          ranges.push_back(range);
-        }
       }
-      return ranges;
-    };
-    Array<Range> ranges = get_ranges(value);
-    if (!ranges.empty()) {
-      int non_unit_dims = 0;
-      for (const Range &range : ranges) {
-        PrimExpr extent = analyzer_->Simplify(range->extent);
-        if (is_const_int(extent, 1) || analyzer_->CanProveEqual(extent, 1)) {
-          continue;
-        }
-        ++non_unit_dims;
-        if (non_unit_dims > 1) {
-          remove_buffer_alias = true;
-          break;
-        }
-      }
-    }
-    if (remove_buffer_alias) {
-      return Evaluate(Integer(0));
-    }
-
-    bool can_inline = CanInlineBind(op);
-    if (can_inline) {
-      analyzer_->Bind(op->var, value);
-    } else if (SideEffect(op->value) <= CallEffectKind::kPure) {
-      non_inlined_bindings_.Set(op->var, value);
-    }
-
-    // Defer deletion to UnusedBindRemover: annotations and other metadata may
-    // still reference the variable after its ordinary uses have been inlined.
-    if (value.same_as(op->value)) {
-      return GetRef<Stmt>(op);
-    } else {
-      auto n = this->CopyOnWrite(op);
-      n->value = std::move(value);
-      return Stmt(n);
-    }
+      return SeqStmt(statements, node->loc);
+    });
   }
 
-  Stmt VisitStmt_(const IfThenElseNode *op) override {
-    if (Optional<Bool> cond = ProveCondition(op->condition)) {
-      if (cond.value()->value) {
-        return this->VisitStmt(op->then_case);
-      } else if (op->else_case) {
-        return this->VisitStmt(op->else_case.value());
-      } else {
-        return Evaluate(0);
-      }
-    } else {
-      return Parent::VisitStmt_(op);
-    }
-  }
-
-  PrimExpr VisitExpr_(const CallNode *op) override {
-    if (op->op.same_as(builtin::if_then_else())) {
-      if (Optional<Bool> cond = ProveCondition(op->args[0])) {
-        if (cond.value()->value) {
-          return this->VisitExpr(op->args[1]);
-        } else {
-          return this->VisitExpr(op->args[2]);
-        }
-      }
-    }
-    return Parent::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) override {
-    used_vars_.insert(op);
-    return Parent::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) override {
-    auto buffer = op->buffer.get();
-    if (used_buffers_.find(buffer) == used_buffers_.end()) {
-      used_buffers_.insert(buffer);
-    }
-    return Parent::VisitExpr_(op);
-  }
-
-  // eliminate useless stores
-  Stmt VisitStmt_(const BufferStoreNode *op) override {
-    BufferStore store = Downcast<BufferStore>(Parent::VisitStmt_(op));
-    if (const BufferLoadNode *load = store->value.as<BufferLoadNode>()) {
-      if (load->buffer->data.same_as(store->buffer->data) &&
-          ArrayDeepEqual(load->indices, store->indices) &&
-          tirx::ExprDeepEqual()(load->buffer->elem_offset,
-                                store->buffer->elem_offset) &&
-          ArrayDeepEqual(load->buffer->shape, store->buffer->shape) &&
-          ArrayDeepEqual(load->buffer->strides, store->buffer->strides)) {
-        return Evaluate(0);
-      }
-    }
-    auto buffer = op->buffer.get();
-    if (used_buffers_.find(buffer) == used_buffers_.end()) {
-      used_buffers_.insert(buffer);
-    }
-    return std::move(store);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) override {
-    if (op->attr_key == "tl.assume") {
-      PrimExpr condition = this->VisitExpr(Downcast<PrimExpr>(op->node));
-      auto n = CopyOnWrite(op);
-      n->node = std::move(condition);
-      return Parent::VisitStmt_(n.get());
-    }
-    return Parent::VisitStmt_(op);
-  }
-
-private:
-  bool ArrayDeepEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs) {
-    if (lhs.size() != rhs.size()) {
+  bool EqualIndices(const ffi::Array<PrimExpr> &first,
+                    const ffi::Array<PrimExpr> &second) {
+    if (first.size() != second.size()) {
       return false;
     }
-    for (size_t i = 0; i < lhs.size(); i++) {
-      if (!tirx::ExprDeepEqual()(lhs[i], rhs[i])) {
+    for (size_t axis = 0; axis < first.size(); ++axis) {
+      if (!analyzer_->CanProve(first[axis] == second[axis])) {
         return false;
       }
     }
     return true;
   }
 
-  /* \brief Internal utility for checking conditionals
-   *
-   * Uses more aggressive optimization, such as performing additional
-   * inlining and tracking known buffer values.
-   */
-  Optional<Bool> ProveCondition(PrimExpr condition) const {
-    condition = Substitute(condition, non_inlined_bindings_);
-    if (config_->propagate_knowns_to_prove_conditional) {
-      ICHECK(touch_pattern_.has_value());
-      condition = touch_pattern_->SimplifyInContext(
-          condition, current_stmt_.value(), analyzer_);
-    } else {
-      condition = analyzer_->Simplify(condition);
+  bool MayAlias(const tirx::TensorVar &first, const tirx::TensorVar &second) {
+    auto first_origin = origins_.find(first);
+    auto second_origin = origins_.find(second);
+    if (first_origin == origins_.end() || second_origin == origins_.end() ||
+        first_origin->second.same_as(second_origin->second)) {
+      return true;
     }
-    if (const int64_t *as_int = as_const_int(condition)) {
-      return Bool(*as_int);
-    } else {
-      // May have symbolic, need kSymbolicBound level prover.
-      if (analyzer_->CanProve(condition) ||
-          analyzer_->CanProve(condition,
-                              arith::ProofStrength::kSymbolicBound)) {
-        return Bool(true);
+    return !noalias_ && !allocations_.count(first_origin->second) &&
+           !allocations_.count(second_origin->second);
+  }
+
+  void Invalidate(const tirx::TensorVar &tensor,
+                  const ffi::Array<PrimExpr> &indices) {
+    std::erase_if(known_, [&](const KnownValue &known) {
+      if (!MayAlias(tensor, known.tensor)) {
+        return false;
       }
-      return std::nullopt;
+      if (tensor.same_as(known.tensor) &&
+          indices.size() == known.indices.size()) {
+        for (size_t axis = 0; axis < indices.size(); ++axis) {
+          if (analyzer_->CanProve(indices[axis] != known.indices[axis])) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  }
+
+  ffi::UnchangedOr<ffi::Any> Mutate(ffi::AnyView input,
+                                    ffi::InplaceMode mode) final {
+    auto result = Parent::Mutate(input, mode);
+    if (def_region_kind() != kTVMFFIDefRegionKindNone ||
+        !input.as<PrimExpr>()) {
+      return result;
     }
+    auto value =
+        std::move(result).ValueOrUnchanged(input).as_or_throw<PrimExpr>();
+    return analyzer_->Simplify(value);
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const FloorDivNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr original = ffi::GetRef<PrimExpr>(node);
+    PrimExpr value = Parent::Mutate_(node, mode).ValueOrUnchanged(original);
+    auto bound = analyzer_->const_int_bound(value);
+    if (bound->min_value == bound->max_value &&
+        bound->min_value != sym::ConstIntBound::kNegInf &&
+        bound->max_value != sym::ConstIntBound::kPosInf) {
+      return MakeConst(value.ty(), bound->min_value);
+    }
+    return value;
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr original = ffi::GetRef<PrimExpr>(node);
+    auto load = Parent::Mutate_(node, mode)
+                    .ValueOrUnchanged(original)
+                    .as_or_throw<TensorLoad>();
+    auto tensor = load->source.as_or_throw<tirx::TensorVar>();
+    bool local_scalar = tensor.scope().name() == "local" &&
+                        tensor.shape().size() == 1 && IsOne(tensor.shape()[0]);
+    if (propagate_now_ || local_scalar) {
+      for (auto known = known_.rbegin(); known != known_.rend(); ++known) {
+        if (load->source.same_as(known->tensor) &&
+            EqualIndices(load->indices, known->indices)) {
+          return known->value;
+        }
+      }
+    }
+    return load;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto store = Parent::Mutate_(node, mode)
+                     .ValueOrUnchanged(original)
+                     .as_or_throw<TensorStore>();
+    auto tensor = store->dest.as_or_throw<tirx::TensorVar>();
+    if (auto load = store->value.as<TensorLoad>()) {
+      if (load.value()->source.same_as(tensor) &&
+          EqualIndices(load.value()->indices, store->indices)) {
+        return SeqStmt({}, store->loc);
+      }
+    }
+    Invalidate(tensor, store->indices);
+    if (SideEffect(store->value) == CallEffectKind::kPure &&
+        store->value.ty().IsScalar() &&
+        std::all_of(store->indices.begin(), store->indices.end(),
+                    [](const PrimExpr &index) {
+                      return SideEffect(index) == CallEffectKind::kPure &&
+                             index.ty().IsScalar();
+                    })) {
+      known_.push_back({tensor, store->indices, store->value});
+    }
+    return store;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto binding = StmtExprMutator::Mutate_(node, mode)
+                       .ValueOrUnchanged(original)
+                       .as_or_throw<Bind>();
+    if (auto tensor = binding->var.as<tirx::TensorVar>()) {
+      const auto *call = binding->value.as<CallNode>();
+      if (call && call->op.same_as(tirx::alloc_tensor_op())) {
+        allocations_.insert(tensor.value());
+        origins_.insert_or_assign(tensor.value(), tensor.value());
+      } else if (call && call->op.same_as(tirx::decl_tensor_op())) {
+        const auto *pointer = call->args[0].as<CallNode>();
+        if (pointer && pointer->op.same_as(tirx::tensor_data_ptr_op())) {
+          if (auto source = pointer->args[0].as<Var>()) {
+            if (auto origin = origins_.find(source.value());
+                origin != origins_.end()) {
+              origins_.insert_or_assign(tensor.value(), origin->second);
+            }
+          }
+        }
+      }
+      return binding;
+    }
+    auto variable = binding->var.as<PrimVar>();
+    auto value = binding->value.as<PrimExpr>();
+    if (variable && value &&
+        SideEffect(value.value()) == CallEffectKind::kPure) {
+      condition_bindings_.Set(variable.value(), value.value());
+      bool inline_value = value->as<IntImmNode>() ||
+                          value->as<FloatImmNode>() || value->as<VarNode>() ||
+                          value->ty().MatchesCode(kDLInt);
+      if (config_->enable_simplify_let_inline && inline_value) {
+        analyzer_->Bind(variable.value(), value.value());
+        VarRemapSet(variable.value(), value.value());
+      }
+    }
+    return binding;
+  }
+
+  PrimExpr Condition(const PrimExpr &condition, ffi::InplaceMode mode) {
+    bool saved = propagate_now_;
+    propagate_now_ |= config_->propagate_knowns_to_prove_conditional;
+    PrimExpr substituted = Substitute(condition, condition_bindings_);
+    PrimExpr value = Mutate(substituted, mode).ValueOrUnchanged(substituted);
+    propagate_now_ = saved;
+    value = analyzer_->Simplify(value);
+    if (config_->transitively_prove_inequalities) {
+      if (analyzer_->CanProve(value)) {
+        return IntImm::Bool(true);
+      }
+      if (analyzer_->CanProve(!value)) {
+        return IntImm::Bool(false);
+      }
+    }
+    return value;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
+                                 ffi::InplaceMode mode) final {
+    PrimExpr condition = Condition(node->condition, mode);
+    auto constant = GetConstInt(condition);
+    if (constant && preserve_ws_schedule_) {
+      known_.clear();
+      SeqStmt then_case =
+          Mutate(node->then_case, mode).ValueOrUnchanged(node->then_case);
+      known_.clear();
+      ffi::Optional<SeqStmt> else_case;
+      if (node->else_case)
+        else_case = Mutate(node->else_case.value(), mode)
+                        .ValueOrUnchanged(node->else_case.value());
+      known_.clear();
+      return If(condition, then_case, else_case, node->loc);
+    }
+    if (constant) {
+      ffi::Optional<SeqStmt> selected =
+          *constant != 0 ? ffi::Optional<SeqStmt>(node->then_case)
+                         : node->else_case;
+      if (!selected) {
+        return SeqStmt({}, node->loc);
+      }
+      auto body =
+          Mutate(selected.value(), mode).ValueOrUnchanged(selected.value());
+      return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), body, {},
+                        node->loc);
+    }
+    auto incoming = known_;
+    PrimExpr predicate = condition;
+    while (const auto *call = predicate.as<CallNode>()) {
+      if (!call->op.same_as(prim::likely_op()))
+        break;
+      predicate = call->args[0].as_or_throw<PrimExpr>();
+    }
+    SeqStmt then_case = node->then_case;
+    constraint_scope_.WithNewScope([&]() {
+      if (SideEffect(condition) == CallEffectKind::kPure) {
+        constraint_scope_.Current().Emplace(analyzer_, predicate);
+      }
+      then_case = Mutate(then_case, mode).ValueOrUnchanged(then_case);
+    });
+    known_ = incoming;
+    ffi::Optional<SeqStmt> else_case;
+    if (node->else_case) {
+      constraint_scope_.WithNewScope([&]() {
+        if (SideEffect(condition) == CallEffectKind::kPure) {
+          constraint_scope_.Current().Emplace(analyzer_,
+                                              analyzer_->Simplify(!predicate));
+        }
+        else_case = Mutate(node->else_case.value(), mode)
+                        .ValueOrUnchanged(node->else_case.value());
+      });
+    }
+    known_.clear();
+    return If(condition, then_case, else_case, node->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (!preserve_ws_schedule_ &&
+        SideEffect(node->begin) == CallEffectKind::kPure &&
+        SideEffect(node->end) == CallEffectKind::kPure &&
+        SideEffect(node->step) == CallEffectKind::kPure &&
+        analyzer_->CanProve((node->step > 0 && node->begin >= node->end) ||
+                            (node->step < 0 && node->begin <= node->end))) {
+      return SeqStmt({}, node->loc);
+    }
+    known_.clear();
+    auto result = !preserve_ws_schedule_ && analyzer_->CanProve(node->step > 0)
+                      ? Parent::Mutate_(node, mode)
+                      : StmtExprMutator::Mutate_(node, mode);
+    known_.clear();
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
+                                 ffi::InplaceMode mode) final {
+    known_.clear();
+    auto result = Parent::Mutate_(node, mode);
+    known_.clear();
+    return result;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
+                                 ffi::InplaceMode mode) final {
+    const auto *operation = node->op.as<OpNode>();
+    bool transparent = node->op.same_as(tirx::scope_op()) ||
+                       (operation && operation->name == "tl.scope");
+    if (!transparent) {
+      known_.clear();
+    }
+    Stmt result =
+        Parent::Mutate_(node, mode).ValueOrUnchanged(ffi::GetRef<Stmt>(node));
+    if (transparent) {
+      std::unordered_set<const VarNode *> scoped_definitions;
+      ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+          result,
+          [&](const Var &variable,
+              TVMFFIDefRegionKind kind) -> ffi::Expected<ffi::WalkResult> {
+            if (kind != kTVMFFIDefRegionKindNone)
+              scoped_definitions.insert(variable.get());
+            return ffi::WalkResult::Advance();
+          });
+      std::erase_if(known_, [&](const KnownValue &known) {
+        ffi::Array<Expr> operands{known.tensor, known.value};
+        for (const PrimExpr &index : known.indices)
+          operands.push_back(index);
+        auto variables = UsedVariables(operands);
+        return std::any_of(variables.begin(), variables.end(),
+                           [&](const VarNode *variable) {
+                             return scoped_definitions.count(variable);
+                           });
+      });
+    } else {
+      known_.clear();
+    }
+    return result;
+  }
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
+                                 ffi::InplaceMode mode) final {
+    if (node->op.same_as(prim::if_then_else_op())) {
+      PrimExpr condition =
+          Condition(node->args[0].as_or_throw<PrimExpr>(), mode);
+      if (auto constant = GetConstInt(condition)) {
+        Expr branch = node->args[*constant != 0 ? 1 : 2];
+        return Mutate(branch, mode).ValueOrUnchanged(branch);
+      }
+    }
+    auto result = Parent::Mutate_(node, mode);
+    static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
+    auto effect = effects.get(node->op, CallEffectKind::kOpaque);
+    if (effect >= CallEffectKind::kUpdateState &&
+        effect != CallEffectKind::kEmbedInfo) {
+      known_.clear();
+    }
+    return result;
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const AndNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr left = Mutate(node->a, mode).ValueOrUnchanged(node->a);
+    PrimExpr right = node->b;
+    if (config_->apply_constraints_to_boolean_branches &&
+        SideEffect(left) == CallEffectKind::kPure &&
+        SideEffect(right) == CallEffectKind::kPure) {
+      With<sym::ConstraintContext> constraint(analyzer_, left);
+      right = Mutate(right, mode).ValueOrUnchanged(right);
+      right = SimplifyBoolean(right);
+    } else {
+      right = Mutate(right, mode).ValueOrUnchanged(right);
+    }
+    if (config_->apply_constraints_to_boolean_branches &&
+        SideEffect(left) == CallEffectKind::kPure &&
+        SideEffect(right) == CallEffectKind::kPure) {
+      With<sym::ConstraintContext> constraint(analyzer_, right);
+      left = SimplifyBoolean(left);
+    }
+    return left && right;
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const OrNode *node,
+                                     ffi::InplaceMode mode) final {
+    PrimExpr left = Mutate(node->a, mode).ValueOrUnchanged(node->a);
+    PrimExpr right = node->b;
+    bool pure = SideEffect(left) == CallEffectKind::kPure &&
+                SideEffect(right) == CallEffectKind::kPure;
+    if (config_->apply_constraints_to_boolean_branches && pure) {
+      With<sym::ConstraintContext> constraint(analyzer_,
+                                              analyzer_->Simplify(!left));
+      right = Mutate(right, mode).ValueOrUnchanged(right);
+      right = SimplifyBoolean(right);
+    } else {
+      right = Mutate(right, mode).ValueOrUnchanged(right);
+    }
+    if (config_->apply_constraints_to_boolean_branches && pure) {
+      With<sym::ConstraintContext> constraint(analyzer_,
+                                              analyzer_->Simplify(!right));
+      left = SimplifyBoolean(left);
+    }
+    bool stable_reads = !volatile_storage_ &&
+                        SideEffect(left) <= CallEffectKind::kReadState &&
+                        SideEffect(right) <= CallEffectKind::kReadState;
+    if (config_->convert_boolean_to_and_of_ors && (pure || stable_reads)) {
+      if (const auto *conjunction = left.as<AndNode>()) {
+        return (conjunction->a || right) && (conjunction->b || right);
+      }
+      if (const auto *conjunction = right.as<AndNode>()) {
+        return (left || conjunction->a) && (left || conjunction->b);
+      }
+    }
+    return left || right;
   }
 
   SimplifyConfig config_;
-  std::optional<ControlFlowGraph> touch_pattern_;
-
-  Map<Var, PrimExpr> non_inlined_bindings_;
-  Optional<Stmt> current_stmt_{std::nullopt};
-  std::unordered_set<const VarNode *> used_in_buffer_def_;
-  std::unordered_set<const VarNode *> used_vars_;
-  std::unordered_set<const BufferNode *> used_buffers_;
+  bool propagate_now_;
+  bool noalias_;
+  bool volatile_storage_;
+  bool preserve_ws_schedule_{false};
+  ffi::Map<PrimVar, PrimExpr> condition_bindings_;
+  std::vector<KnownValue> known_;
+  std::unordered_map<Var, Var> origins_;
+  std::unordered_set<Var> allocations_;
 };
 
-using namespace tirx::transform;
+} // namespace
+
+namespace transform {
 
 tvm::transform::Pass Simplify(bool simplify_arguments = true) {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    arith::Analyzer analyzer;
-    auto cfg = ctx->GetConfig<SimplifyConfig>("tl.Simplify");
-    return StmtSimplifier::Apply(std::move(f), &analyzer, cfg,
-                                 simplify_arguments);
+  auto pass = [simplify_arguments](tirx::Function function, IRModule,
+                                   tvm::transform::PassContext context)
+      -> ffi::Optional<tirx::Function> {
+    if (!function->body) {
+      return function;
+    }
+    sym::Analyzer analyzer;
+    auto config = context->GetConfigOrDefault<SimplifyConfig>("tl.Simplify");
+    auto simplifier =
+        ffi::make_object<StmtSimplifier>(analyzer, config, function);
+    SeqStmt body = function->body.value();
+    function.CopyOnWrite()->body =
+        simplifier->Mutate(body).ValueOrUnchanged(body);
+    while (true) {
+      auto remover = ffi::make_object<UnusedBindRemover>(
+          UsedVariables(function), ContainsVolatileStorage(function));
+      body = function->body.value();
+      function.CopyOnWrite()->body =
+          remover->Mutate(body).ValueOrUnchanged(body);
+      if (!remover->changed) {
+        break;
+      }
+    }
+    if (simplify_arguments) {
+      auto used = UsedVariables(function);
+      ffi::Array<Var> parameters;
+      std::vector<int> new_indices(function->params.size(), -1);
+      size_t old_index = 0;
+      for (const Var &parameter : function->params) {
+        if (!parameter.as<tirx::TensorVar>() || used.count(parameter.get())) {
+          new_indices[old_index] = static_cast<int>(parameters.size());
+          parameters.push_back(parameter);
+        }
+        ++old_index;
+      }
+      for (const char *key :
+           {"tl.readonly_param_indices", "tl.non_restrict_param_indices"}) {
+        if (auto indices = function->GetAttr<ffi::Array<IntImm>>(key)) {
+          ffi::Array<IntImm> remapped;
+          for (const IntImm &index : indices.value()) {
+            TVM_FFI_CHECK(index->value >= 0 &&
+                              index->value <
+                                  static_cast<int64_t>(new_indices.size()),
+                          ValueError)
+                << key << " contains an invalid parameter index";
+            if (int replacement =
+                    new_indices[index->value.as<int64_t>().value()];
+                replacement >= 0) {
+              remapped.push_back(IntImm::Int32(replacement));
+            }
+          }
+          function = WithAttr(std::move(function), key, remapped);
+        }
+      }
+      function.CopyOnWrite()->params = parameters;
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.Simplify");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.Simplify", Simplify);
+  SimplifyConfigNode::RegisterReflection();
+  tvm::transform::PassContext::RegisterConfigOption<SimplifyConfig>(
+      "tl.Simplify");
+  ffi::reflection::GlobalDef().def("tl.transform.Simplify", Simplify);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace transform
+} // namespace tvm::tl

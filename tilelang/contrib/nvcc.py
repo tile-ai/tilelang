@@ -13,11 +13,11 @@ from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH,
 import shutil
 import tempfile
 import tvm_ffi
-from tilelang import tvm as tvm
-from tvm.target import Target
+import tvm_tirx as tvm
+from tvm_tirx.target import Target
 
-from tvm.base import py_str
-from tvm.contrib import utils
+from tilelang._compat.utils import py_str
+from tvm_tirx.support import utils
 from tilelang import logger
 from .cc import get_cplus_compiler
 
@@ -139,7 +139,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     if target_format not in ["cubin", "ptx", "fatbin"]:
         raise ValueError("target_format must be in cubin, ptx, fatbin")
 
-    pass_context = tvm.get_global_func("transform.GetCurrentPassContext")()
+    pass_context = tvm.ir.transform.PassContext.current()
     kernels_output_dir = pass_context.config.get("cuda.kernels_output_dir", None)
     temp_code, temp_target = _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=kernels_output_dir)
 

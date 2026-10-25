@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 from typing import Any
-from tvm import tirx
-from tvm.tirx import IntImm
-import tvm.tirx.script.builder as tb_tir
+from tilelang._compat.tvm import tirx
+from tilelang._compat.tirx import IntImm
+import tvm_tirx.tirx.script.ir_builder as tb_tir
 from .eager.builder import SerialForWithStep, UnrollForWithStep
 from tilelang import _ffi_api
-from tvm.tirx.script.builder import frame
+from tilelang._compat.builder import ThreadBinding, frame
+
+
+def thread_binding(start, stop=None, thread=None, *, annotations=None):
+    """Construct a hardware-thread iteration using a native lexical launch."""
+    if isinstance(stop, str) and thread is None:
+        stop, thread = None, stop
+    if thread is None:
+        raise TypeError("thread_binding requires a hardware thread tag")
+    if stop is None:
+        start, stop = 0, start
+    return ThreadBinding(tb_tir.launch_thread(thread, stop - start, attrs=annotations), start)
 
 
 def Parallel(

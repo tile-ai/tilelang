@@ -1,10 +1,11 @@
 """The reuse contract survives scheduled lowering and is consumed by packing."""
 
 import tilelang
+from tvm_tirx import ir
 import tilelang.ascend.language as T
 from tilelang import tvm
-from tvm import tirx
-from testing.ascend._ir import nodes
+from tilelang._compat import tirx
+from testing.ascend._ir import allocated_buffers, nodes
 from testing.ascend.auto_schedule._reuse_utils import _make_cyclic_scalar_program
 
 
@@ -16,7 +17,7 @@ def test_alias_contract_lifetime():
         "tl.MergeUBAllocations",
     }
 
-    @tvm.ir.instrument.pass_instrument
+    @tvm.transform.instrument.pass_instrument
     class CapturePassIR:
         def run_after_pass(self, mod, info):
             if info.name in wanted:
@@ -25,9 +26,9 @@ def test_alias_contract_lifetime():
     with tvm.transform.PassContext(opt_level=3, instruments=[CapturePassIR()]):
         tilelang.lower(_make_cyclic_scalar_program(), target="ascend")
 
-    assert any("tl.buffer_alias_map" in block.annotations for block in nodes(snapshots["tl.InsertSync"], tirx.SBlock))
-    assert any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.LowerScheduledTIR"], tirx.AttrStmt))
-    assert not any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.MergeUBAllocations"], tirx.AttrStmt))
+    assert any("tl.buffer_alias_map" in region.attrs for region in nodes(snapshots["tl.InsertSync"], ir.RegionStmt))
+    assert any("tl.buffer_alias_map" in region.attrs for region in nodes(snapshots["tl.LowerScheduledTIR"], ir.RegionStmt))
+    assert not any("tl.buffer_alias_map" in region.attrs for region in nodes(snapshots["tl.MergeUBAllocations"], ir.RegionStmt))
 
 
 def test_fixed_versions_allow_ub_reuse_above_raw_capacity():
@@ -49,15 +50,12 @@ def test_fixed_versions_allow_ub_reuse_above_raw_capacity():
 
     allocations = []
 
-    @tvm.ir.instrument.pass_instrument
+    @tvm.transform.instrument.pass_instrument
     class CaptureAllocations:
         def run_after_pass(self, mod, info):
             if info.name == "tl.MergeUBAllocations":
                 allocations.extend(
-                    node.buffer
-                    for func in mod.functions.values()
-                    for node in nodes(func, tirx.AllocBuffer)
-                    if node.buffer.scope() == "shared.dyn"
+                    tensor for func in mod.functions.values() for tensor in allocated_buffers(func) if tensor.scope().name == "shared.dyn"
                 )
 
     with tvm.transform.PassContext(instruments=[CaptureAllocations()]):

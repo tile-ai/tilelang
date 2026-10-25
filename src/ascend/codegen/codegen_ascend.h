@@ -6,8 +6,8 @@
 #include <string>
 
 #include "backend/common/codegen/codegen_c_base.h"
-#include "target/source/codegen_c.h"
-#include <tvm/arith/analyzer.h>
+#include "backend/common/codegen/codegen_py.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm {
 namespace codegen {
@@ -17,55 +17,55 @@ public:
   using CodeGenC::PrintType;
 
   void Init(bool output_ssa);
-  void AddFunction(const PrimFunc &f);
+  void AddFunction(const GlobalVar &global, const tirx::Function &f);
   void PrintFuncPrefix(std::ostream &os) final;
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintCCEVectorSuffix(DataType t, std::ostream &os);
-  void VisitStmt_(const SBlockNode *op) final;
-  void VisitStmt_(const ForNode *op) final;
-  void VisitStmt_(const WhileNode *op) final;
-  void VisitStmt_(const AttrStmtNode *op) final;
-  void VisitStmt_(const AllocBufferNode *op) final;
-  void VisitStmt_(const BindNode *op) final;
+  void PrintType(const PrimType &t, std::ostream &os) final; // NOLINT(*)
+  void PrintCCEVectorSuffix(PrimType t, std::ostream &os);
+  void Dispatch_(const RegionStmtNode *op) final;
+  void Dispatch_(const ForNode *op) final;
+  void Dispatch_(const WhileNode *op) final;
+  void PrintAllocTensor(const BindNode *op, const CallNode *allocation);
+  void Dispatch_(const BindNode *op) final;
   void PrintStorageSync(const CallNode *op) final;
-  void VisitExpr_(const CallNode *op, std::ostream &os) final;
-  void PrintStorageScope(const std::string &scope, std::ostream &os) final;
+  void Dispatch_(const CallNode *op, std::ostream &os) final;
+  void PrintStorageScope(const runtime::MemoryScope &memory_scope,
+                         std::ostream &os) final;
   bool IsScopePartOfType() const final;
 
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const RampNode *op, std::ostream &os) final;
-  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
-  void VisitExpr_(const CastNode *op, std::ostream &os) final;
-  void VisitExpr_(const VarNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
-  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
+  void Dispatch_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const RampNode *op, std::ostream &os) final;
+  void Dispatch_(const FloatImmNode *op, std::ostream &os) final;
+  void Dispatch_(const CastNode *op, std::ostream &os) final;
+  void Dispatch_(const VarNode *op, std::ostream &os) final;
+  void Dispatch_(const NotNode *op, std::ostream &os) final;
+  void Dispatch_(const TensorLoadNode *op, std::ostream &os) final;
+  void Dispatch_(const SelectNode *op, std::ostream &os) final;
+  void Dispatch_(const ShuffleNode *op, std::ostream &os) final;
+  void Dispatch_(const TensorStoreNode *op) final;
 
-  std::string GetBufferRef(DataType t, const BufferNode *buffer,
+  std::string GetBufferRef(const PrimType &t, const VarNode *buffer,
                            PrimExpr index) final;
 
   // Vector element access (use .x/.y/.z/.w like CUDA, not .s0/.s1 from base)
-  void PrintVecElemLoad(const std::string &vec, DataType t, int i,
+  void PrintVecElemLoad(const std::string &vec, const PrimType &t, int i,
                         std::ostream &os) final;
-  void PrintVecElemStore(const std::string &vec, DataType t, int i,
+  void PrintVecElemStore(const std::string &vec, const PrimType &t, int i,
                          const std::string &value) final;
-  void PreFunctionBody(const PrimFunc &f) final;
+  void PreFunctionBody(const tirx::Function &f) final;
 
 protected:
   // Scalarize vector math calls (like CUDA)
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
-                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
+                       const ffi::Array<Expr> &args, bool skip_first_arg,
                        std::ostream &os) final;
 
   // Scalarize vector operations without Ascend SIMT vector support.
-  void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
+  void PrintVecBinaryOp(const std::string &op, const PrimType &t, PrimExpr lhs,
                         PrimExpr rhs, std::ostream &os) final;
 
 private:
   struct CApiArgument {
-    PrimExpr value;
+    Expr value;
     std::string prefix{};
     std::string suffix{};
   };
@@ -121,19 +121,17 @@ private:
   bool has_philox_rng_included_{false};
   bool has_cooperative_groups_included_{false};
   std::string ascend_rng_state_var_;
+  std::string sub_block_id_var_;
 
-  std::unordered_map<Var, IntImm, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
-      unroll_factor_;
-
-  ffi::Array<Var> CollectVFCaptures(const SBlockNode *op) const;
-  void EmitVFFunction(const SBlockNode *op, const ffi::Array<Var> &captures,
+  ffi::Array<Var> CollectVFCaptures(const RegionStmtNode *op) const;
+  void EmitVFFunction(const RegionStmtNode *op, const ffi::Array<Var> &captures,
                       const std::string &helper_name,
                       const std::string &func_attrs, VFMode vf_mode);
   void EmitPhiloxVectorFloat(std::ostream &os, const std::string &distribution,
                              int lanes);
   bool EmitSimdMergingCall(const CallNode *op, std::ostream &os);
   std::string ResolveSimdIntrinsicName_(const Call &call,
-                                        DataType result_dtype) const;
+                                        PrimType result_dtype) const;
   void PrintSimdCall_(const Call &call, size_t num_expr_args, std::ostream &os);
   void EmitCApiCall_(const std::string &function_name,
                      std::initializer_list<CApiArgument> arguments);
@@ -156,8 +154,8 @@ private:
   void EmitMad_(const CallNode *op, bool is_mx);
   void EmitGemmL1_(const CallNode *op);
   void EmitBlockscaledGemmL1_(const CallNode *op);
-  bool IsGlobalGmBuffer(const BufferNode *buffer) const;
-  std::string GetGmBypassPtr(DataType dtype, const BufferNode *buffer,
+  bool IsGlobalGmBuffer(const VarNode *buffer) const;
+  std::string GetGmBypassPtr(PrimType dtype, const VarNode *buffer,
                              PrimExpr index);
 
   enum class AscendKernelMode { kVector, kCube, kMix };
@@ -166,23 +164,23 @@ private:
   bool enable_fast_math_{false};
 
   // Accumulates constraints along the traversal
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_;
 
   const char *VFModeName(VFMode mode) const;
   bool IsInsideSimtVF() const { return vf_mode_ == VFMode::kSimt; }
   bool IsInsideSimdVF() const { return vf_mode_ == VFMode::kSimd; }
   bool IsOutsideVF() const { return vf_mode_ == VFMode::kNone; }
-  void ValidateSimdVectorType(DataType dtype, const std::string &context) const;
-  void RejectGenericVectorInSimd(const char *op_name, DataType dtype) const;
-  void ValidateGenericVectorType(const char *op_name, DataType dtype);
+  void ValidateSimdVectorType(PrimType dtype, const std::string &context) const;
+  void RejectGenericVectorInSimd(const char *op_name, PrimType dtype) const;
+  void ValidateGenericVectorType(const char *op_name, PrimType dtype);
 
   bool VectorAccessIsAligned(const PrimExpr &index, int lanes);
 
-  void EmitSimtVectorPredicateNot(const PrimExpr &value, DataType dtype,
+  void EmitSimtVectorPredicateNot(const PrimExpr &value, PrimType dtype,
                                   std::ostream &os);
-  void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
-  bool EmitScalarizedStore(const BufferStoreNode *op);
-  bool EmitOutOfVFBroadcastStore(const BufferStoreNode *op);
+  void EmitScalarizedLoad(const TensorLoadNode *op, std::ostream &os);
+  bool EmitScalarizedStore(const TensorStoreNode *op);
+  bool EmitOutOfVFBroadcastStore(const TensorStoreNode *op);
 };
 
 } // namespace codegen

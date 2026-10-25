@@ -68,7 +68,7 @@ def get_select_kernel_2():
 def test_select_codegen_no_if():
     kernel = get_select_kernel_2()
     source = kernel.get_kernel_source()
-    assert "if (" not in source
+    assert not any("if (" in line for line in source.splitlines() if not line.lstrip().startswith("#"))
 
 
 @tilelang.jit
@@ -89,9 +89,9 @@ def test_parallel_select_uniform_condition():
     kernel = get_parallel_select_kernel()
     source = kernel.get_kernel_source()
 
-    assert "if (" not in source
-    assert ") ? " in source
-    assert "*(float4*)" in source or "load_global_256" in source
+    assert not any("if (" in line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    assert ")?" in source or ") ? " in source
+    assert any(load in source for load in ("*(float4*)", "load_global_256", "*(ulonglong4*)"))
 
     A = torch.randn((1024,), dtype=torch.float32, device="cuda")
     B = torch.empty_like(A)
@@ -121,7 +121,7 @@ def test_parallel_data_dependent_select_disables_auto_vectorization():
     kernel = get_parallel_data_dependent_select_kernel()
     source = kernel.get_kernel_source()
 
-    assert "if (" not in source
+    assert not any("if (" in line for line in source.splitlines() if not line.lstrip().startswith("#"))
     assert ") ? " in source
     assert "*(float4*)" not in source
     assert "load_global_256" not in source

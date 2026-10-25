@@ -19,12 +19,9 @@
 
 #pragma once
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -44,6 +41,7 @@
 #include "op/fill.h"
 #include "op/utils.h"
 #include "support/check.h"
+#include "task_resources.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
 
@@ -53,46 +51,63 @@ namespace ascend {
 
 using namespace tirx;
 
-inline ffi::Optional<Bind> GetFlatTaskBind(const Stmt &stmt) {
-  if (const auto *bind = stmt.as<BindNode>())
-    return ffi::GetRef<Bind>(bind);
-  const auto *attribute = stmt.as<AttrStmtNode>();
-  if (attribute && (attribute->attr_key == tl::attr::kAscendTask ||
-                    attribute->attr_key == tl::attr::kScheduleUnit))
-    return GetFlatTaskBind(attribute->body);
-  return std::nullopt;
-}
-
-inline Stmt ReplaceFlatTaskBind(const Stmt &stmt, const Bind &replacement) {
-  if (stmt.as<BindNode>())
-    return replacement;
-  const auto *attribute = stmt.as<AttrStmtNode>();
-  ICHECK(attribute && (attribute->attr_key == tl::attr::kAscendTask ||
-                       attribute->attr_key == tl::attr::kScheduleUnit))
-      << "Expected a flat Task/schedule-unit wrapper around Bind, got " << stmt;
-  return AttrStmt(attribute->node, attribute->attr_key, attribute->value,
-                  ReplaceFlatTaskBind(attribute->body, replacement),
-                  attribute->span);
-}
-
 class TaskAwareConstrVisitor : public ConstrVisitor {
 protected:
+  static Stmt GetUnconditionalStatement(Stmt statement) {
+    statement = SingleScheduleStatement(statement);
+    if (const auto *region = statement.as<RegionStmtNode>()) {
+      auto key = ScheduleMarkerKey(region);
+      if (key == attr::kAscendTask || key == attr::kScheduleUnit)
+        return GetUnconditionalStatement(UnwrapScheduleMarker(region));
+    }
+    return statement;
+  }
+
   static ffi::Optional<Bind> GetFlatBind(const Stmt &stmt) {
     return GetFlatTaskBind(stmt);
   }
 
-  void VisitStmt_(const SeqStmtNode *op) final {
-    // Mirror ConstrVisitor's own SeqStmt handling: a flat Bind (here wrapped
-    // in a Task/schedule-unit attr) defines its variable for the following
-    // statements of this sequence, but not while its value is evaluated.
+  ffi::Optional<ffi::VisitInterrupt>
+  Visit_(const RegionStmtNode *node) override {
+    auto key = ScheduleMarkerKey(node);
+    if (key == kScheduleCondition || IsScheduleGuardAttribute(key)) {
+      auto condition = ScheduleMarkerPayload(node).as_or_throw<PrimExpr>();
+      if (auto interrupt = Visit(condition))
+        return interrupt;
+      auto guard = MakeGuard(condition, IsScheduleGuardAttribute(key));
+      return Visit(UnwrapScheduleMarker(node));
+    }
+    if (!key.empty())
+      return Visit(UnwrapScheduleMarker(node));
+    return ConstrVisitor::Visit_(node);
+  }
+
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const SeqStmtNode *node) override {
     size_t old_size = constr_stack_.size();
-    for (const Stmt &stmt : op->seq) {
-      VisitStmt(stmt);
-      if (ffi::Optional<Bind> bind = GetFlatBind(stmt); bind.defined()) {
-        constr_stack_.emplace_back(bind.value()->var, bind.value()->value);
+    for (const Stmt &statement : node->seq) {
+      auto interrupt = Visit(statement);
+      if (interrupt) {
+        constr_stack_.resize(old_size);
+        return interrupt;
+      }
+      Stmt payload = GetUnconditionalStatement(statement);
+      if (auto binding = payload.as<Bind>()) {
+        auto variable = binding.value()->var.as<PrimVar>();
+        auto value = binding.value()->value.as<PrimExpr>();
+        if (variable && value)
+          constr_stack_.emplace_back(variable.value(), value.value());
+      } else if (const auto *assertion = payload.as<AssertStmtNode>()) {
+        if (SideEffect(assertion->condition) == CallEffectKind::kPure)
+          constr_stack_.emplace_back(assertion->condition);
+      } else if (const auto *evaluate = payload.as<EvaluateNode>()) {
+        if (const auto *call = evaluate->value.as<CallNode>();
+            call && call->op.same_as(prim::assume_op()))
+          constr_stack_.emplace_back(call->args[0].as_or_throw<PrimExpr>(),
+                                     true);
       }
     }
     constr_stack_.resize(old_size);
+    return std::nullopt;
   }
 };
 
@@ -109,32 +124,34 @@ struct RegionElementUpperBound {
 // buffer dimension, and finally the legacy extent=1 heuristic. Static buffer
 // dimensions also cap weak dtype-wide Analyzer bounds.
 inline RegionElementUpperBound
-EstimateRegionElementUpperBound(const Buffer &buffer, const Region &ranges,
-                                arith::Analyzer *analyzer) {
+EstimateRegionElementUpperBound(const TensorVar &buffer,
+                                const ffi::Array<Range> &ranges,
+                                sym::Analyzer analyzer) {
   RegionElementUpperBound result;
   for (size_t i = 0; i < ranges.size(); ++i) {
     const PrimExpr &extent_expr = ranges[i]->extent;
     int64_t extent = 1;
     bool extent_reliable = true;
 
-    if (const int64_t *extent_int = as_const_int(extent_expr)) {
+    if (auto extent_int = GetConstInt(extent_expr)) {
       extent = *extent_int;
     } else {
-      const int64_t *shape_extent =
-          i < buffer->shape.size() ? as_const_int(buffer->shape[i]) : nullptr;
-      arith::ConstIntBound bound = analyzer->const_int_bound(extent_expr);
+      auto shape_extent = i < buffer.shape().size()
+                              ? GetConstInt(buffer.shape()[i])
+                              : std::nullopt;
+      sym::ConstIntBound bound = analyzer->const_int_bound(extent_expr);
 
-      arith::Analyzer unconstrained_analyzer;
-      Var unconstrained_extent("unconstrained_extent", extent_expr.dtype());
+      sym::Analyzer unconstrained_analyzer;
+      PrimVar unconstrained_extent("unconstrained_extent", extent_expr.ty());
       int64_t unconstrained_max =
-          unconstrained_analyzer.const_int_bound(unconstrained_extent)
+          unconstrained_analyzer->const_int_bound(unconstrained_extent)
               ->max_value;
       bool has_finite_bound = bound->max_value >= 0 &&
-                              bound->max_value != arith::ConstIntBound::kPosInf;
+                              bound->max_value != sym::ConstIntBound::kPosInf;
       bool has_useful_bound =
           has_finite_bound && bound->max_value < unconstrained_max;
 
-      if (shape_extent != nullptr) {
+      if (shape_extent.has_value()) {
         extent = has_finite_bound ? std::min(bound->max_value, *shape_extent)
                                   : *shape_extent;
       } else if (has_useful_bound) {
@@ -150,32 +167,25 @@ EstimateRegionElementUpperBound(const Buffer &buffer, const Region &ranges,
   return result;
 }
 
-inline PrimExpr RegionElementCountExpr(const Region &ranges) {
-  PrimExpr elements = make_const(DataType::Int(64), 1);
+inline PrimExpr RegionElementCountExpr(const ffi::Array<Range> &ranges) {
+  PrimExpr elements = MakeConst(PrimType::Int(64), 1);
   for (const Range &range : ranges)
-    elements = elements * cast(DataType::Int(64), range->extent);
+    elements = elements * Cast(PrimType::Int(64), range->extent);
   return elements;
 }
 
-inline int64_t ElementsToBytes(int64_t elements, DataType dtype) {
+inline int64_t ElementsToBytes(int64_t elements, PrimType dtype) {
   int64_t elem_bits = dtype.bits() * dtype.lanes();
   return (elements * elem_bits + 7) / 8;
 }
 
 // Hardware resource properties derived from one task body.
-struct TaskResourceUsage {
-  uint16_t pipe_mask{0};
-  uint16_t hbm_mask{0};
-  bool reads_pad_value{false};
-  bool reads_atomic{false};
-};
-
 // Direct buffer and scalar-variable accesses made by one statement. Accesses
 // remain separate from hardware resource classification because AutoSchedule
 // also adds accesses from surrounding guards and loop expressions to a task.
 struct TaskAccessInfo {
-  std::vector<BufferRegion> read_regions;
-  std::vector<BufferRegion> write_regions;
+  std::vector<TensorRegion> read_regions;
+  std::vector<TensorRegion> write_regions;
   Map<Var, Optional<PrimExpr>> l0_pitches;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
@@ -183,179 +193,52 @@ struct TaskAccessInfo {
 
 namespace task_analysis_detail {
 
-inline bool IsCrossCoreSyncCall(const CallNode *op) {
-  return op->op.same_as(tl::ascend_cross_core_set_flag()) ||
-         op->op.same_as(tl::ascend_cross_core_wait_flag());
-}
-
-inline constexpr uint16_t kSpecializedPipes =
-    static_cast<uint16_t>(ResourcePipe::kMTE1) |
-    static_cast<uint16_t>(ResourcePipe::kMTE2) |
-    static_cast<uint16_t>(ResourcePipe::kMTE3) |
-    static_cast<uint16_t>(ResourcePipe::kCube) |
-    static_cast<uint16_t>(ResourcePipe::kVector) |
-    static_cast<uint16_t>(ResourcePipe::kFixpipe);
-
-inline uint16_t ResolvePipe(uint16_t mask) {
-  if ((mask & kSpecializedPipes) == 0)
-    return mask | static_cast<uint16_t>(ResourcePipe::kScalar);
-  return mask;
-}
-
-inline uint16_t GetHbmResourceMask(const Buffer &src, const Buffer &dst) {
-  if (IsGlobalBuffer(src) && IsSharedBuffer(dst))
-    return static_cast<uint16_t>(HbmPort::kAiv);
-  if (IsSharedBuffer(src) && IsGlobalBuffer(dst))
-    return static_cast<uint16_t>(HbmPort::kAiv) |
-           static_cast<uint16_t>(HbmPort::kStore);
-  if (IsGlobalBuffer(src) && IsL1Buffer(dst))
-    return static_cast<uint16_t>(HbmPort::kAic);
-  if (IsL0CBuffer(src) && IsGlobalBuffer(dst))
-    return static_cast<uint16_t>(HbmPort::kAic) |
-           static_cast<uint16_t>(HbmPort::kStore);
-  return 0;
-}
-
-inline SpecialRegister
-SpecialRegisterForCrossCorePipe(const PrimExpr &pipe_arg) {
-  const auto *pipe = pipe_arg.as<StringImmNode>();
-  ICHECK(pipe != nullptr)
-      << "Cross-core synchronization pipe must be a constant string, got "
-      << pipe_arg;
-  switch (ParseAscendPipe(pipe->value)) {
-  case ResourcePipe::kScalar:
-    return SpecialRegister::kPipeScalar;
-  case ResourcePipe::kVector:
-    return SpecialRegister::kPipeVector;
-  case ResourcePipe::kCube:
-    return SpecialRegister::kPipeCube;
-  case ResourcePipe::kMTE1:
-    return SpecialRegister::kPipeMTE1;
-  case ResourcePipe::kMTE2:
-    return SpecialRegister::kPipeMTE2;
-  case ResourcePipe::kMTE3:
-    return SpecialRegister::kPipeMTE3;
-  case ResourcePipe::kFixpipe:
-    return SpecialRegister::kPipeFixpipe;
-  case ResourcePipe::kNone:
-  case ResourcePipe::kAll:
-    break;
-  }
-  LOG(FATAL) << "Unsupported cross-core synchronization pipe " << pipe->value;
-  return SpecialRegister::kNone;
-}
-
-class SpecialRegisterWriteAnalyzer : public StmtExprVisitor {
-public:
-  static uint16_t Analyze(const Stmt &stmt) {
-    SpecialRegisterWriteAnalyzer analyzer;
-    analyzer(stmt);
-    return analyzer.mask_;
-  }
-
-private:
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::loop_break())) {
-      Add(SpecialRegister::kLoopControl);
-    } else if (op->op.same_as(tl::ascend_set_hf32_mode())) {
-      Add(SpecialRegister::kHf32Mode);
-    } else if (op->op.same_as(tl::ascend_set_mmad_direction())) {
-      Add(SpecialRegister::kMmadDirection);
-    } else if (op->op.same_as(tl::ascend_set_copy_pad_value())) {
-      Add(SpecialRegister::kPadValue);
-    } else if (op->op.same_as(tl::ascend_set_atomic()) ||
-               op->op.same_as(tl::ascend_set_atomic_none())) {
-      Add(SpecialRegister::kAtomicMode);
-    } else if (IsCrossCoreSyncCall(op)) {
-      ICHECK_EQ(op->args.size(), 3)
-          << "ascend_cross_core_set_flag/wait_flag expects 3 arguments";
-      Add(SpecialRegisterForCrossCorePipe(op->args[1]));
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void Add(SpecialRegister reg) { mask_ |= static_cast<uint16_t>(reg); }
-
-  uint16_t mask_{0};
-};
-
-class ResourceAnalyzer : public StmtExprVisitor {
-public:
-  static TaskResourceUsage Analyze(const Stmt &stmt) {
-    ResourceAnalyzer analyzer;
-    analyzer(stmt);
-    analyzer.usage_.pipe_mask = ResolvePipe(analyzer.usage_.pipe_mask);
-    return analyzer.usage_;
-  }
-
-private:
-  void VisitExpr_(const CallNode *op) final {
-    usage_.pipe_mask |= GetAscendTaskPipeMask(ffi::GetRef<Call>(op));
-    if (IsAscendCopyCall(op)) {
-      AscendCopy copy_obj(op->args, op->annotations);
-      const AscendCopyNode *copy = copy_obj.get();
-      usage_.hbm_mask |= GetHbmResourceMask(copy->src, copy->dst);
-      if (copy->data_select != 0)
-        usage_.reads_pad_value = true;
-      if (IsGlobalBuffer(copy->dst))
-        usage_.reads_atomic = true;
-    }
-
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  // Task-level blocks are atomic to all task analyses.
-  void VisitStmt_(const SBlockNode *op) final {
-    usage_.pipe_mask |= PipeMask(GetAscendBlockPipe(op->name_hint));
-  }
-
-  TaskResourceUsage usage_;
-};
-
 // Collect expressions evaluated by scalar control rather than by a task's
-// hardware data path. Buffer-region indices are handled separately because a
+// hardware data path. TensorVar-region indices are handled separately because a
 // tile operation may legally transfer data between memories owned by different
 // cores while its address expressions must still be available on the issuing
 // core.
-class ScalarControlExpressionCollector : public StmtVisitor {
+class ScalarControlExpressionCollector : public AnalysisVisitor {
 public:
   static std::vector<PrimExpr> Collect(const Stmt &stmt) {
-    ScalarControlExpressionCollector collector;
-    collector(stmt);
-    return std::move(collector.expressions_);
+    auto collector = ffi::make_object<ScalarControlExpressionCollector>();
+    collector->Visit(stmt);
+    return std::move(collector->expressions_);
   }
 
 private:
-  void VisitExpr(const PrimExpr &) final {}
-
   void VisitStmt_(const BindNode *op) final {
-    expressions_.push_back(op->value);
+    if (auto scalar = op->value.as<PrimExpr>())
+      expressions_.push_back(scalar.value());
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != tl::attr::kAscendTask &&
-        op->attr_key != tl::attr::kAscendPerCoreTask &&
-        op->attr_key != tl::attr::kScheduleUnit) {
-      if (const auto *expr = op->node.as<PrimExprNode>())
-        expressions_.push_back(ffi::GetRef<PrimExpr>(expr));
-      if (op->value.defined())
-        expressions_.push_back(op->value);
+  void VisitStmt_(const RegionStmtNode *op) final {
+    auto key = ScheduleMarkerKey(op);
+    if (!key.empty()) {
+      if (key != attr::kAscendTask && key != attr::kAscendPerCoreTask &&
+          key != attr::kScheduleUnit)
+        if (auto scalar = ScheduleMarkerPayload(op).as<PrimExpr>())
+          expressions_.push_back(scalar.value());
+      VisitStmt(UnwrapScheduleMarker(op));
+      return;
     }
+    for (const Expr &argument : op->args)
+      if (auto scalar = argument.as<PrimExpr>())
+        expressions_.push_back(scalar.value());
     VisitStmt(op->body);
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
+  void VisitStmt_(const IfNode *op) final {
     expressions_.push_back(op->condition);
     VisitStmt(op->then_case);
-    if (op->else_case.defined())
+    if (op->else_case.has_value())
       VisitStmt(op->else_case.value());
   }
 
   void VisitStmt_(const ForNode *op) final {
-    expressions_.push_back(op->min);
-    expressions_.push_back(op->extent);
-    if (op->step.defined())
-      expressions_.push_back(op->step.value());
+    expressions_.push_back(op->begin);
+    expressions_.push_back(op->end);
+    expressions_.push_back(op->step);
     VisitStmt(op->body);
   }
 
@@ -373,30 +256,15 @@ private:
     if (call != nullptr && IsCrossCoreSyncCall(call)) {
       ICHECK_EQ(call->args.size(), 3)
           << "ascend_cross_core_set_flag/wait_flag expects 3 arguments";
-      expressions_.push_back(call->args[2]);
+      expressions_.push_back(call->args[2].as_or_throw<PrimExpr>());
     }
   }
 
-  void VisitStmt_(const BufferStoreNode *) final {}
-  void VisitStmt_(const SBlockNode *op) final { VisitStmt(op->body); }
-
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    expressions_.push_back(op->predicate);
-    VisitStmt(op->block);
-  }
-
+  void VisitStmt_(const TensorStoreNode *) final {}
   std::vector<PrimExpr> expressions_;
 };
 
 } // namespace task_analysis_detail
-
-inline TaskResourceUsage AnalyzeTaskResourceUsage(const Stmt &stmt) {
-  return task_analysis_detail::ResourceAnalyzer::Analyze(stmt);
-}
-
-inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
-  return task_analysis_detail::SpecialRegisterWriteAnalyzer::Analyze(stmt);
-}
 
 inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
                                           const LayoutMap &layouts = {}) {
@@ -412,11 +280,20 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
   return result;
 }
 
-inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
-                                const Var &storage) {
-  auto regions_access = [&](const std::vector<BufferRegion> &regions) {
+inline bool
+TaskAccessesStorage(const TaskAccessInfo &accesses, const Var &storage,
+                    const StorageAliasAnalysis *analysis = nullptr) {
+  auto matches = [&](const Expr &expression) {
+    if (expression.same_as(storage))
+      return true;
+    if (analysis)
+      if (auto access = analysis->Resolve(expression))
+        return access->root.same_as(storage);
+    return false;
+  };
+  auto regions_access = [&](const std::vector<TensorRegion> &regions) {
     return std::any_of(regions.begin(), regions.end(), [&](const auto &region) {
-      return region->buffer->data.same_as(storage);
+      return matches(region->source);
     });
   };
   if (regions_access(accesses.read_regions) ||
@@ -425,13 +302,13 @@ inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
   }
   auto vars_access = [&](const std::vector<Var> &vars) {
     return std::any_of(vars.begin(), vars.end(),
-                       [&](const Var &var) { return var.same_as(storage); });
+                       [&](const Var &var) { return matches(var); });
   };
   return vars_access(accesses.read_vars) || vars_access(accesses.write_vars);
 }
 
 inline bool HasCrossCoreSync(const Stmt &stmt) {
-  class Detector : public StmtExprVisitor {
+  class Detector : public AnalysisVisitor {
   public:
     bool found{false};
 
@@ -441,11 +318,12 @@ inline bool HasCrossCoreSync(const Stmt &stmt) {
         found = true;
         return;
       }
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(op);
     }
-  } detector;
-  detector(stmt);
-  return detector.found;
+  };
+  auto detector = ffi::make_object<Detector>();
+  detector->Visit(stmt);
+  return detector->found;
 }
 
 // Queries where scalar values and control expressions can be evaluated from
@@ -463,11 +341,15 @@ public:
 
   void AddTasks(const std::vector<TaskNode *> &tasks) {
     for (const TaskNode *task : tasks) {
+      if (!storage_context_)
+        storage_context_ = task;
       for (const Var &var : task->GetWriteVars())
         writers_[var].push_back(task);
-      for (const BufferRegion &region : task->GetWriteRegions()) {
+      for (const TensorRegion &region : task->GetWriteRegions()) {
         if (IsRegisterRegion(region))
-          writers_[region->buffer->data].push_back(task);
+          storage_writers_[task->StorageOf(
+                               region->source.as_or_throw<TensorVar>())]
+              .push_back(task);
       }
     }
   }
@@ -483,18 +365,7 @@ public:
     if (external != external_vars_.end())
       return external->second;
 
-    auto writers = writers_.find(value);
-    if (writers == writers_.end())
-      return kCoreAll;
-    CoreMask result = kCoreAll;
-    bool found = false;
-    for (const TaskNode *writer : writers->second) {
-      if (writer == reader)
-        continue;
-      found = true;
-      result &= writer->GetCoreMask();
-    }
-    return found ? result : kCoreAll;
+    return GetWriterCoreMask(writers_, value, reader);
   }
 
   CoreMask GetExpressionCoreMask(const PrimExpr &expr,
@@ -509,14 +380,16 @@ public:
     CoreMask result = kCoreAll;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
-    for (const BufferRegion &region : accesses.read_regions) {
-      if (IsSharedBuffer(region->buffer)) {
+    for (const TensorRegion &region : accesses.read_regions) {
+      if (IsSharedBuffer(region->source.as_or_throw<TensorVar>())) {
         result &= kCoreVector;
-      } else if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
-                 IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer)) {
+      } else if (IsL1Buffer(region->source.as_or_throw<TensorVar>()) ||
+                 IsL0ABuffer(region->source.as_or_throw<TensorVar>()) ||
+                 IsL0BBuffer(region->source.as_or_throw<TensorVar>()) ||
+                 IsL0CBuffer(region->source.as_or_throw<TensorVar>())) {
         result &= kCoreCube;
       } else if (IsRegisterRegion(region)) {
-        result &= GetValueCoreMask(region->buffer->data, reader);
+        result &= GetRegisterCoreMask(region, reader);
       }
     }
     return result;
@@ -534,9 +407,9 @@ public:
     ICHECK(task != nullptr);
     CoreMask result = GetValueInputCoreMask(task);
 
-    for (const BufferRegion &region : task->GetReadRegions())
+    for (const TensorRegion &region : task->GetReadRegions())
       result &= GetRegionIndexCoreMask(region, task);
-    for (const BufferRegion &region : task->GetWriteRegions())
+    for (const TensorRegion &region : task->GetWriteRegions())
       result &= GetRegionIndexCoreMask(region, task);
 
     for (const PrimExpr &expr :
@@ -552,10 +425,8 @@ public:
         continue;
       }
       const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
-      if (const auto *expr = attribute->node.as<PrimExprNode>())
-        result &= GetExpressionCoreMask(ffi::GetRef<PrimExpr>(expr), task);
-      if (attribute->value.defined())
-        result &= GetExpressionCoreMask(attribute->value, task);
+      if (auto expression = attribute->node.as<PrimExpr>())
+        result &= GetExpressionCoreMask(expression.value(), task);
     }
 
     uint16_t scalar_pipe = static_cast<uint16_t>(ResourcePipe::kScalar);
@@ -569,51 +440,60 @@ private:
                                        ObjectPtrHash, ObjectPtrEqual>;
   using CoreMap =
       std::unordered_map<Var, CoreMask, ObjectPtrHash, ObjectPtrEqual>;
-  CoreMask GetValueInputCoreMask(const TaskNode *task) const {
+
+  static CoreMask GetWriterCoreMask(const WriterMap &writers, const Var &value,
+                                    const TaskNode *reader) {
+    auto found = writers.find(value);
+    if (found == writers.end())
+      return kCoreAll;
     CoreMask result = kCoreAll;
-    for (const Var &var : task->GetReadVars())
-      result &= GetValueCoreMask(var, task);
-    for (const BufferRegion &region : task->GetReadRegions()) {
-      if (IsRegisterRegion(region))
-        result &= GetValueCoreMask(region->buffer->data, task);
+    for (const TaskNode *writer : found->second) {
+      if (writer != reader)
+        result &= writer->GetCoreMask();
     }
     return result;
   }
 
-  CoreMask GetRegionIndexCoreMask(const BufferRegion &region,
+  CoreMask GetRegisterCoreMask(const TensorRegion &region,
+                               const TaskNode *reader) const {
+    auto tensor = region->source.as_or_throw<TensorVar>();
+    const TaskNode *context = reader ? reader : storage_context_;
+    Var storage =
+        context ? context->StorageOf(tensor) : static_cast<Var>(tensor);
+    return GetValueCoreMask(tensor, reader) &
+           GetWriterCoreMask(storage_writers_, storage, reader);
+  }
+
+  CoreMask GetValueInputCoreMask(const TaskNode *task) const {
+    CoreMask result = kCoreAll;
+    for (const Var &var : task->GetReadVars())
+      result &= GetValueCoreMask(var, task);
+    for (const TensorRegion &region : task->GetReadRegions()) {
+      if (IsRegisterRegion(region))
+        result &= GetRegisterCoreMask(region, task);
+    }
+    return result;
+  }
+
+  CoreMask GetRegionIndexCoreMask(const TensorRegion &region,
                                   const TaskNode *reader) const {
     CoreMask result = kCoreAll;
     for (const Range &range : region->region) {
-      result &= GetExpressionCoreMask(range->min, reader);
+      result &= GetExpressionCoreMask(range->begin, reader);
       result &= GetExpressionCoreMask(range->extent, reader);
     }
     return result;
   }
 
   WriterMap writers_;
+  WriterMap storage_writers_;
   CoreMap external_vars_;
+  const TaskNode *storage_context_{nullptr};
 };
-
-inline bool HasTaskBufferAccess(const Stmt &stmt) {
-  TaskAccessInfo accesses = AnalyzeTaskAccesses(stmt);
-  return !accesses.read_regions.empty() || !accesses.write_regions.empty();
-}
 
 inline bool HasTaskBufferAccess(const TaskNode *task) {
   ICHECK(task != nullptr);
   return !task->GetReadRegions().empty() || !task->GetWriteRegions().empty();
-}
-
-[[noreturn]] inline void FatalUnmarkedTask(const char *consumer,
-                                           const char *node_kind,
-                                           const char *prerequisite = nullptr) {
-  if (prerequisite != nullptr) {
-    LOG(FATAL) << consumer << " found an unmarked " << node_kind
-               << ". Run tl.transform." << prerequisite << " before "
-               << consumer << ".";
-  }
-  LOG(FATAL) << consumer << " found an unmarked " << node_kind
-             << " after internal task normalization";
 }
 
 inline void ApplyTaskResourceUsage(const TaskResourceUsage &usage,
@@ -629,9 +509,9 @@ inline void ApplyTaskResourceUsage(const TaskResourceUsage &usage,
 
 inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
   ICHECK(task != nullptr);
-  for (const BufferRegion &region : accesses.read_regions)
+  for (const TensorRegion &region : accesses.read_regions)
     task->AddReadRegion(region);
-  for (const BufferRegion &region : accesses.write_regions)
+  for (const TensorRegion &region : accesses.write_regions)
     task->AddWriteRegion(region);
   auto pitches = task->GetL0Pitches();
   for (const auto &[storage, pitch] : accesses.l0_pitches)

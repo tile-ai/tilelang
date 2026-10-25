@@ -1,6 +1,9 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
+
+from tilelang._compat.tensor import tensor_parameter_map, tensor_strides
+from tilelang._compat.tirx import expr_dtype
 import ctypes
 import logging
 import torch
@@ -8,10 +11,10 @@ import torch
 from typing import Any
 from collections.abc import Callable
 from tilelang import tvm as tvm
-from tvm.target import Target
+from tvm_tirx.target import Target
 from tilelang.engine.param import KernelParam
-from tvm import tirx
-from tvm.relax import TensorType
+from tilelang.language.dtypes import dtype as tl_dtype
+from tilelang._compat.tvm import tirx
 
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
@@ -178,7 +181,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     @classmethod
     def from_database(
         cls,
-        params: list[TensorType],
+        params: list[KernelParam],
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
@@ -252,7 +255,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         dynamic_symbolic_map = {}
         # Inputs are visited first. An output's shape is resolved from these entries
         # while that output is being allocated, so a dimension mentioned by both an
@@ -273,10 +276,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer = buffer_map[param]
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
-                for j, stride in enumerate(buffer.strides):
+                for j, stride in enumerate(tensor_strides(buffer)):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
-        return dynamic_symbolic_map
+        from tilelang.jit.adapter.native import dynamic_symbols
+
+        return {symbol: dynamic_symbolic_map[symbol] for symbol in dynamic_symbols(func)}
 
     def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
@@ -287,7 +292,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         sources: dict[str, list[tuple[int, int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
@@ -300,7 +305,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         if key not in sources:
                             sources[key] = []
                         sources[key].append((0, i, j, 1))
-                for j, stride in enumerate(buffer.strides):
+                for j, stride in enumerate(tensor_strides(buffer)):
                     if isinstance(stride, tirx.Var) and stride not in params:
                         key = str(stride)
                         if key not in sources:
@@ -315,13 +320,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         buffer_dtype_map = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 name, dtype = buffer.name, buffer.dtype
-                buffer_dtype_map[name] = (i, dtype.as_torch())
+                buffer_dtype_map[name] = (i, tl_dtype(dtype).as_torch())
         return buffer_dtype_map
 
     def _process_ptr_map(self) -> dict[int, str]:
@@ -334,7 +339,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params = func.params
         ptr_map = {}
         for i, param in enumerate(params):
-            if param.dtype == "handle":
+            if expr_dtype(param) == "handle":
                 ptr_map[i] = param.name
         return ptr_map
 
@@ -347,7 +352,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         static_shape_map = {}
         static_strides_map = {}
         static_contiguous_list = list()
@@ -372,7 +377,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         static_shape.append((j, -1))  # -1 for symbolic
                     else:
                         raise ValueError(f"Unsupported shape type: {type(s)}")
-                for j, s in enumerate(buffer.strides):
+                for j, s in enumerate(tensor_strides(buffer)):
                     if j != innermost_dim and packing_factor > 1 and is_symbolic_expr(s):
                         raise ValueError(
                             f"Packed {buffer.dtype} buffers do not support dynamic outer strides; "
@@ -391,7 +396,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                             stride //= packing_factor
                         static_strides.append((j, stride))
                 is_contiguous, prod = True, 1
-                for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
+                for dim, stride in reversed(list(zip(buffer.shape, tensor_strides(buffer)))):
                     is_contiguous &= bool(stride == prod)
                     prod *= dim
                 static_shape_map[buffer.name] = (i, static_shape)
@@ -407,7 +412,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         func = self.prim_func
         params = func.params
-        buffer_map = func.buffer_map
+        buffer_map = tensor_parameter_map(func)
         buffer_device_map = {}
         device = None
         if is_cuda_target(self.target) or is_hip_target(self.target):

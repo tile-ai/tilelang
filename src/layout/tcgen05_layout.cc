@@ -11,7 +11,7 @@
 #include "support/check.h"
 #include <algorithm>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "layout.h"
@@ -28,9 +28,9 @@ const cute::Layout kColOnly = cute::Layout::Parse("(1,1):(0,1)");
 
 namespace {
 
-IterVar MakeIterVar(std::string name, Range dom) {
-  Var var = Var(name, dom->min->dtype);
-  return IterVar(dom, var, IterVarType::kDataPar);
+LayoutAxis MakeLayoutAxis(std::string name, Range dom) {
+  PrimVar var = PrimVar(name, dom->begin.ty());
+  return LayoutAxis(dom, var);
 }
 
 // kSerialize: (datapath, column) -> serialized TMEM, the flat address
@@ -316,14 +316,14 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
 
 Fragment FragmentToTileLang(const cute::Layout &layout) {
   int64_t r = cute::Rank(layout);
-  Array<IterVar> ivs;
+  Array<LayoutAxis> ivs;
   Array<cute::IntTuple> coords;
-  arith::Analyzer analyzer;
+  sym::Analyzer analyzer;
   for (int64_t i = 0; i < r; ++i) {
     int64_t size = cute::AsConst(cute::Product(layout->shape[i]));
-    IterVar iv =
-        MakeIterVar("i" + std::to_string(i), Range(0, static_cast<int>(size)));
-    analyzer.Bind(iv->var, iv->dom);
+    LayoutAxis iv = MakeLayoutAxis("i" + std::to_string(i),
+                                   Range(0, static_cast<int>(size)));
+    analyzer->Bind(iv->var, iv->dom);
     ivs.push_back(iv);
     coords.push_back(iv->var);
   }
@@ -334,11 +334,12 @@ Fragment FragmentToTileLang(const cute::Layout &layout) {
   Array<cute::IntTuple> fields = cute::TupleFields(tv_coord);
   ICHECK_EQ(fields.size(), 2U)
       << "Fragment must map into (thread@0, value@1), got " << tv_coord;
-  DataType dtype = DataType::Int(32);
+  PrimType dtype = PrimType::Int(32);
   PrimExpr thread =
-      analyzer.Simplify(cute::AsConstOrPrimExpr(fields[0], dtype));
-  PrimExpr value = analyzer.Simplify(cute::AsConstOrPrimExpr(fields[1], dtype));
-  return Fragment(ivs, {value}, thread, MakeIterVar("rep", Range(0, 1)));
+      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[0], dtype));
+  PrimExpr value =
+      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[1], dtype));
+  return Fragment(ivs, {value}, thread, MakeLayoutAxis("rep", Range(0, 1)));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

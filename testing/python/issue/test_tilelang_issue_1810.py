@@ -22,8 +22,8 @@ def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch):
 
     kernel = tilelang.compile(minimal_kernel, execution_backend="tvm_ffi", target="cuda")
     source = kernel.get_host_source()
-    assert "__tvm_cuda_stream_set_access_policy_window_packed" in source
-    assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source
+    assert "tl.cuda.stream_set_access_policy_window" in source
+    assert "tl.cuda.stream_reset_access_policy_window" in source
     assert "half*" not in source
     assert "((half*)" not in source
 

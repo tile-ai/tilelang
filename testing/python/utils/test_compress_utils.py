@@ -121,6 +121,8 @@ def _test_compress(dtype, meta_dtype):
     C_tl = kernel(sp_tl, meta_tl, B)
     C_ref = kernel(sp_ref, meta_ref, B)
     torch_assert_close(C_tl, C_ref, atol=1e-2, rtol=1e-2)
+    expected = (A.to(torch.float64) @ B.to(torch.float64)).to(C_tl.dtype)
+    torch_assert_close(C_tl, expected, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_cuda

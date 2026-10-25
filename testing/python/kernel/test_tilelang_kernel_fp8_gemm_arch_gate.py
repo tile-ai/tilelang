@@ -16,7 +16,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-import tvm
+from tilelang import tvm
 
 _FP8_GATE_MESSAGE = r"T\.gemm\(\) with fp8 operands requires a CUDA target with fp8 mma\.sync atoms \(SM89\+\)"
 
@@ -50,7 +50,7 @@ def _compile(in_dtype, arch):
 @pytest.mark.parametrize("arch", ["sm_80", "sm_86"])
 @pytest.mark.parametrize("in_dtype", [T.float8_e4m3fn, T.float8_e5m2])
 def test_fp8_gemm_rejects_pre_sm89_target(in_dtype, arch):
-    with pytest.raises(tvm.error.InternalError, match=_FP8_GATE_MESSAGE):
+    with pytest.raises(RuntimeError, match=_FP8_GATE_MESSAGE):
         _compile(in_dtype, arch)
 
 

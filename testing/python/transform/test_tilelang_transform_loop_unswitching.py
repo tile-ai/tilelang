@@ -1,3 +1,5 @@
+from testing.python.transform._native_ir import make_function
+
 import numpy as np
 
 from tilelang import tvm as tvm
@@ -7,19 +9,26 @@ import tilelang.testing
 from tilelang.transform import PassConfigKey
 
 
+def _normalize(function):
+    function = function.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
+    module = tvm.IRModule.from_expr(function)
+    module = tvm.tirx.transform.StmtSimplify()(module)
+    module = tvm.tirx.transform.RemoveNoOp()(module)
+    assert tvm.tirx.analysis.check_well_formed(module)
+    tvm.ir.assert_structural_equal(module, tvm.ir.load_json(tvm.ir.save_json(module)))
+    return module["main"]
+
+
 def _check(original, transformed):
-    func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.LoopUnswitching()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), map_free_vars=True)
+    _check_with_config(original, transformed, {})
 
 
 def _check_with_config(original, transformed, config):
-    func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    func = original.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
+    mod = tvm.IRModule.from_expr(func)
     with tvm.transform.PassContext(config=config):
         mod = tl.transform.LoopUnswitching()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), map_free_vars=True)
+    tvm.ir.assert_structural_equal(_normalize(mod["main"]), _normalize(transformed), map_free_vars=True)
 
 
 def test_basic_hoist():
@@ -60,30 +69,18 @@ def test_hoist_preserves_non_unit_loop_step():
         tvm.tirx.BufferStore(output_buffer, 1, [i]),
         None,
     )
-    loop = tvm.tirx.For(
-        i,
-        1,
-        5,
-        tvm.tirx.ForKind.SERIAL,
-        body,
-        step=tvm.tirx.IntImm("int32", 2),
-    )
-    before = tvm.tirx.PrimFunc(
-        [output_buffer.data, cond_buffer.data],
-        loop,
-        buffer_map={
-            output_buffer.data: output_buffer,
-            cond_buffer.data: cond_buffer,
-        },
+    loop = tvm.tirx.For(i, 1, 1 + 5, tvm.tirx.IntImm("int32", 2), tvm.tirx.ForKind.DEFAULT, body)
+    before = make_function(
+        [output_buffer.data, cond_buffer.data], loop, buffer_map={output_buffer.data: output_buffer, cond_buffer.data: cond_buffer}
     ).with_attr("global_symbol", "main")
 
     mod = tvm.IRModule.from_expr(before)
     mod = tl.transform.LoopUnswitching()(mod)
-    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+    executable = tvm.tirx.compile(mod["main"], target="c")
 
     output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
     cond = tvm.runtime.tensor(np.ones(1, dtype="int32"))
-    executable["main"](output, cond)
+    executable(output, cond)
 
     np.testing.assert_array_equal(output.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
@@ -341,11 +338,11 @@ def test_unswitch_restores_ssa_after_simplify_keeps_bind():
                 out[i] = 1
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.Simplify()(mod)
+    mod = tvm.tirx.transform.StmtSimplify()(mod)
     mod = tl.transform.LoopUnswitching()(mod)
 
-    assert tvm.tirx.analysis.verify_ssa(mod["main"])
-    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+    assert tvm.tirx.analysis.check_well_formed(mod["main"])
+    tvm.ir.assert_structural_equal(mod, tvm.ir.load_json(tvm.ir.save_json(mod)))
 
 
 def test_unswitch_freshens_non_condition_bind_definitions():
@@ -361,8 +358,8 @@ def test_unswitch_freshens_non_condition_bind_definitions():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.LoopUnswitching()(mod)
 
-    assert tvm.tirx.analysis.verify_ssa(mod["main"])
-    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+    assert tvm.tirx.analysis.check_well_formed(mod["main"])
+    tvm.ir.assert_structural_equal(mod, tvm.ir.load_json(tvm.ir.save_json(mod)))
 
 
 def test_multiple_identical_conditions():

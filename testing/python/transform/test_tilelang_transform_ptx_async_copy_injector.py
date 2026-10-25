@@ -76,7 +76,9 @@ def test_masked_staging_preserves_positive_zero_fill():
 
     A = torch.randn(M, N, dtype=torch.float32, device="cuda") + 1.0
     kernel = tilelang.compile(main, out_idx=[1], target="cuda")
-    assert "cp_async_gs_conditional<" in kernel.get_kernel_source()
+    source = kernel.get_kernel_source()
+    assert "cp.async.cg.shared.global" in source
+    assert "@!p st.shared.v4.u32" in source
     bits = int(kernel(A, K_LEN).view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
     torch.cuda.synchronize()
     assert bits == 0

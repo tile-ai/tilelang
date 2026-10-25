@@ -22,7 +22,7 @@ from collections.abc import Iterable
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tilelang.language.eager.builder import _make_jit_key
-from tvm.target import Target
+from tvm_tirx.target import Target
 from contextlib import nullcontext
 
 from tilelang.jit.kernel import JITKernel

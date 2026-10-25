@@ -15,7 +15,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from tvm.ir import _ffi_instrument_api
+from tvm_tirx.ir.transform import _ffi_transform_api
 
 from tilelang.instrumentation import (
     PassInstrumentationTool,
@@ -181,7 +181,7 @@ class TileLangPassTimingInstrument:
     @staticmethod
     def _create_tvm_instrument(state: _PassTimingState):
         """Create an instrument whose callbacks do not retain the wrapper."""
-        return _ffi_instrument_api.PassInstrument(
+        return _ffi_transform_api.PassInstrument(
             "TileLangPassTimingInstrument",
             state.enter_pass_ctx,
             state.exit_pass_ctx,

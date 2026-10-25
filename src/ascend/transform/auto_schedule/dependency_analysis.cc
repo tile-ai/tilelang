@@ -34,8 +34,10 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
+#include "./scheduled_tir.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -53,16 +55,29 @@ using namespace tirx;
 
 // An undefined storage key groups explicit conflicts between distinct storage.
 using CoveredDependencyMap =
-    std::unordered_map<ffi::Optional<Var>, std::set<DependencyTaskPair>,
-                       ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
+    std::unordered_map<const VarNode *, std::set<DependencyTaskPair>>;
 
 // A bare buffer hint matches every region using its storage. A region hint
 // matches only the same logical buffer and exact footprint.
-static bool HintOperandMatches(const Any &hint, const BufferRegion &query) {
+static Var RegionStorage(const TensorRegion &region,
+                         const StorageAliasAnalysis *analysis) {
+  auto tensor = region->source.as_or_throw<TensorVar>();
+  if (analysis)
+    if (auto access = analysis->Resolve(tensor))
+      return access->root;
+  return tensor;
+}
+
+static bool HintOperandMatches(const Any &hint, const TensorRegion &query,
+                               const StorageAliasAnalysis *analysis) {
   if (auto var = hint.as<Var>())
-    return var.value().same_as(query->buffer->data);
-  BufferRegion hint_region = Downcast<BufferRegion>(hint);
-  return hint_region->buffer.same_as(query->buffer) &&
+    return var.value().same_as(RegionStorage(query, analysis)) ||
+           (analysis && analysis->Resolve(var.value()) &&
+            analysis->Resolve(var.value())
+                ->root.same_as(RegionStorage(query, analysis)));
+  TensorRegion hint_region = hint.as_or_throw<TensorRegion>();
+  return hint_region->source.as_or_throw<TensorVar>().same_as(
+             query->source.as_or_throw<TensorVar>()) &&
          RegionsEqual(hint_region->region, query->region);
 }
 
@@ -78,10 +93,10 @@ ActiveConflictHints(ControlNode *loop, const ConflictHintList &root_hints) {
 static bool IsConflictHint(const Array<Any> &hint) {
   ICHECK_EQ(hint.size(), 4u)
       << "conflict_hint annotation expects 4-element entries";
-  const auto *is_conflict = hint[3].as<IntImmNode>();
-  ICHECK(is_conflict != nullptr && is_conflict->dtype.is_bool())
+  auto is_conflict = GetIntAnnotation(hint[3]);
+  ICHECK(is_conflict && (*is_conflict == 0 || *is_conflict == 1))
       << "conflict_hint annotation expects a constant boolean polarity";
-  return is_conflict->value;
+  return *is_conflict != 0;
 }
 
 // Return the suffix of the enclosing loop nest that forms one storage-local
@@ -115,28 +130,28 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
   return {controls.begin() + first, controls.end()};
 }
 
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        const ConstrSet &b_ctx, const BufferRegion &b_region,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
+                        const ConstrSet &b_ctx, const TensorRegion &b_region,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
                         const ConflictHintList &root_conflicts,
-                        Optional<PrimExpr> a_pitch,
-                        Optional<PrimExpr> b_pitch) {
+                        Optional<PrimExpr> a_pitch, Optional<PrimExpr> b_pitch,
+                        const StorageAliasAnalysis *storage_analysis) {
   const bool cross = offset != 0;
   if (cross && loop == nullptr)
     return false;
 
   bool declared_no_conflict = false;
   for (const Any &entry : ActiveConflictHints(loop, root_conflicts)) {
-    Array<Any> hint = Downcast<Array<Any>>(entry);
+    Array<Any> hint = entry.as_or_throw<Array<Any>>();
     bool is_conflict = IsConflictHint(hint);
-    int64_t cross_code = Downcast<IntImm>(hint[2])->value;
+    int64_t cross_code = GetIntAnnotation(hint[2]).value();
     if (cross_code != -1 && (cross_code == 1) != cross)
       continue;
-    bool matches = (HintOperandMatches(hint[0], a_region) &&
-                    HintOperandMatches(hint[1], b_region)) ||
-                   (HintOperandMatches(hint[0], b_region) &&
-                    HintOperandMatches(hint[1], a_region));
+    bool matches = (HintOperandMatches(hint[0], a_region, storage_analysis) &&
+                    HintOperandMatches(hint[1], b_region, storage_analysis)) ||
+                   (HintOperandMatches(hint[0], b_region, storage_analysis) &&
+                    HintOperandMatches(hint[1], a_region, storage_analysis));
     if (!matches)
       continue;
     if (is_conflict)
@@ -147,12 +162,14 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   if (declared_no_conflict)
     return false;
 
-  if (!a_region->buffer->data.same_as(b_region->buffer->data))
+  if (!RegionStorage(a_region, storage_analysis)
+           .same_as(RegionStorage(b_region, storage_analysis)))
     return false;
 
   // Same storage but different logical buffer (T.view/T.reshape): regions may
   // differ in rank/dtype/strides, so keep the dependency conservatively.
-  if (!a_region->buffer.same_as(b_region->buffer))
+  if (!a_region->source.as_or_throw<TensorVar>().same_as(
+          b_region->source.as_or_throw<TensorVar>()))
     return true;
 
   const Array<Range> &a_rng = a_region->region;
@@ -161,9 +178,9 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
     return true; // shape mismatch — be safe
   const size_t ndim = a_rng.size();
 
-  arith::Analyzer ana;
-  ana.z3_prover.SetRLimit(50000);
-  Map<Var, PrimExpr> a_sub, b_sub;
+  sym::Analyzer ana;
+  ana->z3_prover.SetRLimit(50000);
+  Map<PrimVar, PrimExpr> a_sub, b_sub;
   ConstrSet a_local_ctx = a_ctx;
   ConstrSet b_local_ctx = b_ctx;
   ConstrSet loop_ctx;
@@ -173,11 +190,15 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   // predicate between producer and consumer would incorrectly make opposite
   // branches mutually exclusive across different iterations.
   auto seed_iteration_vars = [&](const ControlNode *scope) {
-    for (const Var &var : scope->GetWriteVars()) {
+    for (const Var &variable : scope->GetWriteVars()) {
+      auto scalar = variable.as<PrimVar>();
+      if (!scalar)
+        continue;
+      PrimVar var = scalar.value();
       if (!a_sub.count(var))
-        a_sub.Set(var, var.copy_with_suffix("_p"));
+        a_sub.Set(var, PrimVar(var->name + "_p", var.ty()));
       if (!b_sub.count(var))
-        b_sub.Set(var, var.copy_with_suffix("_c"));
+        b_sub.Set(var, PrimVar(var->name + "_c", var.ty()));
     }
   };
   if (cross) {
@@ -185,16 +206,17 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
       std::vector<const ControlNode *> iteration_nest =
           num_storage_owners > 1
               ? loop->GetAncestorControls()
-              : StorageIterationNest(loop, a_region->buffer->data);
+              : StorageIterationNest(loop,
+                                     RegionStorage(a_region, storage_analysis));
       ICHECK(!iteration_nest.empty());
       seed_iteration_vars(iteration_nest.front());
-      Var pivot_lv = iteration_nest.front()->control->loop_var;
+      PrimVar pivot_lv = iteration_nest.front()->control->var;
       a_local_ctx = a_local_ctx.RenameFrom("_p", a_sub, pivot_lv);
       b_local_ctx = b_local_ctx.RenameFrom("_c", b_sub, pivot_lv);
       if (num_storage_owners <= 1) {
-        PrimExpr different_iteration = Bool(false);
+        PrimExpr different_iteration = IntImm::Bool(false);
         for (const ControlNode *control : iteration_nest) {
-          Var iteration = control->control->loop_var;
+          PrimVar iteration = control->control->var;
           PrimExpr p = Substitute(iteration, a_sub);
           PrimExpr c = Substitute(iteration, b_sub);
           different_iteration = different_iteration || (p != c);
@@ -203,51 +225,53 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
       }
     } else {
       seed_iteration_vars(loop);
-      Var iteration = loop->control->loop_var;
+      PrimVar iteration = loop->control->var;
       a_local_ctx = a_local_ctx.RenameFrom("_p", a_sub, iteration);
       b_local_ctx = b_local_ctx.RenameFrom("_c", b_sub, iteration);
       PrimExpr p = Substitute(iteration, a_sub);
       PrimExpr c = Substitute(iteration, b_sub);
-      loop_ctx.AddConstr(c == p + IntImm(iteration.dtype(), offset));
+      loop_ctx.AddConstr(c == p + MakeConst(iteration.ty(), offset) *
+                                      Substitute(loop->control->step, a_sub));
     }
   }
-  loop_ctx.Merge(a_local_ctx).Merge(b_local_ctx).Populate(ana);
+  auto constraints =
+      loop_ctx.Merge(a_local_ctx).Merge(b_local_ctx).Populate(ana);
 
   FreshenMutableReads freshen_a(FreshenMutableReads::Mode::kSnapshot);
   FreshenMutableReads freshen_b(FreshenMutableReads::Mode::kSnapshot);
   size_t compared_dims = ndim;
-  const Buffer &buffer = a_region->buffer;
+  TensorVar buffer = a_region->source.as_or_throw<TensorVar>();
   if (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer)) {
     bool same_pitch = false;
-    if (a_pitch.defined() && b_pitch.defined()) {
+    if (a_pitch.has_value() && b_pitch.has_value()) {
       PrimExpr equal = freshen_a(Substitute(a_pitch.value(), a_sub)) ==
                        freshen_b(Substitute(b_pitch.value(), b_sub));
-      same_pitch = ana.CanProve(equal) || ana.z3_prover.CanProve(equal);
+      same_pitch = ana->CanProve(equal) || ana->z3_prover.CanProve(equal);
     }
     // L0 matrix regions may overlap unless their pitches are provably equal.
     if (!same_pitch)
       compared_dims = ndim > 2 ? ndim - 2 : 0;
   }
-  PrimExpr any_dim_disjoint = Bool(false);
+  PrimExpr any_dim_disjoint = IntImm::Bool(false);
   for (size_t i = 0; i < compared_dims; ++i) {
-    PrimExpr a_min = freshen_a(Substitute(a_rng[i]->min, a_sub));
+    PrimExpr a_min = freshen_a(Substitute(a_rng[i]->begin, a_sub));
     PrimExpr a_extent = freshen_a(Substitute(a_rng[i]->extent, a_sub));
-    PrimExpr b_min = freshen_b(Substitute(b_rng[i]->min, b_sub));
+    PrimExpr b_min = freshen_b(Substitute(b_rng[i]->begin, b_sub));
     PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
     // A half-open endpoint can exceed the int32 index range by one even
     // for an ordinary single-element access.
-    PrimExpr a_end =
-        cast(DataType::Int(64), a_min) + cast(DataType::Int(64), a_extent);
-    PrimExpr b_end =
-        cast(DataType::Int(64), b_min) + cast(DataType::Int(64), b_extent);
+    PrimExpr a_end = prim::cast(a_min, PrimType::Int(64)) +
+                     prim::cast(a_extent, PrimType::Int(64));
+    PrimExpr b_end = prim::cast(b_min, PrimType::Int(64)) +
+                     prim::cast(b_extent, PrimType::Int(64));
     any_dim_disjoint = any_dim_disjoint || (a_extent <= 0) || (b_extent <= 0) ||
                        (a_end <= b_min) || (b_end <= a_min);
   }
-  any_dim_disjoint = ana.Simplify(any_dim_disjoint);
+  any_dim_disjoint = ana->Simplify(any_dim_disjoint);
   // Raw Z3 as a fallback catches the infeasible-context case that Analyzer's
   // constant-fold short-circuit misses.
-  return !(ana.CanProve(any_dim_disjoint) ||
-           ana.z3_prover.CanProve(any_dim_disjoint));
+  return !(ana->CanProve(any_dim_disjoint) ||
+           ana->z3_prover.CanProve(any_dim_disjoint));
 }
 
 std::vector<DepInfo>
@@ -273,7 +297,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
 
   struct RegionAccess {
     TaskNode *task;
-    BufferRegion region;
+    TensorRegion region;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -284,9 +308,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(nodes[i], tasks);
     for (TaskNode *task : tasks) {
-      for (const BufferRegion &region : task->GetReadRegions())
+      for (const TensorRegion &region : task->GetReadRegions())
         accesses[i].reads.push_back({task, region});
-      for (const BufferRegion &region : task->GetWriteRegions())
+      for (const TensorRegion &region : task->GetWriteRegions())
         accesses[i].writes.push_back({task, region});
     }
   }
@@ -303,7 +327,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             AnalyzeDependencies(children, ctrl, manual_buffer_versions,
                                 multi_buffer_owners, &cache, root_conflicts);
         for (const auto &cdep : child_deps) {
-          auto &covered_pairs = out[cdep.storage];
+          auto &covered_pairs =
+              out[cdep.storage ? cdep.storage.value().get() : nullptr];
           covered_pairs.insert(cdep.task_pairs.begin(), cdep.task_pairs.end());
         }
         for (auto *child : children)
@@ -391,8 +416,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                           const std::vector<RegionAccess> &rhs_accesses) {
         for (const RegionAccess &lhs : lhs_accesses) {
           for (const RegionAccess &rhs : rhs_accesses) {
-            if (IsSharedBuffer(lhs.region->buffer) &&
-                IsSharedBuffer(rhs.region->buffer)) {
+            if (IsSharedBuffer(lhs.region->source.as_or_throw<TensorVar>()) &&
+                IsSharedBuffer(rhs.region->source.as_or_throw<TensorVar>())) {
               // A common UB offset (e.g. a hardware dual-copy destination)
               // still names different physical memory on the two AIVs.
               auto local_sid = [](const TaskNode *task) -> std::optional<int> {
@@ -404,8 +429,10 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
               if (lhs_sid && rhs_sid && *lhs_sid != *rhs_sid)
                 continue;
             }
-            const Var &lhs_storage = lhs.region->buffer->data;
-            const Var &rhs_storage = rhs.region->buffer->data;
+            Var lhs_storage = lhs.task->StorageOf(
+                lhs.region->source.as_or_throw<TensorVar>());
+            Var rhs_storage = rhs.task->StorageOf(
+                rhs.region->source.as_or_throw<TensorVar>());
             ffi::Optional<Var> storage;
             if (lhs_storage.same_as(rhs_storage))
               storage = lhs_storage;
@@ -419,11 +446,15 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             int manual_versions = get_manual_versions(storage);
             if (manual_versions && !owner_exclusion) {
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
-                if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                       rhs.task->outer_ctx, rhs.region, loop, d,
-                                       /*num_storage_owners=*/0, root_conflicts,
-                                       lhs.task->GetL0Pitch(lhs_storage),
-                                       rhs.task->GetL0Pitch(rhs_storage))) {
+                if (RegionsMayConflict(
+                        lhs.task->outer_ctx, lhs.region, rhs.task->outer_ctx,
+                        rhs.region, loop, d,
+                        /*num_storage_owners=*/0, root_conflicts,
+                        lhs.task->GetL0Pitch(
+                            lhs.region->source.as_or_throw<TensorVar>()),
+                        rhs.task->GetL0Pitch(
+                            rhs.region->source.as_or_throw<TensorVar>()),
+                        lhs.task->GetStorageAnalysis())) {
                   add_pair(storage, d, lhs.task, rhs.task);
                   break;
                 }
@@ -435,12 +466,15 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                 continue;
               if (distance < 0 && loop == nullptr)
                 continue;
-              if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                     rhs.task->outer_ctx, rhs.region, loop,
-                                     distance, get_num_storage_owners(storage),
-                                     root_conflicts,
-                                     lhs.task->GetL0Pitch(lhs_storage),
-                                     rhs.task->GetL0Pitch(rhs_storage))) {
+              if (RegionsMayConflict(
+                      lhs.task->outer_ctx, lhs.region, rhs.task->outer_ctx,
+                      rhs.region, loop, distance,
+                      get_num_storage_owners(storage), root_conflicts,
+                      lhs.task->GetL0Pitch(
+                          lhs.region->source.as_or_throw<TensorVar>()),
+                      rhs.task->GetL0Pitch(
+                          rhs.region->source.as_or_throw<TensorVar>()),
+                      lhs.task->GetStorageAnalysis())) {
                 add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
                          rhs.task,
                          owner_exclusion ? DependencyKind::kOwnerExclusion
@@ -458,7 +492,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
       if (i == j && nodes[i]->IsControl()) {
         CoveredDependencyMap covered = subtree_covered(nodes[i]);
         for (PendingDependency &dep : pending) {
-          auto covered_it = covered.find(dep.storage);
+          auto covered_it =
+              covered.find(dep.storage ? dep.storage.value().get() : nullptr);
           if (covered_it == covered.end())
             continue;
           for (auto it = dep.task_pairs.begin(); it != dep.task_pairs.end();) {
@@ -484,6 +519,46 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
   if (loop)
     cache.emplace(loop, deps);
   return deps;
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def(
+      "tl.ascend.AnalyzeScheduleDependencies", [](RegionStmt root) {
+        auto scheduled = DecodeScheduledTIR(root, {});
+        ffi::Array<ffi::Map<ffi::String, ffi::Any>> result;
+        DependencyCache cache;
+        std::function<void(const std::vector<std::shared_ptr<IRStructure>> &,
+                           ControlNode *)>
+            collect = [&](const auto &nodes, ControlNode *loop) {
+              std::vector<IRStructure *> ordered;
+              for (const auto &node : nodes)
+                ordered.push_back(node.get());
+              for (const auto &dependency : AnalyzeDependencies(
+                       ordered, loop, scheduled.metadata.manual_buffer_versions,
+                       {}, &cache, scheduled.metadata.root_conflict_hints)) {
+                ffi::Array<ffi::Array<Stmt>> pairs;
+                for (const auto &[producer, consumer] : dependency.task_pairs)
+                  pairs.push_back({producer->stmt, consumer->stmt});
+                result.push_back(
+                    {{"producer",
+                      static_cast<int64_t>(dependency.prod_node->GetIndex())},
+                     {"consumer",
+                      static_cast<int64_t>(dependency.cons_node->GetIndex())},
+                     {"distance", dependency.distance},
+                     {"kind", static_cast<int>(dependency.kind)},
+                     {"storage", dependency.storage},
+                     {"loop", loop ? ffi::Any(loop->control) : ffi::Any()},
+                     {"task_pairs", pairs}});
+              }
+              for (const auto &node : nodes)
+                if (node->IsControl()) {
+                  auto *control = static_cast<ControlNode *>(node.get());
+                  collect(control->children, control);
+                }
+            };
+        collect(scheduled.tree, nullptr);
+        return result;
+      });
 }
 
 } // namespace ascend

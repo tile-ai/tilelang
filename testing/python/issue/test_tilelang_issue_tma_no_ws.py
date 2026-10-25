@@ -6,6 +6,83 @@ from tilelang import language as T
 import torch
 
 from examples.gemm_sp.sparse_utils import get_e_factor
+from tvm_ffi import structural_equal
+from tvm_tirx import ir, sym
+from tilelang._compat.stmt_functor import post_order_visit
+
+
+def _nodes(root, node_type):
+    result = []
+    post_order_visit(root, lambda node: result.append(node) if isinstance(node, node_type) else None)
+    return result
+
+
+def _calls(root, name):
+    return [call for call in _nodes(root, ir.Call) if isinstance(call.op, ir.Op) and call.op.name == name]
+
+
+def _roles(kernel):
+    groups = [region for region in _nodes(kernel.artifact.device_mod, ir.RegionStmt) if region.attrs.get("tl.ws_concurrent")]
+    if not groups:
+        return []
+    assert len(groups) == 1
+    roles = []
+    for statement in groups[0].body.seq:
+        if isinstance(statement, ir.Bind):
+            assert isinstance(statement.value, ir.Call) and statement.value.op.name == "tirx.alloc_tensor"
+            continue
+        if isinstance(statement, ir.Evaluate):
+            assert isinstance(statement.value, ir.Call) and statement.value.op.name == "tl.fence_proxy_async"
+            continue
+        assert isinstance(statement, ir.If) and statement.else_case is None
+        for condition, bodies in roles:
+            if structural_equal(condition, statement.condition):
+                bodies.append(statement.then_case)
+                break
+        else:
+            roles.append((statement.condition, [statement.then_case]))
+    return [ir.SeqStmt(bodies) for _, bodies in roles]
+
+
+def _launch_threads(kernel):
+    return {
+        int(region.args[1])
+        for region in _nodes(kernel.artifact.device_mod, ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and str(region.args[0].value) == "threadIdx.x"
+    }
+
+
+def _assert_async_copy(source):
+    assert re.search(r"^\s+ptx_cp_async_legacy_\w*16_\w*\(", source, re.MULTILINE)
+
+
+def _assert_barrier_protocol(kernel):
+    module = kernel.artifact.device_mod
+    initializes = _calls(module, "tl.mbarrier_init")
+    assert initializes
+    initialized = {(call.args[0].source, int(call.args[0].indices[0])) for call in initializes}
+    assert len(initialized) == len(initializes)
+    assert all(int(call.args[1]) > 0 for call in initializes)
+    analyzer = sym.Analyzer()
+    barriers = {tensor for tensor, _ in initialized}
+    for name in ("tl.mbarrier_wait_parity", "tl.mbarrier_arrive", "tl.ptx_cp_async_barrier_noinc"):
+        for call in _calls(module, name):
+            access = call.args[0]
+            assert isinstance(access, ir.TensorLoad) and access.source in barriers
+            assert analyzer.can_prove(access.indices[0] >= 0)
+            assert analyzer.can_prove(access.indices[0] < access.source.ty.shape[0])
+    for call in _calls(module, "tl.tma_load"):
+        assert isinstance(call.args[1], ir.TensorLoad) and call.args[1].source in barriers
+
+
+def _stores(root, prefix):
+    return [store for store in _nodes(root, ir.TensorStore) if store.dest.name.startswith(prefix)]
+
+
+def _zero(value):
+    if isinstance(value, ir.prim.Broadcast):
+        return _zero(value.value)
+    return isinstance(value, (ir.IntImm, ir.FloatImm)) and value.value == 0
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
@@ -58,8 +135,7 @@ def test_num_stages_zero_pure_tma_does_not_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" not in src
-    assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    assert not _roles(kernel)
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
@@ -103,8 +179,8 @@ def test_num_stages_one_pure_tma_keeps_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    assert "__launch_bounds__(160, 1)" in src
-    assert "if (((int)threadIdx.x) < 128)" in src
+    assert len(_roles(kernel)) >= 2
+    _assert_barrier_protocol(kernel)
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x)
@@ -150,8 +226,8 @@ def test_guarded_pure_tma_pipeline_keeps_auto_warp_specialize():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    assert "__launch_bounds__(160, 1)" in src
-    assert "if (((int)threadIdx.x) < 128)" in src
+    assert len(_roles(kernel)) >= 2
+    _assert_barrier_protocol(kernel)
 
     x = torch.randn((M, K), device="cuda", dtype=torch.float16)
     y = kernel(x, M)
@@ -188,10 +264,9 @@ def test_num_stages_zero_cp_async_only_does_not_auto_warp_specialize():
     kernel = _compile_tvm_ffi(cp_async_only_num_stages_zero, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
-    assert "cp_async_gs<16>" in src
-    assert "__launch_bounds__(32, 1)" in src
-    assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    _assert_async_copy(src)
+    assert _launch_threads(kernel) == {threads}
+    assert not _roles(kernel)
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
     y = kernel(x)
@@ -228,10 +303,9 @@ def test_num_stages_one_cp_async_only_keeps_non_ws_launch_shape():
     kernel = _compile_tvm_ffi(cp_async_only_num_stages_one, pass_configs, out_idx=[1])
 
     src = kernel.get_kernel_source()
-    assert "cp_async_gs<16>" in src
-    assert "__launch_bounds__(32, 1)" in src
-    assert "__launch_bounds__(160, 1)" not in src
-    assert "if (((int)threadIdx.x) < 128)" not in src
+    _assert_async_copy(src)
+    assert _launch_threads(kernel) == {threads}
+    assert not _roles(kernel)
 
     x = torch.randint(0, 256, (4 * bytes_per_copy,), device="cuda", dtype=torch.uint8)
     y = kernel(x)
@@ -289,12 +363,18 @@ def test_num_stages_one_mixed_tma_cp_async_keeps_auto_ws():
 
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    cp_async_idx = src.index("cp_async_gs<16>")
-
-    assert producer_idx < cp_async_idx < consumer_idx
-    assert "cp_async_gs<16>" not in src[consumer_idx:]
+    _assert_async_copy(src)
+    roles = _roles(kernel)
+    producers = [role for role in roles if _calls(role, "tl.tma_load")]
+    assert len(producers) == 1
+    assert _calls(producers[0], "tl.ptx_cp_async")
+    assert all(not _calls(role, "tl.ptx_cp_async") for role in roles if not role.same_as(producers[0]))
+    _assert_barrier_protocol(kernel)
+    source = torch.randn((M, K), dtype=torch.float16, device="cuda")
+    metadata = torch.randint(0, 256, (2 * cp_async_bytes,), dtype=torch.uint8, device="cuda")
+    actual, actual_metadata = kernel(source, metadata)
+    torch.testing.assert_close(actual, source, rtol=0, atol=0)
+    torch.testing.assert_close(actual_metadata, metadata, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -321,8 +401,7 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
             T.clear(C_local)
             for ko in T.Pipelined(T.ceildiv(K, block_k), num_stages=num_stages):
                 T.copy(A[by * block_m, ko * block_k], A_shared)
-                for k, j in T.Parallel(block_k, block_n):
-                    B_shared[k, j] = B[ko * block_k + k, bx * block_n + j]
+                T.copy(B[ko * block_k : (ko + 1) * block_k, bx * block_n : (bx + 1) * block_n], B_shared, prefer_instruction="cp_async")
                 T.gemm(A_shared, B_shared, C_local)
 
             T.copy(C_local, C[by * block_m, bx * block_n])
@@ -331,23 +410,14 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     kernel = _compile_tvm_ffi(mixed_gemm_shared_barrier, pass_configs, out_idx=[2])
 
     src = kernel.get_kernel_source()
-    flat_src = " ".join(src.split())
-
     assert "tl::tma_load" in src
-    assert "cp_async_gs<16>" in src
-    assert "uint64_t mbarrier_mem[6]" in src
+    _assert_async_copy(src)
     assert "arrive_and_expect_tx" not in src
-    assert ".expect_transaction(8192);" in src
-    assert src.count(".init(128);") == 6
-    assert ".init(1);" not in src
-    # Mixed TMA+cp.async should reuse the same forward barrier set. Depending on
-    # when cp.async is lowered, this may appear either as an explicit
-    # noinc-arrive or as a regular arrive on the same forward barrier after the
-    # cp.async visibility sync.
-    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[(ko % 3)])" in flat_src or "mbarrier[(ko % 3)].arrive();" in flat_src
-    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[((ko % 3) + 4)])" not in flat_src
-    assert "mbarrier[((ko % 3) + 7)]" not in flat_src
-    assert "mbarrier[((ko % 3) + 10)]" not in flat_src
+    module = kernel.artifact.device_mod
+    assert any(int(call.args[1]) == 8192 for call in _calls(module, "tl.mbarrier_expect_tx"))
+    assert all(int(call.args[1]) == 128 for call in _calls(module, "tl.mbarrier_init"))
+    assert _calls(module, "tl.ptx_cp_async_barrier_noinc")
+    _assert_barrier_protocol(kernel)
 
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16)
@@ -487,33 +557,37 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(sparse_flash_attn, pass_configs, out_idx=[4])
 
-    src = kernel.get_kernel_source()
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    prelude_src = src[:producer_idx]
-    producer_src = src[producer_idx:consumer_idx]
-    consumer_src = src[consumer_idx:]
-    flat_src = " ".join(src.split())
-
-    assert src.count(".init(1);") == 1
-    assert src.count(".init(128);") == 4
-    assert "tl::tma_load(K_desc, mbarrier[0]" in src
-    assert "tl::tma_load(V_desc, mbarrier[1]" in src
-    assert re.search(r"mbarrier\[2\]\.wait\([^;]+\);", flat_src)
-    assert re.search(r"mbarrier\[3\]\.wait\([^;]+\);", flat_src)
-    assert re.search(r"mbarrier\[0\]\.wait\([^;]+\);", flat_src)
-    assert re.search(r"mbarrier\[1\]\.wait\([^;]+\);", flat_src)
-    assert "mbarrier[2].arrive();" in consumer_src
-    assert "mbarrier[3].arrive();" in consumer_src
-    assert "block_mask" in producer_src
-    assert "block_mask" in consumer_src
-    assert "acc_o" not in producer_src
-    assert "logsum" not in producer_src
-    assert "scores_max" not in producer_src
-    assert "*(float4*)(acc_o + (i * 4)) = make_float4" not in prelude_src
-    assert "*(float4*)(acc_o + (i * 4)) = make_float4" in consumer_src
-    assert "*(float2*)(logsum + 0) = make_float2" not in prelude_src
-    assert "*(float2*)(logsum + 0) = make_float2" in consumer_src
+    roles = _roles(kernel)
+    producers = [role for role in roles if _calls(role, "tl.tma_load")]
+    consumers = [role for role in roles if _stores(role, "acc_o")]
+    assert len(producers) == len(consumers) == 1
+    producer, consumer = producers[0], consumers[0]
+    for role in (producer, consumer):
+        assert _stores(role, "block_mask")
+        assert any(load.source.name.startswith("BlockSparseMask") for load in _nodes(role, ir.TensorLoad))
+    for prefix in ("acc_o", "logsum", "scores_max"):
+        assert not _stores(producer, prefix)
+    for prefix in ("acc_o", "logsum"):
+        initializes = [store for store in _stores(kernel.artifact.device_mod, prefix) if _zero(store.value)]
+        assert initializes
+        assert all(store in _stores(consumer, prefix) for store in initializes)
+    assert _calls(consumer, "tl.mbarrier_wait_parity")
+    assert _calls(consumer, "tl.mbarrier_arrive")
+    calls = _nodes(consumer, ir.Call)
+    handoffs = [
+        index
+        for index, call in enumerate(calls)
+        if call.op.name == "tl.mbarrier_arrive" and call.args[0].source.name.startswith("ws_barrier_O_shared")
+    ]
+    assert len(handoffs) == 1
+    assert calls[handoffs[0] - 1].op.name == "tl.fence_proxy_async"
+    _assert_barrier_protocol(kernel)
+    mask = torch.ones(block_mask_shape, dtype=torch.bool, device="cuda")
+    for _ in range(3):
+        query, key, value = [torch.randn(shape, dtype=torch.float16, device="cuda") for _ in range(3)]
+        actual = kernel(query, key, value, mask)
+        expected = torch.nn.functional.scaled_dot_product_attention(query, key, value)
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -563,16 +637,20 @@ def test_pure_tma_fragment_mask_copy_initializes_consumer_branch():
     pass_configs = {tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False, tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
     kernel = _compile_tvm_ffi(sparse_attention_mask_copy, pass_configs, out_idx=[3])
 
-    src = kernel.get_kernel_source()
-    producer_idx = src.index("if (((int)threadIdx.x) < 128)")
-    consumer_idx = src.index("} else {", producer_idx)
-    producer_src = src[producer_idx:consumer_idx]
-    consumer_src = src[consumer_idx:]
-
-    assert "BlockSparseMask" in producer_src
-    assert "BlockSparseMask" in consumer_src
-    assert "block_mask_producer_ws" in producer_src
-    assert "block_mask" in consumer_src
+    roles = _roles(kernel)
+    producers = [role for role in roles if _calls(role, "tl.tma_load")]
+    consumers = [role for role in roles if _stores(role, "acc_s")]
+    assert len(producers) == len(consumers) == 1
+    for role in (producers[0], consumers[0]):
+        assert _stores(role, "block_mask")
+        assert any(load.source.name.startswith("BlockSparseMask") for load in _nodes(role, ir.TensorLoad))
+    _assert_barrier_protocol(kernel)
+    query = torch.randn(q_shape, dtype=torch.float16, device="cuda")
+    key = torch.randn(kv_shape, dtype=torch.float16, device="cuda")
+    mask = torch.ones(block_mask_shape, dtype=torch.int8, device="cuda")
+    actual = kernel(query, key, mask)
+    expected = query.float() @ key[..., -block_n:, :].float().transpose(-1, -2)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":

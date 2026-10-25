@@ -3,9 +3,9 @@
  * \brief Rewrite layout-driven Ascend ND-to-NZ copies before AutoSchedule.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/op.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -14,11 +14,13 @@
 #include <utility>
 #include <vector>
 
-#include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/ascend_pipe.h"
+#include "ascend/transform/native_storage.h"
+#include "layout/annotations.h"
 #include "op/copy.h"
 #include "op/utils.h"
 #include "support/check.h"
@@ -32,12 +34,14 @@ using namespace tirx::transform;
 
 namespace {
 
-std::string Nd2NzDTypeName(DataType dtype) {
-  if (dtype.is_bfloat16())
+std::string Nd2NzDTypeName(PrimType dtype) {
+  TVM_FFI_CHECK(dtype.IsScalar(), ValueError)
+      << "ND-to-NZ scatter requires scalar element types";
+  if (dtype == PrimType::BFloat(16))
     return "bfloat16_t";
-  if (dtype.is_float16())
+  if (dtype == PrimType::Float(16))
     return "half";
-  if (dtype.is_float() && dtype.bits() == 32)
+  if (dtype.MatchesCode(kDLFloat) && dtype.bits() == 32)
     return "float";
   TVM_FFI_THROW(ValueError)
       << "Unsupported nd2nz dtype: " << dtype
@@ -48,8 +52,8 @@ std::string Nd2NzDTypeName(DataType dtype) {
 }
 
 int64_t RequireStaticInt(const PrimExpr &expr, const std::string &what) {
-  const int64_t *value = as_const_int(expr);
-  if (value == nullptr) {
+  auto value = GetConstInt(expr);
+  if (!value) {
     TVM_FFI_THROW(ValueError) << what << " must be static, got " << expr;
   }
   return *value;
@@ -64,142 +68,141 @@ Array<PrimExpr> RegionExtents(const Array<Range> &ranges) {
 }
 
 PrimExpr ExtentProduct(const Array<PrimExpr> &extents) {
-  PrimExpr result = IntImm(DataType::Int(32), 1);
+  PrimExpr result = IntImm(PrimType::Int(32), 1);
   for (const PrimExpr &extent : extents)
     result = result * extent;
   return result;
 }
 
-PrimExpr MakeTLAccessPtr(const Buffer &buffer, const Array<Range> &ranges,
-                         const Array<PrimExpr> &pointer_extents, int rw_mask) {
-  ICHECK_EQ(ranges.size(), buffer->shape.size());
+Expr MakeTLAccessPtr(const TensorVar &buffer, const Array<Range> &ranges,
+                     const Array<PrimExpr> &pointer_extents, int rw_mask) {
+  ICHECK_EQ(ranges.size(), buffer.shape().size());
   ICHECK_EQ(pointer_extents.size(), ranges.size());
   Array<PrimExpr> mins;
   mins.reserve(ranges.size());
   for (const Range &range : ranges)
-    mins.push_back(range->min);
-  return Call(DataType::Handle(), tl::access_ptr(),
-              {BufferLoad(buffer, mins), ExtentProduct(pointer_extents),
-               IntImm(DataType::Int(32), rw_mask)});
+    mins.push_back(range->begin);
+  return Call(buffer.ty()->DataPtrType(), tl::access_ptr(),
+              {TensorLoad(buffer, mins), ExtentProduct(pointer_extents),
+               IntImm(PrimType::Int(32), rw_mask)});
 }
 
-PrimExpr MakeTLAccessPtr(const Buffer &buffer, const Array<Range> &ranges,
-                         int rw_mask) {
+Expr MakeTLAccessPtr(const TensorVar &buffer, const Array<Range> &ranges,
+                     int rw_mask) {
   return MakeTLAccessPtr(buffer, ranges, RegionExtents(ranges), rw_mask);
 }
 
-bool IsCanonicalNZLayout(const Layout &layout, const Buffer &buffer) {
-  if (!layout.defined() || !buffer.defined() || buffer->shape.size() < 2)
+bool IsCanonicalNZLayout(const Layout &layout, const TensorVar &buffer) {
+  if (!layout.defined() || buffer.shape().size() < 2)
     return false;
-  int bits = buffer->dtype.bits();
+  int bits = buffer.dtype().bits();
   if (bits <= 0 || 256 % bits != 0)
     return false;
   Layout expected = MakeAscendNZLayout(buffer);
   return layout->IsEqual(expected.get());
 }
 
-class Nd2NzInserter : public arith::IRMutatorWithAnalyzer {
+class Nd2NzInserter : public ascend::AnalyzerMutator {
 public:
-  static PrimFunc Rewrite(PrimFunc func) {
-    arith::Analyzer analyzer;
-    analyzer.z3_prover.SetRLimit(50000);
-    Nd2NzInserter inserter(&analyzer);
-    inserter.MarkBufferMapShapes(func);
-    PrimFuncNode *write_ptr = func.CopyOnWrite();
-    write_ptr->body = inserter(std::move(write_ptr->body));
-    return func;
+  explicit Nd2NzInserter(sym::Analyzer analyzer)
+      : ascend::AnalyzerMutator(analyzer) {}
+
+  static tirx::Function Rewrite(tirx::Function function) {
+    if (!function->body)
+      return function;
+    sym::Analyzer analyzer;
+    analyzer->z3_prover.SetRLimit(50000);
+    auto inserter = make_object<Nd2NzInserter>(analyzer);
+    inserter->MarkTensorParamShapes(function);
+    inserter->layout_map_ = CollectLayoutHints(
+        function->body.value(),
+        function->GetAttr<LayoutMap>(attr::kLayoutMap).value_or(LayoutMap{}));
+    SeqStmt body =
+        inserter->VisitStmt(function->body.value()).as_or_throw<SeqStmt>();
+    function.CopyOnWrite()->body = std::move(body);
+    return function;
   }
 
 private:
-  using Parent = arith::IRMutatorWithAnalyzer;
-  explicit Nd2NzInserter(arith::Analyzer *analyzer) : Parent(analyzer) {}
+  using Parent = ascend::AnalyzerMutator;
 
-  Optional<Layout> LayoutFor(const Buffer &buffer) const {
+  Optional<Layout> LayoutFor(const TensorVar &buffer) const {
     return ascend::FindLayoutForBuffer(layout_map_, buffer);
   }
 
-  bool IsNZBuffer(const Buffer &buffer) const {
+  bool IsNZBuffer(const TensorVar &buffer) const {
     Optional<Layout> layout = LayoutFor(buffer);
-    return layout.defined() &&
+    return layout.has_value() &&
            (IsCanonicalNZLayout(layout.value(), buffer) ||
             IsAscendCompactNZLayout(layout.value(), buffer));
   }
 
-  bool HasPhysicalLayout(const Buffer &buffer) const {
+  bool HasPhysicalLayout(const TensorVar &buffer) const {
     Optional<Layout> layout = LayoutFor(buffer);
-    return layout.defined() && !layout.value().as<FragmentNode>();
+    return layout.has_value() && !layout.value().as<FragmentNode>();
   }
 
-  bool HasCompactTrailingMatrix(const Buffer &buffer) const {
-    if (buffer->strides.empty())
-      return true;
-    if (buffer->strides.size() != buffer->shape.size() ||
-        buffer->shape.size() < 2) {
+  bool HasCompactTrailingMatrix(const TensorVar &buffer) const {
+    auto geometry = tirx::MatchShapeStridePattern(buffer.ty());
+    if (!geometry || buffer.shape().size() < 2)
       return false;
-    }
-    size_t col_axis = buffer->shape.size() - 1;
-    size_t row_axis = col_axis - 1;
-    PrimExpr unit_stride = make_const(buffer->strides[col_axis].dtype(), 1);
-    return analyzer_->CanProveEqual(buffer->strides[col_axis], unit_stride) &&
-           analyzer_->CanProveEqual(buffer->strides[row_axis],
-                                    buffer->shape[col_axis]);
+    auto strides = geometry.value().get<1>();
+    size_t column = buffer.shape().size() - 1;
+    return analyzer_->CanProveEqual(strides[column], 1) &&
+           analyzer_->CanProveEqual(strides[column - 1],
+                                    buffer.shape()[column]);
   }
 
-  bool HasAlignedScatterBase(const Buffer &buffer,
+  bool HasAlignedScatterBase(const TensorVar &buffer,
                              const Array<Range> &ranges) const {
-    DataType index_dtype = DataType::Int(64);
-    PrimExpr offset = cast(index_dtype, buffer->elem_offset);
-    PrimExpr compact_stride = make_const(index_dtype, 1);
-    for (size_t axis = buffer->shape.size(); axis-- > 0;) {
-      PrimExpr stride = buffer->strides.empty()
-                            ? compact_stride
-                            : cast(index_dtype, buffer->strides[axis]);
-      offset = offset + cast(index_dtype, ranges[axis]->min) * stride;
-      compact_stride = compact_stride * cast(index_dtype, buffer->shape[axis]);
-    }
-    PrimExpr element_bytes =
-        make_const(index_dtype, (buffer->dtype.bits() + 7) / 8);
-    PrimExpr alignment = make_const(index_dtype, 32);
-    return analyzer_->CanProveEqual(FloorMod(offset * element_bytes, alignment),
-                                    make_const(index_dtype, 0));
+    Array<PrimExpr> indices;
+    for (const Range &range : ranges)
+      indices.push_back(range->begin);
+    auto offsets = buffer.ty()->ElemOffset(indices);
+    if (offsets.size() != 1)
+      return false;
+    PrimExpr bytes = ascend::StorageIndex(offsets[0]) *
+                     IntImm::Int64(buffer.dtype().StorageBytes());
+    return analyzer_->CanProveEqual(floormod(bytes, IntImm::Int64(32)), 0);
   }
 
-  void ValidateRegionInBounds(const Buffer &buffer, const Array<Range> &ranges,
+  void ValidateRegionInBounds(const TensorVar &buffer,
+                              const Array<Range> &ranges,
                               const std::string &role) const {
-    ICHECK_EQ(ranges.size(), buffer->shape.size());
+    ICHECK_EQ(ranges.size(), buffer.shape().size());
     for (size_t axis = 0; axis < ranges.size(); ++axis) {
       const Range &range = ranges[axis];
-      bool lower_in_bounds = analyzer_->CanProve(range->min >= 0);
+      bool lower_in_bounds = analyzer_->CanProve(range->begin >= 0);
       bool non_negative_extent = analyzer_->CanProve(range->extent >= 0);
-      bool upper_in_bounds = analyzer_->CanProve(range->min + range->extent <=
-                                                 buffer->shape[axis]);
+      bool upper_in_bounds = analyzer_->CanProve(range->begin + range->extent <=
+                                                 buffer.shape()[axis]);
       if (!lower_in_bounds || !non_negative_extent || !upper_in_bounds) {
         TVM_FFI_THROW(ValueError)
             << "UB ND->NZ " << role
             << " region must be provably in bounds on axis " << axis
-            << ": min=" << range->min << ", extent=" << range->extent
-            << ", buffer extent=" << buffer->shape[axis] << ".";
+            << ": min=" << range->begin << ", extent=" << range->extent
+            << ", buffer extent=" << buffer.shape()[axis] << ".";
       }
     }
   }
 
   std::pair<std::string, std::string>
-  ValidateScatterTemplate(const Buffer &src, const Buffer &dst, int64_t rows,
-                          int64_t cols) const {
-    std::string src_dtype = Nd2NzDTypeName(src->dtype);
-    std::string dst_dtype = Nd2NzDTypeName(dst->dtype);
+  ValidateScatterTemplate(const TensorVar &src, const TensorVar &dst,
+                          int64_t rows, int64_t cols) const {
+    std::string src_dtype = Nd2NzDTypeName(src.dtype());
+    std::string dst_dtype = Nd2NzDTypeName(dst.dtype());
     if (rows % 16 != 0) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ scatter requires rows divisible by 16, got " << rows
           << ".";
     }
     if (src_dtype == dst_dtype) {
-      int element_bytes = (src->dtype.bits() + 7) / 8;
+      int element_bytes = (src.dtype().bits() + 7) / 8;
       if (cols * element_bytes % 32 != 0) {
         TVM_FFI_THROW(ValueError)
             << "UB ND->NZ same-dtype scatter requires a 32-byte-aligned row, "
                "got cols="
-            << cols << ", dtype=" << src->dtype << ".";
+            << cols << ", dtype=" << src.dtype() << ".";
       }
     } else if (src_dtype == "float" && dst_dtype == "bfloat16_t") {
       if (cols % 64 != 0) {
@@ -218,7 +221,7 @@ private:
     } else {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ scatter does not support dtype conversion "
-          << src->dtype << " -> " << dst->dtype
+          << src.dtype() << " -> " << dst.dtype()
           << "; supported conversions are float32 <-> bfloat16.";
     }
     return {std::move(src_dtype), std::move(dst_dtype)};
@@ -230,7 +233,7 @@ private:
     RequireStaticInt(rows, "NZ post-copy rows");
     RequireStaticInt(cols, "NZ post-copy cols");
     RequireStaticInt(full_rows, "NZ post-copy full_rows");
-    ICHECK_EQ(copy.src_range.size(), copy.src->shape.size());
+    ICHECK_EQ(copy.src_range.size(), copy.src.shape().size());
     ICHECK_GE(copy.src_range.size(), 2U);
     for (size_t i = 0; i + 2 < copy.src_range.size(); ++i) {
       if (!analyzer_->CanProveEqual(copy.src_range[i]->extent, 1)) {
@@ -241,18 +244,18 @@ private:
     }
     size_t ndim = copy.src_range.size();
     bool mins_are_zero =
-        analyzer_->CanProveEqual(copy.src_range[ndim - 2]->min, 0) &&
-        analyzer_->CanProveEqual(copy.src_range[ndim - 1]->min, 0);
+        analyzer_->CanProveEqual(copy.src_range[ndim - 2]->begin, 0) &&
+        analyzer_->CanProveEqual(copy.src_range[ndim - 1]->begin, 0);
     bool extents_are_full =
-        analyzer_->CanProveEqual(copy.src->shape[ndim - 2],
+        analyzer_->CanProveEqual(copy.src.shape()[ndim - 2],
                                  copy.src_range[ndim - 2]->extent + 1) &&
-        analyzer_->CanProveEqual(copy.src->shape[ndim - 1],
+        analyzer_->CanProveEqual(copy.src.shape()[ndim - 1],
                                  copy.src_range[ndim - 1]->extent);
     if (!mins_are_zero || !extents_are_full) {
       TVM_FFI_THROW(ValueError)
           << "NZ source " << copy.src->name
           << " trailing region must cover the full padded matrix: ranges="
-          << copy.src_range << ", buffer shape=" << copy.src->shape;
+          << copy.src_range << ", buffer shape=" << copy.src.shape();
     }
     if (!analyzer_->CanProveEqual(copy.src_range[ndim - 2]->extent, rows) ||
         !analyzer_->CanProveEqual(copy.src_range[ndim - 1]->extent, cols)) {
@@ -261,7 +264,7 @@ private:
           << " region must match post-copy geometry " << rows << "x" << cols;
     }
     Array<PrimExpr> pointer_extents = RegionExtents(copy.src_range);
-    pointer_extents.Set(ndim - 2, copy.src->shape[ndim - 2]);
+    pointer_extents.Set(ndim - 2, copy.src.shape()[ndim - 2]);
     return pointer_extents;
   }
 
@@ -269,7 +272,7 @@ private:
     if (!IsSharedBuffer(copy.src) || !IsSharedBuffer(copy.dst))
       return std::nullopt;
     Optional<Layout> dst_layout = LayoutFor(copy.dst);
-    if (!dst_layout.defined() ||
+    if (!dst_layout.has_value() ||
         !IsAscendCompactNZLayout(dst_layout.value(), copy.dst)) {
       return std::nullopt;
     }
@@ -283,7 +286,7 @@ private:
     if (!HasCompactTrailingMatrix(copy.src)) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ scatter requires a compact trailing source matrix, but "
-          << copy.src->name << " has explicit strides " << copy.src->strides
+          << copy.src->name << " has explicit strides " << copy.src.ty()->layout
           << ".";
     }
     if (copy.annotations.Get("dual_dst_ctl")) {
@@ -296,8 +299,8 @@ private:
           << "UB ND->NZ scatter requires source and destination regions with "
              "rank >= 2.";
     }
-    if (copy.src_range.size() != copy.src->shape.size() ||
-        copy.dst_range.size() != copy.dst->shape.size()) {
+    if (copy.src_range.size() != copy.src.shape().size() ||
+        copy.dst_range.size() != copy.dst.shape().size()) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ scatter requires each region rank to match its buffer "
              "rank.";
@@ -340,40 +343,41 @@ private:
     auto [src_dtype, dst_dtype] =
         ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i);
 
-    if (!analyzer_->CanProveEqual(copy.src_range[src_ndim - 1]->min, 0) ||
-        !analyzer_->CanProveEqual(copy.src->shape[src_ndim - 1], cols)) {
+    if (!analyzer_->CanProveEqual(copy.src_range[src_ndim - 1]->begin, 0) ||
+        !analyzer_->CanProveEqual(copy.src.shape()[src_ndim - 1], cols)) {
       TVM_FFI_THROW(ValueError) << "UB ND->NZ source " << copy.src->name
                                 << " must cover a full contiguous row.";
     }
-    if (!analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 2]->min, 0) ||
-        !analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 1]->min, 0)) {
+    if (!analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 2]->begin, 0) ||
+        !analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 1]->begin, 0)) {
       TVM_FFI_THROW(ValueError) << "UB ND->NZ destination " << copy.dst->name
                                 << " must start at trailing offset [0, 0].";
     }
-    if (!analyzer_->CanProveEqual(copy.dst->shape[dst_ndim - 2], rows + 1) ||
-        !analyzer_->CanProveEqual(copy.dst->shape[dst_ndim - 1], cols)) {
+    if (!analyzer_->CanProveEqual(copy.dst.shape()[dst_ndim - 2], rows + 1) ||
+        !analyzer_->CanProveEqual(copy.dst.shape()[dst_ndim - 1], cols)) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ compact destination " << copy.dst->name
           << " must reserve exactly one padding row.";
     }
 
-    PrimExpr src_ptr = MakeTLAccessPtr(copy.src, copy.src_range, kAccessRead);
+    Expr src_ptr = MakeTLAccessPtr(copy.src, copy.src_range, kAccessRead);
     Array<PrimExpr> dst_extents = RegionExtents(copy.dst_range);
-    dst_extents.Set(dst_ndim - 2, copy.dst->shape[dst_ndim - 2]);
-    PrimExpr dst_ptr =
+    dst_extents.Set(dst_ndim - 2, copy.dst.shape()[dst_ndim - 2]);
+    Expr dst_ptr =
         MakeTLAccessPtr(copy.dst, copy.dst_range, dst_extents, kAccessWrite);
-    Array<PrimExpr> args{src_ptr,
-                         dst_ptr,
-                         rows,
-                         cols,
-                         StringImm(dst_dtype),
-                         StringImm(src_dtype)};
-    return Evaluate(Call(DataType::Handle(), ascend_nd2nz_scatter(), args));
+    Array<Expr> args{src_ptr,
+                     dst_ptr,
+                     rows,
+                     cols,
+                     StringImm(dst_dtype),
+                     StringImm(src_dtype)};
+    return Evaluate(
+        Call(TupleType(Array<Type>{}), ascend_nd2nz_scatter(), args));
   }
 
   std::optional<Stmt> RewriteUBToL1(const CopyNode &copy) {
     if (!IsSharedBuffer(copy.src) || !IsL1Buffer(copy.dst) ||
-        copy.dst_range.size() < 2 || !LayoutFor(copy.dst).defined()) {
+        copy.dst_range.size() < 2 || !LayoutFor(copy.dst).has_value()) {
       return std::nullopt;
     }
     bool src_is_nz = IsNZBuffer(copy.src);
@@ -381,22 +385,23 @@ private:
     size_t dst_ndim = copy.dst_range.size();
     PrimExpr rows = copy.dst_range[dst_ndim - 2]->extent;
     PrimExpr cols = copy.dst_range[dst_ndim - 1]->extent;
-    PrimExpr full_rows = copy.dst->shape[copy.dst->shape.size() - 2];
-    std::string src_dtype = Nd2NzDTypeName(copy.src->dtype);
-    std::string dst_dtype = Nd2NzDTypeName(copy.dst->dtype);
+    PrimExpr full_rows = copy.dst.shape()[copy.dst.shape().size() - 2];
+    std::string src_dtype = Nd2NzDTypeName(copy.src.dtype());
+    std::string dst_dtype = Nd2NzDTypeName(copy.dst.dtype());
 
     Array<PrimExpr> src_extents =
         src_is_nz ? ValidatePrepackedNZSource(copy, rows, cols, full_rows)
                   : RegionExtents(copy.src_range);
-    PrimExpr src_ptr =
+    Expr src_ptr =
         MakeTLAccessPtr(copy.src, copy.src_range, src_extents, kAccessRead);
-    PrimExpr dst_ptr = MakeTLAccessPtr(copy.dst, copy.dst_range, kAccessWrite);
-    bool same_dtype = copy.src->dtype == copy.dst->dtype;
+    Expr dst_ptr = MakeTLAccessPtr(copy.dst, copy.dst_range, kAccessWrite);
+    bool same_dtype = copy.src.dtype() == copy.dst.dtype();
 
-    auto make_post_copy = [&](PrimExpr source_ptr) {
-      Array<PrimExpr> args{dst_ptr, source_ptr, rows,
-                           cols,    full_rows,  StringImm(dst_dtype)};
-      return Evaluate(Call(DataType::Handle(), ascend_nd2nz_post_copy(), args));
+    auto make_post_copy = [&](Expr source_ptr) {
+      Array<Expr> args{dst_ptr, source_ptr, rows,
+                       cols,    full_rows,  StringImm(dst_dtype)};
+      return Evaluate(
+          Call(TupleType(Array<Type>{}), ascend_nd2nz_post_copy(), args));
     };
 
     if (src_is_nz) {
@@ -404,32 +409,32 @@ private:
         TVM_FFI_THROW(ValueError)
             << "NZ source " << copy.src->name
             << " cannot be post-copied with a dtype conversion ("
-            << copy.src->dtype << " -> " << copy.dst->dtype << ")";
+            << copy.src.dtype() << " -> " << copy.dst.dtype() << ")";
       }
       return make_post_copy(src_ptr);
     }
 
-    const int64_t *cols_i = as_const_int(cols);
-    int elem_bytes = (copy.dst->dtype.bits() + 7) / 8;
-    if (cols_i != nullptr && *cols_i * elem_bytes == 32 && same_dtype) {
+    auto cols_i = GetConstInt(cols);
+    int elem_bytes = (copy.dst.dtype().bits() + 7) / 8;
+    if (cols_i.has_value() && *cols_i * elem_bytes == 32 && same_dtype) {
       return make_post_copy(src_ptr);
     }
 
     PrimExpr scratch_extent = (rows + 1) * cols;
-    Buffer scratch = decl_buffer({scratch_extent}, copy.dst->dtype,
-                                 "nz_scratch", "shared.dyn");
-    ICHECK(!pending_allocs_.empty());
-    pending_allocs_.back().push_back(scratch);
+    TensorVar scratch("nz_scratch",
+                      TensorType({scratch_extent}, copy.dst.dtype(),
+                                 runtime::MemoryScope::Get("shared.dyn")));
+    Bind allocation(scratch, Call(scratch.ty(), tirx::alloc_tensor_op(), {},
+                                  DictAttrs(), {scratch.ty()}));
     Array<Range> scratch_ranges{
-        Range::FromMinExtent(IntImm(DataType::Int(32), 0), scratch_extent)};
-    PrimExpr scratch_write =
-        MakeTLAccessPtr(scratch, scratch_ranges, kAccessWrite);
-    PrimExpr scratch_read =
-        MakeTLAccessPtr(scratch, scratch_ranges, kAccessRead);
-    Stmt scatter = Evaluate(Call(DataType::Handle(), ascend_nd2nz_scatter(),
-                                 {src_ptr, scratch_write, rows, cols,
-                                  StringImm(dst_dtype), StringImm(src_dtype)}));
-    return SeqStmt({scatter, make_post_copy(scratch_read)});
+        Range::FromMinExtent(IntImm(PrimType::Int(32), 0), scratch_extent)};
+    Expr scratch_write = MakeTLAccessPtr(scratch, scratch_ranges, kAccessWrite);
+    Expr scratch_read = MakeTLAccessPtr(scratch, scratch_ranges, kAccessRead);
+    Stmt scatter =
+        Evaluate(Call(TupleType(Array<Type>{}), ascend_nd2nz_scatter(),
+                      {src_ptr, scratch_write, rows, cols, StringImm(dst_dtype),
+                       StringImm(src_dtype)}));
+    return SeqStmt({allocation, scatter, make_post_copy(scratch_read)});
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
@@ -438,7 +443,7 @@ private:
     const auto *call = op->value.as<CallNode>();
     if (call == nullptr || !IsAscendCopyCall(call))
       return Parent::VisitStmt_(op);
-    AscendCopy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, AscendCallAnnotations(call));
     if (std::optional<Stmt> rewritten = RewriteUBToUB(*copy.get()))
       return rewritten.value();
     if (std::optional<Stmt> rewritten = RewriteUBToL1(*copy.get()))
@@ -446,43 +451,32 @@ private:
     return Parent::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    LayoutMap saved_layout_map = layout_map_;
-    bool saved_inside_simt_vf = inside_simt_vf_;
-    if (auto layout_map_ref = op->annotations.Get(attr::kLayoutMap)) {
-      if (auto map = layout_map_ref.value().as<Map<Buffer, Layout>>())
-        layout_map_ = map.value();
-    }
-    if (op->name_hint == "SIMT_VF")
-      inside_simt_vf_ = true;
-    pending_allocs_.emplace_back();
-    Stmt rewritten = Parent::VisitStmt_(op);
-    std::vector<Buffer> pending = std::move(pending_allocs_.back());
-    pending_allocs_.pop_back();
-    inside_simt_vf_ = saved_inside_simt_vf;
-    layout_map_ = std::move(saved_layout_map);
-    if (pending.empty())
-      return rewritten;
-    SBlock block = Downcast<SBlock>(rewritten);
-    SBlockNode *write_ptr = block.CopyOnWrite();
-    for (Buffer &buffer : pending)
-      write_ptr->alloc_buffers.push_back(std::move(buffer));
-    return block;
+  Stmt VisitStmt_(const RegionStmtNode *node) final {
+    LayoutMap saved = layout_map_;
+    bool saved_inside = inside_simt_vf_;
+    if (auto layouts = node->attrs.GetAttr<LayoutMap>(attr::kLayoutMap))
+      for (const auto &[tensor, layout] : *layouts)
+        layout_map_.Set(tensor, layout);
+    inside_simt_vf_ |=
+        node->attrs.GetAttr<String>("name_hint").value_or("") == "SIMT_VF";
+    Stmt result = Parent::VisitStmt_(node);
+    inside_simt_vf_ = saved_inside;
+    layout_map_ = std::move(saved);
+    return result;
   }
 
   LayoutMap layout_map_;
-  std::vector<std::vector<Buffer>> pending_allocs_;
   bool inside_simt_vf_{false};
 };
 
 } // namespace
 
 tvm::transform::Pass InsertNd2Nz() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
+  auto pass_func = [](tirx::Function func, const IRModule &mod,
                       const PassContext &ctx) {
     return Nd2NzInserter::Rewrite(std::move(func));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.InsertNd2Nz", {});
+  return CreateFunctionPass(pass_func, 0, "tl.InsertNd2Nz");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

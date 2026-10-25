@@ -14,7 +14,7 @@ dispatch.
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 from tilelang.language.common import evaluate
 from tilelang.language.reduce_op import (
@@ -57,12 +57,12 @@ def reduce(
     # regions: no fragment exists inside SimdVF to round-trip through.
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    out_buffer = to_buffer_region(out).buffer
+    out_buffer = to_buffer_region(out).source
     if reduce_type in ("bitand", "bitor", "bitxor"):
-        buf_dtype = _get_buffer(buffer).dtype
+        buf_dtype = str(_get_buffer(buffer).dtype)
         if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
+        if not (str(out_buffer.dtype).startswith(("int", "uint")) or out_buffer.dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out)

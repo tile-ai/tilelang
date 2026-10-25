@@ -10,6 +10,8 @@ multi-dimensional, permuted, and interleaved physical layouts, with and
 without slicing.
 """
 
+import re
+
 import pytest
 import torch
 
@@ -476,7 +478,7 @@ def test_tmem_copy_roundtrip_across_a_shared_allocation():
     # 96 + 32 columns round up to the same 128 the wide buffer needs alone, so
     # the two buffers share a single allocation.
     assert source.count("tl::tmem_allocate") == 1
-    assert "tl::tmem_allocate((&(wide_tmem[0])), 128)" in source
+    assert re.search(r"tl::tmem_allocate(?:<[^>]+>)?\([^;]+,\s*128\)", source)
     assert "tcgen05_st_" in source and "tcgen05_ld_" in source
 
     a = torch.randn(128, wide_cols, device="cuda", dtype=torch.float32)

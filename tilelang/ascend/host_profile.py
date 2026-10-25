@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from tilelang.env import env
 
 if TYPE_CHECKING:
-    from tvm.tirx import PrimFunc
+    from tilelang._compat.tirx import PrimFunc
 
 
 def maybe_wrap_host_profile(func: Callable[..., Any], prim_func: PrimFunc) -> Callable[..., Any]:

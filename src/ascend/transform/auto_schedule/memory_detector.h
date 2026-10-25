@@ -1,12 +1,9 @@
 #pragma once
-#include <tvm/arith/analyzer.h>
-#include <tvm/arith/iter_affine_map.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/sym/iter_affine_map.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -28,6 +25,8 @@
 #include "ascend/op/copy.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/native_visitor.h"
+#include "compat/visit.h"
 #include "op/builtin.h"
 #include "op/gemm.h"
 #include "op/gemm_blockscaled.h"
@@ -42,13 +41,37 @@ namespace ascend {
 
 using namespace tirx;
 
+inline bool
+ScheduleExprUsesVar(const PrimExpr &expression,
+                    const std::function<bool(const VarNode *)> &predicate) {
+  for (const Var &variable : tvm::UndefinedVars(expression))
+    if (predicate(variable.get()))
+      return true;
+  return false;
+}
+
+inline bool HasContiguousTaskLayout(const TensorVar &tensor,
+                                    sym::Analyzer analyzer) {
+  auto pattern = tirx::MatchShapeStridePattern(tensor.ty());
+  if (!pattern)
+    return false;
+  PrimExpr stride = IntImm::Int32(1);
+  const auto &strides = pattern.value().get<1>();
+  for (size_t axis = tensor.shape().size(); axis > 0; --axis) {
+    if (!analyzer->CanProveEqual(strides[axis - 1], stride))
+      return false;
+    stride = stride * tensor.shape()[axis - 1];
+  }
+  return true;
+}
+
 inline void MergeL0Pitch(Map<Var, Optional<PrimExpr>> *pitches,
                          const Var &storage, Optional<PrimExpr> pitch) {
   auto it = pitches->find(storage);
   if (it != pitches->end()) {
-    arith::Analyzer analyzer;
-    if (!(*it).second.defined() || !pitch.defined() ||
-        !analyzer.CanProveEqual((*it).second.value(), pitch.value()))
+    sym::Analyzer analyzer;
+    if (!(*it).second.has_value() || !pitch.has_value() ||
+        !analyzer->CanProveEqual((*it).second.value(), pitch.value()))
       pitch = std::nullopt;
   }
   pitches->Set(storage, pitch);
@@ -57,36 +80,36 @@ inline void MergeL0Pitch(Map<Var, Optional<PrimExpr>> *pitches,
 inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
                                            const LayoutMap &layouts) {
   Map<Var, PrimExpr> result;
-  auto record = [&](const BufferRegion &region, size_t mn_axis,
+  auto record = [&](const TensorRegion &region, size_t mn_axis,
                     Optional<PrimExpr> l0_pitch = std::nullopt) {
     PrimExpr pitch =
         l0_pitch.value_or(floordiv(region->region[mn_axis]->extent + 15, 16));
-    result.Set(region->buffer->data, pitch);
+    result.Set(region->source.as_or_throw<TensorVar>(), pitch);
   };
   if (IsAscendCopyCall(call.get())) {
-    AscendCopy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, AscendCallAnnotations(call.get()));
     if (IsL1Buffer(copy->src) &&
         (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst))) {
-      auto layout = FindLayoutForBuffer(layouts, copy->dst);
+      auto layout = layouts.Get(copy->dst);
       AscendFractalLayoutInfo info;
-      if (layout.defined() &&
+      if (layout.has_value() &&
           TryExtractAscendFractalLayout(layout.value(), copy->dst, &info) &&
           IsAscendMajorKind(info.kind))
-        record(BufferRegion(copy->dst, copy->dst_range),
+        record(NativeTensorRegion(copy->dst, copy->dst_range),
                copy->dst_range.size() - 2 +
                    (info.row16_axis == LogicalAxis::kCol),
                copy->l0_pitch);
     } else if (IsL0CBuffer(copy->src)) {
-      record(BufferRegion(copy->src, copy->src_range),
+      record(NativeTensorRegion(copy->src, copy->src_range),
              copy->src_range.size() - 2, copy->l0_pitch);
     }
   } else if ((call->op.same_as(Gemm::Get()) ||
               call->op.same_as(GemmBlockScaled::Get()))) {
-    Gemm gemm = Downcast<Gemm>(ParseOperator(call));
+    Gemm gemm = ParseOperator(call).as_or_throw<Gemm>();
     if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
-      record(gemm->aRegion_, gemm->a_->shape.size() - (gemm->transA_ ? 1 : 2));
-      record(gemm->bRegion_, gemm->b_->shape.size() - (gemm->transB_ ? 2 : 1));
-      record(gemm->cRegion_, gemm->c_->shape.size() - 2);
+      record(gemm->aRegion_, gemm->a_.shape().size() - (gemm->transA_ ? 1 : 2));
+      record(gemm->bRegion_, gemm->b_.shape().size() - (gemm->transB_ ? 2 : 1));
+      record(gemm->cRegion_, gemm->c_.shape().size() - 2);
     }
   }
   return result;
@@ -94,12 +117,12 @@ inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
 
 // MemoryAccessDetector: detect read/write regions in statements
 // Adapted from BlockReadWriteDetector in TVM
-class MemoryAccessDetector : public StmtExprVisitor {
+class MemoryAccessDetectorImpl : public AnalysisVisitor {
 public:
   // Lifetime analysis separately requests may/must-write coverage.
   enum class AccessMode { kLogical, kPhysical };
-  explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
-                                LayoutMap layouts = {})
+  explicit MemoryAccessDetectorImpl(AccessMode mode = AccessMode::kLogical,
+                                    LayoutMap layouts = {})
       : layouts_(std::move(layouts)), mode_(mode) {}
 
   // Analyze a statement and collect read/write regions
@@ -126,7 +149,7 @@ public:
     operator()(stmt);
   }
 
-  void Analyze(const PrimExpr &expr) {
+  void Analyze(const Expr &expr) {
     l0_pitches_.clear();
     operation_pitches_.clear();
     read_buffers_.clear();
@@ -150,12 +173,12 @@ public:
   }
 
   // Return collected read regions
-  std::vector<BufferRegion> GetReadRegions() const {
+  std::vector<TensorRegion> GetReadRegions() const {
     return CollectRegions(read_buffers_, read_regions_);
   }
 
   // Return collected write regions
-  std::vector<BufferRegion> GetWriteRegions() const {
+  std::vector<TensorRegion> GetWriteRegions() const {
     return CollectRegions(write_buffers_, write_regions_);
   }
 
@@ -172,7 +195,7 @@ public:
   std::vector<Var> GetOpaqueAccessVars() const { return opaque_access_vars_; }
   // Return each provably dense, unconditional write separately. Unlike
   // GetWriteRegions(), these regions are not merged into a may-write hull.
-  std::vector<BufferRegion> GetMustWriteRegions() const {
+  std::vector<TensorRegion> GetMustWriteRegions() const {
     // A loop_break may truncate any loop domain represented by this atomic
     // task. Keep its may-write regions for dependencies, but do not use any
     // write in the task as a complete definition for lifetime analysis.
@@ -187,13 +210,13 @@ private:
   Map<Var, Optional<PrimExpr>> l0_pitches_;
 
   /*! \brief Iteration range for loop_vars */
-  std::unordered_map<const VarNode *, arith::IntSet> dom_map_;
+  ffi::Map<Var, sym::IntSet> dom_map_;
   /*! \brief Extra iteration range hint for free vars */
-  std::unordered_map<const VarNode *, arith::IntSet> hint_map_;
+  ffi::Map<Var, sym::IntSet> hint_map_;
   /*! \brief Unresolved conditions within current scope. */
   std::vector<PrimExpr> pending_conditions_;
   /*! \brief Individual dense writes that execute whenever the task does. */
-  std::vector<BufferRegion> unconditional_write_regions_;
+  std::vector<TensorRegion> unconditional_write_regions_;
   /*! \brief Loop domains active at the current statement. */
   std::vector<std::pair<Var, Range>> loop_domains_;
   /*! \brief Current nesting depth of control flow that may skip its body. */
@@ -205,34 +228,34 @@ private:
   // Pointer consumers whose physical footprint is not encoded by access_ptr.
   bool opaque_pointer_context_{false};
   /*! \brief The buffers that the current block reads */
-  std::vector<Buffer> read_buffers_;
+  std::vector<TensorVar> read_buffers_;
   /*! \brief The buffers that the current block writes */
-  std::vector<Buffer> write_buffers_;
+  std::vector<TensorVar> write_buffers_;
   /*! \brief The read regions of the current block */
-  std::vector<std::vector<tvm::arith::IntSet>> read_regions_;
+  std::vector<std::vector<tvm::sym::IntSet>> read_regions_;
   /*! \brief The write regions of the current block */
-  std::vector<std::vector<tvm::arith::IntSet>> write_regions_;
+  std::vector<std::vector<tvm::sym::IntSet>> write_regions_;
   AccessMode mode_;
   /*!\ brief Internal analyzer. */
-  arith::Analyzer ana_;
+  sym::Analyzer ana_;
   /*! \brief let bindings inside the block */
-  std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
+  ffi::Map<PrimVar, PrimExpr> let_bindings_;
 
   /*! \brief The set of variables that are read in the current block.  */
   std::vector<Var> read_vars_;
   /*! \brief The set of variables that are written in the current block.  */
   std::vector<Var> write_vars_;
-  /*! \brief Buffer storage Vars with an access of unknown region. */
+  /*! \brief TensorVar storage Vars with an access of unknown region. */
   std::vector<Var> opaque_access_vars_;
 
   /*!
    * \brief Update read/write buffers and regions with provided buffer and
    * region
    */
-  void Update(std::vector<Buffer> *buffers,
-              std::vector<std::vector<arith::IntSet>> *regions, Buffer buffer,
-              std::vector<arith::IntSet> region) {
-    UpdateReadVar(buffer->data);
+  void Update(std::vector<TensorVar> *buffers,
+              std::vector<std::vector<sym::IntSet>> *regions, TensorVar buffer,
+              std::vector<sym::IntSet> region) {
+    UpdateReadVar(buffer);
     // Equal logical indices do not prove equal physical addresses when layout
     // metadata reads mutable state. Lowering uses these expressions at
     // accesses, so retain their reads as well as excluding the viewed storage
@@ -240,44 +263,51 @@ private:
     auto visit_mutable_layout = [&](const PrimExpr &expr) {
       if (mode_ == AccessMode::kPhysical &&
           SideEffect(expr) > CallEffectKind::kPure) {
-        UpdateOpaqueAccessVar(buffer->data);
+        UpdateOpaqueAccessVar(buffer);
         VisitExpr(expr);
       }
     };
-    for (const PrimExpr &extent : buffer->shape)
+    for (const PrimExpr &extent : buffer.shape())
       visit_mutable_layout(extent);
-    for (const PrimExpr &stride : buffer->strides)
-      visit_mutable_layout(stride);
-    visit_mutable_layout(buffer->elem_offset);
+    if (auto geometry = tirx::MatchShapeStridePattern(buffer.ty())) {
+      for (const PrimExpr &stride : geometry.value().get<1>())
+        visit_mutable_layout(stride);
+      visit_mutable_layout(geometry.value().get<2>());
+    } else if (mode_ == AccessMode::kPhysical && buffer.ty()->layout) {
+      auto indices = buffer.shape().Map(
+          [](const PrimExpr &extent) { return MakeConst(extent.ty(), 0); });
+      for (const PrimExpr &offset : buffer.ty()->ElemOffset(indices))
+        visit_mutable_layout(offset);
+    }
     if (mode_ == AccessMode::kLogical &&
         (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer))) {
-      Optional<PrimExpr> pitch = operation_pitches_.Get(buffer->data);
-      if (pitch.defined()) {
-        PrimExpr value = ana_.Simplify(ResolveLets(pitch.value()));
+      Optional<PrimExpr> pitch = operation_pitches_.Get(buffer);
+      if (pitch.has_value()) {
+        PrimExpr value = ana_->Simplify(ResolveLets(pitch.value()));
         if (SideEffect(value) > CallEffectKind::kPure ||
-            UsesVar(value, [&](const VarNode *var) {
-              return dom_map_.count(var) != 0;
+            ScheduleExprUsesVar(value, [&](const VarNode *var) {
+              return dom_map_.count(ffi::GetRef<Var>(var)) != 0;
             }))
           pitch = std::nullopt;
         else
           pitch = value;
       }
-      MergeL0Pitch(&l0_pitches_, buffer->data, pitch);
+      MergeL0Pitch(&l0_pitches_, buffer, pitch);
     }
     MergeRegion(buffers, regions, buffer, region);
   }
 
-  static void MergeRegion(std::vector<Buffer> *buffers,
-                          std::vector<std::vector<arith::IntSet>> *regions,
-                          const Buffer &buffer,
-                          const std::vector<arith::IntSet> &region) {
+  static void MergeRegion(std::vector<TensorVar> *buffers,
+                          std::vector<std::vector<sym::IntSet>> *regions,
+                          const TensorVar &buffer,
+                          const std::vector<sym::IntSet> &region) {
     // Check if buffer already exists
     for (size_t i = 0; i < buffers->size(); ++i) {
       if ((*buffers)[i].same_as(buffer)) {
         // Merge regions
         ICHECK_EQ((*regions)[i].size(), region.size());
         for (size_t j = 0; j < region.size(); ++j) {
-          (*regions)[i][j] = arith::Union({(*regions)[i][j], region[j]});
+          (*regions)[i][j] = sym::Union({(*regions)[i][j], region[j]});
         }
         return;
       }
@@ -287,28 +317,31 @@ private:
     regions->push_back(region);
   }
 
-  BufferRegion
-  MakeBufferRegion(const Buffer &buffer,
-                   const std::vector<arith::IntSet> &int_sets) const {
-    Region region;
-    size_t ndim = buffer->shape.size();
-    ICHECK_EQ(int_sets.size(), ndim) << "Region dimension " << int_sets.size()
-                                     << " must equal buffer dimension " << ndim;
+  TensorRegion
+  MakeTensorRegion(const TensorVar &buffer,
+                   const std::vector<sym::IntSet> &int_sets) const {
+    ffi::Array<Range> region;
+    size_t ndim = buffer.shape().size();
+    ICHECK_EQ(int_sets.size(), ndim)
+        << "ffi::Array<Range> dimension " << int_sets.size()
+        << " must equal buffer dimension " << ndim;
     region.reserve(ndim);
     for (size_t i = 0; i < ndim; ++i) {
       region.push_back(
-          int_sets[i].CoverRange(Range::FromMinExtent(0, buffer->shape[i])));
+          int_sets[i]
+              .CoverRange(Range::FromMinExtent(PrimExpr(0), buffer.shape()[i]))
+              .value());
     }
-    return BufferRegion(buffer, std::move(region));
+    return NativeTensorRegion(buffer, std::move(region));
   }
 
-  void UpdateWrite(Buffer buffer, std::vector<arith::IntSet> region,
+  void UpdateWrite(TensorVar buffer, std::vector<sym::IntSet> region,
                    const std::vector<PrimExpr> &mins,
                    const std::vector<PrimExpr> &extents,
                    bool must_execute = true) {
     if (mode_ == AccessMode::kPhysical && conditional_depth_ == 0 &&
         must_execute && IsDenseWriteRegion(mins, extents, region))
-      unconditional_write_regions_.push_back(MakeBufferRegion(buffer, region));
+      unconditional_write_regions_.push_back(MakeTensorRegion(buffer, region));
     Update(&write_buffers_, &write_regions_, std::move(buffer),
            std::move(region));
   }
@@ -318,12 +351,12 @@ private:
   // a[2 * i] and correlated multi-dimensional writes such as a[i, i].
   bool IsDenseWriteRegion(const std::vector<PrimExpr> &mins,
                           const std::vector<PrimExpr> &extents,
-                          const std::vector<arith::IntSet> &region) {
+                          const std::vector<sym::IntSet> &region) {
     ICHECK_EQ(mins.size(), extents.size());
     ICHECK_EQ(mins.size(), region.size());
     // CoverRange falls back to the whole allocation for an unbounded set.
     // That is a may-write bound, never evidence that every element is written.
-    for (const arith::IntSet &axis : region) {
+    for (const sym::IntSet &axis : region) {
       if (!axis.HasLowerBound() || !axis.HasUpperBound())
         return false;
     }
@@ -334,7 +367,7 @@ private:
       return false;
 
     auto uses_active_loop = [&](const PrimExpr &expr) {
-      return UsesVar(expr, [&](const VarNode *node) {
+      return ScheduleExprUsesVar(expr, [&](const VarNode *node) {
         Var var = ffi::GetRef<Var>(node);
         for (const auto &[loop_var, _] : loop_domains_) {
           if (var.same_as(loop_var))
@@ -344,17 +377,18 @@ private:
       });
     };
 
-    ffi::Map<Var, Range> input_iters;
+    ffi::Map<PrimVar, Range> input_iters;
     for (const auto &[loop_var, loop_domain] : loop_domains_) {
-      PrimExpr min = ResolveLets(loop_domain->min);
+      PrimExpr min = ResolveLets(loop_domain->begin);
       PrimExpr extent = ResolveLets(loop_domain->extent);
       // Dependent loop domains do not describe a Cartesian iteration space to
       // DetectIterMap. Zero-trip loops also cannot establish a definition.
       if (uses_active_loop(min) || uses_active_loop(extent) ||
-          !ana_.CanProve(extent > 0)) {
+          !ana_->CanProve(extent > 0)) {
         return false;
       }
-      input_iters.Set(loop_var, Range::FromMinExtent(min, extent));
+      input_iters.Set(loop_var.as_or_throw<PrimVar>(),
+                      Range::FromMinExtent(min, extent));
     }
 
     ffi::Array<PrimExpr> expanded_indices;
@@ -362,33 +396,34 @@ private:
     for (size_t i = 0; i < mins.size(); ++i) {
       PrimExpr min = ResolveLets(mins[i]);
       PrimExpr extent = ResolveLets(extents[i]);
-      if (uses_active_loop(extent) || !ana_.CanProve(extent > 0))
+      if (uses_active_loop(extent) || !ana_->CanProve(extent > 0))
         return false;
-      Var offset("must_write_offset", min.dtype());
+      PrimVar offset("must_write_offset", min.ty());
       input_iters.Set(offset,
-                      Range::FromMinExtent(make_const(min.dtype(), 0), extent));
+                      Range::FromMinExtent(MakeConst(min.ty(), 0), extent));
       expanded_indices.push_back(min + offset);
     }
 
-    arith::IterMapResult iter_map =
-        arith::DetectIterMap(expanded_indices, input_iters, Bool(true),
-                             arith::IterMapLevel::Surjective, &ana_);
+    sym::IterMapResult iter_map =
+        sym::DetectIterMap(expanded_indices, input_iters, IntImm::Bool(true),
+                           sym::IterMapLevel::Surjective, ana_);
     if (iter_map->indices.size() != expanded_indices.size() ||
-        !ana_.CanProve(!iter_map->padding_predicate)) {
+        !iter_map->padding_predicate ||
+        !ana_->CanProve(!iter_map->padding_predicate.value())) {
       return false;
     }
     for (size_t i = 0; i < iter_map->indices.size(); ++i) {
-      const arith::IterSumExpr &index = iter_map->indices[i];
+      const sym::IterSumExpr &index = iter_map->indices[i];
       PrimExpr min = index->base;
       PrimExpr max = index->base;
       if (!index->args.empty()) {
         if (index->args.size() != 1)
           return false;
-        const arith::IterSplitExpr &split = index->args[0];
-        PrimExpr one = make_const(split->scale.dtype(), 1);
-        if (ana_.CanProveEqual(split->scale, one)) {
+        const sym::IterSplitExpr &split = index->args[0];
+        PrimExpr one = MakeConst(split->scale.ty(), 1);
+        if (ana_->CanProveEqual(split->scale, one)) {
           max = max + split->extent - one;
-        } else if (ana_.CanProveEqual(split->scale, -one)) {
+        } else if (ana_->CanProveEqual(split->scale, -one)) {
           min = min - split->extent + one;
         } else {
           return false;
@@ -397,8 +432,8 @@ private:
       // Surjectivity proves coverage of the iterator image, not an arbitrary
       // EvalSet overestimate. A runtime index (even modulo the buffer size)
       // writes one element, rather than all elements in its possible range.
-      if (!ana_.CanProveEqual(region[i].min(), min) ||
-          !ana_.CanProveEqual(region[i].max(), max)) {
+      if (!ana_->CanProveEqual(region[i].min(), min) ||
+          !ana_->CanProveEqual(region[i].max(), max)) {
         return false;
       }
     }
@@ -441,22 +476,22 @@ private:
 
   /*!
    * \brief Process a buffer region argument from reduce operation
-   * \param arg The argument which could be BufferRegion, BufferLoad, or
+   * \param arg The argument which could be TensorRegion, TensorLoad, or
    * tl.region call
    * \param is_read Whether this is a read (true) or write (false) access
    */
-  void RecordBufferRegion(const BufferRegion &buffer_region, bool is_read) {
-    Buffer buffer = buffer_region->buffer;
-    const Region &region = buffer_region->region;
-    std::vector<arith::IntSet> int_sets;
+  void RecordTensorRegion(const TensorRegion &buffer_region, bool is_read) {
+    TensorVar buffer = buffer_region->source.as_or_throw<TensorVar>();
+    const ffi::Array<Range> &region = buffer_region->region;
+    std::vector<sym::IntSet> int_sets;
     std::vector<PrimExpr> mins;
     std::vector<PrimExpr> extents;
     int_sets.reserve(region.size());
     mins.reserve(region.size());
     extents.reserve(region.size());
     for (const Range &range : region) {
-      int_sets.push_back(RelaxAccessIndex(range->min, range->extent));
-      mins.push_back(range->min);
+      int_sets.push_back(RelaxAccessIndex(range->begin, range->extent));
+      mins.push_back(range->begin);
       extents.push_back(range->extent);
     }
     if (is_read) {
@@ -468,28 +503,30 @@ private:
 
   // Compact storage is opaque to allocation reuse. Preserve its selected
   // plane as may-access without treating it as a complete definition.
-  void RecordL0MayAccess(const BufferRegion &region, bool is_read,
+  void RecordL0MayAccess(const TensorRegion &region, bool is_read,
                          bool compact) {
     if (!compact)
       return;
-    UpdateOpaqueAccessVar(region->buffer->data);
-    std::vector<arith::IntSet> ranges;
+    UpdateOpaqueAccessVar(region->source.as_or_throw<TensorVar>());
+    std::vector<sym::IntSet> ranges;
     for (size_t i = 0; i < region->region.size(); ++i) {
       const Range &range = region->region[i];
-      ranges.push_back(i + 2 < region->region.size()
-                           ? RelaxAccessIndex(range->min, range->extent)
-                           : arith::IntSet::FromRange(Range::FromMinExtent(
-                                 0, region->buffer->shape[i])));
+      ranges.push_back(
+          i + 2 < region->region.size()
+              ? RelaxAccessIndex(range->begin, range->extent)
+              : sym::IntSet::FromRange(Range::FromMinExtent(
+                    0, region->source.as_or_throw<TensorVar>().shape()[i])));
     }
     if (is_read)
-      Update(&read_buffers_, &read_regions_, region->buffer, std::move(ranges));
+      Update(&read_buffers_, &read_regions_,
+             region->source.as_or_throw<TensorVar>(), std::move(ranges));
     else
-      Update(&write_buffers_, &write_regions_, region->buffer,
-             std::move(ranges));
+      Update(&write_buffers_, &write_regions_,
+             region->source.as_or_throw<TensorVar>(), std::move(ranges));
   }
 
-  BufferRegion ExpandPaddedCopyWriteRegion(const AscendCopy &copy,
-                                           BufferRegion write) {
+  TensorRegion ExpandPaddedCopyWriteRegion(const AscendCopy &copy,
+                                           TensorRegion write) {
     if (copy->data_select == 0 || !IsGlobalBuffer(copy->src) ||
         !IsSharedBuffer(copy->dst) || write->region.empty()) {
       return write;
@@ -498,132 +535,95 @@ private:
     // DMA rows follow the coalesced source/destination layouts, not the last
     // logical buffer axis. Use the same coalescing and unit-axis normalization
     // as PlanMTECopy, then select the row boundary from the strided side.
-    arith::Analyzer analyzer;
-    auto src_range = NormalizeEmptyUnitAxesForMTE(copy->src_range, &analyzer);
-    auto dst_range = NormalizeEmptyUnitAxesForMTE(copy->dst_range, &analyzer);
-    int src_bits = copy->src->dtype.bits() * copy->src->dtype.lanes();
-    int elem_bits = write->buffer->dtype.bits() * write->buffer->dtype.lanes();
+    sym::Analyzer analyzer;
+    auto src_range = NormalizeEmptyUnitAxesForMTE(copy->src_range, analyzer);
+    auto dst_range = NormalizeEmptyUnitAxesForMTE(copy->dst_range, analyzer);
+    int src_bits = copy->src.dtype().bits() * copy->src.dtype().lanes();
+    int elem_bits = write->source.as_or_throw<TensorVar>().dtype().bits() *
+                    write->source.as_or_throw<TensorVar>().dtype().lanes();
     auto src = StridedLayout::FromBufferRange(copy->src, src_range, src_bits)
-                   .Coalesce(&analyzer);
+                   .Coalesce(analyzer);
     auto dst = StridedLayout::FromBufferRange(copy->dst, dst_range, elem_bits)
-                   .Coalesce(&analyzer);
+                   .Coalesce(analyzer);
     auto total_elems = [&](const StridedLayout &layout) {
-      PrimExpr total = Integer(1);
+      PrimExpr total = IntImm::Int32(1);
       for (const Mode &mode : layout.modes)
         total = total * mode.size;
       return total;
     };
     if (src_bits != elem_bits || src.modes.empty() || dst.modes.empty() ||
         src.modes.size() > 2 || dst.modes.size() > 2 ||
-        !analyzer.CanProveEqual(total_elems(src), total_elems(dst)) ||
+        !analyzer->CanProveEqual(total_elems(src), total_elems(dst)) ||
         (src.modes.size() == 2 && dst.modes.size() == 2 &&
-         (!analyzer.CanProveEqual(src.modes[0].size, dst.modes[0].size) ||
-          !analyzer.CanProveEqual(src.modes[1].size, dst.modes[1].size)))) {
-      UpdateOpaqueAccessVar(write->buffer->data);
+         (!analyzer->CanProveEqual(src.modes[0].size, dst.modes[0].size) ||
+          !analyzer->CanProveEqual(src.modes[1].size, dst.modes[1].size)))) {
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
-    PrimExpr row_elems = analyzer.Simplify(
+    PrimExpr row_elems = analyzer->Simplify(
         src.modes.size() == 2 ? src.modes[0].size : dst.modes[0].size);
     const auto *row_extent = row_elems.as<IntImmNode>();
     if (row_extent == nullptr) {
-      UpdateOpaqueAccessVar(write->buffer->data);
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
 
-    if (elem_bits <= 0 || 256 % elem_bits != 0 || row_extent->value <= 0 ||
-        row_extent->value >
+    if (elem_bits <= 0 || 256 % elem_bits != 0 ||
+        row_extent->value.as<int64_t>().value() <= 0 ||
+        row_extent->value.as<int64_t>().value() >
             (std::numeric_limits<int64_t>::max() - 255) / elem_bits) {
-      UpdateOpaqueAccessVar(write->buffer->data);
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
-    int64_t row_bits = row_extent->value * elem_bits;
+    int64_t row_bits = row_extent->value.as<int64_t>().value() * elem_bits;
     if (row_bits % 8 != 0) {
-      UpdateOpaqueAccessVar(write->buffer->data);
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
     int64_t padded_extent = ((row_bits + 255) / 256) * 256 / elem_bits;
-    if (padded_extent == row_extent->value)
+    if (padded_extent == row_extent->value.as<int64_t>().value())
       return write;
 
-    Region write_region = write->region;
+    ffi::Array<Range> write_region = write->region;
     const Range &row_range = write_region.back();
-    PrimExpr last_stride = write->buffer->strides.empty()
-                               ? Integer(1)
-                               : write->buffer->strides.back();
+    auto geometry = tirx::MatchShapeStridePattern(
+        write->source.as_or_throw<TensorVar>().ty());
+    if (!geometry || geometry.value().get<1>().empty()) {
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
+      return write;
+    }
+    PrimExpr last_stride = geometry.value().get<1>().back();
     // Expanding the last logical axis is exact only when it is the descriptor's
     // contiguous row. In a view with stride=16, for example, row_elems=1 and
     // its seven padded floats occupy gaps between view elements, not extra
     // logical rows. Those physical lanes have no region in this view.
-    if (!analyzer.CanProveEqual(last_stride, Integer(1)) ||
-        !analyzer.CanProveEqual(row_range->extent, row_elems)) {
-      UpdateOpaqueAccessVar(write->buffer->data);
+    if (!analyzer->CanProveEqual(last_stride, IntImm::Int32(1)) ||
+        !analyzer->CanProveEqual(row_range->extent, row_elems)) {
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
 
-    PrimExpr physical_extent = IntImm(row_range->extent.dtype(), padded_extent);
+    PrimExpr physical_extent = IntImm(row_range->extent.ty(), padded_extent);
     // Lifetime analysis may reject reuse, but must not add an InsertSync
     // failure. Keep a finite footprint when the offset is symbolic.
-    if (analyzer.CanProve(row_range->min + physical_extent >
-                          write->buffer->shape.back()))
-      UpdateOpaqueAccessVar(write->buffer->data);
+    if (analyzer->CanProve(
+            row_range->begin + physical_extent >
+            write->source.as_or_throw<TensorVar>().shape().back()))
+      UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
     write_region.Set(write_region.size() - 1,
-                     Range::FromMinExtent(row_range->min, physical_extent));
-    return BufferRegion(write->buffer, std::move(write_region));
-  }
-
-  void ProcessBufferRegion(const PrimExpr &arg, bool is_read) {
-    // Check if it's a BufferRegion
-    if (const auto *buffer_region = arg.as<BufferRegionNode>()) {
-      RecordBufferRegion(ffi::GetRef<BufferRegion>(buffer_region), is_read);
-      return;
-    }
-
-    // Check if it's a BufferLoad
-    if (const auto *buffer_load = arg.as<BufferLoadNode>()) {
-      Buffer buffer = buffer_load->buffer;
-      std::vector<arith::IntSet> int_sets;
-      int_sets.reserve(buffer_load->indices.size());
-      for (PrimExpr index : buffer_load->indices) {
-        // Create IntSet for single point
-        int_sets.push_back(RelaxAccessIndex(index));
-      }
-      if (is_read) {
-        Update(&read_buffers_, &read_regions_, buffer, int_sets);
-      } else {
-        std::vector<PrimExpr> extents(buffer_load->indices.size(),
-                                      make_const(DataType::Int(32), 1));
-        UpdateWrite(buffer, std::move(int_sets),
-                    std::vector<PrimExpr>(buffer_load->indices.begin(),
-                                          buffer_load->indices.end()),
-                    extents);
-      }
-      return;
-    }
-
-    // Check if it's a tl.region call (should already be handled by
-    // VisitExpr_) but we can still process it recursively
-    if (const auto *call = arg.as<CallNode>()) {
-      static const Op &region_op = region();
-      if (call->op.same_as(region_op)) {
-        // Recursively visit this call to handle it
-        VisitExpr_(call);
-        return;
-      }
-    }
-
-    // If we reach here, the argument type is not supported
-    LOG(WARNING) << "Unsupported argument type in tl.tileop.reduce: "
-                 << arg->GetTypeKey();
+                     Range::FromMinExtent(row_range->begin, physical_extent));
+    return NativeTensorRegion(write->source.as_or_throw<TensorVar>(),
+                              std::move(write_region));
   }
 
   /*! \brief Helper function to collect access regions. */
-  std::vector<BufferRegion> CollectRegions(
-      const std::vector<Buffer> &buffers,
-      const std::vector<std::vector<tvm::arith::IntSet>> &regions) const {
-    std::vector<BufferRegion> result;
+  std::vector<TensorRegion> CollectRegions(
+      const std::vector<TensorVar> &buffers,
+      const std::vector<std::vector<tvm::sym::IntSet>> &regions) const {
+    std::vector<TensorRegion> result;
     result.reserve(buffers.size());
     for (size_t i = 0; i < buffers.size(); ++i) {
-      result.push_back(MakeBufferRegion(buffers[i], regions[i]));
+      result.push_back(MakeTensorRegion(buffers[i], regions[i]));
     }
     return result;
   }
@@ -642,47 +642,43 @@ private:
   /*! \brief Relax the half-open range [base, base + extent) over the loop
    * domain, resolving Let bindings first. The default extent of 1 gives the
    * single-point relaxation of one index. */
-  arith::IntSet RelaxAccessIndex(const PrimExpr &index,
-                                 PrimExpr extent = IntImm(DataType::Int(32),
-                                                          1)) {
+  sym::IntSet RelaxAccessIndex(const PrimExpr &index,
+                               PrimExpr extent = IntImm(PrimType::Int(32), 1)) {
     PrimExpr base = ResolveLets(index);
-    arith::IntSet lo_set =
-        arith::EvalSet(arith::IntSet::Vector(base), dom_map_);
+    sym::IntSet lo_set = sym::EvalSet(sym::IntSet::Vector(base), dom_map_);
     const auto *ext_imm = extent.as<IntImmNode>();
-    if (ext_imm && ext_imm->value <= 1) {
+    if (ext_imm && ext_imm->value.as<int64_t>().value() <= 1) {
       return lo_set;
     }
-    PrimExpr hi = base + ResolveLets(extent) - make_const(base.dtype(), 1);
-    arith::IntSet hi_set = arith::EvalSet(arith::IntSet::Vector(hi), dom_map_);
-    return arith::IntSet::Interval(lo_set.min(), hi_set.max());
+    PrimExpr hi = base + ResolveLets(extent) - MakeConst(base.ty(), 1);
+    sym::IntSet hi_set = sym::EvalSet(sym::IntSet::Vector(hi), dom_map_);
+    return sym::IntSet::Interval(lo_set.min(), hi_set.max());
   }
 
   void VisitStmt_(const ForNode *op) override {
-    Range range = Range::FromMinExtent(op->min, op->extent);
-    dom_map_[op->loop_var.get()] = arith::IntSet::FromRange(range);
-    loop_domains_.emplace_back(op->loop_var, range);
-    PrimExpr step = op->step.has_value() ? ResolveLets(op->step.value())
-                                         : make_const(op->loop_var.dtype(), 1);
-    bool has_non_unit_step =
-        !ana_.CanProveEqual(step, make_const(step.dtype(), 1));
-    if (has_non_unit_step)
+    Range range = ScheduleLoopRange(op);
+    dom_map_.Set(op->var, sym::IntSet::FromRange(range));
+    loop_domains_.emplace_back(op->var, range);
+    PrimExpr step = ResolveLets(op->step);
+    bool non_unit = !ana_->CanProve(step == 1 || step == -1);
+    if (non_unit)
       ++non_unit_step_loop_depth_;
-    StmtExprVisitor::VisitStmt_(op);
-    if (has_non_unit_step)
+    AnalysisVisitor::VisitStmt_(op);
+    if (non_unit)
       --non_unit_step_loop_depth_;
     loop_domains_.pop_back();
-    dom_map_.erase(op->loop_var.get());
+    dom_map_.erase(op->var);
   }
 
-  void VisitStmt_(const IfThenElseNode *op) override {
+  void VisitStmt_(const IfNode *op) override {
     VisitExpr(op->condition);
     ++conditional_depth_;
     // The ordinary write regions remain may-write unions. Writes visited while
     // this depth is nonzero are excluded from the separate must-write list.
-    StmtExprVisitor::VisitStmt(op->then_case);
+    AnalysisVisitor::VisitStmt(op->then_case);
     if (op->else_case) {
       // Visit else branch
-      StmtExprVisitor::VisitStmt(op->else_case.value());
+      AnalysisVisitor::VisitStmt(op->else_case.value());
     }
     --conditional_depth_;
   }
@@ -690,64 +686,103 @@ private:
   void VisitStmt_(const WhileNode *op) override {
     VisitExpr(op->condition);
     ++conditional_depth_;
-    StmtExprVisitor::VisitStmt(op->body);
+    AnalysisVisitor::VisitStmt(op->body);
     --conditional_depth_;
   }
 
   void VisitStmt_(const BindNode *op) override {
     bool previous_context = opaque_pointer_context_;
-    opaque_pointer_context_ |= op->var.dtype().is_handle();
+    opaque_pointer_context_ |= op->var->ty.as<PtrTypeNode>() != nullptr;
     VisitExpr(op->value);
     opaque_pointer_context_ = previous_context;
-    let_bindings_[op->var.get()] = op->value;
+    if (auto variable = op->var.as<PrimVar>()) {
+      if (auto value = op->value.as<PrimExpr>())
+        let_bindings_.Set(variable.value(), value.value());
+    }
     UpdateWriteVar(op->var);
   }
 
-  void VisitStmt_(const AttrStmtNode *op) override {
-    if (op->attr_key == tirx::attr::tilelang_assume ||
-        op->attr_key == attr::kAssumeRequiresRuntimeCheck) {
-      if (const auto *expr = op->node.as<PrimExprNode>())
-        VisitExpr(ffi::GetRef<PrimExpr>(expr));
+  void VisitStmt_(const RegionStmtNode *op) override {
+    auto key = ScheduleMarkerKey(op);
+    if (!key.empty()) {
+      if (IsScheduleGuardAttribute(key) || key == kScheduleCondition) {
+        if (auto expression = ScheduleMarkerPayload(op).as<Expr>())
+          VisitExpr(expression.value());
+      }
+      if (key == kScheduleCondition)
+        ++conditional_depth_;
+      VisitStmt(UnwrapScheduleMarker(op));
+      if (key == kScheduleCondition)
+        --conditional_depth_;
+      return;
     }
-    StmtExprVisitor::VisitStmt_(op);
+    auto old_domains = dom_map_;
+    size_t old_loops = loop_domains_.size();
+    if ((op->op.same_as(tirx::launch_thread_op()) ||
+         op->op.same_as(Op::Get("tl.launch_grid"))) &&
+        op->args.size() == 2 && op->body_params.size() == 1) {
+      auto variable = op->body_params[0].as_or_throw<PrimVar>();
+      auto extent = op->args[1].as_or_throw<PrimExpr>();
+      Range range = Range::FromMinExtent(MakeConst(extent.ty(), 0), extent);
+      dom_map_.Set(variable, sym::IntSet::FromRange(range));
+      loop_domains_.emplace_back(variable, range);
+    }
+    for (const Expr &argument : op->args)
+      VisitExpr(argument);
+    VisitStmt(op->body);
+    dom_map_ = old_domains;
+    loop_domains_.erase(loop_domains_.begin() + old_loops, loop_domains_.end());
+    for (const Var &result : op->result_vars)
+      UpdateWriteVar(result);
+  }
+
+  void VisitStmt_(const BreakNode *) override { has_loop_break_ = true; }
+  void VisitStmt_(const ContinueNode *) override { has_loop_break_ = true; }
+  void VisitStmt_(const ReturnNode *op) override {
+    has_loop_break_ = true;
+    AnalysisVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const VarNode *op) override {
     // Bare storage pointers have no bounded footprint. A structured access in
     // the same task must not hide their escape to an external consumer.
-    if (op->dtype.is_handle())
+    if (op->ty.as<PtrTypeNode>() != nullptr ||
+        op->ty.as<TensorTypeNode>() != nullptr)
       UpdateOpaqueAccessVar(ffi::GetRef<Var>(op));
     UpdateReadVar(tvm::ffi::GetRef<Var>(op));
-    StmtExprVisitor::VisitExpr_(op);
+    AnalysisVisitor::VisitExpr_(op);
   }
 
-  void VisitExpr_(const BufferLoadNode *op) override {
-    std::vector<arith::IntSet> relaxed_region;
+  void VisitExpr_(const TensorLoadNode *op) override {
+    std::vector<sym::IntSet> relaxed_region;
     size_t num_indices = op->indices.size();
-    size_t buffer_ndim = op->buffer->shape.size();
+    size_t buffer_ndim = op->source.as_or_throw<TensorVar>().shape().size();
 
     // Assert that indices count equals buffer dimension
     ICHECK_EQ(num_indices, buffer_ndim)
-        << "BufferLoad indices count " << num_indices
+        << "TensorLoad indices count " << num_indices
         << " must equal buffer dimension " << buffer_ndim;
 
     for (PrimExpr index : op->indices) {
       relaxed_region.push_back(RelaxAccessIndex(index));
     }
-    Update(&read_buffers_, &read_regions_, op->buffer, relaxed_region);
-    StmtExprVisitor::VisitExpr_(op);
+    Update(&read_buffers_, &read_regions_, op->source.as_or_throw<TensorVar>(),
+           relaxed_region);
+    Visit(op->source->ty);
+    for (const PrimExpr &index : op->indices)
+      VisitExpr(index);
   }
 
-  void VisitStmt_(const BufferStoreNode *op) override {
-    std::vector<arith::IntSet> relaxed_region;
+  void VisitStmt_(const TensorStoreNode *op) override {
+    std::vector<sym::IntSet> relaxed_region;
     std::vector<PrimExpr> mins;
     std::vector<PrimExpr> extents;
     size_t num_indices = op->indices.size();
-    size_t buffer_ndim = op->buffer->shape.size();
+    size_t buffer_ndim = op->dest.as_or_throw<TensorVar>().shape().size();
 
     // Assert that indices count equals buffer dimension
     ICHECK_EQ(num_indices, buffer_ndim)
-        << "BufferStore indices count " << num_indices
+        << "TensorStore indices count " << num_indices
         << " must equal buffer dimension " << buffer_ndim;
 
     relaxed_region.reserve(num_indices);
@@ -756,19 +791,45 @@ private:
     for (PrimExpr index : op->indices) {
       relaxed_region.push_back(RelaxAccessIndex(index));
       mins.push_back(index);
-      extents.push_back(make_const(index.dtype(), 1));
+      extents.push_back(MakeConst(index.ty(), 1));
     }
-    bool must_execute = !op->predicate.defined() ||
-                        (op->predicate.value().dtype().is_scalar() &&
-                         ana_.CanProve(op->predicate.value()));
-    UpdateWrite(op->buffer, std::move(relaxed_region), mins, extents,
-                must_execute);
-    // Storing an access_ptr in a handle carrier lets later consumers advance
-    // or reinterpret it beyond the original declared region.
-    bool previous_context = opaque_pointer_context_;
-    opaque_pointer_context_ |= op->value.dtype().is_handle();
-    StmtExprVisitor::VisitStmt_(op);
-    opaque_pointer_context_ = previous_context;
+    bool must_execute = true;
+    UpdateWrite(op->dest.as_or_throw<TensorVar>(), std::move(relaxed_region),
+                mins, extents, must_execute);
+    Visit(op->dest->ty);
+    for (const PrimExpr &index : op->indices)
+      VisitExpr(index);
+    VisitExpr(op->value);
+  }
+
+  void VisitTensorDeclarationPointer(const Expr &pointer) {
+    if (auto variable = pointer.as<Var>()) {
+      UpdateReadVar(variable.value());
+      Visit(variable.value()->ty);
+      return;
+    }
+    if (const auto *call = pointer.as<CallNode>()) {
+      if (call->op.same_as(tirx::tensor_data_ptr_op()) &&
+          call->args.size() == 1) {
+        VisitTensorDeclarationPointer(call->args[0]);
+        return;
+      }
+      if (call->op.same_as(tirx::ptr_byte_offset_op()) &&
+          call->args.size() == 2) {
+        VisitTensorDeclarationPointer(call->args[0]);
+        VisitExpr(call->args[1]);
+        return;
+      }
+      if (call->op.same_as(tirx::address_of_op()) && call->args.size() == 1) {
+        if (const auto *load = call->args[0].as<TensorLoadNode>()) {
+          VisitTensorDeclarationPointer(load->source);
+          for (const PrimExpr &index : load->indices)
+            VisitExpr(index);
+          return;
+        }
+      }
+    }
+    VisitExpr(pointer);
   }
 
   // Calculate a physical byte span without letting overflow prove coverage.
@@ -781,28 +842,29 @@ private:
     return repeats * stride + tail;
   }
 
-  void VisitPhysicalPointer(const PrimExpr &pointer,
-                            std::optional<int64_t> bytes, int mask) {
+  void VisitPhysicalPointer(const Expr &pointer, std::optional<int64_t> bytes,
+                            int mask) {
     if (const auto *call = pointer.as<CallNode>();
         call && call->op.same_as(tl::access_ptr()) && call->args.size() >= 3) {
-      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-        DataType dtype = load->buffer->dtype;
-        PrimExpr extent = ana_.Simplify(ResolveLets(call->args[1]));
+      if (const auto *load = call->args[0].as<TensorLoadNode>()) {
+        PrimType dtype = load->source.as_or_throw<TensorVar>().dtype();
+        PrimExpr extent =
+            ana_->Simplify(ResolveLets(call->args[1].as_or_throw<PrimExpr>()));
         const auto *declared_extent = extent.as<IntImmNode>();
         const auto *declared_mask = call->args[2].as<IntImmNode>();
-        if (bytes && *bytes > 0 && dtype.is_scalar() && dtype.bits() >= 8 &&
+        if (bytes && *bytes > 0 && dtype.IsScalar() && dtype.bits() >= 8 &&
             dtype.bits() % 8 == 0 && declared_extent && declared_mask) {
           int64_t elements = (*bytes - 1) / (dtype.bits() / 8) + 1;
           // Keep the producer's conservative region, including padding. A
           // smaller physical span must not narrow its logical-view contract.
           if (elements <= std::numeric_limits<int32_t>::max() &&
-              declared_extent->value >= elements &&
-              (declared_mask->value & mask) == mask) {
+              declared_extent->value.as<int64_t>().value() >= elements &&
+              (declared_mask->value.as<int64_t>().value() & mask) == mask) {
             VisitExpr(pointer);
             return;
           }
         }
-        UpdateOpaqueAccessVar(load->buffer->data);
+        UpdateOpaqueAccessVar(load->source.as_or_throw<TensorVar>());
       }
     }
     bool previous_context = opaque_pointer_context_;
@@ -825,35 +887,44 @@ private:
           return 2;
         return 0;
       };
-      if (rows && cols && rows->value > 0 && cols->value > 0 &&
-          rows->value < std::numeric_limits<int64_t>::max()) {
+      if (rows && cols && rows->value.as<int64_t>().value() > 0 &&
+          cols->value.as<int64_t>().value() > 0 &&
+          rows->value.as<int64_t>().value() <
+              std::numeric_limits<int64_t>::max()) {
         int64_t dst_bytes = element_bytes(scatter ? 4 : 5);
         if (scatter) {
           int64_t src_bytes = element_bytes(5);
-          auto source_row = PhysicalSpan(cols->value, src_bytes, 0);
-          auto destination_row = PhysicalSpan(cols->value, dst_bytes, 0);
+          auto source_row =
+              PhysicalSpan(cols->value.as<int64_t>().value(), src_bytes, 0);
+          auto destination_row =
+              PhysicalSpan(cols->value.as<int64_t>().value(), dst_bytes, 0);
           if (src_bytes && dst_bytes && source_row && destination_row) {
             // The scatter template loads whole 256-byte vectors, including
             // the last partial vector of the last source row.
             int64_t vectors = (*source_row - 1) / 256 + 1;
             if (auto last_row = PhysicalSpan(vectors, 256, 0))
-              source_bytes =
-                  PhysicalSpan(rows->value - 1, *source_row, *last_row);
-            destination_bytes =
-                PhysicalSpan(rows->value + 1, *destination_row, 0);
+              source_bytes = PhysicalSpan(rows->value.as<int64_t>().value() - 1,
+                                          *source_row, *last_row);
+            destination_bytes = PhysicalSpan(
+                rows->value.as<int64_t>().value() + 1, *destination_row, 0);
           }
         } else {
           const auto *full_rows = op->args[4].as<IntImmNode>();
-          if (dst_bytes && full_rows && full_rows->value >= rows->value &&
-              cols->value % (32 / dst_bytes) == 0) {
-            int64_t bursts = cols->value / (32 / dst_bytes);
+          if (dst_bytes && full_rows &&
+              full_rows->value.as<int64_t>().value() >=
+                  rows->value.as<int64_t>().value() &&
+              cols->value.as<int64_t>().value() % (32 / dst_bytes) == 0) {
+            int64_t bursts =
+                cols->value.as<int64_t>().value() / (32 / dst_bytes);
             // Match EmitNd2NzPostCopy_: 32-byte DMA blocks, one source-gap
             // row, and full_rows - rows destination-gap rows per burst.
-            if (auto blocks =
-                    PhysicalSpan(bursts - 1, rows->value + 1, rows->value))
+            if (auto blocks = PhysicalSpan(
+                    bursts - 1, rows->value.as<int64_t>().value() + 1,
+                    rows->value.as<int64_t>().value()))
               source_bytes = PhysicalSpan(*blocks, 32, 0);
-            if (auto blocks =
-                    PhysicalSpan(bursts - 1, full_rows->value, rows->value))
+            if (auto blocks = PhysicalSpan(
+                    bursts - 1, full_rows->value.as<int64_t>().value(),
+                    rows->value.as<int64_t>().value()))
               destination_bytes = PhysicalSpan(*blocks, 32, 0);
           }
         }
@@ -867,17 +938,17 @@ private:
       else
         VisitExpr(op->args[i]);
     }
-    for (const auto &kv : op->annotations) {
+    for (const auto &kv : AscendCallAnnotations(op)) {
       if (auto expr = kv.second.as<PrimExpr>())
         VisitExpr(expr.value());
     }
   }
 
-  std::vector<arith::IntSet> LogicalPointerRegion(const BufferLoad &load,
-                                                  const PrimExpr &extent) {
-    const Buffer &buffer = load->buffer;
-    size_t ndim = buffer->shape.size();
-    std::vector<arith::IntSet> region(ndim);
+  std::vector<sym::IntSet> LogicalPointerRegion(const TensorLoad &load,
+                                                const PrimExpr &extent) {
+    const TensorVar &buffer = load->source.as_or_throw<TensorVar>();
+    size_t ndim = buffer.shape().size();
+    std::vector<sym::IntSet> region(ndim, sym::IntSet::Nothing());
 
     const auto *ext_imm = extent.as<IntImmNode>();
     if (ext_imm && load->indices.size() == ndim) {
@@ -886,54 +957,56 @@ private:
       // covered at the current dimension; each dim consumes as many of
       // its `shape[i]` indices as the run spans, carrying the rounded-up
       // remainder to the next (outer) dim.
-      int64_t rem = ext_imm->value;
+      int64_t rem = ext_imm->value.as<int64_t>().value();
       for (size_t k = ndim; k-- > 0;) {
         PrimExpr base = load->indices[k];
-        const auto *dim_imm = buffer->shape[k].as<IntImmNode>();
+        const auto *dim_imm = buffer.shape()[k].as<IntImmNode>();
         if (rem <= 1) {
           region[k] = RelaxAccessIndex(base);
         } else if (dim_imm) {
-          int64_t d = dim_imm->value;
+          int64_t d = dim_imm->value.as<int64_t>().value();
           if (rem >= d) {
             // Run spills past this dim: cover it whole and carry up.
-            region[k] = arith::IntSet::FromRange(
-                Range::FromMinExtent(0, buffer->shape[k]));
+            region[k] = sym::IntSet::FromRange(
+                Range::FromMinExtent(PrimExpr(0), buffer.shape()[k]));
             rem = (rem + d - 1) / d;
           } else {
-            region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
+            region[k] = RelaxAccessIndex(base, IntImm(base.ty(), rem));
             rem = 1;
           }
         } else {
           // Non-constant dim size: be conservative for this and any
           // remaining outer dims.
-          region[k] = arith::IntSet::FromRange(
-              Range::FromMinExtent(0, buffer->shape[k]));
+          region[k] = sym::IntSet::FromRange(
+              Range::FromMinExtent(PrimExpr(0), buffer.shape()[k]));
           rem = 1;
         }
       }
     } else {
       // Non-constant extent or arity mismatch: fall back to whole buffer.
       for (size_t k = 0; k < ndim; ++k) {
-        region[k] =
-            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
+        region[k] = sym::IntSet::FromRange(
+            Range::FromMinExtent(PrimExpr(0), buffer.shape()[k]));
       }
     }
     return region;
   }
 
-  std::vector<arith::IntSet> PhysicalPointerRegion(const BufferLoad &load,
-                                                   const PrimExpr &extent) {
-    const Buffer &buffer = load->buffer;
-    size_t ndim = buffer->shape.size();
-    std::vector<arith::IntSet> region(ndim);
+  std::vector<sym::IntSet> PhysicalPointerRegion(const TensorLoad &load,
+                                                 const PrimExpr &extent) {
+    const TensorVar &buffer = load->source.as_or_throw<TensorVar>();
+    size_t ndim = buffer.shape().size();
+    std::vector<sym::IntSet> region(ndim, sym::IntSet::Nothing());
 
     bool reconstructed = false;
     const auto *ext_imm = extent.as<IntImmNode>();
     // Explicit strides, including dense T.view layouts, stay opaque
     // for multi-element runs until their physical image is proved.
-    if (ext_imm && ext_imm->value > 0 && load->indices.size() == ndim &&
-        (ext_imm->value == 1 || buffer->strides.empty())) {
-      int64_t remaining = ext_imm->value;
+    if (ext_imm && ext_imm->value.as<int64_t>().value() > 0 &&
+        load->indices.size() == ndim &&
+        (ext_imm->value.as<int64_t>().value() == 1 ||
+         HasContiguousTaskLayout(buffer, ana_))) {
+      int64_t remaining = ext_imm->value.as<int64_t>().value();
       reconstructed = true;
       for (size_t k = ndim; k-- > 0;) {
         PrimExpr base = load->indices[k];
@@ -946,12 +1019,12 @@ private:
           continue;
         }
 
-        const int64_t *dimension = as_const_int(buffer->shape[k]);
-        arith::IntSet base_set = RelaxAccessIndex(base);
-        const int64_t *base_min = as_const_int(base_set.min());
-        const int64_t *base_max = as_const_int(base_set.max());
-        if (dimension == nullptr || *dimension <= 0 || base_min == nullptr ||
-            base_max == nullptr || *base_min < 0 || *base_max >= *dimension ||
+        auto dimension = GetConstInt(buffer.shape()[k]);
+        sym::IntSet base_set = RelaxAccessIndex(base);
+        auto base_min = GetConstInt(base_set.min());
+        auto base_max = GetConstInt(base_set.max());
+        if (!dimension || *dimension <= 0 || !base_min || !base_max ||
+            *base_min < 0 || *base_max >= *dimension ||
             *base_max > std::numeric_limits<int64_t>::max() - remaining) {
           reconstructed = false;
           break;
@@ -961,13 +1034,13 @@ private:
         int64_t span =
             end_exclusive / *dimension + (end_exclusive % *dimension != 0);
         if (span == 1) {
-          region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), remaining));
+          region[k] = RelaxAccessIndex(base, IntImm(base.ty(), remaining));
           remaining = 1;
         } else {
           // Wrapping this dimension can touch both its high and low
           // coordinates, so its rectangular hull is the whole axis.
-          region[k] = arith::IntSet::FromRange(
-              Range::FromMinExtent(0, buffer->shape[k]));
+          region[k] = sym::IntSet::FromRange(
+              Range::FromMinExtent(PrimExpr(0), buffer.shape()[k]));
           remaining = span;
         }
       }
@@ -976,12 +1049,12 @@ private:
       reconstructed &= remaining == 1;
     }
     if (!reconstructed) {
-      UpdateOpaqueAccessVar(buffer->data);
+      UpdateOpaqueAccessVar(buffer);
       // The storage is opaque: this placeholder cannot prove reuse and
       // is never passed to synchronization dependency analysis.
       for (size_t k = 0; k < ndim; ++k) {
-        region[k] =
-            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
+        region[k] = sym::IntSet::FromRange(
+            Range::FromMinExtent(PrimExpr(0), buffer.shape()[k]));
       }
     }
     return region;
@@ -989,34 +1062,55 @@ private:
 
   void VisitExpr_(const CallNode *op) override {
     static const Op &region_op = region();
-    static const auto reduce_op = Op::Get("tl.tileop.reduce");
     static const auto tl_access_ptr_op = Op::Get("tl.access_ptr");
+
+    if (op->op.same_as(Op::Get("tl.layout_hint"))) {
+      for (const Expr &argument : op->args)
+        VisitTensorDeclarationPointer(argument);
+      return;
+    }
+
+    if (op->op.same_as(tirx::alloc_tensor_op()) ||
+        op->op.same_as(tirx::decl_tensor_op())) {
+      Visit(op->ty);
+      for (const Expr &argument : op->args) {
+        if (op->op.same_as(tirx::decl_tensor_op()))
+          VisitTensorDeclarationPointer(argument);
+        else
+          VisitExpr(argument);
+      }
+      return;
+    }
 
     if (mode_ == AccessMode::kLogical &&
         op->op.same_as(tl::ascend_nd2nz_post_copy()) && op->args.size() == 6) {
       const auto *pointer = op->args[0].as<CallNode>();
       const auto *load = pointer && pointer->op.same_as(tl_access_ptr_op) &&
                                  pointer->args.size() == 3
-                             ? pointer->args[0].as<BufferLoadNode>()
+                             ? pointer->args[0].as<TensorLoadNode>()
                              : nullptr;
       if (load && load->indices.size() >= 2 &&
-          load->indices.size() == load->buffer->shape.size()) {
+          load->indices.size() ==
+              load->source.as_or_throw<TensorVar>().shape().size()) {
         // The DMA parameters retain the rectangular destination even when
         // rows is dynamic. A flat access_ptr extent would lose the two AIVs'
         // disjoint row prefixes and create a spurious cross-AIV WAW edge.
         Array<Range> ranges;
         size_t ndim = load->indices.size();
         for (size_t i = 0; i < ndim; ++i) {
-          PrimExpr extent = i + 2 == ndim   ? op->args[2]
-                            : i + 1 == ndim ? op->args[3]
-                                            : Integer(1);
+          PrimExpr extent = i + 2 == ndim ? op->args[2].as_or_throw<PrimExpr>()
+                            : i + 1 == ndim
+                                ? op->args[3].as_or_throw<PrimExpr>()
+                                : IntImm::Int32(1);
           ranges.push_back(Range::FromMinExtent(load->indices[i], extent));
           VisitExpr(load->indices[i]);
         }
-        RecordBufferRegion(BufferRegion(load->buffer, ranges), false);
+        RecordTensorRegion(
+            NativeTensorRegion(load->source.as_or_throw<TensorVar>(), ranges),
+            false);
         for (size_t i = 1; i < op->args.size(); ++i)
           VisitExpr(op->args[i]);
-        for (const auto &[key, value] : op->annotations)
+        for (const auto &[key, value] : AscendCallAnnotations(op))
           if (auto expr = value.as<PrimExpr>())
             VisitExpr(expr.value());
         return;
@@ -1046,7 +1140,7 @@ private:
         // pointer's compact extent cannot establish physical lifetime coverage.
         bool previous_context = opaque_pointer_context_;
         opaque_pointer_context_ = true;
-        StmtExprVisitor::VisitExpr_(op);
+        AnalysisVisitor::VisitExpr_(op);
         opaque_pointer_context_ = previous_context;
         return;
       }
@@ -1055,222 +1149,94 @@ private:
     if (op->op.same_as(tl::loop_break()))
       has_loop_break_ = true;
 
-    if (mode_ == AccessMode::kLogical &&
-        (IsAscendCopyCall(op) || (op->op.same_as(Gemm::Get()) ||
-                                  op->op.same_as(GemmBlockScaled::Get())))) {
-      auto saved_pitches = std::move(operation_pitches_);
-      operation_pitches_ = GetCallL0Pitches(ffi::GetRef<Call>(op), layouts_);
-      StmtExprVisitor::VisitExpr_(op);
-      operation_pitches_ = std::move(saved_pitches);
+    if (auto operation = ParseOperator(ffi::GetRef<Call>(op));
+        operation.defined()) {
+      auto saved_pitches = operation_pitches_;
+      if (mode_ == AccessMode::kLogical)
+        operation_pitches_ = GetCallL0Pitches(ffi::GetRef<Call>(op), layouts_);
+      ffi::Optional<AscendCopy> copy;
+      ffi::Optional<Gemm> gemm;
+      if (IsAscendCopyCall(op))
+        copy = AscendCopy(op->args, AscendCallAnnotations(op));
+      if (op->op.same_as(Gemm::Get()) || op->op.same_as(GemmBlockScaled::Get()))
+        gemm = operation.as_or_throw<Gemm>();
+      auto record = [&](TensorRegion region, bool read) {
+        if (mode_ == AccessMode::kPhysical && copy && !read)
+          region = ExpandPaddedCopyWriteRegion(copy.value(), region);
+        RecordTensorRegion(region, read);
+        for (const Range &range : region->region) {
+          VisitExpr(range->begin);
+          VisitExpr(range->extent);
+        }
+        if (mode_ != AccessMode::kPhysical)
+          return;
+        auto tensor = region->source.as_or_throw<TensorVar>();
+        bool l0 =
+            IsL0ABuffer(tensor) || IsL0BBuffer(tensor) || IsL0CBuffer(tensor);
+        if (!l0 || region->region.size() < 2)
+          return;
+        bool compact = copy && copy.value()->l0_pitch.has_value();
+        if (copy) {
+          for (size_t axis = region->region.size() - 2;
+               axis < region->region.size(); ++axis)
+            compact |= !ana_->CanProveEqual(region->region[axis]->extent,
+                                            tensor.shape()[axis]);
+        } else if (gemm) {
+          size_t axis = tensor.shape().size() - 2;
+          if (tensor.same_as(gemm.value()->a_))
+            axis += gemm.value()->transA_;
+          if (tensor.same_as(gemm.value()->b_))
+            axis += !gemm.value()->transB_;
+          compact |= !ana_->CanProveEqual(
+              floordiv(region->region[axis]->extent + 15, 16),
+              floordiv(tensor.shape()[axis] + 15, 16));
+        }
+        RecordL0MayAccess(region, read, compact);
+      };
+      auto accesses = operation->GetAccessRegions();
+      for (const TensorRegion &region : accesses.reads)
+        record(region, true);
+      for (const TensorRegion &region : accesses.writes)
+        record(region, false);
+      for (const Expr &argument : op->args) {
+        if (argument.as<TensorRegionNode>() || argument.as<TensorVar>())
+          continue;
+        if (const auto *descriptor = argument.as<CallNode>();
+            descriptor && descriptor->op.same_as(region_op))
+          continue;
+        VisitExpr(argument);
+      }
+      for (const auto &[key, value] : AscendCallAnnotations(op))
+        if (auto expression = value.as<Expr>())
+          VisitExpr(expression.value());
+      operation_pitches_ = saved_pitches;
       return;
     }
 
-    if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
-      AscendCopy copy(op->args, op->annotations);
-      if (copy->l0_pitch.defined() ||
-          (IsL1Buffer(copy->src) &&
-           (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)))) {
-        StmtExprVisitor::VisitExpr_(op);
-        auto record = [&](const BufferRegion &region, bool is_read) {
-          bool l0 = IsL0ABuffer(region->buffer) ||
-                    IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer);
-          bool compact = copy->l0_pitch.defined();
-          for (size_t i = region->region.size() - 2; i < region->region.size();
-               ++i)
-            compact |= !ana_.CanProveEqual(region->region[i]->extent,
-                                           region->buffer->shape[i]);
-          RecordL0MayAccess(region, is_read, l0 && compact);
-        };
-        record(BufferRegion(copy->src, copy->src_range), true);
-        record(BufferRegion(copy->dst, copy->dst_range), false);
-        return;
-      }
-    }
-    if (mode_ == AccessMode::kPhysical &&
-        (op->op.same_as(Gemm::Get()) ||
-         op->op.same_as(GemmBlockScaled::Get()))) {
-      Gemm gemm = Downcast<Gemm>(ParseOperator(ffi::GetRef<Call>(op)));
-      if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
-        StmtExprVisitor::VisitExpr_(op);
-        auto record = [&](const BufferRegion &region, bool is_read,
-                          size_t mn_axis) {
-          bool compact = !ana_.CanProveEqual(
-              floordiv(region->region[mn_axis]->extent + 15, 16),
-              floordiv(region->buffer->shape[mn_axis] + 15, 16));
-          RecordL0MayAccess(region, is_read, compact);
-        };
-        record(gemm->aRegion_, true,
-               gemm->a_->shape.size() - (gemm->transA_ ? 1 : 2));
-        record(gemm->bRegion_, true,
-               gemm->b_->shape.size() - (gemm->transB_ ? 2 : 1));
-        record(gemm->cRegion_, false, gemm->c_->shape.size() - 2);
-        if (!is_one(gemm->clearAccum_))
-          record(gemm->cRegion_, true, gemm->c_->shape.size() - 2);
-        return;
-      }
-    }
-
-    if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
-      // Visit the original operands first so symbolic indices and the logical
-      // source/destination regions retain their normal access accounting.
-      StmtExprVisitor::VisitExpr_(op);
-      AscendCopy copy(op->args, op->annotations);
-      for (const BufferRegion &write : copy->GetAccessRegions().writes)
-        RecordBufferRegion(ExpandPaddedCopyWriteRegion(copy, write), false);
-      return;
-    }
-
-    // Check for tl.region call
     if (op->op.same_as(region_op)) {
-      // Handle tl.region call for memory access analysis
-      // args[0] = buffer (BufferLoad), args[1] = access_type (1: read, 2:
-      // write, 3: read/write) args[2..] = extents
-      if (op->args.size() >= 2) {
-        // Extract access type
-        const auto *access_int = op->args[1].as<IntImmNode>();
-        ICHECK(access_int);
-        int access_type = access_int->value;
-
-        // Extract buffer from BufferLoad
-        if (const auto *buffer_load = op->args[0].as<BufferLoadNode>()) {
-          Buffer buffer = buffer_load->buffer;
-          std::vector<arith::IntSet> relaxed_region;
-
-          // Assert that BufferLoad accesses a single element (no Ramp indices)
-          for (size_t i = 0; i < buffer_load->indices.size(); ++i) {
-            const PrimExpr &index = buffer_load->indices[i];
-            // Check if index is a Ramp (vector access)
-            if (index.as<RampNode>()) {
-              LOG(FATAL) << "BufferLoad in tl.region should access a "
-                            "single element, "
-                         << "but found Ramp index at dimension " << i;
-            }
-          }
-
-          // Use provided extents if available, otherwise use buffer load
-          // indices
-          size_t num_indices = buffer_load->indices.size();
-          size_t buffer_ndim = buffer->shape.size();
-
-          // Assert that indices count equals buffer dimension
-          ICHECK_EQ(num_indices, buffer_ndim)
-              << "BufferLoad indices count " << num_indices
-              << " must equal buffer dimension " << buffer_ndim;
-
-          if (op->args.size() > 2) {
-            // args[2..] are extents for the region
-            // Number of extents provided
-            size_t num_extents = op->args.size() - 2;
-
-            // Assert that extents count equals indices count
-            ICHECK_EQ(num_extents, num_indices)
-                << "Extents count " << num_extents
-                << " must equal indices count " << num_indices;
-
-            relaxed_region.reserve(num_indices);
-            for (size_t i = 0; i < num_indices; ++i) {
-              PrimExpr min = buffer_load->indices[i];
-              PrimExpr extent = op->args[2 + i];
-
-              // Create IntSet for range [min, min + extent)
-              relaxed_region.push_back(RelaxAccessIndex(min, extent));
-            }
-          } else {
-            // No extents provided: each dimension is a single point at the
-            // index
-            for (PrimExpr index : buffer_load->indices) {
-              // Create IntSet for single point
-              relaxed_region.push_back(RelaxAccessIndex(index));
-            }
-          }
-
-          // Add to appropriate list based on access type
-          if (access_type == 1 || access_type == 3) { // read or read/write
-            Update(&read_buffers_, &read_regions_, buffer, relaxed_region);
-          }
-          if (access_type == 2 || access_type == 3) { // write or read/write
-            std::vector<PrimExpr> extents;
-            extents.reserve(num_indices);
-            if (op->args.size() > 2) {
-              for (size_t i = 0; i < num_indices; ++i)
-                extents.push_back(op->args[2 + i]);
-            } else {
-              for (const PrimExpr &index : buffer_load->indices)
-                extents.push_back(make_const(index.dtype(), 1));
-            }
-            UpdateWrite(buffer, std::move(relaxed_region),
-                        std::vector<PrimExpr>(buffer_load->indices.begin(),
-                                              buffer_load->indices.end()),
-                        extents);
-          }
-
-          for (const auto &index : buffer_load->indices) {
-            VisitExpr(index);
-          }
-          for (size_t i = 2; i < op->args.size(); ++i) {
-            VisitExpr(op->args[i]);
-          }
-        } else {
-          LOG(FATAL) << "First argument of tl.region should be a BufferLoad";
-        }
+      auto access = NormalizeToAccessRegion(ffi::GetRef<Call>(op));
+      if (access.access_mask & kAccessRead)
+        RecordTensorRegion(access.region, true);
+      if (access.access_mask & kAccessWrite)
+        RecordTensorRegion(access.region, false);
+      for (const Range &range : access.region->region) {
+        VisitExpr(range->begin);
+        VisitExpr(range->extent);
       }
       return;
     }
 
-    // Check for tl.tileop.reduce call
-    if (op->op.same_as(reduce_op)) {
-      // Handle tl.tileop.reduce call for memory access analysis
-      // args[0] = input buffer region (read)
-      // args[1] = output buffer region (write, and read when clear=false)
-      // args[2] = reduce_type (string)
-      // args[3] = dim (int)
-      // args[4] = clear (bool)
-      if (op->args.size() >= 2) {
-        // Process first argument as read region
-        ProcessBufferRegion(op->args[0], true); // is_read = true
-        // Process second argument as write region
-        ProcessBufferRegion(op->args[1], false); // is_read = false
-        // The frontend historically encodes the destination region as `w`
-        // even when clear=false. In that mode the reduction accumulates onto
-        // the old destination value, so preserve the read side explicitly.
-        bool reads_destination = true;
-        if (op->args.size() >= 5) {
-          if (const auto *clear = op->args[4].as<IntImmNode>())
-            reads_destination = clear->value == 0;
-        }
-        if (mode_ == AccessMode::kPhysical && reads_destination)
-          RecordBufferRegion(NormalizeToBufferRegion(op->args[1]), true);
-      }
+    if (op->op.same_as(tirx::address_of_op()) ||
+        op->op.same_as(tirx::tensor_data_ptr_op())) {
+      if (auto tensor = op->args[0].as<TensorVar>())
+        UpdateOpaqueAccessVar(tensor.value());
+      if (const auto *load = op->args[0].as<TensorLoadNode>())
+        UpdateOpaqueAccessVar(load->source.as_or_throw<TensorVar>());
+      AnalysisVisitor::VisitExpr_(op);
       return;
     }
 
-    if (op->op.same_as(builtin::address_of())) {
-      // The base element does not describe the footprint of a pointer passed
-      // to an external consumer: address_of(a[0]) may also access a[1]. Keep
-      // the storage opaque even when this task has other precise regions.
-      if (!op->args.empty()) {
-        if (const auto *load = op->args[0].as<BufferLoadNode>())
-          UpdateOpaqueAccessVar(load->buffer->data);
-      }
-      // Still visit the base/index expressions for ordinary dependencies.
-      StmtExprVisitor::VisitExpr_(op);
-      return;
-    }
-
-    // Handle other calls (e.g., builtin::tvm_access_ptr)
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      // This flat pointer has no logical Buffer handle from which this
-      // detector can reconstruct a sound region. Mark the storage explicitly
-      // so a structured access in the same task cannot hide this opaque use.
-      if (op->args.size() >= 2) {
-        if (const auto *storage = op->args[1].as<VarNode>())
-          UpdateOpaqueAccessVar(ffi::GetRef<Var>(storage));
-      }
-      StmtExprVisitor::VisitExpr_(op);
-      return;
-    }
-
-    // Handle TileLang `tl.access_ptr(BufferLoad(buf, mins), extent, rw_mask)`.
+    // Handle TileLang `tl.access_ptr(TensorLoad(buf, mins), extent, rw_mask)`.
     // The access is a contiguous run of `extent` elements in row-major layout
     // starting at the base index `mins`. Reconstruct a conservative rectangular
     // hull by carrying both the extent and each dimension's starting offset. If
@@ -1278,18 +1244,20 @@ private:
     // alias proofs. A whole logical view can omit physical storage elements.
     if (op->op.same_as(tl_access_ptr_op)) {
       if (op->args.size() >= 3) {
-        const auto *buffer_load = op->args[0].as<BufferLoadNode>();
-        const auto *mask_int = op->args[2].as<IntImmNode>();
-        if (buffer_load && mask_int) {
-          Buffer buffer = buffer_load->buffer;
+        const auto *buffer_load = op->args[0].as<TensorLoadNode>();
+        if (buffer_load) {
+          TensorVar buffer = buffer_load->source.as_or_throw<TensorVar>();
           if (opaque_pointer_context_)
-            UpdateOpaqueAccessVar(buffer->data);
-          int rw_mask = mask_int->value;
-          BufferLoad load = ffi::GetRef<BufferLoad>(buffer_load);
-          std::vector<arith::IntSet> region =
+            UpdateOpaqueAccessVar(buffer);
+          int rw_mask =
+              GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>());
+          TensorLoad load = ffi::GetRef<TensorLoad>(buffer_load);
+          std::vector<sym::IntSet> region =
               mode_ == AccessMode::kLogical
-                  ? LogicalPointerRegion(load, op->args[1])
-                  : PhysicalPointerRegion(load, op->args[1]);
+                  ? LogicalPointerRegion(load,
+                                         op->args[1].as_or_throw<PrimExpr>())
+                  : PhysicalPointerRegion(load,
+                                          op->args[1].as_or_throw<PrimExpr>());
 
           if (rw_mask & 1) {
             Update(&read_buffers_, &read_regions_, buffer, region);
@@ -1304,10 +1272,11 @@ private:
             VisitExpr(index);
           }
           VisitExpr(op->args[1]);
+          VisitExpr(op->args[2]);
           return;
         }
       }
-      StmtExprVisitor::VisitExpr_(op);
+      AnalysisVisitor::VisitExpr_(op);
       return;
     }
 
@@ -1315,21 +1284,45 @@ private:
     // pointer even when no Bind or handle buffer carries the result. The
     // bounded access_ptr and address_of cases above keep their own semantics.
     bool previous_context = opaque_pointer_context_;
-    opaque_pointer_context_ |= op->dtype.is_handle();
-    StmtExprVisitor::VisitExpr_(op);
+    opaque_pointer_context_ |= op->ty.as<PtrTypeNode>() != nullptr;
+    if (op->op.same_as(tirx::reinterpret_op()))
+      for (const Expr &argument : op->args)
+        opaque_pointer_context_ |= argument->ty.as<PtrTypeNode>() != nullptr;
+    AnalysisVisitor::VisitExpr_(op);
     opaque_pointer_context_ = previous_context;
   }
+};
 
-  void VisitStmt_(const SBlockNode *op) override {
-    // TIRX represents many TileLang regions as direct SBlock nodes.  Match the
-    // old TIR behavior for BlockNode by visiting the body so task-level buffer
-    // dependencies are preserved.
-    StmtExprVisitor::VisitStmt_(op);
+class MemoryAccessDetector {
+public:
+  using AccessMode = MemoryAccessDetectorImpl::AccessMode;
+  explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
+                                LayoutMap layouts = {})
+      : detector_(ffi::make_object<MemoryAccessDetectorImpl>(
+            mode, std::move(layouts))) {}
+
+  void Analyze(const Stmt &statement) { detector_->Analyze(statement); }
+  void Analyze(const Expr &expression) { detector_->Analyze(expression); }
+  std::vector<TensorRegion> GetReadRegions() const {
+    return detector_->GetReadRegions();
+  }
+  std::vector<TensorRegion> GetWriteRegions() const {
+    return detector_->GetWriteRegions();
+  }
+  const Map<Var, Optional<PrimExpr>> &GetL0Pitches() const {
+    return detector_->GetL0Pitches();
+  }
+  std::vector<Var> GetReadVars() const { return detector_->GetReadVars(); }
+  std::vector<Var> GetWriteVars() const { return detector_->GetWriteVars(); }
+  std::vector<Var> GetOpaqueAccessVars() const {
+    return detector_->GetOpaqueAccessVars();
+  }
+  std::vector<TensorRegion> GetMustWriteRegions() const {
+    return detector_->GetMustWriteRegions();
   }
 
-  void VisitStmt_(const SBlockRealizeNode *op) override {
-    // Don't visit child blocks recursively
-  }
+private:
+  ffi::ObjectPtr<MemoryAccessDetectorImpl> detector_;
 };
 
 } // namespace ascend

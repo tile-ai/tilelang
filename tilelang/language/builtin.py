@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as T
+import tvm_tirx.tirx.script as T
 from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, DType
 from tilelang import tvm as tvm
-from tilelang.language.common import ptx_arrive_barrier, evaluate
+from tilelang._compat.intrinsics import ptx_arrive_barrier
+from tvm_tirx.tirx.script.ir_builder import evaluate
+from tvm_tirx.script.ir_builder.stmt import return_ as _return_stmt
+from tvm_tirx.tirx.op import gpu_storage_sync
 from tilelang.language.eager.builder import macro
-from tvm import DataType, DataTypeCode, tirx
-from tvm.runtime import convert
-from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
+from tilelang._compat.tvm import DataType, DataTypeCode, tirx
+from tilelang._compat.tirx import convert, expr_dtype
+from tilelang._compat.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
 from tilelang.utils.language import retrieve_ptr, get_buffer_region_from_load, retrieve_buffer_and_offset
+
+
+def thread_return():
+    """Exit the current kernel thread using a native TIRx return statement."""
+    return _return_stmt(tvm.ir.Tuple([]))
 
 
 def _normalize_index_arg(value: int | PrimExpr | None) -> PrimExpr | None:
@@ -60,7 +68,7 @@ def __ldg(load_or_buf: BufferLoad | tirx.Buffer, index: PrimExpr | int | None = 
         PrimExpr: The loaded value.
     """
     if isinstance(load_or_buf, BufferLoad):
-        dtype = load_or_buf.dtype
+        dtype = expr_dtype(load_or_buf)
         return tirx.call_intrin(str(dtype), tirx.op.Op.get("tl.__ldg"), load_or_buf)
     if isinstance(load_or_buf, tirx.Buffer):
         if index is None:
@@ -180,7 +188,7 @@ def access_ptr(
 
     def _index_dtype(buf: tirx.Buffer) -> str:
         if len(buf.shape) > 0:
-            return str(buf.shape[0].dtype)
+            return str(expr_dtype(buf.shape[0]))
         return "int32"
 
     # Extract underlying buffer and per-axis minima (indices).
@@ -188,16 +196,16 @@ def access_ptr(
     is_buffer_load_base = False
     if isinstance(base, BufferLoad):
         is_buffer_load_base = True
-        buf = base.buffer
+        buf = base.source
         region = get_buffer_region_from_load(base)
         if region is not None:
-            mins = [r.min for r in region.region]
+            mins = [r.begin for r in region.region]
             inferred_region_extents = [r.extent for r in region.region]
         else:
             mins = list(base.indices)
     elif isinstance(base, BufferRegion):
-        buf = base.buffer
-        mins = [r.min for r in base.region]
+        buf = base.source
+        mins = [r.begin for r in base.region]
         inferred_region_extents = [r.extent for r in base.region]
     elif isinstance(base, tirx.Buffer):
         buf = base
@@ -294,8 +302,8 @@ def deallocate_tmem(tmem: tirx.Buffer) -> None:
 
     if not isinstance(tmem, tirx.Buffer):
         raise TypeError(f"T.deallocate_tmem expects a tvm.tirx.Buffer, but got {type(tmem)}.")
-    if tmem.scope() != "shared.tmem":
-        raise ValueError(f"T.deallocate_tmem expects a shared.tmem buffer, but got scope={tmem.scope()}.")
+    if tmem.scope().name != "shared.tmem":
+        raise ValueError(f"T.deallocate_tmem expects a shared.tmem buffer, but got scope={tmem.scope().name}.")
 
     return evaluate(tirx.call_intrin("handle", tirx.op.Op.get("tl.deallocate_tmem"), tmem.data))
 
@@ -507,7 +515,9 @@ def mbarrier_arrive(mbarrier: BarrierType, cta_id: int | Var | None = None):
     """
     mbarrier = _mbar_to_buffer_load(mbarrier)
     if cta_id is not None:
-        assert mbarrier.buffer.scope() == "shared.cluster_barrier", f"mbarrier must be a cluster barrier, but got {mbarrier.buffer.scope}"
+        assert mbarrier.source.scope().name == "shared.cluster_barrier", (
+            f"mbarrier must be a cluster barrier, but got {mbarrier.source.scope}"
+        )
         return ptx_arrive_cluster_barrier(mbarrier, cta_id)
     else:
         return ptx_arrive_barrier(mbarrier)
@@ -738,24 +748,13 @@ def warpgroup_fence_operand(
     """
     if isinstance(buffer_or_ptr, BufferLoad):
         # Treat BufferLoad as a request to fence starting from the loaded element's address
-        buf = buffer_or_ptr.buffer
+        buf = buffer_or_ptr.source
         data_ptr = buf.data
         inferred_dtype = buf.dtype
         if dtype is not None and dtype != inferred_dtype:
             raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
         dtype = inferred_dtype
-        # Compute element offset from indices using strides if present, otherwise row-major
-        if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
-            elem_off = 0
-            for idx, stride in zip(buffer_or_ptr.indices, buf.strides):
-                elem_off = elem_off + idx * stride
-        else:
-            elem_off = 0
-            stride_acc = 1
-            for idx, dim in zip(reversed(buffer_or_ptr.indices), reversed(buf.shape)):
-                elem_off = elem_off + idx * stride_acc
-                stride_acc = stride_acc * dim
-        # Combine with user-provided offset
+        _, elem_off = retrieve_buffer_and_offset(buffer_or_ptr)
         offset = elem_off + convert(offset)
         if num_regs is None:
             raise ValueError("num_regs must be provided when passing a BufferLoad.")
@@ -786,24 +785,13 @@ def warpgroup_fence_operand(
             bits_per_elem = DataType(dtype).bits
             num_regs = (total_elems * bits_per_elem + 31) // 32
     elif isinstance(buffer_or_ptr, BufferRegion):
-        buf = buffer_or_ptr.buffer
+        buf = buffer_or_ptr.source
         data_ptr = buf.data
         inferred_dtype = buf.dtype
         if dtype is not None and dtype != inferred_dtype:
             raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
         dtype = inferred_dtype
-        # Compute element offset from region min using strides if present, otherwise row-major
-        if len(buf.strides) == len(buf.shape) and len(buf.strides) > 0:
-            elem_off = 0
-            for r, stride in zip(buffer_or_ptr.region, buf.strides):
-                elem_off = elem_off + r.min * stride
-        else:
-            elem_off = 0
-            stride_acc = 1
-            for r, dim in zip(reversed(buffer_or_ptr.region), reversed(buf.shape)):
-                elem_off = elem_off + r.min * stride_acc
-                stride_acc = stride_acc * dim
-        # Combine with user-provided offset
+        _, elem_off = retrieve_buffer_and_offset(buffer_or_ptr)
         offset = elem_off + convert(offset)
         # Try derive num_regs from region extents if fully static; otherwise require user input
         if num_regs is None:
@@ -933,7 +921,7 @@ def shfl_xor(
     """XOR-swap ``value`` across lanes (``__shfl_xor_sync`` on CUDA,
     ``__shfl_xor`` on HIP — mask ignored on HIP).
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.shfl_xor_sync"), _as_uint32_mask(mask), value, delta, width)
+    return tirx.call_intrin(expr_dtype(value), tirx.op.Op.get("tl.shfl_xor_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
 def shfl_down(
@@ -945,7 +933,7 @@ def shfl_down(
     """Shift ``value`` down by ``delta`` lanes (``__shfl_down_sync`` on CUDA,
     ``__shfl_down`` on HIP).
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.shfl_down_sync"), _as_uint32_mask(mask), value, delta, width)
+    return tirx.call_intrin(expr_dtype(value), tirx.op.Op.get("tl.shfl_down_sync"), _as_uint32_mask(mask), value, delta, width)
 
 
 def shfl_up(
@@ -957,7 +945,12 @@ def shfl_up(
     """Shift ``value`` up by ``delta`` lanes (``__shfl_up_sync`` on CUDA,
     ``__shfl_up`` on HIP).
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.shfl_up_sync"), _as_uint32_mask(mask), value, delta, width)
+    return tirx.call_intrin(expr_dtype(value), tirx.op.Op.get("tl.shfl_up_sync"), _as_uint32_mask(mask), value, delta, width)
+
+
+def tvm_storage_sync(storage_scope: str, *arguments):
+    """Synchronize native GPU storage using the established TileLang spelling."""
+    return gpu_storage_sync(storage_scope, *arguments)
 
 
 def sync_threads(barrier_id: int = None, arrive_count: int = None):
@@ -967,7 +960,7 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
         args.append(barrier_id)
     if arrive_count is not None:
         args.append(arrive_count)
-    return tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared", *args)
+    return gpu_storage_sync("shared", *args)
 
 
 def named_barrier_arrive(barrier_id, thread_count):
@@ -1016,7 +1009,7 @@ def shfl_sync(
     ``width`` lanes (``__shfl_sync`` on CUDA, ``__shfl`` on HIP — mask ignored
     on HIP).
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.shfl_sync"), _as_uint32_mask(mask), value, srcLane, width)
+    return tirx.call_intrin(expr_dtype(value), tirx.op.Op.get("tl.shfl_sync"), _as_uint32_mask(mask), value, srcLane, width)
 
 
 # ---------------------------------------------------------------------------
@@ -1031,12 +1024,12 @@ def shfl_sync(
 def _validate_predicate(predicate: int | PrimExpr, intrinsic: str) -> PrimExpr:
     """Normalize an intrinsic predicate and reject lossy float-to-int coercion."""
     predicate = tirx.convert(predicate)
-    if DataType(predicate.dtype).type_code not in (
+    if DataType(expr_dtype(predicate)).type_code not in (
         DataTypeCode.INT,
         DataTypeCode.UINT,
         DataTypeCode.BOOL,
     ):
-        raise TypeError(f"T.{intrinsic} requires an integer or boolean predicate, but got {predicate.dtype}.")
+        raise TypeError(f"T.{intrinsic} requires an integer or boolean predicate, but got {expr_dtype(predicate)}.")
     return predicate
 
 
@@ -1273,7 +1266,7 @@ def cooperative_tensor_fill(data, idx, value, rows: int, cols: int):
     return evaluate(
         tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.cooperative_tensor_fill"),
+            tirx.op.Op.get("tirx.metal.cooperative_tensor_fill"),
             data,
             idx,
             value,
@@ -1299,7 +1292,7 @@ def cooperative_tensor_load(
     return evaluate(
         tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.cooperative_tensor_load"),
+            tirx.op.Op.get("tirx.metal.cooperative_tensor_load"),
             data,
             idx,
             ptr,
@@ -1331,7 +1324,7 @@ def cooperative_tensor_store(
     return evaluate(
         tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.cooperative_tensor_store"),
+            tirx.op.Op.get("tirx.metal.cooperative_tensor_store"),
             data,
             idx,
             ptr,
@@ -1365,7 +1358,7 @@ def cooperative_tensor_multiply_accumulate(
     return evaluate(
         tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.cooperative_tensor_multiply_accumulate"),
+            tirx.op.Op.get("tirx.metal.cooperative_tensor_multiply_accumulate"),
             c_data,
             c_idx,
             a_data,
@@ -1448,16 +1441,16 @@ def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool =
     if isinstance(tmem_dst, tirx.Buffer):
         tmem_ptr = tmem_dst.data
     elif isinstance(tmem_dst, (BufferLoad, BufferRegion)):
-        tmem_ptr = tmem_dst.buffer.data
+        tmem_ptr = tmem_dst.source.data
     else:
         tmem_ptr = tmem_dst
     ann = {"use_2cta": 1} if use_2cta else None
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
+    smem_pointer = retrieve_ptr(smem_src, "r")
 
     @macro
-    def _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset):
+    def _tcgen05_cp_warpx4_chunked(smem_pointer, tmem_ptr, tmem_col_offset):
         for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("r", offset=base_offset + i * 128)
+            chunk_ptr = tirx.ptr_byte_offset(smem_pointer, i * 128 * 4, ty=smem_pointer.ty)
             tirx.call_intrin(
                 "void",
                 tirx.op.Op.get("tl.ptx_tcgen05_cp_warpx4"),
@@ -1467,7 +1460,7 @@ def tcgen05_cp_warpx4(smem_src, tmem_dst, tmem_col_offset=0, *, use_2cta: bool =
                 annotations=ann,
             )
 
-    return _tcgen05_cp_warpx4_chunked(buffer, tmem_ptr, tmem_col_offset, base_offset)
+    return _tcgen05_cp_warpx4_chunked(smem_pointer, tmem_ptr, tmem_col_offset)
 
 
 def tcgen05_sf_warp_transpose(smem_src):
@@ -1478,15 +1471,15 @@ def tcgen05_sf_warp_transpose(smem_src):
     """
     num_chunks = _tcgen05_num_smem_chunks(smem_src, 128)
 
-    buffer, base_offset = retrieve_buffer_and_offset(smem_src)
+    smem_pointer = retrieve_ptr(smem_src, "rw")
 
     @macro
-    def _tcgen05_sf_warp_transpose_chunked(buffer, base_offset):
+    def _tcgen05_sf_warp_transpose_chunked(smem_pointer):
         for i in T.unroll(num_chunks):
-            chunk_ptr = buffer.access_ptr("rw", offset=base_offset + i * 128)
+            chunk_ptr = tirx.ptr_byte_offset(smem_pointer, i * 128 * 4, ty=smem_pointer.ty)
             tirx.call_intrin("void", tirx.op.Op.get("tl.ptx_tcgen05_sf_warp_transpose"), chunk_ptr)
 
-    return _tcgen05_sf_warp_transpose_chunked(buffer, base_offset)
+    return _tcgen05_sf_warp_transpose_chunked(smem_pointer)
 
 
 def ptx_mma_sm70(

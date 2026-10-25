@@ -7,8 +7,8 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
-from tvm import tirx
-from tvm.tirx.script.builder import evaluate as T_evaluate
+from tilelang._compat.tvm import tirx
+from tvm_tirx.tirx.script.ir_builder import evaluate as T_evaluate
 
 from .metadata import MAX_EVENT_NAME_BYTES, Event, encode_event
 

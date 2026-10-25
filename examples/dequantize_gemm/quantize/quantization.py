@@ -23,7 +23,7 @@
 
 from tilelang import language as T
 from tilelang import tvm as tvm
-from tvm import tirx
+from tilelang._compat import tirx
 
 
 # fmt: off
@@ -36,7 +36,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
         a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
 
         Behavior:
-        - Validates `nbit == 4`, `dtype == T.bfloat16`, and `val.dtype == T.uint8` (AssertionError if violated).
+        - Validates `nbit == 4`, `dtype == T.bfloat16`, and a uint8 input (AssertionError if violated).
         - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
         - Interprets the 4-bit field as: sign = bit3, exponent = bits1-2, mantissa = bit0.
         - Converts the 2-bit exponent to bf16 exponent space by adding a bias of 126, adds `scale` to that exponent,
@@ -56,7 +56,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
         """
     assert nbit == 4
     assert dtype == T.bfloat16
-    assert val.dtype == T.uint8
+    assert tirx.expr_dtype(val) == T.uint8
     mask = tirx.const((1 << nbit) - 1, T.uint16)
     f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
     s = f4 >> tirx.const(3, T.uint16)
@@ -109,7 +109,7 @@ def _tir_u32_to_bf16x2_to_f32x2(x: tirx.PrimExpr):
 
 
 def _tir_u32_to_int_to_float(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-    assert val.dtype == T.uint32
+    assert tirx.expr_dtype(val) == T.uint32
     mask = tvm.tirx.const((1 << nbit) - 1, T.uint32)
     unextended = (val >> (pos * nbit).astype(T.uint32)) & mask
     shift = tirx.const(32 - nbit, T.int32)
@@ -121,7 +121,7 @@ def _tir_packed_uint_to_uint_to_float(storage_nbit: int):
     storage_dtype = "uint" + str(storage_nbit)
 
     def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         max_int_value = (1 << (nbit - 1)) - 1
         return ((val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & tirx.const(
             (1 << nbit) - 1, "uint32")).astype(dtype) - tirx.const(max_int_value, dtype)
@@ -133,7 +133,7 @@ def _tir_packed_int_to_int_to_float(storage_nbit: int):
     storage_dtype = "int" + str(storage_nbit)
 
     def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         mask = tirx.const((1 << nbit) - 1, T.int32)
         unextended = (val >> (pos.astype(T.int32) * tirx.const(nbit, T.int32))) & mask
         return tirx.Cast(
@@ -143,7 +143,7 @@ def _tir_packed_int_to_int_to_float(storage_nbit: int):
 
 
 def _tir_f32_to_uint_to_f4(val: tirx.PrimExpr):
-    assert val.dtype == T.float32
+    assert tirx.expr_dtype(val) == T.float32
     val_u32 = tirx.reinterpret(T.uint32, val)
     # e_f32 >  120 -> e_f4 = min(e_f32 - 120 + M_h, 7)
     # e_f32 == 120 -> e_f4 = 1
@@ -160,7 +160,7 @@ def _tir_f32_to_uint_to_f4(val: tirx.PrimExpr):
 
 
 def _tir_f16_to_uint_to_f4(val: tirx.PrimExpr):
-    assert val.dtype == T.float16
+    assert tirx.expr_dtype(val) == T.float16
     val_u32 = tirx.Cast(T.uint32, tirx.reinterpret(T.uint16, val))
     m_h = (val_u32 >> tirx.const(9, T.uint32)) & tirx.const(1, T.uint32)
     e_f16 = (val_u32 >> tirx.const(10, T.uint32)) & tirx.const(31, T.uint32)
@@ -175,7 +175,7 @@ def _tir_f16_to_uint_to_f4(val: tirx.PrimExpr):
 def _tir_u32_to_f4_to_f32(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
     assert nbit == 4
     assert dtype == T.float32
-    assert val.dtype == T.uint32
+    assert tirx.expr_dtype(val) == T.uint32
     # e_f4 == 0 -> e_f32 = 0
     # e_f4 != 0 -> e_f32 = e_f4 + 120 = e_f4 | (1111000)_2
     mask = tvm.tirx.const((1 << nbit) - 1, T.uint32)
@@ -191,7 +191,7 @@ def _tir_u32_to_f4_to_f32(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dty
 def _tir_packed_to_fp4_to_f16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
     assert nbit == 4
     assert dtype == T.float16
-    assert val.dtype == T.uint32
+    assert tirx.expr_dtype(val) == T.uint32
     # e_f4 == 0 -> e_f16 = 0
     # e_f4 != 0 -> e_f16 = e_f4 + 8 = e_f4 | (1000)_2
     mask = tvm.tirx.const((1 << nbit) - 1, T.uint16)
@@ -207,7 +207,7 @@ def _tir_packed_to_fp4_to_f16(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
     def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
         f4 = ((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(storage_dtype)
         f4 = (val >> (pos.astype(storage_dtype) * tirx.const(nbit, storage_dtype))) & mask
@@ -299,7 +299,7 @@ def _tir_packed_to_signed_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
     def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         max_int_value = (1 << (nbit - 1))
         return ((val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & tirx.const(
             (1 << nbit) - 1, "uint32")).astype(dtype) - tirx.const(max_int_value, dtype)
@@ -311,7 +311,7 @@ def _tir_packed_to_unsigned_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
     def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
         return ((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(dtype)
 
@@ -323,7 +323,7 @@ def _tir_packed_to_unsigned_convert_with_zeros(storage_type="uint", storage_nbit
 
     def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, zero: tvm.tirx.PrimExpr,
                   dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
         return (((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(dtype) - zero.astype(dtype))
 
@@ -334,7 +334,7 @@ def _tir_packed_int_to_int_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
     def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+        assert tirx.expr_dtype(val) == storage_dtype, f"{tirx.expr_dtype(val)} != {storage_dtype}"
         mask = tirx.const((1 << nbit) - 1, T.int32)
         unextended = (val >> (pos.astype(T.int32) * tirx.const(nbit, T.int32))) & mask
         return tirx.Cast(

@@ -5,7 +5,7 @@ import pytest
 import tilelang
 import tilelang.cpu.language as T
 from tilelang import tvm
-from tvm import tirx
+from tilelang._compat.tvm import tirx
 
 
 def _nodes(func, kind):
@@ -33,8 +33,8 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
         with T.Kernel(2, 2, cpu_num_threads=5) as (bx, by):
             A[4 + bx * 2 + by] = 2
 
-    blocks = [block for block in _nodes(main, tirx.SBlock) if "tl.cpu_num_threads" in block.annotations]
-    assert sorted(int(block.annotations["tl.cpu_num_threads"]) for block in blocks) == [3, 5]
+    blocks = [block for block in _nodes(main, tirx.RegionStmt) if "tl.cpu_num_threads" in block.attrs]
+    assert sorted(int(block.attrs["tl.cpu_num_threads"]) for block in blocks) == [3, 5]
     assert all("tl.cpu_num_threads" not in loop.annotations for loop in _nodes(main, tirx.For))
 
     mod = tvm.IRModule.from_expr(main)
@@ -43,23 +43,22 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
         materialized = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False)(prepared)
         lowered = tilelang.transform.LowerOpaqueBlock()(materialized)
     result = prepared["main"]
-    loops = _nodes(result, tirx.For)
-    assert all(loop.kind == tirx.ForKind.THREAD_BINDING for loop in loops)
-    outer = [loop for loop in loops if str(loop.thread_binding.thread_tag) == "blockIdx.x"]
-    inner = [loop for loop in loops if str(loop.thread_binding.thread_tag) == "blockIdx.y"]
-    assert sorted(int(loop.annotations["tl.cpu_num_threads"]) for loop in outer) == [3, 5]
-    assert all("tl.cpu_num_threads" not in loop.annotations for loop in inner)
-    assert all("tl.cpu_num_threads" not in block.annotations for block in _nodes(result, tirx.SBlock))
+    loops = [region for region in _nodes(result, tirx.RegionStmt) if region.op.name == "tl.launch_grid"]
+    outer = [loop for loop in loops if loop.args[0].value == "blockIdx.x"]
+    inner = [loop for loop in loops if loop.args[0].value == "blockIdx.y"]
+    assert sorted(int(loop.attrs["tl.cpu_num_threads"]) for loop in outer) == [3, 5]
+    assert all("tl.cpu_num_threads" not in loop.attrs for loop in inner)
+    assert all("tl.cpu_num_threads" not in region.attrs for region in _nodes(result, tirx.RegionStmt) if region.op.name != "tl.launch_grid")
     if parallel:
-        assert all(int(loop.annotations["tl.cpu_grid_dim"]) == 0 for loop in outer)
-        assert all(int(loop.annotations["tl.cpu_grid_dim"]) == 1 for loop in inner)
+        assert all(int(loop.attrs["tl.cpu_grid_dim"]) == 0 for loop in outer)
+        assert all(int(loop.attrs["tl.cpu_grid_dim"]) == 1 for loop in inner)
     else:
-        assert all("tl.cpu_grid_dim" not in loop.annotations for loop in loops)
+        assert all("tl.cpu_grid_dim" not in loop.attrs for loop in loops)
 
     for original, serial in zip(loops, _nodes(lowered["main"], tirx.For), strict=True):
-        assert serial.kind == tirx.ForKind.SERIAL
-        assert serial.loop_var.same_as(original.loop_var)
-        tvm.ir.assert_structural_equal(original.annotations, serial.annotations)
+        assert serial.kind == tirx.ForKind.DEFAULT
+        assert serial.var.same_as(original.body_params[0])
+        tvm.ir.assert_structural_equal(original.attrs.dict, serial.annotations)
 
 
 def test_cpu_launch_marks_only_grid_loops():
@@ -73,9 +72,9 @@ def test_cpu_launch_marks_only_grid_loops():
         prepared = tilelang.cpu.transform.LowerCPUKernelLaunch()(tvm.IRModule.from_expr(main))
         materialized = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False)(prepared)
     loops = _nodes(prepared["main"], tirx.For)
-    grid = {str(loop.thread_binding.thread_tag): loop for loop in loops if loop.thread_binding is not None}
-    assert [int(grid[f"blockIdx.{axis}"].annotations["tl.cpu_grid_dim"]) for axis in "xyz"] == [0, 1, 2]
-    assert all("tl.cpu_grid_dim" not in loop.annotations for loop in loops if loop.thread_binding is None)
+    grid = {region.args[0].value: region for region in _nodes(prepared["main"], tirx.RegionStmt) if region.op.name == "tl.launch_grid"}
+    assert [int(grid[f"blockIdx.{axis}"].attrs["tl.cpu_grid_dim"]) for axis in "xyz"] == [0, 1, 2]
+    assert all("tl.cpu_grid_dim" not in loop.annotations for loop in loops)
     serial = _nodes(materialized["main"], tirx.For)
     assert sorted(int(loop.annotations["tl.cpu_grid_dim"]) for loop in serial if "tl.cpu_grid_dim" in loop.annotations) == [0, 1, 2]
     assert sum("tl.cpu_grid_dim" not in loop.annotations for loop in serial) == 1

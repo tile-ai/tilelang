@@ -9,6 +9,8 @@
 
 #include <tvm/target/target.h>
 
+#include "support/base.h"
+
 #include "ascend/target_utils.h"
 #include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
@@ -18,7 +20,7 @@
 namespace tvm {
 namespace tl {
 
-bool TargetHasAsyncCopy(Target target);
+TILELANG_DLL bool TargetHasAsyncCopy(Target target);
 } // namespace tl
 } // namespace tvm
 

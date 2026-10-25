@@ -24,127 +24,88 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <string>
-#include <utility>
-
+#include "compat/expr.h"
+#include "compat/visit.h"
 #include "op/builtin.h"
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tirx::transform;
-
+namespace tvm::tl {
 namespace {
 
-constexpr const char *kModeMerging = "MODE_MERGING";
-constexpr const char *kSimdOpPrefix = "tl.simd.";
-constexpr int kReadWriteAccessMask = 3;
-
 bool IsSimdMergingCall(const CallNode *call) {
-  if (call->args.empty()) {
+  if (call->args.empty())
     return false;
-  }
-  const auto *mode = call->args.back().as<StringImmNode>();
-  if (mode == nullptr || mode->value != kModeMerging) {
-    return false;
-  }
-  if (auto call_op = call->op.as<Op>()) {
-    const std::string &op_name = call_op.value()->name;
-    return op_name.rfind(kSimdOpPrefix, 0) == 0;
-  }
-  return false;
+  auto mode = call->args.back().as<StringImmNode>();
+  auto operation = call->op.as<OpNode>();
+  return mode && mode->value == "MODE_MERGING" && operation &&
+         std::string(operation->name).starts_with("tl.simd.");
 }
 
-class SimdMergingLegalizer : public StmtExprMutator {
-public:
-  static PrimFunc Rewrite(PrimFunc func) {
-    SimdMergingLegalizer legalizer;
-    func.CopyOnWrite()->body = legalizer(func->body);
-    SimdMergingVerifier::Verify(func->body);
-    return func;
-  }
-
-private:
-  class SimdMergingVerifier : public StmtExprVisitor {
-  public:
-    static void Verify(const Stmt &stmt) {
-      SimdMergingVerifier verifier;
-      verifier(stmt);
-    }
-
-  private:
-    void VisitExpr_(const CallNode *call) final {
-      if (IsSimdMergingCall(call)) {
-        ICHECK(call->dtype.is_void())
-            << "MODE_MERGING is a read-modify-write operation and requires "
-               "assignment to a mutable SIMD register, for example "
-               "`dst[i] = T.simd.vadds(...)`.";
-        ICHECK(!call->args.empty());
-        const auto *access_ptr = call->args[0].as<CallNode>();
-        ICHECK(access_ptr && access_ptr->op.same_as(tl::access_ptr()) &&
-               access_ptr->args.size() == 3)
-            << "Legalized MODE_MERGING calls must carry an explicit "
-               "tl.access_ptr destination.";
-        const auto *rw_mask = access_ptr->args[2].as<IntImmNode>();
-        ICHECK(rw_mask && rw_mask->value == kReadWriteAccessMask)
-            << "MODE_MERGING destination must be marked read-write.";
-      }
-      StmtExprVisitor::VisitExpr_(call);
-    }
-  };
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    const auto *call = store->value.as<CallNode>();
-    if (call == nullptr || !IsSimdMergingCall(call)) {
+class SimdMergingLegalizer : public tirx::StmtExprMutator {
+protected:
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
+                                 ffi::InplaceMode mode) final {
+    Stmt original = ffi::GetRef<Stmt>(node);
+    auto store = StmtExprMutator::Mutate_(node, mode)
+                     .ValueOrUnchanged(original)
+                     .as_or_throw<TensorStore>();
+    auto call = store->value.as<CallNode>();
+    if (!call || !IsSimdMergingCall(call))
       return store;
-    }
-
-    // Inactive lanes read the old value from the assignment destination.
-    const BufferLoad destination(store->buffer, store->indices);
-    const DataType index_dtype =
-        store->indices.empty() ? DataType::Int(32) : store->indices[0].dtype();
-    const PrimExpr destination_ptr =
-        Call(DataType::Handle(), tl::access_ptr(),
-             {destination, IntImm(index_dtype, 1),
-              IntImm(DataType::Int(32), kReadWriteAccessMask)});
-
-    ffi::Array<PrimExpr> args;
-    args.reserve(call->args.size() + 1);
-    args.push_back(destination_ptr);
-    for (const PrimExpr &arg : call->args) {
-      args.push_back(arg);
-    }
-
-    Stmt result = Evaluate(Call(DataType::Void(), call->op, std::move(args),
-                                call->annotations, call->span),
-                           store->span);
-    if (store->predicate.defined()) {
-      result = IfThenElse(store->predicate.value(), std::move(result));
-    }
-    return result;
+    TensorLoad destination(store->dest, store->indices, store->loc);
+    auto index_type =
+        store->indices.empty() ? PrimType::Int(32) : store->indices[0].ty();
+    Call pointer(std::nullopt, access_ptr(),
+                 {destination, IntImm(index_type, 1), IntImm::Int32(3)});
+    ffi::Array<Expr> arguments{pointer};
+    arguments.insert(arguments.end(), call->args.begin(), call->args.end());
+    return Evaluate(Call(PrimType::Void(), call->op, arguments, call->attrs,
+                         call->ty_args, call->loc),
+                    store->loc);
   }
 };
 
+void VerifySimdMerging(const Stmt &statement) {
+  PostOrderVisit(statement, [](const ffi::ObjectRef &object) {
+    auto call = object.as<CallNode>();
+    if (!call || !IsSimdMergingCall(call))
+      return;
+    auto primitive = call->ty.as<PrimType>();
+    auto tuple = call->ty.as<TupleTypeNode>();
+    TVM_FFI_CHECK(primitive ? primitive->IsVoid()
+                            : tuple && tuple->fields.empty(),
+                  ValueError)
+        << "MODE_MERGING requires assignment to a mutable SIMD register";
+    auto pointer = call->args[0].as<CallNode>();
+    TVM_FFI_CHECK(pointer && pointer->op.same_as(access_ptr()) &&
+                      pointer->args.size() == 3,
+                  ValueError)
+        << "MODE_MERGING requires an explicit tl.access_ptr destination";
+    TVM_FFI_CHECK(GetConstInt(pointer->args[2]) == 3, ValueError)
+        << "MODE_MERGING destination must be marked read-write";
+  });
+}
 } // namespace
 
 tvm::transform::Pass LegalizeSimdMerging() {
-  auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
-    return SimdMergingLegalizer::Rewrite(std::move(func));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) -> ffi::Optional<tirx::Function> {
+    if (!function->body)
+      return function;
+    auto rewriter = ffi::make_object<SimdMergingLegalizer>();
+    SeqStmt original = function->body.value();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(original).ValueOrUnchanged(original);
+    VerifySimdMerging(function->body.value());
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeSimdMerging", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LegalizeSimdMerging");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LegalizeSimdMerging",
-                        LegalizeSimdMerging);
+  ffi::reflection::GlobalDef().def("tl.transform.LegalizeSimdMerging",
+                                   LegalizeSimdMerging);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

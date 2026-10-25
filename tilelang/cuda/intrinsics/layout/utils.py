@@ -1,4 +1,4 @@
-from tvm import DataType
+from tilelang._compat.tvm import DataType
 from typing import Literal
 from .mma_layout import (
     ldmatrix_32x4_to_shared_16x8_layout_a,

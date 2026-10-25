@@ -65,6 +65,7 @@ def make_input(n: int, torch_dtype: torch.dtype, value_kind: str) -> torch.Tenso
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 @pytest.mark.parametrize("elems_per_thread", COUNTS)
+@tilelang.testing.requires_ascend
 def test_simtvf_cast(case, elems_per_thread):
     name, in_tl_dtype, out_tl_dtype, in_torch_dtype, out_torch_dtype, value_kind = case
     n = THREADS * elems_per_thread
@@ -99,6 +100,7 @@ def _broadcast_cast_arithmetic():
     return main
 
 
+@tilelang.testing.requires_ascend
 def test_broadcast_cast_arbitrary_expression_uses_vector_cast():
     kernel = tilelang.compile(_broadcast_cast_arithmetic(), target="ascend")
     source = kernel.get_kernel_source()

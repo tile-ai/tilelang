@@ -18,9 +18,10 @@
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
-#include <tvm/arith/analyzer.h>
+#include "compat/visit.h"
 #include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ir/expr.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <string>
@@ -47,20 +48,23 @@ bool IsInsideSimtVF(const LowerArgs &T) {
   if (!var) {
     return false;
   }
-  return std::string(var->name_hint).rfind("simtvf", 0) == 0;
+  return std::string(var->name).rfind("simtvf", 0) == 0;
 }
 
-void CollectFragmentLayouts(const PrimExpr &expr,
-                            const Map<Var, PrimExpr> &bind_var_to_expr,
+void CollectFragmentLayouts(const Expr &expr,
+                            const Map<Var, Expr> &bind_var_to_expr,
                             const LayoutMap &existing_layouts,
                             PrimExpr thread_extent, Range thread_bounds,
-                            Map<Buffer, Layout> &result_map) {
+                            Map<TensorVar, Layout> &result_map) {
   PostOrderVisit(expr, [&](const ObjectRef &node) {
-    if (auto bl = node.as<BufferLoadNode>()) {
-      if (IsFragmentBuffer(bl->buffer) && !existing_layouts.count(bl->buffer) &&
-          !result_map.count(bl->buffer)) {
-        auto f = Fragment::FullyReplicated(bl->buffer->shape, thread_extent);
-        result_map.Set(bl->buffer, f->BindThreadRange(thread_bounds));
+    if (auto bl = node.as<TensorLoadNode>()) {
+      if (IsFragmentBuffer(bl->source.as_or_throw<TensorVar>()) &&
+          !existing_layouts.count(bl->source.as_or_throw<TensorVar>()) &&
+          !result_map.count(bl->source.as_or_throw<TensorVar>())) {
+        auto f = Fragment::FullyReplicated(
+            bl->source.as_or_throw<TensorVar>().shape(), thread_extent);
+        result_map.Set(bl->source.as_or_throw<TensorVar>(),
+                       f->BindThreadRange(thread_bounds));
       }
     } else if (auto var_node = node.as<VarNode>()) {
       auto var = GetRef<Var>(var_node);
@@ -73,74 +77,83 @@ void CollectFragmentLayouts(const PrimExpr &expr,
   });
 }
 
-PrimExpr Float4StorageBytes(const PrimExpr &elements, DataType dtype) {
-  ICHECK(dtype.is_float4_e2m1fn());
+PrimExpr Float4StorageBytes(const PrimExpr &elements, PrimType dtype) {
+  ICHECK(dtype.MatchesCode(kDLFloat4_e2m1fn));
   int element_bits = dtype.bits() * dtype.lanes();
   ICHECK(element_bits % 8 == 0 || 8 % element_bits == 0)
       << "FP4 element width must be byte-packable, got " << dtype;
-  return FloorDiv(elements * make_const(elements.dtype(), element_bits),
-                  make_const(elements.dtype(), 8));
+  return FloorDiv(elements * MakeConst(elements.ty(), element_bits),
+                  MakeConst(elements.ty(), 8));
 }
 
-DataType GetBufferStorageDType(const Buffer &buf) {
-  const auto *ptr_type = buf->data->type_annotation.as<PointerTypeNode>();
-  if (!ptr_type)
-    return buf->dtype;
-  const auto *prim_type = ptr_type->element_type.as<PrimTypeNode>();
-  return prim_type ? prim_type->dtype : buf->dtype;
+PrimType GetBufferStorageDType(const TensorVar &tensor,
+                               const ffi::Map<Var, Expr> &bindings) {
+  auto definition = bindings.Get(tensor);
+  if (definition) {
+    if (auto call = definition->as<CallNode>();
+        call && call->op.same_as(tirx::decl_tensor_op())) {
+      if (auto pointer = call->args[0]->ty.as<PtrTypeNode>()) {
+        if (auto primitive = pointer->element_type.as<PrimType>())
+          return primitive.value();
+      }
+    }
+  }
+  return tensor.dtype();
 }
 
 // T.view may give byte-addressable storage a logical FP4 dtype without
 // changing its data Var. Genuine FP4 storage is rewritten later by
 // RewriteFp4ToFp4x2; normalize byte-backed aliases before issuing the DMA.
-PrimExpr NormalizeFloat4ByteViewPtr(const Buffer &buf,
-                                    const PrimExpr &fallback_ptr,
-                                    const PrimExpr &logical_offset,
-                                    const PrimExpr &logical_extent) {
-  DataType storage_dtype = GetBufferStorageDType(buf);
-  if (!buf->dtype.is_float4_e2m1fn() || storage_dtype.is_float4_e2m1fn()) {
+Expr NormalizeFloat4ByteViewPtr(const TensorVar &buf, const Expr &fallback_ptr,
+                                const PrimExpr &logical_offset,
+                                const PrimExpr &logical_extent,
+                                const ffi::Map<Var, Expr> &bindings) {
+  PrimType storage_dtype = GetBufferStorageDType(buf, bindings);
+  if (!buf.dtype().MatchesCode(kDLFloat4_e2m1fn) ||
+      storage_dtype.MatchesCode(kDLFloat4_e2m1fn)) {
     return fallback_ptr;
   }
 
   int storage_bits = storage_dtype.bits() * storage_dtype.lanes();
   ICHECK_EQ(storage_bits % 8, 0)
       << "FP4 view requires byte-addressable storage, got " << storage_dtype;
-  return Call(DataType::Handle(), builtin::tvm_access_ptr(),
-              {TypeAnnotation(DataType::Int(8)), buf->data,
-               Float4StorageBytes(logical_offset, buf->dtype),
-               Float4StorageBytes(logical_extent, buf->dtype),
-               make_const(DataType::Int(32), 1)});
+  return Call(PtrType(PrimType::Int(8), buf.scope()),
+              tirx::ptr_byte_offset_op(),
+              {buf.data(), Float4StorageBytes(logical_offset, buf.dtype())},
+              DictAttrs({{attr::kAccessExtent,
+                          Float4StorageBytes(logical_extent, buf.dtype())},
+                         {attr::kAccessMask, PrimExpr(kAccessRead)}}));
 }
 
 // Map float32 source (L0C) + destination dtype → quant_pre hardware mode.
-static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
-  if (src_dtype.is_float() && src_dtype.bits() == 32) {
-    if (dst_dtype.is_bfloat16())
+static int GetCCQuantPre(PrimType src_dtype, PrimType dst_dtype) {
+  if (src_dtype.MatchesCode(kDLFloat) && src_dtype.bits() == 32) {
+    if (dst_dtype.MatchesElementType(kDLBfloat, 16))
       return 16; // F322BF16
-    if (dst_dtype.is_float16())
+    if (dst_dtype.MatchesElementType(kDLFloat, 16))
       return 1; // F322F16
-    if (dst_dtype.is_float() && dst_dtype.bits() == 8)
+    if (dst_dtype.MatchesCode(kDLFloat) && dst_dtype.bits() == 8)
       return 13; // QF322FP8_PRE
-    if (dst_dtype.is_int() && dst_dtype.bits() == 8)
+    if (dst_dtype.MatchesCode(kDLInt) && dst_dtype.bits() == 8)
       return 9; // REQ8
-    if (dst_dtype.is_int() && dst_dtype.bits() == 4)
+    if (dst_dtype.MatchesCode(kDLInt) && dst_dtype.bits() == 4)
       return 22; // REQ4
-    if (dst_dtype.is_int() && dst_dtype.bits() == 16)
+    if (dst_dtype.MatchesCode(kDLInt) && dst_dtype.bits() == 16)
       return 28; // DEQS16
   }
   return 0; // NoQuant
 }
 
-void CheckCompactL0Region(const Buffer &buffer, const Array<Range> &ranges,
-                          arith::Analyzer *analyzer,
+void CheckCompactL0Region(const TensorVar &buffer, const Array<Range> &ranges,
+                          sym::Analyzer analyzer,
                           const std::string &description) {
   ICHECK_GE(ranges.size(), 2U)
       << description << " requires a rank >= 2 L0 region for buffer "
       << buffer->name << ", got ranges " << ranges;
   for (size_t i = ranges.size() - 2; i < ranges.size(); ++i) {
     const Range &range = ranges[i];
-    PrimExpr zero = make_const(range->min.dtype(), 0);
-    ICHECK(analyzer->CanProveEqual(range->min, zero))
+    PrimExpr zero = MakeConst(range->begin.ty(), 0);
+    ICHECK(analyzer->CanProveEqual(range->begin, zero))
         << description
         << " requires zero-origin trailing matrix dimensions; buffer "
         << buffer->name << " has range " << range << " on axis " << i
@@ -150,19 +163,19 @@ void CheckCompactL0Region(const Buffer &buffer, const Array<Range> &ranges,
 
 PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
                                   const Array<Range> &dst_ranges,
-                                  arith::Analyzer *analyzer) {
+                                  sym::Analyzer analyzer) {
   // OOB clamping represents every reason to skip a DMA as a zero semantic
   // extent. This includes both an empty dynamic tile and an out-of-range
   // fixed/singleton-axis index. Reconstruct one execution predicate here so
   // neither condition becomes control flow before AutoSchedule.
-  PrimExpr has_data = const_true();
+  PrimExpr has_data = MakeConst(PrimType::Bool(), true);
   std::vector<PrimExpr> guarded_predicates;
   auto add_ranges = [&](const Array<Range> &ranges) {
     for (const Range &range : ranges) {
       PrimExpr extent = analyzer->Simplify(range->extent);
-      PrimExpr zero = make_zero(extent.dtype());
+      PrimExpr zero = MakeConst(extent.ty(), 0);
       PrimExpr predicate = analyzer->Simplify(extent > zero);
-      if (analyzer->CanProve(predicate, arith::ProofStrength::kSymbolicBound)) {
+      if (analyzer->CanProve(predicate, sym::ProofStrength::kSymbolicBound)) {
         continue;
       }
 
@@ -190,13 +203,13 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
 
 L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
                                    const LayoutMap &layouts,
-                                   arith::Analyzer *analyzer) {
+                                   sym::Analyzer analyzer) {
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
   if (analyzer->CanProve(!has_data))
-    return {BufferRegion(op.src, op.src_range),
-            BufferRegion(op.dst, op.dst_range),
-            op.l0_pitch.value_or(Integer(1))};
+    return {ascend::NativeTensorRegion(op.src, op.src_range),
+            ascend::NativeTensorRegion(op.dst, op.dst_range),
+            op.l0_pitch.value_or(PrimExpr(1))};
   Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
   Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
   NormalizeTrailingMTE2DLayout(op.src, src_range, analyzer,
@@ -206,12 +219,12 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
   AscendFractalLayoutInfo src_info, dst_info;
   Optional<Layout> src_layout = FindLayoutForBuffer(layouts, op.src);
   Optional<Layout> dst_layout = FindLayoutForBuffer(layouts, op.dst);
-  ICHECK(src_layout.defined() && dst_layout.defined() &&
+  ICHECK(src_layout.has_value() && dst_layout.has_value() &&
          TryExtractAscendFractalLayout(src_layout.value(), op.src, &src_info) &&
          TryExtractAscendFractalLayout(dst_layout.value(), op.dst, &dst_info) &&
          IsAscendMajorKind(src_info.kind) && IsAscendMajorKind(dst_info.kind))
       << "Ascend L1->L0 lowering requires canonical MajorK/MajorMN layouts";
-  TVM_FFI_CHECK(op.src->dtype == op.dst->dtype, ValueError)
+  TVM_FFI_CHECK(op.src.dtype() == op.dst.dtype(), ValueError)
       << "Ascend L1->L0 copy requires matching source/destination dtypes";
 
   AscendFractalRegionInfo src_region, dst_region;
@@ -225,20 +238,20 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
   PrimExpr written_outer0 = k_step;
   PrimExpr written_outer1 = m_step;
   {
-    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-    TVM_FFI_CHECK(analyzer->CanProve(dst_stride > 0) &&
+    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
+    TVM_FFI_CHECK(analyzer->CanProve(dst_stride > 0,
+                                     sym::ProofStrength::kSymbolicBound) &&
                       analyzer->CanProve(dst_stride <= dst_info.outer1,
-                                         arith::ProofStrength::kSymbolicBound),
+                                         sym::ProofStrength::kSymbolicBound),
                   ValueError)
         << "Ascend L1->L0 l0_pitch must be positive and fit destination "
            "capacity";
     auto require_multiple = [&](const PrimExpr &value, int multiple,
                                 const char *parameter) {
-      TVM_FFI_CHECK(
-          analyzer->CanProveEqual(
-              FloorMod(value, make_const(value.dtype(), multiple)), 0),
-          ValueError)
-          << "Ascend L1->L0 copy of " << op.src->name << " (" << op.src->dtype
+      TVM_FFI_CHECK(analyzer->CanProveEqual(
+                        FloorMod(value, MakeConst(value.ty(), multiple)), 0),
+                    ValueError)
+          << "Ascend L1->L0 copy of " << op.src->name << " (" << op.src.dtype()
           << ") requires " << parameter << " to be divisible by " << multiple
           << ", got " << value
           << ". Copy complete fractals/transpose groups; restrict GEMM to "
@@ -246,21 +259,21 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
     };
     bool nonzero_destination = false;
     for (size_t i = dst_range.size() - 2; i < dst_range.size(); ++i)
-      nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->min, 0);
-    TVM_FFI_CHECK(!nonzero_destination || op.l0_pitch.defined(), ValueError)
+      nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->begin, 0);
+    TVM_FFI_CHECK(!nonzero_destination || op.l0_pitch.has_value(), ValueError)
         << "Ascend partial L1->L0 copy with a nonzero destination origin "
            "requires an explicit l0_pitch";
-    auto check_region = [&](const Buffer &buffer, const Array<Range> &ranges,
+    auto check_region = [&](const TensorVar &buffer, const Array<Range> &ranges,
                             const AscendFractalLayoutInfo &info,
                             const AscendFractalRegionInfo &region,
                             bool source) {
       size_t row16_axis =
           ranges.size() - 2 + (info.row16_axis == LogicalAxis::kCol);
       size_t c0_axis = ranges.size() - 2 + (info.c0_axis == LogicalAxis::kCol);
-      require_multiple(ranges[row16_axis]->min, 16,
+      require_multiple(ranges[row16_axis]->begin, 16,
                        source ? "source row16 origin"
                               : "destination row16 origin");
-      require_multiple(ranges[c0_axis]->min, AscendC0(buffer->dtype.bits()),
+      require_multiple(ranges[c0_axis]->begin, AscendC0(buffer.dtype().bits()),
                        source ? "source C0 origin" : "destination C0 origin");
       // Keep existing zero-origin padded loads. Newly supported offset writes
       // explicitly select complete fractals, including their padding lanes.
@@ -269,26 +282,26 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
                          source ? "source row16 extent"
                                 : "destination row16 extent");
         require_multiple(ranges[c0_axis]->extent,
-                         AscendC0(buffer->dtype.bits()),
+                         AscendC0(buffer.dtype().bits()),
                          source ? "source C0 extent" : "destination C0 extent");
       }
       for (size_t i = 0; i + 2 < ranges.size(); ++i) {
         TVM_FFI_CHECK(
-            analyzer->CanProve(ranges[i]->min >= 0) &&
-                analyzer->CanProve(ranges[i]->min + ranges[i]->extent <=
-                                   buffer->shape[i]),
+            analyzer->CanProve(ranges[i]->begin >= 0) &&
+                analyzer->CanProve(ranges[i]->begin + ranges[i]->extent <=
+                                   buffer.shape()[i]),
             ValueError)
             << "Ascend L1->L0 leading plane is outside buffer " << buffer->name;
       }
       TVM_FFI_CHECK(
-          analyzer->CanProve(region.outer0->min >= 0) &&
-              analyzer->CanProve(region.outer1->min >= 0) &&
-              analyzer->CanProve(region.outer0->min + region.outer0->extent <=
+          analyzer->CanProve(region.outer0->begin >= 0) &&
+              analyzer->CanProve(region.outer1->begin >= 0) &&
+              analyzer->CanProve(region.outer0->begin + region.outer0->extent <=
                                      info.outer0,
-                                 arith::ProofStrength::kSymbolicBound) &&
-              analyzer->CanProve(region.outer1->min + region.outer1->extent <=
+                                 sym::ProofStrength::kSymbolicBound) &&
+              analyzer->CanProve(region.outer1->begin + region.outer1->extent <=
                                      info.outer1,
-                                 arith::ProofStrength::kSymbolicBound),
+                                 sym::ProofStrength::kSymbolicBound),
           ValueError)
           << "Ascend L1->L0 " << (source ? "source" : "destination")
           << " region exceeds or cannot be proved within the physical "
@@ -302,15 +315,17 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
     bool needs_transpose =
         (op.transpose != 0) ^ (src_info.c0_axis != dst_info.c0_axis);
     if (needs_transpose) {
-      int c0 = AscendC0(op.src->dtype.bits());
+      int c0 = AscendC0(op.src.dtype().bits());
       require_multiple(m_step, c0 > 16 ? c0 / 16 : 1, "m_step");
       require_multiple(k_step, c0 < 16 ? 16 / c0 : 1, "k_step");
       written_outer0 = FloorDiv(m_step * 16, c0);
       written_outer1 = FloorDiv(k_step * c0, 16);
     }
     TVM_FFI_CHECK(
-        analyzer->CanProve(written_outer0 <= dst_region.outer0->extent) &&
-            analyzer->CanProve(written_outer1 <= dst_region.outer1->extent),
+        analyzer->CanProve(written_outer0 <= dst_region.outer0->extent,
+                           sym::ProofStrength::kSymbolicBound) &&
+            analyzer->CanProve(written_outer1 <= dst_region.outer1->extent,
+                               sym::ProofStrength::kSymbolicBound),
         ValueError)
         << "Ascend L1->L0 copy writes " << written_outer0 << "x"
         << written_outer1 << " fractals, but destination region "
@@ -318,10 +333,12 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
         << dst_region.outer1->extent
         << ". Pad the allocation and copy region; use effective K in T.gemm.";
     TVM_FFI_CHECK(
-        analyzer->CanProve(dst_region.outer0->min + written_outer0 <=
-                           dst_info.outer0) &&
-            analyzer->CanProve(dst_region.outer1->min + written_outer1 <=
-                               dst_stride),
+        analyzer->CanProve(dst_region.outer0->begin + written_outer0 <=
+                               dst_info.outer0,
+                           sym::ProofStrength::kSymbolicBound) &&
+            analyzer->CanProve(dst_region.outer1->begin + written_outer1 <=
+                                   dst_stride,
+                               sym::ProofStrength::kSymbolicBound),
         ValueError)
         << "Ascend L1->L0 copy exceeds the physical L0 allocation "
         << "or l0_pitch of " << op.dst->name;
@@ -339,7 +356,7 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
   // Validate the original operands above, before making the full-block
   // transfers explicit. In particular, rounding must not legalize an invalid
   // offset write or an incomplete transpose group.
-  auto transfer_region = [&](const Buffer &buffer, Array<Range> ranges,
+  auto transfer_region = [&](const TensorVar &buffer, Array<Range> ranges,
                              const AscendFractalLayoutInfo &info,
                              PrimExpr outer0, PrimExpr outer1) {
     for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis) {
@@ -351,10 +368,10 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
       // nonpositive extent would otherwise be replaced by a positive count.
       if (!analyzer->CanProve(has_data))
         extent = analyzer->Simplify(
-            Select(has_data, extent, make_zero(extent.dtype())));
-      ranges.Set(axis, Range::FromMinExtent(ranges[axis]->min, extent));
+            Select(has_data, extent, MakeConst(extent.ty(), 0)));
+      ranges.Set(axis, Range::FromMinExtent(ranges[axis]->begin, extent));
     }
-    return BufferRegion(buffer, ranges);
+    return ascend::NativeTensorRegion(buffer, ranges);
   };
   return {transfer_region(op.src, src_range, src_info, k_step, m_step),
           transfer_region(op.dst, dst_range, dst_info, written_outer0,
@@ -362,52 +379,52 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
           dst_stride};
 }
 
-BufferRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
+TensorRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
                                      const LayoutMap &layouts,
-                                     arith::Analyzer *analyzer) {
+                                     sym::Analyzer analyzer) {
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
   if (analyzer->CanProve(!has_data))
-    return BufferRegion(op.src, op.src_range);
+    return ascend::NativeTensorRegion(op.src, op.src_range);
   AscendFractalLayoutInfo info;
   Optional<Layout> layout = FindLayoutForBuffer(layouts, op.src);
-  ICHECK(layout.defined() &&
+  ICHECK(layout.has_value() &&
          TryExtractAscendFractalLayout(layout.value(), op.src, &info) &&
          info.kind == AscendFractalKind::kSF)
       << "L0 SF copy requires the canonical SF_K layout on its L1 source";
   Array<Range> ranges = op.src_range;
   for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis) {
     PrimExpr alignment = axis + 1 == ranges.size() ? info.c0 : info.row_frac;
-    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-    ICHECK(analyzer->CanProveEqual(floormod(ranges[axis]->min, alignment), 0))
+    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
+    ICHECK(analyzer->CanProveEqual(floormod(ranges[axis]->begin, alignment), 0))
         << "L0 SF source origin must align to 16 MN rows and a scale pair";
     PrimExpr extent = analyzer->Simplify(
         floordiv(ranges[axis]->extent + alignment - 1, alignment) * alignment);
     PrimExpr capacity =
         alignment * (axis + 1 == ranges.size() ? info.outer1 : info.outer0);
-    ICHECK(analyzer->CanProve(ranges[axis]->min >= 0) &&
-           analyzer->CanProve(ranges[axis]->min + extent <= capacity,
-                              arith::ProofStrength::kSymbolicBound))
+    ICHECK(analyzer->CanProve(ranges[axis]->begin >= 0) &&
+           analyzer->CanProve(ranges[axis]->begin + extent <= capacity,
+                              sym::ProofStrength::kSymbolicBound))
         << "L0 SF source region exceeds its physical allocation";
-    ranges.Set(axis, Range::FromMinExtent(ranges[axis]->min, extent));
+    ranges.Set(axis, Range::FromMinExtent(ranges[axis]->begin, extent));
   }
   if (!analyzer->CanProve(has_data)) {
     for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis)
       ranges.Set(axis, Range::FromMinExtent(
-                           ranges[axis]->min,
+                           ranges[axis]->begin,
                            analyzer->Simplify(Select(
                                has_data, ranges[axis]->extent,
-                               make_zero(ranges[axis]->extent.dtype())))));
+                               MakeConst(ranges[axis]->extent.ty(), 0)))));
   }
-  return BufferRegion(op.src, ranges);
+  return ascend::NativeTensorRegion(op.src, ranges);
 }
 
 namespace {
 
 Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
-                  arith::Analyzer *analyzer, DMAPath dma_path) {
-  auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
-  int elem_bits = op.src->dtype.bits() * op.src->dtype.lanes();
+                  sym::Analyzer analyzer, DMAPath dma_path) {
+  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  int elem_bits = op.src.dtype().bits() * op.src.dtype().lanes();
 
   // AscendInsertOOBPadding has already clamped GM-facing regions while
   // preserving possibly-zero semantic extents. Derive both the empty-tile and
@@ -417,17 +434,22 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   // preserves the original semantics.
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
-  if (is_zero(has_data)) {
+  if (IsZero(has_data)) {
     return Evaluate(0);
   }
   Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
   Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
 
-  auto make_access_ptr = [&](const Buffer &buf, PrimExpr offset,
-                             PrimExpr extent, int rw_mask) -> PrimExpr {
-    return Call(
-        DataType::Handle(), builtin::tvm_access_ptr(),
-        {TypeAnnotation(buf->dtype), buf->data, offset, extent, I(rw_mask)});
+  auto make_access_ptr = [&](const TensorVar &buf, PrimExpr offset,
+                             PrimExpr extent, int rw_mask) -> Expr {
+    PrimExpr bytes =
+        FloorDiv(offset * MakeConst(offset.ty(),
+                                    buf.dtype().bits() * buf.dtype().lanes()),
+                 MakeConst(offset.ty(), 8));
+    return Call(PtrType(buf.dtype(), buf.scope()), tirx::ptr_byte_offset_op(),
+                {buf.data(), bytes},
+                DictAttrs({{attr::kAccessExtent, extent},
+                           {attr::kAccessMask, I(rw_mask)}}));
   };
   auto region_elements = [&](const Array<Range> &ranges) {
     PrimExpr result = I(1);
@@ -439,19 +461,25 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   StridedLayout src_region =
       StridedLayout::FromBufferRange(op.src, src_range, elem_bits);
   StridedLayout dst_region = StridedLayout::FromBufferRange(
-      op.dst, dst_range, op.dst->dtype.bits() * op.dst->dtype.lanes());
+      op.dst, dst_range, op.dst.dtype().bits() * op.dst.dtype().lanes());
   PrimExpr src_region_elements = region_elements(src_range);
   PrimExpr dst_region_elements = region_elements(dst_range);
-  PrimExpr src_ptr =
-      make_access_ptr(op.src, src_region.offset, src_region_elements, 1);
-  PrimExpr dst_ptr =
-      make_access_ptr(op.dst, dst_region.offset, dst_region_elements, 2);
+  Expr src_ptr =
+      T.layout_map.count(op.src)
+          ? MakeAccessPtrFromRegion(
+                ascend::NativeTensorRegion(op.src, src_range), 1)
+          : make_access_ptr(op.src, src_region.offset, src_region_elements, 1);
+  Expr dst_ptr =
+      T.layout_map.count(op.dst)
+          ? MakeAccessPtrFromRegion(
+                ascend::NativeTensorRegion(op.dst, dst_range), 2)
+          : make_access_ptr(op.dst, dst_region.offset, dst_region_elements, 2);
 
   PrimExpr sid = I(0);
   PrimExpr zero = I(0);
   PrimExpr l2_cache_ctrl = I(op.L2CacheCtrlOr(0));
 
-  PrimExpr call;
+  Expr call = PrimExpr(0);
   if (dma_path == DMAPath::kGMToUB || dma_path == DMAPath::kUBToGM) {
     MTECopy2D plan = PlanMTECopy(src_region, dst_region, analyzer);
 
@@ -463,9 +491,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         AscendMTEBytesFromElements(plan.dst_stride_elems, elem_bits);
 
     PrimExpr plan_total_elems = plan.row_elems * plan.n_rows;
-    PrimExpr plan_src_ptr =
+    Expr plan_src_ptr =
         make_access_ptr(op.src, plan.src_offset, plan_total_elems, 1);
-    PrimExpr plan_dst_ptr =
+    Expr plan_dst_ptr =
         make_access_ptr(op.dst, plan.dst_offset, plan_total_elems, 2);
     PrimExpr plan_total_bytes = plan_row_bytes * plan.n_rows;
 
@@ -475,7 +503,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // ascend_set_copy_pad_value op.
     auto as_int_plan = [](PrimExpr e) -> int64_t {
       if (auto *imm = e.as<IntImmNode>()) {
-        return imm->value;
+        return imm->value.as<int64_t>().value();
       }
       return -1;
     };
@@ -515,17 +543,17 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         // and rows must land at their real stride to avoid clobbering each
         // other.
         call =
-            Call(DataType::Void(), ascend_copy_gm_to_ubuf(),
+            Call(PrimType::Void(), ascend_copy_gm_to_ubuf(),
                  {plan_dst_ptr, plan_src_ptr, sid, plan.n_rows, plan_row_bytes,
                   zero, I(right_pad_elems), I(1), l2_cache_ctrl,
                   plan_src_stride_bytes, plan_dst_stride_bytes});
       } else if (plan_single_row) {
-        call = Call(DataType::Void(), ascend_copy_gm_to_ubuf(),
+        call = Call(PrimType::Void(), ascend_copy_gm_to_ubuf(),
                     {plan_dst_ptr, plan_src_ptr, sid, I(1), plan_total_bytes,
                      zero, zero, zero, l2_cache_ctrl, plan_total_bytes,
                      plan_total_bytes});
       } else {
-        call = Call(DataType::Void(), ascend_copy_gm_to_ubuf(),
+        call = Call(PrimType::Void(), ascend_copy_gm_to_ubuf(),
                     {plan_dst_ptr, plan_src_ptr, sid, plan.n_rows,
                      plan_row_bytes, zero, zero, zero, l2_cache_ctrl,
                      plan_src_stride_bytes, plan_dst_stride_bytes});
@@ -535,11 +563,11 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       PrimExpr store_l2_cache_ctrl =
           I(op.L2CacheCtrlOr(kStoreDefaultL2CacheCtrl));
       if (plan_single_row) {
-        call = Call(DataType::Void(), ascend_copy_ubuf_to_gm(),
+        call = Call(PrimType::Void(), ascend_copy_ubuf_to_gm(),
                     {plan_dst_ptr, plan_src_ptr, sid, I(1), plan_total_bytes,
                      store_l2_cache_ctrl, plan_total_bytes, plan_total_bytes});
       } else {
-        call = Call(DataType::Void(), ascend_copy_ubuf_to_gm(),
+        call = Call(PrimType::Void(), ascend_copy_ubuf_to_gm(),
                     {plan_dst_ptr, plan_src_ptr, sid, plan.n_rows,
                      plan_row_bytes, store_l2_cache_ctrl, plan_dst_stride_bytes,
                      plan_src_stride_bytes});
@@ -553,7 +581,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     const Mode &src_inner = src_layout.modes[0];
     const Mode &src_row = src_layout.modes[1];
     PrimExpr src_row_stride_bytes = AscendMTEBytesFromElements(
-        cast(DataType::Int(32), src_row.stride), elem_bits);
+        Cast(PrimType::Int(32), src_row.stride), elem_bits);
 
     AscendFractalLayoutInfo dst_layout;
     bool has_dst_layout = false;
@@ -565,7 +593,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           << op.dst->name;
     }
     bool needs_transpose = op.transpose != 0;
-    PrimExpr dst_n_value;
+    PrimExpr dst_n_value = PrimExpr(0);
     if (has_dst_layout) {
       if (dst_layout.kind == AscendFractalKind::kSF) {
         needs_transpose = !needs_transpose;
@@ -602,15 +630,17 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
 
     PrimExpr physical_inner_elems = valid_inner_elems;
     std::string physical_dtype;
-    if (op.src->dtype.is_float4_e2m1fn() && op.dst->dtype.is_float4_e2m1fn()) {
+    if (op.src.dtype().MatchesCode(kDLFloat4_e2m1fn) &&
+        op.dst.dtype().MatchesCode(kDLFloat4_e2m1fn)) {
       // dav-3510 exposes GM->L1 ND2NZ for 8/16/32-bit storage types.  FP4 is
       // physically packed as two values per byte, so issue the DMA as int8
       // and express the inner dimension in packed-byte units.
       physical_inner_elems =
-          Float4StorageBytes(valid_inner_elems, op.src->dtype);
+          Float4StorageBytes(valid_inner_elems, op.src.dtype());
       physical_dtype = "int8_t";
-      src_ptr = NormalizeFloat4ByteViewPtr(op.src, src_ptr, src_region.offset,
-                                           src_region_elements);
+      src_ptr =
+          NormalizeFloat4ByteViewPtr(op.src, src_ptr, src_region.offset,
+                                     src_region_elements, T.bind_var_to_expr);
     }
 
     PrimExpr transpose_flag = I(needs_transpose ? 1 : 0);
@@ -619,11 +649,11 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     PrimExpr n_value = needs_transpose ? physical_inner_elems : valid_n_rows;
     PrimExpr d_value = needs_transpose ? valid_n_rows : physical_inner_elems;
     if (has_dst_layout && dst_layout.kind == AscendFractalKind::kSF &&
-        op.src->dtype.bits() == 8 && op.dst->dtype.bits() == 8) {
+        op.src.dtype().bits() == 8 && op.dst.dtype().bits() == 8) {
       physical_dtype = "uint16_t";
       n_value = n_value / I(2);
     }
-    call = Call(DataType::Void(), ascend_copy_gm_to_cbuf(),
+    call = Call(PrimType::Void(), ascend_copy_gm_to_cbuf(),
                 {dst_ptr, src_ptr, sid, src_row_stride_bytes, l2_cache_ctrl,
                  n_value, d_value, zero, zero, transpose_flag, dst_n_value,
                  StringImm(physical_dtype)});
@@ -643,21 +673,25 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     AscendFractalRegionInfo src_region;
     ICHECK(TryExtractAscendFractalRegion(src_layout.value(),
                                          regions.source->region, &src_region));
-    PrimExpr src_base_ptr = MakeAscendLeadingDimAccessPtr(regions.source, 1);
-    PrimExpr m_start = src_region.outer1->min;
-    PrimExpr k_start = src_region.outer0->min;
+    Expr src_base_ptr = MakeAscendLeadingDimAccessPtr(regions.source, 1);
+    PrimExpr m_start = src_region.outer1->begin;
+    PrimExpr k_start = src_region.outer0->begin;
     PrimExpr m_step = src_region.outer1->extent;
     PrimExpr k_step = src_region.outer0->extent;
     PrimExpr src_stride = src_info.outer1;
     PrimExpr dst_stride = regions.pitch;
     bool needs_transpose =
         (op.transpose != 0) ^ (src_info.c0_axis != dst_info.c0_axis);
-    Call ptr = Downcast<Call>(dst_ptr);
-    ptr.CopyOnWrite()->annotations.Set(attr::kL0AccessPitch, dst_stride);
+    Call ptr =
+        MakeAccessPtrFromRegion(regions.destination, 2).as_or_throw<Call>();
+    auto attributes =
+        ptr->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>()->dict;
+    attributes.Set(attr::kL0AccessPitch, dst_stride);
+    ptr.CopyOnWrite()->attrs = DictAttrs(attributes);
     dst_ptr = ptr;
     auto intrinsic = dma_path == DMAPath::kL1ToL0A ? ascend_load_cbuf_to_ca()
                                                    : ascend_load_cbuf_to_cb();
-    call = Call(DataType::Void(), intrinsic,
+    call = Call(PrimType::Void(), intrinsic,
                 {dst_ptr, src_base_ptr, m_start, k_start, m_step, k_step,
                  src_stride, dst_stride, I(needs_transpose ? 1 : 0)});
   } else if (dma_path == DMAPath::kL0CToUB) {
@@ -676,13 +710,13 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // rows still follow the UB buffer's physical row pitch.  These coincide
     // for a full tile but differ for a sliced L0C->UB tail copy.  DUAL_N also
     // has a destination pitch different from the L0C source width.
-    PrimExpr dst_row_stride = cast(DataType::Int(32), dst_row.stride);
+    PrimExpr dst_row_stride = Cast(PrimType::Int(32), dst_row.stride);
 
     CheckCompactL0Region(op.src, src_range, analyzer,
                          "Ascend L0C->UB compact source");
     Optional<Layout> compact_src_layout =
         FindLayoutForBuffer(T.layout_map, op.src);
-    ICHECK(compact_src_layout.defined() &&
+    ICHECK(compact_src_layout.has_value() &&
            TryExtractAscendFractalLayout(compact_src_layout.value(), op.src,
                                          &info))
         << "L0C->UB copy expects a canonical Ascend L0C layout on source "
@@ -692,15 +726,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
-    if (op.l0_pitch.defined()) {
+    if (op.l0_pitch.has_value()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
-      With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-      TVM_FFI_CHECK(
-          analyzer->CanProve(compact_src_region.outer1->extent <=
-                             compact_pitch) &&
-              analyzer->CanProve(compact_pitch <= info.outer1,
-                                 arith::ProofStrength::kSymbolicBound),
-          ValueError)
+      With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
+                                       compact_pitch) &&
+                        analyzer->CanProve(compact_pitch <= info.outer1,
+                                           sym::ProofStrength::kSymbolicBound),
+                    ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -722,9 +755,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       copy_rows = dst_row.size;
     }
     PrimExpr dual_dst_ctl_val = I(dual_dst_ctl);
-    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
-    PrimExpr sub_blockid_val = cast(DataType::Int(32), op.sub_blockid);
-    call = Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
+    PrimExpr unit_flag_ctl_val = Cast(PrimType::Int(32), op.unit_flag_ctl);
+    PrimExpr sub_blockid_val = Cast(PrimType::Int(32), op.sub_blockid);
+    call = Call(PrimType::Void(), ascend_copy_matrix_cc_to_ub(),
                 {dst_ptr,
                  src_ptr,
                  sid,
@@ -736,12 +769,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                  sub_blockid_val,   // sub_blockid
                  zero,              // clip_relu_pre
                  unit_flag_ctl_val, // unit_flag_ctl
-                 I(GetCCQuantPre(op.src->dtype, op.dst->dtype)), // quant_pre
-                 zero,                                           // relu_pre
-                 zero,                                           // split_en
-                 I(1),                                           // NZ2ND_en
-                 zero,                                           // quant_post
-                 zero,                                           // relu_post
+                 I(GetCCQuantPre(op.src.dtype(), op.dst.dtype())), // quant_pre
+                 zero,                                             // relu_pre
+                 zero,                                             // split_en
+                 I(1),                                             // NZ2ND_en
+                 zero,                                             // quant_post
+                 zero,                                             // relu_post
                  zero,   // clip_relu_post
                  zero,   // loop_enhance_en
                  zero,   // eltwise_op
@@ -757,25 +790,25 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
            "frontend (tilelang/language/copy_op.py); it should never reach "
            "tl.tileop.copy lowering. This indicates the Python bypass was not "
            "taken; check the call site.";
-    ICHECK_EQ(op.src->dtype.bits(), op.dst->dtype.bits())
+    ICHECK_EQ(op.src.dtype().bits(), op.dst.dtype().bits())
         << "Ascend raw UB->L1 copy cannot convert element widths, got source "
-        << op.src->dtype << " and destination " << op.dst->dtype << ".";
+        << op.src.dtype() << " and destination " << op.dst.dtype() << ".";
     StridedLayout src_layout =
         StridedLayout::FromBufferRange(op.src, src_range, elem_bits)
             .Coalesce(analyzer);
     StridedLayout dst_layout =
-        StridedLayout::FromBufferRange(op.dst, dst_range, op.dst->dtype.bits())
+        StridedLayout::FromBufferRange(op.dst, dst_range, op.dst.dtype().bits())
             .Coalesce(analyzer);
     ICHECK_EQ(src_layout.modes.size(), 1U)
         << "Ascend raw UB->L1 copy requires a contiguous source region; got "
         << src_layout.modes.size() << " modes after coalescing for buffer "
-        << op.src->name << " shape " << op.src->shape << " ranges " << src_range
-        << ". Strided UB->L1 copies are not yet supported.";
+        << op.src->name << " shape " << op.src.shape() << " ranges "
+        << src_range << ". Strided UB->L1 copies are not yet supported.";
     ICHECK_EQ(dst_layout.modes.size(), 1U)
         << "Ascend raw UB->L1 copy requires a contiguous destination region; "
         << "got " << dst_layout.modes.size()
         << " modes after coalescing for buffer " << op.dst->name << " shape "
-        << op.dst->shape << " ranges " << dst_range
+        << op.dst.shape() << " ranges " << dst_range
         << ". Strided UB->L1 copies are not yet supported.";
     bool element_count_mismatch = analyzer->CanProve(src_layout.modes[0].size !=
                                                      dst_layout.modes[0].size);
@@ -794,7 +827,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << raw_total_bytes << " bytes from source buffer " << op.src->name
         << " ranges " << src_range << ".";
     PrimExpr n_burst_val = raw_total_bytes / I(32);
-    call = Call(DataType::Void(), ascend_copy_ubuf_to_cbuf(),
+    call = Call(PrimType::Void(), ascend_copy_ubuf_to_cbuf(),
                 {dst_ptr, src_ptr, zero, n_burst_val, I(1), zero, zero});
   } else if (dma_path == DMAPath::kL0CToGM) {
     StridedLayout src_layout = NormalizeTrailingMTE2DLayout(
@@ -813,7 +846,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                          "Ascend L0C->GM compact source");
     Optional<Layout> compact_src_layout =
         FindLayoutForBuffer(T.layout_map, op.src);
-    ICHECK(compact_src_layout.defined() &&
+    ICHECK(compact_src_layout.has_value() &&
            TryExtractAscendFractalLayout(compact_src_layout.value(), op.src,
                                          &info))
         << "L0C->GM copy expects a canonical Ascend L0C layout on source "
@@ -823,15 +856,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << "Failed to map L0C->GM source region through layout for buffer "
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
-    if (op.l0_pitch.defined()) {
+    if (op.l0_pitch.has_value()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
-      With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
-      TVM_FFI_CHECK(
-          analyzer->CanProve(compact_src_region.outer1->extent <=
-                             compact_pitch) &&
-              analyzer->CanProve(compact_pitch <= info.outer1,
-                                 arith::ProofStrength::kSymbolicBound),
-          ValueError)
+      With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
+                                       compact_pitch) &&
+                        analyzer->CanProve(compact_pitch <= info.outer1,
+                                           sym::ProofStrength::kSymbolicBound),
+                    ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -847,42 +879,42 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
            "got source "
         << src_row.size << "x" << src_inner.size << " and destination "
         << dst_row.size << "x" << dst_inner.size << ".";
-    PrimExpr dst_row_stride = cast(DataType::Int(32), dst_row.stride);
-    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
-    call =
-        Call(DataType::Void(), ascend_copy_matrix_cc_to_gm(),
-             {dst_ptr,
-              src_ptr,
-              sid,
-              dst_inner.size,
-              dst_row.size,
-              dst_row_stride,
-              loop_src_stride,
-              I(op.L2CacheCtrlOr(0)), // [7] l2_cache_ctl
-              zero,                   // [8] clip_relu_pre
-              unit_flag_ctl_val,      // [9] unit_flag_ctl
-              I(GetCCQuantPre(op.src->dtype, op.dst->dtype)), // [10] quant_pre
-              zero,                                           // [11] relu_pre
-              zero,                                           // [12] split_en
-              I(1),                                           // [13] NZ2ND_en
-              zero,                                           // [14] quant_post
-              zero,                                           // [15] relu_post
-              zero,   // [16] clip_relu_post
-              zero,   // [17] loop_enhance_en
-              zero,   // [18] eltwise_op
-              zero,   // [19] eltwise_antq_en
-              zero,   // [20] loop_enhance_merge_en
-              zero,   // [21] C0_pad_en
-              zero,   // [22] wino_post_en
-              zero,   // [23] broadcast_en
-              zero}); // [24] NZ2DN_en
+    PrimExpr dst_row_stride = Cast(PrimType::Int(32), dst_row.stride);
+    PrimExpr unit_flag_ctl_val = Cast(PrimType::Int(32), op.unit_flag_ctl);
+    call = Call(
+        PrimType::Void(), ascend_copy_matrix_cc_to_gm(),
+        {dst_ptr,
+         src_ptr,
+         sid,
+         dst_inner.size,
+         dst_row.size,
+         dst_row_stride,
+         loop_src_stride,
+         I(op.L2CacheCtrlOr(0)),                           // [7] l2_cache_ctl
+         zero,                                             // [8] clip_relu_pre
+         unit_flag_ctl_val,                                // [9] unit_flag_ctl
+         I(GetCCQuantPre(op.src.dtype(), op.dst.dtype())), // [10] quant_pre
+         zero,                                             // [11] relu_pre
+         zero,                                             // [12] split_en
+         I(1),                                             // [13] NZ2ND_en
+         zero,                                             // [14] quant_post
+         zero,                                             // [15] relu_post
+         zero,   // [16] clip_relu_post
+         zero,   // [17] loop_enhance_en
+         zero,   // [18] eltwise_op
+         zero,   // [19] eltwise_antq_en
+         zero,   // [20] loop_enhance_merge_en
+         zero,   // [21] C0_pad_en
+         zero,   // [22] wino_post_en
+         zero,   // [23] broadcast_en
+         zero}); // [24] NZ2DN_en
   } else {
     LOG(FATAL) << "Unknown Ascend DMA path";
   }
 
   Stmt copy_stmt = Evaluate(call);
-  if (!is_one(has_data) && !analyzer->CanProve(has_data)) {
-    copy_stmt = IfThenElse(has_data, copy_stmt);
+  if (!IsOne(has_data) && !analyzer->CanProve(has_data)) {
+    copy_stmt = If(has_data, SeqStmt(copy_stmt));
   }
   return copy_stmt;
 }
@@ -890,14 +922,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
 // SF has separate storage but derives its address from the bound L0 tile.
 // All leading axes are ordinary tile selectors, including materialized rings.
 Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
-                   arith::Analyzer *analyzer, bool is_l0a) {
-  auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
-  const Buffer &sf_buf = op.src;
-  const Buffer &handle = op.dst;
+                   sym::Analyzer analyzer, bool is_l0a) {
+  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  const TensorVar &sf_buf = op.src;
+  const TensorVar &handle = op.dst;
 
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
-  if (is_zero(has_data)) {
+  if (IsZero(has_data)) {
     return Evaluate(0);
   }
 
@@ -906,10 +938,10 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
   GetL1ToL0SFSourceRegion(op, T.layout_map, analyzer);
   Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
   Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
-  ICHECK_EQ(sf_buf->dtype.bits(), handle->dtype.bits())
+  ICHECK_EQ(sf_buf.dtype().bits(), handle.dtype().bits())
       << "L0 SF copy requires matching source and destination scale widths";
-  ICHECK_EQ(sf_buf->dtype.lanes(), 1);
-  ICHECK_EQ(handle->dtype.lanes(), 1);
+  ICHECK_EQ(sf_buf.dtype().lanes(), 1);
+  ICHECK_EQ(handle.dtype().lanes(), 1);
   ICHECK_EQ(op.transpose, 0) << "L0 SF copy does not support transpose";
   size_t ndim = dst_range.size();
   ICHECK_GE(ndim, 2) << "Ascend MX scale-factor copy destination " << handle
@@ -917,16 +949,16 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
   CheckCompactL0Region(handle, dst_range, analyzer,
                        "Ascend MX scale-factor copy");
 
-  ICHECK(op.mx_sf_data.defined())
+  ICHECK(op.mx_sf_data.has_value())
       << "L0 SF copy destination " << handle->name
       << " has no allocation binding; use alloc_l0a_sf/alloc_l0b_sf";
-  const Buffer &data_buf = op.mx_sf_data.value();
-  ICHECK_EQ(data_buf->shape.size(), ndim)
+  const TensorVar &data_buf = op.mx_sf_data.value();
+  ICHECK_EQ(data_buf.shape().size(), ndim)
       << "L0 SF and bound data allocation must preserve the same leading axes";
   AscendFractalLayoutInfo data_info;
   Optional<Layout> data_layout = FindLayoutForBuffer(T.layout_map, data_buf);
   ICHECK(
-      data_layout.defined() &&
+      data_layout.has_value() &&
       TryExtractAscendFractalLayout(data_layout.value(), data_buf, &data_info))
       << "L0 SF's bound data buffer requires a fractal layout";
   Array<Range> data_ranges;
@@ -936,23 +968,23 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
     data_ranges.push_back(dst_range[i]);
   }
   PrimExpr mn = dst_range[ndim - 2]->extent;
-  PrimExpr k = dst_range[ndim - 1]->extent * I(4 * handle->dtype.bits());
+  PrimExpr k = dst_range[ndim - 1]->extent * I(4 * handle.dtype().bits());
   data_ranges.push_back(Range::FromMinExtent(
       I(0), data_info.c0_axis == LogicalAxis::kCol ? mn : k));
   data_ranges.push_back(Range::FromMinExtent(
       I(0), data_info.c0_axis == LogicalAxis::kCol ? k : mn));
-  PrimExpr dst_ptr =
-      MakeAscendLeadingDimAccessPtr(BufferRegion(data_buf, data_ranges), 2);
+  Expr dst_ptr = MakeAscendLeadingDimAccessPtr(
+      ascend::NativeTensorRegion(data_buf, data_ranges), 2);
 
   NormalizeTrailingMTE2DLayout(sf_buf, src_range, analyzer,
                                "Ascend MX scale-factor source");
-  PrimExpr sf_ptr =
-      MakeAscendLeadingDimAccessPtr(BufferRegion(sf_buf, src_range), 1);
+  Expr sf_ptr = MakeAscendLeadingDimAccessPtr(
+      ascend::NativeTensorRegion(sf_buf, src_range), 1);
 
   AscendFractalLayoutInfo sf_info;
   Optional<Layout> sf_layout = FindLayoutForBuffer(T.layout_map, sf_buf);
   bool have_sf_layout =
-      sf_layout.defined() &&
+      sf_layout.has_value() &&
       TryExtractAscendFractalLayout(sf_layout.value(), sf_buf, &sf_info) &&
       sf_info.kind == AscendFractalKind::kSF;
 
@@ -964,49 +996,49 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
       << "Failed to map MX scale-factor source region for " << sf_buf->name;
   // Source pitch belongs to the L1 allocation; destination pitch belongs to
   // this compact tile. SF_K packs pairs of E8M0 bytes on its C0 axis.
-  PrimExpr sf_m_start = sf_region.outer0->min;
-  PrimExpr sf_k_start = sf_region.outer1->min;
+  PrimExpr sf_m_start = sf_region.outer0->begin;
+  PrimExpr sf_k_start = sf_region.outer1->begin;
   PrimExpr sf_m_step = sf_region.outer0->extent;
   PrimExpr sf_k_step = sf_region.outer1->extent;
   PrimExpr sf_src_stride = sf_info.outer1;
   PrimExpr sf_dst_stride =
       FloorDiv(dst_range[ndim - 1]->extent + sf_info.c0 - 1, sf_info.c0);
   {
-    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
     size_t src_ndim = src_range.size();
     ICHECK(analyzer->CanProveEqual(
-               FloorMod(src_range[src_ndim - 2]->min, I(16)), 0) &&
+               FloorMod(src_range[src_ndim - 2]->begin, I(16)), 0) &&
            analyzer->CanProveEqual(
-               FloorMod(src_range[src_ndim - 1]->min, sf_info.c0), 0))
+               FloorMod(src_range[src_ndim - 1]->begin, sf_info.c0), 0))
         << "L0 SF source origin must align to 16 MN rows and a scale pair";
     ICHECK(analyzer->CanProveEqual(sf_m_step, FloorDiv(mn + 15, 16)) &&
            analyzer->CanProveEqual(sf_k_step, sf_dst_stride))
         << "L0 SF source and compact destination region must cover the same "
            "physical scale groups";
     for (size_t i = ndim - 2; i < ndim; ++i) {
-      ICHECK(analyzer->CanProve(data_ranges[i]->extent <= data_buf->shape[i]))
+      ICHECK(analyzer->CanProve(data_ranges[i]->extent <= data_buf.shape()[i]))
           << "L0 SF copy must fit its bound data allocation " << data_buf->name;
     }
   }
 
-  Stmt stmt = Evaluate(Call(DataType::Void(),
+  Stmt stmt = Evaluate(Call(PrimType::Void(),
                             is_l0a ? ascend_load_ca_sf() : ascend_load_cb_sf(),
                             {dst_ptr, sf_ptr, sf_m_start, sf_k_start, sf_m_step,
                              sf_k_step, sf_src_stride, sf_dst_stride}));
-  if (!is_one(has_data) && !analyzer->CanProve(has_data)) {
-    stmt = IfThenElse(has_data, stmt);
+  if (!IsOne(has_data) && !analyzer->CanProve(has_data)) {
+    stmt = If(has_data, SeqStmt(stmt));
   }
   return stmt;
 }
 
 Stmt LowerAscendNormalCopy(const CopyNode &op, const LowerArgs &T,
-                           arith::Analyzer *analyzer) {
+                           sym::Analyzer analyzer) {
   if (!IsInsideSimtVF(T)) {
     return LowerNormalCopy(op, T, analyzer);
   }
 
   auto simt_loop = op.MakeSIMTLoop(analyzer);
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto fused_loop = ParallelLoopFuser::Fuse(simt_loop).as_or_throw<For>();
   auto par_op = ParallelOp(fused_loop);
 
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
@@ -1033,16 +1065,16 @@ struct AscendCopyImpl {
   static LayoutMap InferLayout(const AscendCopyNode &op,
                                const LayoutInferArgs &T, InferLevel level) {
     if (IsDMACopy(op)) {
-      Map<Buffer, Layout> result_map;
+      Map<TensorVar, Layout> result_map;
       PrimExpr thread_extent = T.thread_bounds->extent;
       for (const auto &range : op.src_range) {
-        CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
+        CollectFragmentLayouts(range->begin, T.bind_var_to_expr, T.layout_map,
                                thread_extent, T.thread_bounds, result_map);
         CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
                                thread_extent, T.thread_bounds, result_map);
       }
       for (const auto &range : op.dst_range) {
-        CollectFragmentLayouts(range->min, T.bind_var_to_expr, T.layout_map,
+        CollectFragmentLayouts(range->begin, T.bind_var_to_expr, T.layout_map,
                                thread_extent, T.thread_bounds, result_map);
         CollectFragmentLayouts(range->extent, T.bind_var_to_expr, T.layout_map,
                                thread_extent, T.thread_bounds, result_map);
@@ -1058,7 +1090,7 @@ struct AscendCopyImpl {
 
       DMAPath dma_path = GetDMAPath(op.src, op.dst);
       if (dma_path == DMAPath::kGMToL1 && level == InferLevel::kFree &&
-          !FindLayoutForBuffer(T.layout_map, op.dst).defined()) {
+          !FindLayoutForBuffer(T.layout_map, op.dst).has_value()) {
         // A standalone GM->L1 copy has no downstream L0/GEMM consumer to
         // anchor its layout. Preserve the canonical legacy K-col NZ layout as
         // a free-mode fallback.
@@ -1067,10 +1099,10 @@ struct AscendCopyImpl {
                  dma_path == DMAPath::kL1ToL0B) {
         Optional<Layout> existing_src_layout =
             FindLayoutForBuffer(T.layout_map, op.src);
-        Layout src_layout = existing_src_layout.defined()
+        Layout src_layout = existing_src_layout.has_value()
                                 ? existing_src_layout.value()
                                 : MakeAscendMajorKLayout(op.src);
-        if (!existing_src_layout.defined()) {
+        if (!existing_src_layout.has_value()) {
           result_map.Set(op.src, src_layout);
         }
         AscendFractalLayoutInfo src_info;
@@ -1079,7 +1111,7 @@ struct AscendCopyImpl {
             << op.src->name;
 
         Optional<Layout> dst_layout = FindLayoutForBuffer(T.layout_map, op.dst);
-        if (!dst_layout.defined() && level == InferLevel::kFree) {
+        if (!dst_layout.has_value() && level == InferLevel::kFree) {
           // A standalone L1->L0 copy has no GEMM consumer to anchor the L0
           // major. Preserve the legacy default by assigning MajorK only after
           // stricter inference levels have had a chance to contribute it.
@@ -1100,7 +1132,7 @@ struct AscendCopyImpl {
   }
 
   static Stmt Lower(const AscendCopyNode &op, const LowerArgs &T,
-                    arith::Analyzer *analyzer) {
+                    sym::Analyzer analyzer) {
     ICHECK(!IsL0SFBuffer(op.src))
         << "L0 SF handles can only be read by gemm_blockscaled";
     if (IsL0SFBuffer(op.dst)) {
@@ -1108,7 +1140,7 @@ struct AscendCopyImpl {
       ICHECK(dma_path == DMAPath::kL1ToL0ASF || dma_path == DMAPath::kL1ToL0BSF)
           << "Ascend MX scale-factor copy expects an L1 source and an "
              "L0A/L0B SF handle destination, got "
-          << op.src.scope() << " -> " << op.dst.scope();
+          << op.src.scope().name() << " -> " << op.dst.scope().name();
       return LowerMxSfLoad(op, T, analyzer, dma_path == DMAPath::kL1ToL0ASF);
     }
     if (!IsInsideSimtVF(T) && !IsLocalBuffer(op.src) &&
@@ -1134,9 +1166,11 @@ namespace {
 void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   auto int_or = [node](const char *key, int default_value) {
     if (auto val = node->annotations.Get(key)) {
-      if (const auto *int_val = val->as<IntImmNode>()) {
-        return static_cast<int>(int_val->value);
-      }
+      auto integer = GetIntAnnotation(*val);
+      TVM_FFI_CHECK(integer && *integer >= INT32_MIN && *integer <= INT32_MAX,
+                    ValueError)
+          << "Ascend copy " << key << " must be a constant int32";
+      return static_cast<int>(*integer);
     }
     return default_value;
   };
@@ -1147,24 +1181,25 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   node->mx_sf_data = std::nullopt;
   node->l2_cache_ctrl = std::nullopt;
   if (auto val = node->annotations.Get("l2_cache_ctrl")) {
-    if (const auto *int_val = val->as<IntImmNode>()) {
-      node->l2_cache_ctrl = Integer(int_val->value);
-    }
+    auto integer = GetIntAnnotation(*val);
+    TVM_FFI_CHECK(integer.has_value(), ValueError)
+        << "l2_cache_ctrl must be a constant integer";
+    node->l2_cache_ctrl = *integer;
   }
-  node->unit_flag_ctl = IntImm(DataType::Int(32), 0);
+  node->unit_flag_ctl = IntImm(PrimType::Int(32), 0);
   if (auto val = node->annotations.Get("unit_flag_ctrl")) {
-    node->unit_flag_ctl = Downcast<PrimExpr>(val.value());
+    node->unit_flag_ctl = val.value().cast<PrimExpr>();
   }
-  node->sub_blockid = IntImm(DataType::Int(32), 0);
+  node->sub_blockid = IntImm(PrimType::Int(32), 0);
   if (auto val = node->annotations.Get("sub_blockid")) {
-    node->sub_blockid = Downcast<PrimExpr>(val.value());
+    node->sub_blockid = val.value().cast<PrimExpr>();
   }
   node->l0_pitch = std::nullopt;
   if (auto val = node->annotations.Get("l0_pitch")) {
-    node->l0_pitch = Downcast<PrimExpr>(val.value());
-    TVM_FFI_CHECK(node->l0_pitch.value().dtype().is_scalar() &&
-                      (node->l0_pitch.value().dtype().is_int() ||
-                       node->l0_pitch.value().dtype().is_uint()),
+    node->l0_pitch = val.value().cast<PrimExpr>();
+    TVM_FFI_CHECK(node->l0_pitch.value().ty().IsScalar() &&
+                      (node->l0_pitch.value().ty().MatchesCode(kDLInt) ||
+                       node->l0_pitch.value().ty().MatchesCode(kDLUInt)),
                   ValueError)
         << "Ascend copy l0_pitch must be a scalar integer";
     auto path = ascend::GetDMAPath(node->src, node->dst);
@@ -1178,7 +1213,7 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   }
   node->pad_value = std::nullopt;
   if (auto val = node->annotations.Get("pad_value")) {
-    node->pad_value = Downcast<PrimExpr>(val.value());
+    node->pad_value = val.value().cast<PrimExpr>();
   }
 }
 
@@ -1187,22 +1222,21 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
 TileOperator
 ApplyAscendCopyBlockAnnotations(TileOperator tile_op,
                                 BlockAnnotations block_annotations) {
-  AscendCopy copy = Downcast<AscendCopy>(tile_op);
+  AscendCopy copy = (tile_op).as_or_throw<AscendCopy>();
 
   // Safe because this handler is invoked immediately after TLOpBuilder creates
   // a fresh AscendCopyNode, before the node escapes ParseOperator.
   auto *node = const_cast<AscendCopyNode *>(copy.get());
   ICHECK(node != nullptr);
 
-  node->src_oob_safe_value = PrimExpr();
+  node->src_oob_safe_value = std::nullopt;
   auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
   if (!safe_value_map_obj) {
     return copy;
   }
 
-  auto safe_value_map =
-      Downcast<Map<Var, PrimExpr>>(safe_value_map_obj.value());
-  auto it = safe_value_map.find(node->src->data);
+  auto safe_value_map = safe_value_map_obj.value().cast<Map<Var, PrimExpr>>();
+  auto it = safe_value_map.find(node->src);
   if (it != safe_value_map.end()) {
     node->src_oob_safe_value = (*it).second;
   }
@@ -1228,7 +1262,7 @@ LayoutMap BridgeAscendCopyInferLayout(const CopyNode &op,
 }
 
 Stmt BridgeAscendCopyLower(const CopyNode &op, const LowerArgs &lower_args,
-                           arith::Analyzer *analyzer) {
+                           sym::Analyzer analyzer) {
   if (op.IsInstance<AscendCopyNode>()) {
     return ascend::AscendCopyImpl::Lower(
         static_cast<const AscendCopyNode &>(op), lower_args, analyzer);
@@ -1255,13 +1289,13 @@ const bool ascend_copy_registered = RegisterAscendCopy();
 // Constructs an AscendCopy operator node from tl.tileop.ascend_copy call
 // arguments and annotations.
 // args[0]: source region, args[1]: destination region.
-AscendCopy::AscendCopy(Array<PrimExpr> args,
-                       Map<String, ObjectRef> annotations) {
-  ObjectPtr<AscendCopyNode> node = make_object<AscendCopyNode>();
+AscendCopy::AscendCopy(Array<Expr> args, BlockAnnotations annotations) {
+  ObjectPtr<AscendCopyNode> node =
+      make_object<AscendCopyNode>(ffi::UnsafeInit{});
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
-  node->src = src_access.region->buffer;
-  node->dst = dst_access.region->buffer;
+  node->src = src_access.region->source.as_or_throw<TensorVar>();
+  node->dst = dst_access.region->source.as_or_throw<TensorVar>();
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
@@ -1269,10 +1303,10 @@ AscendCopy::AscendCopy(Array<PrimExpr> args,
   if (auto dst_block = node->annotations.Get("dst_block")) {
     if (auto int_imm = dst_block->as<IntImmNode>()) {
       if (int_imm->value != -1) {
-        node->dst_block = Integer(int_imm->value);
+        node->dst_block = GetRef<IntImm>(int_imm);
       }
     } else {
-      node->dst_block = Downcast<PrimExpr>(dst_block.value());
+      node->dst_block = dst_block.value().cast<PrimExpr>();
     }
   }
   DecodeAscendCopyAnnotations(node.get());
@@ -1294,7 +1328,7 @@ AscendCopy::AscendCopy(const CopyNode &base) {
 TileOperator AscendCopyNode::Clone() const {
   auto op = make_object<AscendCopyNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = par_op_->Clone().as_or_throw<ParallelOp>();
   }
   return AscendCopy(op);
 }
@@ -1305,27 +1339,27 @@ LayoutMap AscendCopyNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 Stmt AscendCopyNode::Lower(const LowerArgs &lower_args,
-                           arith::Analyzer *analyzer) const {
+                           sym::Analyzer analyzer) const {
   return ascend::AscendCopyImpl::Lower(*this, lower_args, analyzer);
 }
 
 L0SFBindings CollectL0SFBindings(const Stmt &body) {
   L0SFBindings bindings, data_to_sf;
   PostOrderVisit(body, [&](const ObjectRef &obj) {
-    const auto *block = obj.as<SBlockNode>();
+    const auto *block = obj.as<RegionStmtNode>();
     if (!block)
       return;
-    if (auto annotation = block->annotations.Get(kL0SFBindings)) {
+    if (auto annotation = block->attrs->dict.Get(kL0SFBindings)) {
       for (const auto &[sf, data] : annotation.value().cast<L0SFBindings>()) {
         if (auto existing = bindings.Get(sf)) {
           ICHECK(existing.value().same_as(data))
-              << "Conflicting allocation bindings for L0 SF " << sf->name_hint;
+              << "Conflicting allocation bindings for L0 SF " << sf->name;
         }
         ICHECK(!sf.same_as(data))
             << "L0 SF and data must have distinct storage";
         if (auto existing = data_to_sf.Get(data)) {
           ICHECK(existing.value().same_as(sf))
-              << "L0 data " << data->name_hint
+              << "L0 data " << data->name
               << " has multiple SF handles; reuse the handle returned by "
                  "alloc_l0a_sf/alloc_l0b_sf";
         }
@@ -1348,12 +1382,13 @@ bool IsAscendCopyCall(const CallNode *call) {
 // tl.tileop.copy; the Ascend lowering hints ride in annotations and are
 // decoded into typed AscendCopyNode fields at parse time.
 // - Marked as opaque since it has side effects (memory writes)
-TIR_REGISTER_TL_TILE_OP(AscendCopy, ascend_copy)
-    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
-                                            ApplyAscendCopyBlockAnnotations)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(AscendCopy, ascend_copy, 2)
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("tl.tileop.ascend_copy")
+      .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                              ApplyAscendCopyBlockAnnotations);
+}
 
 TVM_FFI_STATIC_INIT_BLOCK() { AscendCopyNode::RegisterReflection(); }
 

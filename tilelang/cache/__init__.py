@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Literal
-from tvm.target import Target as TVMTarget
-from tvm.tirx import PrimFunc
+from tvm_tirx.target import Target as TVMTarget
+from tilelang._compat.tirx import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
 from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache

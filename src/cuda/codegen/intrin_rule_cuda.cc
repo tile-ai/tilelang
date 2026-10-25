@@ -1,173 +1,72 @@
-/*!
- * \file intrin_rule_cuda.cc
- * \brief CUDA intrinsic rules.
- */
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/attr.h>
 
-#include "target/intrin_rule.h"
+namespace tvm::tl::cuda {
+namespace {
 
-namespace tvm {
-namespace codegen {
-namespace intrin {
-// Add float suffix to the intrinsics, CUDA fast math.
-using tirx::FLowerIntrinsic;
-using namespace ffi;
-
-struct CUDAMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float()) {
-      switch (t.bits()) {
-      case 64:
-        return name;
-      case 32:
-        return name + 'f';
-      case 16: {
-        if (name == "fabs") {
-          return "__habs";
-        } else if (name == "round") {
-          return "hrint";
-        } else {
-          return "h" + name;
-        }
-      }
-      default:
-        return "";
-      }
-    } else if (t.is_bfloat16()) {
-      if (name == "fabs") {
-        return "__habs";
-      } else if (name == "round") {
-        return "hrint";
-      } else {
-        return "h" + name;
-      }
-    } else if (t.is_int() || t.is_uint()) {
-      switch (t.bits()) {
-      case 32:
-        return "__" + name;
-      case 64:
-        return "__" + name + "ll";
-      default:
-        return "";
-      }
-    }
-    return "";
-  }
-};
-
-struct CUDAFastMath : public CUDAMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float() && t.bits() == 32) {
-      return "__" + name + 'f';
-    } else {
-      return CUDAMath::operator()(t, name);
-    }
-    return "";
-  }
-};
-
-struct CUDAFastMathTan : public CUDAMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float()) {
-      switch (t.bits()) {
-      case 64:
-        return name;
-      // `__tanf` seems to produce some values too deviant from numpy tan
-      // version. So, let's use just `tanf` instead.
-      case 32:
-        return name + 'f';
-      case 16:
-        return 'h' + name;
-      default:
-        return "";
-      }
-    }
-    return "";
-  }
-};
-
-static PrimExpr DispatchCUDAPopcount(const PrimExpr &e) {
-  const auto *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 1U);
-  DataType dtype = call->args[0].dtype();
-  const int bits = dtype.bits();
-  if ((!dtype.is_int() && !dtype.is_uint()) ||
-      (bits != 8 && bits != 16 && bits != 32 && bits != 64)) {
-    return e;
-  }
-
-  // Preserve the original bit width before widening: int8(-1) has 8 set bits.
-  PrimExpr arg = cast(DataType::UInt(bits, dtype.lanes()), call->args[0]);
-  if (bits < 32) {
-    arg = cast(DataType::UInt(32, dtype.lanes()), arg);
-  }
-  PrimExpr count = Call(
-      DataType::Int(32, dtype.lanes()), builtin::call_pure_extern(),
-      {StringImm(bits == 64 ? "__popcll" : "__popc"), arg}, call->annotations);
-  return cast(call->dtype, count);
+PrimExpr LowerPopcount(PrimExpr expression) {
+  const auto *call = expression.as<CallNode>();
+  TVM_FFI_ICHECK(call && call->args.size() == 1);
+  PrimExpr argument = call->args[0].as_or_throw<PrimExpr>();
+  PrimType type = argument.ty();
+  int bits = type.bits();
+  if (!type.MatchesCode(kDLInt, kDLUInt) ||
+      (bits != 8 && bits != 16 && bits != 32 && bits != 64))
+    return expression;
+  argument = prim::cast(argument, PrimType::UInt(bits, type.lanes()));
+  if (bits < 32)
+    argument = prim::cast(argument, PrimType::UInt(32, type.lanes()));
+  PrimExpr count =
+      Call(PrimType::Int(32, type.lanes()), tirx::call_pure_extern_op(),
+           {StringImm(bits == 64 ? "__popcll" : "__popc"), argument},
+           call->attrs, {}, call->loc)
+          .as_or_throw<PrimExpr>();
+  return prim::cast(count, expression.ty());
 }
 
-struct CUDAWarpIntrinsic {
-  const Op operator()(DataType t, const Op &orig_op) const {
-    if (orig_op.same_as(builtin::tvm_warp_shuffle())) {
-      return Op::Get("tirx.cuda.__shfl_sync");
-    } else if (orig_op.same_as(builtin::tvm_warp_shuffle_up())) {
-      return Op::Get("tirx.cuda.__shfl_up_sync");
-    } else {
-      ICHECK(orig_op.same_as(builtin::tvm_warp_shuffle_down()));
-      return Op::Get("tirx.cuda.__shfl_down_sync");
-    }
-  }
-};
-
-static PrimExpr DispatchCUDAWarpActiveMask(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  return Call(call->dtype, Op::Get("tirx.cuda.__activemask"), call->args,
-              call->annotations);
+PrimExpr LowerIsFinite(PrimExpr expression) {
+  const auto *call = expression.as<CallNode>();
+  TVM_FFI_ICHECK(call && call->args.size() == 1);
+  PrimType type = call->args[0].as_or_throw<PrimExpr>().ty();
+  if (!type.MatchesCode(kDLFloat) || (type.bits() != 32 && type.bits() != 64))
+    return expression;
+  return Call(expression.ty(), tirx::call_pure_extern_op(),
+              {StringImm("isfinite"), call->args[0]}, call->attrs, {},
+              call->loc)
+      .as_or_throw<PrimExpr>();
 }
 
-static PrimExpr DispatchCUDAIsFinite(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 1U);
-
-  DataType arg_dtype = call->args[0].dtype();
-  if (arg_dtype.is_float() &&
-      (arg_dtype.bits() == 32 || arg_dtype.bits() == 64)) {
-    Array<PrimExpr> new_args = {StringImm("isfinite"), call->args[0]};
-    return Call(call->dtype, builtin::call_pure_extern(), new_args,
-                call->annotations);
-  }
-
-  return e;
+PrimExpr LowerMinMaxNan(PrimExpr expression) {
+  const auto *call = expression.as<CallNode>();
+  TVM_FFI_ICHECK(call && call->args.size() == 2);
+  PrimType type = expression.ty();
+  TVM_FFI_CHECK(type.MatchesElementType(kDLFloat, 16) ||
+                    type.MatchesElementType(kDLBfloat, 16),
+                TypeError)
+      << "NaN-propagating min/max requires float16 or bfloat16";
+  bool maximum = call->op.as_or_throw<Op>()->name == "tl.max_nan";
+  return Call(type, tirx::call_pure_extern_op(),
+              {StringImm(maximum ? "__hmax_nan" : "__hmin_nan"), call->args[0],
+               call->args[1]},
+              call->attrs, {}, call->loc)
+      .as_or_throw<PrimExpr>();
 }
 
-template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
-  Array<PrimExpr> cuda_args{
-      {call->args[0], call->args[1], call->args[2], call->args[3]}};
-  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), cuda_args,
-              call->annotations);
+} // namespace
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef("prim.popcount")
+      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerPopcount,
+                                       true);
+  OpDef("prim.isfinite")
+      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerIsFinite,
+                                       true);
+  OpDef("tl.max_nan")
+      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerMinMaxNan);
+  OpDef("tl.min_nan")
+      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerMinMaxNan);
 }
 
-TVM_REGISTER_OP("tirx.popcount")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAPopcount,
-                               11);
-
-TVM_REGISTER_OP("tirx.rsqrt")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
-                               DispatchPureExtern<CUDAMath>);
-
-TVM_REGISTER_OP("tirx.isfinite")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
-
-} // namespace intrin
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::tl::cuda

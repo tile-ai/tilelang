@@ -5,12 +5,9 @@
 
 #include "transpose.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
 
 #include <dlpack/dlpack.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ir/prim/op.h>
 
 #include "utils.h"
 
@@ -38,7 +35,7 @@ std::vector<int> MakeSourceAxisToIterVarMap(Array<Range> ranges,
   std::vector<int> source_axis_to_iv(ranges.size(), -1);
   size_t iv_idx = 0;
   for (size_t axis = 0; axis < ranges.size(); axis++) {
-    if (is_one(ranges[axis]->extent))
+    if (IsOne(ranges[axis]->extent))
       continue;
     source_axis_to_iv[axis] = static_cast<int>(iv_idx++);
   }
@@ -81,15 +78,36 @@ void RegisterTransposeImpl(TransposeImpl impl) {
   TransposeImplRegistry().push_back(impl);
 }
 
-Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<TransposeNode> node = make_object<TransposeNode>();
+Transpose::Transpose(Array<Expr> args, BlockAnnotations annotations) {
+  TVM_FFI_CHECK_EQ(args.size(), 2, ValueError)
+      << "Transpose expects source and destination";
+  ObjectPtr<TransposeNode> node = make_object<TransposeNode>(ffi::UnsafeInit{});
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
-  node->src = src_access.region->buffer;
-  node->dst = dst_access.region->buffer;
+  node->src = src_access.region->source.as_or_throw<TensorVar>();
+  node->dst = dst_access.region->source.as_or_throw<TensorVar>();
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
+  TVM_FFI_CHECK_GE(node->src_range.size(), 2, ValueError)
+      << "Transpose requires at least two dimensions";
+  TVM_FFI_CHECK_EQ(node->src_range.size(), node->dst_range.size(), ValueError)
+      << "Transpose source and destination ranks must match";
+  sym::Analyzer analyzer;
+  for (size_t axis = 0; axis < node->dst_range.size(); ++axis) {
+    size_t source_axis =
+        SourceAxisForDestinationAxis(axis, node->dst_range.size());
+    const auto &source_extent = node->src_range[source_axis]->extent;
+    const auto &destination_extent = node->dst_range[axis]->extent;
+    TVM_FFI_CHECK(!analyzer->CanProve(source_extent < 0) &&
+                      !analyzer->CanProve(destination_extent < 0),
+                  ValueError)
+        << "Transpose regions must have nonnegative extents";
+    TVM_FFI_CHECK(!analyzer->CanProve(source_extent != destination_extent),
+                  ValueError)
+        << "Transpose destination region must swap the final two source "
+           "extents";
+  }
   data_ = std::move(node);
 }
 
@@ -98,22 +116,24 @@ TileOperator TransposeNode::Clone() const {
   return Transpose(op);
 }
 
-Array<IterVar> TransposeNode::MakeIterVars() const {
+Array<LayoutAxis> TransposeNode::MakeIterVars() const {
   // Use src_range as the iteration domain (src is the "inner" side).
-  Array<IterVar> loop_vars;
+  Array<LayoutAxis> loop_vars;
   size_t idx = 0;
   for (size_t i = 0; i < src_range.size(); i++) {
-    if (is_one(src_range[i]->extent))
+    if (IsOne(src_range[i]->extent))
       continue;
-    Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
+    PrimVar var("transpose_axis_" + std::to_string(idx),
+                src_range[i]->extent.ty());
     idx++;
-    loop_vars.push_back(
-        {Range(0, src_range[i]->extent), var, IterVarType::kDataPar});
+    loop_vars.push_back(LayoutAxis(
+        Range::FromMinExtent(MakeConst(var.ty(), 0), src_range[i]->extent),
+        var));
   }
   return loop_vars;
 }
 
-Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
+Array<PrimExpr> TransposeNode::MakeIndices(const Array<LayoutAxis> &ivs,
                                            int src_dst) const {
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
@@ -127,18 +147,18 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
       size_t src_axis = SourceAxisForDestinationAxis(dst_axis, ranges.size());
       int iv_idx = source_axis_to_iv[src_axis];
       if (iv_idx < 0)
-        indices.push_back(ranges[dst_axis]->min);
+        indices.push_back(ranges[dst_axis]->begin);
       else
-        indices.push_back(ranges[dst_axis]->min + ivs[iv_idx]->var);
+        indices.push_back(ranges[dst_axis]->begin + ivs[iv_idx]->var);
     }
   } else {
     // Source: direct mapping.
     size_t idx = 0;
     for (size_t i = 0; i < ranges.size(); i++) {
-      if (is_one(ranges[i]->extent))
-        indices.push_back(ranges[i]->min);
+      if (IsOne(ranges[i]->extent))
+        indices.push_back(ranges[i]->begin);
       else {
-        indices.push_back(ranges[i]->min + ivs[idx]->var);
+        indices.push_back(ranges[i]->begin + ivs[idx]->var);
         idx++;
       }
     }
@@ -149,33 +169,34 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
   return indices;
 }
 
-PrimExpr TransposeNode::MakePredicate(arith::Analyzer *analyzer,
-                                      const Array<PrimExpr> &indices,
-                                      const Array<PrimExpr> &extents) const {
+Optional<PrimExpr>
+TransposeNode::MakePredicate(sym::Analyzer analyzer,
+                             const Array<PrimExpr> &indices,
+                             const Array<PrimExpr> &extents) const {
   Array<PrimExpr> cond_list;
   ICHECK_EQ(indices.size(), extents.size())
       << "Transpose index rank (" << indices.size()
       << ") must match buffer rank (" << extents.size() << ")";
   for (size_t i = 0; i < indices.size(); i++) {
     PrimExpr cond = indices[i] < extents[i];
-    if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
+    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
     cond = indices[i] >= 0;
-    if (!analyzer->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
+    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
   }
   if (cond_list.empty())
-    return {};
+    return std::nullopt;
   PrimExpr cond = cond_list[0];
   for (size_t i = 1; i < cond_list.size(); i++)
     cond = And(cond, cond_list[i]);
   return cond;
 }
 
-For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
-  Array<IterVar> loop_vars = MakeIterVars();
+For TransposeNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
+  Array<LayoutAxis> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
 
   for (const auto &iv : loop_vars)
@@ -184,31 +205,34 @@ For TransposeNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
-  PrimExpr src_predicate = MakePredicate(analyzer, src_indices, src->shape);
-  PrimExpr dst_predicate = MakePredicate(analyzer, dst_indices, dst->shape);
+  auto src_predicate = MakePredicate(analyzer, src_indices, src.shape());
+  auto dst_predicate = MakePredicate(analyzer, dst_indices, dst.shape());
 
-  PrimExpr value = BufferLoad(src, src_indices);
-  if (src->dtype != dst->dtype)
-    value = Cast(dst->dtype, value);
-  if (src_predicate.defined())
-    value = if_then_else(src_predicate, value, make_zero(dst->dtype));
+  PrimExpr value = TensorLoad(src, src_indices);
+  if (src.dtype() != dst.dtype())
+    value = Cast(dst.dtype(), value);
+  if (src_predicate.has_value())
+    value =
+        if_then_else(src_predicate.value(), value, MakeConst(dst.dtype(), 0));
 
-  Stmt body = BufferStore(dst, value, dst_indices);
-  if (dst_predicate.defined())
-    body = IfThenElse(dst_predicate, body);
+  Stmt body = TensorStore(dst, dst_indices, value, dst->loc);
+  if (dst_predicate.has_value())
+    body = If(dst_predicate.value(), SeqStmt(body));
   if (is_scalar) {
-    return For(Var("i"), 0, 1, ForKind::kSerial, body);
+    return For(PrimVar("transpose_scalar"), 0, 1, 1, ForKind::kParallel,
+               SeqStmt(body));
   }
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body);
+    PrimType type = loop_vars[i]->var.ty();
+    body = For(loop_vars[i]->var, MakeConst(type, 0), loop_vars[i]->dom->extent,
+               MakeConst(type, 1), ForKind::kParallel, SeqStmt(body));
   }
-  return Downcast<For>(body);
+  return body.as_or_throw<For>();
 }
 
 Stmt TransposeNode::Lower(const LowerArgs &lower_args,
-                          arith::Analyzer *analyzer) const {
+                          sym::Analyzer analyzer) const {
   return ResolveTransposeImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
@@ -219,10 +243,7 @@ LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &layout_args,
   return {};
 }
 
-TIR_REGISTER_TL_TILE_OP(Transpose, transpose)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_REGISTER_TL_TILE_OP(Transpose, transpose, 2)
 
 TVM_FFI_STATIC_INIT_BLOCK() { TransposeNode::RegisterReflection(); }
 
