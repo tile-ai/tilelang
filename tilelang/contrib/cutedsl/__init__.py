@@ -34,6 +34,7 @@ from .threadblock_swizzle import *  # noqa: F401,F403
 from .atomic import *  # noqa: F401,F403
 from .quantize import *  # noqa: F401,F403
 from .warp import *  # noqa: F401,F403
+from .ldst import *  # noqa: F401,F403
 from .gemm_v2 import *  # noqa: F401,F403
 from .gemm_v2_sp import *  # noqa: F401,F403
 from .gemm_tcgen05 import *  # noqa: F401,F403

@@ -1786,6 +1786,110 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         << mask_dtype;
     os << "tl.__fns(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::__ldg())) {
+    const BufferLoadNode *load =
+        op->args.empty() ? nullptr : op->args[0].as<BufferLoadNode>();
+    ICHECK(load) << "T.__ldg expects a BufferLoad as the first argument.";
+    DataType dtype = op->dtype;
+    ICHECK(dtype.is_scalar())
+        << "T.__ldg on CuTeDSL supports scalar loads only, but got " << dtype;
+    bool has_overload = ((dtype.is_int() || dtype.is_uint()) &&
+                         (dtype.bits() == 8 || dtype.bits() == 16 ||
+                          dtype.bits() == 32 || dtype.bits() == 64)) ||
+                        dtype.is_float16() || dtype.is_bfloat16() ||
+                        dtype == DataType::Float(32) ||
+                        dtype == DataType::Float(64);
+    ICHECK(has_overload) << "T.__ldg has no CUDA __ldg overload for " << dtype;
+    ICHECK(load->buffer->dtype == dtype)
+        << "T.__ldg expects the load dtype to match the buffer dtype "
+        << load->buffer->dtype << ", but got " << dtype;
+    os << "tl.__ldg("
+       << GetBufferPtr_(
+              load->buffer.get(),
+              LinearizeBufferIndices_(load->buffer.get(), load->indices))
+       << ", " << DTypeToString(dtype) << ")";
+  } else if (op->op.same_as(tl::ldg32()) || op->op.same_as(tl::ldg64()) ||
+             op->op.same_as(tl::ldg128()) || op->op.same_as(tl::ldg256()) ||
+             op->op.same_as(tl::lds32()) || op->op.same_as(tl::lds64()) ||
+             op->op.same_as(tl::lds128())) {
+    // ldgN/ldsN(ptr[, pred]) -> uint32 / uint32xN, mirroring
+    // tl::load_global_N[_conditional] and tl::load_shared_N.
+    const std::string &name = Downcast<Op>(op->op)->name;
+    bool is_global =
+        op->op.same_as(tl::ldg32()) || op->op.same_as(tl::ldg64()) ||
+        op->op.same_as(tl::ldg128()) || op->op.same_as(tl::ldg256());
+    int lanes = std::stoi(name.substr(6)) / 32;
+    ICHECK(op->dtype == DataType::UInt(32, lanes))
+        << "T." << name.substr(3) << " must return "
+        << DataType::UInt(32, lanes) << ", but got " << op->dtype;
+    if (is_global) {
+      ICHECK(op->args.size() == 1U || op->args.size() == 2U)
+          << "T." << name.substr(3)
+          << " expects a pointer and an optional predicate.";
+    } else {
+      ICHECK_EQ(op->args.size(), 1U)
+          << "T." << name.substr(3) << " expects a pointer argument.";
+    }
+    std::string call = name + "(" + PrintBytePointerExpr_(op->args[0]);
+    if (op->args.size() > 1) {
+      call += ", " + PrintExpr_(op->args[1]);
+    }
+    call += ")";
+    if (lanes == 1) {
+      os << call;
+    } else {
+      PrintVecHelperResult_(op->dtype, call, os);
+    }
+  } else if (op->op.same_as(tl::stg32()) || op->op.same_as(tl::stg64()) ||
+             op->op.same_as(tl::stg128()) || op->op.same_as(tl::stg256()) ||
+             op->op.same_as(tl::sts32()) || op->op.same_as(tl::sts64()) ||
+             op->op.same_as(tl::sts128())) {
+    // stgN/stsN(ptr, value[, pred]), mirroring tl::store_global_N[_conditional]
+    // and tl::store_shared_N. The value is passed the way the CUDA parameter
+    // accepts it: 32-bit stores convert a scalar to uint32_t, 64/128-bit
+    // stores take exactly uint2/uint4, and 256-bit stores take the bits of
+    // any 32-byte value.
+    const std::string &name = Downcast<Op>(op->op)->name;
+    bool is_global =
+        op->op.same_as(tl::stg32()) || op->op.same_as(tl::stg64()) ||
+        op->op.same_as(tl::stg128()) || op->op.same_as(tl::stg256());
+    int bits = std::stoi(name.substr(6));
+    if (is_global) {
+      ICHECK(op->args.size() == 2U || op->args.size() == 3U)
+          << "T." << name.substr(3)
+          << " expects pointer and value arguments and an optional predicate.";
+    } else {
+      ICHECK_EQ(op->args.size(), 2U)
+          << "T." << name.substr(3) << " expects pointer and value arguments.";
+    }
+    PrimExpr value = op->args[1];
+    DataType value_dtype = value.dtype();
+    if (bits == 32) {
+      ICHECK(value_dtype.is_scalar() &&
+             (value_dtype.is_int() || value_dtype.is_uint() ||
+              value_dtype.is_bool() || value_dtype.is_float16() ||
+              value_dtype.is_bfloat16() || value_dtype == DataType::Float(32) ||
+              value_dtype == DataType::Float(64)))
+          << "T." << name.substr(3)
+          << " expects a scalar value convertible to uint32, but got "
+          << value_dtype;
+      if (value_dtype != DataType::UInt(32)) {
+        value = tirx::Cast(DataType::UInt(32), value);
+      }
+    } else if (bits == 256) {
+      ICHECK_EQ(value_dtype.bits() * value_dtype.lanes(), 256)
+          << "T.stg256 expects a 256-bit value, but got " << value_dtype;
+    } else {
+      ICHECK(value_dtype == DataType::UInt(32, bits / 32))
+          << "T." << name.substr(3) << " expects a "
+          << DataType::UInt(32, bits / 32) << " value, but got " << value_dtype;
+    }
+    std::string ptr = PrintBytePointerExpr_(op->args[0]);
+    std::string value_str = PrintExpr_(value);
+    std::string pred =
+        op->args.size() > 2 ? ", " + PrintExpr_(op->args[2]) : std::string();
+    PrintIndent();
+    stream << name << "(" << ptr << ", " << value_str << pred << ")\n";
   } else if (op->op.same_as(tl::get_lane_idx())) {
     // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
     ICHECK_LE(op->args.size(), 1U)
