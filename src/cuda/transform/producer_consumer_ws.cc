@@ -1047,6 +1047,12 @@ private:
         static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
     if (num_stages < 1)
       return StmtExprMutator::VisitStmt_(op);
+    // The loop finder descends through every statement kind, but the WS block
+    // can only be rebuilt through the kinds ReplacePipelineLoopInStmt handles
+    // (no While yet). Decline so the pass falls back instead of failing.
+    if (!PipelineLoopContainmentChecker::Contains(orig_block->body,
+                                                  pipeline_loop))
+      return StmtExprMutator::VisitStmt_(op);
 
     // Flatten the loop body.
     Array<Stmt> flat_stmts;

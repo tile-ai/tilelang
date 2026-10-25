@@ -6,7 +6,6 @@ import example_gqa_decode_varlen_logits
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_example_example_gqa_decode():
     example_gqa_decode.main()
 

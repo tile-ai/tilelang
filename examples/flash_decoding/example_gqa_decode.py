@@ -33,7 +33,9 @@ def get_heuristic_config() -> Tuple[Dict, int]:
     sm_major, sm_minor = torch.cuda.get_device_capability(device)
     sm_version = sm_major * 10 + sm_minor
     print(f"CUDA device capability: {sm_version}")
-    if sm_version == 89:
+    # Two pipelined K/V stages need 144 KiB of dynamic shared memory; sm_86/89/120
+    # allow about 99 KiB per block.
+    if torch.cuda.get_device_properties(device).shared_memory_per_block_optin < 160 * 1024:
         cfg = dict(block_N=128, block_H=64, num_split=1, num_stages=0, threads=128)
     else:
         cfg = dict(block_N=128, block_H=64, num_split=8, num_stages=2, threads=128)

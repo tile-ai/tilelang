@@ -691,5 +691,56 @@ def test_ws_persistent_guarded_deep_pipeline_matches_wsoff_reference():
     torch.testing.assert_close(got, ref, rtol=1e-2, atol=1e-2)
 
 
+def pipelined_matmul_under_while(K=128, block_K=32, num_stages=2):
+    """A ``T.Pipelined`` loop with TMA copies nested in a ``while`` (stream-K shape)."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, K), T.float16),
+        B: T.Tensor((64, K), T.float16),
+        C: T.Tensor((64, 64), T.float32),
+        n: T.int32,
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, block_K), T.float16)
+            B_s = T.alloc_shared((64, block_K), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            it = T.alloc_var(T.int32)
+            it = 0
+            T.clear(C_l)
+            while it < n:
+                for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                    T.copy(A[0, k * block_K], A_s)
+                    T.copy(B[0, k * block_K], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+                it = it + 1
+            T.copy(C_l, C[0, 0])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_declines_pipelined_loop_under_while():
+    """WS cannot rebuild a ``while`` yet: it must decline (and drop the pipeline
+    annotation) instead of failing with "failed to replace pipeline loop"."""
+    mod = _apply_ws_pass(pipelined_matmul_under_while())
+    script = mod["main"].script()
+    assert "tl_tiled_ws_applied" not in script
+    assert "num_stages" not in script
+
+
+@tilelang.testing.requires_cuda
+def test_ws_declined_while_kernel_matches_reference():
+    import torch
+
+    kernel = tilelang.compile(pipelined_matmul_under_while(), target=determine_target(), out_idx=[2])
+    torch.manual_seed(0)
+    A = torch.randn(64, 128, dtype=torch.float16, device="cuda")
+    B = torch.randn(64, 128, dtype=torch.float16, device="cuda")
+    ref = A.float() @ B.float().T
+    for n in (0, 1, 3):
+        torch.testing.assert_close(kernel(A, B, n), ref * n, rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
