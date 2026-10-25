@@ -6,6 +6,7 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tirx
+from tilelang.jit.adapter.base import output_allocation_stream
 
 
 cdef class CythonKernelWrapper:
@@ -183,6 +184,7 @@ cdef class CythonKernelWrapper:
             )
 
         device = None
+        cdef bint caller_stream = stream != -1
         if stream == -1:
             if self.get_current_stream is not None:
                 device = self._infer_output_device(inputs)
@@ -205,6 +207,13 @@ cdef class CythonKernelWrapper:
             if i not in self.result_idx:
                 tensor_list[i] = inputs[ins_idx]
                 ins_idx += 1
+
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if caller_stream and total_result_idx > 0:
+            if device is None:
+                device = self._infer_output_device(inputs)
+            alloc_stream = output_allocation_stream(stream, device)
 
         # Prepare output tensors
         for i in range(len(self.params)):
@@ -233,7 +242,11 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
+                if alloc_stream is None:
+                    tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
+                else:
+                    with torch.cuda.stream(alloc_stream):
+                        tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
                 # TODO(chenggang): remove this check or rewrite by ourselves?
                 '''
                 if isinstance(tensor_list[i], torch.Tensor) and tensor_list[i]._base is not None and not tensor_list[i].is_contiguous():

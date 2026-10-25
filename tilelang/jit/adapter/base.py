@@ -21,6 +21,22 @@ class CachedTextSource:
 CachedTextSourceLike = CachedTextSource | str | None
 
 
+def output_allocation_stream(stream: int, device: torch.device) -> torch.cuda.Stream | None:
+    """Return the caller-supplied launch stream when outputs must be allocated on it.
+
+    torch's caching allocator orders reuse of a block only after earlier work on
+    the stream the block was allocated on, so tensors written by a kernel launched
+    on ``stream`` are allocated on ``stream``. ``None`` means the launch stream is
+    the current stream, where a plain ``torch.empty`` is already correct.
+    """
+    if device.type != "cuda" or stream == torch.cuda.current_stream(device).cuda_stream:
+        return None
+    if stream == 0:
+        # ExternalStream(0) yields a pooled stream on some PyTorch releases (2.4, 2.5).
+        return torch.cuda.default_stream(device)
+    return torch.cuda.ExternalStream(stream, device=device)
+
+
 class BaseKernelAdapter(ABC):
     func: Callable | None = None
 

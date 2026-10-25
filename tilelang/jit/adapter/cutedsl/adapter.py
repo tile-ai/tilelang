@@ -15,7 +15,7 @@ from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
 
 logger = logging.getLogger(__name__)
 
@@ -445,22 +445,28 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         args: list[Any] = []
 
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if stream is not None and self.result_idx:
+            alloc_stream = output_allocation_stream(stream, first_tensor.device)
+
         # tensor pointers
-        for i in range(len(self.params)):
-            if i in self.result_idx:
-                dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
-                tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
-                param_values[i] = tensor
-            else:
-                tensor = param_values[i]
-            args.append(tensor)
+        with torch.cuda.stream(alloc_stream):
+            for i in range(len(self.params)):
+                if i in self.result_idx:
+                    dtype = self.param_dtypes[i]
+                    shape = []
+                    # Now working with native Python list, no FFI calls needed
+                    for s in self.param_shapes[i]:
+                        if isinstance(s, tirx.Var):
+                            shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
+                        else:  # Already converted to Python int during initialization
+                            shape.append(s)
+                    tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
+                    param_values[i] = tensor
+                else:
+                    tensor = param_values[i]
+                args.append(tensor)
 
         # dynamic symbolics
         for sym in self.dynamic_symbolic_order:
