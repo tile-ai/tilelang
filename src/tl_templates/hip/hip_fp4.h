@@ -9,6 +9,27 @@
 #if defined(__gfx950__)
 
 #include <stdint.h>
+#include <type_traits>
+
+// Float to E2M1 bits (bit3 = sign): round to nearest, ties to even, saturate
+// to +-6, as __nv_cvt_float_to_fp4(x, __NV_E2M1, cudaRoundNearest) does.
+TL_DEVICE uint8_t __tl_float_to_fp4_bits(float x) {
+  const float fp4_vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+  uint8_t sign = signbit(x) ? 1u : 0u;
+  x = fminf(fabsf(x), 6.0f);
+  uint8_t best = 0u;
+  float best_diff = x;
+  for (uint8_t i = 1u; i < 8u; ++i) {
+    float diff = fabsf(x - fp4_vals[i]);
+    // Codes are ordered by value, so a tie is between neighbours i - 1 and i;
+    // the even code has the mantissa bit clear.
+    if (diff < best_diff || (diff == best_diff && (i & 1u) == 0u)) {
+      best_diff = diff;
+      best = i;
+    }
+  }
+  return (uint8_t)((sign << 3u) | best);
+}
 
 // ---------------------------------------------------------------------------
 // Scalar FP4 type  (fp4_e2_t)
@@ -20,6 +41,14 @@ struct fp4_e2_t {
 
   TL_DEVICE fp4_e2_t() = default;
   TL_DEVICE explicit fp4_e2_t(uint8_t raw) : __x(raw & 0x0Fu) {}
+  // Numeric conversion from float / half / bfloat16, as for CUDA's
+  // __nv_fp4_e2m1: generated code casts values with `(fp4_e2_t)x`, which would
+  // otherwise truncate x to an integer and keep it as raw bits. Integers keep
+  // the raw-bits constructor above.
+  template <typename T, typename = typename std::enable_if<
+                            !std::is_integral<T>::value>::type>
+  TL_DEVICE explicit fp4_e2_t(T x)
+      : __x(__tl_float_to_fp4_bits(static_cast<float>(x))) {}
 
   // Convert FP4 E2M1 to float (pure bit manipulation, no hardware intrinsic).
   // E2M1 encoding: value = (-1)^s * 2^(e-1) * (1 + m*0.5)  for e != 0
@@ -56,37 +85,8 @@ struct fp4_e2_t {
   TL_DEVICE operator bfloat16_t() const { return (bfloat16_t)(float)(*this); }
 };
 
-// Convert float to FP4 E2M1 (round to nearest, saturate).
-TL_DEVICE fp4_e2_t __tl_float_to_fp4(float x) {
-  // FP4 E2M1 representable values (positive):
-  //   0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
-  const float fp4_max = 6.0f;
-  const float fp4_vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-  uint8_t sign = 0u;
-  if (x < 0.0f) {
-    sign = 1u;
-    x = -x;
-  }
-  if (x > fp4_max)
-    x = fp4_max;
-  // Find the closest representable value by brute-force over 8 candidates.
-  uint8_t best = 0u;
-  float best_diff = x; // diff from 0
-  for (uint8_t i = 1u; i < 8u; ++i) {
-    float diff = x - fp4_vals[i];
-    if (diff < 0.0f)
-      diff = -diff;
-    if (diff < best_diff) {
-      best_diff = diff;
-      best = i;
-    }
-  }
-  // Encode: bit3=sign, bits[2:1]=exp, bit0=mant
-  uint8_t enc = (uint8_t)((sign << 3u) | best);
-  fp4_e2_t r;
-  r.__x = enc;
-  return r;
-}
+// Convert float to FP4 E2M1 (round to nearest even, saturate).
+TL_DEVICE fp4_e2_t __tl_float_to_fp4(float x) { return fp4_e2_t(x); }
 
 // ---------------------------------------------------------------------------
 // Packed 2xFP4 type  (fp4_e2_2_t)
