@@ -6,6 +6,7 @@ from tilelang.utils.tensor import torch_assert_close
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["contiguous", "transposed"])
 def test_torch_assert_close_allows_mismatch_within_budget(transpose):
+    """Accept one mismatch within budget for contiguous and transposed tensors."""
     expected = torch.zeros((2, 3), device="cpu")
     actual = expected.clone()
     if transpose:
@@ -17,6 +18,7 @@ def test_torch_assert_close_allows_mismatch_within_budget(transpose):
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["contiguous", "transposed"])
 def test_torch_assert_close_reports_mismatch_beyond_budget(transpose):
+    """Report the logical first index and count when mismatches exceed the budget."""
     expected = torch.zeros((2, 3), device="cpu")
     actual = expected.clone()
     if transpose:
