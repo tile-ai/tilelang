@@ -501,6 +501,9 @@ def test_block_causal_attention_varlen():
     print(f"[varlen] {block_size=} {dllm_block=} OK")
 
     block_size, dllm_block = 128, 64
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin < 128 * 1024:
+        # Shrink the physical tile while preserving the logical dLLM block.
+        block_size = 64
     _run_varlen_case([512, 1024], heads=2, dim=128, dllm_block=dllm_block, block_size=block_size)
     print(f"[varlen] {block_size=} {dllm_block=} OK")
 

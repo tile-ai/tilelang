@@ -368,13 +368,16 @@ class _attention(torch.autograd.Function):
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
         block_M = 128
         block_N = 32
+        threads, num_stages = 256, 2
+        if torch.cuda.get_device_properties(q.device).shared_memory_per_block_optin < 160 * 1024:
+            block_M, threads, num_stages = 64, 128, 1
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
         mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD_QK)
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
             kernel = flashattn_bwd_atomic_add(
-                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
+                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=threads, num_stages=num_stages, groups=groups
             )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
@@ -388,7 +391,7 @@ class _attention(torch.autograd.Function):
             dv = dv.to(torch.float16)
         else:
             kernel = flashattn_bwd_split(
-                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
+                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=threads, num_stages=num_stages, groups=groups
             )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel

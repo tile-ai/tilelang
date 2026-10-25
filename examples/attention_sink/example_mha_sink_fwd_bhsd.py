@@ -12,7 +12,15 @@ from typing import Optional
 
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
-    return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+    configs = [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+    return configs + [dict(block_M=64, block_N=64, num_stages=1, threads=128)]
+
+
+def get_default_config():
+    # Use a smaller tile on devices with less than 160 KiB per block.
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin < 160 * 1024:
+        return 64, 64, 1, 128
+    return 128, 128, 2, 256
 
 
 @autotune(configs=get_configs(), warmup=500, rep=100)
@@ -215,10 +223,7 @@ def main(
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
     else:
-        block_M = 128
-        block_N = 128
-        num_stages = 2
-        threads = 256
+        block_M, block_N, num_stages, threads = get_default_config()
         print(f"{block_M=}, {block_N=}, {num_stages=}, {threads=}")
 
         kernel = flashattn(
@@ -260,10 +265,7 @@ def run_regression_perf(
     dtype: str = "float16",
 ):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
-    block_M = 128
-    block_N = 128
-    num_stages = 2
-    threads = 256
+    block_M, block_N, num_stages, threads = get_default_config()
     kernel = flashattn(
         batch, heads, seq_q, seq_kv, dim, window_size, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads, dtype=dtype
     )
