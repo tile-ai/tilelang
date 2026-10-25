@@ -10,8 +10,8 @@ import argparse
 def get_default_config(heads, kv_heads):
     # The 64x64 decode tile at dim=512 needs 226 KiB per block.
     if torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin < 226 * 1024:
-        return 32, min(16, heads // kv_heads), 128
-    return 64, min(64, heads // kv_heads), 256
+        return 32, 16, 128
+    return 64, min(64, tilelang.cdiv(heads // kv_heads, 16) * 16), 256
 
 
 @tilelang.jit(
@@ -22,8 +22,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = T.float16
     accum_dtype = T.float32
-    kv_group_num = heads // kv_head_num
-    VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
 
     @T.prim_func
@@ -37,7 +35,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         glse = T.alloc_global([batch, heads, num_split], dtype)
         Output_partial = T.alloc_global([batch, heads, num_split, dim], dtype)
         # flash_attn_split
-        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (bid, hid, bz):
+        with T.Kernel(batch, T.ceildiv(heads, block_H), num_split, threads=threads) as (bid, hid, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -53,11 +51,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             scores_sum = T.alloc_fragment([block_H], accum_dtype)
             logsum = T.alloc_fragment([block_H], accum_dtype)
 
-            cur_kv_head = hid // (kv_group_num // block_H)
+            cur_kv_head = 0
             T.use_swizzle(10)
 
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bid, hid * block_H : (hid + 1) * block_H, :], Q_shared)
+            T.copy(Q_pe[bid, hid * block_H : (hid + 1) * block_H, :], Q_pe_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -92,9 +90,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(logsum, glse[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, bz])
+            T.copy(logsum, glse[bid, hid * block_H : (hid + 1) * block_H, bz])
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output_partial[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, bz, :])
+            T.copy(O_shared, Output_partial[bid, hid * block_H : (hid + 1) * block_H, bz, :])
 
         # combine
         with T.Kernel(heads, batch, threads=128) as (hid, bz):
@@ -132,7 +130,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=threads) as (hid, bid):
+        with T.Kernel(T.ceildiv(heads, block_H), batch, threads=threads) as (hid, bid):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -147,10 +145,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             scores_sum = T.alloc_fragment([block_H], accum_dtype)
             logsum = T.alloc_fragment([block_H], accum_dtype)
 
-            cur_kv_head = hid // (kv_group_num // block_H)
+            cur_kv_head = 0
 
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bid, hid * block_H : (hid + 1) * block_H, :], Q_shared)
+            T.copy(Q_pe[bid, hid * block_H : (hid + 1) * block_H, :], Q_pe_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -180,7 +178,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :])
+            T.copy(O_shared, Output[bid, hid * block_H : (hid + 1) * block_H, :])
 
     if num_split > 1:
         return main_split
