@@ -1,3 +1,4 @@
+import errno
 import runpy
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -120,3 +121,30 @@ def test_profiler_uses_shared_device_helpers():
     assert torch_bench.Event is device_utils.Event
     assert bench._cuda_synchronize is device_utils.device_synchronize
     assert torch_bench._cuda_synchronize is device_utils.device_synchronize
+
+
+def test_cpu_count_prefers_process_affinity(monkeypatch):
+    """Respect the process cpuset rather than the host CPU count."""
+    monkeypatch.setattr(device_utils.os, "sched_getaffinity", lambda pid: {2, 5}, raising=False)
+    monkeypatch.setattr(device_utils.os, "cpu_count", Mock(side_effect=AssertionError("unexpected fallback")))
+    assert device_utils.get_available_cpu_count() == 2
+
+
+@pytest.mark.parametrize("error", [PermissionError(errno.EPERM, "denied"), OSError(errno.ENOSYS, "unavailable")])
+def test_cpu_count_falls_back_after_affinity_oserror(monkeypatch, error):
+    """Keep compilation available when the affinity system call cannot be used."""
+
+    def unavailable(pid):
+        raise error
+
+    monkeypatch.setattr(device_utils.os, "sched_getaffinity", unavailable, raising=False)
+    monkeypatch.setattr(device_utils.os, "cpu_count", lambda: 8)
+    assert device_utils.get_available_cpu_count() == 8
+
+
+@pytest.mark.parametrize("host_count, expected", [(None, 1), (0, 1), (6, 6)])
+def test_cpu_count_without_affinity_has_positive_fallback(monkeypatch, host_count, expected):
+    """Handle missing affinity support and unknown host counts."""
+    monkeypatch.delattr(device_utils.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(device_utils.os, "cpu_count", lambda: host_count)
+    assert device_utils.get_available_cpu_count() == expected
