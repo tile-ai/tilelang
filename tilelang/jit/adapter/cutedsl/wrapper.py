@@ -695,7 +695,7 @@ from pathlib import Path
 
 # Minimal imports for runtime (no cutlass/cute - only needed for cubin generation)
 import tvm.runtime as runtime
-
+{workspace_imports}
 _cpp_launcher = None
 _cpp_launcher_lib = None
 _cubin_generated = False
@@ -901,7 +901,7 @@ def call({call_func_params}, stream, device_id=0):
   global _cubin_path_bytes, _cubin_needs_generation
 
   _check_dynamic_smem(device_id)
-
+{workspace_alloc_code}
   if _cubin_needs_generation:
     _generate_cubin_if_needed({cubin_gen_call_args})
     _cubin_needs_generation = False
@@ -1193,7 +1193,68 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                         if isinstance(value, tvm.tirx.Var):
                             append(value, self._TYPE_MAP.get(str(value.dtype), "int"))
 
+        # T.alloc_global buffers are host allocations that the CUDA host codegen
+        # turns into TVMBackendAllocWorkspace; here the Python host allocates them.
+        for buffer in self._collect_global_workspaces():
+            append(
+                buffer.data,
+                "buffer",
+                self._TYPE_MAP.get(buffer.dtype) or self._TYPE_MAP.get(str(buffer.dtype)),
+            )
+            function_args[-1]["workspace"] = buffer
+
         return function_args, buffer_args
+
+    def _collect_global_workspaces(self) -> list[tvm.tirx.Buffer]:
+        """Global-scope buffers allocated by the lowered host entry (T.alloc_global)."""
+        workspaces = []
+
+        def visitor(node):
+            if isinstance(node, tvm.tirx.AllocBuffer) and node.buffer.scope() == "global":
+                workspaces.append(node.buffer)
+
+        post_order_visit(self._host_entry_func().body, visitor)
+        return workspaces
+
+    def _generate_workspace_alloc_code(self, function_args: list[dict]) -> str:
+        """Allocate T.alloc_global workspaces for one call, like TVMBackendAllocWorkspace.
+
+        The memory is uninitialized and lives until call() returns. It is allocated
+        on the launch stream: torch's caching allocator orders reuse of a block after
+        earlier work on the stream it was allocated on, so the kernels need neither a
+        cross-stream wait nor record_stream, even when the caller passes a stream
+        other than the current torch stream.
+        """
+        import tilelang.language as T
+
+        workspaces = [arg for arg in function_args if "workspace" in arg]
+        if not workspaces:
+            return ""
+        lines = [
+            "  _ws_device = torch.device('cuda', device_id)",
+            "  _ws_stream = torch.cuda.current_stream(_ws_device)",
+            "  if stream != _ws_stream.cuda_stream:",
+            # ExternalStream(0) yields a pooled stream on some PyTorch releases (2.4, 2.5).
+            "    _ws_stream = torch.cuda.ExternalStream(stream, device=_ws_device) if stream else torch.cuda.default_stream(_ws_device)",
+            "  with torch.cuda.stream(_ws_stream):",
+        ]
+        for arg in workspaces:
+            buffer = arg["workspace"]
+            dtype = T.dtype(str(buffer.dtype))
+            shape = [self._pythonic_expr(dim) for dim in buffer.shape]
+            element_bits = dtype.bits * dtype.lanes
+            pack = 8 // element_bits if element_bits < 8 else 1
+            if pack > 1:
+                last = buffer.shape[-1] if buffer.shape else 1
+                if not isinstance(last, tvm.tirx.IntImm) or int(last) % pack != 0:
+                    raise ValueError(
+                        f"T.alloc_global buffer {buffer.name} of {buffer.dtype} needs a final extent that is a "
+                        f"constant multiple of {pack} to be stored packed"
+                    )
+                shape[-1] = str(int(last) // pack)
+            shape_expr = f"({', '.join(shape)},)" if shape else "()"
+            lines.append(f"    {arg['name']} = torch.empty({shape_expr}, dtype={dtype.as_torch()}, device=_ws_device)")
+        return "\n".join(lines) + "\n"
 
     def _extract_func_call_args(
         self,
@@ -1779,7 +1840,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     ) -> str:
         """Generate Python wrapper code."""
         # Build function parameters
-        call_func_params = ", ".join(arg["name"] for arg in function_args)
+        call_func_params = ", ".join(arg["name"] for arg in function_args if "workspace" not in arg)
+        workspace_alloc_code = self._generate_workspace_alloc_code(function_args)
         launcher_call_args = ", ".join(arg["name"] for arg in launcher_args)
         cutlass_launcher_call_args = ", ".join(cutlass_launcher_args)
 
@@ -1790,6 +1852,8 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             call_func_params=call_func_params,
             cubin_gen_call_args=cubin_gen_params,
             arg_prep_code="",
+            workspace_imports="import torch\n" if workspace_alloc_code else "",
+            workspace_alloc_code=workspace_alloc_code,
             launcher_call_args=launcher_call_args,
             cutlass_launcher_call_args=cutlass_launcher_call_args,
             has_tma_descs=str(bool(has_tma_descs)),
