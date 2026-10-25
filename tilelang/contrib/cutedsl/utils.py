@@ -34,6 +34,8 @@ from cutlass._mlir.extras import types as mlir_types
 from cutlass._mlir import ir as mlir_ir
 from cutlass.cutlass_dsl import dsl_user_op
 
+from .warp import _as_cuda_predicate
+
 __all__ = [
     "BYTES_PER_TENSORMAP",
     "BYTES_PER_POINTER",
@@ -49,6 +51,10 @@ __all__ = [
     "handle_add_byte_offset",
     "shuffle_elect",
     "sync_thread_partial",
+    "named_barrier_arrive",
+    "__syncthreads_count",
+    "__syncthreads_and",
+    "__syncthreads_or",
     "warpgroup_reg_alloc",
     "warpgroup_reg_dealloc",
     "pack_half2",
@@ -399,6 +405,46 @@ def sync_thread_partial(barrier_id=None, thread_count=None):
     barrier_id = 0 if barrier_id is None else barrier_id
     thread_count = 0 if thread_count is None else thread_count
     bar_sync_ptx(barrier_id, thread_count)
+
+
+@dsl_user_op
+def named_barrier_arrive(barrier_id, thread_count, *, loc=None, ip=None):
+    """
+    Arrive at a named barrier without waiting.
+
+    Matches tl::__named_barrier_arrive: bar.arrive (barrier.cta.arrive.aligned).
+    """
+    prims.barrier_cta_arrive_aligned(barrier_id, thread_count, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def __syncthreads_count(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning the number of threads whose predicate is non-zero.
+
+    Matches CUDA __syncthreads_count: bar.red.popc.u32 on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "popc", loc=loc, ip=ip))
+
+
+@dsl_user_op
+def __syncthreads_and(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning 1 if the predicate is non-zero for all threads, else 0.
+
+    Matches CUDA __syncthreads_and: bar.red.and.pred on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "and", loc=loc, ip=ip))
+
+
+@dsl_user_op
+def __syncthreads_or(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning 1 if the predicate is non-zero for any thread, else 0.
+
+    Matches CUDA __syncthreads_or: bar.red.or.pred on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "or", loc=loc, ip=ip))
 
 
 def warpgroup_reg_alloc(reg_count):
