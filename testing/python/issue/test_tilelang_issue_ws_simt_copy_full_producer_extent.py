@@ -156,9 +156,9 @@ def test_ws_publishes_synchronous_fp8_conversion():
     row_tags = torch.arange(M, device="cuda") // 16 % 4 + 1
     k_tags = torch.arange(K, device="cuda") // 128 + 1
     a = (row_tags[:, None] * k_tags[None, :]).bfloat16()
-    w = torch.ones(N, K, device="cuda").to(torch.float8_e4m3fn)
+    w = ((k_tags % 7) + 1).expand(N, K).to(torch.float8_e4m3fn)
     c = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
-    expected = a.float().sum(1, keepdim=True).expand(M, N).bfloat16()
+    expected = (a.float() @ w.to(torch.bfloat16).float().T).bfloat16()
     for _ in range(200):
         c.fill_(float("nan"))
         kernel(a, w, c)
