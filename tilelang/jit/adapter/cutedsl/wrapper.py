@@ -706,6 +706,8 @@ _cutlass_custream_cls = None
 _has_tma_descs = {has_tma_descs}
 _cutlass_host_launcher_supported = {cutlass_host_launcher_supported}
 _cutlass_host_launcher_disabled_reason = {cutlass_host_launcher_disabled_reason!r}
+_dynamic_smem_bytes = {dynamic_smem_bytes!r}
+_dynamic_smem_checked_devices = set()
 
 # Pre-compute paths - cubin is stored alongside the launcher .so
 # Use module basename to avoid conflicts when multiple kernels run concurrently
@@ -869,6 +871,26 @@ def _load_cpp_launcher():
   _cpp_launcher = _cpp_launcher_lib["launch_kernel"]
   return _cpp_launcher
 
+def _check_dynamic_smem(device_id):
+  \"\"\"Fail like the CUDA backend when a kernel needs more dynamic shared memory
+  than the device allows per block, instead of an opaque launch error.\"\"\"
+  if device_id in _dynamic_smem_checked_devices:
+    return
+  if any(size > 48 * 1024 for size in _dynamic_smem_bytes.values()):
+    from cuda.bindings import driver
+    err, device = driver.cuDeviceGet(device_id)
+    if err == driver.CUresult.CUDA_SUCCESS:
+      err, limit = driver.cuDeviceGetAttribute(
+          driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device)
+    if err == driver.CUresult.CUDA_SUCCESS:
+      for name, size in _dynamic_smem_bytes.items():
+        if size > limit:
+          raise RuntimeError(
+              f"Failed to set the allowed dynamic shared memory size to {{size}} for kernel {{name}}: "
+              f"device {{device_id}} allows at most {{limit}} bytes per block"
+          )
+  _dynamic_smem_checked_devices.add(device_id)
+
 def call({call_func_params}, stream, device_id=0):
   \"\"\"Kernel dispatch function.
 
@@ -877,6 +899,8 @@ def call({call_func_params}, stream, device_id=0):
       device_id: CUDA device ID (should be passed from caller, defaults to 0 for backward compatibility)
   \"\"\"
   global _cubin_path_bytes, _cubin_needs_generation
+
+  _check_dynamic_smem(device_id)
 
   if _cubin_needs_generation:
     _generate_cubin_if_needed({cubin_gen_call_args})
@@ -1751,6 +1775,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         has_tma_descs: bool,
         cutlass_host_launcher_supported: bool,
         cutlass_host_launcher_disabled_reason: str,
+        dynamic_smem_bytes: dict[str, int] | None = None,
     ) -> str:
         """Generate Python wrapper code."""
         # Build function parameters
@@ -1770,6 +1795,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             has_tma_descs=str(bool(has_tma_descs)),
             cutlass_host_launcher_supported=str(bool(cutlass_host_launcher_supported)),
             cutlass_host_launcher_disabled_reason=cutlass_host_launcher_disabled_reason,
+            dynamic_smem_bytes=dynamic_smem_bytes or {},
         )
 
     # =========================================================================
@@ -2009,6 +2035,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             has_tma_descs=bool(all_desc_names_union),
             cutlass_host_launcher_supported=cutlass_host_launcher_supported,
             cutlass_host_launcher_disabled_reason=tma_host_disabled_reason,
+            dynamic_smem_bytes={
+                km["function_name"]: int(km["function_info"]["dynamic_smem_buf"])
+                for km in kernel_metadata
+                if isinstance(km["function_info"].get("dynamic_smem_buf"), int)
+            },
         )
 
         return python_wrapper
