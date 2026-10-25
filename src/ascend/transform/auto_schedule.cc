@@ -65,6 +65,7 @@
 #include "ascend/op/utils.h"
 #include "ascend/transform/buffer_addresses.h"
 #include "ascend/transform/buffer_version.h"
+#include "ascend/transform/onchip_memory_limits.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
 #include "runtime/thread_storage_scope.h"
@@ -80,62 +81,6 @@ using namespace tirx;
 using namespace ascend;
 
 namespace {
-
-// AutoSchedule target resource limits.
-
-// Check whether a kernel body contains any SIMT_VF blocks. SIMT_VF
-// (asc_vf_call) reserves 32 KB of the physical 248 KB Unified Buffer for
-// thread context, so the usable shared memory depends on its presence.
-class SimtVFDetector : public tirx::StmtVisitor {
-public:
-  bool found = false;
-
-  void VisitStmt_(const tirx::SBlockNode *op) override {
-    if (op->name_hint == "SIMT_VF") {
-      found = true;
-    }
-    tirx::StmtVisitor::VisitStmt_(op);
-  }
-};
-
-inline bool HasSimtVF(const tirx::Stmt &stmt) {
-  SimtVFDetector detector;
-  detector(stmt);
-  return detector.found;
-}
-
-inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
-  return HasSimtVF(kernel_body) ? kAscendUBMemoryBytes - kAscendSimtContextBytes
-                                : kAscendUBMemoryBytes;
-}
-
-inline int64_t GetL1MemoryLimit(Target target) {
-  if (TargetIsAscend(target)) {
-    return kAscendL1MemoryBytes;
-  }
-  return 0;
-}
-
-inline int64_t GetL0CMemoryLimit(Target target) {
-  if (TargetIsAscend(target)) {
-    return kAscendL0CMemoryBytes;
-  }
-  return 0;
-}
-
-inline int64_t GetL0AMemoryLimit(Target target) {
-  if (TargetIsAscend(target)) {
-    return kAscendL0ABMemoryBytes;
-  }
-  return 0;
-}
-
-inline int64_t GetL0BMemoryLimit(Target target) {
-  if (TargetIsAscend(target)) {
-    return kAscendL0ABMemoryBytes;
-  }
-  return 0;
-}
 
 // Scheduler.
 
@@ -1390,7 +1335,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
       metadata.manual_buffer_versions, groups, "manual version counts");
   unit_builder.SetStorageGroups(groups);
-  int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
+  int64_t shared_mem_limit = GetSharedMemoryLimit(target, kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
   if (auto value = metadata.kernel_root->annotations.Get(kAivStorageMap)) {
     unit_builder.SetAivStorages(value.value().cast<AivStorageMap>());
