@@ -117,6 +117,7 @@ def test_device_synchronize_rejects_unsupported_devices(monkeypatch, device):
 
 
 def test_profiler_uses_shared_device_helpers():
+    """Keep profiler timing modules bound to the shared device helpers."""
     assert bench.Event is device_utils.Event
     assert torch_bench.Event is device_utils.Event
     assert bench._cuda_synchronize is device_utils.device_synchronize
@@ -135,6 +136,7 @@ def test_cpu_count_falls_back_after_affinity_oserror(monkeypatch, error):
     """Keep compilation available when the affinity system call cannot be used."""
 
     def unavailable(pid):
+        """Simulate an affinity query rejected by the operating system."""
         raise error
 
     monkeypatch.setattr(device_utils.os, "sched_getaffinity", unavailable, raising=False)
