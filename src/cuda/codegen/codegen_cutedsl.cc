@@ -787,6 +787,15 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  */
 void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (op->op.same_as(builtin::bitwise_not()) && op->dtype.is_bool() &&
+      op->dtype.is_scalar()) {
+    ICHECK_EQ(op->args.size(), 1U);
+    // Python's ~ on a bool constant yields -2/-1 instead of a bool, so use
+    // logical negation as the CUDA codegen does. Vector bools stay on ~,
+    // which flips each i1 lane of the TensorSSA.
+    PrintExpr_(Not(op->args[0]), os);
+    return;
+  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
@@ -1711,6 +1720,72 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         << "tl.match_any_sync expects <mask, value>.";
     os << "tl.__match_any_sync(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::match_all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.match_all_sync expects <mask, value>.";
+    // The helper drops __match_all_sync's pred output, as the CUDA codegen
+    // does; a non-zero result implies pred == 1.
+    os << "tl.__match_all_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::any_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
+    os << "tl.__any_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::all_sync())) {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.all_sync expects <mask, predicate>.";
+    os << "tl.__all_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ballot_sync())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.ballot_sync expects <mask, predicate>.";
+    // The 32-bit ballot is zero-extended to uint64 inside the helper.
+    os << "tl.ballot_sync(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ballot())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.ballot expects <predicate>.";
+    os << "tl.ballot(" << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::activemask())) {
+    ICHECK(op->args.empty()) << "tl.activemask takes no arguments.";
+    os << "tl.activemask()";
+  } else if (op->op.same_as(tl::syncthreads_count())) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.syncthreads_count expects <predicate>.";
+    os << "tl.__syncthreads_count(" << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_and())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_and expects <predicate>.";
+    os << "tl.__syncthreads_and(" << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::syncthreads_or())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.syncthreads_or expects <predicate>.";
+    os << "tl.__syncthreads_or(" << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::named_barrier_arrive())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.named_barrier_arrive expects <barrier_id, thread_count>.";
+    std::string barrier_id = PrintExpr_(op->args[0]);
+    std::string thread_count = PrintExpr_(op->args[1]);
+    PrintIndent();
+    stream << "tl.named_barrier_arrive(" << barrier_id << ", " << thread_count
+           << ")\n";
+  } else if (op->op.same_as(tl::__ffs())) {
+    ICHECK_EQ(op->args.size(), 1U) << "T.__ffs expects one argument.";
+    DataType arg_dtype = op->args[0].dtype();
+    ICHECK(arg_dtype.is_int() || arg_dtype.is_uint())
+        << "T.__ffs expects an integer argument, but got " << arg_dtype;
+    ICHECK(arg_dtype.bits() == 32 || arg_dtype.bits() == 64)
+        << "T.__ffs expects a 32-bit or 64-bit integer argument, but got "
+        << arg_dtype;
+    os << (arg_dtype.bits() == 64 ? "tl.__ffsll(" : "tl.__ffs(")
+       << PrintExpr_(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__fns())) {
+    ICHECK_EQ(op->args.size(), 3U)
+        << "T.__fns expects three arguments: mask, base, offset.";
+    DataType mask_dtype = op->args[0].dtype();
+    ICHECK(mask_dtype.is_int() || mask_dtype.is_uint())
+        << "T.__fns expects an integer mask argument, but got " << mask_dtype;
+    ICHECK(mask_dtype.bits() == 32)
+        << "T.__fns expects a 32-bit integer mask argument, but got "
+        << mask_dtype;
+    os << "tl.__fns(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
   } else if (op->op.same_as(tl::get_lane_idx())) {
     // get_lane_idx(warp_size?) -> threadIdx.x % warp_size
     ICHECK_LE(op->args.size(), 1U)
