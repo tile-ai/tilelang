@@ -1669,6 +1669,462 @@ def test_sync_may_stay_inside_block_uniform_guard():
     _assert_syncs_inside(lowered, guard.then_case)
 
 
+# =============================================================================
+# Tests for guards on a value that is private to each thread
+#
+# A thread-local buffer, a lane index or the result of an atomic belongs to one
+# thread, so its expression names no thread variable even when it differs per
+# thread. A guard on such a value is divergent: a barrier inside the branch waits
+# on the threads that skip it, which hangs the block. When both ends of a hazard
+# are inside such a guard, the pass reports the program, as it does for a guard
+# on ``threadIdx``. A thread-local buffer that every thread fills with the same
+# value stays block uniform, and the barrier stays inside its guard.
+# =============================================================================
+
+
+def _shared_reader_guard(root):
+    guards = [
+        guard
+        for guard in collect_nodes(root, tirx.IfThenElse)
+        if any(load.buffer.scope() == "shared" for load in collect_nodes(guard.then_case, tirx.BufferLoad))
+    ]
+    assert len(guards) == 1, f"Expected one guard that reads shared memory, got {len(guards)}"
+    return guards[0]
+
+
+def _assert_hazard_reported_outside(root, capfd):
+    warnings = capfd.readouterr().err
+    assert not _storage_syncs(_shared_reader_guard(root)), "A barrier inside the divergent guard hangs the block"
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+def test_hazard_in_guard_on_local_written_by_some_threads_is_reported(capfd):
+    """A local that only some threads write differs per thread.
+
+    The threads with ``x[tx] > 0`` set ``flag`` to 1 and the others keep 0, so
+    ``flag[0] > 0`` is divergent although its load names no thread variable.
+    """
+
+    @T.prim_func(private=True)
+    def func(x: T.Buffer((128,), "float32")):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        flag = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        flag[0] = 0
+        if x[tx] > T.float32(0):
+            flag[0] = 1
+        if flag[0] > 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_local_holding_a_thread_index_is_reported(capfd):
+    """A local that holds a value computed from ``threadIdx`` differs per thread."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        parity = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        parity[0] = tx % 2
+        if parity[0] == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_copy_of_a_later_private_local_is_reported(capfd):
+    """A copy of a thread-private local is private, wherever the copy sits.
+
+    ``copy[0] = source[0]`` runs before the store that makes ``source`` private
+    in the same iteration, so the property reaches ``copy`` only from the
+    previous iteration.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        source = T.alloc_buffer((1,), dtype="int32", scope="local")
+        copy = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        source[0] = 0
+        for k in range(2):
+            copy[0] = source[0]
+            source[0] = tx
+        if copy[0] == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_atomic_result_is_reported(capfd):
+    """An atomic returns a different previous value to each thread."""
+
+    @T.prim_func(private=True)
+    def func(counter: T.Buffer((1,), "int32")):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        ticket = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        ticket[0] = T.call_intrin(
+            "int32",
+            tvm.tirx.op.Op.get("tl.atomic_add_ret_elem_op"),
+            T.address_of(counter[0]),
+            1,
+            0,
+        )
+        if ticket[0] == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_local_written_through_a_pointer_is_reported(capfd):
+    """A call that writes a local through a pointer can write any value."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        filled = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        T.evaluate(T.call_extern("handle", "fill", T.tvm_access_ptr(T.type_annotation("int32"), filled.data, 0, 1, 2)))
+        if filled[0] == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_local_whose_address_reaches_a_call_is_reported(capfd):
+    """An opaque call can write through the address of a local as well."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        filled = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        T.evaluate(T.call_extern("handle", "fill", T.address_of(filled[0])))
+        if filled[0] == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_lane_index_is_reported(capfd):
+    """The lane index differs per thread without naming ``threadIdx``."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if T.call_intrin("int32", tvm.tirx.op.Op.get("tl.get_lane_idx")) == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_hazard_in_guard_on_bind_of_lane_index_is_reported(capfd):
+    """A bind keeps the per-thread property of its definition.
+
+    The two-thread proof gives each thread its own copy of ``lane``, but both
+    copies equal the same pure call, so only the property of the definition
+    shows that the guard diverges.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        lane: T.int32 = T.call_intrin("int32", tvm.tirx.op.Op.get("tl.get_lane_idx"))
+        if lane == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    _assert_hazard_reported_outside(_device_func(run_passes(func)), capfd)
+
+
+def test_sync_stays_inside_guard_on_block_uniform_local():
+    """A local filled from a block-uniform address holds one value per block.
+
+    Every thread stores ``flags[bx]`` into ``m`` under no guard, so ``m[0] > 0``
+    agrees across the block, and the barrier inside the branch is reached by
+    every thread.
+    """
+
+    @T.prim_func(private=True)
+    def func(flags: T.Buffer((4,), "int32")):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        m = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 4)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        m[0] = flags[bx]
+        if m[0] > 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    lowered = _device_func(run_passes(func))
+    guard = _shared_reader_guard(lowered)
+    syncs = _assert_syncs_inside(lowered, guard.then_case)
+    for call in syncs:
+        _assert_shared_write_sync_read(guard.then_case, call)
+
+
+def test_sync_stays_inside_guard_on_any_of_block_uniform_local():
+    """A guard that reads a block-uniform local through a pointer is uniform.
+
+    ``T.any_of`` reads ``m`` through a read-only pointer, and a serial loop fills
+    ``m`` from block-uniform addresses.
+    """
+
+    @T.prim_func(private=True)
+    def func(mask: T.Buffer((8,), "bool")):
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        m = T.alloc_buffer((2,), dtype="bool", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 4)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in range(2):
+            m[i] = mask[bx * 2 + i]
+        if T.call_intrin("bool", tvm.tirx.op.Op.get("tl.any_of"), T.tvm_access_ptr(T.type_annotation("bool"), m.data, 0, 2, 1), 2):
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    lowered = _device_func(run_passes(func))
+    guard = _shared_reader_guard(lowered)
+    syncs = _assert_syncs_inside(lowered, guard.then_case)
+    for call in syncs:
+        _assert_shared_write_sync_read(guard.then_case, call)
+
+
+def test_unorderable_hazard_in_divergent_loop_is_reported(capfd):
+    """A loop whose trip count differs per thread is as divergent as a branch.
+
+    Each thread runs ``tx % 3`` iterations, so a barrier inside the body waits on
+    the threads that have left the loop. Both ends of the hazard are inside the
+    body, so the pass reports the program, as it does for a divergent branch.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for k in range(tx % 3):
+            s[tx] = T.cast(tx + k, "float32")
+            l[0] = s[(tx + 64) % 128]
+
+    lowered = _device_func(run_passes(func))
+    warnings = capfd.readouterr().err
+    loops = collect_nodes(lowered, tirx.For)
+    assert len(loops) == 1
+    assert not _storage_syncs(loops[0]), "A barrier inside the divergent loop hangs the block"
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+# =============================================================================
+# Tests for barriers that only some paths through a statement run
+#
+# A barrier inside a branch or a loop body orders the accesses before and after
+# it only on the paths that run it. When the block skips the branch, or the loop
+# takes no iteration, a hazard from before the statement reaches the accesses
+# after it unordered.
+# =============================================================================
+
+
+def _flag_read(root):
+    writes = [store for store in collect_nodes(root, tirx.BufferStore) if store.buffer.name == "flag"]
+    assert len(writes) == 1, "Expected one producer of the flag"
+    reads = [
+        store
+        for store in collect_nodes(root, tirx.BufferStore)
+        if any(load.buffer.data.same_as(writes[0].buffer.data) for load in collect_nodes(store.value, tirx.BufferLoad))
+    ]
+    assert len(reads) == 1, "Expected one consumer of the flag"
+    return reads[0]
+
+
+def _assert_sync_between(root, statement, read):
+    syncs = [call for call in _storage_syncs(root) if not any(call.same_as(inner) for inner in _storage_syncs(statement))]
+    assert syncs, "Expected a barrier between the statement and the read of the flag"
+    for call in syncs:
+        _assert_stmt_order(root, statement, _sync_stmt(root, call), read)
+
+
+def test_sync_in_one_branch_keeps_earlier_hazard():
+    """A barrier inside one branch does not order the paths that skip it.
+
+    Thread 0 writes ``flag[0]`` before the branch, and every thread reads it after
+    the branch. When ``n <= 0`` the block skips the barrier inside the branch.
+    """
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        flag = T.alloc_buffer((1,), dtype="float32", scope="shared")
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((2,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0:
+            flag[0] = T.float32(7)
+        if n > 0:
+            s[tx] = T.cast(tx, "float32")
+            T.tvm_storage_sync("shared")
+            l[0] = s[127 - tx]
+        l[1] = flag[0]
+
+    lowered = _device_func(run_passes(func))
+    guard = _guard(lowered, lowered.params[-1] > 0)
+    _assert_sync_between(lowered, guard, _flag_read(lowered))
+
+
+def test_sync_in_both_branches_orders_earlier_hazard():
+    """When both branches run a barrier, every path orders the hazard."""
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        flag = T.alloc_buffer((1,), dtype="float32", scope="shared")
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((2,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0:
+            flag[0] = T.float32(7)
+        if n > 0:
+            s[tx] = T.cast(tx, "float32")
+            T.tvm_storage_sync("shared")
+            l[0] = s[127 - tx]
+        else:
+            T.tvm_storage_sync("shared")
+        l[1] = flag[0]
+
+    lowered = _device_func(run_passes(func))
+    guard = _guard(lowered, lowered.params[-1] > 0)
+    assert len(_storage_syncs(lowered)) == 2, "Expected only the barriers of the two branches"
+    assert len(_storage_syncs(guard)) == 2
+
+
+def test_sync_in_loop_without_iteration_keeps_earlier_hazard():
+    """A loop with ``n`` iterations runs its barrier only when ``n > 0``."""
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        flag = T.alloc_buffer((1,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0:
+            flag[0] = T.float32(7)
+        for k in range(n):
+            T.tvm_storage_sync("shared")
+        l[0] = flag[0]
+
+    lowered = _device_func(run_passes(func))
+    loops = collect_nodes(lowered, tirx.For)
+    assert len(loops) == 1
+    _assert_sync_between(lowered, loops[0], _flag_read(lowered))
+
+
+def test_sync_in_loop_with_iteration_orders_earlier_hazard():
+    """A loop that takes an iteration runs its barrier, so it orders the hazard."""
+
+    @T.prim_func(private=True)
+    def func():
+        flag = T.alloc_buffer((1,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0:
+            flag[0] = T.float32(7)
+        for k in range(2):
+            T.tvm_storage_sync("shared")
+        l[0] = flag[0]
+
+    lowered = _device_func(run_passes(func))
+    loops = collect_nodes(lowered, tirx.For)
+    assert len(loops) == 1
+    assert len(_storage_syncs(lowered)) == 1, "Expected only the barrier of the loop"
+
+
+def test_sync_in_while_loop_keeps_earlier_hazard():
+    """A while loop can end before its body runs the barrier."""
+
+    @T.prim_func(private=True)
+    def func(n: T.int32):
+        flag = T.alloc_buffer((1,), dtype="float32", scope="shared")
+        i = T.alloc_buffer((1,), dtype="int32", scope="local")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0:
+            flag[0] = T.float32(7)
+        i[0] = 0
+        while i[0] < n:
+            T.tvm_storage_sync("shared")
+            i[0] = i[0] + 1
+        l[0] = flag[0]
+
+    lowered = _device_func(run_passes(func))
+    loops = collect_nodes(lowered, tirx.While)
+    assert len(loops) == 1
+    _assert_sync_between(lowered, loops[0], _flag_read(lowered))
+
+
 @tilelang.testing.requires_cuda
 def test_unbounded_atomic_touched_range_stays_conservative():
     """Regression: an atomic whose address is data-dependent relaxes its

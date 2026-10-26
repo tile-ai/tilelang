@@ -30,6 +30,7 @@
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include <algorithm>
+#include <iterator>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -40,6 +41,7 @@
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -259,6 +261,58 @@ PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
   return linear_thread_id;
 }
 
+/*! \brief Return whether each thread has its own copy of a buffer in scope. */
+bool IsThreadLocalScope(const StorageScope &scope) {
+  switch (scope.rank) {
+  case StorageRank::kWarp:
+  case StorageRank::kLocal:
+  case StorageRank::kWMMAMatrixA:
+  case StorageRank::kWMMAMatrixB:
+  case StorageRank::kWMMAAccumulator:
+  case StorageRank::kAMXTMM:
+  case StorageRank::kMMAMatrixA:
+  case StorageRank::kMMAMatrixB:
+  case StorageRank::kMMAMatrixC:
+  case StorageRank::kMetalSimdGroup:
+    return true;
+  case StorageRank::kGlobal:
+  case StorageRank::kShared:
+  case StorageRank::kTexture:
+    return false;
+  }
+  return false;
+}
+
+/*! \brief Return the effect kind of a callee. An unknown callee is opaque. */
+CallEffectKind CallEffect(const CallNode *op) {
+  static auto effect_kind = Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
+  return static_cast<CallEffectKind>(
+      effect_kind
+          .get(op->op, Integer(static_cast<int>(CallEffectKind::kOpaque)))
+          ->value);
+}
+
+/*!
+ * \brief Return whether a call can return a different value in each thread of
+ *        a block for the same arguments.
+ *
+ * The lane, warp and warp group indices and an election depend on the thread
+ * that calls them. A call that reads or updates state, such as an atomic that
+ * returns the previous value or a warp shuffle, can depend on it as well.
+ */
+bool IsThreadPrivateCall(const CallNode *op) {
+  if (op->op.same_as(tl::get_lane_idx()) ||
+      op->op.same_as(tl::get_warp_idx_sync()) ||
+      op->op.same_as(tl::get_warp_idx()) ||
+      op->op.same_as(tl::get_warp_group_idx()) ||
+      op->op.same_as(tl::tl_shuffle_elect())) {
+    return true;
+  }
+  CallEffectKind effect = CallEffect(op);
+  return effect == CallEffectKind::kReadState ||
+         effect == CallEffectKind::kUpdateState;
+}
+
 } // namespace
 
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
@@ -456,11 +510,17 @@ struct ConditionThreadProperty {
   bool depends_on_runtime{false};
   bool is_block_uniform{true};
   bool requires_hoist{false};
+  // Whether the expression reads a value that differs per thread but names no
+  // thread variable: a thread-local buffer that holds per-thread data, a lane
+  // or warp index, or the result of an opaque call. A proof that renames the
+  // thread variables for two threads cannot tell such a value apart.
+  bool reads_thread_private{false};
 
   void Merge(const ConditionThreadProperty &other) {
     depends_on_runtime = depends_on_runtime || other.depends_on_runtime;
     is_block_uniform = is_block_uniform && other.is_block_uniform;
     requires_hoist = requires_hoist || other.requires_hoist;
+    reads_thread_private = reads_thread_private || other.reads_thread_private;
   }
 };
 
@@ -488,9 +548,11 @@ public:
       arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
       const std::unordered_map<const VarNode *, ConditionThreadProperty>
           &let_var_properties,
+      const std::unordered_set<const VarNode *> &thread_private_locals,
       int warp_size = 32)
       : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
-        let_var_properties_(let_var_properties), warp_size_(warp_size) {}
+        let_var_properties_(let_var_properties),
+        thread_private_locals_(thread_private_locals), warp_size_(warp_size) {}
 
   /*!
    * \brief Analyze condition properties relevant to thread-sync hoisting.
@@ -538,25 +600,10 @@ private:
     return false;
   }
 
-  bool IsThreadLocalScope(const StorageScope &scope) const {
-    switch (scope.rank) {
-    case StorageRank::kWarp:
-    case StorageRank::kLocal:
-    case StorageRank::kWMMAMatrixA:
-    case StorageRank::kWMMAMatrixB:
-    case StorageRank::kWMMAAccumulator:
-    case StorageRank::kAMXTMM:
-    case StorageRank::kMMAMatrixA:
-    case StorageRank::kMMAMatrixB:
-    case StorageRank::kMMAMatrixC:
-    case StorageRank::kMetalSimdGroup:
-      return true;
-    case StorageRank::kGlobal:
-    case StorageRank::kShared:
-    case StorageRank::kTexture:
-      return false;
-    }
-    return false;
+  void MarkThreadPrivate() {
+    current_.depends_on_runtime = true;
+    current_.is_block_uniform = false;
+    current_.reads_thread_private = true;
   }
 
   PrimExpr VisitExpr_(const VarNode *op) final {
@@ -585,7 +632,12 @@ private:
     // (e.g., T.copy(BlockMask[blockIdx.y, :], fragment)). If the load
     // indices actually depend on threadIdx, the recursive visit of indices
     // below (via IRMutatorWithAnalyzer::VisitExpr_) will correctly set
-    // is_block_uniform = false through VisitExpr_(VarNode*).
+    // is_block_uniform = false through VisitExpr_(VarNode*). A thread-local
+    // buffer that a store fills with per-thread data, such as a T.alloc_var
+    // that only some threads write, is in thread_private_locals_.
+    if (thread_private_locals_.count(op->buffer->data.get())) {
+      MarkThreadPrivate();
+    }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
@@ -606,6 +658,14 @@ private:
       // conditions like `T.any_of(local_fragment[:])` get hoisted out of the
       // if-body and break write-before-read sync between shared-memory loads
       // and mma/tma reads.
+      if (op->op.same_as(builtin::tvm_access_ptr())) {
+        const auto *data = op->args[1].as<VarNode>();
+        if (data != nullptr && thread_private_locals_.count(data)) {
+          MarkThreadPrivate();
+        }
+      }
+    } else if (IsThreadPrivateCall(op)) {
+      MarkThreadPrivate();
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
@@ -615,7 +675,147 @@ private:
   const Array<IterVar> &env_threads_;
   const std::unordered_map<const VarNode *, ConditionThreadProperty>
       &let_var_properties_;
+  const std::unordered_set<const VarNode *> &thread_private_locals_;
   int warp_size_;
+};
+
+/*!
+ * \brief Collect the thread-local buffers that can hold a different value in
+ *        each thread of a block.
+ *
+ * A thread-local buffer, such as a fragment or a T.alloc_var, belongs to one
+ * thread, so a load of it names no thread variable even when its value differs
+ * per thread. The buffer holds one value per block when every store into it
+ * writes a block-uniform value at block-uniform indices under block-uniform
+ * control flow, and no call can write it through a pointer. A store that reads
+ * another thread-local buffer depends on that buffer, so the collection repeats
+ * until the set stops growing.
+ */
+class ThreadPrivateLocalCollector : public StmtExprVisitor {
+public:
+  static std::unordered_set<const VarNode *> Collect(const Stmt &stmt) {
+    ThreadPrivateLocalCollector collector;
+    do {
+      collector.grew_ = false;
+      collector.var_properties_.clear();
+      collector(stmt);
+    } while (collector.grew_);
+    return std::move(collector.thread_private_);
+  }
+
+private:
+  static bool IsThreadLocal(const Var &data) {
+    return IsThreadLocalScope(StorageScope::Create(GetPtrStorageScope(data)));
+  }
+
+  bool Varies(const PrimExpr &expr) { return !Analyze(expr).is_block_uniform; }
+
+  ConditionThreadProperty Analyze(const PrimExpr &expr) {
+    arith::Analyzer analyzer;
+    ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
+                                           var_properties_, thread_private_);
+    return checker.AnalyzeExpr(expr);
+  }
+
+  void MarkThreadPrivate(const Var &data) {
+    if (IsThreadLocal(data) && thread_private_.insert(data.get()).second) {
+      grew_ = true;
+    }
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tvm::tl::attr::coproc_scope ||
+        op->attr_key == tvm::tirx::attr::thread_extent) {
+      env_threads_.push_back(Downcast<IterVar>(op->node));
+      StmtExprVisitor::VisitStmt_(op);
+      env_threads_.pop_back();
+    } else {
+      StmtExprVisitor::VisitStmt_(op);
+    }
+  }
+
+  void VisitStmt_(const BindNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    var_properties_[op->var.get()] = Analyze(op->value);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    // The loop variable takes the same values in each thread when the bounds
+    // do, and otherwise the threads take different iterations.
+    ConditionThreadProperty bounds = Analyze(op->min);
+    bounds.Merge(Analyze(op->extent));
+    if (auto step = op->step) {
+      bounds.Merge(Analyze(step.value()));
+    }
+    var_properties_[op->loop_var.get()] = bounds;
+    int diverges = bounds.is_block_uniform ? 0 : 1;
+    divergence_ += diverges;
+    StmtExprVisitor::VisitStmt_(op);
+    divergence_ -= diverges;
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    int diverges = Varies(op->condition) ? 1 : 0;
+    divergence_ += diverges;
+    StmtExprVisitor::VisitStmt_(op);
+    divergence_ -= diverges;
+  }
+
+  void VisitStmt_(const WhileNode *op) final {
+    int diverges = Varies(op->condition) ? 1 : 0;
+    divergence_ += diverges;
+    StmtExprVisitor::VisitStmt_(op);
+    divergence_ -= diverges;
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    const Var &data = op->buffer->data;
+    if (thread_private_.count(data.get()) || !IsThreadLocal(data)) {
+      return;
+    }
+    bool varies = divergence_ > 0 || Varies(op->value);
+    for (const PrimExpr &index : op->indices) {
+      varies = varies || Varies(index);
+    }
+    if (varies) {
+      MarkThreadPrivate(data);
+    }
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::tvm_access_ptr())) {
+      // A call can write through a pointer whose access mask has the write bit.
+      const auto *data = op->args[1].as<VarNode>();
+      const auto *mask = op->args[4].as<IntImmNode>();
+      if (data != nullptr && (mask == nullptr || (mask->value & 2) != 0)) {
+        MarkThreadPrivate(GetRef<Var>(data));
+      }
+    } else if (op->op.same_as(builtin::address_of())) {
+      // A call that receives the address can write through it.
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        MarkThreadPrivate(load->buffer->data);
+      }
+    } else if (CallEffect(op) <= CallEffectKind::kPure) {
+      // A pure call only reads through the addresses that it receives.
+      for (const PrimExpr &arg : op->args) {
+        const auto *address = arg.as<CallNode>();
+        if (address != nullptr && address->op.same_as(builtin::address_of())) {
+          StmtExprVisitor::VisitExpr_(address);
+        } else {
+          this->VisitExpr(arg);
+        }
+      }
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  Array<IterVar> env_threads_;
+  std::unordered_map<const VarNode *, ConditionThreadProperty> var_properties_;
+  std::unordered_set<const VarNode *> thread_private_;
+  int divergence_{0};
+  bool grew_{false};
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
@@ -944,12 +1144,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitStmt_(const ForNode *op) final {
+    std::unordered_set<const Object *> syncs_before_body = syncs_inserted_;
     scope_.push_back(std::vector<StmtEntry>());
     ConstrVisitor::VisitStmt_(op);
     StmtEntry s;
     s.stmt = op;
     s.access = Summarize(std::move(scope_.back()), op);
     scope_.pop_back();
+    Array<PrimExpr> bounds = {op->min, op->extent};
+    if (auto step = op->step) {
+      bounds.push_back(step.value());
+    }
+    bool hoisted = HoistLoopSyncs(op, syncs_before_body, bounds);
+    // The body runs its syncs only when the loop takes an iteration.
+    if (hoisted || !GetConstrSet().CanProve(op->extent > 0)) {
+      DropSyncs(&s.access);
+    }
     if (!s.access.empty()) {
       // relax the touched set to contain all ranges in the loop.
       std::unordered_map<const VarNode *, arith::IntSet> relax_map;
@@ -1026,15 +1236,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       syncs_before_else.insert(sync);
     }
 
+    std::vector<AccessEntry> v;
     if (op->else_case) {
       auto guard = MakeGuard(tirx::Not(op->condition));
       scope_.push_back(std::vector<StmtEntry>());
       {
         this->VisitStmt(op->else_case.value());
       }
-      auto v = Summarize(std::move(scope_.back()), nullptr);
+      v = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
-      s.access.insert(s.access.end(), v.begin(), v.end());
     }
 
     // Check if any syncs were inserted inside the if-then-else
@@ -1053,6 +1263,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }
 
     bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
+    bool hoist_then = false;
+    bool hoist_else = false;
 
     if (has_syncs_inside) {
       // Runtime-dependent conditions are only problematic when they can differ
@@ -1064,16 +1276,20 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       arith::Analyzer analyzer;
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
-      ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                             let_var_properties_, warp_size_);
+      ConditionThreadPropertyChecker checker(
+          &analyzer, env_threads_, let_var_properties_, thread_private_locals_,
+          warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
       auto must_hoist = [&](const PrimExpr &branch_condition,
                             const char *branch_name) {
         auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
         bool may_hoist =
             condition_prop.depends_on_runtime || condition_prop.requires_hoist;
-        bool proven_uniform =
-            may_hoist && IsBlockUniformCondition(branch_condition);
+        // The proof renames the thread variables and the binds for two
+        // threads, so a value private to each thread would look shared.
+        bool proven_uniform = may_hoist &&
+                              !condition_prop.reads_thread_private &&
+                              IsBlockUniformCondition(branch_condition);
         bool is_block_uniform =
             condition_prop.is_block_uniform || proven_uniform;
         bool should_hoist =
@@ -1094,10 +1310,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         return should_hoist;
       };
 
-      bool hoist_then =
-          !syncs_in_then.empty() && must_hoist(op->condition, "then");
-      bool hoist_else = !syncs_in_else.empty() &&
-                        must_hoist(tirx::Not(op->condition), "else");
+      hoist_then = !syncs_in_then.empty() && must_hoist(op->condition, "then");
+      hoist_else = !syncs_in_else.empty() &&
+                   must_hoist(tirx::Not(op->condition), "else");
       if (hoist_then || hoist_else) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync out of an if whose condition is not "
@@ -1121,10 +1336,38 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
 
+    // A sync inside the if orders the accesses after the if only when every
+    // path through the if runs one that the whole block waits at. A hoisted
+    // branch keeps none of the syncs that the planner placed in it, and a sync
+    // in a divergent branch waits only on the threads of that branch.
+    auto is_sync = [](const AccessEntry &e) { return e.type == kSync; };
+    auto then_sync = std::find_if(s.access.begin(), s.access.end(), is_sync);
+    auto else_sync = std::find_if(v.begin(), v.end(), is_sync);
+    auto is_block_uniform = [&]() {
+      ConditionThreadProperty property = AnalyzeExprProperty(op->condition);
+      return property.is_block_uniform ||
+             (!property.reads_thread_private &&
+              IsBlockUniformCondition(op->condition));
+    };
+    if (!hoist_then && !hoist_else && then_sync != s.access.end() &&
+        else_sync != v.end() && is_block_uniform()) {
+      // [condition, then head, else head, sync, then tail, else tail]
+      std::vector<AccessEntry> merged(s.access.begin(), then_sync);
+      merged.insert(merged.end(), v.begin(), else_sync);
+      merged.push_back(*then_sync);
+      merged.insert(merged.end(), std::next(then_sync), s.access.end());
+      merged.insert(merged.end(), std::next(else_sync), v.end());
+      s.access = std::move(merged);
+    } else {
+      s.access.insert(s.access.end(), v.begin(), v.end());
+      DropSyncs(&s.access);
+    }
+
     scope_.back().emplace_back(std::move(s));
   }
 
   void VisitStmt_(const WhileNode *op) final {
+    std::unordered_set<const Object *> syncs_before_body = syncs_inserted_;
     StmtEntry s;
     {
       auto guard = MakeGuard(op->condition);
@@ -1145,6 +1388,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                         cond_access.end());
       }
     }
+    HoistLoopSyncs(op, syncs_before_body, {op->condition});
+    // The condition can fail before the body runs its syncs.
+    DropSyncs(&s.access);
     scope_.back().emplace_back(std::move(s));
   }
 
@@ -1366,6 +1612,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     buffer_data_to_buffer_.Set(buffer_var, buffer);
   }
 
+  void SetThreadPrivateLocals(std::unordered_set<const VarNode *> locals) {
+    thread_private_locals_ = std::move(locals);
+  }
+
   std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
                                      const ForNode *loop) {
     // Redirect all "shared.dyn" buffer access to the same buffer var
@@ -1562,8 +1812,61 @@ private:
     ConstrSet constr_set = GetConstrSet();
     constr_set.Populate(analyzer);
     ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                           let_var_properties_, warp_size_);
+                                           let_var_properties_,
+                                           thread_private_locals_, warp_size_);
     return checker.AnalyzeExpr(expr);
+  }
+
+  /*!
+   * \brief Move the syncs that the planner placed inside a loop body in front
+   *        of the loop when the threads of a block can take different
+   *        iterations of it.
+   *
+   * \param loop The For or While statement.
+   * \param syncs_before_body The syncs inserted before the body was visited.
+   * \param bounds The expressions that decide the iterations of the loop.
+   * \return Whether any sync moved.
+   */
+  bool
+  HoistLoopSyncs(const Object *loop,
+                 const std::unordered_set<const Object *> &syncs_before_body,
+                 const Array<PrimExpr> &bounds) {
+    std::vector<const Object *> syncs_in_body;
+    for (const auto &sync : syncs_inserted_) {
+      if (sync != loop && syncs_before_body.count(sync) == 0) {
+        syncs_in_body.push_back(sync);
+      }
+    }
+    if (syncs_in_body.empty()) {
+      return false;
+    }
+    ConditionThreadProperty property;
+    for (const PrimExpr &bound : bounds) {
+      property.Merge(AnalyzeExprProperty(bound));
+    }
+    if (property.is_block_uniform) {
+      return false;
+    }
+    LOG(WARNING)
+        << "[ThreadSync] Hoisting sync out of a loop whose iterations differ "
+           "between the threads of a block. This is not a fix: both ends of "
+           "the conflict are inside the loop body, so the hoisted barrier no "
+           "longer separates them and the race remains. Loop bounds: "
+        << bounds;
+    for (const auto &sync : syncs_in_body) {
+      syncs_inserted_.erase(sync);
+    }
+    insert_syncs(loop);
+    return true;
+  }
+
+  /*! \brief Remove the syncs from the summary of a statement that can complete
+   *         without running them. */
+  static void DropSyncs(std::vector<AccessEntry> *access) {
+    access->erase(
+        std::remove_if(access->begin(), access->end(),
+                       [](const AccessEntry &e) { return e.type == kSync; }),
+        access->end());
   }
 
   bool Enabled(const VarNode *buf, const StorageScope &scope) {
@@ -1592,6 +1895,8 @@ private:
   // current lexical scope.
   std::unordered_map<const VarNode *, ConditionThreadProperty>
       let_var_properties_;
+  // The thread-local buffers that can hold a different value in each thread.
+  std::unordered_set<const VarNode *> thread_private_locals_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
@@ -2082,6 +2387,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
                     .IntValue();
   }
   TileLangThreadSyncPlanner planner(sync_scope, warp_size);
+  planner.SetThreadPrivateLocals(ThreadPrivateLocalCollector::Collect(stmt));
   for (const auto &[_, buffer] : func->buffer_map) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
   }
