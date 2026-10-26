@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file insert_oob_padding.cc
  * \brief Handle Ascend DMA copy out-of-bounds tails and GM->L1 padding before
@@ -25,6 +26,7 @@
  * Both stages share the clamp/fill helpers in oob_padding.h.
  */
 
+#include "op/prim.h"
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/sym/analyzer.h>
@@ -285,21 +287,25 @@ std::optional<MxKTailFill> MakeMxKTailFill(const Copy &copy,
   size_t ndim = copy->dst_range.size();
   size_t k_axis = semantic_k_axis == LogicalAxis::kRow ? ndim - 2 : ndim - 1;
   size_t mn_axis = semantic_k_axis == LogicalAxis::kRow ? ndim - 1 : ndim - 2;
-  PrimExpr zero = MakeConst(copy->dst_range[k_axis]->extent.ty(), 0);
-  if (!analyzer->CanProveEqual(copy->dst_range[k_axis]->begin, zero) ||
-      !analyzer->CanProveEqual(copy->dst_range[mn_axis]->begin, zero)) {
+  PrimExpr zero = tl::MakeConst(copy->dst_range[k_axis]->extent.ty(), 0);
+  if (!tl::arith::CanProveEqual(analyzer, copy->dst_range[k_axis]->begin,
+                                zero) ||
+      !tl::arith::CanProveEqual(analyzer, copy->dst_range[mn_axis]->begin,
+                                zero)) {
     return std::nullopt;
   }
 
-  PrimExpr actual_k = analyzer->Simplify(copy->dst_range[k_axis]->extent);
+  PrimExpr actual_k =
+      tl::arith::Simplify(analyzer, copy->dst_range[k_axis]->extent);
   PrimExpr shape_k = copy->dst.shape()[k_axis];
   PrimExpr shape_mn = copy->dst.shape()[mn_axis];
   auto constant = [&](int64_t value) {
-    return MakeConst(actual_k.ty(), value);
+    return tl::MakeConst(actual_k.ty(), value);
   };
-  PrimExpr k64 = analyzer->Simplify(
-      FloorDiv(actual_k + constant(63), constant(64)) * constant(64));
-  ICHECK(analyzer->CanProveEqual(FloorMod(shape_k, constant(64)), constant(0)))
+  PrimExpr k64 = tl::arith::Simplify(
+      analyzer, FloorDiv(actual_k + constant(63), constant(64)) * constant(64));
+  ICHECK(tl::arith::CanProveEqual(analyzer, FloorMod(shape_k, constant(64)),
+                                  constant(0)))
       << "Ascend MX FP8 K-tail fill requires the L1 K allocation extent to "
          "be divisible by 64, got "
       << shape_k << " for buffer " << copy->dst->name << " with shape "
@@ -311,28 +317,32 @@ std::optional<MxKTailFill> MakeMxKTailFill(const Copy &copy,
   Array<Range> fill_region = copy->dst_range;
   PrimExpr needs_fill = IntImm::Bool(false);
   if (is_k_major) {
-    PrimExpr nz32 = analyzer->Simplify(
+    PrimExpr nz32 = tl::arith::Simplify(
+        analyzer,
         FloorDiv(actual_k + constant(31), constant(32)) * constant(32));
-    needs_fill = analyzer->Simplify(nz32 < k64);
-    fill_region.Set(k_axis,
-                    Range::FromMinExtent(nz32, analyzer->Simplify(k64 - nz32)));
+    needs_fill = tl::arith::Simplify(analyzer, nz32 < k64);
+    fill_region.Set(
+        k_axis,
+        Range::FromMinExtent(nz32, tl::arith::Simplify(analyzer, k64 - nz32)));
     fill_region.Set(mn_axis, Range::FromMinExtent(constant(0), shape_mn));
   } else {
-    ICHECK(analyzer->CanProveEqual(FloorMod(shape_mn, info.c0), constant(0)))
+    ICHECK(tl::arith::CanProveEqual(analyzer, FloorMod(shape_mn, info.c0),
+                                    constant(0)))
         << "Ascend MX FP8 K-tail fill requires a MajorMN extent divisible by "
            "the FP8 C0 width, got MN="
         << shape_mn << " and C0=" << info.c0;
-    PrimExpr tail_k = analyzer->Simplify(k64 - actual_k);
-    needs_fill = analyzer->Simplify(actual_k < k64);
+    PrimExpr tail_k = tl::arith::Simplify(analyzer, k64 - actual_k);
+    needs_fill = tl::arith::Simplify(analyzer, actual_k < k64);
     fill_region.Set(k_axis, Range::FromMinExtent(actual_k, tail_k));
     fill_region.Set(mn_axis, Range::FromMinExtent(constant(0), shape_mn));
   }
 
-  if (IsConstInt(needs_fill, 0) || analyzer->CanProve(Not(needs_fill)))
+  if (IsConstInt(needs_fill, 0) ||
+      tl::arith::CanProve(analyzer, Not(needs_fill)))
     return std::nullopt;
 
   Stmt fill = ascend::MakeL1Fill(copy->dst, fill_region,
-                                 MakeConst(copy->dst.dtype(), 0));
+                                 tl::MakeConst(copy->dst.dtype(), 0));
   return MxKTailFill{fill, needs_fill};
 }
 
@@ -401,19 +411,19 @@ private:
     // possible fill against the later L1 consumer.
     PrimExpr any_fill = IntImm::Bool(false);
     for (const MxKTailFill &fill : *pending) {
-      any_fill = analyzer_->Simplify(Or(any_fill, fill.condition));
+      any_fill = tl::arith::Simplify(analyzer_, Or(any_fill, fill.condition));
     }
 
     Array<Stmt> body;
     for (const MxKTailFill &fill : *pending) {
       Stmt fill_stmt = fill.stmt;
-      if (!analyzer_->CanProveEqual(fill.condition, any_fill)) {
+      if (!tl::arith::CanProveEqual(analyzer_, fill.condition, any_fill)) {
         fill_stmt = If(fill.condition, SeqStmt({fill_stmt}));
       }
       body.push_back(fill_stmt);
     }
     Stmt fill_group = body.size() == 1 ? body[0] : Stmt(SeqStmt(body));
-    if (!IsConstInt(any_fill, 1) && !analyzer_->CanProve(any_fill)) {
+    if (!IsConstInt(any_fill, 1) && !tl::arith::CanProve(analyzer_, any_fill)) {
       fill_group = If(any_fill, SeqStmt({fill_group}));
     }
     seq->push_back(fill_group);

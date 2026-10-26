@@ -1,3 +1,5 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -65,7 +67,7 @@ namespace {
 
 bool GuardsStructurallyEqual(const PrimExpr &a, const PrimExpr &b) {
   ICHECK(a.defined() && b.defined());
-  return a.same_as(b) || ffi::StructuralEqual()(a, b);
+  return a.same_as(b) || tl::StructuralEqual()(a, b);
 }
 
 bool GuardsEquivalentWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &a,
@@ -73,7 +75,8 @@ bool GuardsEquivalentWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &a,
   ICHECK(a.defined() && b.defined());
   if (GuardsStructurallyEqual(a, b))
     return true;
-  return analyzer->CanProve(a == b, sym::ProofStrength::kSymbolicBound);
+  return tl::arith::CanProve(analyzer, a == b,
+                             sym::ProofStrength::kSymbolicBound);
 }
 
 bool GuardImpliesWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &premise,
@@ -81,8 +84,9 @@ bool GuardImpliesWithAnalyzer(sym::Analyzer analyzer, const PrimExpr &premise,
   ICHECK(premise.defined() && conclusion.defined());
   if (GuardsStructurallyEqual(premise, conclusion))
     return true;
-  With<sym::ConstraintContext> constraint(analyzer, premise);
-  return analyzer->CanProve(conclusion, sym::ProofStrength::kSymbolicBound);
+  With<tl::arith::ConstraintContext> constraint(analyzer, premise);
+  return tl::arith::CanProve(analyzer, conclusion,
+                             sym::ProofStrength::kSymbolicBound);
 }
 
 } // namespace
@@ -159,7 +163,7 @@ ConstrSet TaskNode::GetContextBeforeConditionGuards() const {
     for (size_t index = result.constrs_.size(); index > 0; --index) {
       const Constr &constraint = result.constrs_[index - 1];
       if (constraint.kind == Constr::kConstr &&
-          ffi::StructuralEqual()(constraint.value, condition)) {
+          tl::StructuralEqual()(constraint.value, condition)) {
         result.constrs_.erase(result.constrs_.begin() + index - 1);
         removed = true;
         break;
@@ -430,7 +434,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.ascend.EstimateLoopTripCount",
            [](For loop, ffi::Map<Var, Range> domains) {
              sym::Analyzer analyzer;
-             analyzer->Bind(domains);
+             tl::arith::Bind(analyzer, domains);
              return GetSerialTripCount(loop, analyzer);
            });
 }

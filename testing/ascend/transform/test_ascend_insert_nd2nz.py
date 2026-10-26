@@ -50,7 +50,7 @@ def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape
     if reshape:
         allocations.append(source.declare(owner.data))
     root = ir.RegionStmt(
-        "tirx.scope", [], [], {"layout_map": {destination.tensor: make_ascend_compact_nz_layout(destination.tensor)}}, [*allocations, body]
+        "tl.scope", [], [], {"layout_map": {destination.tensor: make_ascend_compact_nz_layout(destination.tensor)}}, [*allocations, body]
     )
     return ir.IRModule({"main": tirx.Function([], root, ret_type=ir.TupleType([]))})
 
@@ -102,7 +102,7 @@ def test_ub_to_l1_scratch_is_defined_at_the_copy_not_hoisted_out_of_its_loop():
     copy = ir.Evaluate(ir.Call("tl.tileop.ascend_copy", [source_region, destination_region], ty=ir.TupleType([])))
     loop = ir.For(index, 0, 4, 1, ir.ForKind.DEFAULT, copy)
     body = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {"layout_map": {destination.tensor: make_ascend_nz_layout(destination.tensor)}},

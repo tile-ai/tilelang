@@ -1,14 +1,14 @@
 #ifndef TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
 #define TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
 
-#include <tvm/codegen/c.h>
+#include "backend/common/codegen/tirx/codegen_c.h"
 
 #include <sstream>
 #include <string>
 
 namespace tvm::codegen {
 
-class CodeGenTileLangCBase : public CodeGenC {
+class CodeGenTileLangCBase : public tl::codegen_impl::CodeGenC {
 public:
   void SetEmitLineDirectives(bool enable) { emit_line_directives_ = enable; }
 

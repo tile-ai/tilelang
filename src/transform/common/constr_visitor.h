@@ -1,5 +1,8 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #ifndef TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 #define TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
+#include "op/prim.h"
 
 #include "compat/expr.h"
 #include <cstdint>
@@ -25,7 +28,7 @@ public:
   enum class Mode { kPerOccurrence, kSnapshot };
 
 private:
-  class Rewriter : public tirx::StmtExprMutator {
+  class Rewriter : public tvm::tl::StmtExprMutator {
   public:
     explicit Rewriter(Mode mode) : mode_(mode) {}
 
@@ -65,13 +68,13 @@ private:
           scalar && SideEffect(expression) > CallEffectKind::kPure) {
         return Fresh(scalar.value());
       }
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
 
     Mode mode_;
     int count_{0};
-    std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
-                       ffi::StructuralEqual>
+    std::unordered_map<PrimExpr, PrimExpr, tl::StructuralHash,
+                       tl::StructuralEqual>
         memo_;
   };
 
@@ -204,7 +207,7 @@ struct Constr {
     return Constr();
   }
   void Populate(sym::Analyzer &analyzer,
-                WithGroup<sym::ConstraintContext> &contexts) const {
+                WithGroup<tl::arith::ConstraintContext> &contexts) const {
     Constr c = FreshenReads();
     switch (c.kind) {
     case kConstr:
@@ -213,13 +216,14 @@ struct Constr {
       // expands into the condition it represents before the analyzer
       // digests it. EnterConstraint evaluates eagerly, exactly like Bind:
       // an opaque boolean entered as-is contributes nothing.
-      contexts.Emplace(analyzer, analyzer->Simplify(c.value), c.is_assume);
+      contexts.Emplace(analyzer, tl::arith::Simplify(analyzer, c.value),
+                       c.is_assume);
       break;
     case kBindValue:
-      analyzer->Bind(c.var, c.value);
+      tl::arith::Bind(analyzer, c.var, c.value);
       break;
     case kBindRange:
-      analyzer->Bind(c.var, c.range);
+      tl::arith::Bind(analyzer, c.var, c.range);
       break;
     default:
       TVM_FFI_THROW(InternalError) << "Unreachable";
@@ -279,8 +283,7 @@ struct ConstrSet {
   ConstrSet Merge(const ConstrSet &other) const {
     ConstrSet out = *this;
     std::unordered_map<const VarNode *, Constr> bound;
-    std::unordered_set<PrimExpr, ffi::StructuralHash, ffi::StructuralEqual>
-        preds;
+    std::unordered_set<PrimExpr, tl::StructuralHash, tl::StructuralEqual> preds;
     for (const Constr &c : out.constrs_) {
       if (c.kind == Constr::kConstr)
         preds.insert(c.value);
@@ -298,8 +301,8 @@ struct ConstrSet {
         bound.emplace(c.var.get(), c);
         out.constrs_.push_back(c);
       } else if (it->second.kind != c.kind ||
-                 !ffi::StructuralEqual()(it->second.ToGenericConstr(),
-                                         c.ToGenericConstr())) {
+                 !tl::StructuralEqual()(it->second.ToGenericConstr(),
+                                        c.ToGenericConstr())) {
         LOG(WARNING) << "ConstrSet::Merge: var '" << c.var->name
                      << "' bound to conflicting values across merged sets; "
                         "caller should rename per-side-varying vars. Dropping "
@@ -391,9 +394,9 @@ struct ConstrSet {
     return out;
   }
 
-  [[nodiscard]] WithGroup<sym::ConstraintContext>
+  [[nodiscard]] WithGroup<tl::arith::ConstraintContext>
   Populate(sym::Analyzer &analyzer) const {
-    WithGroup<sym::ConstraintContext> contexts;
+    WithGroup<tl::arith::ConstraintContext> contexts;
     // Keep program order: `Analyzer::Bind` evaluates the bounds and modular set
     // of the value at bind time, so entering the binds first would widen them
     // -- a `v = tx` inside `if tx < 64` would lose its upper bound. Merged
@@ -426,7 +429,7 @@ struct ConstrSet {
   bool CanProve(const PrimExpr &expr) const {
     sym::Analyzer analyzer;
     auto constraints = Populate(analyzer);
-    return analyzer->CanProve(expr);
+    return tl::arith::CanProve(analyzer, expr);
   }
   template <typename... Args> void AddConstr(Args... args) {
     constrs_.push_back(Constr(args...));
@@ -457,9 +460,9 @@ struct ConstrSet {
   std::vector<Constr> constrs_;
 };
 
-struct ConstrVisitor : public tirx::StmtExprVisitor {
+struct ConstrVisitor : public tvm::tl::StmtExprVisitor {
 private:
-  using Base = tirx::StmtExprVisitor;
+  using Base = tvm::tl::StmtExprVisitor;
   using Result = ffi::Optional<ffi::VisitInterrupt>;
 
   struct Guard {
@@ -530,7 +533,8 @@ public:
       auto variable = node->body_params[0].as_or_throw<PrimVar>();
       auto extent = node->args[1].as_or_throw<PrimExpr>();
       auto guard = MakeGuard(
-          variable, Range::FromMinExtent(MakeConst(extent.ty(), 0), extent));
+          variable,
+          Range::FromMinExtent(tl::MakeConst(extent.ty(), 0), extent));
       return Base::Visit(node->body);
     }
     for (const char *key :
@@ -580,12 +584,12 @@ public:
     }
     sym::Analyzer analyzer;
     auto constraints = GetConstrSet().Populate(analyzer);
-    if (analyzer->CanProve(node->step > 0)) {
+    if (tl::arith::CanProve(analyzer, node->step > 0)) {
       auto range_guard = MakeGuard(node->var, Range(node->begin, node->end));
       auto extent_guard = MakeGuard(node->begin < node->end);
       return Base::Visit(node->body);
     }
-    if (analyzer->CanProve(node->step < 0)) {
+    if (tl::arith::CanProve(analyzer, node->step < 0)) {
       auto range_guard =
           MakeGuard(node->var > node->end && node->var <= node->begin);
       auto extent_guard = MakeGuard(node->begin > node->end);

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -843,8 +844,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       annotated_storage_versions;
   auto get_buffer_size = [](const TensorVar &buffer) -> int64_t {
     sym::Analyzer analyzer;
-    auto size =
-        GetConstInt(analyzer->Simplify(GetBufferStorageSizeBytes(buffer)));
+    auto size = GetConstInt(
+        tl::arith::Simplify(analyzer, GetBufferStorageSizeBytes(buffer)));
     return size.value_or(0);
   };
   auto enumerate_buffers = [&](auto &&visit) {

@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file tl/op/builtin_registry.h
  * \brief Internal registration helper for TileLang intrinsic Ops.
@@ -29,7 +30,8 @@ void RegisterBuiltin(const ffi::String &name, CallEffectKind effect,
     SetBuiltinSignature(definition, std::make_index_sequence<NumInputs>{});
   }
   definition.set_attr(tvm::op_attr::kCallEffectKind, effect);
-  definition.set_attr(tvm::op_attr::kAttrsMayContainExpr, true);
+  definition.set_attr(
+      ffi::reflection::AttrKey<bool>{"tl.attrs_may_contain_expr"}, true);
   if (vectorizable) {
     definition.set_attr(tirx::op_attr::kVectorizable, true);
   }

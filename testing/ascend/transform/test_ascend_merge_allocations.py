@@ -27,7 +27,7 @@ def _scope(body, aliases, aiv_storages=None):
     attrs = {"tl.buffer_alias_map": aliases}
     if aiv_storages is not None:
         attrs["tl.aiv_storage_map"] = aiv_storages
-    return ir.RegionStmt("tirx.scope", [], [], attrs, body)
+    return ir.RegionStmt("tl.scope", [], [], attrs, body)
 
 
 def _merge(body, parameters=(), *, disable_reuse=False, alignment=16, attrs=None):
@@ -119,7 +119,7 @@ def test_scope_alignment_and_empty_contract_enable_sequential_allocation(scope, 
 
 def test_absent_contract_preserves_allocations_and_other_metadata():
     tensors = [_tensor(name, 8) for name in ("first", "second")]
-    body = ir.RegionStmt("tirx.scope", [], [], {"tl.aiv_storage_map": {tensors[0]: 0}}, [_allocate(tensor) for tensor in tensors])
+    body = ir.RegionStmt("tl.scope", [], [], {"tl.aiv_storage_map": {tensors[0]: 0}}, [_allocate(tensor) for tensor in tensors])
     after = _merge(body)
     assert len(_allocations(after)) == 2
     assert "tl.aiv_storage_map" in after.body.seq[0].attrs

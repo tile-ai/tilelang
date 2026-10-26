@@ -1,3 +1,5 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -63,7 +65,7 @@ public:
 
 using VarSet = std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
-class AllocationUsageCollector : public tirx::StmtExprVisitor {
+class AllocationUsageCollector : public tvm::tl::StmtExprVisitor {
 public:
   VarSet Dead() {
     VarSet live = used_;
@@ -95,13 +97,13 @@ protected:
         parents_[node->var] = tvm::UndefinedVars(call->args[0]);
       return std::nullopt;
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const VarNode *node) final {
     if (def_region_kind() == kTVMFFIDefRegionKindNone)
       used_.insert(ffi::GetRef<Var>(node));
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
 private:
@@ -194,7 +196,7 @@ private:
     known_.clear();
     PrimExpr enters = (node->step > 0 && node->begin < node->end) ||
                       (node->step < 0 && node->begin > node->end);
-    if (analyzer_->CanProve(!enters))
+    if (tl::arith::CanProve(analyzer_, !enters))
       return Effects({node->begin, node->end, node->step});
     Stmt result = Parent::VisitStmt_(node);
     known_.clear();
@@ -222,10 +224,10 @@ private:
     for (const PrimExpr &index : store->indices)
       pure_indices &= SideEffect(index) == CallEffectKind::kPure;
     bool redundant =
-        pure_indices && ffi::StructuralEqual()(destination, store->value);
+        pure_indices && tl::StructuralEqual()(destination, store->value);
     auto previous = known_.find(destination);
     if (pure_indices && dataflow_ && previous != known_.end()) {
-      redundant |= ffi::StructuralEqual()(previous->second, store->value);
+      redundant |= tl::StructuralEqual()(previous->second, store->value);
     }
     if (redundant)
       return SeqStmt({});
@@ -254,8 +256,8 @@ private:
 
   bool dataflow_;
   VarSet dead_;
-  std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
-                     ffi::StructuralEqual>
+  std::unordered_map<PrimExpr, PrimExpr, tl::StructuralHash,
+                     tl::StructuralEqual>
       known_;
 };
 

@@ -1,16 +1,72 @@
 #include "backend/common/op/atomic_reduce.h"
 #include "backend/common/op/reduce_value.h"
+#include "compat/analyzer.h"
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/parallel.h"
 #include "op/reducer.h"
+#include "transform/common/loop_aware_visitor.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/common/memory_access.h"
 
 namespace tvm::tl {
 
+class ExitTestContext {
+  friend class tvm::With<ExitTestContext>;
+  ExitTestContext(ffi::Array<ffi::String> *events, int identifier, bool fail)
+      : events_(events), identifier_(identifier), fail_(fail) {}
+  void EnterWithScope() {}
+  void ExitWithScope() {
+    events_->push_back(std::to_string(identifier_));
+    if (fail_)
+      throw std::runtime_error("exit " + std::to_string(identifier_));
+  }
+  ffi::Array<ffi::String> *events_;
+  int identifier_;
+  bool fail_;
+};
+
+ffi::Array<ffi::String> ContextExitBehavior(bool unwind, bool nested) {
+  ffi::Array<ffi::String> events;
+  try {
+    ContextStack<WithGroup<ExitTestContext>> scopes;
+    scopes.Current().Emplace(&events, 1, true);
+    auto body = [&] {
+      scopes.Current().Emplace(&events, 2, true);
+      scopes.Current().Emplace(&events, 3, false);
+      if (unwind)
+        throw std::runtime_error("body");
+    };
+    if (nested)
+      scopes.WithNewScope(body);
+    else
+      body();
+  } catch (const std::runtime_error &error) {
+    events.push_back(error.what());
+  }
+  return events;
+}
+
+class LoopProofCollector : public LoopAwareVisitor {
+public:
+  ffi::Array<int64_t> proofs;
+
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const EvaluateNode *node) final {
+    proofs.push_back(
+        tl::arith::CanProve(analyzer_, node->value.as_or_throw<PrimExpr>()));
+    return std::nullopt;
+  }
+};
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   ffi::reflection::GlobalDef()
+      .def("tl.testing.ContextExitBehavior", ContextExitBehavior)
+      .def("tl.testing.CollectLoopProofs",
+           [](Stmt body) {
+             auto visitor = ffi::make_object<LoopProofCollector>();
+             visitor->Visit(body);
+             return visitor->proofs;
+           })
       .def("tl.testing.SummarizeMemoryAccess",
            [](Stmt body, Stmt statement) {
              auto aliases = ffi::make_object<MemoryAccessCollector>();
@@ -39,7 +95,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              ICHECK(atomic != nullptr);
              sym::Analyzer analyzer;
              if (auto variable = thread.as<PrimVar>()) {
-               analyzer->Bind(variable.value(), threads);
+               tl::arith::Bind(analyzer, variable.value(), threads);
              }
              return backend::AtomicReduce::Lower(
                  *atomic, {target, threads, thread, layouts, {}}, analyzer);
@@ -67,7 +123,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               LayoutMap layouts, ffi::Map<TensorVar, TensorVar> remap) {
              sym::Analyzer analyzer;
              if (auto variable = thread.as<PrimVar>()) {
-               analyzer->Bind(variable.value(), threads);
+               tl::arith::Bind(analyzer, variable.value(), threads);
              }
              ffi::Array<Stmt> statements;
              LowerArgs arguments{target, threads, thread, layouts, remap};
@@ -89,7 +145,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               LayoutMap layouts) {
              sym::Analyzer analyzer;
              if (auto variable = thread.as<PrimVar>()) {
-               analyzer->Bind(variable.value(), threads);
+               tl::arith::Bind(analyzer, variable.value(), threads);
              }
              return LowerNormalCopy(
                  *operation.operator->(),
@@ -126,7 +182,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               ffi::Map<TensorVar, TensorVar> remap) {
              sym::Analyzer analyzer;
              if (auto variable = thread.as<PrimVar>()) {
-               analyzer->Bind(variable.value(), threads);
+               tl::arith::Bind(analyzer, variable.value(), threads);
              }
              LowerArgs arguments{target, threads, thread, layouts, remap};
              return operation->Lower(arguments, analyzer);

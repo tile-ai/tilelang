@@ -56,6 +56,6 @@ class HostCodegenHook:
 STANDARD_HOST_CODEGENS: Mapping[str, HostCodegen] = MappingProxyType(
     {
         "c": HostCodegen("c", build=global_func_host_codegen("target.build.tilelang_c_host")),
-        "llvm": HostCodegen("llvm", build=global_func_host_codegen("target.build.llvm")),
+        "llvm": HostCodegen("llvm", build=global_func_host_codegen("target.build.tilelang_llvm")),
     }
 )

@@ -1,8 +1,11 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cpu/op/builtin.h"
 #include "op/builtin.h"
+#include "op/prim.h"
 #include "op/utils.h"
+#include "transform/common/data_type_rewriter.h"
 
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/transform.h>
@@ -90,16 +93,16 @@ struct AtomicAccess {
   ffi::Array<PrimExpr> indices;
 };
 
-class CPUAtomicLowerer : public tirx::StmtExprMutator {
+class CPUAtomicLowerer : public tvm::tl::StmtExprMutator {
 public:
-  using StmtExprMutator::Mutate;
+  using tvm::tl::StmtExprMutator::Mutate;
 
   ffi::UnchangedOr<ffi::Any> Mutate(ffi::AnyView value,
                                     ffi::InplaceMode mode) final {
     if (auto statement = value.as<Stmt>()) {
       auto previous = std::move(prefix_);
       prefix_.clear();
-      auto result = StmtExprMutator::Mutate(value, mode)
+      auto result = tvm::tl::StmtExprMutator::Mutate(value, mode)
                         .ValueOrUnchanged(ffi::Any(value))
                         .cast<Stmt>();
       prefix_.push_back(result);
@@ -107,8 +110,8 @@ public:
       prefix_ = std::move(previous);
       return ffi::Any(result);
     }
-    auto result =
-        StmtExprMutator::Mutate(value, mode).ValueOrUnchanged(ffi::Any(value));
+    auto result = tvm::tl::StmtExprMutator::Mutate(value, mode)
+                      .ValueOrUnchanged(ffi::Any(value));
     if (auto expression = result.as<PrimExpr>()) {
       if (!expression.value().ty().IsVoid() &&
           SideEffect(expression.value()) > CallEffectKind::kPure) {
@@ -145,7 +148,7 @@ private:
         << "Vector atomics require a non-scalar tensor";
     if (lane)
       indices.Set(indices.size() - 1,
-                  indices.back() + MakeConst(indices.back().ty(), lane));
+                  indices.back() + tl::MakeConst(indices.back().ty(), lane));
     return indices;
   }
 
@@ -174,14 +177,14 @@ private:
       auto value = Mutate(node->args[1])
                        .ValueOrUnchanged(node->args[1])
                        .as_or_throw<PrimExpr>();
-      values.push_back(prim::cast(value, destination.tensor.dtype()));
+      values.push_back(tl::CastValue(value, destination.tensor.dtype()));
     } else if (node->args[1]->ty.as<PtrTypeNode>()) {
       auto source = ParseAccess(node->args[1]);
       for (int lane = 0; lane < operation.lanes; ++lane) {
         auto value =
             TensorLoad(source.tensor, ElementIndices(source.indices, lane));
         values.push_back(
-            Snapshot(prim::cast(value, destination.tensor.dtype())));
+            Snapshot(tl::CastValue(value, destination.tensor.dtype())));
       }
     } else {
       PrimExpr vector = Mutate(node->args[1])
@@ -189,8 +192,8 @@ private:
                             .as_or_throw<PrimExpr>();
       TVM_FFI_CHECK_EQ(vector.ty().lanes(), operation.lanes, ValueError);
       for (int lane = 0; lane < operation.lanes; ++lane) {
-        values.push_back(prim::cast(Shuffle({vector}, {IntImm::Int32(lane)}),
-                                    destination.tensor.dtype()));
+        values.push_back(tl::CastValue(Shuffle({vector}, {IntImm::Int32(lane)}),
+                                       destination.tensor.dtype()));
       }
     }
     ffi::Array<PrimExpr> previous;
@@ -198,7 +201,7 @@ private:
       auto indices = ElementIndices(destination.indices, lane);
       PrimExpr old_value =
           operation.kind == AtomicKind::kStore
-              ? MakeConst(destination.tensor.dtype(), 0)
+              ? tl::MakeConst(destination.tensor.dtype(), 0)
               : Snapshot(TensorLoad(destination.tensor, indices));
       prefix_.push_back(TensorStore(
           destination.tensor, indices,
@@ -252,13 +255,14 @@ private:
       auto access = ParseAccess(ffi::GetRef<Expr>(node));
       ffi::Array<Range> ranges;
       for (const auto &index : access.indices)
-        ranges.push_back(Range::FromMinExtent(index, MakeConst(index.ty(), 1)));
+        ranges.push_back(
+            Range::FromMinExtent(index, tl::MakeConst(index.ty(), 1)));
       auto arguments = node->args;
       arguments.Set(0, TensorRegion(access.tensor, ranges, TensorRegionType()));
       return Call(node->ty, node->op, arguments, node->attrs, node->ty_args,
                   node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const prim::LetNode *node,
@@ -267,7 +271,7 @@ private:
     PrimVar variable("atomic_let_" + std::to_string(counter_++), value.ty(),
                      node->loc);
     prefix_.push_back(Bind(variable, value, node->loc));
-    PrimExpr body = tirx::SubstituteWithDataTypeLegalization(
+    PrimExpr body = tl::SubstituteWithDataTypeLegalization(
         node->body, [&](const Var &candidate) -> ffi::Optional<PrimExpr> {
           return candidate.same_as(node->var)
                      ? ffi::Optional<PrimExpr>(variable)
@@ -284,7 +288,7 @@ private:
         return SeqStmt({}, node->loc);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,

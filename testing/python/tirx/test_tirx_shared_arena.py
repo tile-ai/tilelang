@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir.transform import PassContext
 from tvm_tirx.target import Target
 
@@ -19,7 +20,7 @@ def lower(body, parameters=(), *, static=False, reuse=True, aggressive=False, al
         module = tvm_ffi.get_global_func("tl.transform.MergeSharedMemoryAllocations")(aggressive, 16, not reuse)(
             ir.IRModule({"main": function})
         )
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -166,7 +167,7 @@ def test_tma_reuse_requires_matching_guards_and_sequential_roles(concurrent):
     )
     body = [first.allocate(), second.allocate(), first.store(0, 17), *operations, second.store(0, 29)]
     if concurrent:
-        body = ir.RegionStmt("tirx.scope", [], [], {"tl.ws_concurrent": True}, body)
+        body = ir.RegionStmt("tl.scope", [], [], {"tl.ws_concurrent": True}, body)
     module = lower(body, [output.tensor, condition])
     assert int(allocations(module)[0].var.ty.shape[0]) == 1024
 
@@ -234,7 +235,7 @@ def test_arena_cannot_cross_a_late_size_binding():
 
 
 @pytest.mark.parametrize("reuse", [False, True])
-def test_merged_aliases_and_thread_sync_execute_on_cuda(reuse):
+def test_merged_aliases_and_thread_sync_execute_on_cuda(reuse, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
@@ -258,7 +259,7 @@ def test_merged_aliases_and_thread_sync_execute_on_cuda(reuse):
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     actual = runtime.empty((2, 128), "int32", device=device)
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(2)[:, None] * 128 + (np.arange(128) ^ 1))

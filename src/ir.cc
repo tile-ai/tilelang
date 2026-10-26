@@ -1,5 +1,7 @@
 #include "ir.h"
+#include "compat/metadata.h"
 #include "op/builtin.h"
+#include "op/prim.h"
 #include "transform/common/attr.h"
 #include "transform/common/warp_specialize.h"
 
@@ -52,7 +54,8 @@ PrimType IndexType(const Array<PrimExpr> &expressions) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tl.layout_hint",
         "Attach a TileLang layout to a previously declared tensor.")
-      .set_attr(tvm::op_attr::kAttrsMayContainExpr, true)
+      .set_attr(ffi::reflection::AttrKey<bool>{"tl.attrs_may_contain_expr"},
+                true)
       .signature(sig::arg<tirx::TensorVar>("tensor"))
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque);
   OpDef("tl.safe_value_hint", "Attach an out-of-bounds fill value to a tensor.")
@@ -134,7 +137,8 @@ ForFrame MakeThreadBindingFrame(const std::string &name,
   PrimType type = IndexType({extent});
   auto node = make_object<ForFrameObj>();
   node->vars.push_back(PrimVar(name, type));
-  node->doms.push_back(Range(MakeConst(type, 0), prim::cast(extent, type)));
+  node->doms.push_back(
+      Range(tl::MakeConst(type, 0), tl::CastValue(extent, type)));
   node->f_make_for_loop =
       [thread_tag, annotations](Array<Var> variables, Array<Range> domains,
                                 Array<Optional<PrimExpr>>, SeqStmt body,
@@ -178,7 +182,7 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
     PrimType type = IndexType({extents[axis]});
     node->vars.push_back(PrimVar("parallel_" + std::to_string(axis), type));
     node->doms.push_back(
-        Range(MakeConst(type, 0), prim::cast(extents[axis], type)));
+        Range(tl::MakeConst(type, 0), tl::CastValue(extents[axis], type)));
   }
   node->f_make_for_loop = [annotations](Array<Var> variables,
                                         Array<Range> domains,
@@ -187,8 +191,8 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
     for (size_t axis = variables.size(); axis-- > 0;) {
       PrimVar variable = variables[axis].as_or_throw<PrimVar>();
       PrimExpr step = axis < steps.size() && steps[axis].has_value()
-                          ? prim::cast(steps[axis].value(), variable.ty())
-                          : MakeConst(variable.ty(), 1);
+                          ? tl::CastValue(steps[axis].value(), variable.ty())
+                          : tl::MakeConst(variable.ty(), 1);
       body = SeqStmt(For(variable, domains[axis]->begin,
                          domains[axis]->begin + domains[axis]->extent, step,
                          ForKind::kParallel, body,
@@ -208,7 +212,8 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
   PrimType type = IndexType({start, stop});
   auto node = make_object<ForFrameObj>();
   node->vars.push_back(PrimVar("pipeline", type));
-  node->doms.push_back(Range(prim::cast(start, type), prim::cast(stop, type)));
+  node->doms.push_back(
+      Range(tl::CastValue(start, type), tl::CastValue(stop, type)));
   node->f_make_for_loop = [=](Array<Var> variables, Array<Range> domains,
                               Array<Optional<PrimExpr>> steps, SeqStmt body,
                               Location loc) -> Stmt {
@@ -220,8 +225,8 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
     if (!stages.empty())
       options.Set("tl_pipeline_stage", stages);
     PrimExpr step = !steps.empty() && steps[0].has_value()
-                        ? prim::cast(steps[0].value(), type)
-                        : MakeConst(type, 1);
+                        ? tl::CastValue(steps[0].value(), type)
+                        : tl::MakeConst(type, 1);
     return For(variables[0].as_or_throw<PrimVar>(), domains[0]->begin,
                domains[0]->begin + domains[0]->extent, step, ForKind::kDefault,
                body, options, loc);
@@ -237,26 +242,26 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   TVM_FFI_CHECK_GE(num_stages, 0, ValueError)
       << "Pipeline stages must be nonnegative";
   PrimType type = IndexType(domain);
-  type = IndexType({MakeConst(type, 0), wave_size, index, group_size});
+  type = IndexType({tl::MakeConst(type, 0), wave_size, index, group_size});
   auto node = make_object<ForFrameObj>();
   Array<PrimExpr> shape;
   for (size_t axis = 0; axis < domain.size(); ++axis) {
-    shape.push_back(prim::cast(domain[axis], type));
+    shape.push_back(tl::CastValue(domain[axis], type));
     node->vars.push_back(PrimVar("persistent_" + std::to_string(axis), type));
-    node->doms.push_back(Range(MakeConst(type, 0), shape.back()));
+    node->doms.push_back(Range(tl::MakeConst(type, 0), shape.back()));
   }
-  PrimExpr wave = prim::cast(wave_size, type);
+  PrimExpr wave = tl::CastValue(wave_size, type);
   if (auto constant = GetConstInt(wave)) {
     TVM_FFI_CHECK_GT(*constant, 0, ValueError)
         << "Persistent wave size must be positive";
   }
-  group_size =
-      Max(MakeConst(type, 1), Min(prim::cast(group_size, type), shape.back()));
+  group_size = Max(tl::MakeConst(type, 1),
+                   Min(tl::CastValue(group_size, type), shape.back()));
   Array<PrimExpr> grouped{ceildiv(shape.back(), group_size)};
   for (size_t axis = 0; axis + 1 < shape.size(); ++axis)
     grouped.push_back(shape[axis]);
   grouped.push_back(group_size);
-  PrimExpr total = MakeConst(type, 1);
+  PrimExpr total = tl::MakeConst(type, 1);
   for (const PrimExpr &extent : grouped)
     total = total * extent;
   PrimExpr waves = ceildiv(total, wave);
@@ -267,8 +272,8 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     Map<String, Any> options = annotations;
     if (num_stages > 0)
       options.Set("num_stages", num_stages);
-    Array<PrimExpr> coordinates(grouped.size(), MakeConst(type, 0));
-    PrimExpr linear = wave_var * wave + prim::cast(index, type);
+    Array<PrimExpr> coordinates(grouped.size(), tl::MakeConst(type, 0));
+    PrimExpr linear = wave_var * wave + tl::CastValue(index, type);
     PrimExpr remaining = linear;
     for (size_t axis = grouped.size(); axis-- > 1;) {
       coordinates.Set(axis, FloorMod(remaining, grouped[axis]));
@@ -284,7 +289,7 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     }
     statements.push_back(
         If((last < shape.back()) && (linear < total), body, std::nullopt, loc));
-    return For(wave_var, MakeConst(type, 0), waves, MakeConst(type, 1),
+    return For(wave_var, tl::MakeConst(type, 0), waves, tl::MakeConst(type, 1),
                ForKind::kDefault, SeqStmt(statements), options, loc);
   };
   return ForFrame(node);
@@ -355,13 +360,14 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
   TVM_FFI_CHECK(!warp_group_ids.empty() && warp_group_size > 0, ValueError)
       << "Warp specialization requires nonempty roles and a positive group "
          "size";
-  PrimExpr condition = MakeConst(PrimType::Bool(), false);
+  PrimExpr condition = tl::MakeConst(PrimType::Bool(), false);
   for (const IntImm &group : warp_group_ids) {
     int64_t index = GetConstInt(group).value();
     TVM_FFI_CHECK_GE(index, 0, ValueError)
         << "Warp group indices must be nonnegative";
-    PrimExpr begin = MakeConst(thread_index.ty(), index * warp_group_size);
-    PrimExpr end = MakeConst(thread_index.ty(), (index + 1) * warp_group_size);
+    PrimExpr begin = tl::MakeConst(thread_index.ty(), index * warp_group_size);
+    PrimExpr end =
+        tl::MakeConst(thread_index.ty(), (index + 1) * warp_group_size);
     condition = condition || ((thread_index >= begin) && (thread_index < end));
   }
   auto node = make_object<WarpSpecializeFrameNode>();

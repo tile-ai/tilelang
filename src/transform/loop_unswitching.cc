@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "transform/tirx_passes.h"
+
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/sym/analyzer.h>
@@ -64,7 +68,7 @@ bool EmptyBranch(const Stmt &statement) {
   return false;
 }
 
-class GuardSpecializer : public tirx::StmtExprMutator {
+class GuardSpecializer : public tvm::tl::StmtExprMutator {
 public:
   GuardSpecializer(PrimExpr condition, bool enabled,
                    ffi::Map<PrimVar, PrimExpr> definitions,
@@ -77,14 +81,14 @@ private:
                                  ffi::InplaceMode mode) final {
     if (lifted_.count(node->var.get()))
       return SeqStmt({}, node->loc);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
                                  ffi::InplaceMode mode) final {
-    if (!ffi::StructuralEqual()(Substitute(node->condition, definitions_),
-                                condition_))
-      return StmtExprMutator::Mutate_(node, mode);
+    if (!tl::StructuralEqual()(Substitute(node->condition, definitions_),
+                               condition_))
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     SeqStmt branch =
         enabled_ ? node->then_case : node->else_case.value_or(SeqStmt({}));
     return Mutate(branch, mode).ValueOrUnchanged(branch);
@@ -96,7 +100,7 @@ private:
   std::unordered_set<const VarNode *> lifted_;
 };
 
-class LoopGuardHoister : public tirx::StmtExprMutator {
+class LoopGuardHoister : public tvm::tl::StmtExprMutator {
 public:
   LoopGuardHoister(const tirx::Function &function, bool allow_else)
       : aliases_(function), allow_else_(allow_else) {
@@ -126,7 +130,7 @@ private:
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(node, mode)
+    For loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                    .as_or_throw<For>();
     if (loop->kind == ForKind::kVectorized)
@@ -150,7 +154,7 @@ private:
       }
       if (const auto *branch = statement.as<IfNode>()) {
         PrimExpr expanded = Substitute(branch->condition, definitions);
-        if (condition && !ffi::StructuralEqual()(*condition, expanded))
+        if (condition && !tl::StructuralEqual()(*condition, expanded))
           return loop;
         if (!condition) {
           condition = expanded;
@@ -230,13 +234,13 @@ private:
     if (!reads.reads.empty()) {
       sym::Analyzer analyzer;
       PrimExpr nonempty = IntImm::Bool(false);
-      if (analyzer->CanProve(loop->step > 0))
+      if (tl::arith::CanProve(analyzer, loop->step > 0))
         nonempty = loop->begin < loop->end;
-      else if (analyzer->CanProve(loop->step < 0))
+      else if (tl::arith::CanProve(analyzer, loop->step < 0))
         nonempty = loop->begin > loop->end;
       else
         return loop;
-      if (!analyzer->CanProve(nonempty))
+      if (!tl::arith::CanProve(analyzer, nonempty))
         return If(nonempty, result, std::nullopt, loop->loc);
     }
     return result;
@@ -269,8 +273,8 @@ tvm::transform::Pass LoopUnswitching() {
     };
     module = tirx::transform::CreateFunctionPass(
         hoist, 0, "tl.HoistReplayableLoopGuards")(module);
-    module = tirx::transform::ConvertSSA()(module);
-    return tirx::transform::HoistIf(allow_else)(std::move(module));
+    module = tl::tirx_passes::ConvertSSA()(module);
+    return tirx_passes::HoistIf(allow_else)(std::move(module));
   };
   return tvm::transform::CreateModulePass(pass, 0, "tl.LoopUnswitching");
 }

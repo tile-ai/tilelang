@@ -1,3 +1,5 @@
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -88,7 +90,7 @@ public:
                     return Mutate(node->var);
                   }).as_or_throw<ffi::UnchangedOr<Var>>();
     Var variable = std::move(mapped).ValueOrUnchanged(node->var);
-    if (!ffi::StructuralEqual()(variable->ty, value->ty))
+    if (!tl::StructuralEqual()(variable->ty, value->ty))
       variable = variable.CopyWithType(value->ty);
     VarRemapSet(node->var, variable);
     return Bind(variable, value, node->loc);
@@ -285,7 +287,7 @@ private:
             Bind(cell, Call(cell.ty(), tirx::alloc_tensor_op(), {}, {},
                             {cell.ty()})));
         result.prefix.push_back(
-            TensorStore(cell, {IntImm::Int32(0)}, MakeConst(dtype, 0)));
+            TensorStore(cell, {IntImm::Int32(0)}, tl::MakeConst(dtype, 0)));
         Expr value = TensorLoad(cell, {IntImm::Int32(0)});
         if (pointer) {
           Type pointer_type = type;
@@ -479,7 +481,7 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
     }
     auto region = RegionStmt(Op::Get("tl.scope"), {}, {}, DictAttrs(attrs),
                              SeqStmt(body));
-    auto renewed = tirx::RenewDef(tirx::Function({}, SeqStmt(region)));
+    auto renewed = tl::RenewDef(tirx::Function({}, SeqStmt(region)));
     prefix.push_back(renewed->body.value());
   };
   if (has_cube)

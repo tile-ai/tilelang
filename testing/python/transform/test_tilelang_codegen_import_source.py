@@ -60,7 +60,7 @@ def _generate_source(codegen, target, imports):
     target = tvm.target.Target(target)
     body = tirx.Evaluate(tirx.call_extern("int32", "call_helper", 1))
     for source in reversed(imports):
-        body = ir.RegionStmt("tirx.scope", [], [], {"pragma_import_c": source}, body)
+        body = ir.RegionStmt("tl.scope", [], [], {"pragma_import_c": source}, body)
     func = tirx.PrimFunc([], body).with_attr("global_symbol", "import_kernel")
     if target.kind.name != "c":
         func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)

@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "op/utils.h"
 #include "transform/common/iteration_private.h"
@@ -34,7 +35,7 @@ struct Allocation {
   std::unordered_set<const VarNode *> available;
 };
 
-class AllocationUses : public StmtExprVisitor {
+class AllocationUses : public tvm::tl::StmtExprVisitor {
 public:
   AllocationUses(bool follow_aliases, const Array<Var> &parameters)
       : follow_aliases_(follow_aliases) {
@@ -117,7 +118,7 @@ private:
       allocation.uses.push_back(path_);
       allocation.pinned |= address_use_;
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const CallNode *node) final {
@@ -127,7 +128,7 @@ private:
         node->op.same_as(address_of_op()) ||
         node->op.same_as(tensor_data_ptr_op()) ||
         (operation && operation.value()->name.find("tl.tileop.") == 0);
-    auto result = StmtExprVisitor::Visit_(node);
+    auto result = tvm::tl::StmtExprVisitor::Visit_(node);
     address_use_ = previous;
     return result;
   }
@@ -135,24 +136,24 @@ private:
   Optional<VisitInterrupt> Visit_(const ForNode *node) final {
     owners.emplace(node->body.get(), node);
     defined_.insert(node->var.get());
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const WhileNode *node) final {
     owners.emplace(node->body.get(), node);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const IfNode *node) final {
     owners.emplace(node->then_case.get(), node);
     if (node->else_case)
       owners.emplace(node->else_case.value().get(), node);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const RegionStmtNode *node) final {
     owners.emplace(node->body.get(), node);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Path path_;
@@ -210,7 +211,7 @@ bool CrossesExecutionBoundary(const StmtNode *owner, const TensorVar &tensor,
           statement.as<IfNode>());
 }
 
-class AllocationPlacer : public StmtExprMutator {
+class AllocationPlacer : public tvm::tl::StmtExprMutator {
 public:
   explicit AllocationPlacer(const AllocationUses &analysis, bool cpu) {
     for (const Allocation &allocation : analysis.allocations) {

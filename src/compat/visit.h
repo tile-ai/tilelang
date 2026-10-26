@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #ifndef TILELANG_COMPAT_VISIT_H_
 #define TILELANG_COMPAT_VISIT_H_
 
@@ -9,7 +10,7 @@
 
 namespace tvm::tl {
 
-class PostOrderVisitor : public tirx::StmtExprVisitor {
+class PostOrderVisitor : public tvm::tl::StmtExprVisitor {
 public:
   explicit PostOrderVisitor(
       std::function<void(const ffi::ObjectRef &)> callback)
@@ -19,11 +20,11 @@ public:
     auto object = value.as<ffi::ObjectRef>();
     if (!object ||
         (!object.value().as<ExprNode>() && !object.value().as<StmtNode>())) {
-      return StmtExprVisitor::Visit(value);
+      return tvm::tl::StmtExprVisitor::Visit(value);
     }
     if (!visited_.insert(object.value().get()).second)
       return std::nullopt;
-    auto interrupt = StmtExprVisitor::Visit(value);
+    auto interrupt = tvm::tl::StmtExprVisitor::Visit(value);
     if (!interrupt)
       callback_(object.value());
     return interrupt;

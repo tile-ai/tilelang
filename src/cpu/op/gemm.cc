@@ -1,9 +1,11 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cpu/op/gemm.cc
  * \brief CPU implementation for tl.gemm instruction selection.
  */
 
 #include "op/gemm.h"
+#include "op/prim.h"
 #include "support/check.h"
 
 #include "backend/common/target_utils.h"
@@ -51,8 +53,10 @@ struct Gemm {
       TVM_FFI_CHECK_GE(ranges.size(), 2, ValueError)
           << "CPU GEMM requires matrix operands";
       TVM_FFI_CHECK(
-          analyzer->CanProve(ranges[ranges.size() - 2]->extent >= rows) &&
-              analyzer->CanProve(ranges[ranges.size() - 1]->extent >= columns),
+          tl::arith::CanProve(analyzer,
+                              ranges[ranges.size() - 2]->extent >= rows) &&
+              tl::arith::CanProve(analyzer,
+                                  ranges[ranges.size() - 1]->extent >= columns),
           ValueError)
           << "CPU GEMM region is smaller than its logical matrix";
     };
@@ -77,7 +81,7 @@ struct Gemm {
         For(reduction, 0, op.k_, 1, ForKind::kDefault, SeqStmt(update));
     Stmt initialize =
         If(op.clearAccum_,
-           SeqStmt(TensorStore(op.c_, output, MakeConst(accum_type, 0))),
+           SeqStmt(TensorStore(op.c_, output, tl::MakeConst(accum_type, 0))),
            std::nullopt);
     Stmt columns = For(column, 0, op.n_, 1, ForKind::kDefault,
                        SeqStmt({initialize, inner}));

@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #ifndef TILELANG_TRANSFORM_COMMON_MEMORY_EFFECTS_H_
 #define TILELANG_TRANSFORM_COMMON_MEMORY_EFFECTS_H_
 
@@ -126,7 +127,7 @@ struct MemoryEffects {
   bool unknown_write{false};
 };
 
-class EffectCollector : public tirx::StmtExprVisitor {
+class EffectCollector : public tvm::tl::StmtExprVisitor {
 public:
   explicit EffectCollector(const AliasOrigins &aliases) : aliases_(aliases) {}
 
@@ -144,12 +145,12 @@ private:
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorLoadNode *node) final {
     Add(node->source, false);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorStoreNode *node) final {
     Add(node->dest, true);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const VarNode *) final {
@@ -168,7 +169,7 @@ private:
         for (const auto &region : regions.writes)
           Add(region->source, true);
       }
-      return StmtExprVisitor::Visit_(node);
+      return tvm::tl::StmtExprVisitor::Visit_(node);
     }
     if ((node->op.same_as(access_ptr()) ||
          node->op.same_as(tirx::address_of_op())) &&
@@ -200,7 +201,7 @@ private:
                       .get(node->op, CallEffectKind::kOpaque);
     effects_.unknown_read |= effect == CallEffectKind::kReadState;
     effects_.unknown_write |= effect > CallEffectKind::kReadState;
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   const AliasOrigins &aliases_;

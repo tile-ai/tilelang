@@ -1,4 +1,6 @@
+#include "compat/analyzer.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "op/builtin.h"
 #include "op/gemm.h"
 #include "op/reducer.h"
@@ -27,21 +29,21 @@ struct InitializationEvent {
   bool gemm;
 };
 
-class InitializationAccessCollector : public StmtExprVisitor {
+class InitializationAccessCollector : public tvm::tl::StmtExprVisitor {
 public:
   std::vector<InitializationEvent> events;
 
 private:
   Optional<VisitInterrupt> Visit_(const ForNode *node) final {
     loops_.push_back(node);
-    auto result = StmtExprVisitor::Visit_(node);
+    auto result = tvm::tl::StmtExprVisitor::Visit_(node);
     loops_.pop_back();
     return result;
   }
 
   Optional<VisitInterrupt> Visit_(const IfNode *node) final {
     ++guard_depth_;
-    auto result = StmtExprVisitor::Visit_(node);
+    auto result = tvm::tl::StmtExprVisitor::Visit_(node);
     --guard_depth_;
     return result;
   }
@@ -52,7 +54,8 @@ private:
     Map<PrimVar, PrimExpr> beginnings;
     for (const ForNode *loop : loops_)
       beginnings.Set(loop->var, Substitute(loop->begin, beginnings));
-    return sym::Analyzer()->CanProve(Substitute(gemm->clearAccum_, beginnings));
+    return tl::arith::CanProve(sym::Analyzer(),
+                               Substitute(gemm->clearAccum_, beginnings));
   }
 
   std::vector<TensorVar> Origins(const Expr &value) {

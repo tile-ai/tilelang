@@ -1,10 +1,12 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/transpose.cc
  * \brief Transpose operator that swaps the final two axes using SIMT loops.
  */
 
-#include "transpose.h"
+#include "op/prim.h"
 #include "support/check.h"
+#include "transpose.h"
 
 #include <dlpack/dlpack.h>
 #include <tvm/ir/prim/op.h>
@@ -99,12 +101,13 @@ Transpose::Transpose(Array<Expr> args, BlockAnnotations annotations) {
         SourceAxisForDestinationAxis(axis, node->dst_range.size());
     const auto &source_extent = node->src_range[source_axis]->extent;
     const auto &destination_extent = node->dst_range[axis]->extent;
-    TVM_FFI_CHECK(!analyzer->CanProve(source_extent < 0) &&
-                      !analyzer->CanProve(destination_extent < 0),
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, source_extent < 0) &&
+                      !tl::arith::CanProve(analyzer, destination_extent < 0),
                   ValueError)
         << "Transpose regions must have nonnegative extents";
-    TVM_FFI_CHECK(!analyzer->CanProve(source_extent != destination_extent),
-                  ValueError)
+    TVM_FFI_CHECK(
+        !tl::arith::CanProve(analyzer, source_extent != destination_extent),
+        ValueError)
         << "Transpose destination region must swap the final two source "
            "extents";
   }
@@ -127,7 +130,7 @@ Array<LayoutAxis> TransposeNode::MakeIterVars() const {
                 src_range[i]->extent.ty());
     idx++;
     loop_vars.push_back(LayoutAxis(
-        Range::FromMinExtent(MakeConst(var.ty(), 0), src_range[i]->extent),
+        Range::FromMinExtent(tl::MakeConst(var.ty(), 0), src_range[i]->extent),
         var));
   }
   return loop_vars;
@@ -179,11 +182,13 @@ TransposeNode::MakePredicate(sym::Analyzer analyzer,
       << ") must match buffer rank (" << extents.size() << ")";
   for (size_t i = 0; i < indices.size(); i++) {
     PrimExpr cond = indices[i] < extents[i];
-    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(analyzer, cond,
+                             sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
     cond = indices[i] >= 0;
-    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(analyzer, cond,
+                             sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
   }
@@ -200,7 +205,7 @@ For TransposeNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
   bool is_scalar = loop_vars.empty();
 
   for (const auto &iv : loop_vars)
-    analyzer->Bind(iv->var, iv->dom);
+    tl::arith::Bind(analyzer, iv->var, iv->dom);
 
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
@@ -212,8 +217,8 @@ For TransposeNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
   if (src.dtype() != dst.dtype())
     value = Cast(dst.dtype(), value);
   if (src_predicate.has_value())
-    value =
-        if_then_else(src_predicate.value(), value, MakeConst(dst.dtype(), 0));
+    value = if_then_else(src_predicate.value(), value,
+                         tl::MakeConst(dst.dtype(), 0));
 
   Stmt body = TensorStore(dst, dst_indices, value, dst->loc);
   if (dst_predicate.has_value())
@@ -225,8 +230,9 @@ For TransposeNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     PrimType type = loop_vars[i]->var.ty();
-    body = For(loop_vars[i]->var, MakeConst(type, 0), loop_vars[i]->dom->extent,
-               MakeConst(type, 1), ForKind::kParallel, SeqStmt(body));
+    body = For(loop_vars[i]->var, tl::MakeConst(type, 0),
+               loop_vars[i]->dom->extent, tl::MakeConst(type, 1),
+               ForKind::kParallel, SeqStmt(body));
   }
   return body.as_or_throw<For>();
 }

@@ -1,6 +1,7 @@
 #include "auto_schedule/preprocess_ir.h"
 #include "auto_schedule/role_based_scheduler.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "cuda/op/builtin.h"
 #include "transform/common/attr.h"
 #include "ws_analysis.h"
@@ -14,7 +15,7 @@ namespace {
 using namespace ffi;
 using namespace tirx;
 
-class AutoWarpSpecializationRewriter : public StmtExprMutator {
+class AutoWarpSpecializationRewriter : public tvm::tl::StmtExprMutator {
 public:
   AutoWarpSpecializationRewriter(cuda::SchedulerFn scheduler, Target target,
                                  Array<Var> readonly)
@@ -46,7 +47,7 @@ private:
         }
       }
     } else {
-      region = StmtExprMutator::Mutate_(node, mode)
+      region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(region)
                    .as_or_throw<RegionStmt>();
     }

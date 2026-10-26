@@ -1,3 +1,5 @@
+#include "compat/metadata.h"
+#include "transform/common/data_type_rewriter.h"
 #ifndef TILELANG_COMPAT_EXPR_H_
 #define TILELANG_COMPAT_EXPR_H_
 
@@ -34,7 +36,7 @@ inline std::optional<int64_t> GetIntAnnotation(const ffi::Any &value) {
 
 inline PrimExpr Substitute(const PrimExpr &expression,
                            const ffi::Map<PrimVar, PrimExpr> &replacements) {
-  return tirx::SubstituteWithDataTypeLegalization(
+  return tl::SubstituteWithDataTypeLegalization(
       expression,
       [&replacements](const Var &variable) -> ffi::Optional<PrimExpr> {
         if (auto scalar = variable.as<PrimVar>()) {
@@ -54,7 +56,7 @@ Substitute(const ffi::Array<PrimExpr> &expressions,
 
 inline Stmt Substitute(const Stmt &statement,
                        const ffi::Map<PrimVar, PrimExpr> &replacements) {
-  return tirx::SubstituteWithDataTypeLegalization(
+  return tl::SubstituteWithDataTypeLegalization(
       statement,
       [&replacements](const Var &variable) -> ffi::Optional<PrimExpr> {
         if (auto scalar = variable.as<PrimVar>()) {

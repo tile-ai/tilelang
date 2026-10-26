@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -552,7 +553,7 @@ private:
       if (!counter.defined() && domain.counter.defined())
         continue;
       if (domain.active_guard.same_as(active_guard) ||
-          ffi::StructuralEqual()(domain.active_guard, active_guard)) {
+          tl::StructuralEqual()(domain.active_guard, active_guard)) {
         return domain.id;
       }
     }

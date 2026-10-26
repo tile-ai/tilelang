@@ -1,12 +1,14 @@
 #include "int64_promoter.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 
 #include "compat/expr.h"
-#include <tvm/tirx/data_type_rewriter.h>
+#include "transform/common/data_type_rewriter.h"
 
 namespace tvm::tl {
 namespace {
 
-class IndexPromoter : public tirx::IndexDataTypeRewriter {
+class IndexPromoter : public tl::IndexDataTypeRewriter {
 public:
   using IndexDataTypeRewriter::Mutate;
 
@@ -18,7 +20,7 @@ private:
         return binding.value();
       PrimType type = scalar.value().ty();
       if (type.MatchesCode(kDLInt) && type.bits() < 64) {
-        return prim::cast(scalar.value(), type.WithBits(64));
+        return tl::CastValue(scalar.value(), type.WithBits(64));
       }
     }
     return ffi::Unchanged();
@@ -40,7 +42,7 @@ private:
     PrimExpr preserved = Substitute(original, preserved_bindings_);
     PrimType type = original.ty();
     if (type.MatchesCode(kDLInt) && type.bits() < 64) {
-      return prim::cast(preserved, type.WithBits(64));
+      return tl::CastValue(preserved, type.WithBits(64));
     }
     if (preserved.same_as(original))
       return ffi::Unchanged();
@@ -57,7 +59,7 @@ private:
     auto previous = bindings_.Get(original);
     auto previous_preserved = preserved_bindings_.Get(original);
     bindings_.Set(original, variable);
-    preserved_bindings_.Set(original, prim::cast(variable, original.ty()));
+    preserved_bindings_.Set(original, tl::CastValue(variable, original.ty()));
     PrimExpr body = Mutate(node->body, mode).ValueOrUnchanged(node->body);
     if (previous.has_value()) {
       bindings_.Set(original, previous.value());

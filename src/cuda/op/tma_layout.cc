@@ -1,9 +1,11 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cuda/op/tma_layout.cc
  * \brief Shared CUDA TMA layout analysis helpers.
  */
 
 #include "cuda/op/tma_layout.h"
+#include "op/prim.h"
 
 #include <numeric>
 #include <sstream>
@@ -66,9 +68,9 @@ Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
     auto s = GetConstInt(shape[i]);
     if (s.has_value() && *s > kTmaMaxBoxDim && *s % kTmaMaxBoxDim == 0) {
       outer.push_back(
-          FloorDiv(variable, MakeConst(variable.ty(), kTmaMaxBoxDim)));
+          FloorDiv(variable, tl::MakeConst(variable.ty(), kTmaMaxBoxDim)));
       inner.push_back(
-          FloorMod(variable, MakeConst(variable.ty(), kTmaMaxBoxDim)));
+          FloorMod(variable, tl::MakeConst(variable.ty(), kTmaMaxBoxDim)));
     } else {
       inner.push_back(variable);
     }
@@ -92,11 +94,11 @@ Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
   }
   int64_t element_bits = dtype.bits() * dtype.lanes();
   int64_t alignment = std::lcm(int64_t{128 * 8}, element_bits) / element_bits;
-  PrimExpr unit = MakeConst(tile_extent.ty(), alignment);
+  PrimExpr unit = tl::MakeConst(tile_extent.ty(), alignment);
   sym::Analyzer analyzer;
-  PrimExpr stride =
-      analyzer->Simplify(FloorDiv(tile_extent + unit - 1, unit) * unit);
-  if (analyzer->CanProveEqual(stride, tile_extent))
+  PrimExpr stride = tl::arith::Simplify(
+      analyzer, FloorDiv(tile_extent + unit - 1, unit) * unit);
+  if (tl::arith::CanProveEqual(analyzer, stride, tile_extent))
     return layout;
   return Layout(shape, {fixed_offset * stride + tile_offset});
 }

@@ -1,3 +1,6 @@
+#include "compat/metadata.h"
+#include "transform/tirx_passes.h"
+
 #include "compat/expr.h"
 
 #include <tvm/backend/cuda/attr.h>
@@ -41,7 +44,7 @@ bool HasCluster(const ffi::Array<ffi::String> &fields, bool modern) {
   return count == 3;
 }
 
-class ClusterLaunchLowerer : public tirx::StmtExprMutator {
+class ClusterLaunchLowerer : public tvm::tl::StmtExprMutator {
 public:
   explicit ClusterLaunchLowerer(const ClusterMap &clusters)
       : clusters_(clusters) {}
@@ -50,7 +53,7 @@ private:
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
                                  ffi::InplaceMode mode) final {
     Expr original = ffi::GetRef<Expr>(node);
-    auto call = StmtExprMutator::Mutate_(node, mode)
+    auto call = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<Call>();
     if (!call->op.same_as(tirx::call_ffi_kernel_op()))
@@ -107,7 +110,7 @@ namespace transform {
 
 tvm::transform::Pass LowerDeviceKernelLaunch() {
   auto pass = [](IRModule module, tvm::transform::PassContext) {
-    module = tirx::transform::LowerDeviceKernelLaunch()(module);
+    module = tirx_passes::LowerDeviceKernelLaunch()(module);
     ClusterMap clusters;
     IRModule updates;
     for (const auto &[global, base] : module->functions) {

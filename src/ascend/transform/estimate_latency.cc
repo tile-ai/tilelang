@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -107,13 +110,13 @@ public:
 
 private:
   static PrimExpr Mode(uint8_t modes) {
-    return MakeConst(PrimType::Int(32), modes);
+    return tl::MakeConst(PrimType::Int(32), modes);
   }
 
   uint8_t PossibleModes() {
-    if (analyzer_->CanProve(state_ == kDisabled))
+    if (tl::arith::CanProve(analyzer_, state_ == kDisabled))
       return kDisabled;
-    if (analyzer_->CanProve(state_ == kEnabled))
+    if (tl::arith::CanProve(analyzer_, state_ == kEnabled))
       return kEnabled;
     return kDisabled | kEnabled;
   }
@@ -139,7 +142,7 @@ private:
         variable && variable->ty().IsScalar()) {
       // A normalized condition is a snapshot. Distinct mutable reads must
       // not become equal merely because their expressions look the same.
-      analyzer_->Bind(variable.value(),
+      tl::arith::Bind(analyzer_, variable.value(),
                       FreshenMutableReads()(op->value.as_or_throw<PrimExpr>()),
                       /*allow_override=*/true);
     }
@@ -148,12 +151,13 @@ private:
   void VisitConditional(const PrimExpr &condition, const Stmt &then_case,
                         const Optional<SeqStmt> &else_case = std::nullopt) {
     VisitExpr(condition);
-    PrimExpr guard = analyzer_->Simplify(FreshenMutableReads()(condition));
-    if (analyzer_->CanProve(guard)) {
+    PrimExpr guard =
+        tl::arith::Simplify(analyzer_, FreshenMutableReads()(condition));
+    if (tl::arith::CanProve(analyzer_, guard)) {
       VisitStmt(then_case);
       return;
     }
-    if (analyzer_->CanProve(logical_not(guard))) {
+    if (tl::arith::CanProve(analyzer_, logical_not(guard))) {
       if (else_case)
         VisitStmt(else_case.value());
       return;
@@ -161,18 +165,19 @@ private:
     PrimExpr incoming = state_;
     PrimExpr then_out{ffi::UnsafeInit{}};
     {
-      With<sym::ConstraintContext> context(analyzer_, guard);
-      state_ = analyzer_->Simplify(incoming);
+      With<tl::arith::ConstraintContext> context(analyzer_, guard);
+      state_ = tl::arith::Simplify(analyzer_, incoming);
       VisitStmt(then_case);
       then_out = state_;
     }
     {
-      With<sym::ConstraintContext> context(analyzer_, logical_not(guard));
-      state_ = analyzer_->Simplify(incoming);
+      With<tl::arith::ConstraintContext> context(analyzer_, logical_not(guard));
+      state_ = tl::arith::Simplify(analyzer_, incoming);
       if (else_case)
         VisitStmt(else_case.value());
     }
-    state_ = analyzer_->Simplify(if_then_else(guard, then_out, state_));
+    state_ =
+        tl::arith::Simplify(analyzer_, if_then_else(guard, then_out, state_));
   }
 
   void VisitStmt_(const IfNode *op) final {
@@ -201,13 +206,14 @@ private:
   }
 
   void VisitStmt_(const ForNode *op) final {
-    if (analyzer_->CanProve(ScheduleLoopTripCount(op) <= 0))
+    if (tl::arith::CanProve(analyzer_, ScheduleLoopTripCount(op) <= 0))
       return;
-    if (analyzer_->CanProve(ScheduleLoopTripCount(op) == 1)) {
+    if (tl::arith::CanProve(analyzer_, ScheduleLoopTripCount(op) == 1)) {
       VisitStmt(op->body);
       return;
     }
-    AnalyzeLoop(op->body, analyzer_->CanProve(ScheduleLoopTripCount(op) > 0));
+    AnalyzeLoop(op->body,
+                tl::arith::CanProve(analyzer_, ScheduleLoopTripCount(op) > 0));
   }
 
   void VisitStmt_(const WhileNode *op) final {
@@ -225,7 +231,7 @@ private:
         auto variable = op->result_vars[index].as<PrimVar>();
         auto value = (*values)[index].as<PrimExpr>();
         if (variable && value)
-          analyzer_->Bind(variable.value(), value.value(), true);
+          tl::arith::Bind(analyzer_, variable.value(), value.value(), true);
       }
     }
   }
@@ -1099,109 +1105,109 @@ private:
     ffi::Optional<ffi::VisitInterrupt> Visit_(const AddNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->add_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const SubNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->sub_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const MulNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mul_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const DivNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->div_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const ModNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mod_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const FloorDivNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->div_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const FloorModNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->mod_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const LTNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const LENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const GTNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const GENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const EQNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const NENode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->cmp_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const AndNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const OrNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const NotNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->logic_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const MinNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->min_max_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     ffi::Optional<ffi::VisitInterrupt> Visit_(const MaxNode *op) final {
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
       update_operation(params->min_max_throughput, contained_vars);
-      return tirx::StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
 
     int64_t EstimateNd2NzScatterLatency(const CallNode *op) const {
@@ -1513,7 +1519,8 @@ private:
   int64_t EstimateExprUpperBound(const PrimExpr &expr) const {
     if (auto value = GetConstInt(expr))
       return std::max<int64_t>(*value, 0);
-    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
+    sym::ConstIntBound bound =
+        tl::arith::ConstIntBoundOf(arith_analyzer_, expr);
     if (bound->max_value >= 0 &&
         bound->max_value != sym::ConstIntBound::kPosInf) {
       return bound->max_value;
@@ -1524,12 +1531,14 @@ private:
   int64_t EstimateExprPositiveLowerBound(const PrimExpr &expr) const {
     if (auto value = GetConstInt(expr))
       return std::max<int64_t>(*value, 0);
-    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(expr);
+    sym::ConstIntBound bound =
+        tl::arith::ConstIntBoundOf(arith_analyzer_, expr);
     return bound->min_value > 0 ? bound->min_value : 0;
   }
 
   int64_t EstimateGemmExtent(const PrimExpr &extent, int64_t fallback) const {
-    sym::ConstIntBound bound = arith_analyzer_->const_int_bound(extent);
+    sym::ConstIntBound bound =
+        tl::arith::ConstIntBoundOf(arith_analyzer_, extent);
     if (bound->max_value >= 0 &&
         bound->max_value != sym::ConstIntBound::kPosInf)
       return std::min(fallback, bound->max_value);
@@ -1567,7 +1576,7 @@ private:
     int64_t elements = src_estimate.elements;
     PrimExpr src_elements = RegionElementCountExpr(copy->src_range);
     PrimExpr dst_elements = RegionElementCountExpr(copy->dst_range);
-    if (arith_analyzer_->CanProveEqual(src_elements, dst_elements)) {
+    if (tl::arith::CanProveEqual(arith_analyzer_, src_elements, dst_elements)) {
       if (src_estimate.reliable && dst_estimate.reliable) {
         elements = std::min(src_estimate.elements, dst_estimate.elements);
       } else if (dst_estimate.reliable) {
@@ -2213,7 +2222,7 @@ private:
   std::vector<PerCoreTaskCandidate> per_core_task_candidates_;
 };
 
-class TaskAnnotationRewriter : public tirx::StmtExprMutator {
+class TaskAnnotationRewriter : public tvm::tl::StmtExprMutator {
 public:
   explicit TaskAnnotationRewriter(const TaskCostMap &costs) : costs_(costs) {}
 
@@ -2222,7 +2231,7 @@ private:
                                  ffi::InplaceMode mode) final {
     auto found = costs_.find(GetRef<Stmt>(region));
     if (found == costs_.end())
-      return StmtExprMutator::Mutate_(region, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(region, mode);
     RegionStmt result = GetRef<RegionStmt>(region);
     if (ScheduleMarkerKey(region) == tl::attr::kAscendPerCoreTask)
       result.CopyOnWrite()->body =

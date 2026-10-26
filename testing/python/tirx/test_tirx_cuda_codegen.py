@@ -1,9 +1,7 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 from tvm_tirx import ir, runtime, tirx
-from tvm_tirx.backend.cuda.codegen.registry import get_codegen
+from tilelang._compat.cuda_registry import get_codegen
 from tvm_tirx.ir import prim
 from tvm_tirx.target import Target
 
@@ -110,20 +108,17 @@ def test_packed_codegen_rejects_incompatible_types(dtype):
 @pytest.mark.gpu
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 @pytest.mark.parametrize("name", ["add2", "sub2", "mul2", "fma2", "max2", "min2", "abs2", "max2_nan", "min2_nan"])
-def test_native_packed_cuda_helper_abi(dtype, name):
+def test_native_packed_cuda_helper_abi(dtype, name, compile_tilelang):
     if dtype == "float32" and name.endswith("_nan"):
         pytest.skip("NaN-propagating helpers have fp16/bf16 signatures")
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
-    root = Path(__file__).resolve().parents[3]
     target = Target(
         {
             "kind": "cuda",
             "arch": f"sm_{device.compute_version.replace('.', '')}",
-            "backend_config": {
-                "cuda": {"compiler": "nvcc", "nvcc": [f"-I{root / 'src'}", f"-I{root / '3rdparty' / 'cutlass' / 'include'}"]}
-            },
+            "backend_config": {"cuda": {"compiler": "nvcc"}},
         },
         host="c",
     )
@@ -139,7 +134,7 @@ def test_native_packed_cuda_helper_abi(dtype, name):
     function = tirx.Function([source.tensor for source in sources] + [output.tensor], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "packed_helper_test"
     )
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     left = np.array([-2.0, 3.0], dtype="float32")
     right = np.array([4.0, -1.0], dtype="float32")
     addend = np.array([1.5, 2.5], dtype="float32")

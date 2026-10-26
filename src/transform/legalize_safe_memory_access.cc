@@ -1,3 +1,8 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "compat/expr.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -38,9 +43,8 @@ std::optional<PointerAccess> GetPointerAccess(const Expr &expression) {
                          call->args[2].as_or_throw<PrimExpr>()};
   }
   auto attributes = call->attrs.value_or(DictAttrs()).as_or_throw<DictAttrs>();
-  auto region = attributes.GetAttr<TensorRegion>("tl.access_region");
   return PointerAccess{
-      region.value_or(NormalizeToBufferRegion(call->args[0])),
+      NormalizeToBufferRegion(call->args[0]),
       attributes.GetAttr<PrimExpr>("tl.access_extent").value_or(PrimExpr(1)),
       attributes.GetAttr<PrimExpr>("tl.access_mask").value_or(PrimExpr(3))};
 }
@@ -53,11 +57,10 @@ bool IsAtomic(const CallNode *call) {
   return name.starts_with("tl.atomic_") && name.ends_with("_elem_op");
 }
 
-class SafeMemoryRewriter : public StmtExprMutatorWithAnalyzer {
+class SafeMemoryRewriter : public LoopAwareMutator {
 public:
   SafeMemoryRewriter(const sym::Analyzer &analyzer, bool enabled, bool warnings)
-      : StmtExprMutatorWithAnalyzer(analyzer), enabled_(enabled),
-        warnings_(warnings) {}
+      : LoopAwareMutator(analyzer), enabled_(enabled), warnings_(warnings) {}
 
   void Initialize(const tirx::Function &function) {
     MarkTensorParamShapes(function);
@@ -66,7 +69,7 @@ public:
 private:
   PrimExpr Simplify(const PrimExpr &value) {
     try {
-      return analyzer_->Simplify(value);
+      return tl::arith::Simplify(analyzer_, value);
     } catch (const std::exception &) {
       return value;
     }
@@ -74,7 +77,8 @@ private:
 
   bool Proved(const PrimExpr &condition) {
     try {
-      return analyzer_->CanProve(condition, sym::ProofStrength::kSymbolicBound);
+      return tl::arith::CanProve(analyzer_, condition,
+                                 sym::ProofStrength::kSymbolicBound);
     } catch (const std::exception &) {
       return false;
     }
@@ -133,10 +137,11 @@ private:
         PrimType bound_type = scalar.ty() == PrimType::UInt(64)
                                   ? PrimType::UInt(64)
                                   : PrimType::Int(64);
-        scalar = prim::cast(scalar, bound_type);
-        AddBound(scalar >= MakeConst(bound_type, 0), global, tensor, bounds);
-        AddBound(scalar < prim::cast(tensor.shape()[axis], bound_type), global,
-                 tensor, bounds);
+        scalar = tl::CastValue(scalar, bound_type);
+        AddBound(scalar >= tl::MakeConst(bound_type, 0), global, tensor,
+                 bounds);
+        AddBound(scalar < tl::CastValue(tensor.shape()[axis], bound_type),
+                 global, tensor, bounds);
       }
     }
     guards->independent_conditions = independent.conditions;
@@ -163,7 +168,7 @@ private:
     if (!guards.independent_conditions.empty())
       result =
           tvm::if_then_else(Condition(guards.independent_conditions), result,
-                            fallback.value_or(MakeConst(result.ty(), 0)));
+                            fallback.value_or(tl::MakeConst(result.ty(), 0)));
     return result;
   }
 
@@ -199,13 +204,13 @@ private:
     auto value = safe_values_.Get(tensor);
     if (!value)
       value = safe_values_.Get(Origin(tensor).value_or(tensor));
-    PrimExpr result = value.value_or(MakeConst(type.WithLanes(1), 0));
+    PrimExpr result = value.value_or(tl::MakeConst(type.WithLanes(1), 0));
     if (result.ty().lanes() != type.lanes()) {
       TVM_FFI_CHECK(result.ty().IsScalar(), ValueError)
           << "Safe value must be scalar or match the access lanes";
       result = Broadcast(result, type.lanes());
     }
-    return Simplify(prim::cast(result, type));
+    return Simplify(tl::CastValue(result, type));
   }
 
   Expr SnapshotPointer(const Expr &expression, Guards *guards) {
@@ -262,8 +267,9 @@ private:
       PrimExpr begin = range->begin;
       PrimExpr length = range->extent;
       if (flat_base && axis + 1 == access->region->region.size()) {
-        length = tvm::max(
-            length, prim::cast(required_extent.value_or(extent), length.ty()));
+        length =
+            tvm::max(length, tl::CastValue(required_extent.value_or(extent),
+                                           length.ty()));
       }
       if (global) {
         begin = Freeze(begin, guards);
@@ -271,17 +277,17 @@ private:
       }
       indices.push_back(begin);
       ranges.push_back(Range::FromMinExtent(begin, length));
-      region_size = region_size * prim::cast(length, PrimType::Int(64));
+      region_size = region_size * tl::CastValue(length, PrimType::Int(64));
       if (GetConstInt(access->mask).value_or(3) != 0) {
         PrimType bound_type = begin.ty() == PrimType::UInt(64)
                                   ? PrimType::UInt(64)
                                   : PrimType::Int(64);
-        PrimExpr wide_begin = prim::cast(begin, bound_type);
-        PrimExpr wide_length = prim::cast(length, bound_type);
-        PrimExpr wide_shape = prim::cast(tensor.shape()[axis], bound_type);
-        AddBound(wide_begin >= MakeConst(bound_type, 0), global, tensor,
+        PrimExpr wide_begin = tl::CastValue(begin, bound_type);
+        PrimExpr wide_length = tl::CastValue(length, bound_type);
+        PrimExpr wide_shape = tl::CastValue(tensor.shape()[axis], bound_type);
+        AddBound(wide_begin >= tl::MakeConst(bound_type, 0), global, tensor,
                  guards);
-        AddBound(wide_length >= MakeConst(bound_type, 0), global, tensor,
+        AddBound(wide_length >= tl::MakeConst(bound_type, 0), global, tensor,
                  guards);
         AddBound(wide_length <= wide_shape, global, tensor, guards);
         AddBound(wide_begin <= wide_shape - wide_length, global, tensor,
@@ -290,10 +296,10 @@ private:
     }
     if (!flat_base && GetConstInt(access->mask).value_or(3) != 0) {
       PrimExpr required =
-          prim::cast(required_extent.value_or(extent), PrimType::Int(64));
+          tl::CastValue(required_extent.value_or(extent), PrimType::Int(64));
       AddBound(required >= IntImm::Int64(0), global, tensor, guards);
       AddBound(required <= region_size, global, tensor, guards);
-      AddBound(prim::cast(extent, PrimType::Int(64)) <= region_size, global,
+      AddBound(tl::CastValue(extent, PrimType::Int(64)) <= region_size, global,
                tensor, guards);
     }
     TensorRegion region(tensor, ranges, TensorRegionType(), expression->loc);
@@ -322,7 +328,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
     auto previous_values = safe_values_;
     auto previous_origins = origins_;
-    auto result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    auto result = LoopAwareMutator::Mutate_(node, mode);
     safe_values_ = previous_values;
     origins_ = previous_origins;
     return result;
@@ -339,7 +345,7 @@ private:
         safe_values_.Set(tensor, value);
       }
     }
-    RegionStmt result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    RegionStmt result = LoopAwareMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(GetRef<Stmt>(node))
                             .as_or_throw<RegionStmt>();
     safe_values_ = previous_values;
@@ -354,13 +360,13 @@ private:
       if (auto origin = Origin(node->value))
         origins_.Set(*tensor, *origin);
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                 InplaceMode mode) final {
     TensorLoad original = GetRef<TensorLoad>(node);
-    TensorLoad load = StmtExprMutator::Mutate_(node, mode)
+    TensorLoad load = LoopAwareMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(original)
                           .as_or_throw<TensorLoad>();
     if (!enabled_)
@@ -378,7 +384,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                             InplaceMode mode) final {
     TensorStore original = GetRef<TensorStore>(node);
-    TensorStore store = StmtExprMutator::Mutate_(node, mode)
+    TensorStore store = LoopAwareMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(original)
                             .as_or_throw<TensorStore>();
     if (!enabled_)
@@ -412,8 +418,8 @@ private:
                   node->loc);
     }
     Expr original = GetRef<Expr>(node);
-    Expr result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
-                      .ValueOrUnchanged(original);
+    Expr result =
+        LoopAwareMutator::Mutate_(node, mode).ValueOrUnchanged(original);
     auto call = result.as<Call>();
     if (!enabled_ || !call || !IsAtomic(call->get()) ||
         !result.as<PrimExpr>() || result->ty == PrimType::Void() ||
@@ -489,12 +495,12 @@ private:
     PrimExpr fill_count = count;
     PrimVar lane("safe_fill", fill_count.ty());
     indices.Set(indices.size() - 1,
-                indices.back() + prim::cast(lane, indices.back().ty()));
+                indices.back() + tl::CastValue(lane, indices.back().ty()));
     fallback =
-        tvm::if_then_else(predicate, fallback, MakeConst(fallback.ty(), 0));
+        tvm::if_then_else(predicate, fallback, tl::MakeConst(fallback.ty(), 0));
     Stmt fill = For(
-        lane, MakeConst(fill_count.ty(), 0), fill_count,
-        MakeConst(fill_count.ty(), 1), ForKind::kDefault,
+        lane, tl::MakeConst(fill_count.ty(), 0), fill_count,
+        tl::MakeConst(fill_count.ty(), 1), ForKind::kDefault,
         SeqStmt(TensorStore(destination_tensor, indices, fallback, location)),
         {}, location);
     Stmt result =

@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -121,7 +124,7 @@ struct SyncInsertionSite {
           break;
         PrimExpr condition_guard = path_end->GetConditionGuard();
         if (!active_guard.same_as(condition_guard) &&
-            !ffi::StructuralEqual()(active_guard, condition_guard)) {
+            !tl::StructuralEqual()(active_guard, condition_guard)) {
           break;
         }
         path_begin_guard_matches_active = true;
@@ -1838,12 +1841,12 @@ private:
       PrimExpr flag_id = op->args[2].as_or_throw<PrimExpr>();
       sym::Analyzer analyzer;
       auto constraints = GetConstrSet().Populate(analyzer);
-      sym::ConstIntBound bound = analyzer->const_int_bound(flag_id);
+      sym::ConstIntBound bound = tl::arith::ConstIntBoundOf(analyzer, flag_id);
       sym::Analyzer unconstrained_analyzer;
       PrimVar unconstrained_flag_id("unconstrained_cross_core_flag_id",
                                     flag_id.ty());
-      sym::ConstIntBound unconstrained_bound =
-          unconstrained_analyzer->const_int_bound(unconstrained_flag_id);
+      sym::ConstIntBound unconstrained_bound = tl::arith::ConstIntBoundOf(
+          unconstrained_analyzer, unconstrained_flag_id);
       if (bound->min_value == sym::ConstIntBound::kNegInf ||
           bound->max_value == sym::ConstIntBound::kPosInf ||
           (bound->min_value == unconstrained_bound->min_value &&
@@ -2365,8 +2368,9 @@ PrimExpr MakeFlagEventId(const PrimExpr &iteration, int num_versions,
                           ? IntImm(dtype, base_id)
                           : FloorMod(iteration, IntImm(dtype, num_versions)) +
                                 IntImm(dtype, base_id);
-  return dtype == PrimType::Int(32) ? event_id
-                                    : prim::cast(event_id, PrimType::Int(32));
+  return dtype == PrimType::Int(32)
+             ? event_id
+             : tl::CastValue(event_id, PrimType::Int(32));
 }
 
 void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,

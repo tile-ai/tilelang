@@ -3,7 +3,8 @@ import pytest
 import tvm_ffi
 from pathlib import Path
 
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 from tvm_tirx.target import Target
 
@@ -44,13 +45,13 @@ def _target(host="llvm"):
 
 @pytest.mark.parametrize("lanes", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("host", ["c", "llvm"])
-def test_tf32_casts_round_values_without_changing_storage_width(lanes, host):
+def test_tf32_casts_round_values_without_changing_storage_width(lanes, host, compile_tilelang):
     target = _target(host)
     source = ir.Var("source", tirx.TensorType([lanes], "float32"))
     output = ir.Var("output", tirx.TensorType([lanes], "float32"))
     indices = [ir.const(0) if lanes == 1 else prim.Ramp(0, 1, lanes)]
-    value_type = ir.PrimType.from_dlpack_data_type((130, 32, lanes))
-    result_type = ir.PrimType.from_dlpack_data_type((2, 32, lanes))
+    value_type = ir.prim_type_from_dlpack((130, 32, lanes))
+    result_type = ir.prim_type_from_dlpack((2, 32, lanes))
     value = prim.Cast(result_type, prim.Cast(value_type, ir.TensorLoad(source, indices)))
     body = ir.RegionStmt(
         "tirx.launch_thread",
@@ -60,7 +61,7 @@ def test_tf32_casts_round_values_without_changing_storage_width(lanes, host):
         ir.TensorStore(output, indices, value),
     )
     function = tirx.Function([source, output], body).with_attr("global_symbol", "tf32_cast")
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target)
     values = np.resize(np.array([1.00075, -1.00075, 0.123456, -0.987654], dtype="float32"), lanes)
     expected = ((values.view("uint32") + np.uint32(0x1000)) & np.uint32(0xFFFFE000)).view("float32")
     actual = runtime.empty((lanes,), "float32", device=runtime.cuda(0))
@@ -70,7 +71,7 @@ def test_tf32_casts_round_values_without_changing_storage_width(lanes, host):
 
 
 @pytest.mark.parametrize("host", ["c", "llvm"])
-def test_tf32_tensor_abi_accepts_physical_fp32_and_preserves_storage(host):
+def test_tf32_tensor_abi_accepts_physical_fp32_and_preserves_storage(host, compile_tilelang):
     target = _target(host)
     dtype = tvm_ffi.dtype("custom[tfloat32]")
     source = ir.Var("source", tirx.TensorType([8], dtype))
@@ -84,7 +85,7 @@ def test_tf32_tensor_abi_accepts_physical_fp32_and_preserves_storage(host):
         ir.TensorStore(output, [thread], ir.TensorLoad(source, [thread])),
     )
     function = tirx.Function([source, output], body).with_attr("global_symbol", "tf32_copy")
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target)
     values = np.arange(8, dtype="float32") + np.float32(0.123456)
     actual = runtime.empty((8,), "float32", device=runtime.cuda(0))
     executable(runtime.tensor(values, device=runtime.cuda(0)), actual)

@@ -1,9 +1,13 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  *  Loop unrolling as in Halide pipeline.
  * \file unroll_loop.cc
  */
 // Unrolls the loop as in Halide pipeline.
 #include "compat/expr.h"
+#include "compat/region.h"
 #include "compat/visit.h"
 #include "op/builtin.h"
 
@@ -54,7 +58,7 @@ public:
                                                 UnrollLoopConfigNode);
 };
 
-class TargetedLoopControlDetector : public tirx::StmtExprVisitor {
+class TargetedLoopControlDetector : public tvm::tl::StmtExprVisitor {
 public:
   bool found{false};
 
@@ -77,11 +81,11 @@ private:
     if (node->op.same_as(loop_break())) {
       found = true;
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
-class LoopUnroller : public tirx::StmtExprMutator {
+class LoopUnroller : public tvm::tl::StmtExprMutator {
 public:
   explicit LoopUnroller(UnrollLoopConfig config)
       : config_(std::move(config)), auto_max_step_(config_->auto_max_step),
@@ -115,7 +119,7 @@ private:
     bool saved_explicit = explicit_unroll_;
     SetPolicy(node->attrs->dict);
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto region = StmtExprMutator::Mutate_(node, mode)
+    auto region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(original)
                       .as_or_throw<RegionStmt>();
     auto_max_step_ = saved_limit;
@@ -133,7 +137,7 @@ private:
     bool saved_explicit = explicit_unroll_;
     SetPolicy(node->annotations);
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto loop = StmtExprMutator::Mutate_(node, mode)
+    auto loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<For>();
     int max_step = auto_max_step_;
@@ -184,7 +188,7 @@ private:
 
   ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
                                  ffi::InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     ++normal_loop_depth_;
     return result;
   }
@@ -214,26 +218,26 @@ private:
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                      ffi::InplaceMode mode) final {
     MarkLocalIndices(node->source, node->indices);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
     ++step_count_;
     MarkLocalIndices(node->dest, node->indices);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateNode *node,
                                  ffi::InplaceMode mode) final {
     ++step_count_;
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
     ++step_count_;
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
@@ -260,13 +264,14 @@ private:
   }
 
   int GetTripCount(const ForNode *node) {
-    auto step = GetConstInt(analyzer_->Simplify(node->step));
+    auto step = GetConstInt(tl::arith::Simplify(analyzer_, node->step));
     if (!step || *step <= 0 ||
         SideEffect(node->begin) != CallEffectKind::kPure ||
         SideEffect(node->end) != CallEffectKind::kPure) {
       return -1;
     }
-    auto extent = GetConstInt(analyzer_->Simplify(node->end - node->begin));
+    auto extent =
+        GetConstInt(tl::arith::Simplify(analyzer_, node->end - node->begin));
     if (!extent) {
       return -1;
     }
@@ -289,12 +294,13 @@ private:
     TVM_FFI_CHECK_GE(trip_count, 0, ValueError);
     ffi::Array<Stmt> expanded;
     for (int iteration = 0; iteration < trip_count; ++iteration) {
-      PrimExpr value = analyzer_->Simplify(
-          node->begin + MakeConst(node->var.ty(), iteration) * node->step);
+      PrimExpr value = tl::arith::Simplify(
+          analyzer_,
+          node->begin + tl::MakeConst(node->var.ty(), iteration) * node->step);
       Stmt body = Substitute(node->body,
                              ffi::Map<PrimVar, PrimExpr>{{node->var, value}});
-      auto renewed = tirx::RenewDef(tirx::Function({}, SeqStmt(body)));
-      expanded.push_back(RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(),
+      auto renewed = tl::RenewDef(tirx::Function({}, SeqStmt(body)));
+      expanded.push_back(RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(),
                                     renewed->body.value(), {}, node->loc));
     }
     return SeqStmt(expanded, node->loc);

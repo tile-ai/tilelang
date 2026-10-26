@@ -73,7 +73,7 @@ def test_pipeline_alias_versions_use_owner_storage_stride(dtype, bits):
 
 
 def test_manual_warp_specialization_is_lexical_metadata():
-    body = ir.RegionStmt("tirx.scope", [], [], {"warp_specialize": True}, ir.Evaluate(0))
+    body = ir.RegionStmt("tl.scope", [], [], {"warp_specialize": True}, ir.Evaluate(0))
     assert native("HasManualWarpSpecialization", body)
     assert not native("HasManualWarpSpecialization", ir.Evaluate(0))
 

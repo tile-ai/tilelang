@@ -8,7 +8,7 @@ from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
 
 
-pytestmark = pytest.mark.usefixtures("native_layouts")
+pytestmark = pytest.mark.usefixtures("native_layouts", "tilelang_builders")
 
 
 def simplify(body, params, config=None, simplify_arguments=False):
@@ -164,7 +164,7 @@ def test_loop_carried_and_branch_values_are_not_stale():
 def test_known_values_do_not_capture_out_of_scope_variables():
     output = TensorView.create("output", [1], "int32")
     scalar, value = ir.Var("scalar", "int32"), ir.Var("value", "int32")
-    scope = ir.RegionStmt("tirx.scope", [], [], None, [ir.Bind(value, scalar + 1), output.store(0, value)])
+    scope = ir.RegionStmt("tl.scope", [], [], None, [ir.Bind(value, scalar + 1), output.store(0, value)])
     function = simplify(
         [scope, output.store(0, output.load(0) * 2)],
         [output.tensor, scalar],
@@ -176,7 +176,7 @@ def test_known_values_do_not_capture_out_of_scope_variables():
     np.testing.assert_array_equal(actual.numpy(), [22])
 
 
-@pytest.mark.parametrize("region", ["tirx.scope", "tl.scope"])
+@pytest.mark.parametrize("region", ["tl.scope", "tl.scope"])
 def test_local_scalar_known_values_survive_transparent_regions(region):
     output = TensorView.create("output", [1], "int32")
     scalar = TensorView.create("scalar", [1], "int32", scope="local")

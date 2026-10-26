@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 #ifndef TILELANG_BACKEND_COMMON_OP_REDUCE_LAYOUT_H_
 #define TILELANG_BACKEND_COMMON_OP_REDUCE_LAYOUT_H_
 
@@ -63,16 +64,16 @@ CollectThreadReduceSteps(const PrimExpr &thread,
                          const PrimVar &reduce_var, sym::Analyzer analyzer) {
   ffi::Map<PrimVar, PrimExpr> other_origins;
   for (const auto &[variable, domain] : domains) {
-    analyzer->Bind(variable, domain, true);
+    tl::arith::Bind(analyzer, variable, domain, true);
     if (!variable.same_as(reduce_var))
       other_origins.Set(variable, domain->begin);
   }
   PrimExpr baseline =
       Substitute(thread, {{reduce_var, domains[reduce_var]->begin}});
-  PrimExpr contribution =
-      analyzer->Simplify(Substitute(thread - baseline, other_origins));
-  TVM_FFI_CHECK(analyzer->CanProve(thread == baseline + contribution,
-                                   sym::ProofStrength::kSymbolicBound),
+  PrimExpr contribution = tl::arith::Simplify(
+      analyzer, Substitute(thread - baseline, other_origins));
+  TVM_FFI_CHECK(tl::arith::CanProve(analyzer, thread == baseline + contribution,
+                                    sym::ProofStrength::kSymbolicBound),
                 ValueError)
       << "Reduction thread ownership is not separable for " << reduce_var
       << " in " << thread;

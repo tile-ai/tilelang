@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file layout/layout.cc
  *
@@ -39,7 +40,7 @@ Array<PrimVar> CreateReshapeVars(const Array<PrimExpr> &shape,
   vars.reserve(shape.size());
   for (size_t i = 0; i < shape.size(); ++i) {
     auto var = PrimVar(std::string("n_") + std::to_string(i), shape[i].ty());
-    analyzer->Bind(var, Range(0, shape[i]));
+    tl::arith::Bind(analyzer, var, Range(0, shape[i]));
     vars.push_back(var);
   }
   return vars;
@@ -84,7 +85,7 @@ Array<PrimExpr> SubstituteForwardIndex(const Array<PrimExpr> &forward_index,
       substituted =
           Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
     }
-    new_forward_index.push_back(analyzer->Simplify(substituted));
+    new_forward_index.push_back(tl::arith::Simplify(analyzer, substituted));
   }
   return new_forward_index;
 }
@@ -98,7 +99,7 @@ PrimExpr SubstituteReshapedExpr(const PrimExpr &expr,
     substituted =
         Substitute(substituted, {{InputPlaceholder(i), original_indices[i]}});
   }
-  return analyzer->Simplify(substituted);
+  return tl::arith::Simplify(analyzer, substituted);
 }
 
 Array<PrimExpr> RestoreInputPlaceholders(const Array<PrimExpr> &forward_index,
@@ -172,7 +173,8 @@ Layout TryReinterpretReshape(const LayoutNode *layout_node,
     PrimExpr last = new_forward_index.back();
     new_forward_index.Set(
         new_forward_index.size() - 1,
-        analyzer->Simplify(last * IntImm::Int32(pack_factor) + lane_in_pack));
+        tl::arith::Simplify(analyzer,
+                            last * IntImm::Int32(pack_factor) + lane_in_pack));
     new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
     return Layout(shape, new_forward_index);
   } else { // *old_elem_bits < *new_elem_bits
@@ -182,7 +184,7 @@ Layout TryReinterpretReshape(const LayoutNode *layout_node,
     int64_t pack_factor = *new_elem_bits / *old_elem_bits;
 
     PrimVar lane("_lane", flat_index.ty());
-    analyzer->Bind(lane, Range(0, IntImm::Int32(pack_factor)));
+    tl::arith::Bind(analyzer, lane, Range(0, IntImm::Int32(pack_factor)));
     Array<PrimExpr> base = SubstituteForwardIndex(
         layout_node->GetForwardIndex(), input_shape,
         RecoverOriginalIndices(input_shape,
@@ -195,10 +197,10 @@ Layout TryReinterpretReshape(const LayoutNode *layout_node,
         analyzer);
     ICHECK(!base.empty());
     PrimExpr slot = floordiv(base.back(), IntImm::Int32(pack_factor));
-    bool compatible = analyzer->CanProveEqual(
-        probe.back(), slot * IntImm::Int32(pack_factor) + lane);
+    bool compatible = tl::arith::CanProveEqual(
+        analyzer, probe.back(), slot * IntImm::Int32(pack_factor) + lane);
     for (size_t i = 0; compatible && i + 1 < base.size(); ++i) {
-      compatible = analyzer->CanProveEqual(probe[i], base[i]);
+      compatible = tl::arith::CanProveEqual(analyzer, probe[i], base[i]);
     }
     ICHECK(compatible)
         << "cannot reinterpret layout " << layout_node->DebugOutput() << " as "
@@ -207,7 +209,7 @@ Layout TryReinterpretReshape(const LayoutNode *layout_node,
         << "new element width";
     Array<PrimExpr> new_forward_index = base;
     new_forward_index.Set(new_forward_index.size() - 1,
-                          analyzer->Simplify(slot));
+                          tl::arith::Simplify(analyzer, slot));
     new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
     return Layout(shape, new_forward_index);
   }
@@ -265,7 +267,8 @@ Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
     PrimExpr last = new_forward_index.back();
     new_forward_index.Set(
         new_forward_index.size() - 1,
-        analyzer->Simplify(last * IntImm::Int32(pack_factor) + lane_in_pack));
+        tl::arith::Simplify(analyzer,
+                            last * IntImm::Int32(pack_factor) + lane_in_pack));
     PrimExpr new_forward_thread =
         SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
                                original_indices, analyzer);
@@ -279,7 +282,7 @@ Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
         input_shape, flat_index * IntImm::Int32(pack_factor));
 
     PrimVar lane("_lane", flat_index.ty());
-    analyzer->Bind(lane, Range(0, IntImm::Int32(pack_factor)));
+    tl::arith::Bind(analyzer, lane, Range(0, IntImm::Int32(pack_factor)));
     Array<PrimExpr> probe_indices = RecoverOriginalIndices(
         input_shape, flat_index * IntImm::Int32(pack_factor) + lane);
     Array<PrimExpr> base =
@@ -296,11 +299,11 @@ Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
     ICHECK(!base.empty());
     PrimExpr slot = floordiv(base.back(), IntImm::Int32(pack_factor));
     bool compatible =
-        analyzer->CanProveEqual(probe.back(),
-                                slot * IntImm::Int32(pack_factor) + lane) &&
-        analyzer->CanProveEqual(thread_probe, thread_base);
+        tl::arith::CanProveEqual(analyzer, probe.back(),
+                                 slot * IntImm::Int32(pack_factor) + lane) &&
+        tl::arith::CanProveEqual(analyzer, thread_probe, thread_base);
     for (size_t i = 0; compatible && i + 1 < base.size(); ++i) {
-      compatible = analyzer->CanProveEqual(probe[i], base[i]);
+      compatible = tl::arith::CanProveEqual(analyzer, probe[i], base[i]);
     }
     ICHECK(compatible)
         << "cannot reinterpret fragment " << fragment_node->DebugOutput()
@@ -309,7 +312,7 @@ Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
         << "or threads below the new element width";
     Array<PrimExpr> new_forward_index = base;
     new_forward_index.Set(new_forward_index.size() - 1,
-                          analyzer->Simplify(slot));
+                          tl::arith::Simplify(analyzer, slot));
     return make_fragment(new_forward_index, thread_base);
   }
 }
@@ -401,8 +404,8 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
   int64_t domain_size = 1;
 
   for (const auto &[var, range] : input_iters) {
-    PrimExpr simplified_min = analyzer->Simplify(range->begin);
-    PrimExpr simplified_extent = analyzer->Simplify(range->extent);
+    PrimExpr simplified_min = tl::arith::Simplify(analyzer, range->begin);
+    PrimExpr simplified_extent = tl::arith::Simplify(analyzer, range->extent);
     auto min = GetConstInt(simplified_min);
     auto extent = GetConstInt(simplified_extent);
     if (!min.has_value() || !extent.has_value()) {
@@ -445,7 +448,8 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
     Coordinate output;
     output.reserve(forward_indices.size());
     for (const PrimExpr &index : forward_indices) {
-      PrimExpr value = analyzer->Simplify(Substitute(index, substitution));
+      PrimExpr value =
+          tl::arith::Simplify(analyzer, Substitute(index, substitution));
       std::optional<int64_t> constant = EvaluateConstantInteger(value);
       if (!constant) {
         return {ExactInjectivityStatus::kUnknown,
@@ -481,7 +485,7 @@ bool GetStaticDomain(const Array<PrimExpr> &shape,
   extents->clear();
   extents->reserve(shape.size());
   for (const PrimExpr &dim : shape) {
-    auto extent = GetConstInt(analyzer->Simplify(dim));
+    auto extent = GetConstInt(tl::arith::Simplify(analyzer, dim));
     if (!extent.has_value() || *extent < 0) {
       return false;
     }
@@ -523,7 +527,8 @@ EvaluateStaticMap(const Array<PrimExpr> &indices,
   std::vector<int64_t> output;
   output.reserve(indices.size());
   for (const PrimExpr &index : indices) {
-    PrimExpr value = analyzer->Simplify(Substitute(index, substitution));
+    PrimExpr value =
+        tl::arith::Simplify(analyzer, Substitute(index, substitution));
     std::optional<int64_t> constant = EvaluateConstantInteger(value);
     if (!constant) {
       return std::nullopt;
@@ -543,7 +548,7 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   Map<PrimVar, PrimExpr> logical_substitution;
   for (size_t i = 0; i < input_shape.size(); ++i) {
     PrimVar var("__layout_logical_" + std::to_string(i), input_shape[i].ty());
-    analyzer->Bind(var, Range(0, input_shape[i]));
+    tl::arith::Bind(analyzer, var, Range(0, input_shape[i]));
     logical_vars.push_back(var);
     logical_substitution.Set(InputPlaceholder(i), var);
   }
@@ -556,7 +561,8 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   Array<PrimExpr> recovered_logical =
       Substitute(backward_indices, inverse_substitution);
   for (size_t i = 0; i < logical_vars.size(); ++i) {
-    if (!analyzer->CanProveEqual(recovered_logical[i], logical_vars[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, recovered_logical[i],
+                                  logical_vars[i])) {
       return false;
     }
   }
@@ -565,7 +571,7 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   Map<PrimVar, PrimExpr> physical_substitution;
   for (size_t i = 0; i < output_shape.size(); ++i) {
     PrimVar var("__layout_physical_" + std::to_string(i), output_shape[i].ty());
-    analyzer->Bind(var, Range(0, output_shape[i]));
+    tl::arith::Bind(analyzer, var, Range(0, output_shape[i]));
     physical_vars.push_back(var);
     physical_substitution.Set(InputPlaceholder(i), var);
   }
@@ -578,7 +584,8 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   Array<PrimExpr> recovered_physical =
       Substitute(forward_indices, forward_substitution);
   for (size_t i = 0; i < physical_vars.size(); ++i) {
-    if (!analyzer->CanProveEqual(recovered_physical[i], physical_vars[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, recovered_physical[i],
+                                  physical_vars[i])) {
       return false;
     }
   }
@@ -668,8 +675,8 @@ bool CanProveInjective(const Array<PrimExpr> &forward_indices,
   PrimExpr same_input = IntImm::Bool(true);
   for (const auto &[var, range] : input_iters) {
     PrimVar other(var->name + "<OTHER>", var.ty());
-    analyzer->Bind(var, range);
-    analyzer->Bind(other, range);
+    tl::arith::Bind(analyzer, var, range);
+    tl::arith::Bind(analyzer, other, range);
     other_substitution.Set(var, other);
     same_input = And(same_input, EQ(var, other));
   }
@@ -679,8 +686,8 @@ bool CanProveInjective(const Array<PrimExpr> &forward_indices,
     same_output =
         And(same_output, EQ(index, Substitute(index, other_substitution)));
   }
-  With<sym::ConstraintContext> constraint(analyzer, same_output);
-  return analyzer->CanProve(same_input);
+  With<tl::arith::ConstraintContext> constraint(analyzer, same_output);
+  return tl::arith::CanProve(analyzer, same_input);
 }
 
 // A left inverse proves injectivity even when symbolic padding prevents a
@@ -691,12 +698,12 @@ bool CanProveLeftInverse(const Array<PrimExpr> &forward_indices,
   sym::Analyzer analyzer;
   PrimExpr nonempty = IntImm::Bool(true);
   for (const auto &[var, range] : input_iters) {
-    analyzer->Bind(var, range);
+    tl::arith::Bind(analyzer, var, range);
     nonempty = And(nonempty, range->extent > 0);
   }
   // Empty input domains are trivially injective. For a nonempty domain all
   // extents are positive, including symbolic strides in a flattened index.
-  With<sym::ConstraintContext> constraint(analyzer, nonempty);
+  With<tl::arith::ConstraintContext> constraint(analyzer, nonempty);
   auto iter_map = sym::DetectIterMap(forward_indices, input_iters, 1,
                                      sym::IterMapLevel::NoCheck, analyzer);
   if (!iter_map->errors.empty()) {
@@ -713,10 +720,10 @@ bool CanProveLeftInverse(const Array<PrimExpr> &forward_indices,
   for (const auto &[var, range] : input_iters) {
     auto it = inverse.find(var);
     PrimExpr recovered = it == inverse.end() ? range->begin : (*it).second;
-    recovered = analyzer->Simplify(recovered);
+    recovered = tl::arith::Simplify(analyzer, recovered);
     recovered = sym::IterMapSimplify({recovered}, input_iters, 1,
                                      sym::IterMapLevel::NoCheck, analyzer)[0];
-    if (!analyzer->CanProveEqual(recovered, var)) {
+    if (!tl::arith::CanProveEqual(analyzer, recovered, var)) {
       return false;
     }
   }
@@ -816,11 +823,12 @@ LayoutNode::LayoutNode(Array<PrimExpr> input_size,
                        Array<PrimExpr> forward_index)
     : index_map_({}, {}), input_size_(std::move(input_size)) {
   sym::Analyzer analyzer;
-  input_size_ = input_size_.Map(
-      [&](const PrimExpr &extent) { return analyzer->Simplify(extent); });
+  input_size_ = input_size_.Map([&](const PrimExpr &extent) {
+    return tl::arith::Simplify(analyzer, extent);
+  });
   UpdateAnalyzer(analyzer);
   auto simplified = forward_index.Map([&](const PrimExpr &expression) {
-    return analyzer->Simplify(expression);
+    return tl::arith::Simplify(analyzer, expression);
   });
   index_map_ = BindLayoutCoordinates(simplified, InputDim(), false);
 }
@@ -854,7 +862,7 @@ void LayoutNode::RegisterReflection() {
 
 void LayoutNode::UpdateAnalyzer(sym::Analyzer analyzer) const {
   for (const auto &[var, dom] : GetVarMap()) {
-    analyzer->Bind(var, dom);
+    tl::arith::Bind(analyzer, var, dom);
   }
 }
 
@@ -871,11 +879,11 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
   sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer);
   for (size_t i = 0; i < ret.size(); i++) {
-    auto ist = analyzer->int_set(GetForwardIndex()[i] + 1);
+    auto ist = tl::arith::IntSetOf(analyzer, GetForwardIndex()[i] + 1);
     if (prim::is_neg_inf(ist.min()) && prim::is_pos_inf(ist.max())) {
       // Analyzer couldn't form an IntervalSet (e.g. bitwise ops).
       // Fall back to ConstIntBound to derive a safe extent.
-      auto cib = analyzer->const_int_bound(GetForwardIndex()[i]);
+      auto cib = tl::arith::ConstIntBoundOf(analyzer, GetForwardIndex()[i]);
       if (cib->min_value != sym::ConstIntBound::kNegInf &&
           cib->max_value != sym::ConstIntBound::kPosInf &&
           cib->min_value >= 0) {
@@ -885,7 +893,7 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
                                   << ": " << GetForwardIndex()[i];
       }
     } else {
-      ret.Set(i, analyzer->Simplify(ist.max()));
+      ret.Set(i, tl::arith::Simplify(analyzer, ist.max()));
     }
   }
   return ret;
@@ -902,19 +910,19 @@ Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
   for (size_t i = 0; i < InputDim(); i++) {
     PrimExpr min = region[i]->begin;
     PrimExpr ext = region[i]->extent;
-    analyzer->Bind(InputPlaceholder(i), Range(min, min + ext));
+    tl::arith::Bind(analyzer, InputPlaceholder(i), Range(min, min + ext));
   }
 
   Array<Range> result;
   result.reserve(OutputDim());
   for (size_t i = 0; i < OutputDim(); i++) {
-    auto ist = analyzer->int_set(GetForwardIndex()[i]);
+    auto ist = tl::arith::IntSetOf(analyzer, GetForwardIndex()[i]);
     PrimExpr lo = ist.min();
     PrimExpr hi = ist.max();
     if (prim::is_neg_inf(lo) && prim::is_pos_inf(hi)) {
       // Analyzer couldn't form an IntervalSet (e.g. bitwise ops).
       // Fall back to ConstIntBound, mirroring OutputShape's strategy.
-      auto cib = analyzer->const_int_bound(GetForwardIndex()[i]);
+      auto cib = tl::arith::ConstIntBoundOf(analyzer, GetForwardIndex()[i]);
       if (cib->min_value != sym::ConstIntBound::kNegInf &&
           cib->max_value != sym::ConstIntBound::kPosInf &&
           cib->min_value >= 0) {
@@ -1153,7 +1161,7 @@ InvertFlattenedLayout(const LayoutNode &layout,
   std::vector<int64_t> shape;
   int64_t elements = 1;
   for (const PrimExpr &dimension : layout.InputShape()) {
-    auto extent = GetConstInt(analyzer->Simplify(dimension));
+    auto extent = GetConstInt(tl::arith::Simplify(analyzer, dimension));
     if (!extent || *extent <= 0 ||
         *extent > std::numeric_limits<int32_t>::max() / elements)
       return std::nullopt;
@@ -1162,7 +1170,7 @@ InvertFlattenedLayout(const LayoutNode &layout,
   }
   PrimVar flattened("layout_flat", PrimType::Int(32));
   Range domain(0, static_cast<int32_t>(elements));
-  analyzer->Bind(flattened, domain);
+  tl::arith::Bind(analyzer, flattened, domain);
   Map<PrimVar, PrimExpr> substitutions;
   int64_t stride = elements;
   for (size_t axis = 0; axis < shape.size(); ++axis) {
@@ -1173,7 +1181,7 @@ InvertFlattenedLayout(const LayoutNode &layout,
                  static_cast<int32_t>(shape[axis])));
   }
   auto forward = layout.GetForwardIndex().Map([&](const PrimExpr &index) {
-    return analyzer->Simplify(Substitute(index, substitutions));
+    return tl::arith::Simplify(analyzer, Substitute(index, substitutions));
   });
   auto mapping = sym::DetectIterMap(forward, {{flattened, domain}}, 1,
                                     sym::IterMapLevel::Bijective, analyzer);
@@ -1195,7 +1203,7 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
   auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
     Array<PrimExpr> symbolic_dims;
     for (const auto &dim : shape) {
-      if (!GetConstInt(analyzer->Simplify(dim))) {
+      if (!GetConstInt(tl::arith::Simplify(analyzer, dim))) {
         symbolic_dims.push_back(dim);
       }
     }
@@ -1219,9 +1227,10 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
   }
   auto domains = GetVarMap();
   for (const auto &[variable, domain] : domains)
-    analyzer->Bind(variable, domain);
-  auto forward_indices = GetForwardIndex().Map(
-      [&](const PrimExpr &index) { return analyzer->Simplify(index); });
+    tl::arith::Bind(analyzer, variable, domain);
+  auto forward_indices = GetForwardIndex().Map([&](const PrimExpr &index) {
+    return tl::arith::Simplify(analyzer, index);
+  });
   sym::IterMapResult res =
       sym::DetectIterMap(forward_indices, domains, 1, level, analyzer);
 
@@ -1287,8 +1296,8 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape, sym::Analyzer analyzer,
   // Use provided analyzer if present, otherwise a local fallback to avoid
   // potential null dereference paths flagged by static analysis.
   sym::Analyzer az = analyzer;
-  ICHECK(az->CanProveEqual(input_shape_product * rescale_num,
-                           shape_product * rescale_den))
+  ICHECK(tl::arith::CanProveEqual(az, input_shape_product * rescale_num,
+                                  shape_product * rescale_den))
       << "InputShape() = " << InputShape() << " shape = " << shape
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den;
 
@@ -1338,7 +1347,8 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
 
   // Use provided analyzer if present, otherwise a local fallback.
   sym::Analyzer az = analyzer;
-  ICHECK(az->CanProveEqual(input_prod * rescale_num, shape_prod * rescale_den))
+  ICHECK(tl::arith::CanProveEqual(az, input_prod * rescale_num,
+                                  shape_prod * rescale_den))
       << "InputShape() = " << InputShape() << " shape = " << shape
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den
       << " input fragment layout is = " << DebugOutput();
@@ -1394,8 +1404,9 @@ PrimExpr infer_fragment_index(const Map<PrimVar, Range> &input_iters,
   }
 
   Array<sym::IterSplitExpr> splits = DivideUnusedIterators(
-      {analyzer->Simplify(Substitute(
-          forward_thread, {{ReplicationPlaceholder(), PrimExpr(0)}}))},
+      {tl::arith::Simplify(
+          analyzer, Substitute(forward_thread,
+                               {{ReplicationPlaceholder(), PrimExpr(0)}}))},
       iter_vars, analyzer);
   return MakeFlattenedExpression(splits);
 }
@@ -1406,17 +1417,18 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size,
     : thread_map_({}, {}), replicate_size_(std::move(replicate_size)) {
   input_size_ = std::move(input_size);
   sym::Analyzer analyzer;
-  input_size_ = input_size_.Map(
-      [&](const PrimExpr &extent) { return analyzer->Simplify(extent); });
-  replicate_size_ = analyzer->Simplify(replicate_size_);
+  input_size_ = input_size_.Map([&](const PrimExpr &extent) {
+    return tl::arith::Simplify(analyzer, extent);
+  });
+  replicate_size_ = tl::arith::Simplify(analyzer, replicate_size_);
   UpdateAnalyzer(analyzer);
-  forward_thread = analyzer->Simplify(forward_thread);
+  forward_thread = tl::arith::Simplify(analyzer, forward_thread);
   if (forward_index.empty()) {
     forward_index = {
         infer_fragment_index(GetVarMap(), forward_thread, analyzer)};
   }
   auto simplified = forward_index.Map([&](const PrimExpr &expression) {
-    return analyzer->Simplify(expression);
+    return tl::arith::Simplify(analyzer, expression);
   });
   index_map_ = BindLayoutCoordinates(simplified, InputDim(), true);
   thread_map_ = BindLayoutCoordinates({forward_thread}, InputDim(), true);
@@ -1476,7 +1488,7 @@ PartialFragmentNode::PartialFragmentNode(Array<PrimExpr> input_size,
                    std::move(forward_thread), std::move(replicate_size)),
       combine_size_(combine_size) {
   sym::Analyzer analyzer;
-  combine_size_ = analyzer->Simplify(combine_size);
+  combine_size_ = tl::arith::Simplify(analyzer, combine_size);
   // The low-bits convention only makes sense when the combine width evenly
   // tiles the replication coordinate.
   auto rep = GetConstInt(replicate_size_);
@@ -1558,7 +1570,9 @@ std::string PartialFragmentNode::DebugOutput() const {
   ss << "PartialFragment(" << InputShape() << " -> " << OutputShape()
      << ", replicate: " << ReplicateExtent() << " (combine " << combine_size_
      << " x copy "
-     << analyzer->Simplify(FloorDiv(ReplicateExtent(), combine_size_)) << ")"
+     << tl::arith::Simplify(analyzer,
+                            FloorDiv(ReplicateExtent(), combine_size_))
+     << ")"
      << ", thread: " << ThreadExtent()
      << ", forward_thread: " << GetForwardThread()
      << ", forward_index: " << GetForwardIndex();
@@ -1593,7 +1607,7 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
   sym::Analyzer analyzer;
   PrimExpr rep_extent = ReplicateExtent();
   PrimExpr copy_extent =
-      analyzer->Simplify(FloorDiv(rep_extent, combine_size_));
+      tl::arith::Simplify(analyzer, FloorDiv(rep_extent, combine_size_));
   PrimVar lo("_rep_lo", ReplicationPlaceholder().ty());
   PrimVar hi("_rep_hi", ReplicationPlaceholder().ty());
   PrimExpr thread =
@@ -1632,7 +1646,7 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
   sym::Analyzer analyzer;
-  return ExprDeepEqual()(analyzer->Simplify(GetForwardThread()),
+  return ExprDeepEqual()(tl::arith::Simplify(analyzer, GetForwardThread()),
                          ReplicationPlaceholder());
 }
 
@@ -1656,7 +1670,7 @@ PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer);
-  auto ist = analyzer->int_set(GetForwardThread() + 1);
+  auto ist = tl::arith::IntSetOf(analyzer, GetForwardThread() + 1);
   return ist.max();
 }
 
@@ -1719,7 +1733,8 @@ CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
   const FragmentNode *node = fragment.get();
   ICHECK(node != nullptr);
   PrimExpr rep_extent = node->ReplicateExtent();
-  PrimExpr copy_extent = analyzer->Simplify(FloorDiv(rep_extent, combine_size));
+  PrimExpr copy_extent =
+      tl::arith::Simplify(analyzer, FloorDiv(rep_extent, combine_size));
   PrimVar lo("_rep_lo", ReplicationPlaceholder().ty());
   PrimVar hi("_rep_hi", ReplicationPlaceholder().ty());
   PrimExpr thread =
@@ -1739,9 +1754,9 @@ CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
   // `lo + W*hi` into one iterator and CompressIterator, which attributes
   // splits per source var, cannot compress either half.
   for (const auto &[var, range] : vmap) {
-    analyzer->Bind(var, range);
+    tl::arith::Bind(analyzer, var, range);
   }
-  thread = analyzer->Simplify(thread);
+  thread = tl::arith::Simplify(analyzer, thread);
   // Compress the combine half first, then the copy half; each keeps only
   // the sub-iterators that actually reach the thread expression.
   auto [expr_lo, lo_iv] =
@@ -1750,13 +1765,13 @@ CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
   vmap.Set(lo_iv->var, lo_iv->dom);
   auto [expr_hi, hi_iv] =
       CompressIterator(expr_lo, ToLayoutAxes(vmap), hi, analyzer);
-  PrimExpr w = analyzer->Simplify(lo_iv->dom->extent);
-  PrimExpr c = analyzer->Simplify(hi_iv->dom->extent);
+  PrimExpr w = tl::arith::Simplify(analyzer, lo_iv->dom->extent);
+  PrimExpr c = tl::arith::Simplify(analyzer, hi_iv->dom->extent);
   PrimExpr new_thread = Substitute(
       expr_hi, {{lo_iv->var, FloorMod(ReplicationPlaceholder(), w)},
                 {hi_iv->var, FloorDiv(ReplicationPlaceholder(), w)}});
   Fragment out(node->InputShape(), node->GetForwardIndex(), new_thread,
-               analyzer->Simplify(w * c), std::nullopt);
+               tl::arith::Simplify(analyzer, w * c), std::nullopt);
   if (node->ThreadRange().has_value()) {
     out = out->BindThreadRange(node->ThreadRange());
   }

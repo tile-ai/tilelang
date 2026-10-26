@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -78,7 +79,7 @@ public:
           << "No allocation owner found for versioned storage " << root;
       auto tensor = owner.value();
       if (tensor.shape().empty() ||
-          !analyzer_->CanProve(tensor.shape()[0] == versions)) {
+          !tl::arith::CanProve(analyzer_, tensor.shape()[0] == versions)) {
         continue;
       }
       auto geometry = tirx::MatchShapeStridePattern(tensor.ty());
@@ -88,21 +89,24 @@ public:
       TVM_FFI_CHECK(element_bits > 0 && 256 % element_bits == 0, ValueError)
           << "32-byte version alignment is not representable in "
           << tensor.dtype();
-      PrimExpr slot_bits = analyzer_->Simplify(
+      PrimExpr slot_bits = tl::arith::Simplify(
+          analyzer_,
           ascend::StorageIndex(geometry.value().get<1>()[0]) * element_bits);
-      TVM_FFI_CHECK(!analyzer_->CanProve(slot_bits <= 0), ValueError)
+      TVM_FFI_CHECK(!tl::arith::CanProve(analyzer_, slot_bits <= 0), ValueError)
           << "Versioned UB slots must have positive size";
       PrimExpr alignment = IntImm(PrimType::Int(64), 256);
-      PrimExpr aligned_bits =
-          analyzer_->Simplify(FloorDiv(slot_bits + 255, alignment) * alignment);
-      if (analyzer_->CanProve(aligned_bits == slot_bits))
+      PrimExpr aligned_bits = tl::arith::Simplify(
+          analyzer_, FloorDiv(slot_bits + 255, alignment) * alignment);
+      if (tl::arith::CanProve(analyzer_, aligned_bits == slot_bits))
         continue;
-      PrimExpr base = analyzer_->Simplify(
+      PrimExpr base = tl::arith::Simplify(
+          analyzer_,
           ascend::StorageIndex(geometry.value().get<2>()) * element_bits);
       layouts_.emplace(
           root.get(),
-          VersionLayout{base, slot_bits, aligned_bits,
-                        analyzer_->Simplify(base + aligned_bits * versions)});
+          VersionLayout{
+              base, slot_bits, aligned_bits,
+              tl::arith::Simplify(analyzer_, base + aligned_bits * versions)});
     }
   }
 
@@ -114,15 +118,16 @@ private:
 
   PrimExpr RewriteBits(const VersionLayout &layout, PrimExpr offset) {
     PrimExpr relative = offset - layout.base_bits;
-    return analyzer_->Simplify(layout.base_bits +
-                               FloorDiv(relative, layout.compact_slot_bits) *
-                                   layout.aligned_slot_bits +
-                               FloorMod(relative, layout.compact_slot_bits));
+    return tl::arith::Simplify(
+        analyzer_, layout.base_bits +
+                       FloorDiv(relative, layout.compact_slot_bits) *
+                           layout.aligned_slot_bits +
+                       FloorMod(relative, layout.compact_slot_bits));
   }
 
   PrimExpr Elements(const PrimExpr &bits, int element_bits) {
     PrimExpr divisor = IntImm(bits.ty().WithLanes(1), element_bits);
-    return analyzer_->Simplify(floordiv(bits, divisor));
+    return tl::arith::Simplify(analyzer_, floordiv(bits, divisor));
   }
 
   tirx::TensorType PhysicalType(const tirx::TensorVar &tensor,
@@ -144,7 +149,8 @@ private:
                     const PrimExpr &size) {
     PrimExpr inner =
         floormod(offset - layout.base_bits, layout.compact_slot_bits);
-    TVM_FFI_CHECK(!analyzer_->CanProve(inner + size > layout.compact_slot_bits),
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer_,
+                                       inner + size > layout.compact_slot_bits),
                   ValueError)
         << "Access crosses a 32-byte-aligned version slot: offset=" << offset
         << ", span_bits=" << size;
@@ -166,11 +172,12 @@ private:
                           ascend::StorageIndex(ramp->stride) * element_bits +
                       element_bits;
       ValidateSpan(layout, begin, size);
-      TVM_FFI_CHECK(analyzer_->CanProve(floormod(begin - layout.base_bits,
-                                                 layout.compact_slot_bits) +
-                                            size <=
-                                        layout.compact_slot_bits),
-                    ValueError)
+      TVM_FFI_CHECK(
+          tl::arith::CanProve(analyzer_, floormod(begin - layout.base_bits,
+                                                  layout.compact_slot_bits) +
+                                                 size <=
+                                             layout.compact_slot_bits),
+          ValueError)
           << "A versioned vector access must stay within one physical slot";
       return {Ramp(Elements(RewriteBits(layout, begin), element_bits),
                    ascend::StorageIndex(ramp->stride), ramp->lanes)};

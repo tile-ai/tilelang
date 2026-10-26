@@ -1,5 +1,6 @@
 #ifndef TVM_TL_CPU_OP_ATOMIC_RMW_H_
 #define TVM_TL_CPU_OP_ATOMIC_RMW_H_
+#include "op/prim.h"
 
 #include "backend/common/op/atomic_reduce.h"
 
@@ -43,8 +44,9 @@ inline Stmt LowerAtomicRMW(const AtomicOpBaseNode &op, AtomicCombine combine,
   }
   for (size_t axis = iteration.loops.size(); axis-- > 0;) {
     const auto &loop = iteration.loops[axis];
-    body = For(loop->var, MakeConst(loop->var.ty(), 0), loop->dom->extent,
-               MakeConst(loop->var.ty(), 1), ForKind::kDefault, SeqStmt(body));
+    body =
+        For(loop->var, tl::MakeConst(loop->var.ty(), 0), loop->dom->extent,
+            tl::MakeConst(loop->var.ty(), 1), ForKind::kDefault, SeqStmt(body));
   }
   if (!iteration.loops.empty()) {
     body = PragmaUnrollLoop(body.as_or_throw<For>());

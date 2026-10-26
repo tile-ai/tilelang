@@ -4,6 +4,7 @@ from tilelang._compat.tvm import IRModule, tirx
 from tvm_tirx.target import Target
 
 import tilelang
+from tilelang.transform import _tirx_passes
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
@@ -34,7 +35,7 @@ def allow_autoschedule(pass_ctx=None) -> bool:
 
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
+    mod = _tirx_passes.BindTarget(target)(mod)
     # Materialize the target-neutral kernel-launch nest emitted by T.Kernel.
     # Ascend's NPU launch is a real 1-D blockIdx.x core grid, so the grid loop
     # becomes a thread_extent AttrStmt; there is no threadIdx at kernel scope,
@@ -133,10 +134,10 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = ascend_transform.RewriteAscendBufferVersionLayout()(mod)
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = _tirx_passes.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
 
     # Retype packed 4-bit float (float4_e2m1fn) storage into the 1-byte
@@ -148,14 +149,14 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
     mod = tirx.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = ascend_transform.AscendRemoveNoOp()(mod)
-    mod = tirx.transform.HoistIf()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.HoistIf()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = ascend_transform.AscendRemoveNoOp()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
-    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = _tirx_passes.AnnotateEntryFunc()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     if allow_global_thread_synchronization(pass_ctx=pass_ctx):

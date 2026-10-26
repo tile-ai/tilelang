@@ -151,7 +151,7 @@ def test_decouple_preserves_logical_loop_domain(loop_min):
         tir.ForKind.VECTORIZED,
         tir.BufferStore(a, cast_buf[copy_to_var - loop_min], [copy_to_var]),
     )
-    block = tvm.ir.RegionStmt("tirx.scope", [], [], None, [allocate_tensor(cast_buf), copy_from, compute, copy_to])
+    block = tvm.ir.RegionStmt("tl.scope", [], [], None, [allocate_tensor(cast_buf), copy_from, compute, copy_to])
     expected = before.with_body(block)
 
     actual_mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
@@ -465,7 +465,7 @@ def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     allocs_inside = [0]
 
     def _visit(node):
-        if isinstance(node, tvm.ir.RegionStmt) and node.op.name == "tirx.scope":
+        if isinstance(node, tvm.ir.RegionStmt) and node.op.name == "tl.scope":
             annotated_blocks[0] += 1
 
             def _count(inner):

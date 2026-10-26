@@ -1,5 +1,8 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #ifndef TILELANG_TRANSFORM_COMMON_ITERATION_PRIVATE_H_
 #define TILELANG_TRANSFORM_COMMON_ITERATION_PRIVATE_H_
+#include "op/prim.h"
 
 #include "compat/expr.h"
 #include "memory_access.h"
@@ -13,7 +16,7 @@
 
 namespace tvm::tl {
 
-class IterationPrivateStorage : public tirx::StmtExprVisitor {
+class IterationPrivateStorage : public tvm::tl::StmtExprVisitor {
 public:
   explicit IterationPrivateStorage(tirx::TensorVar tensor,
                                    MemoryAliases aliases = {},
@@ -77,10 +80,10 @@ private:
         IntImm::Int64(tensor.value().dtype().StorageBytes());
     PrimExpr offset = location.offset;
     if (lane) {
-      offset =
-          Substitute(offset, {{lane.value(), MakeConst(lane.value().ty(), 0)}});
-      if (!analyzer_->CanProveEqual(
-              location.offset,
+      offset = Substitute(
+          offset, {{lane.value(), tl::MakeConst(lane.value().ty(), 0)}});
+      if (!tl::arith::CanProveEqual(
+              analyzer_, location.offset,
               offset + Cast(PrimType::Int(64), lane.value()) * element_bytes))
         return std::nullopt;
     }
@@ -94,9 +97,9 @@ private:
     if (!access)
       return false;
     for (const auto &written : written_) {
-      if (analyzer_->CanProve(written.first <= access->first) &&
-          analyzer_->CanProve(access->first + access->second <=
-                              written.first + written.second))
+      if (tl::arith::CanProve(analyzer_, written.first <= access->first) &&
+          tl::arith::CanProve(analyzer_, access->first + access->second <=
+                                             written.first + written.second))
         return true;
     }
     return false;
@@ -111,13 +114,13 @@ private:
       return false;
     }
     if (const auto *region = statement.as<RegionStmtNode>()) {
-      return (region->op->name == "tirx.scope" ||
+      return (region->op->name == "tl.scope" ||
               region->op->name == "tl.scope") &&
              Covers(region->body, loops);
     }
     if (const auto *loop = statement.as<ForNode>()) {
       if (!IsZero(loop->begin) || !IsOne(loop->step) ||
-          !analyzer_->CanProve(loop->end > 0))
+          !tl::arith::CanProve(analyzer_, loop->end > 0))
         return false;
       loops.push_back(loop);
       return Covers(loop->body, loops);
@@ -139,8 +142,9 @@ private:
                Cast(PrimType::Int(64), loop->var);
       count = count * Cast(PrimType::Int(64), loop->end);
     }
-    return analyzer_->CanProveEqual(access->first, linear * access->second) &&
-           analyzer_->CanProveEqual(count * access->second,
+    return tl::arith::CanProveEqual(analyzer_, access->first,
+                                    linear * access->second) &&
+           tl::arith::CanProveEqual(analyzer_, count * access->second,
                                     GetBufferStorageSizeBytes(tensor_));
   }
 
@@ -195,7 +199,7 @@ private:
         SideEffect(node->value) == CallEffectKind::kPure &&
         IsStorage(node->var))
       return std::nullopt;
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const ForNode *node) final {
@@ -219,8 +223,8 @@ private:
             safe_ = false;
             break;
           }
-          Visit(Substitute(node->body,
-                           {{node->var, MakeConst(node->var.ty(), value)}}));
+          Visit(Substitute(
+              node->body, {{node->var, tl::MakeConst(node->var.ty(), value)}}));
         }
         return std::nullopt;
       }
@@ -246,7 +250,8 @@ private:
   ffi::Optional<ffi::VisitInterrupt> Visit_(const IfNode *node) final {
     Visit(node->condition);
     if (allow_loop_carried_) {
-      if (auto condition = GetConstInt(analyzer_->Simplify(node->condition))) {
+      if (auto condition =
+              GetConstInt(tl::arith::Simplify(analyzer_, node->condition))) {
         if (*condition)
           Visit(node->then_case);
         else if (node->else_case)

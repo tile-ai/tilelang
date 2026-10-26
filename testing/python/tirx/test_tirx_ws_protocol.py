@@ -1,5 +1,6 @@
+from tilelang.transform import _tirx_passes
 import pytest
-from tvm_tirx import ir, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 import tilelang
@@ -18,7 +19,7 @@ def nodes(value, kind):
 
 def prepare(function):
     module = ir.IRModule({"main": function.with_attr("global_symbol", "main")})
-    module = tirx.transform.BindTarget(Target({"kind": "cuda", "arch": "sm_100a"}))(module)
+    module = _tirx_passes.BindTarget(Target({"kind": "cuda", "arch": "sm_100a"}))(module)
     return tilelang.transform.MaterializeKernelLaunch()(module)
 
 
@@ -28,7 +29,7 @@ def materialize(function):
         module = tilelang.cuda.transform.AutoWarpSpecialization()(module)
     assert any("tl.ws_schedule" in node.attrs for node in nodes(module, ir.RegionStmt))
     module = tilelang.cuda.transform.MaterializeWSSchedule()(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -213,7 +214,7 @@ def manual_staged_while(trips, depth=2, thread_dependent=False):
 
 def manual(function):
     module = tilelang.cuda.transform.MaterializeWSSchedule()(prepare(function))
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -360,7 +361,7 @@ def test_simplify_keeps_schedule_references_until_materialization():
     assert any(loop.annotations.get(T.WSID) == "wave" for loop in nodes(module, ir.For))
     module = tilelang.cuda.transform.MaterializeWSSchedule()(module)
     module = tilelang.transform.Simplify()(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     assert not any(call.op.name == "tl.tileop.copy" for call in nodes(module, ir.Call))
 
 

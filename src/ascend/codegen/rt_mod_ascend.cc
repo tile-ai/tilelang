@@ -1,9 +1,11 @@
+#include "transform/tirx_passes.h"
+
 #include "backend/common/codegen/native_codegen.h"
 #include "codegen_ascend.h"
 #include "config.h"
 
 #include "support/check.h"
-#include <tvm/codegen/build_common.h>
+#include "tirx_compat/build_common.h"
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -29,8 +31,8 @@ std::string AscendCodeGen(IRModule mod, const Target &target) {
     mod.CopyOnWrite()->functions.Set(
         global, WithAttr(function, tvm::attr::kTarget, target));
   }
-  mod = tirx::transform::StmtSimplify()(mod);
-  mod = tirx::transform::LowerIntrin()(mod);
+  mod = tvm::tl::tirx_passes::StmtSimplify()(mod);
+  mod = tvm::tl::tirx_passes::LowerIntrin()(mod);
   bool output_ssa = false;
   CodeGenTileLangAscend cg;
   cg.Init(output_ssa);

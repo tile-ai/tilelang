@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -30,12 +31,12 @@
 
 namespace tvm::tl {
 namespace {
-class BufferVersionNormalizer : public tirx::StmtExprMutator {
+class BufferVersionNormalizer : public tvm::tl::StmtExprMutator {
 protected:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto region = StmtExprMutator::Mutate_(node, mode)
+    auto region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(original)
                       .as_or_throw<RegionStmt>();
     TVM_FFI_CHECK(!region->attrs->dict.count(attr::kBufferVersion), ValueError)

@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -17,11 +18,11 @@ def plan(body, parameters):
     return tvm_ffi.get_global_func("tl.transform.PipelinePlanning")()(ir.IRModule({"main": function}))
 
 
-def execute(module, *arguments):
+def execute(module, *arguments, compile_tilelang):
     module = tvm_ffi.get_global_func("tl.transform.InjectSoftwarePipeline")()(module)
     module = tvm_ffi.get_global_func("tl.transform.LowerTileOp")()(module)
-    assert tirx.analysis.check_well_formed(module)
-    tirx.compile(module, target="c")(*arguments)
+    assert ir.check_well_formed(module)
+    compile_tilelang(module, target="c")(*arguments)
 
 
 def planned_loop(module):
@@ -36,7 +37,7 @@ def planned_loop(module):
 @pytest.mark.parametrize(
     "relation,bound", [("lt", -1), ("lt", 5), ("le", 4), ("eq", 2), ("ge", 0), ("ge", 3), ("gt", 1), ("gt", 9), ("and", 2)]
 )
-def test_pipeline_restricts_only_constant_contiguous_induction_guards(relation, bound):
+def test_pipeline_restricts_only_constant_contiguous_induction_guards(relation, bound, *, compile_tilelang):
     source = TensorView.create("source", [8], "int32")
     positions = TensorView.create("positions", [8], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
@@ -76,7 +77,7 @@ def test_pipeline_restricts_only_constant_contiguous_induction_guards(relation, 
     values = np.arange(8, dtype="int32") * 11
     indices = np.arange(7, -1, -1, dtype="int32")
     actual = runtime.tensor(np.full(8, -99, dtype="int32"))
-    execute(module, runtime.tensor(values), runtime.tensor(indices), actual)
+    execute(module, runtime.tensor(values), runtime.tensor(indices), actual, compile_tilelang=compile_tilelang)
     expected = np.full(8, -99, dtype="int32")
     for index in range(8):
         if comparisons[relation](index):
@@ -84,7 +85,7 @@ def test_pipeline_restricts_only_constant_contiguous_induction_guards(relation, 
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_pipeline_does_not_split_a_mutable_guard():
+def test_pipeline_does_not_split_a_mutable_guard(*, compile_tilelang):
     flags = TensorView.create("flags", [8], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
     output = TensorView.create("output", [8], "int32")
@@ -113,12 +114,12 @@ def test_pipeline_does_not_split_a_mutable_guard():
     values = np.arange(8, dtype="int32") % 2
     actual = runtime.tensor(np.full(8, -99, dtype="int32"))
     conditions = runtime.tensor(values)
-    execute(module, conditions, actual)
+    execute(module, conditions, actual, compile_tilelang=compile_tilelang)
     np.testing.assert_array_equal(actual.numpy(), np.where(values, np.arange(8) + 1, -99))
     np.testing.assert_array_equal(conditions.numpy(), np.zeros(8, dtype="int32"))
 
 
-def test_pipeline_does_not_replay_effectful_guards(tilelang_builders):
+def test_pipeline_does_not_replay_effectful_guards(tilelang_builders, *, compile_tilelang):
     counter = TensorView.create("counter", [1], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
     output = TensorView.create("output", [13], "int32")
@@ -141,11 +142,11 @@ def test_pipeline_does_not_replay_effectful_guards(tilelang_builders):
         annotations={"num_stages": 3},
     )
     imported = '#ifdef __cplusplus\nextern "C"\n#endif\nint32_t next_pipeline_guard(int32_t *counter) { return ((*counter)++) % 2; }\n'
-    body = ir.RegionStmt("tirx.scope", [], [], {"pragma_import_c": imported}, [temporary.allocate(), loop])
+    body = ir.RegionStmt("tl.scope", [], [], {"pragma_import_c": imported}, [temporary.allocate(), loop])
     module = plan(body, [counter.tensor, output.tensor])
     assert isinstance(planned_loop(module).body.seq[0], ir.If)
     actual = runtime.tensor(np.full(13, -99, dtype="int32"))
     count = runtime.tensor(np.array([0], dtype="int32"))
-    execute(module, count, actual)
+    execute(module, count, actual, compile_tilelang=compile_tilelang)
     np.testing.assert_array_equal(actual.numpy(), [index + 1 if index % 2 else -99 for index in range(13)])
     np.testing.assert_array_equal(count.numpy(), [13])

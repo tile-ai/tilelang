@@ -1,3 +1,4 @@
+#include "op/dtype.h"
 /*!
  * \file tl/op/builtin.cc
  * \brief Registration of backend-neutral TileLang intrinsic Ops.
@@ -16,9 +17,10 @@ namespace tl {
 using namespace tirx;
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  RegisterCustomDType("tfloat32", kTensorFloat32, PrimType::Float(32));
-  RegisterCustomDType("float4_e2m1_unpacked", kFloat4E2M1Unpacked,
-                      PrimType::UInt(8));
+  ::tvm::tl::RegisterCustomDType("tfloat32", kTensorFloat32,
+                                 PrimType::Float(32));
+  ::tvm::tl::RegisterCustomDType("float4_e2m1_unpacked", kFloat4E2M1Unpacked,
+                                 PrimType::UInt(8));
   for (const char *scope :
        {"local.fragment", "local.reducer", "local.descriptor.wgmma",
         "local.descriptor.tcgen05_smem", "local.descriptor.tcgen05_instr",

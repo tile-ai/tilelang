@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/metal/op/copy.cc
  * \brief Metal implementation for tl.copy lowering.
@@ -54,9 +55,10 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_row_base = op.dst_range[0]->begin;
   PrimExpr dst_col_base = op.dst_range[1]->begin;
   auto pattern = tirx::MatchShapeStridePattern(op.dst.ty());
-  TVM_FFI_CHECK(pattern && pattern.value().get<1>().size() == 2 &&
-                    analyzer->CanProve(pattern.value().get<1>()[1] == 1),
-                ValueError)
+  TVM_FFI_CHECK(
+      pattern && pattern.value().get<1>().size() == 2 &&
+          tl::arith::CanProve(analyzer, pattern.value().get<1>()[1] == 1),
+      ValueError)
       << "Metal matrix stores require a row-strided destination";
   PrimExpr dst_stride = pattern.value().get<1>()[0];
 
@@ -140,9 +142,10 @@ Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_row_base = op.dst_range[0]->begin;
   PrimExpr dst_col_base = op.dst_range[1]->begin;
   auto pattern = tirx::MatchShapeStridePattern(op.dst.ty());
-  TVM_FFI_CHECK(pattern && pattern.value().get<1>().size() == 2 &&
-                    analyzer->CanProve(pattern.value().get<1>()[1] == 1),
-                ValueError)
+  TVM_FFI_CHECK(
+      pattern && pattern.value().get<1>().size() == 2 &&
+          tl::arith::CanProve(analyzer, pattern.value().get<1>()[1] == 1),
+      ValueError)
       << "Metal matrix stores require a row-strided destination";
   PrimExpr dst_stride = pattern.value().get<1>()[0];
 

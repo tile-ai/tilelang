@@ -1,10 +1,11 @@
 #ifndef TVM_TL_TARGET_CODEGEN_PY_H_
 #define TVM_TL_TARGET_CODEGEN_PY_H_
 
+#include "backend/common/codegen/tirx/codegen_source_base.h"
 #include "compat/expr.h"
 #include "support/check.h"
+#include "tirx_compat/source_module.h"
 #include <tvm/codegen/codegen.h>
-#include <tvm/codegen/source_base.h>
 #include <tvm/ir/expr_functor.h>
 #include <tvm/ir/op.h>
 #include <tvm/ir/unique_name_supply.h>
@@ -34,7 +35,7 @@ PrimExpr PythonTensorSize(const TensorVar &tensor);
 class CodeGenTileLangPY
     : public tvm::ExprFunctor<void(const Expr &, std::ostream &)>,
       public tirx::StmtFunctor<void(const Stmt &)>,
-      public CodeGenSourceBase {
+      public tl::codegen_impl::CodeGenSourceBase {
 public:
   virtual void AddFunction(const GlobalVar &global,
                            const tirx::Function &function);

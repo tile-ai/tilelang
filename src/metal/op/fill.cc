@@ -1,6 +1,7 @@
 #include "backend/common/op/fill.h"
 #include "backend/common/target_utils.h"
 #include "metal/op/utils.h"
+#include "op/prim.h"
 
 #include <tvm/backend/metal/op/cooperative_tensor.h>
 
@@ -35,7 +36,7 @@ struct Fill {
       statements.push_back(
           Evaluate(Call(PrimType::Void(), intrinsic,
                         {operation.dst.data(), IntImm::Int32(index),
-                         prim::cast(operation.value, operation.dst.dtype()),
+                         tl::CastValue(operation.value, operation.dst.dtype()),
                          IntImm::Int32(rows), IntImm::Int32(columns)})));
     }
     return SeqStmt(statements);

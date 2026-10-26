@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import tvm_ffi
 from tvm_tirx import ir, tirx
+from .structural import structural_visit, structural_mutate
 
 IRNode = ir.Expr | ir.Stmt
 IRRoot = IRNode | tirx.Function | ir.IRModule
@@ -37,7 +38,7 @@ def post_order_visit(root: IRRoot, fvisit: Callable[[IRNode], object]) -> None:
         visitor.default_visit(node)
         fvisit(node)
 
-    tvm_ffi.structural_visit(root, [((ir.Expr, ir.Stmt), visit), (ir.Type, _skip_type)])
+    structural_visit(root, [((ir.Expr, ir.Stmt), visit), (ir.Type, _skip_type)])
 
 
 def pre_order_visit(root: IRRoot, fvisit: Callable[[IRNode], bool]) -> None:
@@ -53,7 +54,7 @@ def pre_order_visit(root: IRRoot, fvisit: Callable[[IRNode], bool]) -> None:
         if fvisit(node):
             visitor.default_visit(node)
 
-    tvm_ffi.structural_visit(root, [((ir.Expr, ir.Stmt), visit), (ir.Type, _skip_type)])
+    structural_visit(root, [((ir.Expr, ir.Stmt), visit), (ir.Type, _skip_type)])
 
 
 def _checked_replacement(original: IRNode, replacement: IRNode) -> IRNode:
@@ -94,7 +95,7 @@ def ir_transform(
                 return _checked_replacement(rewritten, replacement)
         return rewritten
 
-    return tvm_ffi.structural_mutate(root, ((ir.Expr, ir.Stmt), mutate))
+    return structural_mutate(root, ((ir.Expr, ir.Stmt), mutate))
 
 
 def substitute(root: IRRoot, value_map: Mapping[ir.Var, ir.Expr | int | float | bool]) -> IRRoot:
@@ -126,4 +127,4 @@ def substitute(root: IRRoot, value_map: Mapping[ir.Var, ir.Expr | int | float | 
             raise ValueError(f"Cannot replace variable definition {variable.name} with a non-variable; substitute its body instead")
         return replacement
 
-    return tvm_ffi.structural_mutate(root, (ir.Var, mutate))
+    return structural_mutate(root, (ir.Var, mutate))

@@ -1,4 +1,5 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "op/utils.h"
 
 #include <tvm/tirx/transform.h>
@@ -10,7 +11,7 @@ namespace {
 using namespace ffi;
 using namespace tirx;
 
-class L2PersistentLowerer : public StmtExprMutator {
+class L2PersistentLowerer : public tvm::tl::StmtExprMutator {
 private:
   Stmt Hint(const TensorVar &tensor, const PrimExpr &ratio,
             const Location &location) {
@@ -55,7 +56,7 @@ private:
       return Hint(call->args[0].as_or_throw<TensorVar>(),
                   call->args[1].as_or_throw<PrimExpr>(), node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 };
 } // namespace

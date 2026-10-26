@@ -1,5 +1,7 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "cuda/op/builtin.h"
+#include "op/prim.h"
 #include "transform/merge_if_stmt.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
@@ -117,7 +119,7 @@ bool TransparentIssue(const Stmt &statement, const Expr &barrier,
     return call->args.empty();
   auto barrier_index = TmaBarrierIndex(call);
   if (!barrier_index ||
-      !StructuralEqual::Equal(call->args[*barrier_index], barrier))
+      !tl::StructuralEqual()(call->args[*barrier_index], barrier))
     return false;
   for (size_t index = 0; index < call->args.size(); ++index) {
     if (index != *barrier_index && !StableArgument(call->args[index]))
@@ -127,11 +129,11 @@ bool TransparentIssue(const Stmt &statement, const Expr &barrier,
   return true;
 }
 
-class BarrierFuser : public StmtExprMutator {
+class BarrierFuser : public tvm::tl::StmtExprMutator {
 private:
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
     SeqStmt original = GetRef<SeqStmt>(node);
-    SeqStmt visited = StmtExprMutator::Mutate_(node, mode)
+    SeqStmt visited = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(original)
                           .as_or_throw<SeqStmt>();
     Array<Stmt> result;
@@ -155,8 +157,8 @@ private:
       if (!saw_load || !arrive ||
           (!native_arrival && (!arrive->op.same_as(mbarrier_arrive()) ||
                                arrive->args.size() != 1)) ||
-          !StructuralEqual::Equal(BarrierReference(expect->args[0]),
-                                  BarrierReference(arrive->args[0]))) {
+          !tl::StructuralEqual()(BarrierReference(expect->args[0]),
+                                 BarrierReference(arrive->args[0]))) {
         result.push_back(statement);
         continue;
       }
@@ -165,8 +167,8 @@ private:
       if (native_arrival) {
         Array<Expr> arguments{
             arrive->args[0],
-            prim::cast(expect->args[1].as_or_throw<PrimExpr>(),
-                       PrimType::UInt(32)),
+            tl::CastValue(expect->args[1].as_or_throw<PrimExpr>(),
+                          PrimType::UInt(32)),
             arrive->args[1], StringImm("expect_tx")};
         for (size_t argument = 2; argument < arrive->args.size(); ++argument)
           arguments.push_back(arrive->args[argument]);

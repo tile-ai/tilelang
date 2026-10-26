@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 // Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
@@ -7,6 +8,7 @@
  *        return-value vector instructions.
  */
 
+#include "op/prim.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/layout.h>
@@ -163,12 +165,13 @@ private:
       indices.push_back(range->begin);
     auto offsets = buf.ty()->ElemOffset(indices);
     TVM_FFI_CHECK_EQ(offsets.size(), 1, ValueError);
-    PrimExpr offset = prim::cast(offsets[0], index_dtype);
+    PrimExpr offset = tl::CastValue(offsets[0], index_dtype);
     PrimExpr element_bytes =
-        MakeConst(index_dtype, (buf.dtype().bits() + 7) / 8);
-    PrimExpr alignment = MakeConst(index_dtype, 32);
-    if (!analyzer->CanProveEqual(FloorMod(offset * element_bytes, alignment),
-                                 MakeConst(index_dtype, 0))) {
+        tl::MakeConst(index_dtype, (buf.dtype().bits() + 7) / 8);
+    PrimExpr alignment = tl::MakeConst(index_dtype, 32);
+    if (!tl::arith::CanProveEqual(analyzer,
+                                  FloorMod(offset * element_bytes, alignment),
+                                  tl::MakeConst(index_dtype, 0))) {
       TVM_FFI_THROW(ValueError)
           << "T.fill inside SimdVF requires a 32-byte-aligned region base "
              "address, got region ["
@@ -231,7 +234,8 @@ private:
     sym::Analyzer analyzer;
     auto next = tl::Substitute(
         expression, {{variable, variable + IntImm(variable.ty(), 1)}});
-    return GetConstInt(analyzer->Simplify(next - expression)).value_or(-1);
+    return GetConstInt(tl::arith::Simplify(analyzer, next - expression))
+        .value_or(-1);
   }
 
   static Stmt StripAttr(const Stmt &body) {
@@ -273,14 +277,14 @@ private:
       replacements.Set(
           variable,
           parallel_begin_ +
-              prim::cast(chunk_var_ * IntImm(chunk_var_.ty(), vreg_size_),
-                         variable.ty()));
+              tl::CastValue(chunk_var_ * IntImm(chunk_var_.ty(), vreg_size_),
+                            variable.ty()));
     }
     if (outer_parallel_var_) {
       auto variable =
           ffi::GetRef<Var>(outer_parallel_var_).as_or_throw<PrimVar>();
-      replacements.Set(variable, outer_begin_ + prim::cast(outer_serial_var_,
-                                                           variable.ty()));
+      replacements.Set(variable, outer_begin_ + tl::CastValue(outer_serial_var_,
+                                                              variable.ty()));
     }
     return tl::Substitute(index, replacements);
   }
@@ -876,13 +880,15 @@ private:
                   ValueError)
         << "SimdVF parallel loops require a unit step";
     int64_t vreg_ext =
-        GetConstInt(analyzer->Simplify(vreg_for->end - vreg_for->begin))
+        GetConstInt(
+            tl::arith::Simplify(analyzer, vreg_for->end - vreg_for->begin))
             .value();
     int64_t serial_ext =
-        serial_for ? GetConstInt(analyzer->Simplify(serial_for->end -
-                                                    serial_for->begin))
-                         .value()
-                   : 1;
+        serial_for
+            ? GetConstInt(tl::arith::Simplify(analyzer, serial_for->end -
+                                                            serial_for->begin))
+                  .value()
+            : 1;
 
     Stmt scalar_body = vreg_for->body;
     if (serial_for && !CanLowerBody(scalar_body))

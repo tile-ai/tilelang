@@ -1,7 +1,14 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/dtype.h"
+#include "op/prim.h"
+#include "transform/tirx_passes.h"
+
 #include "common/attr.h"
 #include "compat/expr.h"
 #include "compat/visit.h"
 
+#include "transform/common/packed_api.h"
 #include <tvm/ffi/c_api.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -11,7 +18,6 @@
 #include <tvm/tirx/op/abi.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
-#include <tvm/tirx/packed_api.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/type.h>
 
@@ -122,15 +128,15 @@ OutputStorage ResolveStorage(const TensorVar &tensor) {
   return {tensor, storage, shape, condition};
 }
 
-class RuntimeAssumptions : public tirx::StmtExprMutator {
+class RuntimeAssumptions : public tvm::tl::StmtExprMutator {
 public:
-  using tirx::StmtExprMutator::Mutate;
+  using tvm::tl::StmtExprMutator::Mutate;
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
@@ -138,7 +144,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
@@ -146,14 +152,14 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
-    auto rewritten = StmtExprMutator::Mutate_(node, mode)
+    auto rewritten = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                          .as_or_throw<RegionStmt>();
     auto condition =
@@ -174,17 +180,17 @@ private:
   int conditional_depth_{0};
 };
 
-class OutputReturnRewriter : public tirx::StmtExprMutator {
+class OutputReturnRewriter : public tvm::tl::StmtExprMutator {
 public:
   explicit OutputReturnRewriter(Stmt epilogue) : epilogue_(epilogue) {}
-  using tirx::StmtExprMutator::Mutate;
+  using tvm::tl::StmtExprMutator::Mutate;
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     bool parallel = node->kind == ForKind::kParallel;
     parallel_depth_ += parallel;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     parallel_depth_ -= parallel;
     return result;
   }
@@ -193,7 +199,7 @@ private:
                                  ffi::InplaceMode mode) final {
     bool parallel = node->op.same_as(tirx::parallel_launch_op());
     parallel_depth_ += parallel;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     parallel_depth_ -= parallel;
     return result;
   }
@@ -239,7 +245,7 @@ tirx::Function MakeOutputAPI(tirx::Function function,
   }
   int anchor_index = inputs.size();
   inputs.push_back(anchor);
-  auto decoded = tirx::DecodePackedAPIArguments(
+  auto decoded = tirx_passes::DecodePackedAPIArguments(
       name, inputs, packed_args, num_args, device_type, device_id,
       function->GetAttr<ffi::Map<Var, PrimType>>("tirx.packed_storage_dtypes")
           .value_or(ffi::Map<Var, PrimType>{}),
@@ -274,12 +280,12 @@ tirx::Function MakeOutputAPI(tirx::Function function,
   sym::Analyzer analyzer;
   auto bind_or_check = [&](const PrimExpr &actual, const PrimExpr &expected,
                            const ffi::String &description) {
-    PrimExpr cast_expected = prim::cast(expected, actual.ty());
+    PrimExpr cast_expected = tl::CastValue(expected, actual.ty());
     if (auto variable = actual.as<PrimVar>();
         variable && !decoded.bindings.count(variable.value())) {
       initialization.push_back(Bind(variable.value(), cast_expected));
       decoded.bindings.Set(variable.value(), cast_expected);
-    } else if (!analyzer->CanProve(actual == cast_expected)) {
+    } else if (!tl::arith::CanProve(analyzer, actual == cast_expected)) {
       validation.push_back(
           Check(actual == cast_expected, name + ": " + description));
     }
@@ -298,7 +304,7 @@ tirx::Function MakeOutputAPI(tirx::Function function,
               << "; bind it from an input tensor or scalar parameter";
         }
       });
-      if (!analyzer->CanProve(extent >= 0)) {
+      if (!tl::arith::CanProve(analyzer, extent >= 0)) {
         validation.push_back(Check(
             extent >= 0, name + ": output dimensions must be nonnegative"));
       }
@@ -346,7 +352,7 @@ tirx::Function MakeOutputAPI(tirx::Function function,
     for (size_t dimension = 0; dimension < output.shape.size(); ++dimension) {
       allocation.push_back(
           SetField(shapes, shape_offset + dimension, tirx::kInt64ArrayElem,
-                   prim::cast(output.shape[dimension], PrimType::Int(64))));
+                   tl::CastValue(output.shape[dimension], PrimType::Int(64))));
     }
     auto field = [&](int kind, Expr value) {
       allocation.push_back(SetField(prototypes, ordinal, kind, value));
@@ -406,8 +412,9 @@ tirx::Function MakeOutputAPI(tirx::Function function,
     PrimVar status("output_array_status", PrimType::Int(32));
     return_statements.push_back(Bind(
         status,
-        Call(PrimType::Int(32), tirx::call_packed_with_result_op(),
-             {StringImm("ffi.Array"), objects, IntImm::Int32(count), result})));
+        Call(PrimType::Int(32), tirx::call_packed_op(),
+             {StringImm("tl.runtime.CallGlobalWithResult"),
+              StringImm("ffi.Array"), objects, IntImm::Int32(count), result})));
     for (const Expr &handle : handles)
       return_statements.push_back(Release(handle));
     return_statements.push_back(If(status != 0, Return(status)));
@@ -511,7 +518,7 @@ tvm::transform::Pass MakePackedAPI() {
             (tensor.value().dtype().bits() >= 8 &&
              !tensor.value().dtype().MatchesCode(kDLFloat8_e4m3) &&
              !tensor.value().dtype().MatchesCode(kDLFloat4_e2m1fn) &&
-             !IsCustomDType(tensor.value().dtype())))
+             !::tvm::tl::IsCustomDType(tensor.value().dtype())))
           continue;
         auto resolver = ffi::Function::GetGlobalRequired(
             "tl.tvm_ffi.resolve_output_storage_dtype");
@@ -547,7 +554,7 @@ tvm::transform::Pass MakePackedAPI() {
   };
   return tvm::transform::Sequential(
       {tvm::transform::CreateModulePass(prepare, 0, "tl.PreparePackedAPI"),
-       tirx::transform::ConvertSSA(), tirx::transform::MakePackedAPI()},
+       tl::tirx_passes::ConvertSSA(), tirx_passes::MakePackedAPI()},
       "tl.MakePackedAPI");
 }
 

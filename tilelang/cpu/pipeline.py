@@ -4,6 +4,7 @@ from tilelang._compat.tvm import IRModule, tirx
 from tvm_tirx.target import Target
 
 import tilelang
+from tilelang.transform import _tirx_passes
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -19,7 +20,7 @@ def _should_enable_cpu_parallel(pass_ctx=None) -> bool:
 
 
 def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
+    mod = _tirx_passes.BindTarget(target)(mod)
     mod = tilelang.cpu.transform.LowerCPUKernelLaunch()(mod)
     pass_ctx = tilelang.transform.get_pass_context()
     cpu_parallel = _should_enable_cpu_parallel(pass_ctx)
@@ -67,28 +68,28 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = _tirx_passes.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # The CPU codegens have no native BF16. Host codegen legalizes BF16 storage
     # to uint16, which requires BF16 arithmetic to have been legalized first;
     # this is the point TVM's default pipeline runs it.
     mod = tirx.transform.BF16ComputeLegalize()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
     mod = tirx.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
-    mod = tirx.transform.RemoveNoOp()(mod)
-    mod = tirx.transform.HoistIf()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
+    mod = _tirx_passes.RemoveNoOp()(mod)
+    mod = _tirx_passes.HoistIf()(mod)
 
     if cpu_parallel:
         mod = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
-    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = _tirx_passes.AnnotateEntryFunc()(mod)
     # CPU thread bindings are serial, so LowerThreadAllreduce is unnecessary.
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

@@ -1,5 +1,6 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
+#include "op/prim.h"
 
 #include "backend/common/op/reduce.h"
 #include "compat/expr.h"
@@ -88,8 +89,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
       body = tl::Substitute(body, substitutions);
       for (int axis = layout->OutputDim() - 1; axis >= 0; --axis) {
         PrimType index_type = indices[axis].ty();
-        body = For(variables[axis], MakeConst(index_type, 0),
-                   layout->OutputShape()[axis], MakeConst(index_type, 1),
+        body = For(variables[axis], tl::MakeConst(index_type, 0),
+                   layout->OutputShape()[axis], tl::MakeConst(index_type, 1),
                    ForKind::kParallel, SeqStmt(body));
       }
       return body;

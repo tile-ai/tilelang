@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
@@ -78,7 +79,7 @@ Call EncodeTiled(const Call &call, const Var &descriptor) {
               Attrs(attributes), {}, call->loc);
 }
 
-class DeviceDescriptorLowerer : public tirx::StmtExprMutator {
+class DeviceDescriptorLowerer : public tvm::tl::StmtExprMutator {
 public:
   DeviceDescriptorLowerer(const Array<Var> &host_variables,
                           bool disable_shuffle_elect)
@@ -138,14 +139,14 @@ private:
         return SeqStmt({});
       }
     }
-    return StmtExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
   }
 
   UnchangedOr<Expr> Mutate_(const CallNode *node,
                             InplaceMode inplace_mode) final {
     Expr original = GetRef<Expr>(node);
-    Expr visited =
-        StmtExprMutator::Mutate_(node, inplace_mode).ValueOrUnchanged(original);
+    Expr visited = tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode)
+                       .ValueOrUnchanged(original);
     Call call = visited.as_or_throw<Call>();
     if (!IsDescriptor(call.get()))
       return visited;
@@ -188,7 +189,7 @@ private:
   Array<Stmt> prefetch_;
 };
 
-class HopperLowerer : public tirx::StmtExprMutator {
+class HopperLowerer : public tvm::tl::StmtExprMutator {
 public:
   explicit HopperLowerer(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
@@ -198,7 +199,7 @@ private:
                             InplaceMode inplace_mode) final {
     const auto &name = node->op->name;
     if (name != "tirx.device_entry" && name != "tirx.launch_thread") {
-      return StmtExprMutator::Mutate_(node, inplace_mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
     }
     RegionStmt region = GetRef<RegionStmt>(node);
     auto lowerer = make_object<DeviceDescriptorLowerer>(UndefinedVars(region),
@@ -215,7 +216,7 @@ private:
                             InplaceMode inplace_mode) final {
     TVM_FFI_CHECK(!IsDescriptor(node), ValueError)
         << "TMA descriptor construction requires an enclosing device region";
-    return StmtExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
   }
 
   bool disable_shuffle_elect_;

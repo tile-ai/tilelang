@@ -1,7 +1,10 @@
 #include "thread_sync.h"
+#include "compat/analyzer.h"
 #include "compat/visit.h"
 #include "iteration_private.h"
 #include "memory_access.h"
+#include "op/gpu.h"
+#include "op/prim.h"
 #include "read_only_params.h"
 #include "thread_sync_types.h"
 
@@ -63,7 +66,7 @@ const CallNode *EvaluatedCall(const Stmt &statement) {
 
 bool IsStorageSync(const Stmt &statement) {
   const CallNode *call = EvaluatedCall(statement);
-  if (!call || !call->op.same_as(gpu_storage_sync_op()) || call->args.empty())
+  if (!call || !tl::IsStorageSyncOp(call->op) || call->args.empty())
     return false;
   const auto *scope = call->args[0].as<StringImmNode>();
   return scope && (scope->value == "shared" || scope->value == "shared.dyn");
@@ -81,10 +84,18 @@ bool IsAsyncWait(const Stmt &statement) {
 
 bool IsWarpSync(const Stmt &statement) {
   const CallNode *call = EvaluatedCall(statement);
-  if (!call || !call->op.same_as(gpu_storage_sync_op()) || call->args.empty())
+  if (!call || !tl::IsStorageSyncOp(call->op) || call->args.empty())
     return false;
   const auto *scope = call->args[0].as<StringImmNode>();
   return scope && scope->value == "warp";
+}
+
+bool IsClusterSync(const Stmt &statement) {
+  const CallNode *call = EvaluatedCall(statement);
+  if (!call || !tl::IsStorageSyncOp(call->op) || call->args.size() != 1)
+    return false;
+  const auto *scope = call->args[0].as<StringImmNode>();
+  return scope && scope->value == "cluster";
 }
 
 PrimExpr LinearThreadIndex(const SyncContext &context) {
@@ -149,8 +160,7 @@ public:
             escaped.insert(location.allocation.value().get());
         }
       }
-      if (call && call->op.same_as(gpu_storage_sync_op()) &&
-          call->args.size() >= 2) {
+      if (call && tl::IsStorageSyncOp(call->op) && call->args.size() >= 2) {
         if (auto identifier = call->args[1].as<PrimExpr>()) {
           if (auto value = GetConstInt(*identifier))
             used_barriers_.insert(*value);
@@ -310,7 +320,8 @@ private:
       analyzer->z3_prover.SetRLimit(warp_synchronized ? 1000000 : 100000);
     }
     auto guard = constraints.Populate(analyzer);
-    if (analyzer->CanProve(same_thread, sym::ProofStrength::kSymbolicBound))
+    if (tl::arith::CanProve(analyzer, same_thread,
+                            sym::ProofStrength::kSymbolicBound))
       return false;
     std::set<int64_t> scales;
     auto collect_scales = [&](const ObjectRef &object) {
@@ -322,29 +333,32 @@ private:
           scales.insert(*scale);
       }
     };
-    PrimExpr left_begin = analyzer->Simplify(left.location.offset);
-    PrimExpr right_begin = analyzer->Simplify(other_offset);
+    PrimExpr left_begin = tl::arith::Simplify(analyzer, left.location.offset);
+    PrimExpr right_begin = tl::arith::Simplify(analyzer, other_offset);
     PostOrderVisit(left_begin, collect_scales);
     PostOrderVisit(right_begin, collect_scales);
     PrimExpr left_last = left_begin + left.bytes - IntImm::Int64(1);
     PrimExpr right_last = right_begin + other_bytes - IntImm::Int64(1);
     for (const PrimExpr &last : {left_last, right_last}) {
-      auto bound = analyzer->const_int_bound(last);
+      auto bound = tl::arith::ConstIntBoundOf(analyzer, last);
       if (bound->min_value == sym::ConstIntBound::kNegInf ||
           bound->max_value == sym::ConstIntBound::kPosInf)
         return true;
     }
-    WithGroup<sym::ConstraintContext> interval_bounds;
+    WithGroup<tl::arith::ConstraintContext> interval_bounds;
     for (int64_t scale : scales) {
       PrimExpr divisor = IntImm::Int64(scale);
       interval_bounds.Emplace(
-          analyzer, analyzer->Simplify(FloorDiv(left_begin, divisor) <=
-                                       FloorDiv(right_last, divisor)));
+          analyzer,
+          tl::arith::Simplify(analyzer, FloorDiv(left_begin, divisor) <=
+                                            FloorDiv(right_last, divisor)));
       interval_bounds.Emplace(
-          analyzer, analyzer->Simplify(FloorDiv(right_begin, divisor) <=
-                                       FloorDiv(left_last, divisor)));
+          analyzer,
+          tl::arith::Simplify(analyzer, FloorDiv(right_begin, divisor) <=
+                                            FloorDiv(left_last, divisor)));
     }
-    return !analyzer->CanProve(same_thread, sym::ProofStrength::kSymbolicBound);
+    return !tl::arith::CanProve(analyzer, same_thread,
+                                sym::ProofStrength::kSymbolicBound);
   }
 
   bool Conflict(const std::vector<PendingMemoryAccess> &left,
@@ -392,12 +406,13 @@ private:
       auto assumptions = context.uniform_assumptions.Populate(analyzer);
       Map<PrimVar, PrimExpr> first_thread;
       for (const ThreadAxis &thread : context.threads) {
-        PrimExpr zero = MakeConst(thread.variable.ty(), 0);
-        analyzer->Bind(thread.variable, Range(zero, thread.extent));
+        PrimExpr zero = tl::MakeConst(thread.variable.ty(), 0);
+        tl::arith::Bind(analyzer, thread.variable, Range(zero, thread.extent));
         first_thread.Set(thread.variable, zero);
       }
-      if (analyzer->CanProve(expanded == Substitute(expanded, first_thread),
-                             sym::ProofStrength::kSymbolicBound))
+      if (tl::arith::CanProve(analyzer,
+                              expanded == Substitute(expanded, first_thread),
+                              sym::ProofStrength::kSymbolicBound))
         return;
     }
     if (const auto *conjunction = expanded.as<AndNode>()) {
@@ -421,22 +436,26 @@ private:
     const CallNode *call = EvaluatedCall(statement);
     if (call && call->op.same_as(sync_grid()))
       return true;
-    if (!IsStorageSync(statement))
+    bool cluster_sync = IsClusterSync(statement);
+    if (!IsStorageSync(statement) && !cluster_sync)
       return false;
-    if (call->args.size() == 1)
+    if (cluster_sync && context.conditional_exit)
+      return false;
+    if (!cluster_sync && call->args.size() == 1)
       return true;
-    if (call->args.size() != 3)
-      return false;
-    auto expected = GetConstInt(call->args[2]);
-    if (!expected)
+    if (!cluster_sync && call->args.size() != 3)
       return false;
     std::array<int, 3> extents{1, 1, 1};
     for (const ThreadAxis &thread : context.threads)
       extents[thread.dimension] = thread.extent;
+    int total = extents[0] * extents[1] * extents[2];
+    auto expected = cluster_sync ? std::optional<int64_t>(total)
+                                 : GetConstInt(call->args[2]);
+    if (!expected)
+      return false;
     std::vector<PrimExpr> conditions;
     for (const PrimExpr &condition : context.conditions)
       ThreadConditions(condition, context, &conditions);
-    int total = extents[0] * extents[1] * extents[2];
     int count = 0;
     sym::Analyzer analyzer;
     auto assumptions = context.uniform_assumptions.Populate(analyzer);
@@ -446,12 +465,13 @@ private:
                                     linear / (extents[0] * extents[1])};
       Map<PrimVar, PrimExpr> values;
       for (const ThreadAxis &thread : context.threads)
-        values.Set(thread.variable, MakeConst(thread.variable.ty(),
-                                              coordinate[thread.dimension]));
+        values.Set(
+            thread.variable,
+            tl::MakeConst(thread.variable.ty(), coordinate[thread.dimension]));
       bool active = true;
       for (const PrimExpr &condition : conditions) {
-        auto predicate =
-            GetConstInt(analyzer->Simplify(Substitute(condition, values)));
+        auto predicate = GetConstInt(
+            tl::arith::Simplify(analyzer, Substitute(condition, values)));
         if (!predicate)
           return false;
         active &= *predicate != 0;
@@ -490,17 +510,21 @@ private:
                                     linear / (extents[0] * extents[1])};
       Map<PrimVar, PrimExpr> values;
       for (const ThreadAxis &thread : context.threads)
-        values.Set(thread.variable, MakeConst(thread.variable.ty(),
-                                              coordinate[thread.dimension]));
+        values.Set(
+            thread.variable,
+            tl::MakeConst(thread.variable.ty(), coordinate[thread.dimension]));
       bool active = true;
       for (const PrimExpr &condition : conditions) {
-        PrimExpr predicate = analyzer->Simplify(Substitute(condition, values));
+        PrimExpr predicate =
+            tl::arith::Simplify(analyzer, Substitute(condition, values));
         auto constant = GetConstInt(predicate);
         if (!constant &&
-            analyzer->CanProve(predicate, sym::ProofStrength::kSymbolicBound))
+            tl::arith::CanProve(analyzer, predicate,
+                                sym::ProofStrength::kSymbolicBound))
           constant = 1;
         if (!constant &&
-            analyzer->CanProve(!predicate, sym::ProofStrength::kSymbolicBound))
+            tl::arith::CanProve(analyzer, !predicate,
+                                sym::ProofStrength::kSymbolicBound))
           constant = 0;
         if (!constant && defer_partial && context.deferred_visibility) {
           *context.deferred_visibility = true;
@@ -532,9 +556,9 @@ private:
       if (!substitutions.empty()) {
         PrimExpr first = Substitute(expanded, substitutions.front());
         for (const auto &values : substitutions)
-          TVM_FFI_CHECK(
-              analyzer->CanProveEqual(first, Substitute(expanded, values)),
-              ValueError)
+          TVM_FFI_CHECK(tl::arith::CanProveEqual(analyzer, first,
+                                                 Substitute(expanded, values)),
+                        ValueError)
               << "Shared synchronization is unsafe in a thread-divergent loop";
       }
     }
@@ -547,13 +571,13 @@ private:
       for (int linear = 0; linear < total; ++linear)
         if (participants[linear])
           masks[linear / 32] |= uint32_t{1} << (linear % 32);
-      PrimExpr mask = MakeConst(PrimType::UInt(32), masks.back());
+      PrimExpr mask = tl::MakeConst(PrimType::UInt(32), masks.back());
       PrimExpr linear = LinearThreadIndex(context);
       for (int warp = static_cast<int>(masks.size()) - 2; warp >= 0; --warp)
         mask = Select(linear < IntImm::Int64((warp + 1) * 32),
-                      MakeConst(PrimType::UInt(32), masks[warp]), mask);
-      arguments.push_back(analyzer->Simplify(mask));
-      return Evaluate(Call(std::nullopt, gpu_storage_sync_op(), arguments,
+                      tl::MakeConst(PrimType::UInt(32), masks[warp]), mask);
+      arguments.push_back(tl::arith::Simplify(analyzer, mask));
+      return Evaluate(Call(std::nullopt, tl::StorageSyncOp(), arguments,
                            std::nullopt, {}, location),
                       location);
     }
@@ -600,7 +624,7 @@ private:
       arguments.push_back(PrimExpr(found->second));
       arguments.push_back(PrimExpr(count));
     }
-    return Evaluate(Call(std::nullopt, gpu_storage_sync_op(), arguments,
+    return Evaluate(Call(std::nullopt, tl::StorageSyncOp(), arguments,
                          std::nullopt, {}, location),
                     location);
   }
@@ -632,8 +656,8 @@ private:
           Stmt expected = MakeSync(context, statement->loc, String("warp"));
           const CallNode *actual_call = EvaluatedCall(rewritten);
           if (actual_call->args.size() == 2 &&
-              sym::Analyzer()->CanProveEqual(
-                  actual_call->args[1].as_or_throw<PrimExpr>(),
+              tl::arith::CanProveEqual(
+                  sym::Analyzer(), actual_call->args[1].as_or_throw<PrimExpr>(),
                   EvaluatedCall(expected)->args[1].as_or_throw<PrimExpr>()))
             for (PendingMemoryAccess &access : pending)
               access.warp_synchronized = true;

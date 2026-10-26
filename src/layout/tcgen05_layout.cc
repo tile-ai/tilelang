@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file layout/tcgen05_layout.cc
  * \brief tcgen05.ld/st data-movement shapes as CuTe TV atoms.
@@ -323,7 +324,7 @@ Fragment FragmentToTileLang(const cute::Layout &layout) {
     int64_t size = cute::AsConst(cute::Product(layout->shape[i]));
     LayoutAxis iv = MakeLayoutAxis("i" + std::to_string(i),
                                    Range(0, static_cast<int>(size)));
-    analyzer->Bind(iv->var, iv->dom);
+    tl::arith::Bind(analyzer, iv->var, iv->dom);
     ivs.push_back(iv);
     coords.push_back(iv->var);
   }
@@ -336,9 +337,9 @@ Fragment FragmentToTileLang(const cute::Layout &layout) {
       << "Fragment must map into (thread@0, value@1), got " << tv_coord;
   PrimType dtype = PrimType::Int(32);
   PrimExpr thread =
-      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[0], dtype));
+      tl::arith::Simplify(analyzer, cute::AsConstOrPrimExpr(fields[0], dtype));
   PrimExpr value =
-      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[1], dtype));
+      tl::arith::Simplify(analyzer, cute::AsConstOrPrimExpr(fields[1], dtype));
   return Fragment(ivs, {value}, thread, MakeLayoutAxis("rep", Range(0, 1)));
 }
 

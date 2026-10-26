@@ -1,3 +1,5 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #ifndef TILELANG_TRANSFORM_COMMON_MEMORY_ACCESS_H_
 #define TILELANG_TRANSFORM_COMMON_MEMORY_ACCESS_H_
 
@@ -191,7 +193,7 @@ private:
         location.precise = false;
         return;
       }
-      auto bound = analyzer->const_int_bound(expression);
+      auto bound = tl::arith::ConstIntBoundOf(analyzer, expression);
       location.precise &= bound->min_value > sym::ConstIntBound::kNegInf &&
                           bound->max_value < sym::ConstIntBound::kPosInf &&
                           ffi::BigInt(bound->min_value) >=
@@ -224,7 +226,7 @@ private:
           lane = PrimVar("memory_lane", ramp->base.ty());
           lanes = ramp->lanes;
           constraints.AddConstr(*lane, Range(0, ramp->lanes));
-        } else if (!ffi::StructuralEqual()(*lanes, ramp->lanes)) {
+        } else if (!tl::StructuralEqual()(*lanes, ramp->lanes)) {
           precise = false;
         }
         coordinates.push_back(ramp->base + *lane * ramp->stride);

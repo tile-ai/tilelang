@@ -1,7 +1,9 @@
+from tilelang.transform import _tirx_passes
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 from tvm_tirx.ir.transform import PassContext
 from tvm_tirx.target import Target
@@ -28,10 +30,10 @@ def lower(body, parameters=(), target="c", attributes=None, config=None):
     function = tirx.Function(list(parameters), body).with_attr("global_symbol", "parallel_grid")
     for key, value in (attributes or {}).items():
         function = function.with_attr(key, value)
-    module = tirx.transform.BindTarget(Target(target))(ir.IRModule({"main": function}))
+    module = _tirx_passes.BindTarget(Target(target))(ir.IRModule({"main": function}))
     with PassContext(config=config or {}):
         module = tvm_ffi.get_global_func("tl.cpu.transform.MaterializeCPUParallelGrid")()(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -44,12 +46,12 @@ def parallel_loops(module):
 
 
 @pytest.mark.parametrize("target,expected", [("c", 2), ("llvm", 1)])
-def test_multidimensional_disjoint_grid_executes(target, expected):
+def test_multidimensional_disjoint_grid_executes(target, expected, *, compile_tilelang):
     output = TensorView.create("output", [4, 8], "int32")
     row, column = ir.Var("row", "int32"), ir.Var("column", "int32")
     module = lower(grid(row, 4, grid(column, 8, output.store([row, column], row * 10 + column), axis=1)), [output.tensor], target)
     assert len(parallel_loops(module)) == expected
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     actual = runtime.empty((4, 8), "int32")
     if target == "c":
         executable.jit(options=["-fopenmp"]).main(actual)
@@ -91,7 +93,7 @@ def test_parameter_alias_contract(attributes, expected):
 
 
 @pytest.mark.parametrize("tile_stride,expected", [(128, True), (64, False)])
-def test_flattened_vector_tiles_prove_grid_independence(tile_stride, expected):
+def test_flattened_vector_tiles_prove_grid_independence(tile_stride, expected, *, compile_tilelang):
     output = TensorView.create("output", [512 * 512], "int32")
     column, row, element = (ir.Var(name, "int32") for name in ("column", "row", "element"))
     offset = row * 65536 + element // 32 * 512 + column * tile_stride + element % 32 * 4
@@ -100,14 +102,14 @@ def test_flattened_vector_tiles_prove_grid_independence(tile_stride, expected):
     module = lower(body, [output.tensor])
     assert bool(parallel_loops(module)) == expected
     if expected:
-        executable = tirx.compile(module, target="c")
+        executable = compile_tilelang(module, target="c")
         actual = runtime.tensor(np.zeros((512 * 512,), dtype="int32"))
         executable.jit(options=["-fopenmp"]).main(actual)
         np.testing.assert_array_equal(actual.numpy(), np.ones((512 * 512,), dtype="int32"))
 
 
 @pytest.mark.parametrize("reset", ["every", "first"])
-def test_iteration_private_scratch_and_carried_storage(reset):
+def test_iteration_private_scratch_and_carried_storage(reset, *, compile_tilelang):
     scratch = TensorView.create("scratch", [2], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index, element = ir.Var("index", "int32"), ir.Var("element", "int32")
@@ -119,7 +121,7 @@ def test_iteration_private_scratch_and_carried_storage(reset):
         [output.tensor],
     )
     assert bool(parallel_loops(module)) == (reset == "every")
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), [1, 1, 1, 1] if reset == "every" else [1, 2, 3, 4])
@@ -159,14 +161,14 @@ def test_overflowing_unsigned_address_math_stays_serial():
     assert not parallel_loops(module)
 
 
-def test_native_c_grid_uses_requested_openmp_threads():
+def test_native_c_grid_uses_requested_openmp_threads(compile_lowered_cpu):
     output = TensorView.create("output", [64], "int32")
     index = ir.Var("index", "int32")
     thread_number = tirx.call_pure_extern("omp_get_thread_num", ty="int32")
     module = lower(grid(index, 64, output.store(index, thread_number)), [output.tensor])
     assert len(parallel_loops(module)) == 1
     module = module.with_attr("codegen.preamble", "#include <omp.h>\n")
-    executable = tirx.compile(module, target="c")
+    executable = compile_lowered_cpu(module, target="c")
     actual = runtime.empty((64,), "int32")
     executable.jit(options=["-fopenmp"]).main(actual)
     np.testing.assert_array_equal(np.unique(actual.numpy()), np.arange(4))

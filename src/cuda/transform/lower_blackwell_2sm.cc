@@ -1,5 +1,6 @@
 #include "backend/common/target_utils.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "op/gemm.h"
 #include "transform/common/attr.h"
 
@@ -20,7 +21,7 @@ bool ValidCluster(const DictAttrs &attributes) {
          ((*width == 2 && *height == 1) || (*width == 1 && *height == 2));
 }
 
-class Blackwell2SM : public tirx::StmtExprMutator {
+class Blackwell2SM : public tvm::tl::StmtExprMutator {
 public:
   explicit Blackwell2SM(bool valid_cluster) : valid_cluster_(valid_cluster) {}
   bool requested = false;
@@ -29,13 +30,13 @@ private:
   UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                             InplaceMode mode) final {
     if (!IsDeviceMainBlock(node))
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     bool saved_cluster = valid_cluster_;
     bool saved_requested = requested;
     valid_cluster_ = ValidCluster(node->attrs);
     requested = false;
     RegionStmt original = GetRef<RegionStmt>(node);
-    RegionStmt result = StmtExprMutator::Mutate_(node, mode)
+    RegionStmt result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(original)
                             .as_or_throw<RegionStmt>();
     if (requested) {
@@ -50,9 +51,10 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
     const auto *call = node->value.as<CallNode>();
-    if (call && call->attrs) {
-      auto annotations = call->attrs.value().as_or_throw<DictAttrs>()->dict;
-      auto flag = annotations.Get("use_2cta");
+    const auto *annotations =
+        call && call->attrs ? call->attrs.value().as<DictAttrsNode>() : nullptr;
+    if (annotations) {
+      auto flag = annotations->dict.Get("use_2cta");
       auto enabled = flag ? GetIntAnnotation(*flag) : std::nullopt;
       if (enabled && *enabled != 0) {
         TileOperator operation = ParseOperator(GetRef<Stmt>(node));
@@ -66,7 +68,7 @@ private:
         }
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   bool valid_cluster_;

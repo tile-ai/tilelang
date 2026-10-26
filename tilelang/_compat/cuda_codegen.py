@@ -2,10 +2,18 @@
 
 import tvm_ffi
 from tvm_tirx import ir, tirx
-from tvm_tirx.backend.cuda.codegen.registry import get_codegen, register_codegen, register_dtype_codegen
+from .cuda_registry import get_codegen, register_codegen, register_dtype_codegen
+from . import cuda_async as cuda_async, cuda_header as cuda_header
 from tvm_tirx.backend.cuda.op import func_call
 from tvm_tirx.ir import prim
 from tvm_tirx.target import Target
+
+from .target import native_backend_target
+
+
+@tvm_ffi.register_global_func("tl.cuda.resolve_backend_config")
+def _resolve_backend_config(local, defaults, target):
+    return tvm_ffi.get_global_func("cuda.resolve_backend_config")(local, defaults, native_backend_target(target))
 
 
 register_dtype_codegen("custom[tfloat32]", "tl::tfloat32_t", '#include "tl_templates/cuda/common.h"\n')

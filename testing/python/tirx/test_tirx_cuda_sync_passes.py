@@ -1,6 +1,7 @@
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, tirx
+from tvm_tirx import tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -164,6 +165,15 @@ def test_blackwell_two_cta_rejects_cluster_from_another_kernel(dimensions):
 def test_blackwell_two_cta_supports_outlined_kernel_attributes():
     result = apply("LowerBlackwell2SM", gemm(), cluster_dims=[2, 1, 1])
     assert result.attrs["use_2cta"]
+
+
+def test_blackwell_two_cta_preserves_native_typed_call_attributes():
+    call = tirx.call_ffi_kernel("device_kernel", ir.const(4), launch_params=["blockIdx.x"])
+    result = apply("LowerBlackwell2SM", ir.Evaluate(call))
+    calls = nodes(result, ir.Call)
+    assert len(calls) == 1
+    assert isinstance(calls[0].attrs, tirx.CallFFIKernelAttr)
+    ir.assert_structural_equal(call, calls[0])
 
 
 def names(value):

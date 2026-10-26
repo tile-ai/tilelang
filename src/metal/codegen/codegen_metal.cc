@@ -1,4 +1,5 @@
 #include "codegen_metal.h"
+#include "compat/metadata.h"
 
 #include "backend/common/codegen/native_codegen.h"
 
@@ -7,10 +8,10 @@
 
 namespace tvm::codegen {
 namespace {
-class MetalNativeLowerer : public tirx::StmtExprMutator {
+class MetalNativeLowerer : public tvm::tl::StmtExprMutator {
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
                                  ffi::InplaceMode mode) final {
-    Call call = StmtExprMutator::Mutate_(node, mode)
+    Call call = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(GetRef<Expr>(node))
                     .as_or_throw<Call>();
     if (const auto *operation = call->op.as<OpNode>()) {
@@ -33,7 +34,7 @@ class MetalNativeLowerer : public tirx::StmtExprMutator {
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
-    RegionStmt region = StmtExprMutator::Mutate_(node, mode)
+    RegionStmt region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(GetRef<Stmt>(node))
                             .as_or_throw<RegionStmt>();
     if (auto pattern = region->attrs->dict.Get("threadblock_swizzle_pattern")) {

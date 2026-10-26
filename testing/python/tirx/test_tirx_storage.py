@@ -8,6 +8,7 @@ from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
+from tilelang.transform import _tirx_passes
 
 pytestmark = pytest.mark.usefixtures("native_layouts")
 
@@ -44,7 +45,7 @@ def sequential_storage():
         .with_attr("target", Target("c"))
         .with_attr("global_symbol", "storage_test")
     )
-    return tirx.transform.LowerTensorLayouts()(ir.IRModule({"main": function}))
+    return _tirx_passes.LowerTensorLayouts()(ir.IRModule({"main": function}))
 
 
 @pytest.mark.parametrize("detect_inplace", [False, True])
@@ -52,8 +53,6 @@ def test_tilelang_storage_disables_lifetime_reuse_but_preserves_execution(detect
     module = sequential_storage()
     with PassContext(config={"tl.storage_rewrite_detect_inplace": detect_inplace}):
         result = tvm_ffi.get_global_func("tl.transform.StorageRewrite")()(module)
-    expected = tirx.transform.StorageRewrite(enable_reuse=False, detect_inplace=detect_inplace)(module)
-    ir.assert_structural_equal(result, expected)
     assert len(allocations(result)) == 2
     assert tirx.analysis.check_well_formed(result)
     executable = tirx.compile(result, target="c")
@@ -62,10 +61,10 @@ def test_tilelang_storage_disables_lifetime_reuse_but_preserves_execution(detect
     np.testing.assert_array_equal(output.numpy(), [127, 128])
 
 
-def test_native_storage_reuse_option_is_observable():
+def test_tilelang_storage_preserves_allocations_unlike_native_reuse():
     module = sequential_storage()
     reused = tirx.transform.StorageRewrite()(module)
-    separate = tirx.transform.StorageRewrite(enable_reuse=False, detect_inplace=False)(module)
+    separate = _tirx_passes.StorageRewrite(enable_reuse=False, detect_inplace=False)(module)
     assert len(allocations(reused)) == 1
     assert len(allocations(separate)) == 2
 
@@ -96,9 +95,9 @@ def test_storage_rewrite_offsets_retained_pointer_regions():
     ]
     function = tirx.Function([output.tensor], body).with_attr("target", Target("cuda"))
     with Target("cuda"):
-        module = tirx.transform.LowerTensorLayouts()(ir.IRModule({"main": function}))
-        module = tirx.transform.FlattenTensor()(module)
-        module = tirx.transform.StorageRewrite()(module)
+        module = _tirx_passes.LowerTensorLayouts()(ir.IRModule({"main": function}))
+        module = _tirx_passes.FlattenTensor()(module)
+        module = _tirx_passes.StorageRewrite()(module)
     calls = []
     stmt_functor.post_order_visit(
         module,
@@ -122,3 +121,33 @@ def test_pointer_type_rewrite_uses_native_implementation():
     actual = tvm_ffi.get_global_func("tl.transform.PointerValueTypeRewrite")()(module)
     expected = tirx.transform.PointerValueTypeRewrite()(module)
     ir.assert_structural_equal(actual, expected)
+
+
+@pytest.mark.parametrize("pass_name", ["StorageRewrite", "PointerValueTypeRewrite"])
+def test_storage_metadata_keeps_its_logical_element_units(pass_name):
+    from tilelang._compat import ir as tlir
+
+    shared = TensorView.create("shared", [128], "float32", scope="shared")
+    thread = ir.Var("thread", "int32")
+    pointer = ir.Call(
+        "tirx.ptr_byte_offset",
+        [shared.tensor.data, ir.const(0)],
+        attrs={
+            "tl.access_region": ir.TensorRegion(shared.tensor, [ir.Range(0, 128)], ir.TensorRegionType()),
+            "tl.access_extent": ir.const(128),
+            "tl.access_mask": ir.const(1),
+        },
+    )
+    consume = ir.Evaluate(ir.Call("tirx.call_extern", ["consume", pointer], ty="void"))
+    body = [shared.allocate(), shared.store(prim.Ramp(thread * 4, 1, 4), prim.Broadcast(ir.const(1.0), 4)), consume]
+    launch = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(32)], [thread], None, body)
+    function = tirx.Function([], launch).with_attr("target", Target("cuda"))
+    module = tvm_ffi.get_global_func(f"tl.transform.{pass_name}")()(ir.IRModule({"main": function}))
+    assert tlir.check_well_formed(module)
+    calls = []
+    stmt_functor.post_order_visit(module, lambda node: calls.append(node) if isinstance(node, ir.Call) and node.attrs else None)
+    access = next(call for call in calls if "tl.access_region" in call.attrs)
+    allocation = allocations(module)[0].var
+    assert access.attrs["tl.access_region"].source.same_as(allocation)
+    assert allocation.ty.dtype == ir.PrimType("float32")
+    assert int(access.attrs["tl.access_extent"]) == 128

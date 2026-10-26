@@ -1,6 +1,9 @@
+#include "compat/analyzer.h"
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
+#include "op/prim.h"
 
+#include "compat/region.h"
 #include "memory_access.h"
 
 #include <tvm/tirx/op/region.h>
@@ -101,9 +104,9 @@ inline bool FullTensorRegion(const TensorRegion &region,
   if (!tensor || region->region.size() != tensor.value().shape().size())
     return false;
   for (size_t axis = 0; axis < region->region.size(); ++axis)
-    if (!analyzer->CanProve(region->region[axis]->begin == 0) ||
-        !analyzer->CanProve(region->region[axis]->extent ==
-                            tensor.value().shape()[axis]))
+    if (!tl::arith::CanProve(analyzer, region->region[axis]->begin == 0) ||
+        !tl::arith::CanProve(analyzer, region->region[axis]->extent ==
+                                           tensor.value().shape()[axis]))
       return false;
   return true;
 }
@@ -129,12 +132,13 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
   }
   if (const auto *region = statement.as<RegionStmtNode>();
       region &&
-      (region->op.same_as(scope_op()) || region->op->name == "tl.scope") &&
+      (region->op.same_as(::tvm::tl::scope_op()) ||
+       region->op->name == "tl.scope") &&
       region->body_params.empty() && region->result_vars.empty())
     return PipelineOverwrites(region->body, constraints, spans);
   if (const auto *loop = statement.as<ForNode>()) {
-    if (analyzer->CanProve(loop->step == 1) &&
-        analyzer->CanProve(loop->end > loop->begin)) {
+    if (tl::arith::CanProve(analyzer, loop->step == 1) &&
+        tl::arith::CanProve(analyzer, loop->end > loop->begin)) {
       constraints.AddConstr(loop->var, Range(loop->begin, loop->end));
       return PipelineOverwrites(loop->body, constraints, spans);
     }
@@ -157,7 +161,7 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
             ffi::Array<PrimExpr> indices;
             bool nonempty = true;
             for (const Range &range : region->region) {
-              nonempty &= analyzer->CanProve(range->extent > 0);
+              nonempty &= tl::arith::CanProve(analyzer, range->extent > 0);
               PrimVar coordinate("pipeline_write_coordinate",
                                  range->begin.ty());
               domain.AddConstr(coordinate, Range(0, range->extent));
@@ -165,7 +169,8 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
             }
             if (nonempty) {
               auto writes = PipelineOverwrites(
-                  TensorStore(tensor, indices, MakeConst(tensor.dtype(), 0)),
+                  TensorStore(tensor, indices,
+                              tl::MakeConst(tensor.dtype(), 0)),
                   domain, spans);
               result.insert(writes.begin(), writes.end());
             }
@@ -179,12 +184,13 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
     bool full = store->indices.size() == tensor.shape().size();
     for (size_t axis = 0; full && axis < store->indices.size(); ++axis) {
       if (const auto *ramp = store->indices[axis].as<RampNode>())
-        full &= analyzer->CanProve(ramp->base == 0) &&
-                analyzer->CanProve(ramp->stride == 1) &&
-                analyzer->CanProve(ramp->lanes == tensor.shape()[axis]);
+        full &=
+            tl::arith::CanProve(analyzer, ramp->base == 0) &&
+            tl::arith::CanProve(analyzer, ramp->stride == 1) &&
+            tl::arith::CanProve(analyzer, ramp->lanes == tensor.shape()[axis]);
       else
-        full &= analyzer->CanProve(store->indices[axis] == 0) &&
-                analyzer->CanProve(tensor.shape()[axis] == 1);
+        full &= tl::arith::CanProve(analyzer, store->indices[axis] == 0) &&
+                tl::arith::CanProve(analyzer, tensor.shape()[axis] == 1);
     }
     if (full) {
       result.insert(tensor.get());
@@ -212,7 +218,7 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
         ranges.Set(constraint.var, constraint.range);
     }
     PrimExpr offset =
-        analyzer->Simplify(Substitute(location.offset, definitions));
+        tl::arith::Simplify(analyzer, Substitute(location.offset, definitions));
     struct Axis {
       PrimVar variable;
       PrimExpr minimum;
@@ -225,27 +231,29 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
       auto range = primitive ? ranges.Get(*primitive) : std::nullopt;
       if (!range)
         continue;
-      auto extent = GetConstInt(analyzer->Simplify(range.value()->extent));
+      auto extent =
+          GetConstInt(tl::arith::Simplify(analyzer, range.value()->extent));
       if (!extent || *extent <= 0)
         return result;
       minima.Set(*primitive, range.value()->begin);
       if (*extent == 1)
         continue;
-      PrimExpr delta = analyzer->Simplify(
+      PrimExpr delta = tl::arith::Simplify(
+          analyzer,
           Substitute(offset, {{*primitive, range.value()->begin + 1}}) -
-          Substitute(offset, {{*primitive, range.value()->begin}}));
+              Substitute(offset, {{*primitive, range.value()->begin}}));
       auto stride = GetConstInt(delta);
       if (!stride || *stride <= 0)
         return result;
       axes.push_back({*primitive, range.value()->begin, *extent, *stride});
     }
-    PrimExpr base = analyzer->Simplify(Substitute(offset, minima));
+    PrimExpr base = tl::arith::Simplify(analyzer, Substitute(offset, minima));
     PrimExpr reconstructed = base;
     for (const Axis &axis : axes)
       reconstructed = reconstructed +
                       Cast(PrimType::Int(64), axis.variable - axis.minimum) *
                           IntImm::Int64(axis.stride);
-    if (!analyzer->CanProveEqual(offset, reconstructed))
+    if (!tl::arith::CanProveEqual(analyzer, offset, reconstructed))
       return result;
     std::sort(axes.begin(), axes.end(),
               [](const Axis &left, const Axis &right) {
@@ -253,14 +261,16 @@ PipelineOverwrites(const Stmt &statement, ConstrSet constraints = {},
               });
     PrimExpr covered = IntImm::Int64(tensor.dtype().StorageBytes());
     for (const Axis &axis : axes) {
-      if (!analyzer->CanProveEqual(covered, IntImm::Int64(axis.stride)))
+      if (!tl::arith::CanProveEqual(analyzer, covered,
+                                    IntImm::Int64(axis.stride)))
         return result;
       covered = covered * IntImm::Int64(axis.extent);
     }
     if (spans)
       spans->push_back({tensor.get(), base, covered});
-    if (analyzer->CanProveEqual(base, 0) &&
-        analyzer->CanProveEqual(covered, GetBufferStorageSizeBytes(tensor)))
+    if (tl::arith::CanProveEqual(analyzer, base, 0) &&
+        tl::arith::CanProveEqual(analyzer, covered,
+                                 GetBufferStorageSizeBytes(tensor)))
       result.insert(tensor.get());
   }
   return result;
@@ -335,8 +345,9 @@ inline bool PipelineMemoryOverlap(const MemoryAccess &left,
       return std::nullopt;
     sym::Analyzer analyzer;
     auto guard = access.constraints.Populate(analyzer);
-    auto begin = analyzer->const_int_bound(access.location.offset);
-    auto end = analyzer->const_int_bound(access.location.offset + access.bytes);
+    auto begin = tl::arith::ConstIntBoundOf(analyzer, access.location.offset);
+    auto end = tl::arith::ConstIntBoundOf(analyzer, access.location.offset +
+                                                        access.bytes);
     if (begin->min_value == sym::ConstIntBound::kNegInf ||
         end->max_value == sym::ConstIntBound::kPosInf)
       return std::nullopt;
@@ -397,12 +408,12 @@ PipelinePartialVersionRange(const PipelineBody &body, const VarNode *storage) {
   int64_t element_bytes = tensor.value().dtype().StorageBytes();
   sym::Analyzer analyzer;
   PrimVar coordinate("pipeline_coordinate", PrimType::Int(64));
-  analyzer->Bind(coordinate, Range(0, IntImm::Int64(*elements)));
+  tl::arith::Bind(analyzer, coordinate, Range(0, IntImm::Int64(*elements)));
   MemoryAliases aliases;
   auto location = aliases.Element(*tensor, {coordinate});
   if (!location.precise ||
-      !analyzer->CanProveEqual(location.offset,
-                               coordinate * IntImm::Int64(element_bytes)))
+      !tl::arith::CanProveEqual(analyzer, location.offset,
+                                coordinate * IntImm::Int64(element_bytes)))
     return std::nullopt;
   std::vector<std::pair<int64_t, int64_t>> spans;
   for (const PipelineStatement &item : body.statements) {
@@ -412,8 +423,9 @@ PipelinePartialVersionRange(const PipelineBody &body, const VarNode *storage) {
     for (const PipelineWriteSpan &span : item.write_spans) {
       if (span.storage != storage)
         continue;
-      auto begin = GetConstInt(analyzer->Simplify(span.begin));
-      auto end = GetConstInt(analyzer->Simplify(span.begin + span.bytes));
+      auto begin = GetConstInt(tl::arith::Simplify(analyzer, span.begin));
+      auto end =
+          GetConstInt(tl::arith::Simplify(analyzer, span.begin + span.bytes));
       if (!begin || !end || *begin < 0 || *end <= *begin ||
           *begin % element_bytes || *end % element_bytes ||
           *end / element_bytes > *elements)
@@ -442,15 +454,18 @@ PipelinePartialVersionRange(const PipelineBody &body, const VarNode *storage) {
         return std::nullopt;
       sym::Analyzer bounds;
       auto guard = access.constraints.Populate(bounds);
-      if (!bounds->CanProve(access.location.offset >=
-                            MakeConst(access.location.offset.ty(), begin)) ||
-          !bounds->CanProve(access.location.offset + access.bytes <=
-                            MakeConst(access.location.offset.ty(), end)))
+      if (!tl::arith::CanProve(
+              bounds, access.location.offset >=
+                          tl::MakeConst(access.location.offset.ty(), begin)) ||
+          !tl::arith::CanProve(
+              bounds, access.location.offset + access.bytes <=
+                          tl::MakeConst(access.location.offset.ty(), end)))
         return std::nullopt;
     }
   }
-  return Range(MakeConst(tensor.value().shape()[0].ty(), begin / element_bytes),
-               MakeConst(tensor.value().shape()[0].ty(), end / element_bytes));
+  return Range(
+      tl::MakeConst(tensor.value().shape()[0].ty(), begin / element_bytes),
+      tl::MakeConst(tensor.value().shape()[0].ty(), end / element_bytes));
 }
 
 inline bool PipelineVersionable(const PipelineBody &body,
@@ -476,9 +491,9 @@ inline bool PipelineVersionable(const PipelineBody &body,
     for (size_t attempt = 0; attempt < written.size(); ++attempt) {
       bool changed = false;
       for (const PipelineWriteSpan &span : written) {
-        PrimExpr end = analyzer->Simplify(span.begin + span.bytes);
-        if (analyzer->CanProve(span.begin <= covered) &&
-            analyzer->CanProve(end > covered)) {
+        PrimExpr end = tl::arith::Simplify(analyzer, span.begin + span.bytes);
+        if (tl::arith::CanProve(analyzer, span.begin <= covered) &&
+            tl::arith::CanProve(analyzer, end > covered)) {
           covered = end;
           changed = true;
         }
@@ -486,7 +501,8 @@ inline bool PipelineVersionable(const PipelineBody &body,
       if (!changed)
         break;
     }
-    if (analyzer->CanProve(covered >= GetBufferStorageSizeBytes(*tensor)))
+    if (tl::arith::CanProve(analyzer,
+                            covered >= GetBufferStorageSizeBytes(*tensor)))
       return true;
   }
   return PipelinePartialVersionRange(body, storage).has_value();

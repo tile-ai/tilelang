@@ -1,5 +1,8 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cpu/op/builtin.h"
+#include "op/prim.h"
 #include "transform/common/constr_visitor.h"
 #include "transform/common/memory_access.h"
 
@@ -40,24 +43,25 @@ private:
     sym::Analyzer analyzer;
     auto context = constraints.Populate(analyzer);
     bool bounded = true;
-    PostOrderVisit(analyzer->Simplify(expression), [&](const ObjectRef &node) {
-      if (!node.as<AddNode>() && !node.as<SubNode>() && !node.as<MulNode>())
-        return;
-      PrimExpr value = node.as_or_throw<PrimExpr>();
-      PrimType type = value.ty();
-      if (!type.IsScalar() ||
-          !type.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) {
-        bounded = false;
-        return;
-      }
-      auto bound = analyzer->const_int_bound(value);
-      bounded &= bound->min_value > sym::ConstIntBound::kNegInf &&
-                 bound->max_value < sym::ConstIntBound::kPosInf &&
-                 ffi::BigInt(bound->min_value) >=
-                     min_value(type).as_or_throw<IntImm>()->value &&
-                 ffi::BigInt(bound->max_value) <=
-                     max_value(type).as_or_throw<IntImm>()->value;
-    });
+    PostOrderVisit(
+        tl::arith::Simplify(analyzer, expression), [&](const ObjectRef &node) {
+          if (!node.as<AddNode>() && !node.as<SubNode>() && !node.as<MulNode>())
+            return;
+          PrimExpr value = node.as_or_throw<PrimExpr>();
+          PrimType type = value.ty();
+          if (!type.IsScalar() || !type.MatchesCode(DLDataTypeCode::kDLInt,
+                                                    DLDataTypeCode::kDLUInt)) {
+            bounded = false;
+            return;
+          }
+          auto bound = tl::arith::ConstIntBoundOf(analyzer, value);
+          bounded &= bound->min_value > sym::ConstIntBound::kNegInf &&
+                     bound->max_value < sym::ConstIntBound::kPosInf &&
+                     ffi::BigInt(bound->min_value) >=
+                         min_value(type).as_or_throw<IntImm>()->value &&
+                     ffi::BigInt(bound->max_value) <=
+                         max_value(type).as_or_throw<IntImm>()->value;
+        });
     return bounded;
   }
 
@@ -98,8 +102,9 @@ private:
           lane = PrimVar("access_lane", ramp->base.ty());
           lanes = count;
           constraints.AddConstr(
-              *lane, Range::FromMinExtent(MakeConst(lane.value().ty(), 0),
-                                          MakeConst(lane.value().ty(), count)));
+              *lane,
+              Range::FromMinExtent(tl::MakeConst(lane.value().ty(), 0),
+                                   tl::MakeConst(lane.value().ty(), count)));
         }
         coordinates.push_back(ramp->base + *lane * ramp->stride);
       } else if (index.ty().IsScalar()) {
@@ -128,7 +133,8 @@ private:
     FreshenMutableReads freshen;
     sym::Analyzer analyzer;
     auto context = constraints.Populate(analyzer);
-    accesses.push_back({location, freshen(analyzer->Simplify(location.offset)),
+    accesses.push_back({location,
+                        freshen(tl::arith::Simplify(analyzer, location.offset)),
                         bits / 8, write, constraints});
   }
 
@@ -203,7 +209,7 @@ private:
   }
 };
 
-class CPUGridMaterializer : public StmtExprMutator {
+class CPUGridMaterializer : public tvm::tl::StmtExprMutator {
 public:
   CPUGridMaterializer(tirx::Function function, bool collapse, int64_t min_trip)
       : function_(function), collapse_(collapse), min_trip_(min_trip) {
@@ -277,8 +283,9 @@ private:
           analyzer->z3_prover.SetRLimit(1000000);
         }
         auto context = constraints.Populate(analyzer);
-        if (!analyzer->CanProve(loop->var == replacements.at(loop->var),
-                                sym::ProofStrength::kSymbolicBound)) {
+        if (!tl::arith::CanProve(analyzer,
+                                 loop->var == replacements.at(loop->var),
+                                 sym::ProofStrength::kSymbolicBound)) {
           reason_ = left.bytes != right.bytes
                         ? "overlapping accesses with different element widths"
                         : "access independence cannot be proven safe";
@@ -291,12 +298,12 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
     aliases_.Bind(node);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const ForNode *node, InplaceMode mode) final {
     if (!node->annotations.count(attr::kCPUGridDim)) {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     std::vector<const ForNode *> loops{node};
     while (loops.back()->body->seq.size() == 1) {
@@ -331,7 +338,7 @@ private:
     for (size_t depth = 0; depth < loops.size() && parallel; ++depth) {
       const ForNode *loop = loops[depth];
       sym::Analyzer analyzer;
-      if (analyzer->CanProve(loop->end - loop->begin <= loop->step))
+      if (tl::arith::CanProve(analyzer, loop->end - loop->begin <= loop->step))
         continue;
       if (!collapse_ && selected_one)
         break;

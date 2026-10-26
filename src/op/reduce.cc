@@ -1,8 +1,10 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/reduce.cc
  * \brief Implementation of reduction operators
  */
 
+#include "op/prim.h"
 #include "reduce.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
@@ -151,11 +153,12 @@ ReduceOp::ReduceOp(Array<Expr> args, BlockAnnotations annotations) {
     auto tensor = region->source.as_or_throw<TensorVar>();
     for (size_t axis = 0; axis < region->region.size(); ++axis) {
       const auto &domain = region->region[axis];
-      TVM_FFI_CHECK(!analyzer->CanProve(domain->begin < 0) &&
-                        !analyzer->CanProve(domain->extent < 0) &&
-                        !analyzer->CanProve(domain->begin + domain->extent >
-                                            tensor.shape()[axis]),
-                    ValueError)
+      TVM_FFI_CHECK(
+          !tl::arith::CanProve(analyzer, domain->begin < 0) &&
+              !tl::arith::CanProve(analyzer, domain->extent < 0) &&
+              !tl::arith::CanProve(analyzer, domain->begin + domain->extent >
+                                                 tensor.shape()[axis]),
+          ValueError)
           << "ReduceOp region must lie within its tensor";
     }
   }
@@ -166,11 +169,11 @@ ReduceOp::ReduceOp(Array<Expr> args, BlockAnnotations annotations) {
                              : axis + 1;
     PrimExpr expected =
         keep_dimension && axis == static_cast<size_t>(node->dim)
-            ? MakeConst(destination_ranges[axis]->extent.ty(), 1)
+            ? tl::MakeConst(destination_ranges[axis]->extent.ty(), 1)
             : source_ranges[source_axis]->extent;
-    TVM_FFI_CHECK(
-        !analyzer->CanProve(destination_ranges[axis]->extent != expected),
-        ValueError)
+    TVM_FFI_CHECK(!tl::arith::CanProve(
+                      analyzer, destination_ranges[axis]->extent != expected),
+                  ValueError)
         << "ReduceOp destination region has an incompatible extent";
   }
   data_ = std::move(node);
@@ -253,7 +256,8 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
       PrimExpr elements = 1;
       for (const PrimExpr &extent : reducer_layout->OutputShape())
         elements = elements * extent;
-      auto count = GetConstInt(layout_args.analyzer->Simplify(elements));
+      auto count =
+          GetConstInt(tl::arith::Simplify(layout_args.analyzer, elements));
       if (!count || *count < batch || *count % batch != 0) {
         throw LayoutConflictException(
             "ReduceOp batch must evenly divide the per-thread output "
@@ -270,12 +274,12 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (dst.shape().size() == src_layout->InputShape().size()) {
       // Keeping the reduced axis requires its extent to be one.
       expected_shape = src_layout->InputShape();
-      expected_shape.Set(dim, MakeConst(expected_shape[dim].ty(), 1));
+      expected_shape.Set(dim, tl::MakeConst(expected_shape[dim].ty(), 1));
     }
     bool valid_shape = dst.shape().size() == expected_shape.size();
     for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
-      valid_shape = layout_args.analyzer->CanProveEqual(dst.shape()[i],
-                                                        expected_shape[i]);
+      valid_shape = tl::arith::CanProveEqual(layout_args.analyzer,
+                                             dst.shape()[i], expected_shape[i]);
     }
     ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst.shape()
                         << " for " << dst << ", expected " << expected_shape
@@ -296,8 +300,8 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     sym::Analyzer analyzer;
     auto indices = InputPlaceholders(reducer_layout->InputDim());
     for (size_t i = 0; i < indices.size(); i++) {
-      analyzer->Bind(indices[i].as_or_throw<PrimVar>(),
-                     Range(0, reducer_layout->InputShape()[i]));
+      tl::arith::Bind(analyzer, indices[i].as_or_throw<PrimVar>(),
+                      Range(0, reducer_layout->InputShape()[i]));
     }
     if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
                                indices, analyzer)) {

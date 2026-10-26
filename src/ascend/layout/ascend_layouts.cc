@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file ascend/layout/ascend_layouts.cc
  * \brief Ascend fractal/NZ layout constructors and analysis (moved out of the
@@ -168,7 +169,7 @@ static void CheckStaticDivisible(const PrimExpr &value, int divisor,
     return;
   }
   sym::Analyzer analyzer;
-  PrimExpr simplified = analyzer->Simplify(value);
+  PrimExpr simplified = tl::arith::Simplify(analyzer, value);
   auto int_value = GetConstInt(simplified);
   ICHECK(int_value.has_value())
       << what << " requires a static extent to verify divisibility by "
@@ -317,7 +318,7 @@ Layout MakeAscendSFLayout(const TensorVar &buffer) {
       << buffer.dtype();
   if (buffer.dtype().bits() != 16) {
     sym::Analyzer analyzer;
-    PrimExpr k_extent = analyzer->Simplify(k);
+    PrimExpr k_extent = tl::arith::Simplify(analyzer, k);
     auto k_value = GetConstInt(k_extent);
     ICHECK(k_value.has_value())
         << "SF_K layout for non-uint16 storage requires a static K-axis "

@@ -1,14 +1,16 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/copy.cc
  * \brief Define the copy operator, backend dispatch, and shared normal-copy
  *        lowering helpers.
  */
 
-#include "copy.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "compat/visit.h"
+#include "copy.h"
+#include "op/prim.h"
 #include "span_utils.h"
 #include "support/check.h"
 #include "utils.h"
@@ -198,22 +200,25 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   PrimExpr block_k = dst_region->region[ndim - 1]->extent;
   PrimVar row("im2col_row", block_m.ty());
   PrimVar column("im2col_column", block_k.ty());
-  analyzer->Bind(row, Range::FromMinExtent(MakeConst(row.ty(), 0), block_m));
-  analyzer->Bind(column,
-                 Range::FromMinExtent(MakeConst(column.ty(), 0), block_k));
+  tl::arith::Bind(analyzer, row,
+                  Range::FromMinExtent(tl::MakeConst(row.ty(), 0), block_m));
+  tl::arith::Bind(analyzer, column,
+                  Range::FromMinExtent(tl::MakeConst(column.ty(), 0), block_k));
 
   const auto &src_ranges = op.srcRegion_->region;
   PrimExpr h_dim = src_ranges[1]->extent;
   PrimExpr w_dim = src_ranges[2]->extent;
   PrimExpr c_dim = src_ranges[3]->extent;
   PrimExpr out_h =
-      FloorDiv(h_dim + MakeConst(h_dim.ty(), 2) * op.padding_ -
-                   (MakeConst(h_dim.ty(), op.kernel_) - 1) * op.dilation_ - 1,
+      FloorDiv(h_dim + tl::MakeConst(h_dim.ty(), 2) * op.padding_ -
+                   (tl::MakeConst(h_dim.ty(), op.kernel_) - 1) * op.dilation_ -
+                   1,
                op.stride_) +
       1;
   PrimExpr out_w =
-      FloorDiv(w_dim + MakeConst(w_dim.ty(), 2) * op.padding_ -
-                   (MakeConst(w_dim.ty(), op.kernel_) - 1) * op.dilation_ - 1,
+      FloorDiv(w_dim + tl::MakeConst(w_dim.ty(), 2) * op.padding_ -
+                   (tl::MakeConst(w_dim.ty(), op.kernel_) - 1) * op.dilation_ -
+                   1,
                op.stride_) +
       1;
   PrimExpr out_hw = Max(out_h, 0) * Max(out_w, 0);
@@ -233,8 +238,8 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
           op.dilation_ -
       op.padding_;
 
-  PrimExpr in_bound = And(And(access_h >= MakeConst(access_h.ty(), 0),
-                              access_w >= MakeConst(access_w.ty(), 0)),
+  PrimExpr in_bound = And(And(access_h >= tl::MakeConst(access_h.ty(), 0),
+                              access_w >= tl::MakeConst(access_w.ty(), 0)),
                           And(access_h < h_dim, access_w < w_dim));
 
   in_bound = in_bound && position >= 0 &&
@@ -249,7 +254,7 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                src_indices[axis] < src.shape()[axis];
   }
   PrimExpr value = TensorLoad(src, src_indices);
-  value = if_then_else(in_bound, value, MakeConst(dst.dtype(), 0));
+  value = if_then_else(in_bound, value, tl::MakeConst(dst.dtype(), 0));
 
   Array<PrimExpr> dst_indices;
   dst_indices.reserve(ndim);
@@ -265,18 +270,18 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   }
 
   Stmt body = TensorStore(dst, dst_indices, value);
-  PrimExpr dst_bound = MakeConst(PrimType::Bool(), true);
+  PrimExpr dst_bound = tl::MakeConst(PrimType::Bool(), true);
   for (size_t axis = 0; axis < ndim; ++axis) {
     dst_bound = dst_bound && dst_indices[axis] >= 0 &&
                 dst_indices[axis] < dst.shape()[axis];
   }
-  if (!analyzer->CanProve(dst_bound)) {
-    body = If(analyzer->Simplify(dst_bound), SeqStmt(body));
+  if (!tl::arith::CanProve(analyzer, dst_bound)) {
+    body = If(tl::arith::Simplify(analyzer, dst_bound), SeqStmt(body));
   }
-  body = For(column, MakeConst(column.ty(), 0), block_k,
-             MakeConst(column.ty(), 1), ForKind::kParallel, SeqStmt(body));
-  body = For(row, MakeConst(row.ty(), 0), block_m, MakeConst(row.ty(), 1),
-             ForKind::kParallel, SeqStmt(body));
+  body = For(column, tl::MakeConst(column.ty(), 0), block_k,
+             tl::MakeConst(column.ty(), 1), ForKind::kParallel, SeqStmt(body));
+  body = For(row, tl::MakeConst(row.ty(), 0), block_m,
+             tl::MakeConst(row.ty(), 1), ForKind::kParallel, SeqStmt(body));
 
   auto fused_loop = ParallelLoopFuser::Fuse(body).as_or_throw<For>();
   if (lower_args.target->GetTargetDeviceType() == kDLCPU) {
@@ -351,7 +356,8 @@ Copy::Copy(Array<Expr> args, BlockAnnotations annotations) {
   sym::Analyzer analyzer;
   for (const auto &ranges : {node->src_range, node->dst_range}) {
     for (const Range &range : ranges) {
-      TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+      TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, range->extent < 0),
+                    ValueError)
           << "Copy regions must have nonnegative extents";
     }
   }
@@ -422,7 +428,7 @@ Array<LayoutAxis> CopyNode::MakeIterVars() const {
       PrimExpr base_ext = base_ranges[base_dim]->extent;
       PrimExpr src_ext = src_range[src_dim]->extent;
       // Only fail if base extent is provably smaller than src extent
-      if (analyzer->CanProve(base_ext < src_ext)) {
+      if (tl::arith::CanProve(analyzer, base_ext < src_ext)) {
         std::ostringstream oss;
         oss << "Selected loop range is smaller than original src range at "
                "matched non-1 dimension: "
@@ -471,9 +477,10 @@ Array<LayoutAxis> CopyNode::MakeIterVars() const {
     PrimVar var("copy_axis_" + std::to_string(idx),
                 base_ranges[i]->extent.ty());
     idx++;
-    loop_vars.push_back(LayoutAxis(
-        Range::FromMinExtent(MakeConst(var.ty(), 0), base_ranges[i]->extent),
-        var));
+    loop_vars.push_back(
+        LayoutAxis(Range::FromMinExtent(tl::MakeConst(var.ty(), 0),
+                                        base_ranges[i]->extent),
+                   var));
   }
   return loop_vars;
 }
@@ -516,17 +523,20 @@ Optional<PrimExpr> CopyNode::MakePredicate(sym::Analyzer analyzer,
     PrimExpr index = ranges[i]->begin;
     if (!IsOne(ranges[i]->extent)) {
       PrimExpr in_region = ivs[idx]->var < ranges[i]->extent;
-      if (!analyzer->CanProve(in_region, sym::ProofStrength::kSymbolicBound)) {
+      if (!tl::arith::CanProve(analyzer, in_region,
+                               sym::ProofStrength::kSymbolicBound)) {
         cond_list.push_back(in_region);
       }
       index = index + ivs[idx++]->var;
     }
     PrimExpr cond = index < extents[i];
-    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(analyzer, cond,
+                             sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
     cond = index >= 0;
-    if (!analyzer->CanProve(cond, sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(analyzer, cond,
+                             sym::ProofStrength::kSymbolicBound)) {
       cond_list.push_back(cond);
     }
   }
@@ -553,7 +563,7 @@ For CopyNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
   bool is_scalar = loop_vars.empty();
 
   for (const auto &iv : loop_vars)
-    analyzer->Bind(iv->var, iv->dom);
+    tl::arith::Bind(analyzer, iv->var, iv->dom);
   ICHECK(loop_vars.size() <= src_range.size())
       << "loop_vars.size() = " << loop_vars.size()
       << ", src_range.size() = " << src_range.size() << ", src = " << src->name
@@ -574,14 +584,14 @@ For CopyNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
   if (src.dtype() != dst.dtype())
     value = Cast(dst.dtype(), value);
   if (src_predicate.has_value()) {
-    PrimExpr safe_value = MakeConst(src.dtype(), 0);
+    PrimExpr safe_value = tl::MakeConst(src.dtype(), 0);
     if (src_oob_safe_value.has_value()) {
       safe_value = src_oob_safe_value.value();
     }
     if (safe_value.ty() != dst.dtype())
       safe_value = Cast(dst.dtype(), safe_value);
     value = if_then_else(src_predicate.value(), value,
-                         analyzer->Simplify(safe_value));
+                         tl::arith::Simplify(analyzer, safe_value));
   }
 
   Stmt body = TensorStore(dst, dst_indices, value, dst->loc);
@@ -609,9 +619,9 @@ For CopyNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
     }
 
     PrimType type = loop_vars[i]->var.ty();
-    body = For(loop_vars[i]->var, MakeConst(type, 0), loop_vars[i]->dom->extent,
-               MakeConst(type, 1), ForKind::kParallel, SeqStmt(body),
-               loop_annotations);
+    body = For(loop_vars[i]->var, tl::MakeConst(type, 0),
+               loop_vars[i]->dom->extent, tl::MakeConst(type, 1),
+               ForKind::kParallel, SeqStmt(body), loop_annotations);
   }
   return body.as_or_throw<For>();
 }
@@ -673,7 +683,8 @@ Im2ColOp::Im2ColOp(Array<Expr> args, BlockAnnotations annotations) {
   sym::Analyzer analyzer;
   for (const TensorRegion &region : {node->srcRegion_, node->dstRegion_}) {
     for (const Range &range : region->region) {
-      TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+      TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, range->extent < 0),
+                    ValueError)
           << "Im2Col regions must have nonnegative extents";
     }
   }

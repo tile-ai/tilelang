@@ -8,7 +8,7 @@ from tvm_tirx.target import Target
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
 
-pytestmark = pytest.mark.usefixtures("native_layouts")
+pytestmark = pytest.mark.usefixtures("native_layouts", "native_operator_helpers")
 
 
 @pytest.mark.parametrize("lanes", [3, 4, 8, 16])

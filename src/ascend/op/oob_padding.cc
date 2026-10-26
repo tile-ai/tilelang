@@ -1,10 +1,12 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/ascend/op/oob_padding.cc
  * \brief Shared Ascend DMA copy OOB clamping / L1 padding helpers.
  */
 
-#include "oob_padding.h"
 #include "ascend/op/utils.h"
+#include "oob_padding.h"
+#include "op/prim.h"
 
 #include "ascend_mte_plan.h"
 #include "op/builtin.h"
@@ -148,19 +150,19 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     size_t dst_axis = dst_axes[i];
     const Range &src = op.src_range[src_axis];
     const Range &dst = op.dst_range[dst_axis];
-    if (!analyzer->CanProveEqual(src->extent, dst->extent)) {
+    if (!tl::arith::CanProveEqual(analyzer, src->extent, dst->extent)) {
       // GM->L1 permits a larger destination region. A size difference is not
       // itself OOB; when bounds require clamping, transfer the source extent.
       if (dma_path != DMAPath::kGMToL1 ||
-          !analyzer->CanProve(src->extent <= dst->extent))
+          !tl::arith::CanProve(analyzer, src->extent <= dst->extent))
         return result;
     }
-    if (!analyzer->CanProve(src->begin + src->extent <=
-                                op.src.shape()[src_axis],
-                            sym::ProofStrength::kSymbolicBound) ||
-        !analyzer->CanProve(dst->begin + dst->extent <=
-                                op.dst.shape()[dst_axis],
-                            sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(
+            analyzer, src->begin + src->extent <= op.src.shape()[src_axis],
+            sym::ProofStrength::kSymbolicBound) ||
+        !tl::arith::CanProve(
+            analyzer, dst->begin + dst->extent <= op.dst.shape()[dst_axis],
+            sym::ProofStrength::kSymbolicBound)) {
       needs_clamp = true;
     }
   }
@@ -170,8 +172,9 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                                     const std::vector<size_t> &singleton_axes) {
     for (auto &i : singleton_axes) {
       const Range &range = ranges[i];
-      if (!analyzer->CanProve(range->begin + range->extent <= shape[i],
-                              sym::ProofStrength::kSymbolicBound)) {
+      if (!tl::arith::CanProve(analyzer,
+                               range->begin + range->extent <= shape[i],
+                               sym::ProofStrength::kSymbolicBound)) {
         needs_clamp = true;
       }
     }
@@ -192,7 +195,7 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     auto cast_to_dtype = [dtype](PrimExpr value) {
       return value.ty() == dtype ? value : Cast(dtype, value);
     };
-    PrimExpr zero = MakeConst(dtype, 0);
+    PrimExpr zero = tl::MakeConst(dtype, 0);
     PrimExpr extent = cast_to_dtype(op.src_range[src_axis]->extent);
     PrimExpr src_remaining = cast_to_dtype(op.src.shape()[src_axis]) -
                              cast_to_dtype(op.src_range[src_axis]->begin);
@@ -201,8 +204,8 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     PrimExpr src_valid_extent = Min(extent, Max(src_remaining, zero));
     PrimExpr dst_valid_extent = Min(extent, Max(dst_remaining, zero));
     PrimExpr valid_extent = Min(src_valid_extent, dst_valid_extent);
-    src_valid_extent = analyzer->Simplify(src_valid_extent);
-    valid_extent = analyzer->Simplify(valid_extent);
+    src_valid_extent = tl::arith::Simplify(analyzer, src_valid_extent);
+    valid_extent = tl::arith::Simplify(analyzer, valid_extent);
 
     // A destination OOB tail only reduces the L0C->GM transfer count. It must
     // not rewrite the producer's L0C matrix geometry: lowering uses the source
@@ -230,13 +233,14 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
       auto cast_to_dtype = [dtype](PrimExpr value) {
         return value.ty() == dtype ? value : Cast(dtype, value);
       };
-      PrimExpr zero = MakeConst(dtype, 0);
+      PrimExpr zero = tl::MakeConst(dtype, 0);
       PrimExpr remaining =
           cast_to_dtype(shape[axis]) - cast_to_dtype(range->begin);
       PrimExpr valid_extent =
           Min(cast_to_dtype(range->extent), Max(remaining, zero));
-      clamped->Set(axis, Range::FromMinExtent(
-                             range->begin, analyzer->Simplify(valid_extent)));
+      clamped->Set(
+          axis, Range::FromMinExtent(
+                    range->begin, tl::arith::Simplify(analyzer, valid_extent)));
     }
   };
   clamp_singleton_axes(op.src_range, op.src.shape(), src_singleton_axes,
@@ -271,7 +275,7 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 sym::Analyzer analyzer,
                                 const PrimExpr &valid_cols) {
-  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
   size_t dst_ndim = op.dst_range.size();
   ICHECK_GE(dst_ndim, 2U);
   PrimExpr dst_rows = op.dst_range[dst_ndim - 2]->extent;
@@ -279,17 +283,17 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
   PrimExpr dst_row_min = op.dst_range[dst_ndim - 2]->begin;
   PrimExpr dst_col_min = op.dst_range[dst_ndim - 1]->begin;
   PrimExpr tail_cols = dst_cols - valid_cols;
-  if (analyzer->CanProve(tail_cols <= I(0))) {
+  if (tl::arith::CanProve(analyzer, tail_cols <= I(0))) {
     return std::nullopt;
   }
 
-  ICHECK(analyzer->CanProve(valid_cols <= dst_cols))
+  ICHECK(tl::arith::CanProve(analyzer, valid_cols <= dst_cols))
       << "Ascend GM->L1 padded copy requires destination col extent >= "
          "mapped source col extent, got source="
       << valid_cols << " and destination=" << dst_cols;
-  ICHECK(analyzer->CanProveEqual(dst_row_min, I(0)) &&
-         analyzer->CanProveEqual(dst_col_min, I(0)) &&
-         analyzer->CanProveEqual(dst_rows, layout.rows))
+  ICHECK(tl::arith::CanProveEqual(analyzer, dst_row_min, I(0)) &&
+         tl::arith::CanProveEqual(analyzer, dst_col_min, I(0)) &&
+         tl::arith::CanProveEqual(analyzer, dst_rows, layout.rows))
       << "Ascend GM->L1 col padding requires a zero-based destination "
          "region covering the full row axis; got destination ranges "
       << op.dst_range;
@@ -297,7 +301,7 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
   PrimExpr valid_c0_blocks = FloorDiv(valid_cols + layout.c0 - I(1), layout.c0);
   PrimExpr dst_c0_blocks = FloorDiv(dst_cols + layout.c0 - I(1), layout.c0);
   PrimExpr tail_c0_blocks = dst_c0_blocks - valid_c0_blocks;
-  if (analyzer->CanProve(tail_c0_blocks <= I(0))) {
+  if (tl::arith::CanProve(analyzer, tail_c0_blocks <= I(0))) {
     return std::nullopt;
   }
 
@@ -305,7 +309,7 @@ Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
   Array<Range> fill_region =
       MakeFractalFillRegion(op, layout, valid_c0_blocks * layout.c0,
                             tail_c0_blocks * layout.c0, I(0), dst_n);
-  PrimExpr fill_value = op.pad_value.value_or(MakeConst(op.dst.dtype(), 0));
+  PrimExpr fill_value = op.pad_value.value_or(tl::MakeConst(op.dst.dtype(), 0));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 
@@ -313,7 +317,7 @@ Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 sym::Analyzer analyzer,
                                 const PrimExpr &valid_rows) {
-  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
   size_t dst_ndim = op.dst_range.size();
   ICHECK_GE(dst_ndim, 2U);
   PrimExpr dst_rows = op.dst_range[dst_ndim - 2]->extent;
@@ -324,17 +328,17 @@ Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
   // A full-row tail is outside the non-singleton tile-origin contract rather
   // than padding work for a valid partial tail.
   PrimExpr no_partial_tail = Or(tail_rows <= I(0), tail_rows >= dst_rows);
-  if (analyzer->CanProve(no_partial_tail)) {
+  if (tl::arith::CanProve(analyzer, no_partial_tail)) {
     return std::nullopt;
   }
 
-  ICHECK(analyzer->CanProve(valid_rows <= dst_rows))
+  ICHECK(tl::arith::CanProve(analyzer, valid_rows <= dst_rows))
       << "Ascend GM->L1 padded copy requires destination row extent >= "
          "mapped source row extent, got source="
       << valid_rows << " and destination=" << dst_rows;
-  ICHECK(analyzer->CanProveEqual(dst_row_min, I(0)) &&
-         analyzer->CanProveEqual(dst_col_min, I(0)) &&
-         analyzer->CanProveEqual(dst_cols, layout.cols))
+  ICHECK(tl::arith::CanProveEqual(analyzer, dst_row_min, I(0)) &&
+         tl::arith::CanProveEqual(analyzer, dst_col_min, I(0)) &&
+         tl::arith::CanProveEqual(analyzer, dst_cols, layout.cols))
       << "Ascend GM->L1 row padding requires a zero-based destination "
          "region covering the full col axis; got destination ranges "
       << op.dst_range;
@@ -344,7 +348,7 @@ Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
   PrimExpr dst_c0_blocks = FloorDiv(dst_cols + layout.c0 - I(1), layout.c0);
   Array<Range> fill_region = MakeFractalFillRegion(
       op, layout, I(0), dst_c0_blocks * layout.c0, valid_rows, tail_rows);
-  PrimExpr fill_value = op.pad_value.value_or(MakeConst(op.dst.dtype(), 0));
+  PrimExpr fill_value = op.pad_value.value_or(tl::MakeConst(op.dst.dtype(), 0));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 

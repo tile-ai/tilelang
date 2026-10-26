@@ -1,4 +1,7 @@
 #include "common/reducer.h"
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 
 #include "compat/visit.h"
 #include "op/fill.h"
@@ -29,7 +32,7 @@ struct LegacyReducer {
   LegacyPhase phase = LegacyPhase::kAllocated;
 };
 
-class LegacyReducerCanonicalizer : public StmtExprMutator {
+class LegacyReducerCanonicalizer : public tvm::tl::StmtExprMutator {
 public:
   tirx::Function Run(tirx::Function function) {
     if (!function->body)
@@ -58,7 +61,7 @@ private:
     auto operation = ReducerOperation(allocation);
     if (!tensor || !allocation || !allocation->op.same_as(alloc_tensor_op()) ||
         !operation || first_class_.count(tensor->get())) {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     auto [position, inserted] = reducers_.emplace(
         tensor->get(),
@@ -83,7 +86,7 @@ private:
     if (first.size() != second.size())
       return false;
     for (size_t index = 0; index < first.size(); ++index) {
-      if (!analyzer_->CanProveEqual(first[index], second[index]))
+      if (!tl::arith::CanProveEqual(analyzer_, first[index], second[index]))
         return false;
     }
     return true;
@@ -130,7 +133,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
     const auto *call = node->value.as<CallNode>();
     if (!call || call->args.empty())
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     if (call->op.same_as(Op::Get("tl.layout_hint"))) {
       auto found = reducers_.find(call->args[0].as_or_throw<TensorVar>().get());
       if (found != reducers_.end()) {
@@ -149,7 +152,7 @@ private:
         PrimExpr value = call->args[1].as_or_throw<PrimExpr>();
         PrimExpr identity =
             ReducerV2Identity(reducer->operation, reducer->original.dtype());
-        bool is_identity = analyzer_->CanProveEqual(value, identity);
+        bool is_identity = tl::arith::CanProveEqual(analyzer_, value, identity);
         if (const auto *first = value.as<FloatImmNode>()) {
           if (const auto *second = identity.as<FloatImmNode>())
             is_identity = first->value == second->value;
@@ -160,8 +163,8 @@ private:
               << "legacy sum reducer is filled with a non-zero value; use "
                  "reducer_init for a logical seed";
           arguments.push_back(
-              prim::cast(Mutate(value, mode).ValueOrUnchanged(value),
-                         reducer->original.dtype()));
+              tl::CastValue(Mutate(value, mode).ValueOrUnchanged(value),
+                            reducer->original.dtype()));
         }
         reducer->phase = LegacyPhase::kActive;
         return Evaluate(Call(PrimType::Void(), ReducerInitOp::Get(), arguments),
@@ -180,7 +183,7 @@ private:
                         node->loc);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
@@ -188,7 +191,7 @@ private:
     auto tensor = node->dest.as<TensorVar>();
     auto found = tensor ? reducers_.find(tensor->get()) : reducers_.end();
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     const LegacyReducer &reducer = found->second;
     TVM_FFI_CHECK(reducer.phase == LegacyPhase::kActive, ValueError)
         << "legacy reducer store must be between initialization and "
@@ -210,7 +213,7 @@ private:
     auto tensor = node->source.as<TensorVar>();
     auto found = tensor ? reducers_.find(tensor->get()) : reducers_.end();
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     TVM_FFI_CHECK(found->second.phase == LegacyPhase::kFinalized, ValueError)
         << "legacy reducer may be read only after finalize_reducer";
     Array<PrimExpr> indices;
@@ -222,7 +225,7 @@ private:
   UnchangedOr<Expr> Mutate_(const VarNode *node, InplaceMode mode) final {
     auto found = reducers_.find(node);
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     TVM_FFI_CHECK(found->second.phase == LegacyPhase::kFinalized, ValueError)
         << "legacy reducer pointer access is forbidden before finalization";
     return found->second.destination;

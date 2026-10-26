@@ -109,7 +109,7 @@ def test_direct_reset_control_flow(reset_kind):
     elif reset_kind == "predicate":
         reset = fill(zero, bx == 0)
     elif reset_kind == "block_predicate":
-        reset = tirx.IfThenElse(bx == 0, tvm.ir.RegionStmt("tirx.scope", [], [], {}, reset), None)
+        reset = tirx.IfThenElse(bx == 0, tvm.ir.RegionStmt("tl.scope", [], [], {}, reset), None)
     grid = tirx.For(
         bx,
         0,

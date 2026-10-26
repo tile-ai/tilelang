@@ -1,4 +1,5 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cpu/op/builtin.h"
 #include "transform/common/attr.h"
@@ -20,7 +21,7 @@ bool IsGridBinding(const RegionStmtNode *region) {
   return tag && std::string(tag->value).starts_with("blockIdx.");
 }
 
-class CPULaunchAnnotationExtractor : public tirx::StmtExprMutator {
+class CPULaunchAnnotationExtractor : public tvm::tl::StmtExprMutator {
 public:
   ffi::Optional<PrimExpr> num_threads;
   ffi::Array<Stmt> allocations;
@@ -68,7 +69,7 @@ private:
   }
 };
 
-class CPUKernelLaunchLowerer : public tirx::StmtExprMutator {
+class CPUKernelLaunchLowerer : public tvm::tl::StmtExprMutator {
 public:
   explicit CPUKernelLaunchLowerer(bool parallel) : parallel_(parallel) {}
 
@@ -77,8 +78,8 @@ private:
                                  ffi::InplaceMode mode) final {
     if (!IsGridBinding(node)) {
       Stmt original = ffi::GetRef<Stmt>(node);
-      Stmt body =
-          StmtExprMutator::Mutate_(node, mode).ValueOrUnchanged(original);
+      Stmt body = tvm::tl::StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(original);
       if (IsDeviceMainBlock(node)) {
         auto extractor = ffi::make_object<CPULaunchAnnotationExtractor>();
         body = extractor->Mutate(body).ValueOrUnchanged(body);

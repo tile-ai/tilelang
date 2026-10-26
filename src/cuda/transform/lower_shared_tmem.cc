@@ -1,3 +1,8 @@
+#include "compat/analyzer.h"
+#include "op/gpu.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
@@ -151,13 +156,13 @@ struct TmemAddress {
   Optional<TensorVar> live;
 };
 
-class SharedTmemRewriter : public StmtExprMutatorWithAnalyzer {
+class SharedTmemRewriter : public LoopAwareMutator {
 public:
   SharedTmemRewriter(sym::AnalyzerObj *analyzer, Target target)
-      : StmtExprMutatorWithAnalyzer(analyzer), target_(std::move(target)) {}
+      : LoopAwareMutator(analyzer), target_(std::move(target)) {}
 
 private:
-  using Base = StmtExprMutatorWithAnalyzer;
+  using Base = LoopAwareMutator;
 
   PrimExpr ThreadIndex() const {
     PrimExpr result = 0;
@@ -172,7 +177,7 @@ private:
   }
 
   Stmt Sync(Location location) const {
-    return Evaluate(Call(std::nullopt, gpu_storage_sync_op(),
+    return Evaluate(Call(std::nullopt, tl::StorageSyncOp(),
                          {StringImm("shared")}, std::nullopt, {}, location),
                     location);
   }
@@ -202,7 +207,7 @@ private:
 
   bool VariesByThread(const PrimExpr &expression) const {
     PrimExpr simplified =
-        analyzer_->Simplify(Substitute(expression, scalar_values_));
+        tl::arith::Simplify(analyzer_, Substitute(expression, scalar_values_));
     if (SideEffect(simplified) != CallEffectKind::kPure)
       return true;
     for (const Var &variable : tvm::UndefinedVars(simplified))
@@ -319,11 +324,12 @@ private:
       int view_bits =
           tensor.value().dtype().bits() * tensor.value().dtype().lanes();
       int source_bits = source.dtype().bits() * source.dtype().lanes();
-      TVM_FFI_CHECK(
-          analyzer_->CanProve(tensor.value().shape()[0] <= source.shape()[0]) &&
-              analyzer_->CanProve(tensor.value().shape()[1] * view_bits <=
-                                  source.shape()[1] * source_bits),
-          ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, tensor.value().shape()[0] <=
+                                                       source.shape()[0]) &&
+                        tl::arith::CanProve(
+                            analyzer_, tensor.value().shape()[1] * view_bits <=
+                                           source.shape()[1] * source_bits),
+                    ValueError)
           << "A borrowed TMEM view cannot exceed its source physical storage";
       addresses_.insert_or_assign(tensor.value().get(), allocation->second);
       view_bindings_.push_back(tensor.value().get());
@@ -368,8 +374,10 @@ private:
                     ValueError)
           << "TMEM allocation must have its physical (datapath, value-column) "
              "layout materialized";
-      auto rows = GetConstInt(analyzer_->Simplify(tensor.value().shape()[0]));
-      auto values = GetConstInt(analyzer_->Simplify(tensor.value().shape()[1]));
+      auto rows = GetConstInt(
+          tl::arith::Simplify(analyzer_, tensor.value().shape()[0]));
+      auto values = GetConstInt(
+          tl::arith::Simplify(analyzer_, tensor.value().shape()[1]));
       int bits = tensor.value().dtype().bits() * tensor.value().dtype().lanes();
       TVM_FFI_CHECK(bits > 0, ValueError)
           << "TMEM allocation requires a positive element bit width";
@@ -390,7 +398,8 @@ private:
         << "TMEM allocation requires a Blackwell target and a thread launch";
     PrimExpr thread_count =
         thread_extents_[0] * thread_extents_[1] * thread_extents_[2];
-    TVM_FFI_CHECK(analyzer_->CanProve(thread_count >= 32), ValueError)
+    TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, thread_count >= 32),
+                  ValueError)
         << "TMEM allocation requires a complete warp";
     VarSet explicit_releases;
     bool returns = false;
@@ -529,11 +538,12 @@ private:
             remaining = FloorDiv(remaining, thread_extents_[dimension]);
           }
         }
-        PrimExpr active = proof->Simplify(Substitute(path_, replacements));
+        PrimExpr active =
+            tl::arith::Simplify(proof, Substitute(path_, replacements));
         if (!first_lane)
           first_lane = active;
-        TVM_FFI_CHECK(!proof->CanProve(!active) &&
-                          proof->CanProve(active == *first_lane),
+        TVM_FFI_CHECK(!tl::arith::CanProve(proof, !active) &&
+                          tl::arith::CanProve(proof, active == *first_lane),
                       ValueError)
             << "Explicit TMEM deallocation must execute on the complete first "
                "warp";
@@ -557,8 +567,8 @@ private:
     PrimExpr column =
         Mutate(node->indices[1], mode).ValueOrUnchanged(node->indices[1]);
     int bits = tensor.value().dtype().bits() * tensor.value().dtype().lanes();
-    PrimExpr bit_offset = column * MakeConst(column.ty(), bits);
-    TVM_FFI_CHECK(analyzer_->CanProve(floormod(bit_offset, 32) == 0),
+    PrimExpr bit_offset = column * tl::MakeConst(column.ty(), bits);
+    TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, floormod(bit_offset, 32) == 0),
                   ValueError)
         << "TMEM address must begin on a b32 column";
     PrimExpr offset = BitwiseOr(

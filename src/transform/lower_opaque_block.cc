@@ -1,7 +1,11 @@
+#include "compat/analyzer.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
 #include "compat/visit.h"
 #include "op/builtin.h"
 #include "op/builtin_registry.h"
+#include "op/prim.h"
 
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
@@ -12,7 +16,7 @@ namespace tvm::tl {
 
 namespace {
 
-class OpaqueScopeLowerer : public tirx::StmtExprMutator {
+class OpaqueScopeLowerer : public tvm::tl::StmtExprMutator {
 private:
   Stmt Initialize(const tirx::TensorVar &tensor, const PrimExpr &value,
                   const Location &location) {
@@ -22,9 +26,9 @@ private:
         << "Local variable initialization requires local storage";
     ffi::Array<PrimExpr> indices;
     for (const auto &extent : tensor.shape()) {
-      TVM_FFI_CHECK(analyzer_->CanProve(extent == 1), ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, extent == 1), ValueError)
           << "Local variable initialization requires a single-element tensor";
-      indices.push_back(MakeConst(extent.ty(), 0));
+      indices.push_back(tl::MakeConst(extent.ty(), 0));
     }
     return TensorStore(tensor, indices, Cast(tensor.dtype(), value), location);
   }
@@ -32,7 +36,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto bind = StmtExprMutator::Mutate_(node, mode)
+    auto bind = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<Bind>();
     auto tensor = bind->var.as<tirx::TensorVar>();
@@ -61,7 +65,7 @@ private:
     const auto *call = node->value.as<CallNode>();
     const auto *operation = call ? call->op.as<OpNode>() : nullptr;
     if (!operation || operation->name != "tl.local_var_init_hint") {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     TVM_FFI_CHECK_EQ(call->args.size(), 2, ValueError)
         << "Local initialization requires a tensor and a value";
@@ -75,17 +79,12 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto region = StmtExprMutator::Mutate_(node, mode)
+    auto region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(original)
                       .as_or_throw<RegionStmt>();
     TVM_FFI_CHECK(!region->attrs->dict.count(attr::kLocalVarInit), ValueError)
         << "Local initializers must belong to their native allocation or "
            "initialization hint";
-    if (region->op->name == "tl.scope") {
-      return RegionStmt(tirx::scope_op(), region->args, region->body_params,
-                        region->attrs, region->body, region->result_vars,
-                        region->loc);
-    }
     return region;
   }
 
@@ -105,16 +104,17 @@ private:
         SideEffect(node->begin) != CallEffectKind::kPure ||
         SideEffect(node->end) != CallEffectKind::kPure ||
         SideEffect(node->step) != CallEffectKind::kPure ||
-        !analyzer_->CanProve(node->step > 0) ||
-        !analyzer_->CanProve(node->begin < node->end) ||
-        !analyzer_->CanProve(node->begin + node->step >= node->end)) {
-      return StmtExprMutator::Mutate_(node, mode);
+        !tl::arith::CanProve(analyzer_, node->step > 0) ||
+        !tl::arith::CanProve(analyzer_, node->begin < node->end) ||
+        !tl::arith::CanProve(analyzer_,
+                             node->begin + node->step >= node->end)) {
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     Stmt body = Substitute(
         node->body, ffi::Map<PrimVar, PrimExpr>{{node->var, node->begin}});
     body = Mutate(body, mode).ValueOrUnchanged(body);
-    return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), SeqStmt(body), {},
-                      node->loc);
+    return RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(), SeqStmt(body),
+                      {}, node->loc);
   }
 
   sym::Analyzer analyzer_;

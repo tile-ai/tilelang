@@ -6,7 +6,7 @@ from tilelang.language.utils import buffer_region_to_tile_region
 from tilelang.language.utils import get_buffer_region_from_load
 from functools import reduce
 import tvm_ffi
-from tvm_tirx import sym
+from tilelang._compat import sym
 from tilelang._compat.tensor import tensor_strides
 from tilelang._compat.tvm import IRModule, DataType
 from tilelang._compat.tirx import PrimFunc

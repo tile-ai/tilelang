@@ -1,10 +1,11 @@
 import os
 
 import pytest
-from tvm_tirx import ir, tirx
+from tvm_tirx import tirx
 from tvm_tirx.script.ir_builder import IRBuilder
 from tvm_tirx.tirx.script import ir_builder as builder_api
 
+from tilelang._compat import ir
 from tilelang._compat.tensor import TensorView
 
 if os.environ.get("TILELANG_LIGHT_IMPORT") == "1":
@@ -35,7 +36,7 @@ def test_ascend_mutable_pointer_metadata_uses_tensor_identity():
     from tilelang.ascend.language import simd
     from tilelang.language.frame import is_mutable_scalar
 
-    with IRBuilder() as builder, builder_api.scope():
+    with IRBuilder() as builder, builder_api.region("tl.scope", []):
         source = builder_api.bind_(builder_api.alloc_tensor(ty_args=[tirx.TensorType([128], "float16", scope="shared")]))
         pointer = simd.make_ubuf_ptr(ir.TensorLoad(source, [0]), "float16")
         assert is_mutable_scalar(pointer)
@@ -47,4 +48,4 @@ def test_ascend_mutable_pointer_metadata_uses_tensor_identity():
         assert advanced.ty == ir.PrimType("uint64")
         assert isinstance(advanced.args[0].ty, ir.PtrType)
         builder_api.setitem_(pointer, 0, advanced)
-    assert tirx.analysis.check_well_formed(tirx.Function([], builder.get()))
+    assert ir.check_well_formed(tirx.Function([], builder.get()))

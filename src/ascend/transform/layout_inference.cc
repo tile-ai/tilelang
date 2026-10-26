@@ -3,6 +3,8 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include "transform/common/loop_aware_mutator.h"
+
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
@@ -40,7 +42,7 @@ private:
     bool previous = inside_simt_vf_;
     if (name == "SIMT_VF")
       inside_simt_vf_ = true;
-    auto result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    auto result = LoopAwareMutator::Mutate_(node, mode);
     inside_simt_vf_ = previous;
     return result;
   }

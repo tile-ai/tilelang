@@ -8,7 +8,7 @@ from tilelang import tvm as tvm
 from tilelang._compat.intrinsics import ptx_arrive_barrier
 from tvm_tirx.tirx.script.ir_builder import evaluate
 from tvm_tirx.script.ir_builder.stmt import return_ as _return_stmt
-from tvm_tirx.tirx.op import gpu_storage_sync
+from tilelang._compat.intrinsics import gpu_storage_sync
 from tilelang.language.eager.builder import macro
 from tilelang._compat.tvm import DataType, DataTypeCode, tirx
 from tilelang._compat.tirx import convert, expr_dtype

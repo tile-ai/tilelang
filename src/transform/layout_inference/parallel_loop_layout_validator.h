@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #ifndef TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 #define TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 
@@ -12,7 +13,7 @@ inline const ForNode *SingleLoop(const SeqStmt &body) {
   return body->seq.size() == 1 ? body->seq[0].as<ForNode>() : nullptr;
 }
 
-class ParallelLoopLayoutValidator : public tirx::StmtExprVisitor {
+class ParallelLoopLayoutValidator : public tvm::tl::StmtExprVisitor {
 public:
   explicit ParallelLoopLayoutValidator(
       std::function<bool(const RegionStmtNode *)> opaque_region = {})
@@ -29,12 +30,12 @@ private:
   ffi::Optional<ffi::VisitInterrupt> Visit_(const RegionStmtNode *node) final {
     if (opaque_region_ && opaque_region_(node))
       return std::nullopt;
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const ForNode *node) final {
     if (node->kind != ForKind::kParallel)
-      return StmtExprVisitor::Visit_(node);
+      return tvm::tl::StmtExprVisitor::Visit_(node);
     auto annotation = node->annotations.Get(attr::kParallelLoopLayout);
     TVM_FFI_CHECK(annotation.has_value(), ValueError)
         << "Parallel loop missing layout annotation: "

@@ -2,12 +2,23 @@
 
 import functools
 
-from tvm_tirx import ir
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 from tvm_tirx.tirx.script import ir_builder as _native
 
 from tilelang._compat.builder import alloc_buffer, attr, buffer_store, decl_buffer, match_buffer, meta_var as meta_var
 from tilelang._compat.tirx import PrimExpr as PrimExpr
+from tilelang._compat.tirx import (
+    bitwise_and as bitwise_and,
+    bitwise_or as bitwise_or,
+    bitwise_xor as bitwise_xor,
+    if_then_else as if_then_else,
+    isfinite as isfinite,
+    isinf as isinf,
+    left_shift as left_shift,
+    right_shift as right_shift,
+)
+from tilelang._compat.tirx import infinity as _infinity
 from tilelang._compat.tirx import call_extern as call_extern, call_intrin as call_intrin, call_pure_extern as call_pure_extern, tvm_tuple
 from tilelang._compat.intrinsics import (
     ptx_arrive_barrier,
@@ -28,7 +39,7 @@ round = _round_op
 
 
 def infinity(dtype="float32", span=None):
-    return ir.const(float("inf"), dtype, **({} if span is None else {"loc": span}))
+    return _infinity(dtype, span)
 
 
 class _LetBinding(type(_native.let)):
@@ -37,7 +48,7 @@ class _LetBinding(type(_native.let)):
 
         if not isinstance(variable, ir.Var):
             raise TypeError("T.let expects a native variable as its first argument")
-        value = _native.cast(value, ty=variable.ty)
+        value = ir.cast(value, ty=variable.ty)
         _native.add_to_parent(ir.Bind(variable, value))
         register_let_value(variable, value)
 
@@ -73,7 +84,7 @@ def cast(value, dtype=None, round: str = "", sat: bool = True, rbits=None, span=
         raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
     location = loc if loc is not None else span
     options = {} if location is None else {"loc": location}
-    converted = _native.cast(value, dtype, ty=ty, **options)
+    converted = ir.cast(value, dtype, ty=ty, **options)
     if not round and sat:
         return converted
     if not isinstance(value, ir.Expr):

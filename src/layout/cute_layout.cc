@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file cute_layout.cc
  * \brief CuTe-style layout IR types and TileLang-to-CuTe layout recovery.
@@ -614,8 +617,8 @@ bool Compatible(const IntTuple &a, const IntTuple &b) {
     return false;
   }
   sym::Analyzer analyzer;
-  return analyzer->CanProveEqual(AsConstOrPrimExpr(a, dtype),
-                                 AsConstOrPrimExpr(b_size, dtype));
+  return tl::arith::CanProveEqual(analyzer, AsConstOrPrimExpr(a, dtype),
+                                  AsConstOrPrimExpr(b_size, dtype));
 }
 
 Layout::Layout(Array<int64_t> shape, Array<int64_t> stride) {
@@ -1578,8 +1581,8 @@ PrimExpr Bit(const PrimExpr &e, int k) {
 // a swizzle applied over an address carrying a large base offset reduce: the
 // offset stays intact in hi(wide) instead of being shattered into ~log2(offset)
 // parity terms that the prover cannot reconverge. Every other node recurses
-// through ExprMutator's default child-rebuilding visitors.
-class BitOpLowerer : public ExprMutator {
+// through tvm::tl::ExprMutator's default child-rebuilding visitors.
+class BitOpLowerer : public tvm::tl::ExprMutator {
 public:
   explicit BitOpLowerer(sym::Analyzer analyzer)
       : analyzer_(std::move(analyzer)) {}
@@ -1600,7 +1603,7 @@ protected:
       return mul(Rewrite(node->a), IntImm(dtype, ffi::BigInt(1) << *shift),
                  node->loc);
     }
-    return ExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::ExprMutator::Mutate_(node, inplace_mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const RShiftNode *node,
@@ -1612,7 +1615,7 @@ protected:
       return floordiv(Rewrite(node->a), IntImm(dtype, ffi::BigInt(1) << *shift),
                       node->loc);
     }
-    return ExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::ExprMutator::Mutate_(node, inplace_mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const BitwiseAndNode *node,
@@ -1623,26 +1626,26 @@ protected:
       int64_t mask = left_constant ? *left_constant : *right_constant;
       if (mask >= 0) {
         PrimExpr input = Rewrite(left_constant ? node->b : node->a);
-        PrimExpr result = MakeConst(input.ty(), 0);
+        PrimExpr result = tl::MakeConst(input.ty(), 0);
         for (int bit_index = 0; (mask >> bit_index) != 0; ++bit_index) {
           if ((mask >> bit_index) & 1) {
             result =
                 result + Bit(input, bit_index) *
-                             MakeConst(input.ty(), int64_t(1) << bit_index);
+                             tl::MakeConst(input.ty(), int64_t(1) << bit_index);
           }
         }
         return result;
       }
     }
-    return ExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::ExprMutator::Mutate_(node, inplace_mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const BitwiseXorNode *node,
                                      ffi::InplaceMode inplace_mode) final {
     PrimExpr left = Rewrite(node->a);
     PrimExpr right = Rewrite(node->b);
-    auto left_bound = analyzer_->const_int_bound(left);
-    auto right_bound = analyzer_->const_int_bound(right);
+    auto left_bound = tl::arith::ConstIntBoundOf(analyzer_, left);
+    auto right_bound = tl::arith::ConstIntBoundOf(analyzer_, right);
     int64_t narrower_bound =
         std::min(left_bound->max_value, right_bound->max_value);
     if (left_bound->min_value >= 0 && right_bound->min_value >= 0 &&
@@ -1651,12 +1654,12 @@ protected:
           1, 64 - CountLeadingZeros(static_cast<uint64_t>(narrower_bound) | 1));
       PrimExpr wider =
           left_bound->max_value >= right_bound->max_value ? left : right;
-      PrimExpr scale = MakeConst(wider.ty(), int64_t(1) << width);
+      PrimExpr scale = tl::MakeConst(wider.ty(), int64_t(1) << width);
       PrimExpr result = floordiv(wider, scale) * scale;
       for (int bit_index = 0; bit_index < width; ++bit_index) {
         result = result + floormod(Bit(left, bit_index) + Bit(right, bit_index),
-                                   MakeConst(left.ty(), 2)) *
-                              MakeConst(left.ty(), int64_t(1) << bit_index);
+                                   tl::MakeConst(left.ty(), 2)) *
+                              tl::MakeConst(left.ty(), int64_t(1) << bit_index);
       }
       return result;
     }
@@ -1681,8 +1684,8 @@ PrimExpr LowerBitOps(const PrimExpr &expression, sym::Analyzer analyzer) {
 // parities thus become structurally identical, which lets the surrounding
 // Simplify cancel them — the step the rewrite simplifier cannot do by itself.
 // Only FloorMod(_, 2) needs custom handling; every other node recurses through
-// ExprMutator's default child-rebuilding visitors.
-class ParityCanonicalizer : public ExprMutator {
+// tvm::tl::ExprMutator's default child-rebuilding visitors.
+class ParityCanonicalizer : public tvm::tl::ExprMutator {
 public:
   explicit ParityCanonicalizer(sym::Analyzer ana) : ana_(ana) {}
   PrimExpr Rewrite(const PrimExpr &expression) {
@@ -1695,7 +1698,7 @@ protected:
   ffi::UnchangedOr<PrimExpr> Mutate_(const FloorModNode *op,
                                      ffi::InplaceMode inplace_mode) final {
     if (!is_two(op->b))
-      return ExprMutator::Mutate_(op, inplace_mode);
+      return tvm::tl::ExprMutator::Mutate_(op, inplace_mode);
     std::vector<PrimExpr> terms;
     int parity = 0;
     flatten(op->a, &terms, &parity);
@@ -1712,7 +1715,7 @@ protected:
         ++i;
       }
     }
-    return FloorMod(sum, MakeConst(sum.ty(), 2), op->loc);
+    return FloorMod(sum, tl::MakeConst(sum.ty(), 2), op->loc);
   }
 
 private:
@@ -1757,7 +1760,7 @@ private:
     // Leaf: canonicalize via the simplifier's single-bit form (recursing into
     // any nested parities first). If that form is itself a parity of a sum,
     // keep flattening through it.
-    PrimExpr key = ana_->Simplify(FloorMod(Rewrite(x), 2));
+    PrimExpr key = tl::arith::Simplify(ana_, FloorMod(Rewrite(x), 2));
     if (const auto *km = key.as<FloorModNode>()) {
       if (is_two(km->b) && (km->a.as<AddNode>() || km->a.as<SubNode>() ||
                             km->a.as<MulNode>() || km->a.as<IntImmNode>())) {
@@ -1785,7 +1788,7 @@ PrimExpr ParityCanon(const PrimExpr &e, sym::Analyzer ana) {
 // means "not proven" and the caller must reject. Complete enough in practice
 // that neither sampling nor an SMT solver is needed.
 bool ProveZero(PrimExpr e, sym::Analyzer ana, int max_rounds = 8) {
-  PrimExpr d = ana->Simplify(e);
+  PrimExpr d = tl::arith::Simplify(ana, e);
   size_t last_hash = 0;
   for (int round = 0; round < max_rounds; ++round) {
     if (IsZero(d))
@@ -1794,7 +1797,7 @@ bool ProveZero(PrimExpr e, sym::Analyzer ana, int max_rounds = 8) {
     if (round > 0 && h == last_hash)
       return false; // fixpoint reached without proving 0.
     last_hash = h;
-    d = ana->Simplify(ParityCanon(LowerBitOps(d, ana), ana));
+    d = tl::arith::Simplify(ana, ParityCanon(LowerBitOps(d, ana), ana));
   }
   return IsZero(d);
 }
@@ -1831,7 +1834,7 @@ bool ProveEquivalent(const AddrProbe &probe, const Swizzle &swizzle,
     PrimVar v("c" + std::to_string(k), PrimType::Int(32));
     vars.push_back(v);
     if (shape[k] > 0)
-      ana->Bind(v, Range(MakeI32(0), MakeI32(shape[k])));
+      tl::arith::Bind(ana, v, Range(MakeI32(0), MakeI32(shape[k])));
   }
 
   PrimExpr A = probe.Symbolic(vars);

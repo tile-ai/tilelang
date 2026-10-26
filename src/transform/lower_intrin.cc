@@ -1,10 +1,10 @@
+#include "transform/tirx_passes.h"
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/transform.h>
 
 namespace tvm::tl::transform {
 
 tvm::transform::Pass LowerIntrin() {
-  return tvm::transform::Sequential({tirx::transform::LowerIntrin()},
+  return tvm::transform::Sequential({tirx_passes::LowerIntrin()},
                                     "tl.LowerIntrin");
 }
 

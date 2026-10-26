@@ -1,7 +1,11 @@
+#include "compat/analyzer.h"
 /*!
  * \file vectorize_loop.cc
  */
 // Loop vectorizer as in Halide pipeline.
+#include "op/prim.h"
+#include "transform/tirx_passes.h"
+
 #include "../op/builtin.h"
 #include "../op/utils.h"
 #include "common/int64_promoter.h"
@@ -30,7 +34,8 @@ public:
         rewrite_(std::move(rewrite)), target_(std::move(target)) {
     if (!target_)
       target_ = Target::Current();
-    analyzer_->Bind(variable_, Range(MakeConst(variable_.ty(), 0), lanes_));
+    tl::arith::Bind(analyzer_, variable_,
+                    Range(tl::MakeConst(variable_.ty(), 0), lanes_));
   }
 
   std::optional<int64_t> Width() const { return GetConstInt(lanes_); }
@@ -72,20 +77,22 @@ public:
       return std::nullopt;
     PrimExpr offset = offsets[0];
     PrimExpr base_offset =
-        Substitute(offset, {{variable_, MakeConst(variable_.ty(), 0)}});
-    if (!analyzer_->CanProveEqual(floormod(base_offset, elements_per_lane), 0))
+        Substitute(offset, {{variable_, tl::MakeConst(variable_.ty(), 0)}});
+    if (!tl::arith::CanProveEqual(analyzer_,
+                                  floormod(base_offset, elements_per_lane), 0))
       return std::nullopt;
     if (!IndicesCanVectorize(floordiv(offset, elements_per_lane), variable_,
                              lanes_, static_cast<int>(width.value()), analyzer_,
-                             false, MakeConst(variable_.ty(), 0)))
+                             false, tl::MakeConst(variable_.ty(), 0)))
       return std::nullopt;
     PrimExpr contiguous =
-        base_offset + prim::cast(variable_, offset.ty()) * elements_per_lane;
-    if (!analyzer_->CanProveEqual(offset, contiguous))
+        base_offset + tl::CastValue(variable_, offset.ty()) * elements_per_lane;
+    if (!tl::arith::CanProveEqual(analyzer_, offset, contiguous))
       return std::nullopt;
     Array<PrimExpr> base_indices =
         load.value()->indices.Map([&](const PrimExpr &index) {
-          return Substitute(index, {{variable_, MakeConst(variable_.ty(), 0)}});
+          return Substitute(index,
+                            {{variable_, tl::MakeConst(variable_.ty(), 0)}});
         });
     TensorLoad base(tensor, base_indices, expression->loc);
     Map<String, Any> attributes;
@@ -95,8 +102,8 @@ public:
     attributes.Set(attr::kAccessRegion, NormalizeToBufferRegion(tensor));
     attributes.Set(
         attr::kAccessExtent,
-        MakeConst(variable_.ty(), width.value() * elements_per_lane));
-    attributes.Set(attr::kAccessMask, MakeConst(variable_.ty(), mask));
+        tl::MakeConst(variable_.ty(), width.value() * elements_per_lane));
+    attributes.Set(attr::kAccessMask, tl::MakeConst(variable_.ty(), mask));
     return Call(tensor.ty()->DataPtrType(), tirx::address_of_op(), {base},
                 DictAttrs(attributes), {}, expression->loc);
   }
@@ -175,9 +182,10 @@ Optional<Expr> VectorizeAsyncCopy(Call call, PrimVar variable, PrimExpr lanes,
   auto source = context.Pointer(call->args[1], count.value(), kAccessRead);
   if (!destination || !source)
     return std::nullopt;
-  Array<Expr> arguments{destination.value(), source.value(),
-                        MakeConst(call->args[2].as_or_throw<PrimExpr>().ty(),
-                                  count.value() * width.value())};
+  Array<Expr> arguments{
+      destination.value(), source.value(),
+      tl::MakeConst(call->args[2].as_or_throw<PrimExpr>().ty(),
+                    count.value() * width.value())};
   if (call->args.size() == 4) {
     auto predicate = context.ScalarValue(call->args[3]);
     if (!predicate)
@@ -216,19 +224,19 @@ Optional<Expr> VectorizeRoundedCast(Call call, PrimVar variable, PrimExpr lanes,
 } // namespace
 
 tvm::transform::Pass VectorizeLoop(bool enable_vectorize) {
-  return tirx::transform::VectorizeLoop(enable_vectorize);
+  return tirx_passes::VectorizeLoop(enable_vectorize);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tl.cast_with_rounding")
-      .set_attr(tirx::op_attr::kVectorizeCall,
-                tirx::FVectorizeCall(VectorizeRoundedCast));
+      .set_attr(tirx_passes::kVectorizeCall,
+                tirx_passes::FVectorizeCall(VectorizeRoundedCast));
   OpDef(atomic_add_elem_op()->name)
-      .set_attr(tirx::op_attr::kVectorizeCall,
-                tirx::FVectorizeCall(VectorizeAtomicAdd));
+      .set_attr(tirx_passes::kVectorizeCall,
+                tirx_passes::FVectorizeCall(VectorizeAtomicAdd));
   OpDef(ptx_cp_async()->name)
-      .set_attr(tirx::op_attr::kVectorizeCall,
-                tirx::FVectorizeCall(VectorizeAsyncCopy));
+      .set_attr(tirx_passes::kVectorizeCall,
+                tirx_passes::FVectorizeCall(VectorizeAsyncCopy));
   ffi::reflection::GlobalDef().def(
       "tl.transform.VectorizeLoop",
       [](bool enable) { return VectorizeLoop(enable); });

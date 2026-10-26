@@ -24,7 +24,7 @@ def tensor_parameter_map(function):
 
 def tensor_strides(tensor):
     """Read a strided tensor contract without inventing strides for swizzled layouts."""
-    from tvm_tirx import sym
+    from tilelang._compat import sym
 
     layout = tensor.ty.layout
     if not isinstance(layout, TileLayout) or layout.replica or len(layout.shard) != len(tensor.shape):

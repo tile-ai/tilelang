@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -59,7 +62,7 @@ namespace {
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
 bool GuardExprEqual(const PrimExpr &a, const PrimExpr &b) {
-  return a.same_as(b) || ffi::StructuralEqual()(a, b);
+  return a.same_as(b) || tl::StructuralEqual()(a, b);
 }
 
 PrimExpr DisjoinGuards(const PrimExpr &a, const PrimExpr &b,
@@ -70,10 +73,10 @@ PrimExpr DisjoinGuards(const PrimExpr &a, const PrimExpr &b,
     return a;
 
   auto implies = [&](const PrimExpr &premise, const PrimExpr &conclusion) {
-    With<sym::ConstraintContext> constraints(analyzer, premise);
-    return analyzer->CanProve(conclusion);
+    With<tl::arith::ConstraintContext> constraints(analyzer, premise);
+    return tl::arith::CanProve(analyzer, conclusion);
   };
-  if (analyzer->CanProveEqual(a, b) || implies(b, a))
+  if (tl::arith::CanProveEqual(analyzer, a, b) || implies(b, a))
     return a;
   if (implies(a, b))
     return b;
@@ -1055,9 +1058,9 @@ void AnnotateStorageEpochs(
           continue;
         }
         if (GuardExprEqual(representative.expression, epoch.active_guard) ||
-            domain_analyzer->CanProve(representative.expression ==
-                                          epoch.active_guard,
-                                      sym::ProofStrength::kSymbolicBound)) {
+            tl::arith::CanProve(domain_analyzer,
+                                representative.expression == epoch.active_guard,
+                                sym::ProofStrength::kSymbolicBound)) {
           representative_index = i;
           break;
         }
@@ -1169,7 +1172,7 @@ void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
       PrimExpr zero = IntImm::Int32(0);
       PrimExpr value = TensorLoad(protocol.counter, {zero});
       Stmt advance = TensorStore(protocol.counter, {zero},
-                                 value + MakeConst(value.ty(), 1));
+                                 value + tl::MakeConst(value.ty(), 1));
       advance = WrapWithGuard(std::move(advance), active_guard);
       advances[owner.loop][anchor].push_back(
           MakeCounterTask(advance, anchor->GetStage()));

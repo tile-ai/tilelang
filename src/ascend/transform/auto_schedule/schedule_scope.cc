@@ -1,4 +1,5 @@
 #include "schedule_scope.h"
+#include "compat/metadata.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/op.h>
@@ -26,7 +27,7 @@ void ValidateScheduleScope(const RegionStmtNode *region) {
         << "Scheduled yields must be lexical variable definitions";
     auto type =
         remapper->Mutate(values[index]->ty).ValueOrUnchanged(values[index]->ty);
-    TVM_FFI_CHECK(ffi::StructuralEqual()(type, region->result_vars[index]->ty),
+    TVM_FFI_CHECK(tl::StructuralEqual()(type, region->result_vars[index]->ty),
                   TypeError)
         << "Scheduled result and yield types must match";
   }

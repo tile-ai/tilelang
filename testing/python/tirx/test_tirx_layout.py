@@ -3,7 +3,8 @@ import sys
 
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, sym
+from tvm_tirx import sym
+from tilelang._compat import ir
 
 from tilelang._compat.tensor import TensorView
 
@@ -29,11 +30,9 @@ def test_layout_normalizes_constant_extents(native_layouts, kind):
 
 
 @pytest.mark.parametrize("kind", ["layout", "fragment", "partial", "major_k", "major_mn", "l0c", "sf"])
-def test_native_layout_script_preserves_type_and_mapping(native_layouts, kind, capfd):
+def test_tilelang_layout_script_preserves_type_and_mapping(native_layouts, kind, capfd):
     import tilelang
     from tvm_tirx.script import tirx as script
-    from tvm_tirx.script.printer import PrinterConfig
-    from tvm_tirx.script.printer.scriptable import _script
 
     if kind == "layout":
         layout = native_layouts.Layout([4, 8], lambda row, column: row * 8 + column)
@@ -45,14 +44,14 @@ def test_native_layout_script_preserves_type_and_mapping(native_layouts, kind, c
         tensor = TensorView.create("tensor", [32, 64], "float16", scope="shared.l1").tensor
         layout = getattr(native_layouts, "make_ascend_" + kind + "_layout")(tensor)
     capfd.readouterr()
-    source = _script(layout, PrinterConfig())
+    source = ir.script(layout)
     assert "printer has no Doc hook" not in capfd.readouterr().err
-    restored = eval(source, {"tilelang": tilelang, "T": script, "I": ir})
+    restored = eval(source, {"tilelang": tilelang, "T": script, "I": ir, "tlir": ir})
     assert type(restored) is type(layout)
     ir.assert_structural_equal(restored, layout)
 
 
-def test_native_layout_script_keeps_external_symbolic_identity(native_layouts):
+def test_tilelang_layout_script_keeps_external_symbolic_identity(native_layouts):
     import tilelang
     from tvm_tirx import tirx
     from tvm_tirx.script import from_source
@@ -61,7 +60,7 @@ def test_native_layout_script_keeps_external_symbolic_identity(native_layouts):
     extent = ir.Var("extent", "int32")
     layout = native_layouts.Layout([4, extent], lambda row, column: row * extent + column)
     function = tirx.Function([extent], ir.Evaluate(0), ret_type=ir.TupleType([])).with_attr("test_layout", layout)
-    source = function.script()
+    source = ir.script(function)
     restored = from_source(source, extra_vars={"tilelang": tilelang, "T": script})
     ir.assert_structural_equal(restored, function)
 

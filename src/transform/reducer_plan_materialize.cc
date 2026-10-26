@@ -1,4 +1,7 @@
 #include "common/reducer.h"
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 
 #include "backend/common/op/reduce_layout.h"
 #include "compat/visit.h"
@@ -7,6 +10,7 @@
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/parallel.h"
+#include "transform/common/loop_aware_visitor.h"
 
 #include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor_with_analyzer.h>
@@ -54,7 +58,7 @@ struct DestinationUse {
   std::vector<TensorVar> consumers;
 };
 
-class DestinationUses : public StmtExprVisitor {
+class DestinationUses : public tvm::tl::StmtExprVisitor {
 public:
   std::unordered_map<const VarNode *, DestinationUse> uses;
 
@@ -107,11 +111,11 @@ private:
       ++uses[ReducerRegionTensor(node->args[1]).get()].finalized;
       return std::nullopt;
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
-class EpochCollector : public StmtExprVisitorWithAnalyzer {
+class EpochCollector : public LoopAwareVisitor {
 public:
   PlanMap plans;
   LayoutMap layouts;
@@ -142,12 +146,12 @@ private:
       for (size_t serial = loops_.size(); serial > inner; --serial) {
         const ForNode *candidate = loops_[serial - 1];
         auto step = GetConstInt(candidate->step);
-        auto extent =
-            GetConstInt(analyzer_->Simplify(candidate->end - candidate->begin));
+        auto extent = GetConstInt(
+            tl::arith::Simplify(analyzer_, candidate->end - candidate->begin));
         if (candidate->kind == ForKind::kDefault && step && *step == 1 &&
             extent && *extent >= 2 && *extent % 2 == 0) {
           return FloorMod(candidate->var - candidate->begin,
-                          MakeConst(candidate->var.ty(), 2));
+                          tl::MakeConst(candidate->var.ty(), 2));
         }
       }
       ReducerUpdateSiteHint site{layout, variables, indices, value};
@@ -171,7 +175,8 @@ private:
       }
       int64_t run = *extent / multiplicity;
       if (*extent % multiplicity == 0 && run >= 2 && run % 2 == 0)
-        return FloorMod(variables.back(), MakeConst(variables.back().ty(), 2));
+        return FloorMod(variables.back(),
+                        tl::MakeConst(variables.back().ty(), 2));
       return std::nullopt;
     }
     return std::nullopt;
@@ -179,7 +184,7 @@ private:
 
   Optional<VisitInterrupt> Visit_(const ForNode *node) final {
     loops_.push_back(node);
-    auto result = StmtExprVisitorWithAnalyzer::Visit_(node);
+    auto result = LoopAwareVisitor::Visit_(node);
     loops_.pop_back();
     return result;
   }
@@ -197,7 +202,7 @@ private:
       plans.emplace(tensor->get(),
                     ReducerPlan(*tensor, ParseReducerV2OpType(*operation)));
     }
-    return StmtExprVisitorWithAnalyzer::Visit_(node);
+    return LoopAwareVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const RegionStmtNode *node) final {
@@ -206,7 +211,7 @@ private:
         node->args[0].as_or_throw<StringImm>()->value == "threadIdx.x") {
       thread_ = node->body_params[0].as_or_throw<PrimVar>();
     }
-    auto result = StmtExprVisitorWithAnalyzer::Visit_(node);
+    auto result = LoopAwareVisitor::Visit_(node);
     thread_ = previous;
     return result;
   }
@@ -227,7 +232,7 @@ private:
       ReducerPlan &plan = found->second;
       if (thread_) {
         plan.thread_type = thread_.value().ty();
-        auto bound = analyzer_->const_int_bound(*thread_);
+        auto bound = tl::arith::ConstIntBoundOf(analyzer_, *thread_);
         TVM_FFI_CHECK(bound->min_value >= 0 && bound->max_value < 1024,
                       ValueError)
             << "Reducer participant bounds must be statically known";
@@ -258,14 +263,14 @@ private:
                              ? PackingLane(plan, update.indices, update.value)
                              : std::nullopt;
     }
-    return StmtExprVisitorWithAnalyzer::Visit_(node);
+    return LoopAwareVisitor::Visit_(node);
   }
 
   Optional<PrimVar> thread_;
   std::vector<const ForNode *> loops_;
 };
 
-class ReducerMaterializer : public StmtExprMutator {
+class ReducerMaterializer : public tvm::tl::StmtExprMutator {
 public:
   ReducerMaterializer(PlanMap plans, LayoutMap layouts,
                       const DestinationUses &uses)
@@ -290,9 +295,9 @@ public:
         Array<PrimExpr> coordinates;
         for (size_t axis = 0; axis < plan.original.shape().size(); ++axis) {
           PrimVar coordinate = InputPlaceholder(axis);
-          analyzer->Bind(coordinate,
-                         Range::FromMinExtent(0, plan.original.shape()[axis]),
-                         true);
+          tl::arith::Bind(analyzer, coordinate,
+                          Range::FromMinExtent(0, plan.original.shape()[axis]),
+                          true);
           coordinates.push_back(coordinate);
         }
         if (!fragment ||
@@ -306,8 +311,8 @@ public:
               break;
             }
             for (size_t axis = 0; axis < tensor.shape().size(); ++axis) {
-              if (!analyzer->CanProveEqual(tensor.shape()[axis],
-                                           plan.layout->InputShape()[axis]))
+              if (!tl::arith::CanProveEqual(analyzer, tensor.shape()[axis],
+                                            plan.layout->InputShape()[axis]))
                 override = false;
             }
           }
@@ -334,12 +339,13 @@ public:
           slots *= *extent;
         }
         Range range = Range::FromMinExtent(
-            MakeConst(plan.thread_type, plan.thread_begin),
-            MakeConst(plan.thread_type, plan.participants));
-        plan.layout = PartialFragment::FullyReplicated(
-                          plan.original.shape(),
-                          MakeConst(plan.thread_type, plan.participants), range)
-                          .AsPostCollective();
+            tl::MakeConst(plan.thread_type, plan.thread_begin),
+            tl::MakeConst(plan.thread_type, plan.participants));
+        plan.layout =
+            PartialFragment::FullyReplicated(
+                plan.original.shape(),
+                tl::MakeConst(plan.thread_type, plan.participants), range)
+                .AsPostCollective();
         plan.steps.clear();
         if (plan.participants > 1)
           plan.steps.emplace_back(plan.participants, 1);
@@ -350,7 +356,7 @@ public:
                 tensor,
                 PartialFragment::FullyReplicated(
                     tensor.shape(),
-                    MakeConst(plan.thread_type, plan.participants), range)
+                    tl::MakeConst(plan.thread_type, plan.participants), range)
                     .AsPostCollective());
           }
           plan.assigned_destination = true;
@@ -371,7 +377,7 @@ public:
         auto slot = plan.layout->Forward(coordinates)[0];
         PrimExpr lane = InputPlaceholder(coordinates.size());
         plan.packed_layout =
-            Fragment(packed_shape, {slot * MakeConst(slot.ty(), 2) + lane},
+            Fragment(packed_shape, {slot * tl::MakeConst(slot.ty(), 2) + lane},
                      plan.layout->ForwardThread(coordinates,
                                                 ReplicationPlaceholder()),
                      plan.layout->ReplicateExtent(), std::nullopt)
@@ -405,7 +411,7 @@ private:
         statements.push_back(AllocateReducerTensor(*plan.seed));
       return SeqStmt(statements);
     }
-    Stmt binding = StmtExprMutator::Mutate_(node, mode)
+    Stmt binding = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                        .ValueOrUnchanged(GetRef<Stmt>(node));
     if (auto tensor = node->var.as<TensorVar>()) {
       if (auto layout = extra_layouts_.Get(*tensor)) {
@@ -426,9 +432,9 @@ private:
     for (int axis = static_cast<int>(indices.size()) - 1; axis >= 0; --axis) {
       PrimType index_type = indices[axis].ty();
       result =
-          For(indices[axis].as_or_throw<PrimVar>(), MakeConst(index_type, 0),
-              destination.shape()[axis], MakeConst(index_type, 1),
-              ForKind::kDefault, SeqStmt(result));
+          For(indices[axis].as_or_throw<PrimVar>(),
+              tl::MakeConst(index_type, 0), destination.shape()[axis],
+              tl::MakeConst(index_type, 1), ForKind::kDefault, SeqStmt(result));
     }
     return result;
   }
@@ -451,10 +457,10 @@ private:
       Map<String, Any> annotations;
       if (axis == 0)
         annotations.Set(attr::kParallelLoopLayout, plan.layout);
-      result =
-          For(indices[axis].as_or_throw<PrimVar>(), MakeConst(index_type, 0),
-              plan.original.shape()[axis], MakeConst(index_type, 1),
-              ForKind::kParallel, SeqStmt(result), annotations);
+      result = For(indices[axis].as_or_throw<PrimVar>(),
+                   tl::MakeConst(index_type, 0), plan.original.shape()[axis],
+                   tl::MakeConst(index_type, 1), ForKind::kParallel,
+                   SeqStmt(result), annotations);
     }
     return result;
   }
@@ -462,7 +468,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
     const auto *call = node->value.as<CallNode>();
     if (!call)
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     if (call->op.same_as(Op::Get("tl.layout_hint"))) {
       TensorVar tensor = call->args[0].as_or_throw<TensorVar>();
       if (plans_.count(tensor.get()))
@@ -542,7 +548,7 @@ private:
       }
       return SeqStmt(result);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   PlanMap plans_;

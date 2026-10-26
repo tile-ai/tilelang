@@ -7,6 +7,7 @@
 #include "builtin.h"
 #include "builtin_registry.h"
 #include "compat/expr.h"
+#include "op/prim.h"
 #include "support/check.h"
 #include <tvm/tirx/op/abi.h>
 
@@ -39,15 +40,15 @@ PrimExpr LowerClamp(PrimExpr expression) {
     PrimExpr result = min(max(value, lower), upper);
     if (type.bits() < 16 && !type.MatchesCode(kDLInt, kDLUInt, kDLBool)) {
       PrimType compute_type = PrimType::Float(32);
-      result =
-          cast(min(max(cast(value, compute_type), cast(lower, compute_type)),
-                   cast(upper, compute_type)),
-               value.ty());
+      result = tl::CastValue(min(max(tl::CastValue(value, compute_type),
+                                     tl::CastValue(lower, compute_type)),
+                                 tl::CastValue(upper, compute_type)),
+                             value.ty());
     }
     for (const PrimExpr &operand : {upper, lower, value}) {
       PrimExpr check = type.MatchesElementType(kDLFloat, 64)
                            ? operand
-                           : cast(operand, PrimType::Float(32));
+                           : tl::CastValue(operand, PrimType::Float(32));
       result = Select(isnan(check), operand, result);
     }
     results.push_back(result);
@@ -99,12 +100,12 @@ PrimExpr LowerRoundTiesAwayFromZero(PrimExpr expression) {
   PrimType compute_type =
       type.bits() < 16 ? PrimType::Float(32, type.lanes()) : type;
   PrimExpr value =
-      prim::cast(call->args[0].as_or_throw<PrimExpr>(), compute_type);
+      tl::CastValue(call->args[0].as_or_throw<PrimExpr>(), compute_type);
   PrimExpr result = Call(compute_type, tirx::call_pure_extern_op(),
                          {StringImm("tl::RoundTiesAwayFromZero"), value},
                          std::nullopt, {}, call->loc)
                         .as_or_throw<PrimExpr>();
-  return prim::cast(result, type);
+  return tl::CastValue(result, type);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

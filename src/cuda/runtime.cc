@@ -10,6 +10,7 @@
 
 #include "cuda/stubs/cuda.h"
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <sstream>
 #include <vector>
 
@@ -17,6 +18,17 @@ namespace tvm {
 namespace tl {
 
 using namespace ffi;
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  reflection::GlobalDef().def("tl.runtime.GetCUDADeviceIndex", []() {
+    int device_index = 0;
+    cudaError_t status = cudaGetDevice(&device_index);
+    TVM_FFI_CHECK(status == cudaSuccess, RuntimeError)
+        << "Cannot query the current CUDA device: "
+        << cudaGetErrorString(status);
+    return device_index;
+  });
+}
 
 #if 1
 // Thread-local storage for restoring the L2 persisting cache limit

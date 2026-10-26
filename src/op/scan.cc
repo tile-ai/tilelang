@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/scan.cc
  * \brief Implementation of inclusive scan operators.
@@ -79,20 +80,24 @@ void InitScanOpNode(ScanOpNode *node, const Array<Expr> &args,
       << op_name << " requires matching source and destination ranks";
   sym::Analyzer analyzer;
   for (size_t axis = 0; axis < node->srcRegion_->region.size(); ++axis) {
-    TVM_FFI_CHECK(!analyzer->CanProve(node->srcRegion_->region[axis]->extent !=
-                                      node->dstRegion_->region[axis]->extent),
+    TVM_FFI_CHECK(!tl::arith::CanProve(
+                      analyzer, node->srcRegion_->region[axis]->extent !=
+                                    node->dstRegion_->region[axis]->extent),
                   ValueError)
         << op_name << " requires matching source and destination extents";
   }
   for (const TensorRegion &region : {node->srcRegion_, node->dstRegion_}) {
     TensorVar tensor = region->source.as_or_throw<TensorVar>();
     for (size_t axis = 0; axis < region->region.size(); ++axis) {
-      TVM_FFI_CHECK(!analyzer->CanProve(region->region[axis]->begin < 0) &&
-                        !analyzer->CanProve(region->region[axis]->extent < 0) &&
-                        !analyzer->CanProve(region->region[axis]->begin +
-                                                region->region[axis]->extent >
-                                            tensor.shape()[axis]),
-                    ValueError)
+      TVM_FFI_CHECK(
+          !tl::arith::CanProve(analyzer, region->region[axis]->begin < 0) &&
+              !tl::arith::CanProve(analyzer,
+                                   region->region[axis]->extent < 0) &&
+              !tl::arith::CanProve(analyzer,
+                                   region->region[axis]->begin +
+                                           region->region[axis]->extent >
+                                       tensor.shape()[axis]),
+          ValueError)
           << op_name << " region must lie within its tensor";
     }
   }

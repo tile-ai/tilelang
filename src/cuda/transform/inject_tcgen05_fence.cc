@@ -1,6 +1,8 @@
 #include "backend/common/target_utils.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
+#include "op/gpu.h"
 
 #include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/transform.h>
@@ -23,8 +25,7 @@ bool IsAfter(const CallNode *call) {
 }
 
 bool IsSharedSync(const CallNode *call) {
-  if (!call || !call->op.same_as(tirx::gpu_storage_sync_op()) ||
-      call->args.empty())
+  if (!call || !tl::IsStorageSyncOp(call->op) || call->args.empty())
     return false;
   const auto *scope = call->args[0].as<StringImmNode>();
   return scope && (scope->value == "shared" || scope->value == "shared.dyn" ||
@@ -90,11 +91,11 @@ Stmt Fence(bool before, const Location &location) {
       location);
 }
 
-class FenceInjector : public tirx::StmtExprMutator {
+class FenceInjector : public tvm::tl::StmtExprMutator {
 private:
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
     SeqStmt original = GetRef<SeqStmt>(node);
-    SeqStmt visited = StmtExprMutator::Mutate_(node, mode)
+    SeqStmt visited = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(original)
                           .as_or_throw<SeqStmt>();
     Array<Stmt> result;

@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 from tvm_tirx.target import Target
 
@@ -20,7 +21,7 @@ def lower(body, parameters=(), attributes=None):
     for name, value in (attributes or {}).items():
         function = function.with_attr(name, value)
     module = tvm_ffi.get_global_func("tl.transform.ThreadSync")("shared")(ir.IRModule({"main": function}))
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -29,7 +30,9 @@ def barriers(module):
     result = []
     stmt_functor.post_order_visit(
         module,
-        lambda node: result.append(node) if isinstance(node, ir.Call) and node.op.name == "tirx.gpu_storage_sync" else None,
+        lambda node: result.append(node)
+        if isinstance(node, ir.Call) and node.op.name in ("tirx.gpu_storage_sync", "tl.gpu_storage_sync")
+        else None,
     )
     return result
 
@@ -58,7 +61,7 @@ def test_concurrent_ws_roles_do_not_get_a_barrier_between_producer_and_consumer(
     sync = ir.Evaluate(ir.Call("tirx.gpu_storage_sync", ["shared"], ty="void"))
     consumer = ir.If(thread < 32, [wait, output.store(thread, shared.load(thread ^ 1))], None)
     producer = ir.If(thread >= 32, [shared.store(thread - 32, thread), sync, arrive], None)
-    concurrent = ir.RegionStmt("tirx.scope", [], [], ir.DictAttrs({"tl.ws_concurrent": True}), [consumer, producer])
+    concurrent = ir.RegionStmt("tl.scope", [], [], ir.DictAttrs({"tl.ws_concurrent": True}), [consumer, producer])
     module = lower(launch(thread, [shared.allocate(), completion.allocate(), concurrent], extent=64), [output.tensor])
     groups = []
     stmt_functor.post_order_visit(
@@ -306,7 +309,7 @@ def test_partial_async_wait_stays_inside_its_warp_specialized_role():
     wait = ir.Evaluate(ir.Call("tirx.ptx.cp_async_wait_group", [0, ir.StringImm("async"), ir.StringImm("wait_group"), ir.StringImm("")]))
     worker = ir.If(thread < 128, ir.Evaluate(0), None)
     loader = ir.If(prim.And(thread >= 128, thread < 256), ir.If(thread < 168, wait, None), None)
-    concurrent = ir.RegionStmt("tirx.scope", [], [], {"tl.ws_concurrent": True}, [worker, loader])
+    concurrent = ir.RegionStmt("tl.scope", [], [], {"tl.ws_concurrent": True}, [worker, loader])
     module = lower(launch(thread, concurrent, extent=256))
     groups = []
     stmt_functor.post_order_visit(
@@ -336,7 +339,7 @@ def test_async_wait_is_immediately_followed_by_visibility_barrier():
     assert len(barriers(module)) == 1
     body = module["main"].body.seq[0].body.seq
     assert body[0].value.op.name == "tirx.ptx.cp_async_wait_group"
-    assert body[1].value.op.name == "tirx.gpu_storage_sync"
+    assert body[1].value.op.name == "tl.gpu_storage_sync"
 
 
 def test_thread_divergent_loop_with_cross_thread_access_is_rejected():
@@ -355,7 +358,7 @@ def test_thread_divergent_loop_with_cross_thread_access_is_rejected():
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_cross_thread_loop_execution(partial):
+def test_cross_thread_loop_execution(partial, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
@@ -379,7 +382,7 @@ def test_cross_thread_loop_execution(partial):
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     actual = runtime.tensor(np.full((7, 128), -1, dtype="int32"), device=device)
     executable(actual)
     expected = np.arange(7, dtype="int32")[:, None] * 128 + (np.arange(128, dtype="int32") ^ 1)
@@ -388,7 +391,7 @@ def test_cross_thread_loop_execution(partial):
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_in_place_cross_thread_exchange_snapshots_loads_before_storing():
+def test_in_place_cross_thread_exchange_snapshots_loads_before_storing(*, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
@@ -411,7 +414,7 @@ def test_in_place_cross_thread_exchange_snapshots_loads_before_storing():
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     actual = runtime.empty((128,), "int32", device=device)
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(128) ^ 1)
@@ -428,11 +431,30 @@ def test_explicit_block_sync_in_a_role_becomes_named_and_is_idempotent():
     ir.assert_structural_equal(module, repeated)
 
 
+@pytest.mark.parametrize("operation", ["tirx.gpu_storage_sync", "tl.gpu_storage_sync"])
+@pytest.mark.parametrize("guarded", [False, True])
+def test_cluster_sync_orders_the_block_without_becoming_block_sync(operation, guarded):
+    shared = TensorView.create("shared", [128], "int32", scope="shared")
+    output = TensorView.create("output", [128], "int32")
+    thread = ir.Var("thread", "int32")
+    enabled = ir.Var("enabled", "bool")
+    synchronization = ir.Evaluate(ir.Call(operation, [ir.StringImm("cluster")]))
+    body = [shared.store(thread, thread), synchronization, output.store(thread, shared.load(thread ^ 1))]
+    if guarded:
+        body = [ir.If(prim.And(thread < 128, enabled), body, None)]
+    module = lower(launch(thread, [shared.allocate(), *body]), [output.tensor, enabled])
+    calls = barriers(module)
+    assert len(calls) == 1
+    assert calls[0].op.name == operation
+    assert str(calls[0].args[0].value) == "cluster"
+    ir.assert_structural_equal(module, tvm_ffi.get_global_func("tl.transform.ThreadSync")("shared")(module))
+
+
 def test_partial_explicit_barrier_does_not_order_the_entire_block():
     shared = TensorView.create("shared", [128], "int32", scope="shared")
     output = TensorView.create("output", [128], "int32")
     thread = ir.Var("thread", "int32")
-    synchronization = ir.Evaluate(ir.Call("tirx.gpu_storage_sync", [ir.StringImm("shared"), 3, 64]))
+    synchronization = ir.Evaluate(ir.Call("tl.gpu_storage_sync", [ir.StringImm("shared"), 3, 64]))
     module = lower(
         launch(thread, [shared.allocate(), shared.store(thread, thread), synchronization, output.store(thread, shared.load(thread ^ 1))]),
         [output.tensor],
@@ -469,7 +491,7 @@ def test_incomplete_warp_mask_does_not_hide_memory_dependencies():
     shared = TensorView.create("shared", [8], "int32", scope="shared")
     output = TensorView.create("output", [8], "int32")
     thread = ir.Var("thread", "int32")
-    synchronization = ir.Evaluate(ir.Call("tirx.gpu_storage_sync", [ir.StringImm("warp"), ir.const(3, "uint32")]))
+    synchronization = ir.Evaluate(ir.Call("tl.gpu_storage_sync", [ir.StringImm("warp"), ir.const(3, "uint32")]))
     body = [shared.allocate(), shared.store(thread, thread), synchronization, output.store(thread, shared.load(thread ^ 1))]
     calls = barriers(lower(launch(thread, body, 8), [output.tensor]))
     assert [str(call.args[0].value) for call in calls] == ["warp", "shared"]

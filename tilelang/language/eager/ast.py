@@ -99,6 +99,18 @@ _T = TypeVar("_T")
 
 
 def eval_op(op: Operator, left: Any, right: Any) -> Any:
+    if op in ("LShift", "RShift", "BitOr", "BitXor", "BitAnd"):
+        from tilelang._compat import ir, tirx
+
+        if ir.is_prim_expr(left) or ir.is_prim_expr(right):
+            operation = {
+                "LShift": tirx.left_shift,
+                "RShift": tirx.right_shift,
+                "BitOr": tirx.bitwise_or,
+                "BitXor": tirx.bitwise_xor,
+                "BitAnd": tirx.bitwise_and,
+            }[op]
+            return operation(left, right)
     if op == "Add":
         return left + right
     if op == "Sub":
@@ -129,6 +141,12 @@ def eval_op(op: Operator, left: Any, right: Any) -> Any:
 
 
 def eval_aug_assign(op: Operator, left: Any, sl: slice, right: Any) -> Any:
+    if op in ("LShift", "RShift", "BitOr", "BitXor", "BitAnd"):
+        from tilelang._compat import ir
+
+        if ir.is_prim_expr(left[sl]):
+            left[sl] = eval_op(op, left[sl], right)
+            return left
     if op == "Add":
         left[sl] += right
         return left

@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file tl/ascend/transform/lower_tile_op.cc
  * \brief Ascend fork of LowerTileOp (VF region scopes, buffer-version remap).
@@ -38,7 +41,7 @@ Expr ApplyL0AccessPitch(const Call &pointer, sym::Analyzer analyzer) {
   size_t rank = shape.size();
   PrimType index_type = PrimType::Int(64);
   auto index = [&](const PrimExpr &expression) {
-    return prim::cast(expression, index_type);
+    return tl::CastValue(expression, index_type);
   };
   PrimExpr extra_elements = index(region->region[rank - 4]->begin) *
                             (index(pitch.value()) - index(shape[rank - 3])) *
@@ -46,22 +49,23 @@ Expr ApplyL0AccessPitch(const Call &pointer, sym::Analyzer analyzer) {
   PrimExpr extra_bits =
       extra_elements *
       IntImm(index_type, tensor.dtype().bits() * tensor.dtype().lanes());
-  TVM_FFI_CHECK(analyzer->CanProveEqual(
-                    prim::FloorMod(extra_bits, IntImm(index_type, 8)), 0),
-                ValueError)
+  TVM_FFI_CHECK(
+      tl::arith::CanProveEqual(
+          analyzer, prim::FloorMod(extra_bits, IntImm(index_type, 8)), 0),
+      ValueError)
       << "L0 pitch displacement must be byte aligned";
   attributes.CopyOnWrite()->dict.erase(attr::kL0AccessPitch);
   Call base(pointer->ty, pointer->op, pointer->args, attributes,
             pointer->ty_args, pointer->loc);
-  auto offset =
-      analyzer->Simplify(prim::FloorDiv(extra_bits, IntImm(index_type, 8)));
+  auto offset = tl::arith::Simplify(
+      analyzer, prim::FloorDiv(extra_bits, IntImm(index_type, 8)));
   if (prim::IsZero(offset))
     return base;
   return Call(pointer->ty, tirx::ptr_byte_offset_op(), {base, offset},
               std::nullopt, {}, pointer->loc);
 }
 
-class ScaleHandleCleanup : public tirx::StmtExprMutator {
+class ScaleHandleCleanup : public tvm::tl::StmtExprMutator {
 public:
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
@@ -74,12 +78,12 @@ public:
           << "L0 SF handles must be declared by an allocation binding";
       return SeqStmt({});
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
-    auto region = StmtExprMutator::Mutate_(node, mode)
+    auto region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                       .as_or_throw<RegionStmt>();
     auto attributes = region->attrs;

@@ -6,6 +6,7 @@
 #include "op/atomic_add.h"
 #include "backend/common/op/atomic_reduce.h"
 #include "cuda/stubs/cuda.h"
+#include "op/prim.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
@@ -246,9 +247,9 @@ struct AtomicAdd {
     seq.push_back(tma_reduce);
     seq.push_back(
         Evaluate(Call(TupleType(Array<Type>{}), tma_store_arrive(), {})));
-    seq.push_back(Evaluate(Call(
-        TupleType(Array<Type>{}), tma_store_wait(),
-        {IntImm(PrimType::Int(32), 0), MakeConst(PrimType::Bool(), true)})));
+    seq.push_back(Evaluate(Call(TupleType(Array<Type>{}), tma_store_wait(),
+                                {IntImm(PrimType::Int(32), 0),
+                                 tl::MakeConst(PrimType::Bool(), true)})));
     return If(EQ(lower_args.thread_index, lower_args.thread_bounds->begin),
               SeqStmt(std::move(seq)));
   }

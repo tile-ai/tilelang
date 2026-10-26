@@ -1,5 +1,11 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
+#include "transform/tirx_passes.h"
+
 #include "codegen_cuda.h"
 
+#include "backend/common/codegen/attr.h"
 #include "backend/common/codegen/native_codegen.h"
 #include "compat/expr.h"
 #include "ptx.h"
@@ -17,7 +23,7 @@
 
 namespace tvm::codegen {
 namespace {
-class ThreadblockSwizzleLowerer : public tirx::StmtExprMutator {
+class ThreadblockSwizzleLowerer : public tvm::tl::StmtExprMutator {
 public:
   explicit ThreadblockSwizzleLowerer(const DictAttrs &attributes) {
     SetCluster(attributes);
@@ -72,16 +78,16 @@ private:
       TVM_FFI_CHECK(blocks_[0] || blocks_[1], ValueError)
           << "Threadblock swizzle requires a CUDA block launch";
       bool column = name == "rasterization2DColumn";
-      PrimExpr block_x = prim::cast(
+      PrimExpr block_x = tl::CastValue(
           blocks_[0] ? PrimExpr(*blocks_[0]) : PrimExpr(0), PrimType::Int(64));
-      PrimExpr block_y = prim::cast(
+      PrimExpr block_y = tl::CastValue(
           blocks_[1] ? PrimExpr(*blocks_[1]) : PrimExpr(0), PrimType::Int(64));
       PrimExpr cluster_x = IntImm::Int64(cluster_[0]);
       PrimExpr cluster_y = IntImm::Int64(cluster_[1]);
-      PrimExpr columns =
-          prim::FloorDiv(prim::cast(extents_[0], PrimType::Int(64)), cluster_x);
-      PrimExpr rows =
-          prim::FloorDiv(prim::cast(extents_[1], PrimType::Int(64)), cluster_y);
+      PrimExpr columns = prim::FloorDiv(
+          tl::CastValue(extents_[0], PrimType::Int(64)), cluster_x);
+      PrimExpr rows = prim::FloorDiv(
+          tl::CastValue(extents_[1], PrimType::Int(64)), cluster_y);
       PrimExpr linear = prim::FloorDiv(block_x, cluster_x) +
                         prim::FloorDiv(block_y, cluster_y) * columns;
       PrimExpr width = IntImm::Int64(*panel);
@@ -108,7 +114,7 @@ private:
         PrimVar variable(axis == 0 ? "swizzled_block_x" : "swizzled_block_y",
                          blocks_[axis].value().ty());
         statements.push_back(
-            Bind(variable, prim::cast(coordinates[axis], variable.ty())));
+            Bind(variable, tl::CastValue(coordinates[axis], variable.ty())));
         replacements.Set(*blocks_[axis], variable);
       }
       Stmt body = tl::Substitute(node->body, replacements);
@@ -118,8 +124,8 @@ private:
       region.CopyOnWrite()->attrs = DictAttrs(attributes);
       region.CopyOnWrite()->body = SeqStmt(statements);
     }
-    Stmt result =
-        StmtExprMutator::Mutate_(region.get(), mode).ValueOrUnchanged(region);
+    Stmt result = tvm::tl::StmtExprMutator::Mutate_(region.get(), mode)
+                      .ValueOrUnchanged(region);
     for (size_t axis = 0; axis < 2; ++axis) {
       blocks_[axis] = saved_blocks[axis];
       extents_[axis] = saved_extents[axis];
@@ -129,7 +135,7 @@ private:
   }
 };
 
-class CudaTemplateLowerer : public tirx::StmtExprMutator {
+class CudaTemplateLowerer : public tvm::tl::StmtExprMutator {
 public:
   SeqStmt Lower(const SeqStmt &body) {
     SeqStmt result = Mutate(body).ValueOrUnchanged(body);
@@ -151,12 +157,12 @@ private:
           operation && operation->name == "tl.no_set_max_nreg")
         return SeqStmt({});
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   static PrimExpr LoadWord(const Expr &pointer, int bits) {
     if (auto scalar = pointer.as<PrimExpr>())
-      return prim::cast(scalar.value(), PrimType::UInt(bits));
+      return tl::CastValue(scalar.value(), PrimType::UInt(bits));
     auto pointer_type = pointer->ty.as_or_throw<PtrType>();
     TVM_FFI_CHECK(pointer_type->element_type == PrimType::UInt(bits), TypeError)
         << "Expected a uint" << bits << " storage pointer";
@@ -179,7 +185,7 @@ private:
 
   static PrimExpr TmemOffset(const Expr &pointer, const Expr &offset) {
     return LoadWord(pointer, 32) +
-           prim::cast(offset.as_or_throw<PrimExpr>(), PrimType::UInt(32));
+           tl::CastValue(offset.as_or_throw<PrimExpr>(), PrimType::UInt(32));
   }
 
   static Expr RegisterPointer(const Expr &pointer, const PrimExpr &offset,
@@ -200,8 +206,9 @@ private:
       register_type = PrimType::Float(32);
     }
     sym::Analyzer analyzer;
-    PrimExpr byte_offset = analyzer->Simplify(prim::FloorDiv(
-        offset * IntImm(offset.ty(), element_bits), IntImm(offset.ty(), 8)));
+    PrimExpr byte_offset = tl::arith::Simplify(
+        analyzer, prim::FloorDiv(offset * IntImm(offset.ty(), element_bits),
+                                 IntImm(offset.ty(), 8)));
     Expr advanced =
         Call(pointer->ty, tirx::ptr_byte_offset_op(), {pointer, byte_offset});
     return tirx::reinterpret(PtrType(register_type, pointer_type->scope),
@@ -210,7 +217,7 @@ private:
 
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
                                  ffi::InplaceMode mode) final {
-    Call call = StmtExprMutator::Mutate_(node, mode)
+    Call call = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(GetRef<Expr>(node))
                     .as_or_throw<Call>();
     auto operation = call->op.as<Op>();
@@ -253,7 +260,7 @@ private:
           LoadWord(call->args[15], 32),
           LoadWord(call->args[16], 32)};
       for (size_t index = 17; index < 21; ++index)
-        arguments.push_back(prim::cast(
+        arguments.push_back(tl::CastValue(
             call->args[index].as_or_throw<PrimExpr>(), PrimType::UInt(16)));
       return Call(PrimType::Void(), tirx::call_extern_op(), arguments,
                   call->attrs, {}, call->loc);
@@ -320,8 +327,10 @@ private:
                       : TmemOffset(call->args[1], call->args[2]),
           DescriptorOffset(call->args[3], call->args[4], true),
           TmemOffset(call->args[5], call->args[6]),
-          prim::cast(call->args[8].as_or_throw<PrimExpr>(), PrimType::UInt(32)),
-          prim::cast(call->args[7].as_or_throw<PrimExpr>(), PrimType::UInt(32)),
+          tl::CastValue(call->args[8].as_or_throw<PrimExpr>(),
+                        PrimType::UInt(32)),
+          tl::CastValue(call->args[7].as_or_throw<PrimExpr>(),
+                        PrimType::UInt(32)),
           call->args[9],
           call->args[10],
           call->args[11],
@@ -346,8 +355,10 @@ private:
           DescriptorOffset(call->args[1], call->args[2], true),
           DescriptorOffset(call->args[3], call->args[4], true),
           TmemOffset(call->args[5], call->args[6]),
-          prim::cast(call->args[8].as_or_throw<PrimExpr>(), PrimType::UInt(32)),
-          prim::cast(call->args[7].as_or_throw<PrimExpr>(), PrimType::UInt(32)),
+          tl::CastValue(call->args[8].as_or_throw<PrimExpr>(),
+                        PrimType::UInt(32)),
+          tl::CastValue(call->args[7].as_or_throw<PrimExpr>(),
+                        PrimType::UInt(32)),
           TmemOffset(call->args[9], call->args[10]),
           TmemOffset(call->args[11], call->args[12])};
       return Call(call->ty, tirx::call_extern_op(), arguments, call->attrs, {},
@@ -410,8 +421,8 @@ private:
         TVM_FFI_CHECK(value.ty().IsScalar() && value.ty().bits() == bits,
                       TypeError)
             << "Packing requires scalar " << bits << "-bit operands";
-        value = prim::cast(tirx::reinterpret(PrimType::UInt(bits), value),
-                           PrimType::UInt(32));
+        value = tl::CastValue(tirx::reinterpret(PrimType::UInt(bits), value),
+                              PrimType::UInt(32));
         packed = tvm::bitwise_or(packed, tvm::left_shift(value, index * bits));
       }
       return tirx::reinterpret(call->ty, packed);
@@ -539,7 +550,7 @@ ffi::Module BuildTileLangCUDA(IRModule module, Target target,
   }
   if (!source_only &&
       ffi::Function::GetGlobal("tilelang_callback_cuda_compile")) {
-    module = WithAttr(std::move(module), attr::kCompile,
+    module = WithAttr(std::move(module), tl::codegen_attr::kCompile,
                       ffi::String("tl.cuda.compile_source"));
   }
   for (const auto &[global, base] : module->functions) {
@@ -555,8 +566,8 @@ ffi::Module BuildTileLangCUDA(IRModule module, Target target,
       module.CopyOnWrite()->functions.Set(global, function);
     }
   }
-  module = tirx::transform::BindTarget(target)(std::move(module));
-  module = tirx::transform::LowerIntrin()(std::move(module));
+  module = tvm::tl::tirx_passes::BindTarget(target)(std::move(module));
+  module = tvm::tl::tirx_passes::LowerIntrin()(std::move(module));
   return tl::BuildNativeCodegen(std::move(module), std::move(target),
                                 "tilelang_callback_cuda_postproc", source_only);
 }

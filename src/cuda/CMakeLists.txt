@@ -184,8 +184,10 @@ link_directories(${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_DIR}/stubs)
 
 # Register stubs for linking and install
 if(TILELANG_USE_CUDA_STUBS)
-  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub)
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK cuda_stub cudart_stub)
   list(APPEND TILELANG_ACTIVE_BACKEND_STUB_TARGETS cuda_stub cudart_stub nvrtc_stub)
+else()
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK CUDA::cudart)
 endif()
 
 # Register additional RPATH for CUDA toolkit lib directory

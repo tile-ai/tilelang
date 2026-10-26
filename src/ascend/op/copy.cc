@@ -1,11 +1,13 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/ascend/op/copy.cc
  * \brief Ascend implementation for tl.copy lowering.
  */
 
-#include "op/copy.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
+#include "op/copy.h"
+#include "op/prim.h"
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
@@ -82,8 +84,8 @@ PrimExpr Float4StorageBytes(const PrimExpr &elements, PrimType dtype) {
   int element_bits = dtype.bits() * dtype.lanes();
   ICHECK(element_bits % 8 == 0 || 8 % element_bits == 0)
       << "FP4 element width must be byte-packable, got " << dtype;
-  return FloorDiv(elements * MakeConst(elements.ty(), element_bits),
-                  MakeConst(elements.ty(), 8));
+  return FloorDiv(elements * tl::MakeConst(elements.ty(), element_bits),
+                  tl::MakeConst(elements.ty(), 8));
 }
 
 PrimType GetBufferStorageDType(const TensorVar &tensor,
@@ -152,8 +154,8 @@ void CheckCompactL0Region(const TensorVar &buffer, const Array<Range> &ranges,
       << buffer->name << ", got ranges " << ranges;
   for (size_t i = ranges.size() - 2; i < ranges.size(); ++i) {
     const Range &range = ranges[i];
-    PrimExpr zero = MakeConst(range->begin.ty(), 0);
-    ICHECK(analyzer->CanProveEqual(range->begin, zero))
+    PrimExpr zero = tl::MakeConst(range->begin.ty(), 0);
+    ICHECK(tl::arith::CanProveEqual(analyzer, range->begin, zero))
         << description
         << " requires zero-origin trailing matrix dimensions; buffer "
         << buffer->name << " has range " << range << " on axis " << i
@@ -168,20 +170,21 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
   // extent. This includes both an empty dynamic tile and an out-of-range
   // fixed/singleton-axis index. Reconstruct one execution predicate here so
   // neither condition becomes control flow before AutoSchedule.
-  PrimExpr has_data = MakeConst(PrimType::Bool(), true);
+  PrimExpr has_data = tl::MakeConst(PrimType::Bool(), true);
   std::vector<PrimExpr> guarded_predicates;
   auto add_ranges = [&](const Array<Range> &ranges) {
     for (const Range &range : ranges) {
-      PrimExpr extent = analyzer->Simplify(range->extent);
-      PrimExpr zero = MakeConst(extent.ty(), 0);
-      PrimExpr predicate = analyzer->Simplify(extent > zero);
-      if (analyzer->CanProve(predicate, sym::ProofStrength::kSymbolicBound)) {
+      PrimExpr extent = tl::arith::Simplify(analyzer, range->extent);
+      PrimExpr zero = tl::MakeConst(extent.ty(), 0);
+      PrimExpr predicate = tl::arith::Simplify(analyzer, extent > zero);
+      if (tl::arith::CanProve(analyzer, predicate,
+                              sym::ProofStrength::kSymbolicBound)) {
         continue;
       }
 
       bool duplicate = false;
       for (const PrimExpr &guarded_predicate : guarded_predicates) {
-        if (analyzer->CanProveEqual(predicate, guarded_predicate)) {
+        if (tl::arith::CanProveEqual(analyzer, predicate, guarded_predicate)) {
           duplicate = true;
           break;
         }
@@ -191,12 +194,12 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
       }
 
       guarded_predicates.push_back(predicate);
-      has_data = analyzer->Simplify(has_data && predicate);
+      has_data = tl::arith::Simplify(analyzer, has_data && predicate);
     }
   };
   add_ranges(src_ranges);
   add_ranges(dst_ranges);
-  return analyzer->Simplify(has_data);
+  return tl::arith::Simplify(analyzer, has_data);
 }
 
 } // namespace
@@ -206,7 +209,7 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
                                    sym::Analyzer analyzer) {
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
-  if (analyzer->CanProve(!has_data))
+  if (tl::arith::CanProve(analyzer, !has_data))
     return {ascend::NativeTensorRegion(op.src, op.src_range),
             ascend::NativeTensorRegion(op.dst, op.dst_range),
             op.l0_pitch.value_or(PrimExpr(1))};
@@ -238,18 +241,21 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
   PrimExpr written_outer0 = k_step;
   PrimExpr written_outer1 = m_step;
   {
-    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
-    TVM_FFI_CHECK(analyzer->CanProve(dst_stride > 0,
-                                     sym::ProofStrength::kSymbolicBound) &&
-                      analyzer->CanProve(dst_stride <= dst_info.outer1,
-                                         sym::ProofStrength::kSymbolicBound),
+    With<tl::arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    TVM_FFI_CHECK(tl::arith::CanProve(analyzer, dst_stride > 0,
+                                      sym::ProofStrength::kSymbolicBound) &&
+                      tl::arith::CanProve(analyzer,
+                                          dst_stride <= dst_info.outer1,
+                                          sym::ProofStrength::kSymbolicBound),
                   ValueError)
         << "Ascend L1->L0 l0_pitch must be positive and fit destination "
            "capacity";
     auto require_multiple = [&](const PrimExpr &value, int multiple,
                                 const char *parameter) {
-      TVM_FFI_CHECK(analyzer->CanProveEqual(
-                        FloorMod(value, MakeConst(value.ty(), multiple)), 0),
+      TVM_FFI_CHECK(tl::arith::CanProveEqual(
+                        analyzer,
+                        FloorMod(value, tl::MakeConst(value.ty(), multiple)),
+                        0),
                     ValueError)
           << "Ascend L1->L0 copy of " << op.src->name << " (" << op.src.dtype()
           << ") requires " << parameter << " to be divisible by " << multiple
@@ -259,7 +265,8 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
     };
     bool nonzero_destination = false;
     for (size_t i = dst_range.size() - 2; i < dst_range.size(); ++i)
-      nonzero_destination |= !analyzer->CanProveEqual(dst_range[i]->begin, 0);
+      nonzero_destination |=
+          !tl::arith::CanProveEqual(analyzer, dst_range[i]->begin, 0);
     TVM_FFI_CHECK(!nonzero_destination || op.l0_pitch.has_value(), ValueError)
         << "Ascend partial L1->L0 copy with a nonzero destination origin "
            "requires an explicit l0_pitch";
@@ -286,22 +293,24 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
                          source ? "source C0 extent" : "destination C0 extent");
       }
       for (size_t i = 0; i + 2 < ranges.size(); ++i) {
-        TVM_FFI_CHECK(
-            analyzer->CanProve(ranges[i]->begin >= 0) &&
-                analyzer->CanProve(ranges[i]->begin + ranges[i]->extent <=
-                                   buffer.shape()[i]),
-            ValueError)
+        TVM_FFI_CHECK(tl::arith::CanProve(analyzer, ranges[i]->begin >= 0) &&
+                          tl::arith::CanProve(
+                              analyzer, ranges[i]->begin + ranges[i]->extent <=
+                                            buffer.shape()[i]),
+                      ValueError)
             << "Ascend L1->L0 leading plane is outside buffer " << buffer->name;
       }
       TVM_FFI_CHECK(
-          analyzer->CanProve(region.outer0->begin >= 0) &&
-              analyzer->CanProve(region.outer1->begin >= 0) &&
-              analyzer->CanProve(region.outer0->begin + region.outer0->extent <=
-                                     info.outer0,
-                                 sym::ProofStrength::kSymbolicBound) &&
-              analyzer->CanProve(region.outer1->begin + region.outer1->extent <=
-                                     info.outer1,
-                                 sym::ProofStrength::kSymbolicBound),
+          tl::arith::CanProve(analyzer, region.outer0->begin >= 0) &&
+              tl::arith::CanProve(analyzer, region.outer1->begin >= 0) &&
+              tl::arith::CanProve(
+                  analyzer,
+                  region.outer0->begin + region.outer0->extent <= info.outer0,
+                  sym::ProofStrength::kSymbolicBound) &&
+              tl::arith::CanProve(
+                  analyzer,
+                  region.outer1->begin + region.outer1->extent <= info.outer1,
+                  sym::ProofStrength::kSymbolicBound),
           ValueError)
           << "Ascend L1->L0 " << (source ? "source" : "destination")
           << " region exceeds or cannot be proved within the physical "
@@ -321,33 +330,36 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
       written_outer0 = FloorDiv(m_step * 16, c0);
       written_outer1 = FloorDiv(k_step * c0, 16);
     }
-    TVM_FFI_CHECK(
-        analyzer->CanProve(written_outer0 <= dst_region.outer0->extent,
-                           sym::ProofStrength::kSymbolicBound) &&
-            analyzer->CanProve(written_outer1 <= dst_region.outer1->extent,
-                               sym::ProofStrength::kSymbolicBound),
-        ValueError)
+    TVM_FFI_CHECK(tl::arith::CanProve(
+                      analyzer, written_outer0 <= dst_region.outer0->extent,
+                      sym::ProofStrength::kSymbolicBound) &&
+                      tl::arith::CanProve(
+                          analyzer, written_outer1 <= dst_region.outer1->extent,
+                          sym::ProofStrength::kSymbolicBound),
+                  ValueError)
         << "Ascend L1->L0 copy writes " << written_outer0 << "x"
         << written_outer1 << " fractals, but destination region "
         << op.dst->name << " only covers " << dst_region.outer0->extent << "x"
         << dst_region.outer1->extent
         << ". Pad the allocation and copy region; use effective K in T.gemm.";
     TVM_FFI_CHECK(
-        analyzer->CanProve(dst_region.outer0->begin + written_outer0 <=
-                               dst_info.outer0,
-                           sym::ProofStrength::kSymbolicBound) &&
-            analyzer->CanProve(dst_region.outer1->begin + written_outer1 <=
-                                   dst_stride,
-                               sym::ProofStrength::kSymbolicBound),
+        tl::arith::CanProve(analyzer,
+                            dst_region.outer0->begin + written_outer0 <=
+                                dst_info.outer0,
+                            sym::ProofStrength::kSymbolicBound) &&
+            tl::arith::CanProve(analyzer,
+                                dst_region.outer1->begin + written_outer1 <=
+                                    dst_stride,
+                                sym::ProofStrength::kSymbolicBound),
         ValueError)
         << "Ascend L1->L0 copy exceeds the physical L0 allocation "
         << "or l0_pitch of " << op.dst->name;
     if (nonzero_destination) {
-      TVM_FFI_CHECK(
-          analyzer->CanProveEqual(written_outer0, dst_region.outer0->extent) &&
-              analyzer->CanProveEqual(written_outer1,
-                                      dst_region.outer1->extent),
-          ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProveEqual(analyzer, written_outer0,
+                                             dst_region.outer0->extent) &&
+                        tl::arith::CanProveEqual(analyzer, written_outer1,
+                                                 dst_region.outer1->extent),
+                    ValueError)
           << "Ascend partial L1->L0 copy requires matching physical source and "
              "destination extents";
     }
@@ -363,12 +375,12 @@ L0CopyRegions GetL1ToL0CopyRegions(const AscendCopyNode &op,
       bool c0_axis =
           axis == ranges.size() - 2 + (info.c0_axis == LogicalAxis::kCol);
       PrimExpr extent = c0_axis ? outer0 * info.c0 : outer1 * info.row_frac;
-      extent = analyzer->Simplify(extent);
+      extent = tl::arith::Simplify(analyzer, extent);
       // Keep the original empty-copy predicate even when one operand's
       // nonpositive extent would otherwise be replaced by a positive count.
-      if (!analyzer->CanProve(has_data))
-        extent = analyzer->Simplify(
-            Select(has_data, extent, MakeConst(extent.ty(), 0)));
+      if (!tl::arith::CanProve(analyzer, has_data))
+        extent = tl::arith::Simplify(
+            analyzer, Select(has_data, extent, tl::MakeConst(extent.ty(), 0)));
       ranges.Set(axis, Range::FromMinExtent(ranges[axis]->begin, extent));
     }
     return ascend::NativeTensorRegion(buffer, ranges);
@@ -384,7 +396,7 @@ TensorRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
                                      sym::Analyzer analyzer) {
   PrimExpr has_data =
       MakeCopyHasDataPredicate(op.src_range, op.dst_range, analyzer);
-  if (analyzer->CanProve(!has_data))
+  if (tl::arith::CanProve(analyzer, !has_data))
     return ascend::NativeTensorRegion(op.src, op.src_range);
   AscendFractalLayoutInfo info;
   Optional<Layout> layout = FindLayoutForBuffer(layouts, op.src);
@@ -395,26 +407,31 @@ TensorRegion GetL1ToL0SFSourceRegion(const AscendCopyNode &op,
   Array<Range> ranges = op.src_range;
   for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis) {
     PrimExpr alignment = axis + 1 == ranges.size() ? info.c0 : info.row_frac;
-    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
-    ICHECK(analyzer->CanProveEqual(floormod(ranges[axis]->begin, alignment), 0))
+    With<tl::arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    ICHECK(tl::arith::CanProveEqual(
+        analyzer, floormod(ranges[axis]->begin, alignment), 0))
         << "L0 SF source origin must align to 16 MN rows and a scale pair";
-    PrimExpr extent = analyzer->Simplify(
+    PrimExpr extent = tl::arith::Simplify(
+        analyzer,
         floordiv(ranges[axis]->extent + alignment - 1, alignment) * alignment);
     PrimExpr capacity =
         alignment * (axis + 1 == ranges.size() ? info.outer1 : info.outer0);
-    ICHECK(analyzer->CanProve(ranges[axis]->begin >= 0) &&
-           analyzer->CanProve(ranges[axis]->begin + extent <= capacity,
-                              sym::ProofStrength::kSymbolicBound))
+    ICHECK(tl::arith::CanProve(analyzer, ranges[axis]->begin >= 0) &&
+           tl::arith::CanProve(analyzer,
+                               ranges[axis]->begin + extent <= capacity,
+                               sym::ProofStrength::kSymbolicBound))
         << "L0 SF source region exceeds its physical allocation";
     ranges.Set(axis, Range::FromMinExtent(ranges[axis]->begin, extent));
   }
-  if (!analyzer->CanProve(has_data)) {
+  if (!tl::arith::CanProve(analyzer, has_data)) {
     for (size_t axis = ranges.size() - 2; axis < ranges.size(); ++axis)
-      ranges.Set(axis, Range::FromMinExtent(
-                           ranges[axis]->begin,
-                           analyzer->Simplify(Select(
-                               has_data, ranges[axis]->extent,
-                               MakeConst(ranges[axis]->extent.ty(), 0)))));
+      ranges.Set(axis,
+                 Range::FromMinExtent(
+                     ranges[axis]->begin,
+                     tl::arith::Simplify(
+                         analyzer,
+                         Select(has_data, ranges[axis]->extent,
+                                tl::MakeConst(ranges[axis]->extent.ty(), 0)))));
   }
   return ascend::NativeTensorRegion(op.src, ranges);
 }
@@ -423,7 +440,7 @@ namespace {
 
 Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                   sym::Analyzer analyzer, DMAPath dma_path) {
-  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
   int elem_bits = op.src.dtype().bits() * op.src.dtype().lanes();
 
   // AscendInsertOOBPadding has already clamped GM-facing regions while
@@ -443,9 +460,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   auto make_access_ptr = [&](const TensorVar &buf, PrimExpr offset,
                              PrimExpr extent, int rw_mask) -> Expr {
     PrimExpr bytes =
-        FloorDiv(offset * MakeConst(offset.ty(),
-                                    buf.dtype().bits() * buf.dtype().lanes()),
-                 MakeConst(offset.ty(), 8));
+        FloorDiv(offset * tl::MakeConst(offset.ty(), buf.dtype().bits() *
+                                                         buf.dtype().lanes()),
+                 tl::MakeConst(offset.ty(), 8));
     return Call(PtrType(buf.dtype(), buf.scope()), tirx::ptr_byte_offset_op(),
                 {buf.data(), bytes},
                 DictAttrs({{attr::kAccessExtent, extent},
@@ -530,9 +547,11 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // intrinsics support byte-granular bursts, so sub-32B rows are valid in the
     // multi-row path.
     bool plan_single_row =
-        analyzer->CanProveEqual(plan.n_rows, I(1)) ||
-        (analyzer->CanProveEqual(plan_src_stride_bytes, plan_row_bytes) &&
-         analyzer->CanProveEqual(plan_dst_stride_bytes, plan_row_bytes));
+        tl::arith::CanProveEqual(analyzer, plan.n_rows, I(1)) ||
+        (tl::arith::CanProveEqual(analyzer, plan_src_stride_bytes,
+                                  plan_row_bytes) &&
+         tl::arith::CanProveEqual(analyzer, plan_dst_stride_bytes,
+                                  plan_row_bytes));
 
     if (dma_path == DMAPath::kGMToUB) {
       if (do_pad) {
@@ -616,10 +635,11 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     bool geometry_transpose = op.transpose != 0;
     bool source_exceeds_destination =
         geometry_transpose
-            ? analyzer->CanProve(src_row.size > dst_inner.size) ||
-                  analyzer->CanProve(src_inner.size > dst_row.size)
-            : analyzer->CanProve(src_row.size > dst_row.size) ||
-                  analyzer->CanProve(src_inner.size > dst_inner.size);
+            ? tl::arith::CanProve(analyzer, src_row.size > dst_inner.size) ||
+                  tl::arith::CanProve(analyzer, src_inner.size > dst_row.size)
+            : tl::arith::CanProve(analyzer, src_row.size > dst_row.size) ||
+                  tl::arith::CanProve(analyzer,
+                                      src_inner.size > dst_inner.size);
     ICHECK(!source_exceeds_destination)
         << "Ascend GM->L1 copy requires the mapped 2D source region to fit "
            "inside the destination (with axes reversed for transpose), got "
@@ -728,12 +748,13 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
     if (op.l0_pitch.has_value()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
-      With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
-      TVM_FFI_CHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
-                                       compact_pitch) &&
-                        analyzer->CanProve(compact_pitch <= info.outer1,
-                                           sym::ProofStrength::kSymbolicBound),
-                    ValueError)
+      With<tl::arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(
+          tl::arith::CanProve(analyzer, compact_src_region.outer1->extent <=
+                                            compact_pitch) &&
+              tl::arith::CanProve(analyzer, compact_pitch <= info.outer1,
+                                  sym::ProofStrength::kSymbolicBound),
+          ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -744,8 +765,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     PrimExpr copy_rows = src_row.size;
     if (dual_dst_ctl == 0) {
       bool destination_exceeds_source =
-          analyzer->CanProve(dst_inner.size > src_inner.size) ||
-          analyzer->CanProve(dst_row.size > src_row.size);
+          tl::arith::CanProve(analyzer, dst_inner.size > src_inner.size) ||
+          tl::arith::CanProve(analyzer, dst_row.size > src_row.size);
       ICHECK(!destination_exceeds_source)
           << "Ascend L0C->UB destination region must fit inside the source "
              "tile unless dual-destination mode is enabled, got source "
@@ -810,8 +831,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << " modes after coalescing for buffer " << op.dst->name << " shape "
         << op.dst.shape() << " ranges " << dst_range
         << ". Strided UB->L1 copies are not yet supported.";
-    bool element_count_mismatch = analyzer->CanProve(src_layout.modes[0].size !=
-                                                     dst_layout.modes[0].size);
+    bool element_count_mismatch = tl::arith::CanProve(
+        analyzer, src_layout.modes[0].size != dst_layout.modes[0].size);
     ICHECK(!element_count_mismatch)
         << "Ascend raw UB->L1 copy requires source and destination regions "
            "with the same element count, got source "
@@ -819,9 +840,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         << dst_layout.modes[0].size << ".";
     PrimExpr raw_total_bytes =
         AscendMTEBytesFromElements(src_layout.modes[0].size, elem_bits);
-    TVM_FFI_CHECK(
-        analyzer->CanProveEqual(FloorMod(raw_total_bytes, I(32)), I(0)),
-        ValueError)
+    TVM_FFI_CHECK(tl::arith::CanProveEqual(
+                      analyzer, FloorMod(raw_total_bytes, I(32)), I(0)),
+                  ValueError)
         << "Ascend raw UB->L1 copy requires a payload that is a multiple of "
            "32 bytes, but got "
         << raw_total_bytes << " bytes from source buffer " << op.src->name
@@ -858,12 +879,13 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
     if (op.l0_pitch.has_value()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
-      With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
-      TVM_FFI_CHECK(analyzer->CanProve(compact_src_region.outer1->extent <=
-                                       compact_pitch) &&
-                        analyzer->CanProve(compact_pitch <= info.outer1,
-                                           sym::ProofStrength::kSymbolicBound),
-                    ValueError)
+      With<tl::arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(
+          tl::arith::CanProve(analyzer, compact_src_region.outer1->extent <=
+                                            compact_pitch) &&
+              tl::arith::CanProve(analyzer, compact_pitch <= info.outer1,
+                                  sym::ProofStrength::kSymbolicBound),
+          ValueError)
           << "Ascend L0C copy l0_pitch must cover the source region and fit "
              "capacity";
       loop_src_stride = compact_pitch * info.row_frac;
@@ -872,8 +894,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // not the logical last dimension.  They are equal for compact tensors but
     // differ for padded/runtime StridedTensor outputs.
     bool destination_exceeds_source =
-        analyzer->CanProve(dst_inner.size > src_inner.size) ||
-        analyzer->CanProve(dst_row.size > src_row.size);
+        tl::arith::CanProve(analyzer, dst_inner.size > src_inner.size) ||
+        tl::arith::CanProve(analyzer, dst_row.size > src_row.size);
     ICHECK(!destination_exceeds_source)
         << "Ascend L0C->GM destination region must fit inside the source tile, "
            "got source "
@@ -913,7 +935,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   }
 
   Stmt copy_stmt = Evaluate(call);
-  if (!IsOne(has_data) && !analyzer->CanProve(has_data)) {
+  if (!IsOne(has_data) && !tl::arith::CanProve(analyzer, has_data)) {
     copy_stmt = If(has_data, SeqStmt(copy_stmt));
   }
   return copy_stmt;
@@ -923,7 +945,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
 // All leading axes are ordinary tile selectors, including materialized rings.
 Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
                    sym::Analyzer analyzer, bool is_l0a) {
-  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
   const TensorVar &sf_buf = op.src;
   const TensorVar &handle = op.dst;
 
@@ -963,7 +985,7 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
       << "L0 SF's bound data buffer requires a fractal layout";
   Array<Range> data_ranges;
   for (size_t i = 0; i + 2 < ndim; ++i) {
-    ICHECK(analyzer->CanProve(dst_range[i]->extent <= 1))
+    ICHECK(tl::arith::CanProve(analyzer, dst_range[i]->extent <= 1))
         << "L0 SF copy must select one tile on each leading axis";
     data_ranges.push_back(dst_range[i]);
   }
@@ -1004,19 +1026,22 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
   PrimExpr sf_dst_stride =
       FloorDiv(dst_range[ndim - 1]->extent + sf_info.c0 - 1, sf_info.c0);
   {
-    With<sym::ConstraintContext> nonempty_copy(analyzer, has_data);
+    With<tl::arith::ConstraintContext> nonempty_copy(analyzer, has_data);
     size_t src_ndim = src_range.size();
-    ICHECK(analyzer->CanProveEqual(
-               FloorMod(src_range[src_ndim - 2]->begin, I(16)), 0) &&
-           analyzer->CanProveEqual(
-               FloorMod(src_range[src_ndim - 1]->begin, sf_info.c0), 0))
+    ICHECK(
+        tl::arith::CanProveEqual(
+            analyzer, FloorMod(src_range[src_ndim - 2]->begin, I(16)), 0) &&
+        tl::arith::CanProveEqual(
+            analyzer, FloorMod(src_range[src_ndim - 1]->begin, sf_info.c0), 0))
         << "L0 SF source origin must align to 16 MN rows and a scale pair";
-    ICHECK(analyzer->CanProveEqual(sf_m_step, FloorDiv(mn + 15, 16)) &&
-           analyzer->CanProveEqual(sf_k_step, sf_dst_stride))
+    ICHECK(
+        tl::arith::CanProveEqual(analyzer, sf_m_step, FloorDiv(mn + 15, 16)) &&
+        tl::arith::CanProveEqual(analyzer, sf_k_step, sf_dst_stride))
         << "L0 SF source and compact destination region must cover the same "
            "physical scale groups";
     for (size_t i = ndim - 2; i < ndim; ++i) {
-      ICHECK(analyzer->CanProve(data_ranges[i]->extent <= data_buf.shape()[i]))
+      ICHECK(tl::arith::CanProve(analyzer,
+                                 data_ranges[i]->extent <= data_buf.shape()[i]))
           << "L0 SF copy must fit its bound data allocation " << data_buf->name;
     }
   }
@@ -1025,7 +1050,7 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
                             is_l0a ? ascend_load_ca_sf() : ascend_load_cb_sf(),
                             {dst_ptr, sf_ptr, sf_m_start, sf_k_start, sf_m_step,
                              sf_k_step, sf_src_stride, sf_dst_stride}));
-  if (!IsOne(has_data) && !analyzer->CanProve(has_data)) {
+  if (!IsOne(has_data) && !tl::arith::CanProve(analyzer, has_data)) {
     stmt = If(has_data, SeqStmt(stmt));
   }
   return stmt;

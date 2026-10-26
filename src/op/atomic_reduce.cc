@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/atomic_reduce.cc
  *
@@ -73,14 +74,14 @@ void AtomicOpBaseNode::Initialize(const Array<Expr> &arguments,
   Array<PrimExpr> source_extents;
   Array<PrimExpr> destination_extents;
   for (const Range &range : src_range) {
-    TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, range->extent < 0), ValueError)
         << "Atomic source region cannot have negative extents";
     if (!IsOne(range->extent)) {
       source_extents.push_back(range->extent);
     }
   }
   for (const Range &range : dst_range) {
-    TVM_FFI_CHECK(!analyzer->CanProve(range->extent < 0), ValueError)
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, range->extent < 0), ValueError)
         << "Atomic destination region cannot have negative extents";
     if (!IsOne(range->extent)) {
       destination_extents.push_back(range->extent);
@@ -91,9 +92,10 @@ void AtomicOpBaseNode::Initialize(const Array<Expr> &arguments,
                      ValueError)
         << "Atomic source and destination must have matching non-unit extents";
     for (size_t axis = 0; axis < source_extents.size(); ++axis) {
-      TVM_FFI_CHECK(!analyzer->CanProve(source_extents[axis] !=
-                                        destination_extents[axis]),
-                    ValueError)
+      TVM_FFI_CHECK(
+          !tl::arith::CanProve(analyzer, source_extents[axis] !=
+                                             destination_extents[axis]),
+          ValueError)
           << "Atomic source and destination must have matching non-unit "
              "extents";
     }

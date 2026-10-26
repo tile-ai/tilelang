@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,6 +20,7 @@
 
 #pragma once
 
+#include "op/prim.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/expr.h>
@@ -139,12 +141,14 @@ EstimateRegionElementUpperBound(const TensorVar &buffer,
       auto shape_extent = i < buffer.shape().size()
                               ? GetConstInt(buffer.shape()[i])
                               : std::nullopt;
-      sym::ConstIntBound bound = analyzer->const_int_bound(extent_expr);
+      sym::ConstIntBound bound =
+          tl::arith::ConstIntBoundOf(analyzer, extent_expr);
 
       sym::Analyzer unconstrained_analyzer;
       PrimVar unconstrained_extent("unconstrained_extent", extent_expr.ty());
       int64_t unconstrained_max =
-          unconstrained_analyzer->const_int_bound(unconstrained_extent)
+          tl::arith::ConstIntBoundOf(unconstrained_analyzer,
+                                     unconstrained_extent)
               ->max_value;
       bool has_finite_bound = bound->max_value >= 0 &&
                               bound->max_value != sym::ConstIntBound::kPosInf;
@@ -168,7 +172,7 @@ EstimateRegionElementUpperBound(const TensorVar &buffer,
 }
 
 inline PrimExpr RegionElementCountExpr(const ffi::Array<Range> &ranges) {
-  PrimExpr elements = MakeConst(PrimType::Int(64), 1);
+  PrimExpr elements = tl::MakeConst(PrimType::Int(64), 1);
   for (const Range &range : ranges)
     elements = elements * Cast(PrimType::Int(64), range->extent);
   return elements;

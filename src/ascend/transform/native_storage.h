@@ -1,5 +1,6 @@
 #ifndef TILELANG_ASCEND_TRANSFORM_NATIVE_STORAGE_H_
 #define TILELANG_ASCEND_TRANSFORM_NATIVE_STORAGE_H_
+#include "op/prim.h"
 
 #include <tvm/tirx/op/memory.h>
 
@@ -19,7 +20,7 @@ struct StorageAccess {
 inline int ElementBits(PrimType dtype) { return dtype.bits() * dtype.lanes(); }
 
 inline PrimExpr StorageIndex(const PrimExpr &index) {
-  return prim::cast(index, PrimType::Int(64).WithLanes(index.ty().lanes()));
+  return tl::CastValue(index, PrimType::Int(64).WithLanes(index.ty().lanes()));
 }
 
 class StorageAliasAnalysis : public AnalysisVisitor {

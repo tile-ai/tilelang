@@ -1,4 +1,6 @@
 #include "multi_version_buffer_rewriter.h"
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #include "transform/common/pipeline_utils.h"
 
 namespace tvm::tl {
@@ -45,12 +47,14 @@ TensorVar ExpandPipelineAlias(const TensorVar &alias, const TensorVar &owner,
     PrimExpr bits = Cast(PrimType::Int(64),
                          expanded.ty()->ElemOffset(indices)[0] - base[0]) *
                     IntImm::Int64(owner_bits);
-    TVM_FFI_CHECK(analyzer->CanProve(floormod(bits, alias_bits) == 0),
-                  ValueError)
+    TVM_FFI_CHECK(
+        tl::arith::CanProve(analyzer, floormod(bits, alias_bits) == 0),
+        ValueError)
         << "Pipeline version offsets must align with alias elements";
-    versions.push_back(Iter(expanded.shape()[axis],
-                            analyzer->Simplify(floordiv(bits, alias_bits)),
-                            Axis::Get("m")));
+    versions.push_back(
+        Iter(expanded.shape()[axis],
+             tl::arith::Simplify(analyzer, floordiv(bits, alias_bits)),
+             Axis::Get("m")));
     shape.push_back(expanded.shape()[axis]);
   }
   shape.insert(shape.end(), alias.shape().begin(), alias.shape().end());
@@ -63,7 +67,7 @@ TensorVar ExpandPipelineAlias(const TensorVar &alias, const TensorVar &owner,
                    alias->loc);
 }
 
-class BufferVersionRewriter : public StmtExprMutator {
+class BufferVersionRewriter : public tvm::tl::StmtExprMutator {
 public:
   BufferVersionRewriter(Map<TensorVar, TensorVar> replacements,
                         Map<TensorVar, Array<PrimExpr>> versions)
@@ -107,7 +111,7 @@ private:
     if (auto tensor = GetRef<Var>(node).as<TensorVar>())
       if (auto replacement = replacements_.Get(*tensor))
         return *replacement;
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
@@ -116,7 +120,7 @@ private:
     if (tensor && replacements_.count(*tensor))
       return TensorLoad(replacements_[*tensor],
                         Indices(*tensor, node->indices, mode), node->loc);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
@@ -126,7 +130,7 @@ private:
       return TensorStore(
           replacements_[*tensor], Indices(*tensor, node->indices, mode),
           Mutate(node->value, mode).ValueOrUnchanged(node->value), node->loc);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const TensorRegionNode *node,
@@ -134,7 +138,7 @@ private:
     auto tensor = node->source.as<TensorVar>();
     if (tensor && replacements_.count(*tensor))
       return Region(*tensor, node->region, node->loc, mode);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
@@ -194,7 +198,8 @@ private:
         }
       call.CopyOnWrite()->args = arguments;
     }
-    return StmtExprMutator::Mutate_(call.get(), mode).ValueOrUnchanged(call);
+    return tvm::tl::StmtExprMutator::Mutate_(call.get(), mode)
+        .ValueOrUnchanged(call);
   }
 
   Map<TensorVar, TensorVar> replacements_;

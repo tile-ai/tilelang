@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -22,6 +25,7 @@
  * \brief Infer pairwise buffer-reuse compatibility for manual schedules.
  */
 #include "buffer_alias.h"
+#include "compat/region.h"
 #include "compat/visit.h"
 #include "merge_ub_common.h"
 #include "support/check.h"
@@ -565,7 +569,7 @@ static int EvalGuardAtLoopVal(const PrimExpr &cond, const ForNode *for_node,
   subs.Set(for_node->var, IntImm(for_node->var.ty(), loop_val));
   PrimExpr e = Substitute(cond, subs);
   sym::Analyzer analyzer;
-  e = analyzer->Simplify(e);
+  e = tl::arith::Simplify(analyzer, e);
   if (const auto *imm = e.as<IntImmNode>())
     return imm->value != 0 ? 1 : 0;
   return -1;
@@ -599,7 +603,7 @@ static UnrollPlan MakeConservativeLoopPlan(const ForNode *for_node,
 //   - modulus (k % M): the steady-state id pattern repeats with period M.
 // Crucially the natural trip-count bound (k < N) contributes tail depth
 // phys_count - N ≈ 0, NOT N, so large loops don't force a large unroll.
-class LoopVarConstCollector : public tirx::StmtExprVisitor {
+class LoopVarConstCollector : public tvm::tl::StmtExprVisitor {
 public:
   explicit LoopVarConstCollector(const VarNode *loop_var, int64_t loop_start)
       : loop_var_(loop_var), loop_start_(loop_start) {}
@@ -633,11 +637,11 @@ public:
   }
   Optional<VisitInterrupt> Visit_(const ModNode *op) final {
     RecordMod(op->a, op->b);
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const FloorModNode *op) final {
     RecordMod(op->a, op->b);
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
 
   // lower bound: loop_var side >= const
@@ -658,7 +662,7 @@ public:
       if (const auto *c = op->a.as<IntImmNode>())
         RecordLower(c->value.as<int64_t>().value() + 1); // C < k  → k >= C+1
     }
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   //   a <= b
   Optional<VisitInterrupt> Visit_(const LENode *op) final {
@@ -669,7 +673,7 @@ public:
       if (const auto *c = op->a.as<IntImmNode>())
         RecordLower(c->value.as<int64_t>().value()); // C <= k
     }
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const GTNode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
@@ -679,7 +683,7 @@ public:
       if (const auto *c = op->a.as<IntImmNode>())
         RecordUpper(c->value.as<int64_t>().value()); // C > k → k < C
     }
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const GENode *op) final {
     if (RefersLoopVar(op->a, loop_var_)) {
@@ -690,7 +694,7 @@ public:
         RecordUpper(c->value.as<int64_t>().value() +
                     1); // C >= k → k <= C → k < C+1
     }
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const EQNode *op) final {
     // k == C constrains both ends.
@@ -703,14 +707,14 @@ public:
       RecordLower(c->value.as<int64_t>().value());
       RecordUpper(c->value.as<int64_t>().value() + 1);
     }
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const SubNode *op) final {
     if (RefersLoopVar(op->a, loop_var_))
       if (const auto *c = op->b.as<IntImmNode>())
         max_offset = std::max<int>(
             max_offset, static_cast<int>(c->value.as<int64_t>().value()));
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const AddNode *op) final {
     if (RefersLoopVar(op->a, loop_var_))
@@ -721,7 +725,7 @@ public:
       if (const auto *c = op->a.as<IntImmNode>())
         max_offset = std::max<int>(
             max_offset, static_cast<int>(c->value.as<int64_t>().value()));
-    return tirx::StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
 
 private:
@@ -745,11 +749,11 @@ static UnrollPlan BuildLoopUnrollPlan(const ForNode *for_node,
   if (!begin_value || !end_value || !step_value || *step_value <= 0)
     return MakeConservativeLoopPlan(for_node, 2, 0, begin_idx, end_idx);
   sym::Analyzer bounds;
-  PrimExpr trip_count =
-      bounds->Simplify(floordiv(ascend::StorageIndex(for_node->end) -
-                                    ascend::StorageIndex(for_node->begin) +
-                                    IntImm::Int64(*step_value) - 1,
-                                IntImm::Int64(*step_value)));
+  PrimExpr trip_count = tl::arith::Simplify(
+      bounds, floordiv(ascend::StorageIndex(for_node->end) -
+                           ascend::StorageIndex(for_node->begin) +
+                           IntImm::Int64(*step_value) - 1,
+                       IntImm::Int64(*step_value)));
   auto extent = GetConstInt(trip_count);
   if (!extent || *extent > std::numeric_limits<int>::max())
     return MakeConservativeLoopPlan(for_node, 2, 0, begin_idx, end_idx);
@@ -1759,15 +1763,16 @@ private:
     if (instance.loop_variable) {
       auto variable =
           GetRef<Var>(instance.loop_variable).as_or_throw<PrimVar>();
-      substitutions.Set(variable, prim::cast(instance.loop_val, variable.ty()));
+      substitutions.Set(variable,
+                        tl::CastValue(instance.loop_val, variable.ty()));
     }
     if (has_sid) {
       auto variable = GetRef<Var>(instance.sid_variable).as_or_throw<PrimVar>();
       substitutions.Set(variable, IntImm(variable.ty(), sid_value));
     }
     sym::Analyzer analyzer;
-    PrimExpr expression =
-        analyzer->Simplify(Substitute(instance.event_id_expr, substitutions));
+    PrimExpr expression = tl::arith::Simplify(
+        analyzer, Substitute(instance.event_id_expr, substitutions));
     auto value = GetConstInt(expression);
     if (!value)
       return false;
@@ -2034,7 +2039,7 @@ private:
     if (found == contracts.end() || owned.count(node))
       return body;
     DictAttrs attrs(Map<String, Any>{{kBufferAliasMap, found->second}});
-    return SeqStmt({RegionStmt(tirx::scope_op(), {}, {}, attrs, body)});
+    return SeqStmt({RegionStmt(::tvm::tl::scope_op(), {}, {}, attrs, body)});
   }
 };
 

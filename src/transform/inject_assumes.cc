@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file inject_assumes.cc
  * \brief Inject assumes on buffer's shape boundary check. Also convert
@@ -7,6 +10,7 @@
 #include "common/assume.h"
 #include "common/attr.h"
 #include "compat/expr.h"
+#include "compat/region.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
@@ -23,22 +27,22 @@ namespace {
 
 constexpr const char *kProcessedAssume = "tl.assume_processed";
 
-class AssumeInjector : public tirx::StmtExprMutator {
+class AssumeInjector : public tvm::tl::StmtExprMutator {
 public:
   ffi::Array<Stmt> TensorFacts(const ffi::Array<tirx::TensorVar> &tensors) {
     ffi::Array<Stmt> facts;
-    std::unordered_set<PrimExpr, ffi::StructuralHash, ffi::StructuralEqual>
-        seen;
+    std::unordered_set<PrimExpr, tl::StructuralHash, tl::StructuralEqual> seen;
     auto add = [&](const PrimExpr &condition) {
-      PrimExpr simplified = analyzer_->Simplify(condition);
-      if (!analyzer_->CanProve(simplified) && seen.insert(simplified).second) {
+      PrimExpr simplified = tl::arith::Simplify(analyzer_, condition);
+      if (!tl::arith::CanProve(analyzer_, simplified) &&
+          seen.insert(simplified).second) {
         facts.push_back(Evaluate(Assume(simplified)));
       }
     };
     for (const tirx::TensorVar &tensor : tensors) {
       for (const PrimExpr &extent : tensor.shape()) {
         if (!extent.as<IntImmNode>()) {
-          add(extent >= MakeConst(extent.ty(), 0));
+          add(extent >= tl::MakeConst(extent.ty(), 0));
         }
       }
       int bits = tensor.dtype().bits() * tensor.dtype().lanes();
@@ -51,8 +55,8 @@ public:
         for (size_t axis = 0; axis + 1 < strides.size(); ++axis) {
           const auto &stride = strides[axis];
           if (!stride.as<IntImmNode>()) {
-            add(floormod(stride, MakeConst(stride.ty(), 8 / bits)) ==
-                MakeConst(stride.ty(), 0));
+            add(floormod(stride, tl::MakeConst(stride.ty(), 8 / bits)) ==
+                tl::MakeConst(stride.ty(), 0));
           }
         }
       }
@@ -69,7 +73,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto binding = StmtExprMutator::Mutate_(node, mode)
+    auto binding = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                        .ValueOrUnchanged(original)
                        .as_or_throw<Bind>();
     auto tensor = binding->var.as<tirx::TensorVar>();
@@ -108,7 +112,7 @@ private:
               Evaluate(Assume(condition.value()), statement->loc)};
           body.insert(body.end(), suffix.begin(), suffix.end());
           suffix = {RegionStmt(
-              tirx::scope_op(), {}, {},
+              ::tvm::tl::scope_op(), {}, {},
               DictAttrs({{attr::kAssumeRequiresRuntimeCheck, condition.value()},
                          {"tl.assume_message", ffi::String(message.str())}}),
               SeqStmt(body), {}, statement->loc)};

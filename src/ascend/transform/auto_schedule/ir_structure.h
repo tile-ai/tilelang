@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 #pragma once
 #include <tvm/runtime/logging.h>
 #include <tvm/sym/analyzer.h>
@@ -51,11 +52,11 @@ inline bool RegionsEqual(const ffi::Array<Range> &a,
   sym::Analyzer analyzer;
   for (size_t i = 0; i < a.size(); ++i) {
     // Check if min values are equal
-    if (!analyzer->CanProveEqual(a[i]->begin, b[i]->begin)) {
+    if (!tl::arith::CanProveEqual(analyzer, a[i]->begin, b[i]->begin)) {
       return false;
     }
     // Check if extent values are equal
-    if (!analyzer->CanProveEqual(a[i]->extent, b[i]->extent)) {
+    if (!tl::arith::CanProveEqual(analyzer, a[i]->extent, b[i]->extent)) {
       return false;
     }
   }
@@ -74,8 +75,8 @@ inline bool RegionCovers(const ffi::Array<Range> &outer,
   for (size_t i = 0; i < outer.size(); ++i) {
     PrimExpr outer_end = outer[i]->begin + outer[i]->extent;
     PrimExpr inner_end = inner[i]->begin + inner[i]->extent;
-    if (!analyzer->CanProve(outer[i]->begin <= inner[i]->begin) ||
-        !analyzer->CanProve(inner_end <= outer_end)) {
+    if (!tl::arith::CanProve(analyzer, outer[i]->begin <= inner[i]->begin) ||
+        !tl::arith::CanProve(analyzer, inner_end <= outer_end)) {
       return false;
     }
   }
@@ -86,16 +87,18 @@ constexpr int64_t kDynamicSerialTripCountFallback = 100;
 
 inline int64_t GetSerialTripCount(const For &loop,
                                   sym::Analyzer analyzer = sym::Analyzer()) {
-  TVM_FFI_CHECK(!analyzer->CanProve(loop->step == 0), ValueError)
+  TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, loop->step == 0), ValueError)
       << "An Ascend scheduled loop cannot have a zero step";
-  PrimExpr count = analyzer->Simplify(ScheduleLoopTripCount(loop.get()));
+  PrimExpr count =
+      tl::arith::Simplify(analyzer, ScheduleLoopTripCount(loop.get()));
   if (auto value = GetConstInt(count))
     return std::max<int64_t>(0, *value);
-  auto bound = analyzer->const_int_bound(count);
+  auto bound = tl::arith::ConstIntBoundOf(analyzer, count);
   PrimVar unconstrained("trip_count", count.ty());
   sym::Analyzer independent;
   if (bound->max_value >= 0 &&
-      bound->max_value < independent->const_int_bound(unconstrained)->max_value)
+      bound->max_value <
+          tl::arith::ConstIntBoundOf(independent, unconstrained)->max_value)
     return bound->max_value;
   return kDynamicSerialTripCountFallback;
 }
@@ -786,7 +789,7 @@ public:
   int64_t GetTripCount() const {
     sym::Analyzer analyzer;
     auto constraints = task ? task->outer_ctx.Populate(analyzer)
-                            : WithGroup<sym::ConstraintContext>();
+                            : WithGroup<tl::arith::ConstraintContext>();
     return GetSerialTripCount(control, analyzer);
   }
 

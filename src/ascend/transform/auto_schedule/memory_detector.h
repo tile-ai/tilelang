@@ -1,4 +1,6 @@
+#include "compat/analyzer.h"
 #pragma once
+#include "op/prim.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/sym/iter_affine_map.h>
@@ -58,7 +60,7 @@ inline bool HasContiguousTaskLayout(const TensorVar &tensor,
   PrimExpr stride = IntImm::Int32(1);
   const auto &strides = pattern.value().get<1>();
   for (size_t axis = tensor.shape().size(); axis > 0; --axis) {
-    if (!analyzer->CanProveEqual(strides[axis - 1], stride))
+    if (!tl::arith::CanProveEqual(analyzer, strides[axis - 1], stride))
       return false;
     stride = stride * tensor.shape()[axis - 1];
   }
@@ -71,7 +73,8 @@ inline void MergeL0Pitch(Map<Var, Optional<PrimExpr>> *pitches,
   if (it != pitches->end()) {
     sym::Analyzer analyzer;
     if (!(*it).second.has_value() || !pitch.has_value() ||
-        !analyzer->CanProveEqual((*it).second.value(), pitch.value()))
+        !tl::arith::CanProveEqual(analyzer, (*it).second.value(),
+                                  pitch.value()))
       pitch = std::nullopt;
   }
   pitches->Set(storage, pitch);
@@ -275,7 +278,7 @@ private:
       visit_mutable_layout(geometry.value().get<2>());
     } else if (mode_ == AccessMode::kPhysical && buffer.ty()->layout) {
       auto indices = buffer.shape().Map(
-          [](const PrimExpr &extent) { return MakeConst(extent.ty(), 0); });
+          [](const PrimExpr &extent) { return tl::MakeConst(extent.ty(), 0); });
       for (const PrimExpr &offset : buffer.ty()->ElemOffset(indices))
         visit_mutable_layout(offset);
     }
@@ -283,7 +286,7 @@ private:
         (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer))) {
       Optional<PrimExpr> pitch = operation_pitches_.Get(buffer);
       if (pitch.has_value()) {
-        PrimExpr value = ana_->Simplify(ResolveLets(pitch.value()));
+        PrimExpr value = tl::arith::Simplify(ana_, ResolveLets(pitch.value()));
         if (SideEffect(value) > CallEffectKind::kPure ||
             ScheduleExprUsesVar(value, [&](const VarNode *var) {
               return dom_map_.count(ffi::GetRef<Var>(var)) != 0;
@@ -384,7 +387,7 @@ private:
       // Dependent loop domains do not describe a Cartesian iteration space to
       // DetectIterMap. Zero-trip loops also cannot establish a definition.
       if (uses_active_loop(min) || uses_active_loop(extent) ||
-          !ana_->CanProve(extent > 0)) {
+          !tl::arith::CanProve(ana_, extent > 0)) {
         return false;
       }
       input_iters.Set(loop_var.as_or_throw<PrimVar>(),
@@ -396,11 +399,11 @@ private:
     for (size_t i = 0; i < mins.size(); ++i) {
       PrimExpr min = ResolveLets(mins[i]);
       PrimExpr extent = ResolveLets(extents[i]);
-      if (uses_active_loop(extent) || !ana_->CanProve(extent > 0))
+      if (uses_active_loop(extent) || !tl::arith::CanProve(ana_, extent > 0))
         return false;
       PrimVar offset("must_write_offset", min.ty());
       input_iters.Set(offset,
-                      Range::FromMinExtent(MakeConst(min.ty(), 0), extent));
+                      Range::FromMinExtent(tl::MakeConst(min.ty(), 0), extent));
       expanded_indices.push_back(min + offset);
     }
 
@@ -409,7 +412,7 @@ private:
                            sym::IterMapLevel::Surjective, ana_);
     if (iter_map->indices.size() != expanded_indices.size() ||
         !iter_map->padding_predicate ||
-        !ana_->CanProve(!iter_map->padding_predicate.value())) {
+        !tl::arith::CanProve(ana_, !iter_map->padding_predicate.value())) {
       return false;
     }
     for (size_t i = 0; i < iter_map->indices.size(); ++i) {
@@ -420,10 +423,10 @@ private:
         if (index->args.size() != 1)
           return false;
         const sym::IterSplitExpr &split = index->args[0];
-        PrimExpr one = MakeConst(split->scale.ty(), 1);
-        if (ana_->CanProveEqual(split->scale, one)) {
+        PrimExpr one = tl::MakeConst(split->scale.ty(), 1);
+        if (tl::arith::CanProveEqual(ana_, split->scale, one)) {
           max = max + split->extent - one;
-        } else if (ana_->CanProveEqual(split->scale, -one)) {
+        } else if (tl::arith::CanProveEqual(ana_, split->scale, -one)) {
           min = min - split->extent + one;
         } else {
           return false;
@@ -432,8 +435,8 @@ private:
       // Surjectivity proves coverage of the iterator image, not an arbitrary
       // EvalSet overestimate. A runtime index (even modulo the buffer size)
       // writes one element, rather than all elements in its possible range.
-      if (!ana_->CanProveEqual(region[i].min(), min) ||
-          !ana_->CanProveEqual(region[i].max(), max)) {
+      if (!tl::arith::CanProveEqual(ana_, region[i].min(), min) ||
+          !tl::arith::CanProveEqual(ana_, region[i].max(), max)) {
         return false;
       }
     }
@@ -553,15 +556,19 @@ private:
     };
     if (src_bits != elem_bits || src.modes.empty() || dst.modes.empty() ||
         src.modes.size() > 2 || dst.modes.size() > 2 ||
-        !analyzer->CanProveEqual(total_elems(src), total_elems(dst)) ||
+        !tl::arith::CanProveEqual(analyzer, total_elems(src),
+                                  total_elems(dst)) ||
         (src.modes.size() == 2 && dst.modes.size() == 2 &&
-         (!analyzer->CanProveEqual(src.modes[0].size, dst.modes[0].size) ||
-          !analyzer->CanProveEqual(src.modes[1].size, dst.modes[1].size)))) {
+         (!tl::arith::CanProveEqual(analyzer, src.modes[0].size,
+                                    dst.modes[0].size) ||
+          !tl::arith::CanProveEqual(analyzer, src.modes[1].size,
+                                    dst.modes[1].size)))) {
       UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
-    PrimExpr row_elems = analyzer->Simplify(
-        src.modes.size() == 2 ? src.modes[0].size : dst.modes[0].size);
+    PrimExpr row_elems = tl::arith::Simplify(analyzer, src.modes.size() == 2
+                                                           ? src.modes[0].size
+                                                           : dst.modes[0].size);
     const auto *row_extent = row_elems.as<IntImmNode>();
     if (row_extent == nullptr) {
       UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
@@ -597,8 +604,8 @@ private:
     // contiguous row. In a view with stride=16, for example, row_elems=1 and
     // its seven padded floats occupy gaps between view elements, not extra
     // logical rows. Those physical lanes have no region in this view.
-    if (!analyzer->CanProveEqual(last_stride, IntImm::Int32(1)) ||
-        !analyzer->CanProveEqual(row_range->extent, row_elems)) {
+    if (!tl::arith::CanProveEqual(analyzer, last_stride, IntImm::Int32(1)) ||
+        !tl::arith::CanProveEqual(analyzer, row_range->extent, row_elems)) {
       UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
       return write;
     }
@@ -606,9 +613,10 @@ private:
     PrimExpr physical_extent = IntImm(row_range->extent.ty(), padded_extent);
     // Lifetime analysis may reject reuse, but must not add an InsertSync
     // failure. Keep a finite footprint when the offset is symbolic.
-    if (analyzer->CanProve(
+    if (tl::arith::CanProve(
+            analyzer,
             row_range->begin + physical_extent >
-            write->source.as_or_throw<TensorVar>().shape().back()))
+                write->source.as_or_throw<TensorVar>().shape().back()))
       UpdateOpaqueAccessVar(write->source.as_or_throw<TensorVar>());
     write_region.Set(write_region.size() - 1,
                      Range::FromMinExtent(row_range->begin, physical_extent));
@@ -650,7 +658,7 @@ private:
     if (ext_imm && ext_imm->value.as<int64_t>().value() <= 1) {
       return lo_set;
     }
-    PrimExpr hi = base + ResolveLets(extent) - MakeConst(base.ty(), 1);
+    PrimExpr hi = base + ResolveLets(extent) - tl::MakeConst(base.ty(), 1);
     sym::IntSet hi_set = sym::EvalSet(sym::IntSet::Vector(hi), dom_map_);
     return sym::IntSet::Interval(lo_set.min(), hi_set.max());
   }
@@ -660,7 +668,7 @@ private:
     dom_map_.Set(op->var, sym::IntSet::FromRange(range));
     loop_domains_.emplace_back(op->var, range);
     PrimExpr step = ResolveLets(op->step);
-    bool non_unit = !ana_->CanProve(step == 1 || step == -1);
+    bool non_unit = !tl::arith::CanProve(ana_, step == 1 || step == -1);
     if (non_unit)
       ++non_unit_step_loop_depth_;
     AnalysisVisitor::VisitStmt_(op);
@@ -723,7 +731,7 @@ private:
         op->args.size() == 2 && op->body_params.size() == 1) {
       auto variable = op->body_params[0].as_or_throw<PrimVar>();
       auto extent = op->args[1].as_or_throw<PrimExpr>();
-      Range range = Range::FromMinExtent(MakeConst(extent.ty(), 0), extent);
+      Range range = Range::FromMinExtent(tl::MakeConst(extent.ty(), 0), extent);
       dom_map_.Set(variable, sym::IntSet::FromRange(range));
       loop_domains_.emplace_back(variable, range);
     }
@@ -791,7 +799,7 @@ private:
     for (PrimExpr index : op->indices) {
       relaxed_region.push_back(RelaxAccessIndex(index));
       mins.push_back(index);
-      extents.push_back(MakeConst(index.ty(), 1));
+      extents.push_back(tl::MakeConst(index.ty(), 1));
     }
     bool must_execute = true;
     UpdateWrite(op->dest.as_or_throw<TensorVar>(), std::move(relaxed_region),
@@ -848,8 +856,8 @@ private:
         call && call->op.same_as(tl::access_ptr()) && call->args.size() >= 3) {
       if (const auto *load = call->args[0].as<TensorLoadNode>()) {
         PrimType dtype = load->source.as_or_throw<TensorVar>().dtype();
-        PrimExpr extent =
-            ana_->Simplify(ResolveLets(call->args[1].as_or_throw<PrimExpr>()));
+        PrimExpr extent = tl::arith::Simplify(
+            ana_, ResolveLets(call->args[1].as_or_throw<PrimExpr>()));
         const auto *declared_extent = extent.as<IntImmNode>();
         const auto *declared_mask = call->args[2].as<IntImmNode>();
         if (bytes && *bytes > 0 && dtype.IsScalar() && dtype.bits() >= 8 &&
@@ -1179,16 +1187,16 @@ private:
         if (copy) {
           for (size_t axis = region->region.size() - 2;
                axis < region->region.size(); ++axis)
-            compact |= !ana_->CanProveEqual(region->region[axis]->extent,
-                                            tensor.shape()[axis]);
+            compact |= !tl::arith::CanProveEqual(
+                ana_, region->region[axis]->extent, tensor.shape()[axis]);
         } else if (gemm) {
           size_t axis = tensor.shape().size() - 2;
           if (tensor.same_as(gemm.value()->a_))
             axis += gemm.value()->transA_;
           if (tensor.same_as(gemm.value()->b_))
             axis += !gemm.value()->transB_;
-          compact |= !ana_->CanProveEqual(
-              floordiv(region->region[axis]->extent + 15, 16),
+          compact |= !tl::arith::CanProveEqual(
+              ana_, floordiv(region->region[axis]->extent + 15, 16),
               floordiv(tensor.shape()[axis] + 15, 16));
         }
         RecordL0MayAccess(region, read, compact);

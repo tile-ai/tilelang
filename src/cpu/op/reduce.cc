@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cpu/op/reduce.cc
  * \brief CPU implementation for tl.reduce lowering (serial, local buffers).
@@ -13,6 +14,7 @@
  * through alloc_fragment, which CPU does not have).
  */
 
+#include "op/prim.h"
 #include "op/reduce.h"
 #include "op/reducer.h"
 
@@ -92,15 +94,15 @@ struct Reduce {
         TensorLoad(source, source_indices));
     Stmt reduction = TensorStore(destination, destination_indices, value);
     PrimType reduce_type = reduce_variable.ty();
-    statements.push_back(For(reduce_variable, MakeConst(reduce_type, 0),
+    statements.push_back(For(reduce_variable, tl::MakeConst(reduce_type, 0),
                              source_ranges[op.dim]->extent,
-                             MakeConst(reduce_type, 1), ForKind::kDefault,
+                             tl::MakeConst(reduce_type, 1), ForKind::kDefault,
                              SeqStmt(reduction)));
     Stmt body = SeqStmt(statements);
     for (size_t axis = destination_vars.size(); axis-- > 0;) {
       PrimType type = destination_vars[axis].ty();
-      body = For(destination_vars[axis], MakeConst(type, 0),
-                 destination_ranges[axis]->extent, MakeConst(type, 1),
+      body = For(destination_vars[axis], tl::MakeConst(type, 0),
+                 destination_ranges[axis]->extent, tl::MakeConst(type, 1),
                  ForKind::kDefault, SeqStmt(body));
     }
     if (!destination_vars.empty()) {
@@ -113,12 +115,14 @@ struct Reduce {
 struct FinalizeReducer {
   static Stmt Lower(const FinalizeReducerOpNode &operation,
                     const LowerArgs &arguments, sym::Analyzer analyzer) {
-    TVM_FFI_CHECK(analyzer->CanProveEqual(arguments.thread_bounds->extent, 1),
-                  ValueError)
+    TVM_FFI_CHECK(
+        tl::arith::CanProveEqual(analyzer, arguments.thread_bounds->extent, 1),
+        ValueError)
         << "CPU reducers require one logical participant per grid iteration";
     for (size_t index = 0; index < operation.plan_steps.size(); index += 2) {
-      TVM_FFI_CHECK(analyzer->CanProveEqual(operation.plan_steps[index], 1),
-                    ValueError)
+      TVM_FFI_CHECK(
+          tl::arith::CanProveEqual(analyzer, operation.plan_steps[index], 1),
+          ValueError)
           << "A GPU collective plan cannot be lowered as a CPU reducer";
     }
     if (!operation.seed)
@@ -137,8 +141,8 @@ struct FinalizeReducer {
     for (size_t axis = indices.size(); axis-- > 0;) {
       PrimVar index = indices[axis].as_or_throw<PrimVar>();
       result =
-          For(index, MakeConst(index.ty(), 0), storage.shape()[axis],
-              MakeConst(index.ty(), 1), ForKind::kDefault, SeqStmt(result));
+          For(index, tl::MakeConst(index.ty(), 0), storage.shape()[axis],
+              tl::MakeConst(index.ty(), 1), ForKind::kDefault, SeqStmt(result));
     }
     return result;
   }

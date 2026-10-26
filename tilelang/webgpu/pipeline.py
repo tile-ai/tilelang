@@ -4,6 +4,7 @@ from tilelang._compat.tvm import IRModule, tirx
 from tvm_tirx.target import Target
 
 import tilelang
+from tilelang.transform import _tirx_passes
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -15,7 +16,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 
 
 def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
+    mod = _tirx_passes.BindTarget(target)(mod)
     # WebGPU is a SIMT backend: lower the launch nest to thread_extent
     # bindings for codegen.
     mod = tilelang.transform.MaterializeKernelLaunch(
@@ -62,21 +63,21 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = _tirx_passes.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
     mod = tirx.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
-    mod = tirx.transform.RemoveNoOp()(mod)
-    mod = tirx.transform.HoistIf()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
+    mod = _tirx_passes.RemoveNoOp()(mod)
+    mod = _tirx_passes.HoistIf()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
-    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = _tirx_passes.AnnotateEntryFunc()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/reducer.cc
  * \brief Reducer v2 first-class op definitions. These ops are pure IR
@@ -5,6 +6,7 @@
  *        LayoutInference; Lower() must never be reached.
  */
 
+#include "op/prim.h"
 #include "reducer.h"
 
 #include <cmath>
@@ -157,7 +159,7 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
   // boundary-preserving condensation compacts both halves without mixing
   // them, keeping `_rep % combine` = addend lanes true on the result.
   Fragment induced = site.loop_layout;
-  PrimExpr combine_raw = MakeConst(PrimType::Int(32), 1);
+  PrimExpr combine_raw = tl::MakeConst(PrimType::Int(32), 1);
   for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
     if (!is_output_dim[dim]) {
       combine_raw = combine_raw * induced->InputShape()[dim];
@@ -228,7 +230,8 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
     return reject("induced layout rank mismatch");
   }
   for (size_t d = 0; d < reducer_shape.size(); ++d) {
-    if (!analyzer->CanProveEqual(induced->InputShape()[d], reducer_shape[d])) {
+    if (!tl::arith::CanProveEqual(analyzer, induced->InputShape()[d],
+                                  reducer_shape[d])) {
       return reject("induced layout shape mismatch");
     }
   }
@@ -242,11 +245,11 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
   Map<PrimVar, Range> var_ranges;
   for (size_t i = 0; i < ndim; ++i) {
     var_ranges.Set(InputPlaceholder(i),
-                   Range::FromMinExtent(MakeConst(PrimType::Int(32), 0),
+                   Range::FromMinExtent(tl::MakeConst(PrimType::Int(32), 0),
                                         site.loop_layout->InputShape()[i]));
   }
   var_ranges.Set(ReplicationPlaceholder(),
-                 Range::FromMinExtent(MakeConst(PrimType::Int(32), 0),
+                 Range::FromMinExtent(tl::MakeConst(PrimType::Int(32), 0),
                                       site.loop_layout->ReplicateExtent()));
   analysis.iter_sum = sym::NormalizeToIterSum(
       site.loop_layout->GetForwardThread(), var_ranges, analyzer);
@@ -322,29 +325,29 @@ PrimExpr ReducerV2Identity(ReducerV2OpType op, PrimType dtype) {
   };
   switch (op) {
   case ReducerV2OpType::kSum:
-    return MakeConst(dtype, 0);
+    return tl::MakeConst(dtype, 0);
   case ReducerV2OpType::kMax:
     if (is_int)
-      return MakeConst(dtype, signed_min());
+      return tl::MakeConst(dtype, signed_min());
     if (is_uint)
-      return MakeConst(dtype, 0);
-    return MakeConst(dtype, -INFINITY);
+      return tl::MakeConst(dtype, 0);
+    return tl::MakeConst(dtype, -INFINITY);
   case ReducerV2OpType::kMin:
     if (is_int)
-      return MakeConst(dtype, signed_max());
+      return tl::MakeConst(dtype, signed_max());
     if (is_uint)
-      return MakeConst(dtype, unsigned_max());
-    return MakeConst(dtype, INFINITY);
+      return tl::MakeConst(dtype, unsigned_max());
+    return tl::MakeConst(dtype, INFINITY);
   case ReducerV2OpType::kBitAnd:
     // All-ones: x & identity == x for every bit pattern.
     check_bitwise_dtype();
     if (is_uint)
-      return MakeConst(dtype, unsigned_max());
-    return MakeConst(dtype, -1);
+      return tl::MakeConst(dtype, unsigned_max());
+    return tl::MakeConst(dtype, -1);
   case ReducerV2OpType::kBitOr:
   case ReducerV2OpType::kBitXor:
     check_bitwise_dtype();
-    return MakeConst(dtype, 0);
+    return tl::MakeConst(dtype, 0);
   }
   LOG(FATAL) << "unreachable";
   return PrimExpr(ffi::UnsafeInit{});
@@ -539,7 +542,8 @@ bool FinalizeReducerV2OpNode::CanSteerDst(const TensorVar &reducer,
     return false;
   }
   for (size_t d = 0; d < reducer.shape().size(); ++d) {
-    if (!analyzer->CanProveEqual(reducer.shape()[d], dst.shape()[d])) {
+    if (!tl::arith::CanProveEqual(analyzer, reducer.shape()[d],
+                                  dst.shape()[d])) {
       return false;
     }
   }

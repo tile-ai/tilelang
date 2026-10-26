@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file rewrite_flag_to_buf.cc
  * \brief Normalize each hard_event's synchronization into the 8-slot flag
@@ -123,7 +124,7 @@ EventIdBounds EventIdRange(const ConstrSet &constraints, const std::string &he,
                            const PrimExpr &event_id) {
   sym::Analyzer analyzer;
   auto scope = constraints.Populate(analyzer);
-  sym::ConstIntBound bound = analyzer->const_int_bound(event_id);
+  sym::ConstIntBound bound = tl::arith::ConstIntBoundOf(analyzer, event_id);
   ICHECK(bound->min_value != sym::ConstIntBound::kNegInf &&
          bound->max_value != sym::ConstIntBound::kPosInf)
       << "RewriteFlagToBuf: cannot bound event_id for hard_event '" << he

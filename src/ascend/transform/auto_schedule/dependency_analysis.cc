@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -25,6 +26,7 @@
 #include "./dependency_analysis.h"
 #include "./task_annotations.h"
 #include "ascend/op/utils.h"
+#include "op/prim.h"
 
 #include <algorithm>
 #include <functional>
@@ -230,7 +232,7 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
       b_local_ctx = b_local_ctx.RenameFrom("_c", b_sub, iteration);
       PrimExpr p = Substitute(iteration, a_sub);
       PrimExpr c = Substitute(iteration, b_sub);
-      loop_ctx.AddConstr(c == p + MakeConst(iteration.ty(), offset) *
+      loop_ctx.AddConstr(c == p + tl::MakeConst(iteration.ty(), offset) *
                                       Substitute(loop->control->step, a_sub));
     }
   }
@@ -246,7 +248,8 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
     if (a_pitch.has_value() && b_pitch.has_value()) {
       PrimExpr equal = freshen_a(Substitute(a_pitch.value(), a_sub)) ==
                        freshen_b(Substitute(b_pitch.value(), b_sub));
-      same_pitch = ana->CanProve(equal) || ana->z3_prover.CanProve(equal);
+      same_pitch =
+          tl::arith::CanProve(ana, equal) || tl::arith::Z3CanProve(ana, equal);
     }
     // L0 matrix regions may overlap unless their pitches are provably equal.
     if (!same_pitch)
@@ -260,18 +263,18 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
     PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
     // A half-open endpoint can exceed the int32 index range by one even
     // for an ordinary single-element access.
-    PrimExpr a_end = prim::cast(a_min, PrimType::Int(64)) +
-                     prim::cast(a_extent, PrimType::Int(64));
-    PrimExpr b_end = prim::cast(b_min, PrimType::Int(64)) +
-                     prim::cast(b_extent, PrimType::Int(64));
+    PrimExpr a_end = tl::CastValue(a_min, PrimType::Int(64)) +
+                     tl::CastValue(a_extent, PrimType::Int(64));
+    PrimExpr b_end = tl::CastValue(b_min, PrimType::Int(64)) +
+                     tl::CastValue(b_extent, PrimType::Int(64));
     any_dim_disjoint = any_dim_disjoint || (a_extent <= 0) || (b_extent <= 0) ||
                        (a_end <= b_min) || (b_end <= a_min);
   }
-  any_dim_disjoint = ana->Simplify(any_dim_disjoint);
+  any_dim_disjoint = tl::arith::Simplify(ana, any_dim_disjoint);
   // Raw Z3 as a fallback catches the infeasible-context case that Analyzer's
   // constant-fold short-circuit misses.
-  return !(ana->CanProve(any_dim_disjoint) ||
-           ana->z3_prover.CanProve(any_dim_disjoint));
+  return !(tl::arith::CanProve(ana, any_dim_disjoint) ||
+           tl::arith::Z3CanProve(ana, any_dim_disjoint));
 }
 
 std::vector<DepInfo>

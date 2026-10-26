@@ -56,7 +56,8 @@ ProxyEvent Classify(const CallNode *call) {
     return ProxyEvent::Fence;
   if (const auto *operation = call->op.as<OpNode>();
       operation && (operation->name.starts_with("tirx.ptx.mbarrier_") ||
-                    operation->name == "tirx.ptx.cp_async_mbarrier_arrive"))
+                    operation->name == "tirx.ptx.cp_async_mbarrier_arrive" ||
+                    operation->name == "tirx.cuda.cvta_generic_to_shared"))
     return ProxyEvent::None;
   for (const Op &operation :
        {tma_load(), tma_load_im2col(), tma_load_multicast(), tma_load_gather4(),

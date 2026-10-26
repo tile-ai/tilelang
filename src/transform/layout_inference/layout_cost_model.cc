@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
+#include "transform/common/data_type_rewriter.h"
 /*!
  * \file layout_cost_model.cc
  * \brief Statement-level bottleneck traffic model for free-mode layout
@@ -203,14 +207,14 @@ bool TryMultiplyPositive(int64_t lhs, int64_t rhs, int64_t *product) {
  *  Non-int foreign vars are kept and fail the affine recovery, marking the
  *  statement outside the model. */
 PrimExpr ZeroForeignVars(const PrimExpr &e, const VarSet &own) {
-  return tirx::SubstituteWithDataTypeLegalization(
+  return tl::SubstituteWithDataTypeLegalization(
       e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
         if (own.count(var) || !var->ty.as<PrimTypeNode>() ||
             (!var->ty.as_or_throw<PrimType>().MatchesCode(kDLInt) &&
              !var->ty.as_or_throw<PrimType>().MatchesCode(kDLUInt))) {
           return std::nullopt;
         }
-        return MakeConst(var->ty.as_or_throw<PrimType>(), 0);
+        return tl::MakeConst(var->ty.as_or_throw<PrimType>(), 0);
       });
 }
 
@@ -687,7 +691,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
   probe.vector_bits = MaxVectorLoadBits(target, /*global_only_access=*/true);
   BindMemoryGeometry(&probe, target);
 
-  PrimExpr addr = MakeConst(PrimType::Int(32), 0);
+  PrimExpr addr = tl::MakeConst(PrimType::Int(32), 0);
   for (size_t d = 0; d < ndim; ++d) {
     addr = addr + (global_range[d]->begin + probe.point_vars[d]) *
                       IntImm(PrimType::Int(32), (*strides)[d]);
@@ -704,7 +708,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
 /*! \brief Collect the direct global-memory accesses of a parallel loop
  *  body, with the trip count of any enclosing serial loops (the access
  *  pattern replays, shifted, once per serial iteration). */
-class LoopGlobalAccessCollector : public StmtExprVisitor {
+class LoopGlobalAccessCollector : public tvm::tl::StmtExprVisitor {
 public:
   struct RawAccess {
     TensorVar buffer;
@@ -723,23 +727,23 @@ public:
 private:
   ffi::Optional<ffi::VisitInterrupt> Visit_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      return StmtExprVisitor::Visit_(op);
+      return tvm::tl::StmtExprVisitor::Visit_(op);
     }
-    auto extent = GetConstInt(
-        sym::Analyzer()->Simplify(ceildiv(op->end - op->begin, op->step)));
+    auto extent = GetConstInt(tl::arith::Simplify(
+        sym::Analyzer(), ceildiv(op->end - op->begin, op->step)));
     serial_stack_.push_back(extent ? *extent : -1);
-    StmtExprVisitor::Visit_(op);
+    tvm::tl::StmtExprVisitor::Visit_(op);
     serial_stack_.pop_back();
     return std::nullopt;
   }
   ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorStoreNode *op) final {
     Record(op->dest.as_or_throw<TensorVar>(), op->indices, /*is_store=*/true);
-    return StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorLoadNode *op) final {
     Record(op->source.as_or_throw<TensorVar>(), op->indices,
            /*is_store=*/false);
-    return StmtExprVisitor::Visit_(op);
+    return tvm::tl::StmtExprVisitor::Visit_(op);
   }
   void Record(const TensorVar &buffer, const Array<PrimExpr> &indices,
               bool is_store) {
@@ -852,7 +856,7 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
         raw.indices.size() != raw.buffer.shape().size()) {
       return worst_only("global access has unsupported dtype, shape, or rank");
     }
-    PrimExpr addr = MakeConst(PrimType::Int(32), 0);
+    PrimExpr addr = tl::MakeConst(PrimType::Int(32), 0);
     for (size_t d = 0; d < raw.indices.size(); ++d) {
       addr = addr + raw.indices[d] * IntImm(PrimType::Int(32), (*strides)[d]);
     }

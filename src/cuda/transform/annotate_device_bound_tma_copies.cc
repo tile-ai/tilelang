@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "op/copy.h"
@@ -15,7 +16,7 @@ namespace {
 
 using Bindings = std::unordered_map<const VarNode *, Expr>;
 
-class DeviceBoundAddress : public tirx::StmtExprVisitor {
+class DeviceBoundAddress : public tvm::tl::StmtExprVisitor {
 public:
   explicit DeviceBoundAddress(const Bindings &bindings) : bindings_(bindings) {}
 
@@ -47,7 +48,7 @@ private:
   bool found_ = false;
 };
 
-class DeviceBoundTmaCopyAnnotator : public tirx::StmtExprMutator {
+class DeviceBoundTmaCopyAnnotator : public tvm::tl::StmtExprMutator {
 public:
   explicit DeviceBoundTmaCopyAnnotator(Bindings bindings)
       : bindings_(std::move(bindings)) {}
@@ -56,7 +57,7 @@ private:
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
                                  ffi::InplaceMode inplace_mode) final {
     Expr original = ffi::GetRef<Expr>(node);
-    Call call = StmtExprMutator::Mutate_(node, inplace_mode)
+    Call call = tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<Call>();
     auto op = call->op.as<Op>();

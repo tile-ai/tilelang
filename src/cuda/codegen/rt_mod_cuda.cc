@@ -1,3 +1,4 @@
+#include "backend/common/codegen/attr.h"
 #include "backend/common/codegen/native_codegen.h"
 #include "codegen_cuda.h"
 
@@ -21,10 +22,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.cuda.build_from_source",
            [](IRModule module, Target target, ffi::String source) {
              module = tl::PrepareNativeCodegen(std::move(module), target);
-             module = WithAttr(std::move(module), attr::kCompile,
+             module = WithAttr(std::move(module), tl::codegen_attr::kCompile,
                                ffi::String("tl.cuda.compile_source"));
              return ffi::Function::GetGlobalRequired(
-                        "target.build.cuda_from_source")(module, target, source)
+                        "tl.codegen.cuda_from_source")(module, target, source)
                  .cast<ffi::Module>();
            })
       .def("tl.cuda.compile_source",

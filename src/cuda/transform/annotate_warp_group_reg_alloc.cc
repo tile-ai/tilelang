@@ -1,4 +1,6 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "op/utils.h"
@@ -18,7 +20,7 @@ bool HasMarker(const RegionStmtNode *region, const char *name) {
   return region->attrs->dict.count(name) != 0;
 }
 
-class RegisterHints : public StmtExprVisitor {
+class RegisterHints : public tvm::tl::StmtExprVisitor {
 public:
   std::array<int64_t, 2> counts{0, 0};
   bool disabled = false;
@@ -27,7 +29,7 @@ public:
 private:
   Optional<VisitInterrupt> Visit_(const RegionStmtNode *node) final {
     custom |= HasMarker(node, attr::kCustomWarpSpecialization);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const CallNode *node) final {
@@ -45,7 +47,7 @@ private:
              "240";
       counts[index] = *count;
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
@@ -83,8 +85,8 @@ Stmt RewriteFirstBranch(const Stmt &statement,
     return *rewritten ? Stmt(SeqStmt(statements, sequence->loc)) : statement;
   }
   if (const auto *region = statement.as<RegionStmtNode>();
-      region &&
-      (region->op.same_as(scope_op()) || region->op->name == "tl.scope")) {
+      region && (region->op.same_as(::tvm::tl::scope_op()) ||
+                 region->op->name == "tl.scope")) {
     Stmt body = RewriteFirstBranch(region->body, rewrite, rewritten);
     if (*rewritten) {
       RegionStmt result = GetRef<RegionStmt>(region);
@@ -100,7 +102,7 @@ Stmt ReconfigureRegisters(int64_t count, bool increase) {
                        {IntImm::Int32(count), IntImm::Int32(increase)}));
 }
 
-class RegisterInjector : public StmtExprMutator {
+class RegisterInjector : public tvm::tl::StmtExprMutator {
 public:
   explicit RegisterInjector(const RegisterHints &hints)
       : counts_(hints.counts), disabled_(hints.disabled) {}
@@ -113,7 +115,7 @@ private:
                  call->op.same_as(no_set_max_nreg()))) {
       return SeqStmt({});
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   Stmt RewriteBranch(const IfNode *branch) const {
@@ -177,7 +179,7 @@ private:
       thread_ = node->body_params[0].as_or_throw<PrimVar>();
       thread_extent_ = GetConstInt(node->args[1].as_or_throw<PrimExpr>());
     }
-    RegionStmt result = StmtExprMutator::Mutate_(node, mode)
+    RegionStmt result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(GetRef<Stmt>(node))
                             .as_or_throw<RegionStmt>();
     if (HasMarker(node, attr::kWarpSpecializationScope)) {

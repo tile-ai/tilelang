@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 import tvm_ffi
@@ -8,7 +6,7 @@ from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
 
-pytestmark = pytest.mark.usefixtures("native_layouts")
+pytestmark = pytest.mark.usefixtures("native_layouts", "native_operator_helpers")
 
 
 def atomic_operator(name, source, destination, annotations=None):
@@ -76,18 +74,15 @@ def test_atomic_rejects_invalid_annotations(annotations):
 @pytest.mark.gpu
 @pytest.mark.parametrize("name", ["add", "max", "min"])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
-def test_atomic_tile_runs_with_multiple_cuda_blocks(name, dtype):
+def test_atomic_tile_runs_with_multiple_cuda_blocks(name, dtype, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
-    root = Path(__file__).resolve().parents[3]
     target = Target(
         {
             "kind": "cuda",
             "arch": f"sm_{device.compute_version.replace('.', '')}",
-            "backend_config": {
-                "cuda": {"compiler": "nvcc", "nvcc": [f"-I{root / 'src'}", f"-I{root / '3rdparty' / 'cutlass' / 'include'}"]}
-            },
+            "backend_config": {"cuda": {"compiler": "nvcc"}},
         },
         host="c",
     )
@@ -106,7 +101,7 @@ def test_atomic_tile_runs_with_multiple_cuda_blocks(name, dtype):
         module = tvm_ffi.get_global_func("tl.transform.VectorizeLoop")(True)(module)
         module = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(module)
     assert tirx.analysis.check_well_formed(module)
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     numpy_dtype = pytest.importorskip("ml_dtypes").bfloat16 if dtype == "bfloat16" else dtype
     values = (np.arange(256) % 19 - 9).astype(numpy_dtype)
     initial = (np.arange(256) % 11 - 5).astype(numpy_dtype)

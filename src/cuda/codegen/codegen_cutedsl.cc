@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file target/codegen_cutedsl.cc
  */
@@ -32,7 +35,7 @@ namespace {
 
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
-class LoopBreakDetector : public tirx::StmtExprVisitor {
+class LoopBreakDetector : public tvm::tl::StmtExprVisitor {
 public:
   bool found = false;
   ffi::Optional<ffi::VisitInterrupt> Visit_(const BreakNode *op) override {
@@ -405,7 +408,7 @@ static bool IsZeroTensorLike(
   return IsZeroLike(value);
 }
 
-class BufferLoadDetector : public tirx::StmtExprVisitor {
+class BufferLoadDetector : public tvm::tl::StmtExprVisitor {
 public:
   bool found = false;
   ffi::Optional<ffi::VisitInterrupt> Visit_(const TensorLoadNode *op) override {
@@ -2271,7 +2274,7 @@ void CodeGenTileLangCuTeDSL::Dispatch_(const TensorLoadNode *op,
           << "Expected Ramp index for vectorized non-contiguous access";
       for (int i = 0; i < value_lanes; ++i) {
         auto idx_expr =
-            sym::Analyzer()->Simplify(ramp->base + ramp->stride * i);
+            tl::arith::Simplify(sym::Analyzer(), ramp->base + ramp->stride * i);
 
         PrintIndent();
         stream << sret << "[" << i << "] = "
@@ -2801,7 +2804,7 @@ void CodeGenTileLangCuTeDSL::Dispatch_(const TensorStoreNode *op) {
         const RampNode *ramp = index_expr.as<RampNode>();
         ICHECK(ramp);
         auto idx_expr =
-            sym::Analyzer()->Simplify(ramp->base + ramp->stride * i);
+            tl::arith::Simplify(sym::Analyzer(), ramp->base + ramp->stride * i);
 
         PrintIndent();
         stream << GetBufferRef_(element_dtype,
@@ -2933,7 +2936,7 @@ void CodeGenTileLangCuTeDSL::PrintAllocTensor_(const BindNode *op,
       PrintType(storage_dtype, stream);
       stream << ")\n";
     } else if (scope == "local.var") {
-      PrimExpr init = prim::MakeConst(alloc_dtype, 0);
+      PrimExpr init = tl::MakeConst(alloc_dtype, 0);
       auto init_it = annotations.find(tl::attr::kLocalVarInit);
       if (init_it != annotations.end()) {
         PrimExpr user_init = (*init_it).second.cast<PrimExpr>();
@@ -3031,8 +3034,9 @@ void CodeGenTileLangCuTeDSL::Dispatch_(const ForNode *op) {
     return;
   }
 
-  auto start_expr = sym::Analyzer()->Simplify(op->begin);
-  auto stop_expr = sym::Analyzer()->Simplify((op->end - op->begin) + op->begin);
+  auto start_expr = tl::arith::Simplify(sym::Analyzer(), op->begin);
+  auto stop_expr =
+      tl::arith::Simplify(sym::Analyzer(), (op->end - op->begin) + op->begin);
   std::string unroll_factor;
   if (auto it = unroll_factor_.find(op->var.get());
       it != unroll_factor_.end()) {

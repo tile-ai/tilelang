@@ -1,11 +1,13 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/op/fill.cc
  *
  * Define elment-wise operators.
  */
 
-#include "fill.h"
 #include "compat/visit.h"
+#include "fill.h"
+#include "op/prim.h"
 #include "support/check.h"
 
 #include <tvm/ir/prim/op.h>
@@ -101,13 +103,15 @@ Fill::Fill(Array<Expr> args, BlockAnnotations annotations) {
   sym::Analyzer analyzer;
   for (size_t axis = 0; axis < node->region.size(); ++axis) {
     const Range &domain = node->region[axis];
-    TVM_FFI_CHECK(!analyzer->CanProve(domain->begin < 0), ValueError)
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, domain->begin < 0), ValueError)
         << "Fill region must start within the destination tensor";
-    TVM_FFI_CHECK(!analyzer->CanProve(domain->extent < 0), ValueError)
-        << "Fill region must have nonnegative extents";
-    TVM_FFI_CHECK(!analyzer->CanProve(domain->begin + domain->extent >
-                                      node->dst.shape()[axis]),
+    TVM_FFI_CHECK(!tl::arith::CanProve(analyzer, domain->extent < 0),
                   ValueError)
+        << "Fill region must have nonnegative extents";
+    TVM_FFI_CHECK(
+        !tl::arith::CanProve(analyzer, domain->begin + domain->extent >
+                                           node->dst.shape()[axis]),
+        ValueError)
         << "Fill region exceeds the destination tensor";
   }
   data_ = std::move(node);
@@ -145,7 +149,8 @@ For FillNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
     PrimVar variable("fill_axis_" + std::to_string(axis),
                      region[axis]->extent.ty());
     loop_vars.push_back(variable);
-    indices.push_back(analyzer->Simplify(region[axis]->begin + variable));
+    indices.push_back(
+        tl::arith::Simplify(analyzer, region[axis]->begin + variable));
   }
   Stmt body = TensorStore(dst, indices, value, dst->loc);
   if (region.empty()) {
@@ -154,8 +159,8 @@ For FillNode::MakeSIMTLoop(sym::Analyzer analyzer) const {
   }
   for (size_t axis = region.size(); axis-- > 0;) {
     PrimType type = loop_vars[axis].ty();
-    body = For(loop_vars[axis], MakeConst(type, 0), region[axis]->extent,
-               MakeConst(type, 1), ForKind::kParallel, SeqStmt(body));
+    body = For(loop_vars[axis], tl::MakeConst(type, 0), region[axis]->extent,
+               tl::MakeConst(type, 1), ForKind::kParallel, SeqStmt(body));
   }
   return body.as_or_throw<For>();
 }

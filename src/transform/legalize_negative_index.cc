@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "compat/expr.h"
 #include "support/check.h"
 
@@ -9,17 +13,17 @@ namespace tvm::tl {
 
 namespace {
 
-class NegativeIndexRewriter : public tirx::StmtExprMutatorWithAnalyzer {
+class NegativeIndexRewriter : public ::tvm::tl::LoopAwareMutator {
 public:
   explicit NegativeIndexRewriter(const sym::Analyzer &analyzer)
-      : StmtExprMutatorWithAnalyzer(analyzer) {}
+      : LoopAwareMutator(analyzer) {}
 
 private:
   PrimExpr NormalizeIndex(const PrimExpr &index, const PrimExpr &extent) {
-    PrimExpr value = analyzer_->Simplify(index);
+    PrimExpr value = tl::arith::Simplify(analyzer_, index);
     if (value.ty().IsScalar()) {
-      return analyzer_->CanProve(value < 0)
-                 ? analyzer_->Simplify(extent + value)
+      return tl::arith::CanProve(analyzer_, value < 0)
+                 ? tl::arith::Simplify(analyzer_, extent + value)
                  : index;
     }
     if (const auto *broadcast = value.as<BroadcastNode>()) {
@@ -34,26 +38,29 @@ private:
         return index;
       }
       PrimExpr last =
-          ramp->base + MakeConst(ramp->stride.ty(), *lanes - 1) * ramp->stride;
-      if (analyzer_->CanProve(Min(ramp->base, last) >= 0)) {
+          ramp->base +
+          tl::MakeConst(ramp->stride.ty(), *lanes - 1) * ramp->stride;
+      if (tl::arith::CanProve(analyzer_, Min(ramp->base, last) >= 0)) {
         return index;
       }
-      if (analyzer_->CanProve(Max(ramp->base, last) < 0)) {
-        return analyzer_->Simplify(extent + value);
+      if (tl::arith::CanProve(analyzer_, Max(ramp->base, last) < 0)) {
+        return tl::arith::Simplify(analyzer_, extent + value);
       }
       ffi::Array<PrimExpr> values;
       ffi::Array<PrimExpr> positions;
       PrimType element_type = (extent + ramp->base).ty();
       for (int64_t lane = 0; lane < *lanes; ++lane) {
-        PrimExpr scalar = analyzer_->Simplify(
-            ramp->base + MakeConst(ramp->stride.ty(), lane) * ramp->stride);
+        PrimExpr scalar = tl::arith::Simplify(
+            analyzer_,
+            ramp->base + tl::MakeConst(ramp->stride.ty(), lane) * ramp->stride);
         scalar = Cast(element_type, scalar);
         PrimExpr wrapped = Cast(element_type, extent + scalar);
-        values.push_back(
-            analyzer_->Simplify(Select(scalar < 0, wrapped, scalar)));
+        values.push_back(tl::arith::Simplify(
+            analyzer_, Select(scalar < 0, wrapped, scalar)));
         positions.push_back(IntImm(PrimType::Int(32), lane));
       }
-      return analyzer_->Simplify(Shuffle(values, positions, value->loc));
+      return tl::arith::Simplify(analyzer_,
+                                 Shuffle(values, positions, value->loc));
     }
     return index;
   }
@@ -73,7 +80,7 @@ private:
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                      ffi::InplaceMode mode) final {
     PrimExpr original = ffi::GetRef<PrimExpr>(node);
-    auto load = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    auto load = LoopAwareMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<TensorLoad>();
     return TensorLoad(load->source,
@@ -83,7 +90,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto store = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    auto store = LoopAwareMutator::Mutate_(node, mode)
                      .ValueOrUnchanged(original)
                      .as_or_throw<TensorStore>();
     return TensorStore(store->dest,
@@ -94,7 +101,7 @@ private:
   ffi::UnchangedOr<Expr> Mutate_(const TensorRegionNode *node,
                                  ffi::InplaceMode mode) final {
     Expr original = ffi::GetRef<Expr>(node);
-    auto region = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    auto region = LoopAwareMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(original)
                       .as_or_throw<TensorRegion>();
     const auto *type = region->source->ty.as<tirx::TensorTypeNode>();

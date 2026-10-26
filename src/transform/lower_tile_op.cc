@@ -1,4 +1,9 @@
-#include "lower_tile_op.h"
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "compat/thread.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
@@ -6,6 +11,7 @@
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/swizzle_mode.h"
 #include "layout/utils.h"
+#include "lower_tile_op.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "span_utils.h"
@@ -29,7 +35,7 @@ using namespace tirx;
 
 namespace {
 
-class TensorRebinder : public StmtExprMutator {
+class TensorRebinder : public tvm::tl::StmtExprMutator {
 public:
   explicit TensorRebinder(Map<TensorVar, TensorVar> replacements)
       : replacements_(std::move(replacements)) {}
@@ -40,7 +46,7 @@ private:
       if (auto replacement = replacements_.Get(tensor.value()))
         return replacement.value();
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
@@ -59,12 +65,12 @@ private:
                     node->loc);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
   Map<TensorVar, TensorVar> replacements_;
 };
 
-class BarrierArrivalUpdater : public StmtExprMutator {
+class BarrierArrivalUpdater : public tvm::tl::StmtExprMutator {
 public:
   explicit BarrierArrivalUpdater(Map<Var, PrimExpr> updates)
       : updates_(std::move(updates)) {}
@@ -78,7 +84,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
     auto updated_count = updates_.Get(node->var);
     if (!updated_count)
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     const auto *call = node->value.as<CallNode>();
     TVM_FFI_CHECK(call && call->op.same_as(alloc_tensor_op()) && call->attrs,
                   ValueError)
@@ -132,7 +138,7 @@ TensorVar PhysicalTensor(const TensorVar &tensor,
         TVM_FFI_CHECK(elements % physical == 0, ValueError)
             << "Shared layout replication must have an integral extent";
         shape.insert(shape.begin(),
-                     MakeConst(PrimType::Int(64), elements / physical));
+                     tl::MakeConst(PrimType::Int(64), elements / physical));
       }
     }
   }
@@ -142,11 +148,11 @@ TensorVar PhysicalTensor(const TensorVar &tensor,
   return TensorVar(tensor->name, type, tensor->loc);
 }
 
-class LowerTileOpPass : public StmtExprMutatorWithAnalyzer {
+class LowerTileOpPass : public LoopAwareMutator {
 public:
   LowerTileOpPass(sym::Analyzer analyzer, Target target,
                   LowerTileOpOptions options = {})
-      : StmtExprMutatorWithAnalyzer(analyzer), target_(std::move(target)),
+      : LoopAwareMutator(analyzer), target_(std::move(target)),
         options_(std::move(options)) {}
 
   tirx::Function Run(tirx::Function function) {
@@ -287,7 +293,7 @@ private:
     if (!in_tma_) {
       Array<PrimExpr> result = layout.value()->Forward(rewritten);
       if (result.size() + 1 == remap_[tensor].shape().size()) {
-        result.insert(result.begin(), MakeConst(PrimType::Int(32), 0));
+        result.insert(result.begin(), tl::MakeConst(PrimType::Int(32), 0));
       }
       return result;
     }
@@ -298,9 +304,11 @@ private:
     Array<PrimExpr> result;
     const auto &shape = remap_[tensor].shape();
     for (int axis = static_cast<int>(shape.size()) - 1; axis >= 0; --axis) {
-      result.insert(result.begin(),
-                    analyzer_->Simplify(floormod(remaining, shape[axis])));
-      remaining = analyzer_->Simplify(floordiv(remaining, shape[axis]));
+      result.insert(
+          result.begin(),
+          tl::arith::Simplify(analyzer_, floormod(remaining, shape[axis])));
+      remaining =
+          tl::arith::Simplify(analyzer_, floordiv(remaining, shape[axis]));
     }
     return result;
   }
@@ -310,7 +318,7 @@ private:
       if (auto physical = remap_.Get(tensor.value()))
         return physical.value();
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node, InplaceMode) final {
@@ -331,7 +339,7 @@ private:
                             InplaceMode mode) final {
     TensorVar tensor = node->source.as_or_throw<TensorVar>();
     if (!layouts_.count(tensor) || !remap_.count(tensor)) {
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     }
     auto region = node->region.Map([this](const Range &range) {
       return Range::FromMinExtent(RewriteScalar(range->begin),
@@ -380,7 +388,7 @@ private:
       RecordSharedAlignment(GetVarFromAccessPtr(node->args[1]),
                             SwizzleMode::FromOrdinal(ordinal).SmemAlignment());
     }
-    Expr result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    Expr result = LoopAwareMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(GetRef<Expr>(node));
     in_tma_ = previous_tma;
     if (operation &&
@@ -416,7 +424,7 @@ private:
                     node->loc);
       }
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateNode *node, InplaceMode mode) final {
@@ -429,12 +437,12 @@ private:
         safe_values_.Set(call->args[0].as_or_throw<Var>(),
                          call->args[1].as_or_throw<PrimExpr>());
         annotations_.Set(attr::kSafeValueMap, safe_values_);
-        return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+        return LoopAwareMutator::Mutate_(node, mode);
       }
     }
     TileOperator operation = ParseOperator(GetRef<Stmt>(node), annotations_);
     if (!operation.defined())
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     if (options_.rewrite_operator)
       operation = options_.rewrite_operator(operation,
                                             GetRef<sym::Analyzer>(analyzer_));
@@ -498,7 +506,7 @@ private:
     if (thread_scope)
       thread_ = node->body_params[0].as_or_throw<PrimVar>();
     bool lexical_scope =
-        node->op->name == "tl.scope" || node->op.same_as(tirx::scope_op());
+        node->op->name == "tl.scope" || node->op.same_as(::tvm::tl::scope_op());
     bool resource_scope = lexical_scope || thread_scope;
     if (resource_scope)
       resources_.emplace_back();
@@ -515,7 +523,7 @@ private:
         cluster_size_ = StaticElements(dimensions.value(), "cluster_dims");
       }
     }
-    RegionStmt result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    RegionStmt result = LoopAwareMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(GetRef<Stmt>(node))
                             .as_or_throw<RegionStmt>();
     if (resource_scope)
@@ -533,7 +541,7 @@ private:
     attributes.CopyOnWrite()->dict.erase(kPipelineCPAsyncScope);
     result.CopyOnWrite()->attrs = attributes;
     if (node->op->name == "tl.scope")
-      result.CopyOnWrite()->op = tirx::scope_op();
+      result.CopyOnWrite()->op = ::tvm::tl::scope_op();
     thread_ = previous_thread;
     annotations_ = previous_annotations;
     safe_values_ = previous_safe_values;
@@ -555,10 +563,10 @@ private:
   UnchangedOr<Stmt> Mutate_(const ForNode *node, InplaceMode mode) final {
     bool serial = node->kind == ForKind::kDefault;
     if (serial)
-      phases_.push_back(analyzer_->Simplify(
-          FloorMod(FloorDiv(node->var - node->begin, node->step),
-                   MakeConst(node->var.ty(), 2))));
-    For loop = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+      phases_.push_back(tl::arith::Simplify(
+          analyzer_, FloorMod(FloorDiv(node->var - node->begin, node->step),
+                              tl::MakeConst(node->var.ty(), 2))));
+    For loop = LoopAwareMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(GetRef<Stmt>(node))
                    .as_or_throw<For>();
     if (serial)

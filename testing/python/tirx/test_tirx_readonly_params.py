@@ -113,9 +113,7 @@ def test_stale_readonly_annotation_is_replaced_after_a_write():
 def test_native_scope_preserves_alias_analysis():
     source = tensor("source")
     alias = ir.Var("alias", source.data.ty)
-    body = ir.RegionStmt(
-        "tirx.scope", [], [], None, [ir.Bind(alias, source.data), ir.Evaluate(tirx.call_extern("write", alias, ty="void"))]
-    )
+    body = ir.RegionStmt("tl.scope", [], [], None, [ir.Bind(alias, source.data), ir.Evaluate(tirx.call_extern("write", alias, ty="void"))])
     assert readonly(annotate([source.tensor], body)) == []
 
 

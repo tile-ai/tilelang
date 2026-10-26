@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file op/parallel.cc
  * \brief Define Parallel for operator
@@ -35,7 +38,7 @@ using namespace ffi;
 
 namespace {
 
-class IfBufferRemapLoopGenerator : public StmtExprMutator {
+class IfBufferRemapLoopGenerator : public tvm::tl::StmtExprMutator {
 public:
   static For run(Stmt stmt, Map<TensorVar, TensorVar> buffer_remap,
                  Map<TensorVar, Layout> layout_map) {
@@ -52,7 +55,7 @@ public:
 private:
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *op,
                                 InplaceMode mode) final {
-    auto load = StmtExprMutator::Mutate_(op, mode)
+    auto load = tvm::tl::StmtExprMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<PrimExpr>(op))
                     .as_or_throw<TensorLoad>();
 
@@ -68,7 +71,7 @@ private:
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *op, InplaceMode mode) final {
-    auto store = StmtExprMutator::Mutate_(op, mode)
+    auto store = tvm::tl::StmtExprMutator::Mutate_(op, mode)
                      .ValueOrUnchanged(GetRef<Stmt>(op))
                      .as_or_throw<TensorStore>();
     if (buffer_remap_.count(store->dest.as_or_throw<TensorVar>())) {
@@ -93,8 +96,8 @@ private:
 int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
                                PrimExpr thread_extent, sym::Analyzer analyzer) {
   ICHECK_GT(max_vector_size, 0);
-  auto total = GetConstInt(analyzer->Simplify(loop_total_size));
-  auto threads = GetConstInt(analyzer->Simplify(thread_extent));
+  auto total = GetConstInt(tl::arith::Simplify(analyzer, loop_total_size));
+  auto threads = GetConstInt(tl::arith::Simplify(analyzer, thread_extent));
   // This is a compile-time planning heuristic.  If the size is symbolic, keep
   // the vectorizer's original choice and rely on the existing runtime guard.
   if (!total.has_value() || !threads.has_value() || *threads <= 0) {
@@ -112,8 +115,8 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
         IntImm(PrimType::Int(64), (*threads) * static_cast<int64_t>(candidate));
     // Use tirx::ceildiv instead of hand-rolled integer arithmetic so the same
     // simplification and constant-folding rules are used as TIR expressions.
-    PrimExpr covered_expr = analyzer->Simplify(
-        ceildiv(total_i64, partition_width) * partition_width);
+    PrimExpr covered_expr = tl::arith::Simplify(
+        analyzer, ceildiv(total_i64, partition_width) * partition_width);
     auto covered = GetConstInt(covered_expr);
     if (!covered.has_value()) {
       return max_vector_size;
@@ -145,10 +148,10 @@ Optional<VisitInterrupt> ParallelLoopNestVisitor::Visit_(const ForNode *op) {
   auto analyzer = operation_->analyzer_;
   PrimExpr lower = Min(op->begin, op->end);
   PrimExpr upper = Max(op->begin, op->end) + 1;
-  if (analyzer->CanProve(op->step > 0)) {
+  if (tl::arith::CanProve(analyzer, op->step > 0)) {
     lower = op->begin;
     upper = Max(op->begin, op->end);
-  } else if (analyzer->CanProve(op->step < 0)) {
+  } else if (tl::arith::CanProve(analyzer, op->step < 0)) {
     lower = Min(op->begin + 1, op->end + 1);
     upper = op->begin + 1;
   }
@@ -162,8 +165,8 @@ Optional<VisitInterrupt> ParallelLoopNestVisitor::Visit_(const ForNode *op) {
   } else {
     operation_->inner_vars_.Set(op->var, LayoutAxis(domain, op->var));
   }
-  operation_->analyzer_->Bind(op->var, domain);
-  return StmtExprVisitor::Visit_(op);
+  tl::arith::Bind(operation_->analyzer_, op->var, domain);
+  return tvm::tl::StmtExprVisitor::Visit_(op);
 }
 
 Optional<VisitInterrupt>
@@ -172,7 +175,7 @@ ParallelLoopNestVisitor::Visit_(const TensorStoreNode *op) {
   if (IsFragmentBuffer(tensor)) {
     operation_->RecordBufferAccess(tensor, op->indices, true);
   }
-  return StmtExprVisitor::Visit_(op);
+  return tvm::tl::StmtExprVisitor::Visit_(op);
 }
 
 Optional<VisitInterrupt>
@@ -181,7 +184,7 @@ ParallelLoopNestVisitor::Visit_(const TensorLoadNode *op) {
   if (IsFragmentBuffer(tensor)) {
     operation_->RecordBufferAccess(tensor, op->indices, false);
   }
-  return StmtExprVisitor::Visit_(op);
+  return tvm::tl::StmtExprVisitor::Visit_(op);
 }
 
 Optional<VisitInterrupt> ParallelLoopNestVisitor::Visit_(const CallNode *op) {
@@ -190,7 +193,7 @@ Optional<VisitInterrupt> ParallelLoopNestVisitor::Visit_(const CallNode *op) {
     operation_->reducer_updates_.push_back(ParallelOpNode::ReducerUpdateRecord{
         update.reducer, update.indices, update.value});
   }
-  return StmtExprVisitor::Visit_(op);
+  return tvm::tl::StmtExprVisitor::Visit_(op);
 }
 
 ParallelOpNode::ParallelOpNode(For root) : root_(root) {
@@ -611,7 +614,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     }
   }
 
-  if (!analyzer_->CanProveEqual(loop_thread_extent, block_size)) {
+  if (!tl::arith::CanProveEqual(analyzer_, loop_thread_extent, block_size)) {
     AddPredicate(LT(InputPlaceholder(0),
                     loop_thread_extent + layout_args.thread_bounds->begin));
   }
@@ -748,7 +751,7 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
         is_output_dim[pos] = true;
         acc_args.push_back(loop_vars_[pos]->var);
       } else if (IsZero(index)) {
-        acc_args.push_back(MakeConst(PrimType::Int(32), 0));
+        acc_args.push_back(tl::MakeConst(PrimType::Int(32), 0));
       } else {
         mappable = false;
         break;
@@ -765,13 +768,14 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
     // per-thread reduction slice vectorizable).
     PrimType dtype =
         loop_vars_.empty() ? PrimType::Int(32) : loop_vars_[0]->var.ty();
-    PrimExpr flat = MakeConst(dtype, 0);
+    PrimExpr flat = tl::MakeConst(dtype, 0);
     int64_t flat_extent = 1;
     for (size_t i = 0; i < loop_vars_.size(); ++i) {
       if (is_output_dim[i]) {
         continue;
       }
-      auto ext = GetConstInt(analyzer_->Simplify(loop_vars_[i]->dom->extent));
+      auto ext = GetConstInt(
+          tl::arith::Simplify(analyzer_, loop_vars_[i]->dom->extent));
       if (!ext.has_value()) {
         mappable = false;
         break;
@@ -779,8 +783,10 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
       flat = flat * loop_vars_[i]->dom->extent + loop_vars_[i]->var;
       flat_extent *= *ext;
     }
-    auto lanes_ptr = GetConstInt(analyzer_->Simplify(pinned->CombineSize()));
-    auto rep_ptr = GetConstInt(analyzer_->Simplify(pinned->ReplicateExtent()));
+    auto lanes_ptr =
+        GetConstInt(tl::arith::Simplify(analyzer_, pinned->CombineSize()));
+    auto rep_ptr =
+        GetConstInt(tl::arith::Simplify(analyzer_, pinned->ReplicateExtent()));
     if (!mappable || !lanes_ptr.has_value() || !rep_ptr.has_value()) {
       continue;
     }
@@ -788,13 +794,13 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
     int64_t copies = *rep_ptr / lanes; // ctor guarantees divisibility
     PrimExpr lane_expr(ffi::UnsafeInit{});
     if (lanes <= 1) {
-      lane_expr = MakeConst(dtype, 0);
+      lane_expr = tl::MakeConst(dtype, 0);
     } else if (flat_extent % lanes != 0) {
       // Cannot split evenly; the annotation conflict (if any) is reported
       // by ProposeReducerPartial once the loop layout is solved elsewhere.
       continue;
     } else {
-      lane_expr = FloorDiv(flat, MakeConst(dtype, flat_extent / lanes));
+      lane_expr = FloorDiv(flat, tl::MakeConst(dtype, flat_extent / lanes));
     }
     // Copy groups (annotated combine < replicate) come from the loop's own
     // replication: give the candidate a replicate var on the high side of
@@ -804,13 +810,14 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
         loop_rep; // stays null when the partial has no copy groups
     PrimExpr rep_expr = lane_expr;
     if (copies > 1) {
-      loop_rep = LayoutAxis(
-          Range::FromMinExtent(MakeConst(dtype, 0), MakeConst(dtype, copies)),
-          PrimVar("rep", dtype));
-      rep_expr = lane_expr + MakeConst(dtype, lanes) * loop_rep.value()->var;
+      loop_rep = LayoutAxis(Range::FromMinExtent(tl::MakeConst(dtype, 0),
+                                                 tl::MakeConst(dtype, copies)),
+                            PrimVar("rep", dtype));
+      rep_expr =
+          lane_expr + tl::MakeConst(dtype, lanes) * loop_rep.value()->var;
     }
-    PrimExpr loop_var_to_thread =
-        analyzer_->Simplify(pinned->ForwardThread(acc_args, rep_expr));
+    PrimExpr loop_var_to_thread = tl::arith::Simplify(
+        analyzer_, pinned->ForwardThread(acc_args, rep_expr));
     try {
       return Fragment(loop_vars_, {}, loop_var_to_thread, loop_rep)
           ->BindThreadRange(layout_args.thread_bounds);
@@ -990,7 +997,7 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
         LayoutAxis(Range::FromMinExtent(0, src_layout->ReplicateExtent()), rep);
     PrimExpr loop_var_to_thread =
         src_layout->ForwardThread(GetAccessInfo(buffer).indices, rep);
-    loop_var_to_thread = analyzer_->Simplify(loop_var_to_thread);
+    loop_var_to_thread = tl::arith::Simplify(analyzer_, loop_var_to_thread);
     PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
       if (auto opt_var = objref.as<Var>();
           opt_var && inner_vars_.count(*opt_var)) {
@@ -1059,7 +1066,8 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
              << '\n';
   bool has_fragment_access = !indice_map_.empty();
   if (has_fragment_access) {
-    while (!analyzer_->CanProve(
+    while (!tl::arith::CanProve(
+               analyzer_,
                floormod(loop_total_size, layout_args.thread_bounds->extent *
                                              vector_size) == 0) &&
            vector_size > 1) {
@@ -1129,7 +1137,8 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
       if (IsOne(fragment_layout->ReplicateExtent()))
         continue;
 
-      if (analyzer_->CanProveEqual(fragment_layout->ReplicateExtent(),
+      if (tl::arith::CanProveEqual(analyzer_,
+                                   fragment_layout->ReplicateExtent(),
                                    loop_layout_->ReplicateExtent()))
         continue;
       if (std::find(const_index_fragment_buffer.begin(),
@@ -1238,7 +1247,7 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
     return candidate_from_buffer;
   }
   // Neither strictly contains the other; prefer the one with smaller/equal rep.
-  if (analyzer_->CanProve(rep_plan <= rep_buf)) {
+  if (tl::arith::CanProve(analyzer_, rep_plan <= rep_buf)) {
     return candidate_from_plan;
   }
   // Safe fallback: buffer-based candidate is always correct.
@@ -1263,20 +1272,21 @@ FragmentThreadIndexProbe::FragmentThreadIndexProbe(
     // below are range-dependent (e.g. `(o0*512 + t*4 + o1) // 512 -> o0`
     // only holds for t*4 + o1 < 512), and an unbound var makes Simplify
     // keep the thread term, flagging clean strided layouts as spilling.
-    analyzer->Bind(coord, Range::FromMinExtent(MakeConst(PrimType::Int(32), 0),
-                                               loop_layout->OutputShape()[i]));
+    tl::arith::Bind(analyzer, coord,
+                    Range::FromMinExtent(tl::MakeConst(PrimType::Int(32), 0),
+                                         loop_layout->OutputShape()[i]));
     partition_vars.push_back(coord);
   }
   partition_vars.push_back(thread_var_);
   if (loop_layout->ThreadRange().has_value()) {
-    analyzer->Bind(
-        thread_var_,
+    tl::arith::Bind(
+        analyzer, thread_var_,
         Range::FromMinExtent(loop_layout->ThreadRange().value()->begin,
                              loop_layout->ThreadRange().value()->extent));
   } else {
-    analyzer->Bind(thread_var_,
-                   Range::FromMinExtent(MakeConst(PrimType::Int(32), 0),
-                                        loop_layout->ThreadExtent()));
+    tl::arith::Bind(analyzer, thread_var_,
+                    Range::FromMinExtent(tl::MakeConst(PrimType::Int(32), 0),
+                                         loop_layout->ThreadExtent()));
   }
 
   Array<PrimExpr> recovered_indices;
@@ -1313,7 +1323,7 @@ bool FragmentThreadIndexProbe::AccessUsesThread(
   }
   Array<PrimExpr> physical_indices = fragment_layout->Forward(indices);
   for (const auto &index : physical_indices) {
-    PrimExpr simplified = analyzer_->Simplify(index);
+    PrimExpr simplified = tl::arith::Simplify(analyzer_, index);
     bool uses_thread = false;
     PostOrderVisit(simplified, [&](const ObjectRef &node) {
       if (auto variable = node.as<PrimVar>()) {

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,6 +20,7 @@
 
 #pragma once
 
+#include "op/prim.h"
 #include <array>
 #include <unordered_map>
 #include <unordered_set>
@@ -451,7 +453,7 @@ private:
       // Condition snapshots belong inside PerCoreTask. Expand only immutable
       // bindings when exposing the selected candidates to outer
       // synchronization.
-      active = analyzer_->Simplify(Substitute(active, bindings));
+      active = tl::arith::Simplify(analyzer_, Substitute(active, bindings));
       bool available = SideEffect(active) <= CallEffectKind::kReadState;
       PostOrderVisit(active, [&](const ObjectRef &node) {
         if (const auto *var = node.as<VarNode>())
@@ -489,7 +491,7 @@ private:
       Stmt body = rewriter->VisitStmt(marked);
       local_vars_.insert(rewriter->local_vars_.begin(),
                          rewriter->local_vars_.end());
-      PrimExpr active = analyzer_->Simplify(rewriter->active_);
+      PrimExpr active = tl::arith::Simplify(analyzer_, rewriter->active_);
       bool has_access = HasTaskBufferAccess(task->body);
       if (has_access) {
         per_core_->active = per_core_->active || (per_core_->path && active);
@@ -538,7 +540,8 @@ private:
         return NativeMutator::VisitStmt_(op);
       }
       if (key == kScheduleCondition) {
-        auto condition = analyzer_->Simplify(
+        auto condition = tl::arith::Simplify(
+            analyzer_,
             VisitExpr(ScheduleMarkerPayload(op).as_or_throw<PrimExpr>()));
         if (GetConstInt(condition) == 0)
           return Evaluate(IntImm::Int32(0));
@@ -595,7 +598,7 @@ private:
     Expr VisitExpr_(const VarNode *op) final {
       Var variable = ffi::GetRef<Var>(op);
       if (variable.same_as(owner_->sid_))
-        return MakeConst(variable.as_or_throw<PrimVar>().ty(), p_);
+        return tl::MakeConst(variable.as_or_throw<PrimVar>().ty(), p_);
       Var mapped = owner_->VarFor(variable, p_);
       if (auto constant = owner_->constants_.Get(mapped))
         return constant.value();
@@ -606,7 +609,7 @@ private:
       Var variable = owner_->VarFor(op->var, p_);
       Expr value = VisitExpr(op->value);
       if (auto scalar = value.as<PrimExpr>())
-        value = analyzer_->Simplify(scalar.value());
+        value = tl::arith::Simplify(analyzer_, scalar.value());
       local_vars_.insert(variable);
       if (conditional_depth_ == 0 && value.as<IntImmNode>())
         owner_->constants_.Set(variable, value.as_or_throw<PrimExpr>());
@@ -624,7 +627,8 @@ private:
     }
 
     Stmt VisitStmt_(const IfNode *op) final {
-      PrimExpr condition = analyzer_->Simplify(VisitExpr(op->condition));
+      PrimExpr condition =
+          tl::arith::Simplify(analyzer_, VisitExpr(op->condition));
       if ((GetConstInt(condition) == 1))
         return VisitStmt(op->then_case);
       if ((GetConstInt(condition) == 0))
@@ -677,7 +681,8 @@ private:
         target = copy->sub_blockid;
       // Keep a single routing target for each projected atomic task.
       if (copy_target_.has_value()) {
-        ICHECK(analyzer_->CanProveEqual(target, copy_target_.value()))
+        ICHECK(
+            tl::arith::CanProveEqual(analyzer_, target, copy_target_.value()))
             << "Projected Fixpipe copies in one T.Task must use the same "
                "sub_blockid; put copies with different destinations in "
                "separate T.Task scopes";
@@ -701,7 +706,7 @@ private:
           (source_route_expr && owner_->Varies(source_route_expr.value()));
       owner_->copy_origins_.emplace(call, std::move(source));
 
-      PrimExpr condition = analyzer_->Simplify(target == p_);
+      PrimExpr condition = tl::arith::Simplify(analyzer_, target == p_);
       bool task_local = SideEffect(condition) > CallEffectKind::kReadState;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
         if (const auto *var = node.as<VarNode>())
@@ -833,7 +838,7 @@ private:
               ffi::make_object<Rewriter>(this, p, !conditional_parent);
           body = rewriter->VisitStmt(body);
           sym::Analyzer analyzer;
-          PrimExpr active = analyzer->Simplify(rewriter->active_);
+          PrimExpr active = tl::arith::Simplify(analyzer, rewriter->active_);
           if ((GetConstInt(active) == 0))
             continue;
           if (node->IsTask() && rewriter->CanReplayFixpipe())

@@ -1,3 +1,5 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 /*!
  * \file restore_while_loops.cc
  * \brief Restore `while` loops that NormalizeControlFlowForSchedule turned into
@@ -32,24 +34,24 @@
 namespace tvm::tl {
 namespace {
 
-class ExpressionSimplifier : public tirx::StmtExprMutator {
+class ExpressionSimplifier : public tvm::tl::StmtExprMutator {
 public:
-  using StmtExprMutator::Mutate;
+  using tvm::tl::StmtExprMutator::Mutate;
   ffi::UnchangedOr<ffi::Any> Mutate(ffi::AnyView input,
                                     ffi::InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate(input, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate(input, mode);
     if (def_region_kind() != kTVMFFIDefRegionKindNone || !input.as<PrimExpr>())
       return result;
     auto expression =
         std::move(result).ValueOrUnchanged(input).as_or_throw<PrimExpr>();
-    return analyzer_->Simplify(expression);
+    return tl::arith::Simplify(analyzer_, expression);
   }
 
 private:
   sym::Analyzer analyzer_;
 };
 
-class ContinueCounter : public tirx::StmtExprMutator {
+class ContinueCounter : public tvm::tl::StmtExprMutator {
 public:
   explicit ContinueCounter(Stmt increment) : increment_(std::move(increment)) {}
 
@@ -69,12 +71,12 @@ private:
   Stmt increment_;
 };
 
-class WhileLoopRestorer : public tirx::StmtExprMutator {
+class WhileLoopRestorer : public tvm::tl::StmtExprMutator {
 protected:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto loop = StmtExprMutator::Mutate_(node, mode)
+    auto loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<For>();
     if (!loop->annotations.count("synthetic_while"))

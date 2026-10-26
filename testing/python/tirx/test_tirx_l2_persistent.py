@@ -28,7 +28,7 @@ def lower(function, target=None):
 def kernel(source, output, ratio=0.75):
     thread = ir.Var("thread", "int32")
     scope = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {"l2_hit_ratio_map": {source.tensor: ir.const(ratio, "float32")}},
@@ -86,7 +86,7 @@ def test_conditional_l2_configuration_is_not_hoisted():
 
 
 @pytest.mark.gpu
-def test_l2_configured_native_kernel_executes():
+def test_l2_configured_native_kernel_executes(compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
@@ -97,7 +97,7 @@ def test_l2_configured_native_kernel_executes():
         host="c",
     )
     module = split(lower(kernel(source, output), target))
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     expected = np.arange(16, dtype="float32")
     actual = runtime.empty((16,), "float32", device=device)
     executable(runtime.tensor(expected, device=device), actual)

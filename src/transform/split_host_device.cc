@@ -1,3 +1,7 @@
+#include "compat/metadata.h"
+#include "op/prim.h"
+#include "transform/tirx_passes.h"
+
 #include "common/assume.h"
 #include "common/attr.h"
 #include "compat/expr.h"
@@ -43,7 +47,7 @@ AssertStmt MakeRuntimeCheck(const RegionStmtNode *node) {
                     node->loc);
 }
 
-class DeviceBoundaryCollector : public tirx::StmtExprMutator {
+class DeviceBoundaryCollector : public tvm::tl::StmtExprMutator {
 public:
   explicit DeviceBoundaryCollector(const VariableSet &parameters)
       : parameters_(parameters) {}
@@ -58,7 +62,7 @@ private:
     const auto *call = node->value.as<CallNode>();
     const auto *operation = call ? call->op.as<OpNode>() : nullptr;
     if (!operation || operation->name != "tl.l2_persistent_hint") {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     TVM_FFI_CHECK(conditional_depth_ == 0, ValueError)
         << "L2 persistence must be configured unconditionally at kernel entry";
@@ -73,7 +77,7 @@ private:
     if (l2_window) {
       TVM_FFI_CHECK(
           l2_window.value()->args[0].same_as(tensor) &&
-              ffi::StructuralEqual()(l2_window.value()->args[1], call->args[1]),
+              tl::StructuralEqual()(l2_window.value()->args[1], call->args[1]),
           ValueError)
           << "One CUDA kernel launch supports one L2 access-policy window";
     } else {
@@ -85,7 +89,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
@@ -93,7 +97,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const WhileNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
@@ -101,7 +105,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
                                  ffi::InplaceMode mode) final {
     ++conditional_depth_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     --conditional_depth_;
     return result;
   }
@@ -112,7 +116,7 @@ private:
     if (auto dimensions = attributes.Get("cluster_dims")) {
       if (auto previous = function_attrs.Get("cluster_dims")) {
         TVM_FFI_CHECK(
-            ffi::StructuralEqual()(previous.value(), dimensions.value()),
+            tl::StructuralEqual()(previous.value(), dimensions.value()),
             ValueError)
             << "Conflicting cluster_dims annotations in one kernel";
       }
@@ -151,7 +155,7 @@ private:
   int conditional_depth_{0};
 };
 
-class SourceKernelSignatureRewriter : public tirx::StmtExprMutator {
+class SourceKernelSignatureRewriter : public tvm::tl::StmtExprMutator {
 public:
   SourceKernelSignatureRewriter(ffi::String entry, ffi::Array<Expr> arguments)
       : entry_(std::move(entry)), arguments_(std::move(arguments)) {}
@@ -169,14 +173,14 @@ private:
                     node->loc);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::String entry_;
   ffi::Array<Expr> arguments_;
 };
 
-class HostBoundaryPreparer : public tirx::StmtExprMutator {
+class HostBoundaryPreparer : public tvm::tl::StmtExprMutator {
 public:
   explicit HostBoundaryPreparer(const tirx::Function &function) {
     for (const Var &parameter : function->params) {
@@ -249,7 +253,7 @@ private:
                                  ffi::InplaceMode mode) final {
     auto previous_parameters = parameters_;
     parameters_.insert(node->var.get());
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     parameters_ = std::move(previous_parameters);
     return result;
   }
@@ -300,12 +304,12 @@ private:
         auto tensor = window->args[0].as_or_throw<tirx::TensorVar>();
         PrimExpr elements = IntImm::Int64(1);
         if (tensor.ty()->layout) {
-          elements =
-              prim::cast(tensor.ty()->layout.value().GetSpan(ffi::String("m")),
-                         PrimType::Int(64));
+          elements = tl::CastValue(
+              tensor.ty()->layout.value().GetSpan(ffi::String("m")),
+              PrimType::Int(64));
         } else {
           for (const PrimExpr &extent : tensor.shape()) {
-            elements = elements * prim::cast(extent, PrimType::Int(64));
+            elements = elements * tl::CastValue(extent, PrimType::Int(64));
           }
         }
         int bits = tensor.dtype().bits() * tensor.dtype().lanes();
@@ -335,8 +339,8 @@ private:
       return SeqStmt(statements, node->loc);
     }
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto result =
-        StmtExprMutator::Mutate_(node, mode).ValueOrUnchanged(original);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(original);
     if (node->attrs->dict.count(attr::kAssumeRequiresRuntimeCheck)) {
       auto region = result.as_or_throw<RegionStmt>();
       auto attributes = region->attrs->dict;
@@ -369,7 +373,7 @@ VariableSet ParameterSet(const tirx::Function &function, const char *key) {
   return result;
 }
 
-class SourceKernelSymbolRewriter : public tirx::StmtExprMutator {
+class SourceKernelSymbolRewriter : public tvm::tl::StmtExprMutator {
 public:
   explicit SourceKernelSymbolRewriter(
       ffi::Map<GlobalVar, GlobalVar> replacements)
@@ -380,7 +384,7 @@ private:
                                  ffi::InplaceMode mode) final {
     if (auto replacement = replacements_.Get(ffi::GetRef<GlobalVar>(node)))
       return replacement.value();
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::Map<GlobalVar, GlobalVar> replacements_;
@@ -509,7 +513,7 @@ tvm::transform::Pass SplitHostDevice() {
       original_functions.insert(global.get());
     module = AnnotateDeviceRegions()(module);
     module = prepare(module);
-    module = tirx::transform::OutlineDeviceRegions()(module);
+    module = tirx_passes::OutlineDeviceRegions()(module);
     module = NameSourceKernels(module);
     IRModule updates;
     for (const auto &[global, function] : module->functions) {

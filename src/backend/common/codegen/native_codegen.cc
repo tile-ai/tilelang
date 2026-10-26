@@ -1,3 +1,7 @@
+#include "compat/metadata.h"
+#include "transform/tirx_passes.h"
+
+#include "backend/common/codegen/attr.h"
 #include "native_codegen.h"
 
 #include "compat/expr.h"
@@ -16,7 +20,7 @@
 
 namespace tvm::tl {
 namespace {
-class ImportCollector : public tirx::StmtExprMutator {
+class ImportCollector : public tvm::tl::StmtExprMutator {
 public:
   explicit ImportCollector(bool cuda) : cuda_(cuda) {}
   std::ostringstream source;
@@ -35,7 +39,7 @@ private:
         return Mutate(*lowered, mode).ValueOrUnchanged(*lowered);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
@@ -81,7 +85,7 @@ private:
         }
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
@@ -95,7 +99,8 @@ private:
       loop.CopyOnWrite()->annotations.Set("codegen.num_threads", *threads);
       loop.CopyOnWrite()->annotations.erase("tl.cpu_num_threads");
     }
-    return StmtExprMutator::Mutate_(loop.get(), mode).ValueOrUnchanged(loop);
+    return tvm::tl::StmtExprMutator::Mutate_(loop.get(), mode)
+        .ValueOrUnchanged(loop);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
@@ -120,7 +125,7 @@ private:
       attributes.erase("pragma_import_c");
       region.CopyOnWrite()->attrs = DictAttrs(attributes);
     }
-    return StmtExprMutator::Mutate_(region.get(), mode)
+    return tvm::tl::StmtExprMutator::Mutate_(region.get(), mode)
         .ValueOrUnchanged(region);
   }
   bool cuda_;
@@ -142,10 +147,10 @@ IRModule PrepareNativeCodegen(IRModule module, const Target &target) {
     function = WithAttr(std::move(function), tvm::attr::kGlobalSymbol, symbol);
     for (const auto &[old_key, new_key] :
          {std::pair{"tl.readonly_param_indices",
-                    codegen::attr::kReadOnlyParamIndices.name},
+                    codegen_attr::kReadOnlyParamIndices.name},
           std::pair{"tl.non_restrict_param_indices",
-                    codegen::attr::kNonRestrictParamIndices.name},
-          std::pair{attr::kCodeBlockSource, codegen::attr::kSource.name}}) {
+                    codegen_attr::kNonRestrictParamIndices.name},
+          std::pair{attr::kCodeBlockSource, codegen_attr::kSource.name}}) {
       if (auto value = function->attrs->dict.Get(old_key)) {
         function = WithAttr(std::move(function), new_key, *value);
       }
@@ -188,9 +193,9 @@ IRModule PrepareNativeCodegen(IRModule module, const Target &target) {
     }
     module.CopyOnWrite()->functions.Set(global, function);
   }
-  module = WithAttr(std::move(module), codegen::attr::kEmitLineDirectives,
+  module = WithAttr(std::move(module), codegen_attr::kEmitLineDirectives,
                     tl_config::EmitLineDirectivesEnabled());
-  ffi::String preamble = module->GetAttr(codegen::attr::kPreamble).value_or("");
+  ffi::String preamble = module->GetAttr(codegen_attr::kPreamble).value_or("");
   std::ostringstream includes;
   if (target->kind->name == "cuda" && !imports.str().empty()) {
     includes << "#include <tl_templates/cuda/common.h>\n";
@@ -198,7 +203,7 @@ IRModule PrepareNativeCodegen(IRModule module, const Target &target) {
   for (const auto &header : headers)
     includes << "#include <tl_templates/cuda/" << header << ">\n";
   return WithAttr(
-      std::move(module), codegen::attr::kPreamble,
+      std::move(module), codegen_attr::kPreamble,
       ffi::String(includes.str() + std::string(preamble) + imports.str()));
 }
 
@@ -206,10 +211,26 @@ ffi::Module BuildNativeCodegen(IRModule module, Target target,
                                const ffi::String &postproc, bool source_only) {
   module = PrepareNativeCodegen(std::move(module), target);
   if (!postproc.empty() && ffi::Function::GetGlobal(postproc)) {
-    module = WithAttr(std::move(module), codegen::attr::kPostproc, postproc);
+    module = WithAttr(std::move(module), codegen_attr::kPostproc, postproc);
   }
-  module = WithAttr(std::move(module), codegen::attr::kSourceOnly, source_only);
-  module = tirx::transform::StmtSimplify()(module);
-  return codegen::Build(std::move(module), std::move(target));
+  module = WithAttr(std::move(module), codegen_attr::kSourceOnly, source_only);
+  module = tirx_passes::StmtSimplify()(module);
+  if (tvm::transform::PassContext::Current()
+          ->GetConfig<bool>("tirx.disable_assert")
+          .value_or(false))
+    module = tirx::transform::SkipAssert()(module);
+  if (auto build =
+          ffi::Function::GetGlobal("tl.codegen.build_" + target->kind->name))
+    return (*build)(module, target).cast<ffi::Module>();
+  return tvm::codegen::Build(std::move(module), std::move(target));
 }
 } // namespace tvm::tl
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  tvm::ffi::reflection::GlobalDef().def(
+      "target.build.tilelang_webgpu",
+      [](tvm::IRModule module, tvm::Target target) {
+        return tvm::tl::BuildNativeCodegen(std::move(module),
+                                           std::move(target));
+      });
+}

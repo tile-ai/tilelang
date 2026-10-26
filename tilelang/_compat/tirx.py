@@ -5,18 +5,72 @@ from __future__ import annotations
 import sys
 
 import tvm_ffi
-from tvm_tirx import ir, tirx as _native
+from tvm_tirx import tirx as _native
 from tvm_tirx.ir import prim
 from tvm_tirx.ir._prim_expr_overload import EqualOp as EqualOp, NotEqualOp as NotEqualOp
 from tvm_tirx.tirx import analysis as analysis, transform as transform
 from tvm_tirx.tirx import Function as _NativeFunction
 from tvm_tirx.tirx import IndexMap as IndexMap
 
-from . import functor as functor, stmt_functor as stmt_functor
+from . import ir, functor as functor, stmt_functor as stmt_functor
 from .functor import PyStmtExprMutator as PyStmtExprMutator, PyStmtExprVisitor as PyStmtExprVisitor
 from .tensor import tensor_type
+from .intrinsics import gpu_storage_sync as gpu_storage_sync
 
 PrimFunc = _NativeFunction
+
+
+def cast(value, dtype, span=None):
+    return ir.cast(value, dtype, loc=span)
+
+
+def _unary_math(name, value, span=None):
+    value = value if ir.is_prim_expr(value) else ir.const(value)
+    return tvm_ffi.get_global_func(name)(value, ir.UnknownLoc() if span is None else span)
+
+
+def isfinite(value, span=None):
+    return _unary_math("tl.ir.IsFinite", value, span)
+
+
+def isinf(value, span=None):
+    return _unary_math("tl.ir.IsInf", value, span)
+
+
+def infinity(dtype="float32", span=None):
+    return tvm_ffi.get_global_func("tl.ir.Infinity")(ir.PrimType(dtype), ir.UnknownLoc() if span is None else span)
+
+
+def if_then_else(condition, true_value, false_value, span=None):
+    return prim.if_then_else(condition, true_value, false_value, **({} if span is None else {"loc": span}))
+
+
+def _bitwise(operation, first, second, span=None):
+    if ir.is_prim_expr(first) and isinstance(second, int):
+        second = ir.const(second, first.ty)
+    elif ir.is_prim_expr(second) and isinstance(first, int):
+        first = ir.const(first, second.ty)
+    return operation(first, second, **({} if span is None else {"loc": span}))
+
+
+def bitwise_and(first, second, span=None):
+    return _bitwise(prim.bitwise_and, first, second, span)
+
+
+def bitwise_or(first, second, span=None):
+    return _bitwise(prim.bitwise_or, first, second, span)
+
+
+def bitwise_xor(first, second, span=None):
+    return _bitwise(prim.bitwise_xor, first, second, span)
+
+
+def left_shift(first, second, span=None):
+    return _bitwise(prim.left_shift, first, second, span)
+
+
+def right_shift(first, second, span=None):
+    return _bitwise(prim.right_shift, first, second, span)
 
 
 class _PrimitiveMeta(type):

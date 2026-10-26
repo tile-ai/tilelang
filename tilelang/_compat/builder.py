@@ -125,11 +125,16 @@ def storage_identity(tensor):
             visited.add(expression)
             storage = expression
             expression = definitions.get(expression)
-        elif isinstance(expression, ir.Call) and isinstance(expression.op, ir.Op) and expression.op.name in (
-            "tirx.decl_tensor",
-            "tirx.tensor_data_ptr",
-            "tirx.ptr_byte_offset",
-            "tirx.reinterpret",
+        elif (
+            isinstance(expression, ir.Call)
+            and isinstance(expression.op, ir.Op)
+            and expression.op.name
+            in (
+                "tirx.decl_tensor",
+                "tirx.tensor_data_ptr",
+                "tirx.ptr_byte_offset",
+                "tirx.reinterpret",
+            )
         ):
             expression = expression.args[0]
         else:
@@ -139,7 +144,7 @@ def storage_identity(tensor):
 def attr(node, key, value):
     if node is not None:
         raise ValueError("Node-specific annotations must be carried by native calls or tensor types")
-    return _native.scope(attrs={key: value})
+    return _native.region("tl.scope", [], attrs={key: value})
 
 
 def buffer_store(buffer, value, indices):

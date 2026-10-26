@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/gpu.h"
+#include "op/prim.h"
 /*!
  * \file tl/cuda/op/copy.cc
  * \brief CUDA implementation for tl.copy lowering.
@@ -51,7 +55,7 @@ Expr MakeFlatAccessPtr(const TensorVar &tensor, int mask,
                        Optional<PrimExpr> elements = std::nullopt) {
   Array<PrimExpr> indices;
   PrimExpr remaining = offset;
-  PrimExpr extent = MakeConst(offset.ty(), 1);
+  PrimExpr extent = tl::MakeConst(offset.ty(), 1);
   for (int axis = static_cast<int>(tensor.shape().size()) - 1; axis >= 0;
        --axis) {
     indices.insert(indices.begin(),
@@ -124,8 +128,8 @@ int64_t TMAElementsForBytes(int64_t bytes, PrimType dtype) {
 }
 
 bool IsProvably16ByteMultiple(const PrimExpr &bytes, sym::Analyzer analyzer) {
-  return analyzer->CanProveEqual(FloorMod(bytes, IntImm(bytes.ty(), 16)),
-                                 IntImm(bytes.ty(), 0));
+  return tl::arith::CanProveEqual(
+      analyzer, FloorMod(bytes, IntImm(bytes.ty(), 16)), IntImm(bytes.ty(), 0));
 }
 
 PrimExpr GetCopyMbarPhaseExpr(const BlockAnnotations &annotations,
@@ -266,7 +270,7 @@ bool IsContiguousRegion(const TensorVar &buf, const Array<Range> &ranges,
   int n = static_cast<int>(ranges.size());
   int pivot = -1;
   for (int i = 0; i < n; ++i) {
-    if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+    if (!tl::arith::CanProveEqual(analyzer, ranges[i]->extent, 1)) {
       pivot = i;
       break;
     }
@@ -276,15 +280,16 @@ bool IsContiguousRegion(const TensorVar &buf, const Array<Range> &ranges,
   }
 
   for (int i = 0; i < pivot; ++i) {
-    ICHECK(analyzer->CanProveEqual(ranges[i]->extent, 1))
+    ICHECK(tl::arith::CanProveEqual(analyzer, ranges[i]->extent, 1))
         << "IsContiguousRegion: dim " << i << " precedes pivot " << pivot
         << " but has non-unit extent " << ranges[i]->extent << " for buffer "
         << buf->name;
   }
 
   for (int i = pivot + 1; i < n; ++i) {
-    if (!analyzer->CanProveEqual(ranges[i]->begin, 0) ||
-        !analyzer->CanProveEqual(ranges[i]->extent, buf.shape()[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, ranges[i]->begin, 0) ||
+        !tl::arith::CanProveEqual(analyzer, ranges[i]->extent,
+                                  buf.shape()[i])) {
       return false;
     }
   }
@@ -334,7 +339,7 @@ MakeTMARows(const TensorVar &src, const Array<Range> &src_ranges,
 
   int split_dim = -1;
   for (int d = 0; d < n; ++d) {
-    if (!analyzer->CanProveEqual(src_ranges[d]->extent, 1)) {
+    if (!tl::arith::CanProveEqual(analyzer, src_ranges[d]->extent, 1)) {
       split_dim = d;
       break;
     }
@@ -959,7 +964,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
     for (auto r : dst_range) {
       dst_elements = dst_elements * r->extent;
     }
-    bool element_match = analyzer->CanProveEqual(src_elements, dst_elements);
+    bool element_match =
+        tl::arith::CanProveEqual(analyzer, src_elements, dst_elements);
 
     if (src_contiguous && dst_contiguous && element_match) {
       PrimExpr barrier_load = barrier_opt.value();
@@ -983,8 +989,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
       for (auto r : src_range) {
         total_elements = total_elements * r->extent;
       }
-      PrimExpr total_bytes =
-          analyzer->Simplify(TMABytesFromElements(total_elements, src.dtype()));
+      PrimExpr total_bytes = tl::arith::Simplify(
+          analyzer, TMABytesFromElements(total_elements, src.dtype()));
 
       if (IsProvably16ByteMultiple(total_bytes, analyzer)) {
         PrimExpr size_bytes = Cast(PrimType::UInt(32), total_bytes);
@@ -1008,8 +1014,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
     } else {
       bool same_shape = (src_range.size() == dst_range.size());
       for (size_t d = 0; d < src_range.size() && same_shape; ++d) {
-        if (!analyzer->CanProveEqual(src_range[d]->extent,
-                                     dst_range[d]->extent)) {
+        if (!tl::arith::CanProveEqual(analyzer, src_range[d]->extent,
+                                      dst_range[d]->extent)) {
           same_shape = false;
         }
       }
@@ -1076,7 +1082,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
   auto vectorized_thread_loop =
       VectorizeLoop(thread_loop, lower_args.layout_map, /*vectorize_hint=*/1);
 
-  class ClusterCopyReplacer : public StmtExprMutator {
+  class ClusterCopyReplacer : public tvm::tl::StmtExprMutator {
   public:
     ClusterCopyReplacer(const TensorVar &dst, PrimExpr dst_block,
                         const TensorVar &target_dst,
@@ -1123,7 +1129,7 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
 
         return If(linearized_index < total_elems, remote_store, std::nullopt);
       }
-      return StmtExprMutator::Mutate_(op, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(op, mode);
     }
 
   private:
@@ -1149,8 +1155,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
                        .ValueOrUnchanged(vectorized_thread_loop);
 
   if (auto barrier_opt = GetBarrier(op)) {
-    Stmt sync = Evaluate(Call(PrimType::Int(32), tirx::gpu_storage_sync_op(),
-                              {StringImm("shared")}));
+    Stmt sync = Evaluate(
+        Call(PrimType::Int(32), tl::StorageSyncOp(), {StringImm("shared")}));
     Stmt arrive =
         Evaluate(Call(TupleType(Array<Type>{}), ptx_arrive_cluster_barrier(),
                       {barrier_opt.value(), op.dst_block.value()}));
@@ -1177,7 +1183,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
     return LowerNormal(op, lower_args, analyzer);
   }
   for (const auto &iv : loop_vars)
-    analyzer->Bind(iv->var, iv->dom);
+    tl::arith::Bind(analyzer, iv->var, iv->dom);
   auto src_predicate = op.MakePredicate(analyzer, loop_vars, src.shape(), 0);
   auto dst_predicate = op.MakePredicate(analyzer, loop_vars, dst.shape(), 1);
   if (src_predicate.has_value() || dst_predicate.has_value()) {
@@ -1195,10 +1201,10 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   // may be a subregion, but its extents must match the fragment.
   for (size_t i = 0; i < fragment_range.size(); i++) {
     if (!IsZero(fragment_range[i]->begin) ||
-        !analyzer->CanProveEqual(fragment_range[i]->extent,
-                                 local_tensor.shape()[i]) ||
-        !analyzer->CanProveEqual(shared_range[i]->extent,
-                                 fragment_range[i]->extent)) {
+        !tl::arith::CanProveEqual(analyzer, fragment_range[i]->extent,
+                                  local_tensor.shape()[i]) ||
+        !tl::arith::CanProveEqual(analyzer, shared_range[i]->extent,
+                                  fragment_range[i]->extent)) {
       return LowerNormal(op, lower_args, analyzer);
     }
   }
@@ -1228,12 +1234,13 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
           {FloorMod(row_var->var, 8), FloorMod(col_var->var, 8)}, std::nullopt);
   PrimExpr local_indices_flattened =
       local_tensor.ty()->ElemOffset(local_indices_transformed).back();
-  if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
+  if (tl::arith::CanProveEqual(analyzer, matrix_8x8_thread_map,
+                               local_layout_thread_map) &&
       IndicesCanVectorize(local_indices_flattened, col_var->var,
                           col_var->dom->extent, 2, analyzer)) {
     is_transposed = false;
-  } else if (analyzer->CanProveEqual(matrix_8x8_thread_map_trans,
-                                     local_layout_thread_map) &&
+  } else if (tl::arith::CanProveEqual(analyzer, matrix_8x8_thread_map_trans,
+                                      local_layout_thread_map) &&
              IndicesCanVectorize(local_indices_flattened, row_var->var,
                                  row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
@@ -1270,7 +1277,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
                                        FloorMod(col_var->var, 8) +
                                        FloorDiv(packed_var, 2) * 8}});
     if (!IndicesCanVectorize(packed_index, packed_var,
-                             MakeConst(packed_var.ty(), 4), 4, analyzer,
+                             tl::MakeConst(packed_var.ty(), 4), 4, analyzer,
                              /*allow_broadcast=*/false)) {
       return LowerNormal(op, lower_args, analyzer);
     }
@@ -1278,9 +1285,11 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
 
   PrimExpr extent = local_tensor.shape()[0];
   int num = 1;
-  if (analyzer->CanProveEqual(FloorMod(extent, elems_per_reg * 4), 0))
+  if (tl::arith::CanProveEqual(analyzer, FloorMod(extent, elems_per_reg * 4),
+                               0))
     num = 4;
-  else if (analyzer->CanProveEqual(FloorMod(extent, elems_per_reg * 2), 0))
+  else if (tl::arith::CanProveEqual(analyzer,
+                                    FloorMod(extent, elems_per_reg * 2), 0))
     num = 2;
 
   Array<Expr> args;
@@ -1299,19 +1308,21 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   }
   PrimExpr warp = FloorDiv(norm_thread_index, 32) * 32;
   if (!is_transposed) {
-    auto local_index = analyzer->Simplify(
+    auto local_index = tl::arith::Simplify(
+        analyzer,
         local_iter * elems_per_reg * num +
-        elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num));
-    auto thread_index =
-        analyzer->Simplify(warp + FloorMod(norm_thread_index, 8) * 4);
+            elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num));
+    auto thread_index = tl::arith::Simplify(
+        analyzer, warp + FloorMod(norm_thread_index, 8) * 4);
     shared_coords = inv->Forward({local_index, thread_index});
   } else {
-    auto local_index = analyzer->Simplify(
+    auto local_index = tl::arith::Simplify(
+        analyzer,
         local_iter * elems_per_reg * num +
-        elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num) +
-        FloorMod(norm_thread_index, 2));
-    auto thread_index =
-        analyzer->Simplify(warp + FloorDiv(FloorMod(norm_thread_index, 8), 2));
+            elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num) +
+            FloorMod(norm_thread_index, 2));
+    auto thread_index = tl::arith::Simplify(
+        analyzer, warp + FloorDiv(FloorMod(norm_thread_index, 8), 2));
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back();
@@ -1319,11 +1330,12 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   // buffer. Translate before the shared layout remaps these coordinates.
   for (size_t i = 0; i < shared_coords.size(); i++)
     shared_coords.Set(
-        i, analyzer->Simplify(shared_coords[i] + shared_range[i]->begin));
-  Expr shared_addr = Call(std::nullopt, tl::access_ptr(),
-                          {TensorLoad(shared_tensor, shared_coords),
-                           PrimExpr(elems_per_reg * num),
-                           MakeConst(PrimType::Int(32), is_ldmatrix ? 1 : 2)});
+        i, tl::arith::Simplify(analyzer,
+                               shared_coords[i] + shared_range[i]->begin));
+  Expr shared_addr = Call(
+      std::nullopt, tl::access_ptr(),
+      {TensorLoad(shared_tensor, shared_coords), PrimExpr(elems_per_reg * num),
+       tl::MakeConst(PrimType::Int(32), is_ldmatrix ? 1 : 2)});
   args.push_back(shared_addr);
 
   if (is_ldmatrix) {
@@ -1333,7 +1345,7 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
     Expr local_addr =
         Call(std::nullopt, tl::access_ptr(),
              {TensorLoad(local_tensor, {local_iter * 2 * num}),
-              PrimExpr(2 * num), MakeConst(PrimType::Int(32), 2)});
+              PrimExpr(2 * num), tl::MakeConst(PrimType::Int(32), 2)});
     args.push_back(local_addr);
   } else {
     for (int i = 0; i < num; i++) {
@@ -1425,7 +1437,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       << "Tensor memory copy needs at least the two matrix dimensions, got "
       << loop_vars.size();
   for (const auto &iv : loop_vars)
-    analyzer->Bind(iv->var, iv->dom);
+    tl::arith::Bind(analyzer, iv->var, iv->dom);
   auto src_predicate = op.MakePredicate(analyzer, loop_vars, src.shape(), 0);
   auto dst_predicate = op.MakePredicate(analyzer, loop_vars, dst.shape(), 1);
   ICHECK(!src_predicate.has_value() && !dst_predicate.has_value())
@@ -1441,7 +1453,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       << "Tensor memory copy requires thread_bounds->extent (num_threads) to "
          "be constant integers";
   int num_threads = *GetConstInt(lower_args.thread_bounds->extent);
-  ICHECK(analyzer->CanProveEqual(
+  ICHECK(tl::arith::CanProveEqual(
+             analyzer,
              FloorMod(lower_args.thread_bounds->begin, WARPGROUP_SIZE), 0) &&
          num_threads % WARPGROUP_SIZE == 0)
       << "Tensor memory copy requires thread bounds to be aligned to "
@@ -1497,12 +1510,14 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
     tile = TmemTileToB32Columns(tile, values_per_b32);
     // The width-alignment checks below run in the tile's (b32) units; a
     // pack::16b origin is always storage-slot aligned.
-    ICHECK(analyzer->CanProveEqual(
+    ICHECK(tl::arith::CanProveEqual(
+        analyzer,
         floormod(phy_origin[1], IntImm(PrimType::Int(32), values_per_b32)), 0))
         << "A pack::16b TMEM origin must start on a b32 column";
     phy_origin.Set(
-        1, analyzer->Simplify(floordiv(
-               phy_origin[1], IntImm(PrimType::Int(32), values_per_b32))));
+        1, tl::arith::Simplify(
+               analyzer, floordiv(phy_origin[1],
+                                  IntImm(PrimType::Int(32), values_per_b32))));
   }
 
   size_t tmem_rank = tmem_buf.shape().size();
@@ -1515,11 +1530,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   }
   Array<PrimExpr> tmem_origin_indices =
       tmem_logical_indices.Map([&](const PrimExpr &index) {
-        return analyzer->Simplify(Substitute(index, loop_to_origin));
+        return tl::arith::Simplify(analyzer, Substitute(index, loop_to_origin));
       });
   if (needs_pack_unpack && !pack16b) {
-    ICHECK(analyzer->CanProveEqual(
-        floormod(tmem_origin_indices[tmem_rank - 1], 2), 0))
+    ICHECK(tl::arith::CanProveEqual(
+        analyzer, floormod(tmem_origin_indices[tmem_rank - 1], 2), 0))
         << "A sliced packed 16-bit TMEM copy must start at an even logical "
            "column";
   }
@@ -1537,8 +1552,9 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       return;
     }
     int width = static_cast<int>(Tcgen05AtomWidth(meta));
-    if (!analyzer->CanProveEqual(phy_origin[0], 0) ||
-        !analyzer->CanProveEqual(floormod(phy_origin[1], width), 0)) {
+    if (!tl::arith::CanProveEqual(analyzer, phy_origin[0], 0) ||
+        !tl::arith::CanProveEqual(analyzer, floormod(phy_origin[1], width),
+                                  0)) {
       return;
     }
 
@@ -1566,14 +1582,15 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
           target_frag->ForwardThread(loop_exprs, std::nullopt);
       PrimExpr reg_thread =
           reg_layout->ForwardThread(reg_logical_indices, std::nullopt);
-      if (!analyzer->CanProveEqual(target_thread, reg_thread)) {
+      if (!tl::arith::CanProveEqual(analyzer, target_thread, reg_thread)) {
         continue;
       }
       PrimExpr target_reg = target_frag->Forward(loop_exprs)[0];
       PrimExpr reg_val = reg_layout->Forward(reg_logical_indices)[0];
       PrimExpr reg_origin =
-          analyzer->Simplify(Substitute(reg_val, loop_to_origin));
-      if (!analyzer->CanProveEqual(target_reg, reg_val - reg_origin)) {
+          tl::arith::Simplify(analyzer, Substitute(reg_val, loop_to_origin));
+      if (!tl::arith::CanProveEqual(analyzer, target_reg,
+                                    reg_val - reg_origin)) {
         continue;
       }
 
@@ -1613,7 +1630,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         }
         Array<PrimExpr> issue_tmem_indices =
             tmem_logical_indices.Map([&](const PrimExpr &index) {
-              return analyzer->Simplify(Substitute(index, loop_to_issue));
+              return tl::arith::Simplify(analyzer,
+                                         Substitute(index, loop_to_issue));
             });
         // The access_ptr offset is a LOGICAL linear offset (row-major over
         // the buffer shape); LowerTileOp later maps it through the Fragment
@@ -1623,11 +1641,12 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
           issue_reg_offset = issue_reg_offset * orig_reg_buf.shape()[d] +
                              Substitute(reg_logical_indices[d], loop_to_issue);
         }
-        issue_reg_offset = analyzer->Simplify(issue_reg_offset);
+        issue_reg_offset = tl::arith::Simplify(analyzer, issue_reg_offset);
         Array<Expr> args;
         args.push_back(IntImm(PrimType::Int(32), width * 32));
         args.push_back(IntImm(PrimType::Int(32), effective_chunks));
-        args.push_back(MakeConst(PrimType::Bool(), use_pack_unpack_modifier));
+        args.push_back(
+            tl::MakeConst(PrimType::Bool(), use_pack_unpack_modifier));
         args.push_back(TensorLoad(tmem_buf, issue_tmem_indices));
         args.push_back(col_offset);
         args.push_back(IntImm(PrimType::Int(32),
@@ -1862,9 +1881,9 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     seq.push_back(
         Evaluate(Call(TupleType(Array<Type>{}), tma_store_arrive(), {})));
     if (!GetIsTmaCopy(op)) {
-      seq.push_back(Evaluate(Call(
-          TupleType(Array<Type>{}), tma_store_wait(),
-          {IntImm(PrimType::Int(32), 0), MakeConst(PrimType::Bool(), true)})));
+      seq.push_back(Evaluate(Call(TupleType(Array<Type>{}), tma_store_wait(),
+                                  {IntImm(PrimType::Int(32), 0),
+                                   tl::MakeConst(PrimType::Bool(), true)})));
     }
     tma_copy = SeqStmt(std::move(seq));
   }
@@ -2073,7 +2092,7 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
     shared_elements *= shared_range[i]->extent;
   }
 
-  PrimExpr elements = analyzer->Simplify(shared_elements);
+  PrimExpr elements = tl::arith::Simplify(analyzer, shared_elements);
   Expr shared_addr = MakeAccessPtrFromRegion(
       TensorRegion(shared_tensor, shared_range, TensorRegionType()),
       is_load ? kAccessWrite : kAccessRead);
@@ -2106,9 +2125,10 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
   // Safety net: instruction selection (CheckBulkCopy1D) must not route a
   // provably misaligned transfer here. Symbolic sizes cannot be proven
   // either way and are allowed through, matching the selection logic.
-  ICHECK(!analyzer->CanProve(
-      FloorMod(total_bytes, MakeConst(total_bytes.ty(), 16)) !=
-          MakeConst(total_bytes.ty(), 0),
+  ICHECK(!tl::arith::CanProve(
+      analyzer,
+      FloorMod(total_bytes, tl::MakeConst(total_bytes.ty(), 16)) !=
+          tl::MakeConst(total_bytes.ty(), 0),
       sym::ProofStrength::kSymbolicBound))
       << "BulkCopy1D requires total_bytes to be 16-byte aligned, but got "
          "invalid size.\n"
@@ -2134,9 +2154,9 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
     seq.push_back(
         Evaluate(Call(TupleType(Array<Type>{}), tma_store_arrive(), {})));
     if (!GetIsTmaCopy(op)) {
-      seq.push_back(Evaluate(Call(
-          TupleType(Array<Type>{}), tma_store_wait(),
-          {IntImm(PrimType::Int(32), 0), MakeConst(PrimType::Bool(), true)})));
+      seq.push_back(Evaluate(Call(TupleType(Array<Type>{}), tma_store_wait(),
+                                  {IntImm(PrimType::Int(32), 0),
+                                   tl::MakeConst(PrimType::Bool(), true)})));
     }
     tma_copy = SeqStmt(std::move(seq));
   }
@@ -2212,7 +2232,8 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   desc.global_stride = desc.global_stride.Map(
       [&](PrimExpr e) { return TMAGlobalBytesFromElements(e, src.dtype()); });
   for (size_t axis = 1; axis < desc.global_stride.size(); ++axis) {
-    auto stride = GetConstInt(analyzer->Simplify(desc.global_stride[axis]));
+    auto stride =
+        GetConstInt(tl::arith::Simplify(analyzer, desc.global_stride[axis]));
     TVM_FFI_CHECK(!stride || *stride % 16 == 0, ValueError)
         << "im2col cannot lower " << src->name
         << ": global strides must be a 16-byte multiple";
@@ -2266,7 +2287,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
 
   // Channel steps stay inside one box_channel window (box_channel divides the
   // channel count), so the filter-tap decomposition is per-copy constant.
-  ICHECK(analyzer->CanProveEqual(FloorMod(channels, box_channel), 0))
+  ICHECK(tl::arith::CanProveEqual(analyzer, FloorMod(channels, box_channel), 0))
       << "Currently can only support divisible channel case";
 
   int barrier_base_id = -1;

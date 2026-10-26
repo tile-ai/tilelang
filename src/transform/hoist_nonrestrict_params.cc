@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Hoist tl.non_restrict_params block annotation(s) to PrimFunc attribute.
  *
@@ -18,7 +19,7 @@
 namespace tvm::tl {
 namespace {
 
-class NonRestrictCollector : public tirx::StmtExprMutator {
+class NonRestrictCollector : public tvm::tl::StmtExprMutator {
 public:
   explicit NonRestrictCollector(ffi::Array<Var> parameters)
       : parameters_(std::move(parameters)) {}
@@ -83,7 +84,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto region = StmtExprMutator::Mutate_(node, mode)
+    auto region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(original)
                       .as_or_throw<RegionStmt>();
     if (auto annotation = region->attrs->dict.Get(attr::kNonRestrictParams)) {

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cuda/op/copy_analysis.cc
  * \brief CUDA copy instruction classification helpers.
@@ -156,8 +157,8 @@ bool CheckGlobalStrides(const TensorVar &buffer, sym::Analyzer analyzer,
   Array<PrimExpr> strides = pattern.value().get<1>();
 
   if (!strides.empty() &&
-      analyzer->CanProve(strides[strides.size() - 1] != 1,
-                         sym::ProofStrength::kSymbolicBound)) {
+      tl::arith::CanProve(analyzer, strides[strides.size() - 1] != 1,
+                          sym::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
           << "TMA bulk copy requires contiguous innermost global stride"
@@ -170,7 +171,8 @@ bool CheckGlobalStrides(const TensorVar &buffer, sym::Analyzer analyzer,
   for (size_t i = 0; i + 1 < strides.size(); ++i) {
     PrimExpr stride_bytes =
         TMAGlobalBytesFromElements(strides[i], buffer.dtype());
-    if (analyzer->CanProve(
+    if (tl::arith::CanProve(
+            analyzer,
             FloorMod(stride_bytes, IntImm(PrimType::Int(64), 16)) != 0,
             sym::ProofStrength::kSymbolicBound)) {
       if (emit_diagnostics) {
@@ -180,7 +182,8 @@ bool CheckGlobalStrides(const TensorVar &buffer, sym::Analyzer analyzer,
       }
       return false;
     }
-    if (auto stride = GetConstInt(analyzer->Simplify(stride_bytes))) {
+    if (auto stride =
+            GetConstInt(tl::arith::Simplify(analyzer, stride_bytes))) {
       if (*stride >= (int64_t{1} << 40)) {
         if (emit_diagnostics) {
           DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
@@ -206,7 +209,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, sym::Analyzer analyzer,
     return false;
   }
   if (check_last_dim &&
-      analyzer->CanProve(
+      tl::arith::CanProve(
+          analyzer,
           FloorMod(TMAGlobalBitsFromElements(
                        op.src_range[op.src_range.size() - 1]->extent,
                        op.src.dtype()),
@@ -246,7 +250,8 @@ bool CheckBulkStore(const CopyNode &op, Target target, sym::Analyzer analyzer,
     return false;
   }
   if (check_last_dim &&
-      analyzer->CanProve(
+      tl::arith::CanProve(
+          analyzer,
           FloorMod(TMAGlobalBitsFromElements(
                        op.dst_range[op.dst_range.size() - 1]->extent,
                        op.dst.dtype()),
@@ -281,14 +286,14 @@ bool IsSemanticallyLinearLayout(const Layout &layout,
     return false;
   }
   for (size_t i = 0; i < shape.size(); ++i) {
-    if (!analyzer->CanProveEqual(input_shape[i], shape[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, input_shape[i], shape[i])) {
       return false;
     }
   }
 
   Layout linear_layout = MakeLinearLayout(shape);
-  return analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
-                                 linear_layout->GetLinearizedForwardIndex());
+  return tl::arith::CanProveEqual(analyzer, layout->GetLinearizedForwardIndex(),
+                                  linear_layout->GetLinearizedForwardIndex());
 }
 
 bool IsContiguousGlobalRegion(const TensorVar &global_tensor,
@@ -306,18 +311,20 @@ bool IsContiguousGlobalRegion(const TensorVar &global_tensor,
   bool non_full_dim_encountered = false;
   PrimExpr expected_stride = 1;
   for (int i = static_cast<int>(global_range.size()) - 1; i >= 0; --i) {
-    bool is_singleton = analyzer->CanProve(global_range[i]->extent == 1,
-                                           sym::ProofStrength::kSymbolicBound);
+    bool is_singleton =
+        tl::arith::CanProve(analyzer, global_range[i]->extent == 1,
+                            sym::ProofStrength::kSymbolicBound);
     if (!non_full_dim_encountered) {
       if (!is_singleton &&
-          !analyzer->CanProveEqual(strides[i], expected_stride)) {
+          !tl::arith::CanProveEqual(analyzer, strides[i], expected_stride)) {
         return false;
       }
 
-      bool is_full_dim = analyzer->CanProve(global_range[i]->extent ==
-                                                    global_tensor.shape()[i] &&
-                                                global_range[i]->begin == 0,
-                                            sym::ProofStrength::kSymbolicBound);
+      bool is_full_dim = tl::arith::CanProve(
+          analyzer,
+          global_range[i]->extent == global_tensor.shape()[i] &&
+              global_range[i]->begin == 0,
+          sym::ProofStrength::kSymbolicBound);
       if (is_full_dim) {
         expected_stride *= global_tensor.shape()[i];
       } else {
@@ -359,15 +366,16 @@ bool CheckBulkCopy1D(const TensorVar &global_tensor,
   }
 
   bool element_match =
-      analyzer->CanProveEqual(shared_elements, global_elements);
+      tl::arith::CanProveEqual(analyzer, shared_elements, global_elements);
 
   PrimExpr total_bits = shared_elements * shared_tensor.dtype().bits();
 
   // Reject only when the total transfer size is provably not 16-byte
   // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
   // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
-  bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, sym::ProofStrength::kSymbolicBound);
+  bool total_16b_aligned =
+      !tl::arith::CanProve(analyzer, FloorMod(total_bits, 128) != 0,
+                           sym::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
@@ -381,8 +389,9 @@ bool CanProveRegionInBounds(const TensorVar &buffer, const Array<Range> &region,
   for (size_t i = 0; i < region.size(); ++i) {
     PrimExpr min = region[i]->begin;
     PrimExpr extent = region[i]->extent;
-    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer.shape()[i],
-                            sym::ProofStrength::kSymbolicBound)) {
+    if (!tl::arith::CanProve(analyzer,
+                             min >= 0 && min + extent <= buffer.shape()[i],
+                             sym::ProofStrength::kSymbolicBound)) {
       return false;
     }
   }

@@ -1,4 +1,6 @@
 #include "merge_if_stmt.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
 
 #include <tvm/ir/prim/expr.h>
 #include <tvm/tirx/op/region.h>
@@ -9,7 +11,7 @@
 
 namespace tvm::tl {
 
-class MergeIfStmtRewriter : public tirx::StmtExprMutator {
+class MergeIfStmtRewriter : public tvm::tl::StmtExprMutator {
 public:
   static Stmt Apply(const Stmt &statement) {
     auto rewriter = ffi::make_object<MergeIfStmtRewriter>();
@@ -22,7 +24,7 @@ private:
       const auto *region = statement.as<RegionStmtNode>();
       if (statement.as<BindNode>() ||
           (region && !region->result_vars.empty())) {
-        return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), body, {},
+        return RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(), body, {},
                           body->loc);
       }
     }
@@ -32,7 +34,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *statement,
                                  ffi::InplaceMode inplace_mode) final {
     Stmt original = ffi::GetRef<Stmt>(statement);
-    SeqStmt visited = StmtExprMutator::Mutate_(statement, inplace_mode)
+    SeqStmt visited = tvm::tl::StmtExprMutator::Mutate_(statement, inplace_mode)
                           .ValueOrUnchanged(original)
                           .as_or_throw<SeqStmt>();
     ffi::Array<Stmt> result;

@@ -1,5 +1,8 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 #ifndef TILELANG_ASCEND_TRANSFORM_SCHEDULE_SCOPE_H_
 #define TILELANG_ASCEND_TRANSFORM_SCHEDULE_SCOPE_H_
+#include "op/prim.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/stmt.h>
@@ -52,7 +55,7 @@ inline Stmt SingleScheduleStatement(Stmt statement) {
   return statement;
 }
 
-class ScheduleVarRemapper : public tirx::StmtExprMutator {
+class ScheduleVarRemapper : public tvm::tl::StmtExprMutator {
 public:
   explicit ScheduleVarRemapper(ffi::Map<Var, Var> replacements) {
     for (const auto &[variable, replacement] : replacements)
@@ -66,7 +69,7 @@ public:
                     return Mutate(node->var, mode);
                   }).as_or_throw<ffi::UnchangedOr<Var>>();
     Var variable = std::move(mapped).ValueOrUnchanged(node->var);
-    if (!ffi::StructuralEqual()(variable->ty, value->ty))
+    if (!tl::StructuralEqual()(variable->ty, value->ty))
       variable = variable.CopyWithType(value->ty);
     VarRemapSet(node->var, variable);
     return Bind(variable, value, node->loc);
@@ -196,8 +199,8 @@ inline Stmt ReplaceFlatTaskBind(const Stmt &statement,
 }
 
 inline PrimExpr ScheduleLoopTripCount(const ForNode *loop) {
-  PrimExpr zero = MakeConst(loop->var.ty(), 0);
-  PrimExpr one = MakeConst(loop->var.ty(), 1);
+  PrimExpr zero = tl::MakeConst(loop->var.ty(), 0);
+  PrimExpr one = tl::MakeConst(loop->var.ty(), 1);
   PrimExpr forward =
       ceildiv(max(loop->end - loop->begin, zero), max(loop->step, one));
   PrimExpr backward =
@@ -208,12 +211,14 @@ inline PrimExpr ScheduleLoopTripCount(const ForNode *loop) {
 
 inline Range ScheduleLoopRange(const ForNode *loop,
                                sym::Analyzer analyzer = sym::Analyzer()) {
-  PrimExpr count = analyzer->Simplify(ScheduleLoopTripCount(loop));
-  PrimExpr zero = MakeConst(loop->var.ty(), 0);
-  PrimExpr one = MakeConst(loop->var.ty(), 1);
-  PrimExpr last = analyzer->Simplify(loop->begin + (count - one) * loop->step);
-  PrimExpr lower = analyzer->Simplify(min(loop->begin, last));
-  PrimExpr extent = analyzer->Simplify(
+  PrimExpr count = tl::arith::Simplify(analyzer, ScheduleLoopTripCount(loop));
+  PrimExpr zero = tl::MakeConst(loop->var.ty(), 0);
+  PrimExpr one = tl::MakeConst(loop->var.ty(), 1);
+  PrimExpr last =
+      tl::arith::Simplify(analyzer, loop->begin + (count - one) * loop->step);
+  PrimExpr lower = tl::arith::Simplify(analyzer, min(loop->begin, last));
+  PrimExpr extent = tl::arith::Simplify(
+      analyzer,
       Select(count > zero, max(loop->begin, last) - lower + one, zero));
   return Range::FromMinExtent(lower, extent);
 }

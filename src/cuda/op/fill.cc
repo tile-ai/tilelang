@@ -1,9 +1,11 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cuda/op/fill.cc
  * \brief CUDA implementation for tl.fill lowering.
  */
 
 #include "backend/common/op/fill.h"
+#include "op/prim.h"
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
@@ -33,17 +35,18 @@ bool IsZeroFillValue(const PrimExpr &value, sym::Analyzer analyzer) {
   if (const auto *broadcast = value.as<BroadcastNode>()) {
     return IsZeroFillValue(broadcast->value, analyzer);
   }
-  return IsZeroBitPattern(analyzer->Simplify(value));
+  return IsZeroBitPattern(tl::arith::Simplify(analyzer, value));
 }
 
 std::optional<PrimExpr> FullRegionElements(const TensorVar &buffer,
                                            const Array<Range> &region,
                                            sym::Analyzer analyzer) {
   ICHECK_EQ(buffer.shape().size(), region.size());
-  PrimExpr elements = MakeConst(PrimType::Int(64), 1);
+  PrimExpr elements = tl::MakeConst(PrimType::Int(64), 1);
   for (size_t i = 0; i < region.size(); ++i) {
-    if (!analyzer->CanProveEqual(region[i]->begin, 0) ||
-        !analyzer->CanProveEqual(region[i]->extent, buffer.shape()[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, region[i]->begin, 0) ||
+        !tl::arith::CanProveEqual(analyzer, region[i]->extent,
+                                  buffer.shape()[i])) {
       return std::nullopt;
     }
     elements = elements * Cast(PrimType::Int(64), region[i]->extent);
@@ -74,8 +77,8 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
   if (bits % 8 != 0) {
     return std::nullopt;
   }
-  PrimExpr bytes = analyzer->Simplify(elements.value() *
-                                      IntImm(PrimType::Int(64), bits / 8));
+  PrimExpr bytes = tl::arith::Simplify(
+      analyzer, elements.value() * IntImm(PrimType::Int(64), bits / 8));
   auto bytes_imm = bytes.as<IntImmNode>();
   if (bytes_imm == nullptr || bytes_imm->value % 8 != 0) {
     return std::nullopt;
@@ -87,7 +90,7 @@ std::optional<Stmt> TryLowerSharedBulkZeroFill(const FillNode &op,
       MakeAccessPtrFromRegion(NormalizeToBufferRegion(op.dst), kAccessWrite);
   Expr bulk_store =
       Call(TupleType(ffi::Array<Type>{}), ptx_st_bulk_shared(),
-           {dst_access_ptr, bytes, MakeConst(PrimType::UInt(64), 0)});
+           {dst_access_ptr, bytes, tl::MakeConst(PrimType::UInt(64), 0)});
   Stmt body = Evaluate(bulk_store);
   body = If(EQ(lower_args.thread_index, lower_args.thread_bounds->begin),
             SeqStmt(body));

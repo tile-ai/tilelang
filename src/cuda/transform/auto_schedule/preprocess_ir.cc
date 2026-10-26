@@ -1,4 +1,6 @@
 #include "preprocess_ir.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
 
 #include "compat/visit.h"
 #include "cuda/transform/ws_analysis.h"
@@ -63,7 +65,7 @@ bool CheckOpaque(const Stmt &statement, const Target &target) {
   return supported;
 }
 
-class OpIdNormalizer : public StmtExprMutator {
+class OpIdNormalizer : public tvm::tl::StmtExprMutator {
 public:
   explicit OpIdNormalizer(Target target) : target_(std::move(target)) {}
   bool supported = true;
@@ -87,7 +89,7 @@ private:
   }
 
   Stmt Wrap(const Stmt &statement, const std::string &kind) {
-    return RegionStmt(scope_op(), {}, {},
+    return RegionStmt(::tvm::tl::scope_op(), {}, {},
                       DictAttrs({{kWSOpIdKey, FreshId(kind)}}),
                       SeqStmt(statement), {}, statement->loc);
   }
@@ -149,7 +151,7 @@ private:
       }
     });
     if (contains_pipeline)
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     supported &= CheckOpaque(statement, target_);
     return Wrap(statement, "if");
   }

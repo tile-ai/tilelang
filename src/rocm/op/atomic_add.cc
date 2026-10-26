@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file tl/rocm/op/atomic_add.cc
  * \brief ROCm implementation for tl.atomic_add lowering.
@@ -27,7 +28,7 @@ LayoutMap InferROCmAtomicAdd(const AtomicAddNode &operation,
     auto destination_layout = arguments.layout_map.Get(operation.dst);
     TVM_FFI_CHECK(
         !source_layout || !destination_layout ||
-            ffi::StructuralEqual()(*source_layout, *destination_layout),
+            tl::StructuralEqual()(*source_layout, *destination_layout),
         ValueError)
         << "AtomicAdd requires source and destination fragments to have the "
            "same layout";

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,6 +25,7 @@
 
 #include "buffer_alias.h"
 #include "merge_ub_common.h"
+#include "op/prim.h"
 #include "transform/common/attr.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -298,8 +300,8 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
     const Var &var = ordered_vars[index];
     const BindNode *alloc = allocations.at(var.get());
     sym::Analyzer analyzer;
-    PrimExpr bytes =
-        analyzer->Simplify(GetBufferSizeBytes(alloc, PrimType::Int(64)));
+    PrimExpr bytes = tl::arith::Simplify(
+        analyzer, GetBufferSizeBytes(alloc, PrimType::Int(64)));
     const auto *constant_bytes = bytes.as<IntImmNode>();
     if (!constant_bytes) {
       dynamic.push_back(var);
@@ -487,9 +489,9 @@ tirx::Function MergeUBAllocations(tirx::Function function, int align_bytes,
       MemoryPlan local = plan(groups[sid], orders[sid]);
       for (const auto &[storage, offset] : local.byte_offsets)
         result.byte_offsets.insert_or_assign(
-            storage, prefix + prim::cast(offset, prefix.ty()));
+            storage, prefix + tl::CastValue(offset, prefix.ty()));
       private_size =
-          tvm::max(private_size, prim::cast(local.total_size, prefix.ty()));
+          tvm::max(private_size, tl::CastValue(local.total_size, prefix.ty()));
     }
     result.total_size = prefix + private_size;
     return result;

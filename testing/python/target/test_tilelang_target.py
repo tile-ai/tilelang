@@ -62,8 +62,9 @@ def test_cuda_target_code_attr_survives_target_normalization():
     assert isinstance(target, Target)
     assert target.kind.name == "cuda"
     assert str(target.attrs["arch"]) == "sm_100f"
-    assert list(target.attrs["code"]) == ["sm_100a", "sm_103a"]
-    assert list(target.export()["code"]) == ["sm_100a", "sm_103a"]
+    assert "code" not in target.attrs
+    assert list(target.attrs["backend_config"]["tilelang"]["code"]) == ["sm_100a", "sm_103a"]
+    assert list(target.export()["backend_config"]["tilelang"]["code"]) == ["sm_100a", "sm_103a"]
 
 
 def test_cuda_target_code_attr_rejects_string_code():

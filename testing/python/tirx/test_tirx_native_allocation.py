@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -16,7 +17,7 @@ def transform(name, body, params):
         tirx.Function(params, body, ret_type=ir.TupleType([])).with_attr("global_symbol", "allocation").with_attr("target", Target("c"))
     )
     result = tvm_ffi.get_global_func(f"tl.transform.{name}")()(ir.IRModule({"main": function}))["main"]
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
     ir.assert_structural_equal(result, ir.load_json(ir.save_json(result)))
     for original, transformed in zip(params, result.params):
         if isinstance(original.ty, tirx.TensorType) and name == "FlattenBuffer":
@@ -36,7 +37,7 @@ def collect(function, node_type):
 
 @pytest.mark.parametrize("shape", [[], [1], [1, 1]])
 @pytest.mark.parametrize("use_hint", [False, True])
-def test_allocation_owned_initializers_execute(shape, use_hint):
+def test_allocation_owned_initializers_execute(shape, use_hint, *, compile_tilelang):
     local = TensorView.create("value", shape, "float32", scope="local")
     output = TensorView.create("output", [1], "float32")
     value = ir.Var("initial", "int32")
@@ -48,7 +49,7 @@ def test_allocation_owned_initializers_execute(shape, use_hint):
     statements.append(output.store(0, local.load([0] * len(shape)) * 2))
     function = transform("LowerOpaqueBlock", statements, [output.tensor, value])
     assert not any(call.op.name == "tl.local_var_init_hint" for call in collect(function, ir.Call))
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     result = runtime.empty((1,), "float32")
     executable(result, 13)
     np.testing.assert_array_equal(result.numpy(), [26])
@@ -61,7 +62,7 @@ def test_invalid_initializer_storage_is_rejected(shape, scope, diagnostic):
         transform("LowerOpaqueBlock", [local.allocate(), ir.Evaluate(ir.Call("tl.local_var_init_hint", [local.tensor, 7]))], [])
 
 
-def test_unit_loop_preserves_lexical_allocation_and_step():
+def test_unit_loop_preserves_lexical_allocation_and_step(*, compile_tilelang):
     local = TensorView.create("value", [1], "int32", scope="local")
     output = TensorView.create("output", [1], "int32")
     index = ir.Var("index", "int32")
@@ -69,7 +70,7 @@ def test_unit_loop_preserves_lexical_allocation_and_step():
     function = transform("LowerOpaqueBlock", body, [output.tensor])
     assert not collect(function, ir.For)
     assert len(collect(function, ir.RegionStmt)) == 1
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     result = runtime.empty((1,), "int32")
     executable(result)
     np.testing.assert_array_equal(result.numpy(), [5])
@@ -85,7 +86,7 @@ def test_loop_control_is_not_removed(control):
 
 def test_native_scope_metadata_survives():
     output = TensorView.create("output", [1], "int32")
-    body = ir.RegionStmt("tirx.scope", [], [], {"pipeline_stage": 3}, output.store(0, 5))
+    body = ir.RegionStmt("tl.scope", [], [], {"pipeline_stage": 3}, output.store(0, 5))
     function = transform("LowerOpaqueBlock", body, [output.tensor])
     scopes = collect(function, ir.RegionStmt)
     assert len(scopes) == 1
@@ -94,7 +95,7 @@ def test_native_scope_metadata_survives():
 
 @pytest.mark.parametrize("dtype", ["int32", "float32", "bool"])
 @pytest.mark.parametrize("offset", [0, 3])
-def test_flatten_strided_aliases_keep_address_geometry(dtype, offset):
+def test_flatten_strided_aliases_keep_address_geometry(dtype, offset, *, compile_tilelang):
     storage = TensorView.create("storage", [32], dtype)
     view = TensorView.create("view", [2, 3], dtype, strides=[7, 2], elem_offset=offset)
     output = TensorView.create("output", [2, 3], dtype)
@@ -112,7 +113,7 @@ def test_flatten_strided_aliases_keep_address_geometry(dtype, offset):
     ]
     function = transform("FlattenBuffer", body, [storage.tensor, output.tensor])
     assert all(len(node.indices) == 1 for node in collect(function, ir.TensorLoad) + collect(function, ir.TensorStore))
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     values = (np.arange(32) % 3 == 0) if dtype == "bool" else np.arange(32).astype(dtype)
     actual = runtime.empty((2, 3), dtype)
     executable(runtime.tensor(values), actual)
@@ -120,17 +121,17 @@ def test_flatten_strided_aliases_keep_address_geometry(dtype, offset):
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_flatten_rank_zero_allocation():
+def test_flatten_rank_zero_allocation(*, compile_tilelang):
     local = TensorView.create("scalar", [], "float32", scope="local")
     output = TensorView.create("output", [], "float32")
     function = transform("FlattenBuffer", [local.allocate(), local.store([], 4.5), output.store([], local.load([]))], [output.tensor])
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     actual = runtime.empty((), "float32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), 4.5)
 
 
-def test_unrolled_allocation_initializers_follow_renewed_local_bindings():
+def test_unrolled_allocation_initializers_follow_renewed_local_bindings(*, compile_tilelang):
     local = TensorView.create("local", [1], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index, value = ir.Var("index", "int32"), ir.Var("value", "int32")
@@ -146,7 +147,7 @@ def test_unrolled_allocation_initializers_follow_renewed_local_bindings():
     )
     unrolled = transform("UnrollLoop", body, [output.tensor])
     lowered = transform("LowerOpaqueBlock", unrolled.body, list(unrolled.params))
-    executable = tirx.compile(lowered, target="llvm")
+    executable = compile_tilelang(lowered, target="llvm")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(4) * 3)

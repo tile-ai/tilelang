@@ -7,6 +7,7 @@ from tvm_tirx import ir
 from tilelang._compat.stmt_functor import post_order_visit
 
 import tilelang
+from tilelang.transform import _tirx_passes
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
@@ -70,7 +71,7 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
-    mod = tirx.transform.BindTarget(target)(mod)
+    mod = _tirx_passes.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
     # Record body-bound global bases before optional let inlining obscures
     # their provenance. CopyAnalysis consumes this marker for every lowering
@@ -208,23 +209,23 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = _tirx_passes.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
     mod = tirx.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.StmtSimplify()(mod)
-    mod = tirx.transform.RemoveNoOp()(mod)
-    mod = tirx.transform.HoistIf()(mod)
+    mod = _tirx_passes.StmtSimplify()(mod)
+    mod = _tirx_passes.RemoveNoOp()(mod)
+    mod = _tirx_passes.HoistIf()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
-    mod = tirx.transform.AnnotateEntryFunc()(mod)
+    mod = _tirx_passes.AnnotateEntryFunc()(mod)
     # TODO(lei): This is a hack to make sure the
     # thread level allreduce pass can be applied
     # in TL. As Tl only use one thread dimension

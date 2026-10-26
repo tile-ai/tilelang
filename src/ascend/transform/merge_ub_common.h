@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,6 +25,7 @@
 
 #pragma once
 
+#include "op/prim.h"
 #include <tvm/ir/analysis.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/function.h>
@@ -94,7 +96,7 @@ inline PrimExpr AlignPrimExpr(const PrimExpr &value, int alignment) {
 
 inline PrimExpr GetBufferSizeBytes(const BindNode *allocation,
                                    PrimType result_type) {
-  return prim::cast(
+  return tl::CastValue(
       GetBufferStorageSizeBytes(allocation->var.as_or_throw<tirx::TensorVar>()),
       result_type);
 }
@@ -292,7 +294,7 @@ tirx::Function MergeAllocations(tirx::Function function, int align_bytes,
                             : planner(function->body.value(), allocations,
                                       order, scope, alignment, verbose);
       sym::Analyzer analyzer;
-      PrimExpr bytes = analyzer->Simplify(plan.total_size);
+      PrimExpr bytes = tl::arith::Simplify(analyzer, plan.total_size);
       TVM_FFI_CHECK(SideEffect(bytes) == CallEffectKind::kPure, ValueError)
           << "Ascend arena sizes must be side-effect-free";
       for (const Var &dependency : tvm::UndefinedVars(bytes))
@@ -311,7 +313,8 @@ tirx::Function MergeAllocations(tirx::Function function, int align_bytes,
       for (const VarNode *variable : order) {
         const BindNode *allocation = allocations.at(variable);
         auto tensor = allocation->var.as_or_throw<tirx::TensorVar>();
-        PrimExpr offset = analyzer->Simplify(plan.byte_offsets.at(variable));
+        PrimExpr offset =
+            tl::arith::Simplify(analyzer, plan.byte_offsets.at(variable));
         Expr pointer = Call(tensor.ty()->DataPtrType(),
                             tirx::ptr_byte_offset_op(), {arena.data(), offset});
         rewriter->replacements.emplace(

@@ -3,7 +3,7 @@
 import torch
 import ctypes
 from libc.stdint cimport int64_t
-from tvm_tirx import sym as arith
+from tilelang._compat import sym as arith
 from tilelang._compat import tirx
 
 

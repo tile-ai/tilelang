@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 import tvm_ffi
@@ -9,24 +7,18 @@ from tvm_tirx.target import Target
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
 
-pytestmark = pytest.mark.usefixtures("native_layouts")
+pytestmark = pytest.mark.usefixtures("native_layouts", "native_operator_helpers")
 
 
 def cuda_target():
     device = runtime.cuda(0)
     if not device.exist or int(device.compute_version.split(".")[0]) < 9:
         pytest.skip("TMA requires a CUDA device with compute capability 9.0 or newer")
-    root = Path(__file__).resolve().parents[3]
     return Target(
         {
             "kind": "cuda",
             "arch": f"sm_{device.compute_version.replace('.', '')}",
-            "backend_config": {
-                "cuda": {
-                    "compiler": "nvcc",
-                    "nvcc": [f"-I{root / 'src'}", f"-I{root / '3rdparty' / 'cutlass' / 'include'}"],
-                }
-            },
+            "backend_config": {"cuda": {"compiler": "nvcc"}},
         },
         host="c",
     )
@@ -53,7 +45,7 @@ def calls_in(value, name):
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int32", "uint32"])
 @pytest.mark.parametrize("sliced", [False, True])
 @pytest.mark.parametrize("auto_fence", [False, True])
-def test_tma_atomic_add_runs_native_descriptor_pipeline(dtype, sliced, auto_fence):
+def test_tma_atomic_add_runs_native_descriptor_pipeline(dtype, sliced, auto_fence, compile_tilelang):
     target = cuda_target()
     source = TensorView.create("source", [8, 32], dtype)
     output = TensorView.create("output", [16, 32], dtype)
@@ -98,7 +90,7 @@ def test_tma_atomic_add_runs_native_descriptor_pipeline(dtype, sliced, auto_fenc
     assert not calls_in(module, "tl.create_tma_descriptor")
     assert len(calls_in(module, "tirx.cuda.tensormap_encode_tiled")) == 1
     assert tirx.analysis.check_well_formed(module)
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     numpy_dtype = pytest.importorskip("ml_dtypes").bfloat16 if dtype == "bfloat16" else dtype
     values = (np.arange(256).reshape(8, 32) % 9).astype(numpy_dtype)
     initial = np.ones((16, 32), dtype=numpy_dtype)

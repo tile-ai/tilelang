@@ -1,6 +1,6 @@
 """NVRTC launch programs serialized from native TIRx host IR."""
 
-from tvm_tirx import ir
+from tilelang._compat import ir
 
 from tilelang._compat.stmt_functor import ir_transform, post_order_visit
 from tilelang.jit.adapter.native import _with_cuda_stream, raw_host_function

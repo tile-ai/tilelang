@@ -1,4 +1,6 @@
 #include "ws_analysis.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
 
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
@@ -17,7 +19,7 @@ namespace {
 using namespace ffi;
 using namespace tirx;
 
-class TensorRemapper : public StmtExprMutator {
+class TensorRemapper : public tvm::tl::StmtExprMutator {
 public:
   explicit TensorRemapper(BufferRemap remap) : remap_(std::move(remap)) {
     for (const auto &[source, replacement] : remap_)
@@ -31,14 +33,14 @@ private:
       if (auto found = remap_.find(*tensor); found != remap_.end())
         return Expr(found->second);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
     auto tensor = node->var.as<TensorVar>();
     auto found = tensor ? remap_.find(*tensor) : remap_.end();
     if (found == remap_.end())
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     Expr value = Mutate(node->value, mode).ValueOrUnchanged(node->value);
     if (auto call = value.as<Call>();
         call && (call.value()->op.same_as(alloc_tensor_op()) ||
@@ -47,7 +49,7 @@ private:
           Call(found->second.ty(), call.value()->op, call.value()->args,
                call.value()->attrs, {found->second.ty()}, call.value()->loc);
     }
-    TVM_FFI_CHECK(ffi::StructuralEqual()(value->ty, found->second.ty()),
+    TVM_FFI_CHECK(tl::StructuralEqual()(value->ty, found->second.ty()),
                   TypeError)
         << "A remapped tensor definition must produce its replacement type";
     return Bind(found->second, value, node->loc);
@@ -68,7 +70,8 @@ ffi::Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &statement) {
     return GetEvaluateCallInSimpleWrapper(conditional->then_case);
   if (const auto *region = statement.as<RegionStmtNode>();
       region && region->body_params.empty() && region->result_vars.empty() &&
-      (region->op.same_as(tirx::scope_op()) || region->op->name == "tl.scope"))
+      (region->op.same_as(::tvm::tl::scope_op()) ||
+       region->op->name == "tl.scope"))
     return GetEvaluateCallInSimpleWrapper(region->body);
   return std::nullopt;
 }
@@ -80,6 +83,7 @@ bool IsBarrierOrTmaControlCall(const CallNode *call) {
   std::string name = operation.value()->name;
   static const std::unordered_set<std::string> barriers{
       "tirx.gpu_storage_sync",
+      "tl.gpu_storage_sync",
       "tl.sync_grid",
       "tl.cluster_sync",
       "tl.syncthreads_count",

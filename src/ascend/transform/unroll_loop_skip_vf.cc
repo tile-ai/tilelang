@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -21,6 +24,7 @@
  * \file unroll_loop_skip_vf.cc
  * \brief Explicitly unroll requested loops outside Ascend VF blocks.
  */
+#include "compat/region.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/region.h>
@@ -34,7 +38,7 @@
 namespace tvm::tl {
 namespace {
 
-class TargetedControlDetector : public tirx::StmtExprVisitor {
+class TargetedControlDetector : public tvm::tl::StmtExprVisitor {
 public:
   bool found{false};
 
@@ -56,11 +60,11 @@ protected:
   ffi::Optional<ffi::VisitInterrupt> Visit_(const CallNode *node) final {
     if (node->op.same_as(loop_break()))
       found = true;
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
-class ExplicitLoopUnroller : public tirx::StmtExprMutator {
+class ExplicitLoopUnroller : public tvm::tl::StmtExprMutator {
 protected:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
@@ -70,13 +74,13 @@ protected:
         node->attrs->dict.count("tl.simtvf_scope")) {
       return ffi::Unchanged{};
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto loop = StmtExprMutator::Mutate_(node, mode)
+    auto loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<For>();
     auto request = loop->annotations.Get("pragma_unroll_explicit");
@@ -89,8 +93,9 @@ protected:
         << "pragma_unroll_explicit must be a boolean";
     if (!*explicit_unroll)
       return loop;
-    auto step = GetConstInt(analyzer_->Simplify(loop->step));
-    auto distance = GetConstInt(analyzer_->Simplify(loop->end - loop->begin));
+    auto step = GetConstInt(tl::arith::Simplify(analyzer_, loop->step));
+    auto distance =
+        GetConstInt(tl::arith::Simplify(analyzer_, loop->end - loop->begin));
     TVM_FFI_CHECK(step && *step != 0 && distance, ValueError)
         << "T.unroll(..., explicit=True) requires a constant trip count and "
            "nonzero step";
@@ -116,12 +121,13 @@ protected:
            "loop";
     ffi::Array<Stmt> expanded;
     for (int64_t iteration = 0; iteration < count; ++iteration) {
-      PrimExpr index = analyzer_->Simplify(
-          loop->begin + MakeConst(loop->var.ty(), iteration) * loop->step);
+      PrimExpr index = tl::arith::Simplify(
+          analyzer_,
+          loop->begin + tl::MakeConst(loop->var.ty(), iteration) * loop->step);
       Stmt body = Substitute(loop->body,
                              ffi::Map<PrimVar, PrimExpr>{{loop->var, index}});
-      auto renewed = tirx::RenewDef(tirx::Function({}, SeqStmt(body)));
-      expanded.push_back(RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(),
+      auto renewed = tl::RenewDef(tirx::Function({}, SeqStmt(body)));
+      expanded.push_back(RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(),
                                     renewed->body.value(), {}, loop->loc));
     }
     return SeqStmt(expanded, loop->loc);

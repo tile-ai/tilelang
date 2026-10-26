@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -43,12 +44,12 @@ bool IsSimdMergingCall(const CallNode *call) {
          std::string(operation->name).starts_with("tl.simd.");
 }
 
-class SimdMergingLegalizer : public tirx::StmtExprMutator {
+class SimdMergingLegalizer : public tvm::tl::StmtExprMutator {
 protected:
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto store = StmtExprMutator::Mutate_(node, mode)
+    auto store = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                      .ValueOrUnchanged(original)
                      .as_or_throw<TensorStore>();
     auto call = store->value.as<CallNode>();

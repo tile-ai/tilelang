@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/backend/common/op/reduce.h
  * \brief Shared tl.reduce AllReduce lowering for GPU backends.
@@ -5,6 +6,7 @@
 
 #ifndef TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_REDUCE_H_
+#include "op/prim.h"
 
 #include "backend/common/target_utils.h"
 #include "op/reduce.h"
@@ -71,24 +73,25 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
   sym::Analyzer analyzer;
   for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
     PrimVar placeholder = InputPlaceholder(i);
-    analyzer->Bind(placeholder,
-                   Range::FromMinExtent(MakeConst(placeholder.ty(), 0),
-                                        red_layout->InputShape()[i]));
+    tl::arith::Bind(analyzer, placeholder,
+                    Range::FromMinExtent(tl::MakeConst(placeholder.ty(), 0),
+                                         red_layout->InputShape()[i]));
   }
   PrimVar replicate_var = ReplicationPlaceholder();
-  analyzer->Bind(replicate_var,
-                 Range::FromMinExtent(MakeConst(replicate_var.ty(), 0),
-                                      red_layout->ReplicateExtent()));
+  tl::arith::Bind(analyzer, replicate_var,
+                  Range::FromMinExtent(tl::MakeConst(replicate_var.ty(), 0),
+                                       red_layout->ReplicateExtent()));
 
   // PartitionLoop feeds (threadIdx.x - ThreadRange.min) into the inverse
   // layout. Convert the forward map back to the corresponding absolute CTA
   // thread ID before computing its image.
   PrimExpr thread_expr = red_layout->GetForwardThread();
   if (red_layout->ThreadRange().has_value()) {
-    thread_expr = analyzer->Simplify(thread_expr +
-                                     red_layout->ThreadRange().value()->begin);
+    thread_expr = tl::arith::Simplify(
+        analyzer, thread_expr + red_layout->ThreadRange().value()->begin);
   }
-  const sym::ConstIntBound bound = analyzer->const_int_bound(thread_expr);
+  const sym::ConstIntBound bound =
+      tl::arith::ConstIntBoundOf(analyzer, thread_expr);
   if (bound->min_value == sym::ConstIntBound::kNegInf ||
       bound->max_value == sym::ConstIntBound::kPosInf) {
     LOG(FATAL) << "tl.reduce: cannot determine the scalar AllReduce "
@@ -120,8 +123,8 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
          "range, got "
       << count << " threads";
 
-  return Range::FromMinExtent(MakeConst(thread_expr.ty(), base),
-                              MakeConst(thread_bounds->extent.ty(), count));
+  return Range::FromMinExtent(tl::MakeConst(thread_expr.ty(), base),
+                              tl::MakeConst(thread_bounds->extent.ty(), count));
 }
 
 inline int GetPreferredVectorizedSize(PrimType dt,
@@ -166,23 +169,24 @@ inline bool CanUsePackedRamp(const PrimExpr &index, const PrimVar &var,
                              int vsize, sym::Analyzer analyzer) {
   ICHECK_GT(vsize, 1);
 
-  PrimExpr vector_size = MakeConst(var.ty(), vsize);
+  PrimExpr vector_size = tl::MakeConst(var.ty(), vsize);
   PrimExpr packed_var = var * vector_size;
   PrimExpr ramp_base =
-      analyzer->Simplify(Substitute(index, {{var, packed_var}}));
+      tl::arith::Simplify(analyzer, Substitute(index, {{var, packed_var}}));
 
-  PrimExpr index_mod = FloorMod(ramp_base, MakeConst(index.ty(), vsize));
-  if (!analyzer->CanProveEqual(index_mod, MakeConst(index.ty(), 0))) {
+  PrimExpr index_mod = FloorMod(ramp_base, tl::MakeConst(index.ty(), vsize));
+  if (!tl::arith::CanProveEqual(analyzer, index_mod,
+                                tl::MakeConst(index.ty(), 0))) {
     return false;
   }
 
   for (int lane = 1; lane < vsize; ++lane) {
-    PrimExpr lane_value = MakeConst(var.ty(), lane);
-    PrimExpr lane_index =
-        analyzer->Simplify(Substitute(index, {{var, packed_var + lane_value}}));
-    PrimExpr expected =
-        analyzer->Simplify(ramp_base + MakeConst(index.ty(), lane));
-    if (!analyzer->CanProveEqual(lane_index, expected)) {
+    PrimExpr lane_value = tl::MakeConst(var.ty(), lane);
+    PrimExpr lane_index = tl::arith::Simplify(
+        analyzer, Substitute(index, {{var, packed_var + lane_value}}));
+    PrimExpr expected = tl::arith::Simplify(
+        analyzer, ramp_base + tl::MakeConst(index.ty(), lane));
+    if (!tl::arith::CanProveEqual(analyzer, lane_index, expected)) {
       return false;
     }
   }
@@ -236,8 +240,10 @@ CandidateThreadOwnedFactors(int64_t thread_owned_factor,
 
   std::vector<int64_t> divisible_factors;
   for (int64_t factor : factors) {
-    if (analyzer->CanProveEqual(
-            FloorMod(local_extent, MakeConst(local_extent.ty(), factor)), 0)) {
+    if (tl::arith::CanProveEqual(
+            analyzer,
+            FloorMod(local_extent, tl::MakeConst(local_extent.ty(), factor)),
+            0)) {
       divisible_factors.push_back(factor);
     }
   }
@@ -247,28 +253,33 @@ CandidateThreadOwnedFactors(int64_t thread_owned_factor,
 inline std::optional<std::pair<PrimExpr, LayoutAxis>>
 TryRemoveThreadOwnedFactor(const PrimExpr &expr, const LayoutAxis &iter_var,
                            int64_t factor, sym::Analyzer analyzer) {
-  PrimExpr factor_expr = MakeConst(iter_var->var.ty(), factor);
+  PrimExpr factor_expr = tl::MakeConst(iter_var->var.ty(), factor);
   PrimVar old_var = iter_var->var;
-  PrimExpr old_extent = analyzer->Simplify(iter_var->dom->extent);
-  if (!analyzer->CanProveEqual(FloorMod(old_extent, factor_expr), 0)) {
+  PrimExpr old_extent = tl::arith::Simplify(analyzer, iter_var->dom->extent);
+  if (!tl::arith::CanProveEqual(analyzer, FloorMod(old_extent, factor_expr),
+                                0)) {
     return std::nullopt;
   }
 
-  analyzer->Bind(old_var, Range(0, old_extent), /*allow_override=*/true);
+  tl::arith::Bind(analyzer, old_var, Range(0, old_extent),
+                  /*allow_override=*/true);
   PrimExpr masked = FloorDiv(old_var, factor_expr) * factor_expr;
-  PrimExpr simplified_expr = analyzer->Simplify(expr);
-  PrimExpr masked_expr =
-      analyzer->Simplify(Substitute(simplified_expr, {{old_var, masked}}));
-  if (!analyzer->CanProveEqual(masked_expr, simplified_expr)) {
+  PrimExpr simplified_expr = tl::arith::Simplify(analyzer, expr);
+  PrimExpr masked_expr = tl::arith::Simplify(
+      analyzer, Substitute(simplified_expr, {{old_var, masked}}));
+  if (!tl::arith::CanProveEqual(analyzer, masked_expr, simplified_expr)) {
     return std::nullopt;
   }
 
-  PrimExpr new_extent = analyzer->Simplify(FloorDiv(old_extent, factor_expr));
+  PrimExpr new_extent =
+      tl::arith::Simplify(analyzer, FloorDiv(old_extent, factor_expr));
   PrimVar new_var(old_var->name, old_var.ty());
-  PrimExpr new_expr = analyzer->Simplify(
+  PrimExpr new_expr = tl::arith::Simplify(
+      analyzer,
       Substitute(simplified_expr, {{old_var, new_var * factor_expr}}));
   LayoutAxis new_iter_var = LayoutAxis(Range(0, new_extent), new_var);
-  analyzer->Bind(new_var, Range(0, new_extent), /*allow_override=*/true);
+  tl::arith::Bind(analyzer, new_var, Range(0, new_extent),
+                  /*allow_override=*/true);
   return std::make_pair(new_expr, new_iter_var);
 }
 
@@ -286,20 +297,22 @@ inline void CheckThreadOwnedStepsProjectable(
   // coarse and rejects valid packed layouts.
   PrimExpr projected_reduce_var = reduce_var;
   for (const auto &step : steps) {
-    PrimExpr lower = MakeConst(reduce_var.ty(), step.lower_factor);
-    PrimExpr extent = MakeConst(reduce_var.ty(), step.extent);
+    PrimExpr lower = tl::MakeConst(reduce_var.ty(), step.lower_factor);
+    PrimExpr extent = tl::MakeConst(reduce_var.ty(), step.extent);
     projected_reduce_var =
         projected_reduce_var -
         FloorMod(FloorDiv(reduce_var, lower), extent) * lower;
   }
 
-  PrimExpr simplified_index = analyzer->Simplify(index_expr);
-  PrimExpr projected_index = analyzer->Simplify(
-      Substitute(simplified_index,
-                 {{reduce_var, analyzer->Simplify(projected_reduce_var)}}));
+  PrimExpr simplified_index = tl::arith::Simplify(analyzer, index_expr);
+  PrimExpr projected_index = tl::arith::Simplify(
+      analyzer,
+      Substitute(
+          simplified_index,
+          {{reduce_var, tl::arith::Simplify(analyzer, projected_reduce_var)}}));
 
-  ICHECK(analyzer->CanProve(projected_index == simplified_index,
-                            sym::ProofStrength::kSymbolicBound))
+  ICHECK(tl::arith::CanProve(analyzer, projected_index == simplified_index,
+                             sym::ProofStrength::kSymbolicBound))
       << "ReduceOp cannot lower a layout where a source index depends on a "
          "thread-owned reduce segment: src_index="
       << simplified_index << ", projected_src_index=" << projected_index
@@ -315,7 +328,7 @@ inline std::pair<PrimExpr, LayoutAxis> BuildLocalReduceIterator(
       CompressIterator(index_expr, input_iters, reduce_var, analyzer);
   sym::Analyzer proof_analyzer;
   for (const auto &iv : input_iters) {
-    proof_analyzer->Bind(iv->var, iv->dom, /*allow_override=*/true);
+    tl::arith::Bind(proof_analyzer, iv->var, iv->dom, /*allow_override=*/true);
   }
   CheckThreadOwnedStepsProjectable(index_expr, reduce_var, thread_steps,
                                    proof_analyzer);
@@ -324,7 +337,8 @@ inline std::pair<PrimExpr, LayoutAxis> BuildLocalReduceIterator(
   PrimExpr cur_expr = expr;
   LayoutAxis cur_iter_var = iter_var;
   while (remaining_thread_owned_factor > 1) {
-    PrimExpr cur_extent = proof_analyzer->Simplify(cur_iter_var->dom->extent);
+    PrimExpr cur_extent =
+        tl::arith::Simplify(proof_analyzer, cur_iter_var->dom->extent);
     auto candidates = CandidateThreadOwnedFactors(remaining_thread_owned_factor,
                                                   cur_extent, proof_analyzer);
     bool removed = false;
@@ -342,7 +356,7 @@ inline std::pair<PrimExpr, LayoutAxis> BuildLocalReduceIterator(
       break;
     }
   }
-  return {analyzer->Simplify(cur_expr), cur_iter_var};
+  return {tl::arith::Simplify(analyzer, cur_expr), cur_iter_var};
 }
 
 inline ReduceOwnershipPlan
@@ -489,9 +503,9 @@ template <typename Impl> struct ReduceLowerer {
           packed_buffer, packed_indices,
           reduce::MakeReduce(
               op, vsize, TensorLoad(packed_buffer, packed_indices), src_value));
-      stmts.push_back(For(rv, MakeConst((rv).ty(), 0),
-                          MakeConst(rv.ty(), *reduce_extent / vsize),
-                          MakeConst((rv).ty(), 1), ForKind::kUnrolled,
+      stmts.push_back(For(rv, tl::MakeConst((rv).ty(), 0),
+                          tl::MakeConst(rv.ty(), *reduce_extent / vsize),
+                          tl::MakeConst((rv).ty(), 1), ForKind::kUnrolled,
                           SeqStmt(reduce_body)));
 
       PrimExpr packed = TensorLoad(packed_buffer, packed_indices);
@@ -509,16 +523,17 @@ template <typename Impl> struct ReduceLowerer {
           dst_buffer, dst_indices,
           reduce::MakeReduce(op, 1, TensorLoad(dst_buffer, dst_indices),
                              TensorLoad(src_buffer, make_src_indices(rv))));
-      stmts.push_back(For(
-          rv, MakeConst((rv).ty(), 0), source_ranges[op.dim]->extent,
-          MakeConst((rv).ty(), 1), ForKind::kUnrolled, SeqStmt(reduce_body)));
+      stmts.push_back(For(rv, tl::MakeConst((rv).ty(), 0),
+                          source_ranges[op.dim]->extent,
+                          tl::MakeConst((rv).ty(), 1), ForKind::kUnrolled,
+                          SeqStmt(reduce_body)));
     }
 
     Stmt body = SeqStmt(stmts);
     for (int axis = dst_dim - 1; axis >= 0; --axis) {
-      body = For(dst_vars[axis], MakeConst(dst_vars[axis].ty(), 0),
+      body = For(dst_vars[axis], tl::MakeConst(dst_vars[axis].ty(), 0),
                  destination_ranges[axis]->extent,
-                 MakeConst(dst_vars[axis].ty(), 1), ForKind::kUnrolled,
+                 tl::MakeConst(dst_vars[axis].ty(), 1), ForKind::kUnrolled,
                  SeqStmt(body));
     }
     if (can_pack) {
@@ -626,12 +641,12 @@ template <typename Impl> struct ReduceLowerer {
         need_update = true;
       }
 
-      if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
-                              red_layout->ReplicateExtent())) {
+      if (!tl::arith::CanProve(analyzer, dst_layout->ReplicateExtent() ==
+                                             red_layout->ReplicateExtent())) {
         need_duplicate = true;
       }
-      ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
-                                 red_layout->ReplicateExtent()))
+      ICHECK(!tl::arith::CanProve(analyzer, dst_layout->ReplicateExtent() >
+                                                red_layout->ReplicateExtent()))
           << "Inconsistent layouts between src and dst in ReduceOp: "
           << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
 
@@ -679,7 +694,7 @@ template <typename Impl> struct ReduceLowerer {
 
             auto ext_int = GetConstInt(src_var_compressed.back()->dom->extent);
             int64_t inner_extent = *ext_int;
-            PrimExpr halved_extent = MakeConst(
+            PrimExpr halved_extent = tl::MakeConst(
                 src_var_compressed.back()->var.ty(), inner_extent / vsize);
 
             LayoutAxis inner_var = src_var_compressed.back();
@@ -700,17 +715,17 @@ template <typename Impl> struct ReduceLowerer {
                                    src_load));
 
             reduce_local =
-                For(inner_var->var, MakeConst((inner_var->var).ty(), 0),
-                    halved_extent, MakeConst((inner_var->var).ty(), 1),
+                For(inner_var->var, tl::MakeConst((inner_var->var).ty(), 0),
+                    halved_extent, tl::MakeConst((inner_var->var).ty(), 1),
                     ForKind::kUnrolled, SeqStmt(reduce_local));
 
             for (int i = static_cast<int>(src_layout->OutputDim()) - 2; i >= 0;
                  --i) {
               reduce_local =
                   For(src_var_compressed[i]->var,
-                      MakeConst((src_var_compressed[i]->var).ty(), 0),
+                      tl::MakeConst((src_var_compressed[i]->var).ty(), 0),
                       src_var_compressed[i]->dom->extent,
-                      MakeConst((src_var_compressed[i]->var).ty(), 1),
+                      tl::MakeConst((src_var_compressed[i]->var).ty(), 1),
                       ForKind::kUnrolled, SeqStmt(reduce_local));
             }
             local_body.push_back(reduce_local);
@@ -742,11 +757,12 @@ template <typename Impl> struct ReduceLowerer {
 
         for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
              --i) {
-          reduce_local = For(src_var_compressed[i]->var,
-                             MakeConst((src_var_compressed[i]->var).ty(), 0),
-                             src_var_compressed[i]->dom->extent,
-                             MakeConst((src_var_compressed[i]->var).ty(), 1),
-                             ForKind::kUnrolled, SeqStmt(reduce_local));
+          reduce_local =
+              For(src_var_compressed[i]->var,
+                  tl::MakeConst((src_var_compressed[i]->var).ty(), 0),
+                  src_var_compressed[i]->dom->extent,
+                  tl::MakeConst((src_var_compressed[i]->var).ty(), 1),
+                  ForKind::kUnrolled, SeqStmt(reduce_local));
         }
         stmts.push_back(reduce_local);
       }
@@ -773,9 +789,10 @@ template <typename Impl> struct ReduceLowerer {
       auto make_dst_loop = [&](Stmt body,
                                const Array<LayoutAxis> &vars) -> Stmt {
         for (int i = static_cast<int>(vars.size()) - 1; i >= 0; --i) {
-          body = For(vars[i]->var, MakeConst((vars[i]->var).ty(), 0),
-                     vars[i]->dom->extent, MakeConst((vars[i]->var).ty(), 1),
-                     ForKind::kParallel, SeqStmt(body));
+          body =
+              For(vars[i]->var, tl::MakeConst((vars[i]->var).ty(), 0),
+                  vars[i]->dom->extent, tl::MakeConst((vars[i]->var).ty(), 1),
+                  ForKind::kParallel, SeqStmt(body));
         }
         body = PartitionLoop((body).as_or_throw<For>(), lower_args.thread_index,
                              analyzer, red_layout);
@@ -868,7 +885,7 @@ template <typename Impl> struct ReduceLowerer {
               int64_t flat_offset = static_cast<int64_t>(chunk) * batch;
 
               PrimVar pack_j("pack_j");
-              PrimExpr base = MakeConst(PrimType::Int(64), flat_offset);
+              PrimExpr base = tl::MakeConst(PrimType::Int(64), flat_offset);
               PrimExpr scaled = pack_j * vsize;
 
               Array<PrimExpr> idx_a;
@@ -876,20 +893,21 @@ template <typename Impl> struct ReduceLowerer {
               PrimExpr fa = base + scaled;
               PrimExpr fb = base + scaled + PrimExpr(1);
               for (int d = 0; d < buf_ndim; d++) {
-                idx_a.push_back(
-                    FloorMod(FloorDiv(fa, MakeConst(fa.ty(), buf_strides[d])),
-                             MakeConst(fa.ty(), buf_shape_vals[d])));
-                idx_b.push_back(
-                    FloorMod(FloorDiv(fb, MakeConst(fb.ty(), buf_strides[d])),
-                             MakeConst(fb.ty(), buf_shape_vals[d])));
+                idx_a.push_back(FloorMod(
+                    FloorDiv(fa, tl::MakeConst(fa.ty(), buf_strides[d])),
+                    tl::MakeConst(fa.ty(), buf_shape_vals[d])));
+                idx_b.push_back(FloorMod(
+                    FloorDiv(fb, tl::MakeConst(fb.ty(), buf_strides[d])),
+                    tl::MakeConst(fb.ty(), buf_shape_vals[d])));
               }
               auto a_load = TensorLoad(clear_buffer, idx_a);
               auto b_load = TensorLoad(clear_buffer, idx_b);
               Stmt pack_body = TensorStore(pack_buf, {pack_j},
                                            Shuffle({a_load, b_load}, {0, 1}));
-              Stmt pack_loop = For(pack_j, MakeConst((pack_j).ty(), 0),
-                                   packed_batch, MakeConst((pack_j).ty(), 1),
-                                   ForKind::kUnrolled, SeqStmt(pack_body));
+              Stmt pack_loop =
+                  For(pack_j, tl::MakeConst((pack_j).ty(), 0), packed_batch,
+                      tl::MakeConst((pack_j).ty(), 1), ForKind::kUnrolled,
+                      SeqStmt(pack_body));
               phases.push_back(pack_loop);
 
               Expr packed_ptr = Call(std::nullopt, address_of_op(),
@@ -902,19 +920,19 @@ template <typename Impl> struct ReduceLowerer {
                   Call(TupleType(Array<Type>{}), call_extern_op(), args)));
 
               PrimVar unpack_j("unpack_j");
-              PrimExpr ubase = MakeConst(PrimType::Int(64), flat_offset);
+              PrimExpr ubase = tl::MakeConst(PrimType::Int(64), flat_offset);
               PrimExpr uscaled = unpack_j * vsize;
               Array<PrimExpr> uidx_a;
               Array<PrimExpr> uidx_b;
               PrimExpr ufa = ubase + uscaled;
               PrimExpr ufb = ubase + uscaled + PrimExpr(1);
               for (int d = 0; d < buf_ndim; d++) {
-                uidx_a.push_back(
-                    FloorMod(FloorDiv(ufa, MakeConst(ufa.ty(), buf_strides[d])),
-                             MakeConst(ufa.ty(), buf_shape_vals[d])));
-                uidx_b.push_back(
-                    FloorMod(FloorDiv(ufb, MakeConst(ufb.ty(), buf_strides[d])),
-                             MakeConst(ufb.ty(), buf_shape_vals[d])));
+                uidx_a.push_back(FloorMod(
+                    FloorDiv(ufa, tl::MakeConst(ufa.ty(), buf_strides[d])),
+                    tl::MakeConst(ufa.ty(), buf_shape_vals[d])));
+                uidx_b.push_back(FloorMod(
+                    FloorDiv(ufb, tl::MakeConst(ufb.ty(), buf_strides[d])),
+                    tl::MakeConst(ufb.ty(), buf_shape_vals[d])));
               }
               auto packed_val = TensorLoad(pack_buf, {unpack_j});
               Stmt unpack_body = SeqStmt({
@@ -924,8 +942,8 @@ template <typename Impl> struct ReduceLowerer {
                               Shuffle::ExtractElement(packed_val, 1)),
               });
               Stmt unpack_loop =
-                  For(unpack_j, MakeConst((unpack_j).ty(), 0), packed_batch,
-                      MakeConst((unpack_j).ty(), 1), ForKind::kUnrolled,
+                  For(unpack_j, tl::MakeConst((unpack_j).ty(), 0), packed_batch,
+                      tl::MakeConst((unpack_j).ty(), 1), ForKind::kUnrolled,
                       SeqStmt(unpack_body));
               phases.push_back(unpack_loop);
             }
@@ -936,7 +954,7 @@ template <typename Impl> struct ReduceLowerer {
               for (int d = 0; d < buf_ndim; d++) {
                 int64_t idx =
                     (flat_offset / buf_strides[d]) % buf_shape_vals[d];
-                chunk_indices.push_back(MakeConst(PrimType::Int(64), idx));
+                chunk_indices.push_back(tl::MakeConst(PrimType::Int(64), idx));
               }
               Expr ptr = Call(std::nullopt, address_of_op(),
                               {TensorLoad(clear_buffer, chunk_indices)});
@@ -955,7 +973,7 @@ template <typename Impl> struct ReduceLowerer {
           auto [post_vars, post_dst_idx, post_red_idx] =
               make_fresh_dst_vars("_p");
 
-          PrimExpr predicate = MakeConst(PrimType::Bool(), true);
+          PrimExpr predicate = tl::MakeConst(PrimType::Bool(), true);
           {
             // The fragment inverse expects a zero-based logical thread
             // coordinate within the destination layout's thread range, so
@@ -972,7 +990,7 @@ template <typename Impl> struct ReduceLowerer {
             for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
               predicate = predicate && (inv[i] == post_vars[i]->var);
             }
-            predicate = analyzer->Simplify(predicate);
+            predicate = tl::arith::Simplify(analyzer, predicate);
           }
 
           PrimExpr update =
@@ -982,7 +1000,7 @@ template <typename Impl> struct ReduceLowerer {
                   : TensorLoad(clear_buffer, post_red_idx);
           auto store = TensorStore(dst_buffer, post_dst_idx, update);
           Stmt post_body{ffi::UnsafeInit{}};
-          if (analyzer->CanProve(predicate)) {
+          if (tl::arith::CanProve(analyzer, predicate)) {
             post_body = store;
           } else {
             post_body = If(predicate, SeqStmt(store));
@@ -1046,7 +1064,7 @@ template <typename Impl> struct ReduceLowerer {
         stmts.push_back(TensorStore(clear_buffer, red_indices, call));
       }
 
-      PrimExpr predicate = MakeConst(PrimType::Bool(), true);
+      PrimExpr predicate = tl::MakeConst(PrimType::Bool(), true);
       {
         // The fragment inverse expects a zero-based logical thread coordinate
         // within the destination layout's thread range, so normalize the
@@ -1063,7 +1081,7 @@ template <typename Impl> struct ReduceLowerer {
         for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
           predicate = predicate && (inv[i] == dst_vars[i]->var);
         }
-        predicate = analyzer->Simplify(predicate);
+        predicate = tl::arith::Simplify(analyzer, predicate);
       }
       if (need_duplicate) {
         PrimExpr update =
@@ -1072,7 +1090,7 @@ template <typename Impl> struct ReduceLowerer {
                                      TensorLoad(clear_buffer, red_indices))
                 : TensorLoad(clear_buffer, red_indices);
         auto store = TensorStore(dst_buffer, dst_indices, update);
-        if (analyzer->CanProve(predicate)) {
+        if (tl::arith::CanProve(analyzer, predicate)) {
           stmts.push_back(store);
         } else {
           stmts.push_back(If(predicate, SeqStmt(store)));
@@ -1081,10 +1099,10 @@ template <typename Impl> struct ReduceLowerer {
 
       auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
       for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
-        body =
-            For(dst_vars[i]->var, MakeConst((dst_vars[i]->var).ty(), 0),
-                dst_vars[i]->dom->extent, MakeConst((dst_vars[i]->var).ty(), 1),
-                ForKind::kParallel, SeqStmt(body));
+        body = For(dst_vars[i]->var, tl::MakeConst((dst_vars[i]->var).ty(), 0),
+                   dst_vars[i]->dom->extent,
+                   tl::MakeConst((dst_vars[i]->var).ty(), 1),
+                   ForKind::kParallel, SeqStmt(body));
       }
 
       if (dst_layout->InputDim() > 0) {

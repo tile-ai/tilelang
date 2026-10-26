@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -15,7 +16,7 @@ def inject(body, parameters):
         {"target": Target("c"), "global_symbol": "partial_pipeline"}
     )
     module = tvm_ffi.get_global_func("tl.transform.InjectSoftwarePipeline")()(ir.IRModule({"main": function}))
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return tvm_ffi.get_global_func("tl.transform.LowerTileOp")()(module)
 
@@ -34,7 +35,7 @@ def pipeline(iteration, extent, statements):
 
 @pytest.mark.parametrize("extent", [0, 1, 2, 7])
 @pytest.mark.parametrize("offset", [0, 1, 4])
-def test_partial_pipeline_preserves_initialized_tail_and_copyback(extent, offset):
+def test_partial_pipeline_preserves_initialized_tail_and_copyback(extent, offset, compile_lowered_cpu):
     temporary = TensorView.create("temporary", [8], "int32", scope="local")
     output = TensorView.create("output", [extent * 4 + 8], "int32")
     iteration = ir.Var("iteration", "int32")
@@ -58,7 +59,7 @@ def test_partial_pipeline_preserves_initialized_tail_and_copyback(extent, offset
         [output.tensor],
     )
     actual = runtime.empty((extent * 4 + 8,), "int32")
-    tirx.compile(module, target="c")(actual)
+    compile_lowered_cpu(module, target="c")(actual)
     final = np.arange(8, dtype="int32") + 1000
     expected = []
     for index in range(extent):
@@ -67,7 +68,7 @@ def test_partial_pipeline_preserves_initialized_tail_and_copyback(extent, offset
     np.testing.assert_array_equal(actual.numpy(), [*expected, *final])
 
 
-def test_partial_pipeline_evaluates_effectful_load_index_once(tilelang_builders):
+def test_partial_pipeline_evaluates_effectful_load_index_once(compile_lowered_cpu):
     temporary = TensorView.create("temporary", [8], "int32", scope="local")
     output = TensorView.create("output", [13], "int32")
     counter = TensorView.create("counter", [1], "int32")
@@ -84,7 +85,7 @@ def test_partial_pipeline_evaluates_effectful_load_index_once(tilelang_builders)
     )
     imported = '#ifdef __cplusplus\nextern "C"\n#endif\nint32_t next_partial_index(int32_t *counter) { return ((*counter)++) % 8; }\n'
     body = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {"pragma_import_c": imported},
@@ -102,7 +103,7 @@ def test_partial_pipeline_evaluates_effectful_load_index_once(tilelang_builders)
     assert len(calls) == 1
     actual = runtime.empty((13,), "int32")
     count = runtime.tensor(np.array([0], dtype="int32"))
-    tirx.compile(module, target="c")(actual, count)
+    compile_lowered_cpu(module, target="c")(actual, count)
     np.testing.assert_array_equal(
         actual.numpy(), [iteration * 100 + iteration % 8 if iteration % 8 < 4 else 1000 + iteration % 8 for iteration in range(13)]
     )

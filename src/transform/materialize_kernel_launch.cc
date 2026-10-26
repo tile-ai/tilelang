@@ -1,6 +1,8 @@
 #include "common/attr.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "op/builtin.h"
+#include "op/prim.h"
 
 #include <tvm/ir/analysis.h>
 #include <tvm/target/target.h>
@@ -31,7 +33,7 @@ const RegionStmtNode *KernelScope(const SeqStmt &body) {
   return region && IsDeviceMainBlock(region) ? region : nullptr;
 }
 
-class KernelLaunchMaterializer : public tirx::StmtExprMutator {
+class KernelLaunchMaterializer : public tvm::tl::StmtExprMutator {
 public:
   KernelLaunchMaterializer(bool grid_binding, bool thread_binding,
                            Optional<Array<PrimExpr>> default_threads,
@@ -54,7 +56,7 @@ private:
       }
     }
     if (node->op->name != "tl.launch_grid") {
-      return StmtExprMutator::Mutate_(node, inplace_mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
     }
     TVM_FFI_CHECK(node->args.size() == 2 && node->body_params.size() == 1 &&
                       node->result_vars.empty(),
@@ -65,13 +67,13 @@ private:
         tag == "blockIdx.x" || tag == "blockIdx.y" || tag == "blockIdx.z";
     if (!block_tag && std::find(extra_tags_.begin(), extra_tags_.end(), tag) ==
                           extra_tags_.end()) {
-      return StmtExprMutator::Mutate_(node, inplace_mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
     }
     SeqStmt body =
         Mutate(node->body).ValueOrUnchanged(node->body).as_or_throw<SeqStmt>();
     PrimVar variable = node->body_params[0].as_or_throw<PrimVar>();
     PrimExpr extent =
-        prim::cast(node->args[1].as_or_throw<PrimExpr>(), variable.ty());
+        tl::CastValue(node->args[1].as_or_throw<PrimExpr>(), variable.ty());
     if (auto value = GetConstInt(extent)) {
       if (grid_binding_ && block_tag) {
         TVM_FFI_CHECK_GT(*value, 0, ValueError)
@@ -87,15 +89,15 @@ private:
       return RegionStmt(tirx::launch_thread_op(), {StringImm(tag), extent},
                         {variable}, DictAttrs(), body, {}, node->loc);
     }
-    return For(variable, MakeConst(variable.ty(), 0), extent,
-               MakeConst(variable.ty(), 1), ForKind::kDefault, body,
+    return For(variable, tl::MakeConst(variable.ty(), 0), extent,
+               tl::MakeConst(variable.ty(), 1), ForKind::kDefault, body,
                node->attrs->dict, node->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
                             InplaceMode inplace_mode) final {
     if (node->seq.empty() || ThreadPlaceholder(node->seq[0]) == nullptr) {
-      return StmtExprMutator::Mutate_(node, inplace_mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
     }
     Array<Var> variables;
     std::vector<int> axes;
@@ -148,7 +150,7 @@ private:
     const char *tags[] = {"threadIdx.x", "threadIdx.y", "threadIdx.z"};
     for (size_t position = variables.size(); position-- > 0;) {
       PrimVar variable = variables[position].as_or_throw<PrimVar>();
-      PrimExpr extent = prim::cast(extents[axes[position]], variable.ty());
+      PrimExpr extent = tl::CastValue(extents[axes[position]], variable.ty());
       auto constant = GetConstInt(extent);
       TVM_FFI_CHECK(constant && *constant > 0, ValueError)
           << "Kernel thread extents must be positive constants";

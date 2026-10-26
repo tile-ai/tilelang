@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/ascend/op/ascend_mte_plan.h
  * \brief Utilities for planning Ascend MTE (Memory Transfer Engine) DMA copies.
@@ -9,6 +10,7 @@
 
 #ifndef TVM_TL_ASCEND_OP_ASCEND_MTE_PLAN_H_
 #define TVM_TL_ASCEND_OP_ASCEND_MTE_PLAN_H_
+#include "op/prim.h"
 
 #include "support/check.h"
 
@@ -33,11 +35,11 @@ using namespace tirx;
 /// ceil(elements * elem_bits / 8).
 inline PrimExpr AscendMTEBytesFromElements(PrimExpr elements, int elem_bits) {
   if (elem_bits % 8 == 0) {
-    return elements * prim::MakeConst(elements.ty(), elem_bits / 8);
+    return elements * tl::MakeConst(elements.ty(), elem_bits / 8);
   }
-  return prim::FloorDiv(elements * prim::MakeConst(elements.ty(), elem_bits) +
-                            prim::MakeConst(elements.ty(), 7),
-                        prim::MakeConst(elements.ty(), 8));
+  return prim::FloorDiv(elements * tl::MakeConst(elements.ty(), elem_bits) +
+                            tl::MakeConst(elements.ty(), 7),
+                        tl::MakeConst(elements.ty(), 8));
 }
 
 /// Normalize a possibly-empty unit axis for MTE descriptor planning.
@@ -52,9 +54,10 @@ NormalizeEmptyUnitAxesForMTE(const ffi::Array<Range> &ranges,
   ffi::Array<Range> normalized = ranges;
   for (size_t i = 0; i < ranges.size(); ++i) {
     const Range &range = ranges[i];
-    PrimExpr extent = analyzer->Simplify(range->extent);
-    PrimExpr one = prim::MakeConst(extent.ty(), 1);
-    if (analyzer->CanProve(extent <= one, sym::ProofStrength::kSymbolicBound)) {
+    PrimExpr extent = tl::arith::Simplify(analyzer, range->extent);
+    PrimExpr one = tl::MakeConst(extent.ty(), 1);
+    if (tl::arith::CanProve(analyzer, extent <= one,
+                            sym::ProofStrength::kSymbolicBound)) {
       normalized.Set(i, Range::FromMinExtent(range->begin, one));
     }
   }
@@ -94,7 +97,7 @@ struct StridedLayout {
                                        const ffi::Array<Range> &range,
                                        int elem_bits) {
     int ndim = static_cast<int>(range.size());
-    auto I = [](int64_t v) { return prim::MakeConst(PrimType::Int(32), v); };
+    auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
 
     ICHECK_EQ(range.size(), buf.shape().size())
         << "Expected one access range per buffer axis, got ranges " << range
@@ -131,8 +134,8 @@ struct StridedLayout {
   StridedLayout RemoveUnitModes(sym::Analyzer analyzer) const {
     std::vector<Mode> result;
     for (const Mode &mode : modes) {
-      PrimExpr one = prim::MakeConst(mode.size.ty(), 1);
-      if (!analyzer->CanProveEqual(mode.size, one)) {
+      PrimExpr one = tl::MakeConst(mode.size.ty(), 1);
+      if (!tl::arith::CanProveEqual(analyzer, mode.size, one)) {
         result.push_back(mode);
       }
     }
@@ -150,7 +153,7 @@ struct StridedLayout {
     if (modes.empty())
       return *this;
 
-    auto I = [](int64_t v) { return prim::MakeConst(PrimType::Int(32), v); };
+    auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
 
     // First, filter out size-1 modes (they don't contribute to data layout).
     std::vector<Mode> filtered = RemoveUnitModes(analyzer).modes;
@@ -169,7 +172,7 @@ struct StridedLayout {
       // Check: cur.stride == prev.stride * prev.size
       // i.e. the outer dimension is contiguous with the inner
       PrimExpr expected_stride = prev.stride * prev.size;
-      if (analyzer->CanProveEqual(cur.stride, expected_stride)) {
+      if (tl::arith::CanProveEqual(analyzer, cur.stride, expected_stride)) {
         // Merge: new size = prev.size * cur.size, keep prev.stride
         prev.size = prev.size * cur.size;
       } else {
@@ -177,7 +180,7 @@ struct StridedLayout {
       }
     }
 
-    if (!analyzer->CanProveEqual(result[0].stride, I(1))) {
+    if (!tl::arith::CanProveEqual(analyzer, result[0].stride, I(1))) {
       result.insert(result.begin(), Mode{I(1), I(1), -1});
     }
 
@@ -194,7 +197,7 @@ struct StridedLayout {
 inline std::optional<StridedLayout>
 TryNormalizeMTE2DLayout(const TensorVar &buf, const ffi::Array<Range> &range,
                         sym::Analyzer analyzer) {
-  auto I = [](int64_t v) { return prim::MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
 
   if (range.size() != buf.shape().size() || range.size() < 2)
     return std::nullopt;
@@ -209,7 +212,7 @@ TryNormalizeMTE2DLayout(const TensorVar &buf, const ffi::Array<Range> &range,
   // other axis is a fixed selector and the inner axis is contiguous.
   for (int inner = ndim - 1; inner >= 1 && inner_axis < 0; --inner) {
     const Mode &inner_mode = raw.modes[ndim - 1 - inner];
-    if (!analyzer->CanProveEqual(inner_mode.stride, I(1))) {
+    if (!tl::arith::CanProveEqual(analyzer, inner_mode.stride, I(1))) {
       continue;
     }
     for (int row = inner - 1; row >= 0; --row) {
@@ -219,7 +222,8 @@ TryNormalizeMTE2DLayout(const TensorVar &buf, const ffi::Array<Range> &range,
           continue;
         }
         PrimExpr extent = range[axis]->extent;
-        if (!analyzer->CanProveEqual(extent, prim::MakeConst(extent.ty(), 1))) {
+        if (!tl::arith::CanProveEqual(analyzer, extent,
+                                      tl::MakeConst(extent.ty(), 1))) {
           all_other_axes_are_unit = false;
           break;
         }
@@ -309,7 +313,7 @@ struct MTECopy2D {
 inline MTECopy2D PlanMTECopy(const StridedLayout &src_raw,
                              const StridedLayout &dst_raw,
                              sym::Analyzer analyzer) {
-  auto I = [](int64_t v) { return prim::MakeConst(PrimType::Int(32), v); };
+  auto I = [](int64_t v) { return tl::MakeConst(PrimType::Int(32), v); };
 
   // 1. Coalesce both sides independently
   StridedLayout src = src_raw.Coalesce(analyzer);
@@ -324,8 +328,8 @@ inline MTECopy2D PlanMTECopy(const StridedLayout &src_raw,
       << "PlanMTECopy: >2D strided copy not yet supported. " << "src has "
       << src.modes.size() << " modes, " << "dst has " << dst.modes.size()
       << " modes after coalesce.";
-  ICHECK(analyzer->CanProveEqual(src.modes[0].stride, I(1)) &&
-         analyzer->CanProveEqual(dst.modes[0].stride, I(1)))
+  ICHECK(tl::arith::CanProveEqual(analyzer, src.modes[0].stride, I(1)) &&
+         tl::arith::CanProveEqual(analyzer, dst.modes[0].stride, I(1)))
       << "PlanMTECopy: innermost MTE modes must be contiguous, got src stride "
       << src.modes[0].stride << " and dst stride " << dst.modes[0].stride
       << ".";
@@ -335,11 +339,11 @@ inline MTECopy2D PlanMTECopy(const StridedLayout &src_raw,
     for (const auto &mode : layout.modes) {
       total = total * mode.size;
     }
-    return analyzer->Simplify(total);
+    return tl::arith::Simplify(analyzer, total);
   };
   PrimExpr src_total = total_elems(src);
   PrimExpr dst_total = total_elems(dst);
-  ICHECK(analyzer->CanProveEqual(src_total, dst_total))
+  ICHECK(tl::arith::CanProveEqual(analyzer, src_total, dst_total))
       << "PlanMTECopy: source and destination regions must contain the same "
          "number of elements, got src="
       << src_total << " and dst=" << dst_total << ".";
@@ -361,25 +365,27 @@ inline MTECopy2D PlanMTECopy(const StridedLayout &src_raw,
     src_stride_elems = row_elems;
     dst_stride_elems = row_elems;
   } else if (!src_1d && dst_1d) {
-    row_elems = analyzer->Simplify(src.modes[0].size);
-    n_rows = analyzer->Simplify(src.modes[1].size);
+    row_elems = tl::arith::Simplify(analyzer, src.modes[0].size);
+    n_rows = tl::arith::Simplify(analyzer, src.modes[1].size);
     src_stride_elems = src.modes[1].stride;
     dst_stride_elems = row_elems;
   } else if (src_1d && !dst_1d) {
-    row_elems = analyzer->Simplify(dst.modes[0].size);
-    n_rows = analyzer->Simplify(dst.modes[1].size);
+    row_elems = tl::arith::Simplify(analyzer, dst.modes[0].size);
+    n_rows = tl::arith::Simplify(analyzer, dst.modes[1].size);
     src_stride_elems = row_elems;
     dst_stride_elems = dst.modes[1].stride;
   } else {
-    ICHECK(analyzer->CanProveEqual(src.modes[0].size, dst.modes[0].size))
+    ICHECK(tl::arith::CanProveEqual(analyzer, src.modes[0].size,
+                                    dst.modes[0].size))
         << "PlanMTECopy: incompatible 2D row boundaries require outer-loop "
            "lowering, got src inner="
         << src.modes[0].size << " and dst inner=" << dst.modes[0].size << ".";
-    ICHECK(analyzer->CanProveEqual(src.modes[1].size, dst.modes[1].size))
+    ICHECK(tl::arith::CanProveEqual(analyzer, src.modes[1].size,
+                                    dst.modes[1].size))
         << "PlanMTECopy: source and destination row counts differ, got src="
         << src.modes[1].size << " and dst=" << dst.modes[1].size << ".";
-    row_elems = analyzer->Simplify(src.modes[0].size);
-    n_rows = analyzer->Simplify(src.modes[1].size);
+    row_elems = tl::arith::Simplify(analyzer, src.modes[0].size);
+    n_rows = tl::arith::Simplify(analyzer, src.modes[1].size);
     src_stride_elems = src.modes[1].stride;
     dst_stride_elems = dst.modes[1].stride;
   }
@@ -387,8 +393,10 @@ inline MTECopy2D PlanMTECopy(const StridedLayout &src_raw,
   // A packed sub-byte row must contain a whole number of bytes. Otherwise MTE
   // rounds every row up and can overrun the packed destination.
   if (src.elem_bits < 8) {
-    PrimExpr row_bits = analyzer->Simplify(row_elems * I(src.elem_bits));
-    ICHECK(analyzer->CanProveEqual(prim::FloorMod(row_bits, I(8)), I(0)))
+    PrimExpr row_bits =
+        tl::arith::Simplify(analyzer, row_elems * I(src.elem_bits));
+    ICHECK(tl::arith::CanProveEqual(analyzer, prim::FloorMod(row_bits, I(8)),
+                                    I(0)))
         << "PlanMTECopy: packed sub-byte row must be byte-aligned, got "
         << row_elems << " elements at " << src.elem_bits
         << " bits per element.";

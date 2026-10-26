@@ -17,7 +17,7 @@ from tilelang.transform.simplify import _Simplify
 from tilelang._compat.tvm import tirx
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tvm_tirx.sym import Analyzer
+from tilelang._compat.sym import Analyzer
 from collections.abc import Callable
 
 

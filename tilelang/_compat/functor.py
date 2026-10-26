@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-import tvm_ffi
 from tvm_tirx import ir
+from .structural import structural_visit, structural_mutate
 
 
 def _method_name(node_type: type) -> str:
@@ -39,7 +39,7 @@ class PyStmtExprVisitor:
     def visit(self, node):
         if self._engines:
             return self._engines[-1].visit(node)
-        return tvm_ffi.structural_visit(node, ((ir.Expr, ir.Stmt), self._dispatch))
+        return structural_visit(node, ((ir.Expr, ir.Stmt), self._dispatch))
 
     visit_stmt = visit
     visit_expr = visit
@@ -69,7 +69,7 @@ class PyStmtExprMutator:
     def visit(self, node):
         if self._engines:
             return self._engines[-1].mutate(node)
-        return tvm_ffi.structural_mutate(node, ((ir.Expr, ir.Stmt), self._dispatch))
+        return structural_mutate(node, ((ir.Expr, ir.Stmt), self._dispatch))
 
     visit_stmt = visit
     visit_expr = visit

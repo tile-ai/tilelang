@@ -55,7 +55,9 @@ def _resolve_artifact_paths(temp, file_name, target_format, kernels_output_dir=N
 def get_target_arch_and_code(target: Target | None = None) -> tuple[str, list[str] | None]:
     """Return the CUDA target arch suffix and optional NVCC code targets."""
     target = target or Target.current(allow_none=True)
-    target_code = get_target_code_list(target.attrs["code"]) if target is not None and "code" in target.attrs else None
+    backend_config = target.attrs.get("backend_config", {}) if target is not None else {}
+    target_code = backend_config.get("tilelang", {}).get("code")
+    target_code = get_target_code_list(target_code) if target_code is not None else None
 
     if target is not None and "arch" in target.attrs:
         arch = str(target.attrs["arch"])
@@ -122,8 +124,8 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         # If None, then it will use `tvm.target.Target.current().arch`.
         target_arch, target_code = get_target_arch_and_code(Target.current(allow_none=True))
         gencode_code = format_target_code_for_gencode(target_code)
-        if gencode_code is None:
-            arch = [f"-arch=sm_{target_arch}"]
+        if gencode_code is None or target_format == "ptx":
+            arch = f"sm_{target_arch}"
         else:
             arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
         if target_format == "cubin" and len(get_target_code_list(target_code)) > 1:
@@ -167,7 +169,14 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     if isinstance(arch, list):
         cmd += arch
     elif isinstance(arch, str):
-        cmd += ["-arch", arch]
+        if arch.startswith("sm_") and arch.endswith(("a", "f")) and target_format == "fatbin":
+            virtual_arch = "compute_" + arch.removeprefix("sm_")
+            cmd += ["-gencode", f"arch={virtual_arch},code=[{arch},{virtual_arch}]"]
+        elif arch.startswith("sm_") and target_format == "ptx":
+            virtual_arch = "compute_" + arch.removeprefix("sm_")
+            cmd += ["-arch", virtual_arch, "-code", virtual_arch]
+        else:
+            cmd += ["-arch", arch]
     if os.name == "nt":
         # /Zc:preprocessor: standards-conforming preprocessor (needed by some
         # CUDA macros).

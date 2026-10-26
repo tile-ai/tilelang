@@ -6,6 +6,7 @@ from tvm_tirx.target import Target
 
 from tilelang._compat.stmt_functor import ir_transform, post_order_visit
 from tilelang._compat.tensor import tensor_strides
+from tilelang.transform import _tirx_passes
 
 
 def dynamic_symbols(function):
@@ -157,6 +158,7 @@ class NativeCUDASourceWrapper:
 
     def __init__(self, scheduled_ir_module, source, target, device_mod=None, host_mod=None, pass_configs=None):
         from tvm_tirx.backend.cuda.host import export_cuda_host
+
         from tilelang.engine.lower import _prepare_device_codegen_mod
         from tilelang.utils.language import retrieve_func_from_module
 
@@ -172,7 +174,7 @@ class NativeCUDASourceWrapper:
             with target:
                 device = tvm_ffi.get_global_func("tl.cuda.build_from_source")(_prepare_device_codegen_mod(device_mod), target, source)
             with host_target:
-                host_ir = tirx.transform.LowerTVMBuiltin()(ir.IRModule({"call": raw}))
-                host = tvm_ffi.get_global_func("target.build.cuda_host")(_prepare_device_codegen_mod(host_ir), host_target)
+                host_ir = _tirx_passes.LowerTVMBuiltin()(ir.IRModule({"call": raw}))
+                host = tvm_ffi.get_global_func("tl.codegen.build_cuda_host")(_prepare_device_codegen_mod(host_ir), host_target)
         host.import_module(device)
         self.lib_code = export_cuda_host(host) + _ERROR_API

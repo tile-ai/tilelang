@@ -17,13 +17,13 @@ constexpr const char *HostMainBlockName = "root";
 constexpr const char *DeviceMainBlockName = "tilelang_root";
 
 inline bool IsHostMainBlock(const RegionStmtNode *node) {
-  return (node->op->name == "tl.scope" || node->op->name == "tirx.scope") &&
+  return (node->op->name == "tl.scope" || node->op->name == "tl.scope") &&
          node->attrs.GetAttr<ffi::String>("name_hint").value_or("") ==
              HostMainBlockName;
 }
 
 inline bool IsDeviceMainBlock(const RegionStmtNode *node) {
-  return (node->op->name == "tl.scope" || node->op->name == "tirx.scope") &&
+  return (node->op->name == "tl.scope" || node->op->name == "tl.scope") &&
          node->attrs.GetAttr<ffi::String>("name_hint").value_or("") ==
              DeviceMainBlockName;
 }

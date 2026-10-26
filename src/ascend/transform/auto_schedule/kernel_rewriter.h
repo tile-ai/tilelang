@@ -1,3 +1,5 @@
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -73,7 +75,8 @@ protected:
       auto variable = node->body_params[0].as_or_throw<PrimVar>();
       auto extent = node->args[1].as_or_throw<PrimExpr>();
       auto guard = MakeGuard(
-          variable, Range::FromMinExtent(MakeConst(extent.ty(), 0), extent));
+          variable,
+          Range::FromMinExtent(tl::MakeConst(extent.ty(), 0), extent));
       result = Visit(node->body);
     } else {
       result = ConstrVisitor::Visit_(node);
@@ -86,7 +89,7 @@ private:
   ffi::Optional<PrimVar> sid_;
 };
 
-class TilelangKernelRewriter : public tirx::StmtExprMutator {
+class TilelangKernelRewriter : public tvm::tl::StmtExprMutator {
 public:
   TilelangKernelRewriter(TilelangKernelRewrite rewrite,
                          std::vector<TilelangKernelContext> contexts)
@@ -97,7 +100,7 @@ protected:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     if (KernelRegionName(node) != "tilelang_root") {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     TVM_FFI_ICHECK_LT(count, contexts_.size());
     const auto &context = contexts_[count++];

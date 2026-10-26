@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -201,8 +204,10 @@ TryMergeDenseRegions(const TensorRegion &lhs, const TensorRegion &rhs) {
   for (size_t i = 0; i < lhs->region.size(); ++i) {
     const Range &lhs_range = lhs->region[i];
     const Range &rhs_range = rhs->region[i];
-    if (analyzer->CanProveEqual(lhs_range->begin, rhs_range->begin) &&
-        analyzer->CanProveEqual(lhs_range->extent, rhs_range->extent)) {
+    if (tl::arith::CanProveEqual(analyzer, lhs_range->begin,
+                                 rhs_range->begin) &&
+        tl::arith::CanProveEqual(analyzer, lhs_range->extent,
+                                 rhs_range->extent)) {
       continue;
     }
     if (differing_axis.has_value())
@@ -218,20 +223,21 @@ TryMergeDenseRegions(const TensorRegion &lhs, const TensorRegion &rhs) {
   PrimExpr lhs_end = lhs_range->begin + lhs_range->extent;
   PrimExpr rhs_end = rhs_range->begin + rhs_range->extent;
   PrimExpr merged_min{ffi::UnsafeInit{}};
-  if (analyzer->CanProve(lhs_range->begin <= rhs_range->begin) &&
-      analyzer->CanProve(rhs_range->begin <= lhs_end)) {
+  if (tl::arith::CanProve(analyzer, lhs_range->begin <= rhs_range->begin) &&
+      tl::arith::CanProve(analyzer, rhs_range->begin <= lhs_end)) {
     merged_min = lhs_range->begin;
-  } else if (analyzer->CanProve(rhs_range->begin <= lhs_range->begin) &&
-             analyzer->CanProve(lhs_range->begin <= rhs_end)) {
+  } else if (tl::arith::CanProve(analyzer,
+                                 rhs_range->begin <= lhs_range->begin) &&
+             tl::arith::CanProve(analyzer, lhs_range->begin <= rhs_end)) {
     merged_min = rhs_range->begin;
   } else {
     return std::nullopt;
   }
 
   PrimExpr merged_end{ffi::UnsafeInit{}};
-  if (analyzer->CanProve(lhs_end >= rhs_end)) {
+  if (tl::arith::CanProve(analyzer, lhs_end >= rhs_end)) {
     merged_end = lhs_end;
-  } else if (analyzer->CanProve(rhs_end >= lhs_end)) {
+  } else if (tl::arith::CanProve(analyzer, rhs_end >= lhs_end)) {
     merged_end = rhs_end;
   } else {
     return std::nullopt;
@@ -295,8 +301,9 @@ inline bool IsGuaranteedSingleTrip(const ControlNode *control) {
   sym::Analyzer analyzer;
   auto constraints = (control->task ? control->task->outer_ctx : ConstrSet())
                          .Populate(analyzer);
-  return analyzer->CanProve(ScheduleLoopTripCount(control->control.get()) == 1,
-                            sym::ProofStrength::kSymbolicBound);
+  return tl::arith::CanProve(analyzer,
+                             ScheduleLoopTripCount(control->control.get()) == 1,
+                             sym::ProofStrength::kSymbolicBound);
 }
 
 } // namespace buffer_alias_analysis_detail
@@ -703,7 +710,7 @@ private:
     std::reverse(path.begin(), path.end());
 
     sym::Analyzer analyzer;
-    WithGroup<sym::ConstraintContext> constraints;
+    WithGroup<tl::arith::ConstraintContext> constraints;
     for (const Constr &constraint : task->outer_ctx.constrs_) {
       if (constraint.kind != Constr::kConstr)
         constraint.Populate(analyzer, constraints);
@@ -718,7 +725,7 @@ private:
             static_cast<const ConditionGuard *>(guard.get());
         raw_conditions.push_back(condition->condition);
         signature.conditions.push_back(
-            analyzer->Simplify(condition->condition));
+            tl::arith::Simplify(analyzer, condition->condition));
       }
     }
     signature.iteration_invariant =
@@ -745,9 +752,9 @@ private:
             .Populate(analyzer);
     PrimExpr implication =
         !ConditionPredicate(premise) || ConditionPredicate(conclusion);
-    implication = analyzer->Simplify(implication);
-    return analyzer->CanProve(implication) ||
-           analyzer->z3_prover.CanProve(implication);
+    implication = tl::arith::Simplify(analyzer, implication);
+    return tl::arith::CanProve(analyzer, implication) ||
+           tl::arith::Z3CanProve(analyzer, implication);
   }
 
   bool ProveMutuallyExclusive(const PrimExpr &lhs, const PrimExpr &rhs,
@@ -759,9 +766,9 @@ private:
     auto constraints =
         (scope && scope->task ? scope->task->outer_ctx : ConstrSet())
             .Populate(analyzer);
-    PrimExpr exclusive = analyzer->Simplify(!(lhs && rhs));
-    return analyzer->CanProve(exclusive) ||
-           analyzer->z3_prover.CanProve(exclusive);
+    PrimExpr exclusive = tl::arith::Simplify(analyzer, !(lhs && rhs));
+    return tl::arith::CanProve(analyzer, exclusive) ||
+           tl::arith::Z3CanProve(analyzer, exclusive);
   }
 
   LifetimeSummary
@@ -935,7 +942,8 @@ private:
       const ForNode *loop = analysis_scope->control.get();
       PrimExpr step = loop->step;
       ffi::Map<PrimVar, PrimExpr> substitution{
-          {loop->var, loop->var + MakeConst(loop->var.ty(), distance) * step}};
+          {loop->var,
+           loop->var + tl::MakeConst(loop->var.ty(), distance) * step}};
       std::vector<TensorRegion> shifted;
       for (const TensorRegion &region : regions)
         shifted.push_back(
@@ -990,9 +998,10 @@ private:
               const Range &next = shifted[i]->region[axis];
               regions_periodic &= has_stable_parameters(original->begin) &&
                                   has_stable_parameters(original->extent);
-              regions_periodic &=
-                  analyzer->CanProveEqual(original->begin, next->begin) &&
-                  analyzer->CanProveEqual(original->extent, next->extent);
+              regions_periodic &= tl::arith::CanProveEqual(
+                                      analyzer, original->begin, next->begin) &&
+                                  tl::arith::CanProveEqual(
+                                      analyzer, original->extent, next->extent);
             }
           }
         }
@@ -1169,8 +1178,8 @@ private:
                                   : ConstrSet())
                 .Populate(analyzer);
         scope_must_execute =
-            analyzer->CanProve(ScheduleLoopTripCount(loop) > 0,
-                               sym::ProofStrength::kSymbolicBound);
+            tl::arith::CanProve(analyzer, ScheduleLoopTripCount(loop) > 0,
+                                sym::ProofStrength::kSymbolicBound);
       }
       bool outside_reads_have_must_def = scope_must_execute;
       for (const TaskStorageAccess &reader : reads_after_scope) {
@@ -1255,8 +1264,8 @@ private:
     sym::Analyzer analyzer;
     auto constraints = (control->task ? control->task->outer_ctx : ConstrSet())
                            .Populate(analyzer);
-    if (!analyzer->CanProve(ScheduleLoopTripCount(loop.get()) > 0,
-                            sym::ProofStrength::kSymbolicBound))
+    if (!tl::arith::CanProve(analyzer, ScheduleLoopTripCount(loop.get()) > 0,
+                             sym::ProofStrength::kSymbolicBound))
       return std::nullopt;
     // An inner-loop offset is not an outer-loop offset. Collapsing a local
     // generation to the child's entry/exit encloses every child iteration;
@@ -1287,7 +1296,7 @@ private:
     std::vector<GenerationLifetime> generations;
     if (!parent_live_through) {
       sym::Analyzer guard_analyzer;
-      WithGroup<sym::ConstraintContext> guard_constraints;
+      WithGroup<tl::arith::ConstraintContext> guard_constraints;
       if (control->task) {
         for (const Constr &constraint : control->task->outer_ctx.constrs_) {
           if (constraint.kind != Constr::kConstr)
@@ -1303,18 +1312,19 @@ private:
             static_cast<const ConditionGuard *>(guard.get());
         raw_control_conditions.push_back(condition->condition);
         control_guard =
-            control_guard && guard_analyzer->Simplify(condition->condition);
+            control_guard &&
+            tl::arith::Simplify(guard_analyzer, condition->condition);
       }
       bool control_guard_iteration_invariant = AreConditionsIterationInvariant(
           control->task.get(), raw_control_conditions, parent_scope);
 
-      ffi::StructuralEqual structural_equal;
+      tl::StructuralEqual structural_equal;
       std::vector<GenerationLifetime> local_summaries;
       for (const GenerationLifetime &generation : child_result.generations) {
         PrimExpr generation_guard =
             generation.guard.defined() ? generation.guard : IntImm::Bool(true);
-        PrimExpr promoted_guard =
-            guard_analyzer->Simplify(control_guard && generation_guard);
+        PrimExpr promoted_guard = tl::arith::Simplify(
+            guard_analyzer, control_guard && generation_guard);
         auto existing = std::find_if(
             local_summaries.begin(), local_summaries.end(),
             [&](const GenerationLifetime &summary) {

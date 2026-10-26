@@ -1,4 +1,5 @@
 #include "common/constr_visitor.h"
+#include "compat/analyzer.h"
 #include "op/reducer.h"
 #include "op/utils.h"
 #include "span_utils.h"
@@ -89,17 +90,18 @@ private:
     PrimExpr same_value = first_value(node->value) ==
                           second_value(Substitute(node->value, replacements));
     PrimExpr race_free = same_iteration || same_value;
-    if (!analyzer->CanProve(race_free)) {
+    if (!tl::arith::CanProve(analyzer, race_free)) {
       ffi::Array<PrimVar> failed;
       for (const PrimVar &variable : iteration_variables) {
-        if (!analyzer->CanProve(variable == replacements.at(variable))) {
+        if (!tl::arith::CanProve(analyzer,
+                                 variable == replacements.at(variable))) {
           failed.push_back(variable);
         }
       }
       if (!failed.empty()) {
         reports_.push_back({tensor, node->indices, failed,
-                            analyzer->z3_prover.GetModel(race_free), node->loc,
-                            parallel_locations_.back()});
+                            tl::arith::Z3GetModel(analyzer, race_free),
+                            node->loc, parallel_locations_.back()});
       }
     }
     return ConstrVisitor::Visit_(node);

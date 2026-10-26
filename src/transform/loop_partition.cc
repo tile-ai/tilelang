@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -22,6 +25,7 @@
  * \brief Partition parallel loops onto threads
  */
 
+#include "compat/region.h"
 #include "loop_partition.h"
 
 #include "op/utils.h"
@@ -34,7 +38,7 @@
 namespace tvm::tl {
 namespace {
 
-class BufferIndexSimplifier : public tirx::StmtExprMutator {
+class BufferIndexSimplifier : public tvm::tl::StmtExprMutator {
 public:
   explicit BufferIndexSimplifier(sym::Analyzer analyzer)
       : analyzer_(std::move(analyzer)) {}
@@ -43,13 +47,13 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    Bind binding = StmtExprMutator::Mutate_(node, mode)
+    Bind binding = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                        .ValueOrUnchanged(original)
                        .as_or_throw<Bind>();
     if (auto value = binding->value.as<PrimExpr>();
         value && binding->var.as<PrimVar>() &&
         SideEffect(value.value()) <= CallEffectKind::kPure) {
-      analyzer_->Bind(binding->var, value.value(), true);
+      tl::arith::Bind(analyzer_, binding->var, value.value(), true);
     }
     return binding;
   }
@@ -57,29 +61,32 @@ private:
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                      ffi::InplaceMode mode) final {
     PrimExpr original = ffi::GetRef<PrimExpr>(node);
-    TensorLoad load = StmtExprMutator::Mutate_(node, mode)
+    TensorLoad load = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(original)
                           .as_or_throw<TensorLoad>();
-    load.CopyOnWrite()->indices = load->indices.Map(
-        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    load.CopyOnWrite()->indices = load->indices.Map([&](const PrimExpr &index) {
+      return tl::arith::Simplify(analyzer_, index);
+    });
     return load;
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    TensorStore store = StmtExprMutator::Mutate_(node, mode)
+    TensorStore store = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(original)
                             .as_or_throw<TensorStore>();
-    store.CopyOnWrite()->indices = store->indices.Map(
-        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    store.CopyOnWrite()->indices =
+        store->indices.Map([&](const PrimExpr &index) {
+          return tl::arith::Simplify(analyzer_, index);
+        });
     return store;
   }
 
   sym::Analyzer analyzer_;
 };
 
-class MultiplicityMarkerLowerer : public tirx::StmtExprMutator {
+class MultiplicityMarkerLowerer : public tvm::tl::StmtExprMutator {
 public:
   explicit MultiplicityMarkerLowerer(ffi::Optional<PrimExpr> guard)
       : guard_(std::move(guard)) {}
@@ -87,7 +94,7 @@ public:
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
-    Stmt statement = StmtExprMutator::Mutate_(node, mode)
+    Stmt statement = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(node));
     auto tensor = node->dest.as<TensorVar>();
     if (guard_ && tensor && tensor.value().scope().name() == "global")
@@ -98,7 +105,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    RegionStmt region = StmtExprMutator::Mutate_(node, mode)
+    RegionStmt region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(original)
                             .as_or_throw<RegionStmt>();
     if (region->op->name != "tl.parallel_multiplicity") {
@@ -107,8 +114,8 @@ private:
     if (guard_.has_value()) {
       return If(guard_.value(), region->body, std::nullopt, region->loc);
     }
-    return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), region->body, {},
-                      region->loc);
+    return RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(), region->body,
+                      {}, region->loc);
   }
 
   ffi::Optional<PrimExpr> guard_;
@@ -124,7 +131,7 @@ const ForNode *UnwrapLoop(const Stmt &statement) {
   return current.as<ForNode>();
 }
 
-class FragmentAccessFinder : public tirx::StmtExprVisitor {
+class FragmentAccessFinder : public tvm::tl::StmtExprVisitor {
 public:
   bool has_fragment{false};
 
@@ -133,31 +140,31 @@ private:
     if (auto tensor = load->source.as<tirx::TensorVar>()) {
       has_fragment |= IsFragmentBuffer(tensor.value());
     }
-    return StmtExprVisitor::Visit_(load);
+    return tvm::tl::StmtExprVisitor::Visit_(load);
   }
   ffi::Optional<ffi::VisitInterrupt>
   Visit_(const TensorStoreNode *store) final {
     if (auto tensor = store->dest.as<tirx::TensorVar>()) {
       has_fragment |= IsFragmentBuffer(tensor.value());
     }
-    return StmtExprVisitor::Visit_(store);
+    return tvm::tl::StmtExprVisitor::Visit_(store);
   }
 };
 
-class LoopPragmaUnroller : public tirx::StmtExprMutator {
+class LoopPragmaUnroller : public tvm::tl::StmtExprMutator {
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
     if (node->kind == ForKind::kDefault) {
       sym::Analyzer analyzer;
-      if (GetConstInt(analyzer->Simplify(node->end - node->begin))
+      if (GetConstInt(tl::arith::Simplify(analyzer, node->end - node->begin))
               .has_value()) {
         For loop = ffi::GetRef<For>(node);
         loop.CopyOnWrite()->kind = ForKind::kUnrolled;
         return loop;
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 };
 
@@ -175,8 +182,9 @@ For PartitionLoop(For loop, PrimExpr thread_index, sym::Analyzer analyzer,
   for (size_t axis = 0; axis < output_rank; ++axis) {
     PrimVar variable("partition_" + std::to_string(axis),
                      output_shape[axis].ty());
-    analyzer->Bind(variable, Range::FromMinExtent(MakeConst(variable.ty(), 0),
-                                                  output_shape[axis]));
+    tl::arith::Bind(analyzer, variable,
+                    Range::FromMinExtent(tl::MakeConst(variable.ty(), 0),
+                                         output_shape[axis]));
     variables.push_back(variable);
   }
   PrimExpr normalized_thread = thread_index;
@@ -216,15 +224,16 @@ For PartitionLoop(For loop, PrimExpr thread_index, sym::Analyzer analyzer,
   }
   ffi::Optional<PrimExpr> replica_guard;
   if (indices.size() > input_rank) {
-    PrimExpr primary_replica = analyzer->Simplify(indices[input_rank] == 0);
-    if (!analyzer->CanProve(primary_replica))
+    PrimExpr primary_replica =
+        tl::arith::Simplify(analyzer, indices[input_rank] == 0);
+    if (!tl::arith::CanProve(analyzer, primary_replica))
       replica_guard = primary_replica;
   }
   auto multiplicity =
       ffi::make_object<MultiplicityMarkerLowerer>(replica_guard);
   body = multiplicity->Mutate(body).ValueOrUnchanged(body);
-  guard = analyzer->Simplify(guard);
-  if (!analyzer->CanProve(guard)) {
+  guard = tl::arith::Simplify(analyzer, guard);
+  if (!tl::arith::CanProve(analyzer, guard)) {
     body = If(guard, SeqStmt(body), std::nullopt, location);
   }
   if (output_rank == 0) {
@@ -236,11 +245,12 @@ For PartitionLoop(For loop, PrimExpr thread_index, sym::Analyzer analyzer,
       size_t axis = remaining - 1;
       PrimExpr extent = inverse->InputShape()[axis];
       PrimType type = variables[axis].ty();
-      body =
-          For(variables[axis], MakeConst(type, 0), extent, MakeConst(type, 1),
-              ForKind::kDefault, SeqStmt(body), {}, location);
-      analyzer->Bind(variables[axis],
-                     Range::FromMinExtent(MakeConst(type, 0), extent), true);
+      body = For(variables[axis], tl::MakeConst(type, 0), extent,
+                 tl::MakeConst(type, 1), ForKind::kDefault, SeqStmt(body), {},
+                 location);
+      tl::arith::Bind(analyzer, variables[axis],
+                      Range::FromMinExtent(tl::MakeConst(type, 0), extent),
+                      true);
     }
   }
   auto simplifier = ffi::make_object<BufferIndexSimplifier>(analyzer);
@@ -270,12 +280,12 @@ Fragment PlanLoopPartition(const For &loop, size_t num_thread,
   TVM_FFI_CHECK(!axes.empty(), ValueError)
       << "Loop partition planning requires a parallel loop";
   PrimType type = axes.back()->var.ty();
-  PrimExpr flattened = MakeConst(type, 0);
+  PrimExpr flattened = tl::MakeConst(type, 0);
   for (const LayoutAxis &axis : axes) {
     flattened = flattened * axis->dom->extent + axis->var;
   }
-  PrimExpr width = MakeConst(type, vectorize_size);
-  PrimExpr threads = MakeConst(type, static_cast<int32_t>(num_thread));
+  PrimExpr width = tl::MakeConst(type, vectorize_size);
+  PrimExpr threads = tl::MakeConst(type, static_cast<int32_t>(num_thread));
   PrimExpr access = floordiv(flattened, width);
   PrimExpr thread = floormod(access, threads);
   PrimExpr offset =

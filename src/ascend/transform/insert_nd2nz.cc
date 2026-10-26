@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file ascend/transform/insert_nd2nz.cc
  * \brief Rewrite layout-driven Ascend ND-to-NZ copies before AutoSchedule.
@@ -148,8 +149,8 @@ private:
       return false;
     auto strides = geometry.value().get<1>();
     size_t column = buffer.shape().size() - 1;
-    return analyzer_->CanProveEqual(strides[column], 1) &&
-           analyzer_->CanProveEqual(strides[column - 1],
+    return tl::arith::CanProveEqual(analyzer_, strides[column], 1) &&
+           tl::arith::CanProveEqual(analyzer_, strides[column - 1],
                                     buffer.shape()[column]);
   }
 
@@ -163,7 +164,8 @@ private:
       return false;
     PrimExpr bytes = ascend::StorageIndex(offsets[0]) *
                      IntImm::Int64(buffer.dtype().StorageBytes());
-    return analyzer_->CanProveEqual(floormod(bytes, IntImm::Int64(32)), 0);
+    return tl::arith::CanProveEqual(analyzer_,
+                                    floormod(bytes, IntImm::Int64(32)), 0);
   }
 
   void ValidateRegionInBounds(const TensorVar &buffer,
@@ -172,10 +174,11 @@ private:
     ICHECK_EQ(ranges.size(), buffer.shape().size());
     for (size_t axis = 0; axis < ranges.size(); ++axis) {
       const Range &range = ranges[axis];
-      bool lower_in_bounds = analyzer_->CanProve(range->begin >= 0);
-      bool non_negative_extent = analyzer_->CanProve(range->extent >= 0);
-      bool upper_in_bounds = analyzer_->CanProve(range->begin + range->extent <=
-                                                 buffer.shape()[axis]);
+      bool lower_in_bounds = tl::arith::CanProve(analyzer_, range->begin >= 0);
+      bool non_negative_extent =
+          tl::arith::CanProve(analyzer_, range->extent >= 0);
+      bool upper_in_bounds = tl::arith::CanProve(
+          analyzer_, range->begin + range->extent <= buffer.shape()[axis]);
       if (!lower_in_bounds || !non_negative_extent || !upper_in_bounds) {
         TVM_FFI_THROW(ValueError)
             << "UB ND->NZ " << role
@@ -236,7 +239,7 @@ private:
     ICHECK_EQ(copy.src_range.size(), copy.src.shape().size());
     ICHECK_GE(copy.src_range.size(), 2U);
     for (size_t i = 0; i + 2 < copy.src_range.size(); ++i) {
-      if (!analyzer_->CanProveEqual(copy.src_range[i]->extent, 1)) {
+      if (!tl::arith::CanProveEqual(analyzer_, copy.src_range[i]->extent, 1)) {
         TVM_FFI_THROW(ValueError)
             << "NZ source " << copy.src->name
             << " leading region extents must all be 1, got " << copy.src_range;
@@ -244,12 +247,13 @@ private:
     }
     size_t ndim = copy.src_range.size();
     bool mins_are_zero =
-        analyzer_->CanProveEqual(copy.src_range[ndim - 2]->begin, 0) &&
-        analyzer_->CanProveEqual(copy.src_range[ndim - 1]->begin, 0);
+        tl::arith::CanProveEqual(analyzer_, copy.src_range[ndim - 2]->begin,
+                                 0) &&
+        tl::arith::CanProveEqual(analyzer_, copy.src_range[ndim - 1]->begin, 0);
     bool extents_are_full =
-        analyzer_->CanProveEqual(copy.src.shape()[ndim - 2],
+        tl::arith::CanProveEqual(analyzer_, copy.src.shape()[ndim - 2],
                                  copy.src_range[ndim - 2]->extent + 1) &&
-        analyzer_->CanProveEqual(copy.src.shape()[ndim - 1],
+        tl::arith::CanProveEqual(analyzer_, copy.src.shape()[ndim - 1],
                                  copy.src_range[ndim - 1]->extent);
     if (!mins_are_zero || !extents_are_full) {
       TVM_FFI_THROW(ValueError)
@@ -257,8 +261,10 @@ private:
           << " trailing region must cover the full padded matrix: ranges="
           << copy.src_range << ", buffer shape=" << copy.src.shape();
     }
-    if (!analyzer_->CanProveEqual(copy.src_range[ndim - 2]->extent, rows) ||
-        !analyzer_->CanProveEqual(copy.src_range[ndim - 1]->extent, cols)) {
+    if (!tl::arith::CanProveEqual(analyzer_, copy.src_range[ndim - 2]->extent,
+                                  rows) ||
+        !tl::arith::CanProveEqual(analyzer_, copy.src_range[ndim - 1]->extent,
+                                  cols)) {
       TVM_FFI_THROW(ValueError)
           << "NZ source " << copy.src->name
           << " region must match post-copy geometry " << rows << "x" << cols;
@@ -314,14 +320,14 @@ private:
           << copy.src->name << " with ranges " << copy.src_range << ".";
     }
     for (size_t i = 0; i + 2 < copy.src_range.size(); ++i) {
-      if (!analyzer_->CanProveEqual(copy.src_range[i]->extent, 1)) {
+      if (!tl::arith::CanProveEqual(analyzer_, copy.src_range[i]->extent, 1)) {
         TVM_FFI_THROW(ValueError)
             << "UB ND->NZ source leading region extents must all be 1, got "
             << copy.src_range;
       }
     }
     for (size_t i = 0; i + 2 < copy.dst_range.size(); ++i) {
-      if (!analyzer_->CanProveEqual(copy.dst_range[i]->extent, 1)) {
+      if (!tl::arith::CanProveEqual(analyzer_, copy.dst_range[i]->extent, 1)) {
         TVM_FFI_THROW(ValueError)
             << "UB ND->NZ destination leading region extents must all be 1, "
                "got "
@@ -333,8 +339,10 @@ private:
     size_t dst_ndim = copy.dst_range.size();
     PrimExpr rows = copy.src_range[src_ndim - 2]->extent;
     PrimExpr cols = copy.src_range[src_ndim - 1]->extent;
-    if (!analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 2]->extent, rows) ||
-        !analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 1]->extent, cols)) {
+    if (!tl::arith::CanProveEqual(analyzer_,
+                                  copy.dst_range[dst_ndim - 2]->extent, rows) ||
+        !tl::arith::CanProveEqual(analyzer_,
+                                  copy.dst_range[dst_ndim - 1]->extent, cols)) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ source/destination logical regions must match.";
     }
@@ -343,18 +351,24 @@ private:
     auto [src_dtype, dst_dtype] =
         ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i);
 
-    if (!analyzer_->CanProveEqual(copy.src_range[src_ndim - 1]->begin, 0) ||
-        !analyzer_->CanProveEqual(copy.src.shape()[src_ndim - 1], cols)) {
+    if (!tl::arith::CanProveEqual(analyzer_,
+                                  copy.src_range[src_ndim - 1]->begin, 0) ||
+        !tl::arith::CanProveEqual(analyzer_, copy.src.shape()[src_ndim - 1],
+                                  cols)) {
       TVM_FFI_THROW(ValueError) << "UB ND->NZ source " << copy.src->name
                                 << " must cover a full contiguous row.";
     }
-    if (!analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 2]->begin, 0) ||
-        !analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 1]->begin, 0)) {
+    if (!tl::arith::CanProveEqual(analyzer_,
+                                  copy.dst_range[dst_ndim - 2]->begin, 0) ||
+        !tl::arith::CanProveEqual(analyzer_,
+                                  copy.dst_range[dst_ndim - 1]->begin, 0)) {
       TVM_FFI_THROW(ValueError) << "UB ND->NZ destination " << copy.dst->name
                                 << " must start at trailing offset [0, 0].";
     }
-    if (!analyzer_->CanProveEqual(copy.dst.shape()[dst_ndim - 2], rows + 1) ||
-        !analyzer_->CanProveEqual(copy.dst.shape()[dst_ndim - 1], cols)) {
+    if (!tl::arith::CanProveEqual(analyzer_, copy.dst.shape()[dst_ndim - 2],
+                                  rows + 1) ||
+        !tl::arith::CanProveEqual(analyzer_, copy.dst.shape()[dst_ndim - 1],
+                                  cols)) {
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ compact destination " << copy.dst->name
           << " must reserve exactly one padding row.";

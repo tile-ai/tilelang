@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
 
-from tilelang._compat import stmt_functor
+from tilelang._compat import ir, stmt_functor
 
 pytestmark = pytest.mark.usefixtures("ascend_codegen")
 
@@ -16,12 +16,12 @@ def _nodes(root, kind):
 
 def _apply(name, body, parameters=()):
     function = tirx.Function(list(parameters), body, ret_type=ir.TupleType([])).with_attr("global_symbol", "main")
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
     result = tvm_ffi.get_global_func("tl.transform." + name)()(ir.IRModule({"main": function}))["main"]
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
     restored = ir.load_json(ir.save_json(result))
     ir.assert_structural_equal(result, restored)
-    assert tirx.analysis.check_well_formed(restored)
+    assert ir.check_well_formed(restored)
     return result
 
 
@@ -114,7 +114,7 @@ def test_fp4_aliases_and_metadata_share_retyped_definitions():
     view = ir.Var("view", tensor.ty)
     declaration = ir.Bind(view, ir.Call("tirx.decl_tensor", [ir.Call("tirx.tensor_data_ptr", [tensor])], ty_args=[view.ty]))
     region = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {"buffers": {tensor: [view]}},
@@ -129,10 +129,10 @@ def test_fp4_aliases_and_metadata_share_retyped_definitions():
 
 
 def _version_scope(tensor, body, versions=2):
-    return ir.RegionStmt("tirx.scope", [], [], {"tl.buffer_version": {tensor: versions}}, body)
+    return ir.RegionStmt("tl.scope", [], [], {"tl.buffer_version": {tensor: versions}}, body)
 
 
-def test_versioned_ub_slots_preserve_numerical_accesses_and_shifted_aliases():
+def test_versioned_ub_slots_preserve_numerical_accesses_and_shifted_aliases(compile_tilelang):
     storage = ir.Var("storage", tirx.TensorType([2, 5], "int32", scope="shared"))
     alias = ir.Var("second_version", tirx.TensorType([5], "int32", scope="shared"))
     byte_alias = ir.Var("bytes", tirx.TensorType([40], "uint8", scope="shared"))
@@ -168,7 +168,7 @@ def test_versioned_ub_slots_preserve_numerical_accesses_and_shifted_aliases():
     assert not any("tl.buffer_version" in region.attrs for region in _nodes(result, ir.RegionStmt))
     assert [int(store.indices[0]) for store in _nodes(result, ir.TensorStore) if store.dest.same_as(output)][-2:] == [10, 11]
     actual = runtime.empty([12], "int32")
-    tirx.compile(result, target="c")(actual)
+    compile_tilelang(result, target="c")(actual)
     np.testing.assert_array_equal(actual.numpy(), [0, 1, 2, 3, 4, 100, 101, 102, 103, 104, 101, 101])
 
 
@@ -209,7 +209,7 @@ def test_version_layout_does_not_require_a_ub_allocation_for_l1_parameters():
 
 
 def _fractal_scope(body, layouts):
-    return ir.RegionStmt("tirx.scope", [], [], {"layout_map": layouts}, body)
+    return ir.RegionStmt("tl.scope", [], [], {"layout_map": layouts}, body)
 
 
 def _copy(source, destination, source_shape, destination_shape, attrs=None):

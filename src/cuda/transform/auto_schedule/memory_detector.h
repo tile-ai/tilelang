@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #pragma once
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
@@ -33,7 +34,7 @@ using ffi::GetRef;
 // Buffer indices are relaxed over surrounding loop domains, and repeated
 // accesses to the same logical buffer are unioned dimension by dimension.
 // Adapted from BlockReadWriteDetector in TVM.
-class MemoryAccessDetector : public StmtExprVisitor {
+class MemoryAccessDetector : public tvm::tl::StmtExprVisitor {
 public:
   MemoryAccessDetector() = default;
 
@@ -245,7 +246,7 @@ private:
   void VisitStmt_(const ForNode *op) override {
     Range range = Range::FromMinExtent(op->min, op->extent);
     dom_map_[op->loop_var.get()] = arith::IntSet::FromRange(range);
-    StmtExprVisitor::VisitStmt_(op);
+    tvm::tl::StmtExprVisitor::VisitStmt_(op);
     dom_map_.erase(op->loop_var.get());
   }
 
@@ -254,11 +255,11 @@ private:
     {
       // Visit then branch
       // Simplified: we don't handle conditional bounds for now
-      StmtExprVisitor::VisitStmt(op->then_case);
+      tvm::tl::StmtExprVisitor::VisitStmt(op->then_case);
     }
     if (op->else_case) {
       // Visit else branch
-      StmtExprVisitor::VisitStmt(op->else_case.value());
+      tvm::tl::StmtExprVisitor::VisitStmt(op->else_case.value());
     }
   }
 
@@ -273,7 +274,7 @@ private:
 
   void VisitExpr_(const VarNode *op) override {
     UpdateReadVar(tvm::ffi::GetRef<Var>(op));
-    StmtExprVisitor::VisitExpr_(op);
+    tvm::tl::StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitExpr_(const BufferLoadNode *op) override {
@@ -290,7 +291,7 @@ private:
       relaxed_region.push_back(RelaxAccessIndex(index));
     }
     Update(&read_buffers_, &read_regions_, op->buffer, relaxed_region);
-    StmtExprVisitor::VisitExpr_(op);
+    tvm::tl::StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) override {
@@ -307,7 +308,7 @@ private:
       relaxed_region.push_back(RelaxAccessIndex(index));
     }
     Update(&write_buffers_, &write_regions_, op->buffer, relaxed_region);
-    StmtExprVisitor::VisitStmt_(op);
+    tvm::tl::StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallNode *op) override {
@@ -340,7 +341,7 @@ private:
     // Handle other calls (e.g., builtin::tvm_access_ptr)
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       // Simplified: skip for now
-      StmtExprVisitor::VisitExpr_(op);
+      tvm::tl::StmtExprVisitor::VisitExpr_(op);
       return;
     }
 
@@ -412,7 +413,7 @@ private:
           return;
         }
       }
-      StmtExprVisitor::VisitExpr_(op);
+      tvm::tl::StmtExprVisitor::VisitExpr_(op);
       return;
     }
 
@@ -445,14 +446,14 @@ private:
       return;
     }
 
-    StmtExprVisitor::VisitExpr_(op);
+    tvm::tl::StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const SBlockNode *op) override {
     // TIRX represents many TileLang regions as direct SBlock nodes.  Match the
     // old TIR behavior for BlockNode by visiting the body so task-level buffer
     // dependencies are preserved.
-    StmtExprVisitor::VisitStmt_(op);
+    tvm::tl::StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const SBlockRealizeNode *op) override {

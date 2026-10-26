@@ -6,7 +6,7 @@ import operator
 import struct
 
 import tvm_ffi
-from tvm_tirx import ir
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 
 
@@ -204,7 +204,7 @@ class _Execution:
         elif isinstance(node, ir.AssertStmt):
             if not self.expression(node.condition):
                 raise RuntimeError("".join(str(self.expression(value)) for value in node.message_parts))
-        elif isinstance(node, ir.RegionStmt) and node.op.name in ("tirx.scope", "tirx.compute_scope", "tl.scope"):
+        elif isinstance(node, ir.RegionStmt) and node.op.name in ("tl.scope", "tirx.compute_scope", "tl.scope"):
             self.statement(node.body)
         else:
             raise TypeError(f"Unsupported native NVRTC host statement: {type(node).__name__}")

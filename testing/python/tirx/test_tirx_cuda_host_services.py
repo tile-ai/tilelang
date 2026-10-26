@@ -26,7 +26,8 @@ def test_native_host_packed_calls_marshal_typed_pointers(monkeypatch):
         assert cuda_stream.value == 8192
         return 37
 
-    monkeypatch.setattr(host_runtime.tvm_ffi, "get_global_func", lambda name: callback)
+    native_get = host_runtime.tvm_ffi.get_global_func
+    monkeypatch.setattr(host_runtime.tvm_ffi, "get_global_func", lambda name: callback if name == "test.host_pointer" else native_get(name))
     program = host_runtime.NativeHostProgram(ir.save_json(function))
     assert program({}, [4096], stream=8192) == 37
 
@@ -34,7 +35,12 @@ def test_native_host_packed_calls_marshal_typed_pointers(monkeypatch):
 def test_native_host_packed_pointer_results_are_normalized(monkeypatch):
     call = ir.Call("tirx.call_packed", ["test.host_pointer"], ty=ir.PtrType("void"))
     execution = host_runtime._Execution({}, {})
-    monkeypatch.setattr(host_runtime.tvm_ffi, "get_global_func", lambda name: lambda: ctypes.c_void_p(4096))
+    native_get = host_runtime.tvm_ffi.get_global_func
+    monkeypatch.setattr(
+        host_runtime.tvm_ffi,
+        "get_global_func",
+        lambda name: (lambda: ctypes.c_void_p(4096)) if name == "test.host_pointer" else native_get(name),
+    )
     assert execution.expression(call) == 4096
 
 
@@ -56,7 +62,12 @@ def test_packed_tensor_map_initialization_has_aligned_stable_storage(monkeypatch
         ctypes.memmove(pointer, pattern, len(pattern))
         return 0
 
-    monkeypatch.setattr(host_runtime.tvm_ffi, "get_global_func", lambda name: encode)
+    native_get = host_runtime.tvm_ffi.get_global_func
+    monkeypatch.setattr(
+        host_runtime.tvm_ffi,
+        "get_global_func",
+        lambda name: encode if name == "__tvm_tensormap_create_im2col" else native_get(name),
+    )
     execution = host_runtime._Execution({}, {descriptor: storage})
     call = ir.Call("tirx.call_packed", ["__tvm_tensormap_create_im2col", descriptor], ty="int32")
     assert execution.expression(call) == 0

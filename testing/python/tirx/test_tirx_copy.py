@@ -1,7 +1,9 @@
+from tilelang.transform import _tirx_passes
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -31,7 +33,7 @@ def function(body, tensors):
     result = tirx.Function([tensor.tensor for tensor in tensors], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "native_copy_test"
     )
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
     ir.assert_structural_equal(result, ir.load_json(ir.save_json(result)))
     return result
 
@@ -48,22 +50,22 @@ def nodes(body, node_type):
 
 @pytest.mark.parametrize("shape", [(8, 16), (7, 13), (), (0, 3)])
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
-def test_copy_cpu(shape, dtype):
+def test_copy_cpu(shape, dtype, *, compile_tilelang):
     source = TensorView.create("source", shape, dtype)
     output = TensorView.create("output", shape, dtype)
     operation = parse("copy", [source.tensor, output.tensor])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     expected = np.arange(np.prod(shape), dtype=dtype).reshape(shape)
     actual = runtime.tensor(np.full(shape, -1, dtype=dtype))
     executable(runtime.tensor(expected), actual)
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_copy_dynamic_shape_cpu():
+def test_copy_dynamic_shape_cpu(*, compile_tilelang):
     extent = ir.Var("extent", "int32")
     source = TensorView.create("source", [extent], "float32")
     output = TensorView.create("output", [extent], "float32")
-    executable = tirx.compile(function(lower(parse("copy", [source.tensor, output.tensor]), Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(parse("copy", [source.tensor, output.tensor]), Target("c")), [source, output]), target="c")
     for size in (1, 7, 32):
         expected = np.arange(size, dtype="float32")
         actual = runtime.empty((size,), "float32")
@@ -72,7 +74,7 @@ def test_copy_dynamic_shape_cpu():
 
 
 @pytest.mark.parametrize("source_begin,destination_begin,extent", [(-2, 0, 8), (5, 1, 8), (0, -2, 8), (0, 6, 8), (2, 3, 3), (0, 0, 0)])
-def test_copy_slices_guard_both_tensors(source_begin, destination_begin, extent):
+def test_copy_slices_guard_both_tensors(source_begin, destination_begin, extent, *, compile_tilelang):
     source = TensorView.create("source", [8], "float32")
     output = TensorView.create("output", [8], "int32")
     operation = parse(
@@ -80,7 +82,7 @@ def test_copy_slices_guard_both_tensors(source_begin, destination_begin, extent)
         [region(source, [source_begin], [extent]), region(output, [destination_begin], [extent])],
         block_annotations={"safe_value_map": {source.tensor: ir.const(-5.0, "float32")}},
     )
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(8, dtype="float32") + 0.5
     expected = np.full((8,), -9, dtype="int32")
     for offset in range(extent):
@@ -92,11 +94,11 @@ def test_copy_slices_guard_both_tensors(source_begin, destination_begin, extent)
 
 
 @pytest.mark.parametrize("source_begin,destination_begin", [(-1, 0), (2, 0), (0, -1), (0, 2), (1, 1)])
-def test_copy_unit_dimensions_are_bounds_checked(source_begin, destination_begin):
+def test_copy_unit_dimensions_are_bounds_checked(source_begin, destination_begin, *, compile_tilelang):
     source = TensorView.create("source", [2, 8], "float32")
     output = TensorView.create("output", [2, 8], "float32")
     operation = parse("copy", [region(source, [source_begin, 0], [1, 8]), region(output, [destination_begin, 0], [1, 8])])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(16, dtype="float32").reshape(2, 8)
     expected = np.full((2, 8), -1, dtype="float32")
     if 0 <= destination_begin < 2:
@@ -106,11 +108,11 @@ def test_copy_unit_dimensions_are_bounds_checked(source_begin, destination_begin
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_copy_larger_local_region_zero_fills_beyond_requested_source():
+def test_copy_larger_local_region_zero_fills_beyond_requested_source(compile_lowered_cpu):
     source = TensorView.create("source", [16], "float32")
     output = TensorView.create("output", [8], "float32", scope="local")
     operation = parse("copy", [region(source, [2], [5]), output.tensor])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_lowered_cpu(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(16, dtype="float32")
     actual = runtime.empty((8,), "float32")
     executable(runtime.tensor(source_values), actual)
@@ -134,15 +136,15 @@ def test_copy_aliases_keep_metadata_and_accesses(name, flag):
 
 
 @pytest.mark.parametrize("shape", [(8, 16), (7, 13), ()])
-def test_normal_copy_partition_in_cpu_simulation(shape):
+def test_normal_copy_partition_in_cpu_simulation(shape, *, compile_tilelang):
     source = TensorView.create("source", shape, "float32")
     output = TensorView.create("output", shape, "float32")
     operation = parse("copy", [source.tensor, output.tensor])
     thread = ir.Var("thread", "int32")
     body = lower(operation, Target({"kind": "cuda", "arch": "sm_90"}), thread, 32, normal=True)
     body = ir.For(thread, 0, 32, 1, ir.ForKind.DEFAULT, body)
-    module = tirx.transform.VectorizeLoop(False)(ir.IRModule({"main": function(body, [source, output])}))
-    executable = tirx.compile(module, target="c")
+    module = _tirx_passes.VectorizeLoop(False)(ir.IRModule({"main": function(body, [source, output])}))
+    executable = compile_tilelang(module, target="c")
     expected = np.arange(np.prod(shape), dtype="float32").reshape(shape)
     actual = runtime.empty(shape, "float32")
     executable(runtime.tensor(expected), actual)
@@ -151,7 +153,7 @@ def test_normal_copy_partition_in_cpu_simulation(shape):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("shape", [(8, 16), (7, 13), ()])
-def test_normal_copy_executes_on_cuda(shape):
+def test_normal_copy_executes_on_cuda(shape, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -165,7 +167,7 @@ def test_normal_copy_executes_on_cuda(shape):
     )
     body = lower(operation, target, thread, 32, normal=True)
     body = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(32)], [thread], None, body)
-    executable = tirx.compile(function(body, [source, output]), target=target)
+    executable = compile_tilelang(function(body, [source, output]), target=target)
     expected = np.arange(np.prod(shape), dtype="float32").reshape(shape)
     actual = runtime.empty(shape, "float32", device=device)
     executable(runtime.tensor(expected, device=device), actual)
@@ -194,18 +196,18 @@ def im2col_expected(source, shape, position_step, channel_step, kernel, stride, 
 @pytest.mark.parametrize(
     "parameters", [(0, 0, 3, 1, 1, 1), (1, 1, 3, 2, 1, 0), (0, 0, 2, 1, 2, 1), (-1, -1, 2, 1, 1, 0), (8, 8, 3, 1, 1, 1), (0, 0, 8, 1, 1, 0)]
 )
-def test_im2col_cpu_guards_batch_channel_and_padding(parameters):
+def test_im2col_cpu_guards_batch_channel_and_padding(parameters, *, compile_tilelang):
     source = TensorView.create("source", [2, 4, 5, 3], "float32")
     output = TensorView.create("output", [32, 16], "float32")
     operation = parse("im2col", [source.tensor, output.tensor, *(ir.const(value) for value in parameters)])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(120, dtype="float32").reshape(2, 4, 5, 3)
     actual = runtime.empty((32, 16), "float32")
     executable(runtime.tensor(source_values), actual)
     np.testing.assert_array_equal(actual.numpy(), im2col_expected(source_values, (32, 16), *parameters))
 
 
-def test_im2col_honors_source_and_destination_regions():
+def test_im2col_honors_source_and_destination_regions(*, compile_tilelang):
     source = TensorView.create("source", [2, 6, 7, 3], "float32")
     output = TensorView.create("output", [1, 20, 18], "float32")
     parameters = (0, 0, 2, 1, 1, 0)
@@ -213,7 +215,7 @@ def test_im2col_honors_source_and_destination_regions():
         "c2d_im2col",
         [region(source, [1, 1, 2, 1], [1, 4, 4, 2]), region(output, [0, 2, 3], [1, 16, 12]), *(ir.const(value) for value in parameters)],
     )
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(252, dtype="float32").reshape(2, 6, 7, 3)
     expected = np.full((1, 20, 18), -1, dtype="float32")
     expected[0, 2:18, 3:15] = im2col_expected(source_values[1:2, 1:5, 2:6, 1:3], (16, 12), *parameters)
@@ -280,12 +282,12 @@ def test_parallel_inference_preserves_serial_steps(begin, end, step):
 
 
 @pytest.mark.parametrize("shape", [(8, 16), (7, 13), (2, 3, 5), (1, 8), (1, 1), (0, 3)])
-def test_transpose_cpu(shape):
+def test_transpose_cpu(shape, *, compile_tilelang):
     destination_shape = (*shape[:-2], shape[-1], shape[-2])
     source = TensorView.create("source", shape, "float32")
     output = TensorView.create("output", destination_shape, "int32")
     operation = parse("transpose", [source.tensor, output.tensor])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(np.prod(shape), dtype="float32").reshape(shape) + 0.25
     actual = runtime.empty(destination_shape, "int32")
     executable(runtime.tensor(source_values), actual)
@@ -300,11 +302,11 @@ def test_transpose_rejects_shape_mismatches(source_shape, destination_shape):
         parse("transpose", [source.tensor, output.tensor])
 
 
-def test_transpose_regions_keep_offsets_and_guards():
+def test_transpose_regions_keep_offsets_and_guards(*, compile_tilelang):
     source = TensorView.create("source", [4, 6], "float32")
     output = TensorView.create("output", [8, 7], "float32")
     operation = parse("transpose", [region(source, [-1, 2], [4, 3]), region(output, [3, 5], [3, 4])])
-    executable = tirx.compile(function(lower(operation, Target("c")), [source, output]), target="c")
+    executable = compile_tilelang(function(lower(operation, Target("c")), [source, output]), target="c")
     source_values = np.arange(24, dtype="float32").reshape(4, 6)
     expected = np.full((8, 7), -1, dtype="float32")
     expected[3:6, 5] = 0
@@ -319,7 +321,7 @@ def test_transpose_regions_keep_offsets_and_guards():
     "name,source_shape,output_shape,arguments",
     [("transpose", (7, 13), (13, 7), ()), ("transpose", (1, 1), (1, 1), ()), ("im2col", (2, 4, 5, 3), (32, 16), (1, 1, 3, 1, 1, 1))],
 )
-def test_data_movement_operators_execute_on_cuda(name, source_shape, output_shape, arguments):
+def test_data_movement_operators_execute_on_cuda(name, source_shape, output_shape, arguments, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -333,7 +335,7 @@ def test_data_movement_operators_execute_on_cuda(name, source_shape, output_shap
     )
     body = lower(operation, target, thread, 32)
     body = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(32)], [thread], None, body)
-    executable = tirx.compile(function(body, [source, output]), target=target)
+    executable = compile_tilelang(function(body, [source, output]), target=target)
     source_values = np.arange(np.prod(source_shape), dtype="float32").reshape(source_shape)
     expected = source_values.T if name == "transpose" else im2col_expected(source_values, output_shape, *arguments)
     actual = runtime.empty(output_shape, "float32", device=device)

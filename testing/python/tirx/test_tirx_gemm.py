@@ -3,7 +3,8 @@ import itertools
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
@@ -46,7 +47,7 @@ def lower(operation, target):
 @pytest.mark.parametrize("transpose_left,transpose_right,clear", list(itertools.product([False, True], repeat=3)))
 @pytest.mark.parametrize("dtype,accum_dtype", [("float32", "float32"), ("float16", "float32"), ("int8", "int32")])
 @pytest.mark.parametrize("leading", [(), (1,)])
-def test_cpu_gemm_native_regions_and_accumulator(transpose_left, transpose_right, clear, dtype, accum_dtype, leading):
+def test_cpu_gemm_native_regions_and_accumulator(transpose_left, transpose_right, clear, dtype, accum_dtype, leading, *, compile_tilelang):
     rows, columns, reduction = 5, 7, 3
     left_shape = (reduction, rows) if transpose_left else (rows, reduction)
     right_shape = (columns, reduction) if transpose_right else (reduction, columns)
@@ -68,9 +69,9 @@ def test_cpu_gemm_native_regions_and_accumulator(transpose_left, transpose_right
     function = tirx.Function([left.tensor, right.tensor, output.tensor], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "matrix_product"
     )
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
     ir.assert_structural_equal(function, ir.load_json(ir.save_json(function)))
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     generator = np.random.default_rng(1)
     left_values = generator.integers(-3, 4, tuple(int(extent) for extent in left.shape)).astype(dtype)
     right_values = generator.integers(-3, 4, tuple(int(extent) for extent in right.shape)).astype(dtype)
@@ -88,7 +89,7 @@ def test_cpu_gemm_native_regions_and_accumulator(transpose_left, transpose_right
 
 
 @pytest.mark.parametrize("reduction", [0, 3])
-def test_cpu_gemm_dynamic_clear(reduction):
+def test_cpu_gemm_dynamic_clear(reduction, *, compile_tilelang):
     left = TensorView.create("left", [2, reduction], "float32")
     right = TensorView.create("right", [reduction, 2], "float32")
     output = TensorView.create("output", [2, 2], "float32")
@@ -99,7 +100,7 @@ def test_cpu_gemm_dynamic_clear(reduction):
     function = tirx.Function(
         [left.tensor, right.tensor, output.tensor, clear], lower(operation, Target("c")), ret_type=ir.TupleType([])
     ).with_attr("global_symbol", "dynamic_clear")
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     for flag in (True, False):
         actual = runtime.tensor(np.full((2, 2), 7, dtype="float32"))
         executable(

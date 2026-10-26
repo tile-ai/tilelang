@@ -21,6 +21,8 @@
  * \file flatten_buffer.cc
  */
 
+#include "transform/tirx_passes.h"
+
 #include <tvm/tirx/transform.h>
 
 #include "common/index_legalizer.h"
@@ -35,8 +37,8 @@ tvm::transform::Pass FlattenBuffer() {
       },
       0, "tl.LegalizeIndexArithmetic");
   return tvm::transform::Sequential(
-      {legalize, tirx::transform::LowerTensorLayouts(), legalize,
-       tirx::transform::FlattenTensor(), legalize},
+      {legalize, tirx_passes::LowerTensorLayouts(), legalize,
+       tirx_passes::FlattenTensor(), legalize},
       "tl.FlattenBuffer");
 }
 

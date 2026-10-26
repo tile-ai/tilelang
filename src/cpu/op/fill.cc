@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/cpu/op/fill.cc
  * \brief CPU implementation for tl.fill lowering.
@@ -21,9 +22,9 @@ struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
                     sym::Analyzer analyzer) {
     if (IsFragmentBuffer(op.dst)) {
-      TVM_FFI_CHECK(
-          analyzer->CanProveEqual(lower_args.thread_bounds->extent, 1),
-          ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProveEqual(
+                        analyzer, lower_args.thread_bounds->extent, 1),
+                    ValueError)
           << "CPU fragment fill requires one logical participant";
       return backend::Fill::Lower(op, lower_args, analyzer);
     }

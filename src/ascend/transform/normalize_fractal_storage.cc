@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file normalize_fractal_storage.cc
  * \brief Normalize Cube storage and aliases before OOB handling and scheduling.
@@ -6,6 +7,7 @@
  * must honor valid regions and their own padding requirements; consumers must
  * not assume all padded elements are zero.
  */
+#include "op/prim.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
@@ -187,15 +189,16 @@ private:
         << "Cube aliases must preserve element width: " << tensor->name;
     auto access = storage_->Resolve(tensor).value();
     auto geometry = tirx::MatchShapeStridePattern(tensor.ty());
-    ICHECK(geometry && analyzer_->CanProve(geometry.value().get<2>() == 0) &&
-           analyzer_->CanProve(access.bit_offset == 0))
+    ICHECK(geometry &&
+           tl::arith::CanProve(analyzer_, geometry.value().get<2>() == 0) &&
+           tl::arith::CanProve(analyzer_, access.bit_offset == 0))
         << "Ascend fractal buffers require a zero base and strided storage";
     auto strides = geometry.value().get<1>();
     PrimExpr stride = IntImm(tensor.ty()->DefaultIndexType(), 1);
     for (size_t dimension = tensor.shape().size(); dimension > 0; --dimension) {
       size_t axis = dimension - 1;
-      ICHECK(analyzer_->CanProve(tensor.shape()[axis] == 1) ||
-             analyzer_->CanProve(strides[axis] == stride))
+      ICHECK(tl::arith::CanProve(analyzer_, tensor.shape()[axis] == 1) ||
+             tl::arith::CanProve(analyzer_, strides[axis] == stride))
           << "Cube aliases require dense logical strides: " << tensor->name;
       stride = stride * tensor.shape()[axis];
     }
@@ -214,9 +217,10 @@ private:
       PrimExpr alignment = (row == (info.c0_axis == LogicalAxis::kRow))
                                ? info.c0
                                : info.row_frac;
-      shape.Set(axis, analyzer_->Simplify(
+      shape.Set(axis, tl::arith::Simplify(
+                          analyzer_,
                           floordiv(shape[axis] + alignment - 1, alignment) *
-                          alignment));
+                              alignment));
     }
     Var root = access.root;
     TensorVar padded = canonical_buffers_.Get(root).value_or(owner);
@@ -253,8 +257,9 @@ private:
       return VisitExpr(index).as_or_throw<PrimExpr>();
     });
     if (auto layout = logical_maps_.Get(buffer))
-      return layout.value()->Forward(rewritten).Map(
-          [&](PrimExpr index) { return analyzer_->Simplify(index); });
+      return layout.value()->Forward(rewritten).Map([&](PrimExpr index) {
+        return tl::arith::Simplify(analyzer_, index);
+      });
     return rewritten;
   }
   TensorRegion RewriteRegion_(const TensorRegion &region) {
@@ -271,7 +276,8 @@ private:
       // not wrap across the original view's strides. Otherwise equal bounding
       // box volume alone can hide duplicated logical elements.
       for (size_t i = 1; i < ranges.size(); ++i)
-        ICHECK(analyzer_->CanProve(ranges[i]->extent <= buffer.shape()[i]))
+        ICHECK(tl::arith::CanProve(analyzer_,
+                                   ranges[i]->extent <= buffer.shape()[i]))
             << "Cube region crosses an original reshape axis: " << region;
       Array<Range> mapped = logical_maps_[buffer]->MapRegionBounds(ranges);
       PrimExpr old_size = PrimExpr(1), new_size = PrimExpr(1);
@@ -280,7 +286,7 @@ private:
       for (const Range &range : mapped)
         new_size = new_size * range->extent;
       // A bounding box with holes cannot replace a tile operation's region.
-      ICHECK(analyzer_->CanProveEqual(old_size, new_size))
+      ICHECK(tl::arith::CanProveEqual(analyzer_, old_size, new_size))
           << "Reshaped Cube region is not a contiguous rectangular matrix: "
           << region;
       ranges = mapped;
@@ -291,7 +297,7 @@ private:
     AscendCopy copy(call->args, CallAnnotations(call.get()));
     for (const auto &ranges : {copy->src_range, copy->dst_range})
       for (const Range &range : ranges)
-        if (analyzer_->CanProve(range->extent <= 0))
+        if (tl::arith::CanProve(analyzer_, range->extent <= 0))
           return call;
     TensorRegion source{ffi::UnsafeInit{}};
     Optional<TensorRegion> destination;
@@ -319,7 +325,8 @@ private:
       ICHECK(TryExtractAscendFractalRegion(canonical_layouts_[copy->dst],
                                            destination.value()->region,
                                            &normalized));
-      if (!analyzer_->CanProveEqual(normalized.outer1->extent, pitch.value())) {
+      if (!tl::arith::CanProveEqual(analyzer_, normalized.outer1->extent,
+                                    pitch.value())) {
         auto attrs = CallAnnotations(writer);
         attrs.Set("l0_pitch", pitch.value());
         writer->attrs = DictAttrs(attrs);
@@ -337,7 +344,7 @@ private:
     for (const Array<Range> &ranges :
          {rewritten->src_range, rewritten->dst_range}) {
       for (const Range &range : ranges) {
-        if (analyzer_->CanProve(range->extent <= 0))
+        if (tl::arith::CanProve(analyzer_, range->extent <= 0))
           return call;
       }
     }
@@ -360,17 +367,17 @@ private:
     PrimExpr dst_row_stride = dst_layout->modes[1].stride;
     const int dst_elem_bits =
         rewritten->dst.dtype().bits() * rewritten->dst.dtype().lanes();
-    PrimExpr dst_row_stride_bytes = analyzer_->Simplify(
-        AscendMTEBytesFromElements(dst_row_stride, dst_elem_bits));
+    PrimExpr dst_row_stride_bytes = tl::arith::Simplify(
+        analyzer_, AscendMTEBytesFromElements(dst_row_stride, dst_elem_bits));
     PrimExpr stride_remainder =
-        floormod(dst_row_stride_bytes,
-                 MakeConst(dst_row_stride_bytes.ty(), kFixpipeAlignmentBytes));
+        floormod(dst_row_stride_bytes, tl::MakeConst(dst_row_stride_bytes.ty(),
+                                                     kFixpipeAlignmentBytes));
     // The descriptor's stride must be aligned even for a single-row copy.
-    if (!analyzer_->CanProveEqual(stride_remainder, 0)) {
+    if (!tl::arith::CanProveEqual(analyzer_, stride_remainder, 0)) {
       LOG(WARNING) << "Ascend L0C->UB copy: destination "
                    << rewritten->dst->name << " row stride is "
                    << dst_row_stride_bytes << " bytes; "
-                   << (analyzer_->CanProve(stride_remainder != 0)
+                   << (tl::arith::CanProve(analyzer_, stride_remainder != 0)
                            ? "it is not a multiple of "
                            : "cannot prove it is a multiple of ")
                    << kFixpipeAlignmentBytes
@@ -393,18 +400,20 @@ private:
     // Normal copy takes n_size from UB; M-split takes it from L0C.
     PrimExpr transfer_width =
         dual_dst_ctl == 1 ? source_width : destination_width;
-    PrimExpr alignment_elements = MakeConst(
+    PrimExpr alignment_elements = tl::MakeConst(
         transfer_width.ty(), kFixpipeAlignmentBytes * 8 / dst_elem_bits);
-    if (analyzer_->CanProveEqual(floormod(transfer_width, alignment_elements),
-                                 0))
+    if (tl::arith::CanProveEqual(
+            analyzer_, floormod(transfer_width, alignment_elements), 0))
       return call;
 
-    PrimExpr padded_width = analyzer_->Simplify(
+    PrimExpr padded_width = tl::arith::Simplify(
+        analyzer_,
         floordiv(transfer_width + alignment_elements - 1, alignment_elements) *
-        alignment_elements);
+            alignment_elements);
     // Keep a larger source tile without enlarging the normal copy's n_size.
     auto widen_region = [&](const PrimExpr &width) {
-      return analyzer_->Simplify(max(width, cast(padded_width, width.ty())));
+      return tl::arith::Simplify(
+          analyzer_, max(width, tl::CastValue(padded_width, width.ty())));
     };
     PrimExpr padded_src =
         dual_dst_ctl == 1 ? padded_width : widen_region(source_width);
@@ -416,9 +425,9 @@ private:
         min(rewritten->dst.shape()[dst_inner_axis], dst_row_stride);
     auto fits = [&](const Range &range, const PrimExpr &width,
                     const PrimExpr &capacity) {
-      return analyzer_->CanProve(range->begin >= 0 &&
-                                     range->begin + width <= capacity,
-                                 sym::ProofStrength::kSymbolicBound);
+      return tl::arith::CanProve(
+          analyzer_, range->begin >= 0 && range->begin + width <= capacity,
+          sym::ProofStrength::kSymbolicBound);
     };
     // L0C's canonical shape already includes fractal padding and bounds reads.
     if (!fits(rewritten->src_range[src_inner_axis], padded_src,
@@ -438,9 +447,11 @@ private:
     // Select preserves empty copies and remains analyzable by layout bounds.
     auto pad_range = [&](const Range &range, const PrimExpr &width) {
       return Range::FromMinExtent(
-          range->begin, analyzer_->Simplify(Select(
-                            range->extent > 0, cast(width, range->extent.ty()),
-                            range->extent)));
+          range->begin,
+          tl::arith::Simplify(analyzer_,
+                              Select(range->extent > 0,
+                                     tl::CastValue(width, range->extent.ty()),
+                                     range->extent)));
     };
     Array<Range> src_ranges = rewritten->src_range;
     src_ranges.Set(src_inner_axis,
@@ -531,7 +542,8 @@ private:
       bool source_has_tail = false;
       for (size_t axis = 0; axis < original->src_range.size(); ++axis) {
         source_has_tail |=
-            !analyzer_->CanProve(original->src_range[axis]->begin +
+            !tl::arith::CanProve(analyzer_,
+                                 original->src_range[axis]->begin +
                                          original->src_range[axis]->extent <=
                                      original->src.shape()[axis],
                                  sym::ProofStrength::kSymbolicBound);
@@ -541,9 +553,9 @@ private:
         auto ranges = rewritten->dst_range;
         const auto &logical_shape = anchors_[Root(original->dst)].shape();
         for (size_t axis = 0; axis < ranges.size(); ++axis) {
-          if (analyzer_->CanProve(ranges[axis]->begin == 0) &&
-              analyzer_->CanProve(ranges[axis]->extent ==
-                                  logical_shape[axis])) {
+          if (tl::arith::CanProve(analyzer_, ranges[axis]->begin == 0) &&
+              tl::arith::CanProve(analyzer_, ranges[axis]->extent ==
+                                                 logical_shape[axis])) {
             ranges.Set(axis,
                        Range::FromMinExtent(ranges[axis]->begin,
                                             rewritten->dst.shape()[axis]));
@@ -566,9 +578,11 @@ private:
             << anchor.dtype();
         PrimExpr bits = VisitExpr(access->bit_offset).as_or_throw<PrimExpr>();
         int element_bits = ascend::ElementBits(anchor.dtype());
-        ICHECK(analyzer_->CanProve(floormod(bits, element_bits) == 0))
+        ICHECK(
+            tl::arith::CanProve(analyzer_, floormod(bits, element_bits) == 0))
             << "Cube pointer byte offset must address a whole element";
-        PrimExpr remaining = analyzer_->Simplify(floordiv(bits, element_bits));
+        PrimExpr remaining =
+            tl::arith::Simplify(analyzer_, floordiv(bits, element_bits));
         Array<PrimExpr> indices(anchor.shape().size(),
                                 IntImm(PrimType::Int(64), 0));
         for (size_t dimension = anchor.shape().size(); dimension > 0;
@@ -576,7 +590,8 @@ private:
           size_t axis = dimension - 1;
           PrimExpr extent = ascend::StorageIndex(anchor.shape()[axis]);
           indices.Set(axis,
-                      analyzer_->Simplify(
+                      tl::arith::Simplify(
+                          analyzer_,
                           axis == 0 ? remaining : floormod(remaining, extent)));
           remaining = floordiv(remaining, extent);
         }

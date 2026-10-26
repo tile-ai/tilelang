@@ -1,0 +1,26 @@
+include_guard(GLOBAL)
+
+function(tilelang_configure_tirx_exports source_directory)
+  get_property(dependency_targets DIRECTORY "${source_directory}" PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(dependency_target IN LISTS dependency_targets)
+    if(dependency_target MATCHES "^tvm_(tirx_compiler|runtime)(_|$)")
+      get_target_property(dependency_type ${dependency_target} TYPE)
+      if(dependency_type MATCHES "^(OBJECT|SHARED|STATIC)_LIBRARY$")
+        set_target_properties(${dependency_target} PROPERTIES
+          CXX_VISIBILITY_PRESET default
+          VISIBILITY_INLINES_HIDDEN OFF)
+        if(WIN32 AND dependency_type STREQUAL "SHARED_LIBRARY")
+          set_target_properties(${dependency_target} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+        endif()
+      endif()
+    endif()
+  endforeach()
+  get_property(dependency_directories DIRECTORY "${source_directory}" PROPERTY SUBDIRECTORIES)
+  foreach(dependency_directory IN LISTS dependency_directories)
+    tilelang_configure_tirx_exports("${dependency_directory}")
+  endforeach()
+endfunction()
+
+if(PROJECT_NAME STREQUAL "tvm_tirx")
+  cmake_language(DEFER CALL tilelang_configure_tirx_exports "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()

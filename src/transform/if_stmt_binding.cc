@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 
 #include "common/memory_effects.h"
 #include <tvm/tirx/transform.h>
@@ -9,11 +10,11 @@ using analysis::AliasOrigins;
 using analysis::EffectCollector;
 using analysis::MemoryEffects;
 
-class IfGuardRewriter : public tirx::StmtExprMutator {
+class IfGuardRewriter : public tvm::tl::StmtExprMutator {
 public:
   IfGuardRewriter(const tirx::Function &function, bool inline_bindings)
       : aliases_(function), inline_bindings_(inline_bindings) {}
-  using tirx::StmtExprMutator::Mutate;
+  using tvm::tl::StmtExprMutator::Mutate;
 
 private:
   bool Replayable(const PrimExpr &expression, const MemoryEffects &body) const {
@@ -31,7 +32,7 @@ private:
 
   ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
                                  ffi::InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate_(node, mode)
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                       .as_or_throw<If>();
     if (result->else_case)

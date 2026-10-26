@@ -1,8 +1,12 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file layout_inference.cc
  * \brief infer the fragment/shared memory layout
  */
 
+#include "compat/region.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/index_map.h>
@@ -28,6 +32,7 @@
 #include "../../op/reducer.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
+#include "../common/loop_aware_visitor.h"
 #include "../common/loop_fusion_utils.h"
 #include "../common/union_find.h"
 #include "backend/common/target_utils.h"
@@ -62,7 +67,7 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
     return false;
   }
   for (size_t i = 0; i < lhs.size(); ++i) {
-    if (!analyzer->CanProveEqual(lhs[i], rhs[i])) {
+    if (!tl::arith::CanProveEqual(analyzer, lhs[i], rhs[i])) {
       return false;
     }
   }
@@ -129,7 +134,7 @@ bool IsOpenFragmentLayout(const TensorVar &buffer, const Layout &layout) {
 } // namespace
 
 using namespace tirx;
-using IRVisitorWithAnalyzer = tirx::StmtExprVisitorWithAnalyzer;
+using IRVisitorWithAnalyzer = LoopAwareVisitor;
 
 struct LayoutInferenceResult {
   Map<TensorVar, Layout> layout_map;
@@ -324,8 +329,8 @@ public:
               src_layout->InputShape().size() == sib.shape().size();
           if (shapes_equal) {
             for (size_t i = 0; i < src_layout->InputShape().size(); ++i) {
-              if (!analyzer_->CanProveEqual(src_layout->InputShape()[i],
-                                            sib.shape()[i])) {
+              if (!tl::arith::CanProveEqual(
+                      analyzer_, src_layout->InputShape()[i], sib.shape()[i])) {
                 shapes_equal = false;
                 break;
               }
@@ -341,10 +346,11 @@ public:
                   // allowing the logical element count to change.
                   : src_layout->Reshape(
                         sib.shape(), analyzer_,
-                        MakeConst(PrimType::Int(32),
-                                  GetElementStorageBits(src_buffer.dtype())),
-                        MakeConst(PrimType::Int(32),
-                                  GetElementStorageBits(sib.dtype())));
+                        tl::MakeConst(
+                            PrimType::Int(32),
+                            GetElementStorageBits(src_buffer.dtype())),
+                        tl::MakeConst(PrimType::Int(32),
+                                      GetElementStorageBits(sib.dtype())));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -438,9 +444,11 @@ public:
             auto x = InputPlaceholder(i);
             indices.push_back(x);
             // should be literal - literal = 0, any analyzer will work
-            ICHECK(inner_analyzer->CanProveEqual(dst_layout->InputShape()[i],
-                                                 src_layout->InputShape()[i]));
-            inner_analyzer->Bind(x, Range(0, dst_layout->InputShape()[i]));
+            ICHECK(tl::arith::CanProveEqual(inner_analyzer,
+                                            dst_layout->InputShape()[i],
+                                            src_layout->InputShape()[i]));
+            tl::arith::Bind(inner_analyzer, x,
+                            Range(0, dst_layout->InputShape()[i]));
           }
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
@@ -650,7 +658,8 @@ public:
           if (shapes_equal) {
             for (size_t i = 0; i < rep_layout.value()->InputShape().size();
                  ++i) {
-              if (!analyzer_->CanProveEqual(rep_layout.value()->InputShape()[i],
+              if (!tl::arith::CanProveEqual(analyzer_,
+                                            rep_layout.value()->InputShape()[i],
                                             buf.shape()[i])) {
                 shapes_equal = false;
                 break;
@@ -662,10 +671,11 @@ public:
                   ? rep_layout.value()
                   : rep_layout.value()->Reshape(
                         buf.shape(), analyzer_,
-                        MakeConst(PrimType::Int(32),
-                                  GetElementStorageBits(rep.value().dtype())),
-                        MakeConst(PrimType::Int(32),
-                                  GetElementStorageBits(buf.dtype())));
+                        tl::MakeConst(
+                            PrimType::Int(32),
+                            GetElementStorageBits(rep.value().dtype())),
+                        tl::MakeConst(PrimType::Int(32),
+                                      GetElementStorageBits(buf.dtype())));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -805,9 +815,9 @@ private:
           same_shape ? layout
                      : layout->Reshape(
                            alias.shape(), analyzer_,
-                           MakeConst(PrimType::Int(32), anchor_bits),
-                           MakeConst(PrimType::Int(32),
-                                     GetElementStorageBits(alias.dtype())));
+                           tl::MakeConst(PrimType::Int(32), anchor_bits),
+                           tl::MakeConst(PrimType::Int(32),
+                                         GetElementStorageBits(alias.dtype())));
       if (IsSharedBuffer(alias) || IsReducerV2Buffer(alias)) {
         auto injectivity = resolved->DetectInjective();
         TVM_FFI_CHECK(injectivity->errors.empty(), ValueError)
@@ -930,7 +940,8 @@ private:
         node->args[0].as_or_throw<StringImm>()->value == "threadIdx.x") {
       thread_binding_ = node->body_params[0].as_or_throw<PrimVar>();
     }
-    if (node->op->name == "tl.scope" || node->op.same_as(tirx::scope_op())) {
+    if (node->op->name == "tl.scope" ||
+        node->op.same_as(::tvm::tl::scope_op())) {
       for (const auto &[key, value] : node->attrs->dict)
         block_annotations_.Set(key, value);
     }
@@ -1306,7 +1317,7 @@ private:
   }
 };
 
-class LayoutInferencer : public tirx::StmtExprMutator {
+class LayoutInferencer : public tvm::tl::StmtExprMutator {
 public:
   explicit LayoutInferencer(LayoutInferenceResult result,
                             LayoutInferenceOptions options = {})
@@ -1357,7 +1368,7 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node,
                             InplaceMode inplace_mode) final {
-    Stmt statement = StmtExprMutator::Mutate_(node, inplace_mode)
+    Stmt statement = tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode)
                          .ValueOrUnchanged(GetRef<Stmt>(node));
     if (auto tensor = node->var.as<TensorVar>()) {
       if (auto layout = result_.layout_map.Get(tensor.value())) {
@@ -1369,7 +1380,7 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const ForNode *node,
                             InplaceMode inplace_mode) final {
-    For loop = StmtExprMutator::Mutate_(node, inplace_mode)
+    For loop = tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode)
                    .ValueOrUnchanged(GetRef<Stmt>(node))
                    .as_or_throw<For>();
     For original = GetRef<For>(node);
@@ -1381,7 +1392,8 @@ private:
                                  padding.value());
       }
       if (auto predicate = result_.predicate_map.Get(original)) {
-        PrimExpr simplified = sym::Analyzer()->Simplify(predicate.value());
+        PrimExpr simplified =
+            tl::arith::Simplify(sym::Analyzer(), predicate.value());
         if (!IsOne(simplified))
           updated->annotations.Set(attr::kParallelLoopPredicate, simplified);
       }
@@ -1393,7 +1405,7 @@ private:
                             InplaceMode inplace_mode) final {
     if (options_.opaque_region && options_.opaque_region(node))
       return ffi::Unchanged{};
-    RegionStmt region = StmtExprMutator::Mutate_(node, inplace_mode)
+    RegionStmt region = tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode)
                             .ValueOrUnchanged(GetRef<Stmt>(node))
                             .as_or_throw<RegionStmt>();
     if (region->attrs->dict.count(attr::kLayoutMap)) {
@@ -1411,7 +1423,7 @@ private:
         call->op.as_or_throw<Op>()->name == "tl.layout_hint") {
       return SeqStmt({});
     }
-    return StmtExprMutator::Mutate_(node, inplace_mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, inplace_mode);
   }
 
   LayoutInferenceResult result_;

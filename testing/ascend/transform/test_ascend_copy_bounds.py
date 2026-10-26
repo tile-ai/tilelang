@@ -53,7 +53,7 @@ def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_ex
         ty=ir.TupleType([]),
     )
     annotations = {"layout_map": {destination: make_ascend_nz_layout(destination)}} if scope == "shared.l1" else {}
-    body = ir.RegionStmt("tirx.scope", [], [], annotations, [_allocate(destination), ir.Evaluate(copy)])
+    body = ir.RegionStmt("tl.scope", [], [], annotations, [_allocate(destination), ir.Evaluate(copy)])
     parameters = [source, *tirx.analysis.undefined_vars(body, [source])]
     return ir.IRModule({"main": tirx.Function(parameters, body, ret_type=ir.TupleType([]))})
 
@@ -154,7 +154,7 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
     )
     allocations = [l1, scale, l0a, l0b, acc, sfa, sfb]
     root = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {

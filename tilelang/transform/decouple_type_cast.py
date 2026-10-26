@@ -257,7 +257,7 @@ class DecoupleTypeCastMutator(PyStmtExprMutator):
         copy_to = self._create_copy_loops(statement, store_entries, to_memory=True, condition=condition)
         definitions = [TensorView(temporary).allocate(loc=statement.loc) for _, _, temporary in store_entries + load_entries]
         return ir.RegionStmt(
-            "tirx.scope",
+            "tl.scope",
             [],
             [],
             None,

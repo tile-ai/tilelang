@@ -1,5 +1,7 @@
+#include "compat/analyzer.h"
 #ifndef TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
+#include "op/prim.h"
 
 #include "op/atomic_reduce.h"
 #include "op/utils.h"
@@ -42,9 +44,9 @@ inline AtomicIteration MakeIteration(const AtomicOpBaseNode &op,
       PrimVar variable("atomic_axis_" + std::to_string(loops.size()),
                        range->extent.ty());
       loops.push_back(LayoutAxis(
-          Range::FromMinExtent(MakeConst(variable.ty(), 0), range->extent),
+          Range::FromMinExtent(tl::MakeConst(variable.ty(), 0), range->extent),
           variable));
-      analyzer->Bind(variable, loops.back()->dom);
+      tl::arith::Bind(analyzer, variable, loops.back()->dom);
     }
   }
   auto make_indices = [&](const Array<Range> &ranges) {
@@ -61,13 +63,13 @@ inline AtomicIteration MakeIteration(const AtomicOpBaseNode &op,
     }
     return indices;
   };
-  PrimExpr predicate = MakeConst(PrimType::Bool(), true);
+  PrimExpr predicate = tl::MakeConst(PrimType::Bool(), true);
   auto add_bounds = [&](const TensorVar &tensor,
                         const Array<PrimExpr> &indices) {
     for (size_t axis = 0; axis < indices.size(); ++axis) {
       PrimExpr condition =
           indices[axis] >= 0 && indices[axis] < tensor.shape()[axis];
-      if (!analyzer->CanProve(condition)) {
+      if (!tl::arith::CanProve(analyzer, condition)) {
         predicate = predicate && condition;
       }
     }
@@ -75,7 +77,7 @@ inline AtomicIteration MakeIteration(const AtomicOpBaseNode &op,
   auto destination_indices = make_indices(op.dst_range);
   add_bounds(op.dst, destination_indices);
   destination_indices = RemapIndices(op.dst, destination_indices, lower_args);
-  PrimExpr value = op.src_value.value_or(MakeConst(op.dst.dtype(), 0));
+  PrimExpr value = op.src_value.value_or(tl::MakeConst(op.dst.dtype(), 0));
   if (op.src.has_value()) {
     TensorVar source = op.src.value();
     auto source_indices = make_indices(op.src_range);
@@ -84,7 +86,8 @@ inline AtomicIteration MakeIteration(const AtomicOpBaseNode &op,
                        RemapIndices(source, source_indices, lower_args));
   }
   value = Cast(op.dst.dtype(), value);
-  return {loops, destination_indices, value, analyzer->Simplify(predicate)};
+  return {loops, destination_indices, value,
+          tl::arith::Simplify(analyzer, predicate)};
 }
 
 inline For MakeSIMTLoop(const AtomicOpBaseNode &op, sym::Analyzer analyzer) {
@@ -110,16 +113,16 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, sym::Analyzer analyzer) {
         annotations.Set(attr::kCoalescedWidth, width.value());
       }
     }
-    body = For(loop->var, MakeConst(loop->var.ty(), 0), loop->dom->extent,
-               MakeConst(loop->var.ty(), 1), ForKind::kParallel, SeqStmt(body),
-               annotations);
+    body = For(loop->var, tl::MakeConst(loop->var.ty(), 0), loop->dom->extent,
+               tl::MakeConst(loop->var.ty(), 1), ForKind::kParallel,
+               SeqStmt(body), annotations);
   }
   return body.as_or_throw<For>();
 }
 
 inline bool IsEmpty(const AtomicOpBaseNode &op, sym::Analyzer analyzer) {
   for (const Range &range : op.dst_range) {
-    if (analyzer->CanProve(range->extent == 0)) {
+    if (tl::arith::CanProve(analyzer, range->extent == 0)) {
       return true;
     }
   }

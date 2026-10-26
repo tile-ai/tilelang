@@ -117,7 +117,7 @@ def test_imported_source_and_line_directives(tilelang_builders):
     value = ir.Call("tirx.call_pure_extern", [ir.StringImm("imported_value")], ty="int32")
     store = ir.TensorStore(output.tensor, [0], value, loc=location)
     imported = '#ifdef __cplusplus\nextern "C" {\n#endif\nint32_t imported_value(void) { return 23; }\n#ifdef __cplusplus\n}\n#endif\n'
-    body = ir.RegionStmt("tirx.scope", [], [], {"pragma_import_c": imported}, store)
+    body = ir.RegionStmt("tl.scope", [], [], {"pragma_import_c": imported}, store)
     function = tirx.Function([output.tensor], body, ret_type=ir.TupleType([])).with_attr("global_symbol", "imported_source_test")
     with PassContext(config={"tl.emit_line_directives": True}):
         executable = tirx.compile(function, target="c")

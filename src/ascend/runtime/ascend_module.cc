@@ -33,7 +33,7 @@
 #include <vector>
 
 #include "support/check.h"
-#include <tvm/runtime/launch_param.h>
+#include "tirx_compat/launch_param.h"
 #include <tvm/support/bytes_io.h>
 
 #if TILELANG_ASCEND_PROFILER

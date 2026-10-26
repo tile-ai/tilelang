@@ -1,3 +1,4 @@
+#include "op/prim.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/op/abi.h>
@@ -15,26 +16,26 @@ PrimExpr LowerPopcount(PrimExpr expression) {
   if (!type.MatchesCode(kDLInt, kDLUInt) ||
       (bits != 8 && bits != 16 && bits != 32 && bits != 64))
     return expression;
-  argument = prim::cast(argument, PrimType::UInt(bits, type.lanes()));
+  argument = tl::CastValue(argument, PrimType::UInt(bits, type.lanes()));
   if (bits < 32)
-    argument = prim::cast(argument, PrimType::UInt(32, type.lanes()));
+    argument = tl::CastValue(argument, PrimType::UInt(32, type.lanes()));
   PrimExpr count =
       Call(PrimType::Int(32, type.lanes()), tirx::call_pure_extern_op(),
            {StringImm(bits == 64 ? "__popcll" : "__popc"), argument},
            call->attrs, {}, call->loc)
           .as_or_throw<PrimExpr>();
-  return prim::cast(count, expression.ty());
+  return tl::CastValue(count, expression.ty());
 }
 
 PrimExpr LowerIsFinite(PrimExpr expression) {
   const auto *call = expression.as<CallNode>();
   TVM_FFI_ICHECK(call && call->args.size() == 1);
-  PrimType type = call->args[0].as_or_throw<PrimExpr>().ty();
+  PrimExpr value = call->args[0].as_or_throw<PrimExpr>();
+  PrimType type = value.ty();
   if (!type.MatchesCode(kDLFloat) || (type.bits() != 32 && type.bits() != 64))
-    return expression;
+    value = tl::CastValue(value, PrimType::Float(32, type.lanes()));
   return Call(expression.ty(), tirx::call_pure_extern_op(),
-              {StringImm("isfinite"), call->args[0]}, call->attrs, {},
-              call->loc)
+              {StringImm("isfinite"), value}, call->attrs, {}, call->loc)
       .as_or_throw<PrimExpr>();
 }
 
@@ -58,11 +59,11 @@ PrimExpr LowerMinMaxNan(PrimExpr expression) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("prim.popcount")
-      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerPopcount,
-                                       true);
-  OpDef("prim.isfinite")
-      .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerIsFinite,
-                                       true);
+      .set_attr<tirx::FLowerIntrinsic>("tl.cuda.FLowerIntrinsic",
+                                       LowerPopcount);
+  OpDef("tl.isfinite")
+      .set_attr<tirx::FLowerIntrinsic>("tl.cuda.FLowerIntrinsic",
+                                       LowerIsFinite);
   OpDef("tl.max_nan")
       .set_attr<tirx::FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerMinMaxNan);
   OpDef("tl.min_nan")

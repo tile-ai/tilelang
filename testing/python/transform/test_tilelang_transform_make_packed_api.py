@@ -144,15 +144,15 @@ def test_assume_requires_runtime_check_is_lowered_to_assert():
     n = tirx.Var("n", "int32")
     condition = n % 4 == 0
     message = "n must be divisible by 4"
-    body = ir.RegionStmt("tirx.scope", [], [], {"tilelang_assume": condition}, ir.Evaluate(0))
+    body = ir.RegionStmt("tl.scope", [], [], {"tilelang_assume": condition}, ir.Evaluate(0))
     body = ir.RegionStmt(
-        "tirx.scope",
+        "tl.scope",
         [],
         [],
         {"tl.assume_requires_runtime_check": condition, "tl.assume_message": message},
         body,
     )
-    body = ir.RegionStmt("tirx.scope", [], [], {"tilelang_assume": condition}, body)
+    body = ir.RegionStmt("tl.scope", [], [], {"tilelang_assume": condition}, body)
     before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
     before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
 
@@ -178,7 +178,7 @@ def test_assume_requires_runtime_check_is_lowered_to_assert():
 def test_optimizer_only_assume_is_not_lowered_to_assert():
     n = tirx.Var("n", "int32")
     message = "compiler-generated shape assumption"
-    body = ir.RegionStmt("tirx.scope", [], [], {"tilelang_assume": n > 0}, ir.Evaluate(0))
+    body = ir.RegionStmt("tl.scope", [], [], {"tilelang_assume": n > 0}, ir.Evaluate(0))
     before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
     before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
 

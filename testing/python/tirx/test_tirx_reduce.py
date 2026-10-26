@@ -2,7 +2,8 @@ import numpy as np
 from pathlib import Path
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
@@ -22,16 +23,16 @@ def operation(source, destination, kind, dimension, clear=True, annotations=None
     return native("ParseOperator", call, {})
 
 
-def cpu_executable(op, source, output):
+def cpu_executable(op, source, output, *, compile_tilelang):
     target = Target("c")
     with target:
         body = native("testing.LowerOperator", op, target, ir.Range(0, 1), ir.const(0), {}, {})
     function = tirx.Function([source.tensor, output.tensor], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "native_reduce_test"
     )
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
     ir.assert_structural_equal(function, ir.load_json(ir.save_json(function)))
-    return tirx.compile(function, target=target)
+    return compile_tilelang(function, target=target)
 
 
 def expected_reduce(values, kind, axis, keepdims=False):
@@ -57,11 +58,11 @@ def expected_reduce(values, kind, axis, keepdims=False):
     ],
 )
 @pytest.mark.parametrize("clear", [True, False])
-def test_cpu_reduce_values_and_accumulation(kind, dtype, clear):
+def test_cpu_reduce_values_and_accumulation(kind, dtype, clear, *, compile_tilelang):
     source = TensorView.create("source", [3, 5], dtype, scope="local")
     output = TensorView.create("output", [3], dtype, scope="local")
     op = operation(source.tensor, output.tensor, kind, 1, clear)
-    executable = cpu_executable(op, source, output)
+    executable = cpu_executable(op, source, output, compile_tilelang=compile_tilelang)
     offset = 0 if dtype == "uint64" else 8
     values = (np.arange(15).reshape(3, 5) - offset).astype(dtype)
     expected = expected_reduce(values, kind, 1)
@@ -84,7 +85,7 @@ def test_cpu_reduce_values_and_accumulation(kind, dtype, clear):
     "shape,axis,keepdims",
     [((5,), 0, False), ((5,), 0, True), ((3, 5), 0, False), ((3, 5), 0, True), ((3, 5), 1, True), ((2, 3, 5), 1, False)],
 )
-def test_cpu_reduce_axes_and_keepdims(shape, axis, keepdims):
+def test_cpu_reduce_axes_and_keepdims(shape, axis, keepdims, *, compile_tilelang):
     destination_shape = list(shape)
     if keepdims:
         destination_shape[axis] = 1
@@ -92,18 +93,18 @@ def test_cpu_reduce_axes_and_keepdims(shape, axis, keepdims):
         destination_shape.pop(axis)
     source = TensorView.create("source", shape, "float32", scope="local")
     output = TensorView.create("output", destination_shape, "float32", scope="local")
-    executable = cpu_executable(operation(source.tensor, output.tensor, "sum", axis), source, output)
+    executable = cpu_executable(operation(source.tensor, output.tensor, "sum", axis), source, output, compile_tilelang=compile_tilelang)
     values = np.arange(np.prod(shape), dtype="float32").reshape(shape)
     actual = runtime.empty(destination_shape, "float32")
     executable(runtime.tensor(values), actual)
     np.testing.assert_array_equal(actual.numpy(), expected_reduce(values, "sum", axis, keepdims))
 
 
-def test_cpu_reduce_dynamic_extent():
+def test_cpu_reduce_dynamic_extent(*, compile_tilelang):
     extent = ir.Var("extent", "int32")
     source = TensorView.create("source", [3, extent], "float32", scope="local")
     output = TensorView.create("output", [3], "float32", scope="local")
-    executable = cpu_executable(operation(source.tensor, output.tensor, "sum", 1), source, output)
+    executable = cpu_executable(operation(source.tensor, output.tensor, "sum", 1), source, output, compile_tilelang=compile_tilelang)
     for size in (0, 1, 7, 32):
         values = np.arange(3 * size, dtype="float32").reshape(3, size)
         actual = runtime.empty((3,), "float32")
@@ -122,21 +123,21 @@ def test_cpu_reduce_dynamic_extent():
         ("bitand", "uint64", 2**64 - 1),
     ],
 )
-def test_empty_reduce_preserves_identity(kind, dtype, expected):
+def test_empty_reduce_preserves_identity(kind, dtype, expected, *, compile_tilelang):
     source = TensorView.create("source", [3, 0], dtype, scope="local")
     output = TensorView.create("output", [3], dtype, scope="local")
-    executable = cpu_executable(operation(source.tensor, output.tensor, kind, 1), source, output)
+    executable = cpu_executable(operation(source.tensor, output.tensor, kind, 1), source, output, compile_tilelang=compile_tilelang)
     actual = runtime.empty((3,), dtype)
     executable(runtime.tensor(np.empty((3, 0), dtype=dtype)), actual)
     np.testing.assert_array_equal(actual.numpy(), np.full((3,), expected, dtype=dtype))
 
 
-def test_reduce_preserves_sliced_tensor_regions():
+def test_reduce_preserves_sliced_tensor_regions(*, compile_tilelang):
     source = TensorView.create("source", [5, 8], "float32", scope="local")
     output = TensorView.create("output", [6], "float32", scope="local")
     source_region = source.region([ir.Range(1, 4), ir.Range(2, 6)])
     destination_region = output.region([ir.Range(2, 5)])
-    executable = cpu_executable(operation(source_region, destination_region, "sum", 1), source, output)
+    executable = cpu_executable(operation(source_region, destination_region, "sum", 1), source, output, compile_tilelang=compile_tilelang)
     values = np.arange(40, dtype="float32").reshape(5, 8)
     expected = np.full((6,), -1, dtype="float32")
     expected[2:5] = values[1:4, 2:6].sum(axis=1)
@@ -148,7 +149,7 @@ def test_reduce_preserves_sliced_tensor_regions():
 @pytest.mark.gpu
 @pytest.mark.parametrize("clear", [True, False])
 @pytest.mark.parametrize("begin,end", [(1, 5), (2, 7), (3, 3)])
-def test_cuda_local_reduce_preserves_sliced_regions(clear, begin, end):
+def test_cuda_local_reduce_preserves_sliced_regions(clear, begin, end, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -189,7 +190,7 @@ def test_cuda_local_reduce_preserves_sliced_regions(clear, begin, end):
     function = tirx.Function([source.tensor, output.tensor], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "local_slice_reduce_test"
     )
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     values = np.arange(40, dtype="float32").reshape(5, 8)
     expected = np.full((6,), -1, dtype="float32")
     expected[2:5] = values[1:4, begin:end].sum(axis=1) - (0 if clear else 1)
@@ -250,7 +251,7 @@ def test_packed_reduce_uses_typed_dialect_ops(kind, dtype, nan, name):
     assert native("testing.ReduceCodegen", op, 2).endswith({"float32": "_f32x2", "float16": "_fp16x2", "bfloat16": "_bf16x2"}[dtype])
 
 
-def cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layouts):
+def cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layouts, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -303,9 +304,9 @@ def cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layo
     function = tirx.Function([source.tensor, output.tensor], body, ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "native_cuda_reduce"
     )
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
     ir.assert_structural_equal(function, ir.load_json(ir.save_json(function)))
-    return tirx.compile(function, target=target), device
+    return compile_tilelang(function, target=target), device
 
 
 @pytest.mark.gpu
@@ -323,9 +324,9 @@ def cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layo
         ("absmax", 64, 2, False),
     ],
 )
-def test_fragment_reduction_executes_on_cuda(kind, threads, batch, clear, native_layouts):
+def test_fragment_reduction_executes_on_cuda(kind, threads, batch, clear, native_layouts, *, compile_tilelang):
     rows, columns = 4, 128
-    executable, device = cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layouts)
+    executable, device = cuda_reduce_function(kind, rows, columns, threads, batch, clear, native_layouts, compile_tilelang=compile_tilelang)
     values = (np.arange(rows * columns).reshape(rows, columns) % 19 - 9).astype("float32")
     expected = expected_reduce(values, kind, 1)
     if not clear:

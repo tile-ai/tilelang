@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file collector.h
  * \brief Collect information from the IR
@@ -20,7 +21,7 @@ namespace tl {
 
 using namespace tirx;
 
-class ThreadTagChecker : public StmtExprVisitor {
+class ThreadTagChecker : public tvm::tl::StmtExprVisitor {
 public:
   static bool HasOnlyThreadIdxX(const PrimFunc &f) {
     ThreadTagChecker checker;
@@ -46,7 +47,7 @@ private:
         is_valid_ = false;
       }
     }
-    StmtExprVisitor::VisitStmt_(op);
+    tvm::tl::StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -66,7 +67,7 @@ private:
         }
       }
     }
-    StmtExprVisitor::VisitStmt_(op);
+    tvm::tl::StmtExprVisitor::VisitStmt_(op);
   }
   IterVar thread_var_;
   bool is_valid_ = true;

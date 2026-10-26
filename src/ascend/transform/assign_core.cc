@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -110,8 +111,8 @@ struct CrossCorePlacement {
   CoreMask candidate_core_mask{kCoreAll};
 };
 using CrossCorePlacementMap =
-    std::unordered_map<PrimExpr, CrossCorePlacement, ffi::StructuralHash,
-                       ffi::StructuralEqual>;
+    std::unordered_map<PrimExpr, CrossCorePlacement, tl::StructuralHash,
+                       tl::StructuralEqual>;
 
 static void AssignCrossCoreTasksInList(
     const std::vector<std::shared_ptr<IRStructure>> &nodes,

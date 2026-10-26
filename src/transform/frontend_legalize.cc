@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -54,7 +55,7 @@ bool IsReplayableRead(const PrimExpr &expression) {
   return replayable;
 }
 
-class LetInliner : public tirx::StmtExprMutator {
+class LetInliner : public tvm::tl::StmtExprMutator {
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node,
                                  ffi::InplaceMode mode) final {
@@ -98,7 +99,7 @@ private:
       VarRemapSet(node->var, value);
       return SeqStmt(ffi::Array<Stmt>{}, node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const prim::LetNode *node,
@@ -106,7 +107,7 @@ private:
     PrimExpr value = Mutate(node->value, mode).ValueOrUnchanged(node->value);
     if (SideEffect(value) > CallEffectKind::kPure &&
         !(IsReplayableRead(value) && IsReplayableRead(node->body))) {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     ffi::Any previous = VarRemapGet(node->var);
     VarRemapSet(node->var, value);
@@ -124,7 +125,7 @@ private:
 
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *node,
                                  ffi::InplaceMode mode) final {
-    Call call = StmtExprMutator::Mutate_(node, mode)
+    Call call = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(ffi::GetRef<Expr>(node))
                     .as_or_throw<Call>();
     if (call->attrs) {

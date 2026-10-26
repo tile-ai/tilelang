@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/ascend/op/gemm_blockscaled.cc
  * \brief Ascend instruction selection for block-scaled GEMM.
@@ -44,15 +45,15 @@ void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
     ICHECK_EQ(sf->region.size(), rank)
         << "L0 SF and data must have matching leading dimensions";
     for (size_t i = 0; i + 2 < rank; ++i) {
-      ICHECK(analyzer->CanProveEqual(data->region[i]->begin,
-                                     sf->region[i]->begin) &&
-             analyzer->CanProveEqual(data->region[i]->extent, 1) &&
-             analyzer->CanProveEqual(sf->region[i]->extent, 1))
+      ICHECK(tl::arith::CanProveEqual(analyzer, data->region[i]->begin,
+                                      sf->region[i]->begin) &&
+             tl::arith::CanProveEqual(analyzer, data->region[i]->extent, 1) &&
+             tl::arith::CanProveEqual(analyzer, sf->region[i]->extent, 1))
           << "L0 SF " << sf->source.as_or_throw<TensorVar>()->name
           << " and data must select the same leading index on axis " << i;
     }
     for (size_t i = rank - 2; i < rank; ++i) {
-      ICHECK(analyzer->CanProveEqual(sf->region[i]->begin, 0))
+      ICHECK(tl::arith::CanProveEqual(analyzer, sf->region[i]->begin, 0))
           << "Compact L0 SF regions require zero-origin trailing dimensions";
     }
     int bits = sf->source.as_or_throw<TensorVar>().dtype().bits();
@@ -61,10 +62,10 @@ void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
         << "L0 SF storage must contain 8-bit scales or 16-bit scale pairs";
     PrimExpr mn = data->region[rank - (transpose ? 1 : 2)]->extent;
     PrimExpr k = data->region[rank - (transpose ? 2 : 1)]->extent;
-    ICHECK(analyzer->CanProve(sf->region[rank - 2]->extent >= mn))
+    ICHECK(tl::arith::CanProve(analyzer, sf->region[rank - 2]->extent >= mn))
         << "L0 SF region must cover the data operand's MN extent";
-    ICHECK(
-        analyzer->CanProveEqual(sf->region[rank - 1]->extent * (4 * bits), k))
+    ICHECK(tl::arith::CanProveEqual(
+        analyzer, sf->region[rank - 1]->extent * (4 * bits), k))
         << "L0 SF region must match the compact data K extent (one scale "
            "per 32 K elements); slice both operands consistently";
   };

@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -22,6 +23,8 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include "transform/common/loop_aware_mutator.h"
+
 #include "loop_vectorize.h"
 #include "support/check.h"
 
@@ -34,16 +37,16 @@
 
 namespace tvm::tl {
 
-class LoopVectorizedLegalizer : public tirx::StmtExprMutatorWithAnalyzer {
+class LoopVectorizedLegalizer : public ::tvm::tl::LoopAwareMutator {
 public:
   explicit LoopVectorizedLegalizer(sym::Analyzer analyzer, bool cpu)
-      : StmtExprMutatorWithAnalyzer(analyzer),
-        analyzer_context_(std::move(analyzer)), cpu_(cpu) {}
+      : LoopAwareMutator(analyzer), analyzer_context_(std::move(analyzer)),
+        cpu_(cpu) {}
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForNode *node,
                                  ffi::InplaceMode mode) final {
-    For loop = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    For loop = LoopAwareMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                    .as_or_throw<For>();
     bool explicit_vectorization = loop->kind == ForKind::kVectorized;
@@ -51,7 +54,8 @@ private:
       return loop;
     loop.CopyOnWrite()->kind = ForKind::kDefault;
     int width = GetVectorizeSize(loop, analyzer_context_);
-    auto extent = GetConstInt(analyzer_->Simplify(loop->end - loop->begin));
+    auto extent =
+        GetConstInt(tl::arith::Simplify(analyzer_, loop->end - loop->begin));
     if (explicit_vectorization && width == 1 &&
         (!extent || extent.value() > 1)) {
       LOG(WARNING) << "T.vectorized loop over `" << loop->var

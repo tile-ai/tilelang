@@ -379,10 +379,18 @@ set(TILE_LANG_INCLUDES ${TVM_TIRX_INCLUDES})
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # Collect source files
+file(GLOB TILELANG_TIRX_PASS_SRCS CONFIGURE_DEPENDS src/transform/tirx/*.cc)
+file(GLOB TILELANG_TIRX_CODEGEN_SRCS CONFIGURE_DEPENDS
+  src/backend/common/codegen/tirx/*.cc
+  src/cuda/codegen/tirx/*.cc
+  src/metal/codegen/tirx/*.cc
+  src/webgpu/codegen/tirx/*.cc)
 file(GLOB TILE_LANG_SRCS
   src/*.cc
   src/layout/*.cc
   src/transform/*.cc
+  ${TILELANG_TIRX_PASS_SRCS}
+  ${TILELANG_TIRX_CODEGEN_SRCS}
   src/transform/common/*.cc
   src/transform/layout_inference/*.cc
   src/transform/pipeline/*.cc
@@ -397,6 +405,7 @@ file(GLOB TILE_LANG_SRCS
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/packed_result.cc
 )
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
@@ -420,7 +429,6 @@ endif()
 # from __FILE__ so wheel users don't see CI machine paths in warnings).
 if(NOT TILELANG_USE_INSTALLED_TIRX)
   set(TVM_TIRX_USE_CUSTOM_LOGGING ON CACHE BOOL "Use custom logging implementation" FORCE)
-  set(TVM_TIRX_EXPORT_ALL_SYMBOLS ON CACHE BOOL "Export compiler extension symbols" FORCE)
 endif()
 
 # Detect release (wheel) builds: in CI (cibuildwheel) or scikit-build-core wheel builds,
@@ -451,6 +459,8 @@ if(NOT TILELANG_USE_INSTALLED_TIRX)
     endif()
     add_subdirectory("${TVM_TIRX_SOURCE}" tvm_tirx EXCLUDE_FROM_ALL)
   endblock()
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/tirx_extension_exports.cmake")
+  tilelang_configure_tirx_exports("${TVM_TIRX_SOURCE}")
 endif()
 
 # Strip the hardcoded /Zi PRIVATE option that tvm-ffi attaches in its
@@ -526,6 +536,7 @@ if(NOT TILELANG_USE_INSTALLED_TIRX)
 endif()
 
 add_library(tilelang_tirx_test_passes SHARED EXCLUDE_FROM_ALL
+  ${TILELANG_TIRX_PASS_SRCS}
   src/backend/common/codegen/codegen_py.cc
   src/backend/common/codegen/codegen_utils.cc
   src/cuda/codegen/codegen_cutedsl.cc

@@ -1,17 +1,22 @@
 import numpy as np
 import pytest
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir import prim
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
+from tilelang._compat.tirx import isfinite
 
 pytestmark = pytest.mark.usefixtures("native_tirx_passes")
 
 
 def lower(name, arguments, dtype, backend):
     expression = ir.Call(f"prim.{name}", arguments, ty=dtype)
+    extensions = ir.Op.get_attr_map(f"tl.{backend}.FLowerIntrinsic")
+    if extensions is not None and expression.op in extensions:
+        return extensions[expression.op](expression)
     return ir.Op.get_attr_map(f"{backend}.FLowerIntrinsic")[expression.op](expression)
 
 
@@ -79,7 +84,7 @@ def test_hip_shuffle_keeps_typed_value_and_width(suffix):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("dtype", ["int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64"])
-def test_cuda_popcount_numerical(dtype):
+def test_cuda_popcount_numerical(dtype, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -103,7 +108,7 @@ def test_cuda_popcount_numerical(dtype):
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     actual = runtime.empty(values.shape, "int32", device=device)
     executable(runtime.tensor(values, device=device), actual)
     np.testing.assert_array_equal(actual.numpy(), [value.bit_count() for value in raw])
@@ -111,7 +116,7 @@ def test_cuda_popcount_numerical(dtype):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
-def test_cuda_isfinite_numerical(dtype):
+def test_cuda_isfinite_numerical(dtype, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -119,7 +124,7 @@ def test_cuda_isfinite_numerical(dtype):
     source = TensorView.create("source", values.shape, dtype)
     output = TensorView.create("output", values.shape, "int32")
     index = ir.Var("index", "int32")
-    value = ir.Call("prim.isfinite", [source.load(index)], ty="bool")
+    value = isfinite(source.load(index))
     body = ir.RegionStmt(
         "tirx.launch_thread",
         [ir.StringImm("threadIdx.x"), ir.const(len(values))],
@@ -132,7 +137,7 @@ def test_cuda_isfinite_numerical(dtype):
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     actual = runtime.empty(values.shape, "int32", device=device)
     executable(runtime.tensor(values, device=device), actual)
     np.testing.assert_array_equal(actual.numpy(), np.isfinite(values))

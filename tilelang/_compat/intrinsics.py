@@ -8,6 +8,13 @@ from tvm_tirx.tirx import op
 _ptx = PTXNamespace()
 
 
+def gpu_storage_sync(storage_scope, *participants, ty=None, loc=None):
+    options = {} if loc is None else {"loc": loc}
+    if not participants:
+        return op.gpu_storage_sync(storage_scope, ty=ty, **options)
+    return ir.Call("tl.gpu_storage_sync", [ir.StringImm(storage_scope), *participants], ty=ty, **options)
+
+
 def _pointer(value):
     if tirx.is_tensor_var(value) or isinstance(value, ir.TensorLoad):
         return op.address_of(value)
@@ -76,7 +83,7 @@ _ALIASES = {
     "tvm_stack_make_array": op.stack_make_dltensor,
     "tvm_thread_allreduce": op.gpu_thread_allreduce,
     "tvm_thread_invariant": op.gpu_thread_invariant,
-    "tvm_storage_sync": op.gpu_storage_sync,
+    "tvm_storage_sync": gpu_storage_sync,
     "tvm_load_matrix_sync": op.gpu_load_matrix_sync,
     "tvm_mma_sync": op.gpu_mma_sync,
     "tvm_bmma_sync": cuda.bmma_sync,

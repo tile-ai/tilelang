@@ -1,11 +1,12 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
 from tvm_tirx.target import Target
 
-from tilelang._compat import stmt_functor
+from tilelang._compat import ir, stmt_functor
 from tilelang._compat.tensor import TensorView
+from tilelang.transform import _tirx_passes
 from tilelang.transform import LowerAccessPtr
 
 pytestmark = pytest.mark.usefixtures("native_tirx_passes")
@@ -90,8 +91,8 @@ def test_native_pointer_metadata_tracks_flattened_and_renewed_tensor_identity():
     tensor = TensorView.create("tensor", [4, 8], "float32", scope="shared")
     pointer = native("LowerAccessPtrCall", native("MakeAccessPtrFromRegion", region_of(tensor, [1, 2], [1, 4]), 1, True))
     function = tirx.Function([], [tensor.allocate(), ir.Evaluate(pointer)])
-    renewed = tirx.renew_def(function)
-    module = tirx.transform.FlattenTensor()(ir.IRModule({"main": renewed}))
+    renewed = ir.renew_def(function)
+    module = _tirx_passes.FlattenTensor()(ir.IRModule({"main": renewed}))
     pointers = []
     stmt_functor.post_order_visit(
         module,
@@ -105,7 +106,7 @@ def test_native_pointer_metadata_tracks_flattened_and_renewed_tensor_identity():
     assert len(lowered.attrs["tl.access_region"].region) == len(lowered.args[0].indices) == 1
     assert int(lowered.attrs["tl.access_region"].region[0].begin) == 10
     assert int(lowered.attrs["tl.access_region"].region[0].extent) == 4
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
 
 
 @pytest.mark.parametrize("index", [ir.prim.Ramp(3, 2, 4), ir.prim.Broadcast(3, 4)])
@@ -149,12 +150,12 @@ def test_lower_access_ptr_preserves_native_function_contract():
     assert lowered.body.seq[0].value.op.name == "tirx.address_of"
     assert lowered.params[0].same_as(tensor.tensor)
     assert lower_function(lowered).same_as(lowered)
-    assert tirx.analysis.check_well_formed(lowered)
+    assert ir.check_well_formed(lowered)
     declaration = tirx.Function([tensor.tensor], None, ret_type=ir.TupleType([]))
     assert lower_function(declaration).same_as(declaration)
 
 
-def test_strided_offset_access_executes_on_cpu():
+def test_strided_offset_access_executes_on_cpu(compile_tilelang):
     source = TensorView.create("source", [80], "float32")
     output = TensorView.create("output", [1], "float32")
     view = TensorView.create("view", [4, 8], "float32", strides=[20, 2], elem_offset=3)
@@ -166,8 +167,8 @@ def test_strided_offset_access_executes_on_cpu():
         ret_type=ir.TupleType([]),
     ).with_attr("global_symbol", "strided_access")
     lowered = lower_function(function)
-    assert tirx.analysis.check_well_formed(lowered)
-    executable = tirx.compile(lowered, target="c")
+    assert ir.check_well_formed(lowered)
+    executable = compile_tilelang(lowered, target="c")
     values = np.arange(80, dtype="float32")
     actual = runtime.empty((1,), "float32")
     executable(runtime.tensor(values), actual)
@@ -175,7 +176,7 @@ def test_strided_offset_access_executes_on_cpu():
 
 
 @pytest.mark.gpu
-def test_typed_pointer_alias_executes_on_cuda():
+def test_typed_pointer_alias_executes_on_cuda(compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -200,7 +201,7 @@ def test_typed_pointer_alias_executes_on_cuda():
     assert not remaining
     version = device.compute_version.replace(".", "")
     target = Target({"kind": "cuda", "arch": f"sm_{version}", "backend_config": {"cuda": {"compiler": "nvcc"}}}, host="c")
-    executable = tirx.compile(lowered, target=target)
+    executable = compile_tilelang(lowered, target=target)
     values = np.arange(32, dtype="float32")
     actual = runtime.empty((32,), "float32", device=device)
     executable(runtime.tensor(values, device=device), actual)

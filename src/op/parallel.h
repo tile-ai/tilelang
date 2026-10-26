@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file tl/op/parallel.h
  * \brief Infer layout from ops and parallel for
@@ -68,7 +69,7 @@ private:
   sym::Analyzer analyzer_;
 };
 
-class ParallelLoopNestVisitor : public StmtExprVisitor {
+class ParallelLoopNestVisitor : public tvm::tl::StmtExprVisitor {
 public:
   explicit ParallelLoopNestVisitor(ParallelOpNode *op) : operation_(op) {}
 

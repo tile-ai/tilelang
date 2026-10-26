@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file tl/op/utils.cc
  * \brief Common utilities implementation for TL ops.
@@ -44,7 +47,7 @@ TensorRegion RegionFromLoad(const TensorLoad &load) {
         base = broadcast->value;
       }
       ranges.push_back(
-          Range::FromMinExtent(base, MakeConst(base.ty(), 1), index->loc));
+          Range::FromMinExtent(base, tl::MakeConst(base.ty(), 1), index->loc));
     }
   }
   return CheckTensorRegion(
@@ -73,7 +76,8 @@ AccessRegion DecodeRegionCall(const Call &call) {
       TVM_FFI_CHECK(GetConstInt(ramp->stride) == 1, ValueError)
           << "tl.region expects a stride-1 Ramp";
       sym::Analyzer analyzer;
-      TVM_FFI_CHECK(analyzer->CanProveEqual(ramp->lanes, extent), ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProveEqual(analyzer, ramp->lanes, extent),
+                    ValueError)
           << "Ramp lanes and provided extent must match";
       ranges.push_back(Range::FromMinExtent(ramp->base, extent, index->loc));
     } else {
@@ -99,7 +103,7 @@ Type InferAccessPtrType(const CallNode *call) {
 
 void ValidateAccessPtr(const CallNode *call) {
   Type expected = InferAccessPtrType(call);
-  TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty, expected), TypeError)
+  TVM_FFI_CHECK(tl::StructuralEqual()(call->ty, expected), TypeError)
       << "tl.access_ptr result must preserve the tensor pointer type";
   TVM_FFI_CHECK(call->ty_args.empty(), TypeError)
       << "tl.access_ptr does not accept type arguments";
@@ -148,7 +152,8 @@ TensorRegion NormalizeToBufferRegion(const Expr &expression) {
   if (auto tensor = expression.as<tirx::TensorVar>()) {
     ffi::Array<Range> ranges;
     for (const PrimExpr &extent : tensor.value().shape()) {
-      ranges.push_back(Range::FromMinExtent(MakeConst(extent.ty(), 0), extent));
+      ranges.push_back(
+          Range::FromMinExtent(tl::MakeConst(extent.ty(), 0), extent));
     }
     return TensorRegion(tensor.value(), ranges, TensorRegionType(),
                         expression->loc);

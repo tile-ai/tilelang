@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, sym, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir, sym
 
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
@@ -68,7 +69,7 @@ def test_let_binding_and_explicit_cast_preserve_lexical_identity():
     ir.assert_structural_equal(widened, ir.load_json(ir.save_json(widened)), map_free_vars=True)
     output = TensorView.create("output", [1], "int64")
     function = tirx.Function([variable, output.tensor], output.store(0, widened), ret_type=ir.TupleType([]))
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
 
 
 def test_tensor_load_indices_are_promoted_without_changing_tensor_identity():
@@ -81,14 +82,14 @@ def test_tensor_load_indices_are_promoted_without_changing_tensor_identity():
     assert widened.indices[0].ty == ir.PrimType("int64")
 
 
-def test_widened_indices_execute_on_cpu():
+def test_widened_indices_execute_on_cpu(*, compile_tilelang):
     variable = ir.Var("input", "int32")
     output = TensorView.create("output", [1], "int64")
     widened = promote(variable * variable + 1)
     function = tirx.Function([variable, output.tensor], output.store(0, widened), ret_type=ir.TupleType([])).with_attr(
         "global_symbol", "wide_index"
     )
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     actual = runtime.empty((1,), "int64")
     executable(50000, actual)
     np.testing.assert_array_equal(actual.numpy(), np.array([2500000001], dtype="int64"))

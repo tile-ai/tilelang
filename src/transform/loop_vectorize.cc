@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -21,6 +24,8 @@
  * \file loop_vectorize.cc
  * \brief A tool to automatically vectorize a for loop
  */
+
+#include "transform/common/loop_aware_mutator.h"
 
 #include "loop_vectorize.h"
 
@@ -50,10 +55,10 @@ using namespace prim;
 
 namespace {
 
-class AnalysisLetInliner : public tirx::StmtExprMutator {
+class AnalysisLetInliner : public tvm::tl::StmtExprMutator {
 private:
   UnchangedOr<PrimExpr> Mutate_(const LetNode *node, InplaceMode mode) final {
-    PrimExpr result = StmtExprMutator::Mutate_(node, mode)
+    PrimExpr result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(GetRef<PrimExpr>(node));
     const auto *binding = result.as<LetNode>();
     if (SideEffect(binding->value) != CallEffectKind::kPure)
@@ -74,7 +79,7 @@ PrimExpr PrepareExprForAnalyzer(const PrimExpr &expression, int scale,
     PrimType type = scalar.value().ty();
     if (!type.MatchesCode(kDLInt) || type.bits() >= 64 || !type.IsScalar())
       return;
-    auto bounds = analyzer->const_int_bound(scalar.value());
+    auto bounds = tl::arith::ConstIntBoundOf(analyzer, scalar.value());
     int64_t maximum = (int64_t{1} << (type.bits() - 1)) - 1;
     int64_t minimum = -(int64_t{1} << (type.bits() - 1));
     promote = bounds->max_value > maximum / scale ||
@@ -93,7 +98,7 @@ PrimExpr FlatOffset(const TensorVar &tensor, const Array<PrimExpr> &indices) {
   return offsets[0];
 }
 
-class MemoryAccessFinder : public tirx::StmtExprVisitor {
+class MemoryAccessFinder : public tvm::tl::StmtExprVisitor {
 public:
   bool global{false};
   bool shared{false};
@@ -108,12 +113,12 @@ private:
 
   Optional<VisitInterrupt> Visit_(const TensorLoadNode *node) final {
     Record(node->source);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const TensorStoreNode *node) final {
     Record(node->dest);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
@@ -198,11 +203,10 @@ struct VectorConstraintSummary {
   std::vector<BufferVectorInfo> deferred_accesses;
 };
 
-class VectorizePlanner : public tirx::StmtExprMutatorWithAnalyzer {
+class VectorizePlanner : public ::tvm::tl::LoopAwareMutator {
 public:
   VectorizePlanner(sym::Analyzer analyzer, LayoutMap layouts)
-      : StmtExprMutatorWithAnalyzer(analyzer),
-        analyzer_context_(std::move(analyzer)),
+      : LoopAwareMutator(analyzer), analyzer_context_(std::move(analyzer)),
         layout_map_(std::move(layouts)) {}
 
   int Plan(const For &loop) {
@@ -462,7 +466,8 @@ private:
     });
     if (!nested) {
       ++innermost_loop_count_;
-      auto extent = GetConstInt(analyzer_->Simplify(node->end - node->begin));
+      auto extent =
+          GetConstInt(tl::arith::Simplify(analyzer_, node->end - node->begin));
       if (!IsOne(node->step) || !extent || extent.value() <= 0) {
         loop_extent_vector_size_ = 1;
         return Unchanged();
@@ -470,7 +475,7 @@ private:
       loop_extent_vector_size_ = static_cast<int>(
           std::gcd<int64_t>(initial_vector_size_, extent.value()));
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   void RecordAccess(const TensorVar &tensor, const Array<PrimExpr> &indices,
@@ -514,13 +519,13 @@ private:
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                 InplaceMode mode) final {
     RecordAccess(node->source.as_or_throw<TensorVar>(), node->indices, false);
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                             InplaceMode mode) final {
     RecordAccess(node->dest.as_or_throw<TensorVar>(), node->indices, true);
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   int InvariantWidth(const PrimExpr &expression, int width) const {
@@ -543,14 +548,14 @@ private:
     If analysis = GetRef<If>(node);
     analysis.CopyOnWrite()->condition = PrepareExprForAnalyzer(
         node->condition, initial_vector_size_, analyzer_context_);
-    return StmtExprMutatorWithAnalyzer::Mutate_(analysis.get(), mode);
+    return LoopAwareMutator::Mutate_(analysis.get(), mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const LetNode *node, InplaceMode mode) final {
     PrimExpr analysis = PrepareExprForAnalyzer(
         GetRef<PrimExpr>(node), initial_vector_size_, analyzer_context_);
     if (auto binding = analysis.as<LetNode>())
-      return StmtExprMutatorWithAnalyzer::Mutate_(binding, mode);
+      return LoopAwareMutator::Mutate_(binding, mode);
     return Mutate(analysis, mode).ValueOrUnchanged(analysis);
   }
 
@@ -560,7 +565,7 @@ private:
     if (!target->GetAttr<bool>("supports_vector_predicate").value_or(false)) {
       RecordCall(InvariantWidth(node->condition, loop_extent_vector_size_));
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   int AtomicWidth(const Expr &destination) const {
@@ -655,7 +660,7 @@ private:
       });
       RecordCall(width);
     }
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const CastNode *node, InplaceMode mode) final {
@@ -664,17 +669,17 @@ private:
     RecordCall(std::gcd(initial_vector_size_,
                         std::max(1, vector_load_bits_max_ / bits)),
                true);
-    return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    return LoopAwareMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
-    Stmt result = StmtExprMutator::Mutate_(node, mode)
+    Stmt result = LoopAwareMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(GetRef<Stmt>(node));
     Bind binding = result.as_or_throw<Bind>();
     if (auto value = binding->value.as<PrimExpr>();
         value && binding->var.as<PrimVar>() &&
         SideEffect(value.value()) <= CallEffectKind::kPure) {
-      analyzer_->Bind(binding->var, value.value(), true);
+      tl::arith::Bind(analyzer_, binding->var, value.value(), true);
     }
     return result;
   }
@@ -689,7 +694,7 @@ private:
   std::vector<BufferVectorInfo> buffer_vector_infos_;
 };
 
-class VectorizeRewriter : public tirx::StmtExprMutator {
+class VectorizeRewriter : public tvm::tl::StmtExprMutator {
 public:
   VectorizeRewriter(int width, sym::Analyzer analyzer)
       : width_(width), analyzer_(std::move(analyzer)) {}
@@ -700,7 +705,7 @@ private:
     PostOrderVisit(node->body, [&](const ObjectRef &object) {
       nested |= object.as<ForNode>() != nullptr;
     });
-    For loop = StmtExprMutator::Mutate_(node, mode)
+    For loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(GetRef<Stmt>(node))
                    .as_or_throw<For>();
     if (nested || width_ == 1) {
@@ -709,27 +714,29 @@ private:
       return loop;
     }
     ICHECK(IsOne(loop->step)) << "Vectorization requires a unit loop step";
-    auto extent = GetConstInt(analyzer_->Simplify(loop->end - loop->begin));
+    auto extent =
+        GetConstInt(tl::arith::Simplify(analyzer_, loop->end - loop->begin));
     ICHECK(extent && extent.value() > 0 && extent.value() % width_ == 0)
         << "The vector width must divide a positive static loop extent";
     PrimType type = loop->var.ty();
-    PrimExpr zero = MakeConst(type, 0);
-    PrimExpr width = MakeConst(type, width_);
+    PrimExpr zero = tl::MakeConst(type, 0);
+    PrimExpr width = tl::MakeConst(type, width_);
     PrimVar lane("vec", type);
     if (extent.value() == width_) {
       Stmt body = Substitute(loop->body, {{loop->var, loop->begin + lane}});
-      return For(lane, zero, width, MakeConst(type, 1), ForKind::kVectorized,
-                 body, loop->annotations, loop->loc);
+      return For(lane, zero, width, tl::MakeConst(type, 1),
+                 ForKind::kVectorized, body, loop->annotations, loop->loc);
     }
     PrimVar group(loop->var->name, type);
     Stmt body = Substitute(loop->body,
                            {{loop->var, loop->begin + group * width + lane}});
-    body = For(lane, zero, width, MakeConst(type, 1), ForKind::kVectorized,
+    body = For(lane, zero, width, tl::MakeConst(type, 1), ForKind::kVectorized,
                body, {}, loop->loc);
     ForKind kind =
         loop->kind == ForKind::kParallel ? ForKind::kDefault : loop->kind;
-    return For(group, zero, MakeConst(type, extent.value() / width_),
-               MakeConst(type, 1), kind, body, loop->annotations, loop->loc);
+    return For(group, zero, tl::MakeConst(type, extent.value() / width_),
+               tl::MakeConst(type, 1), kind, body, loop->annotations,
+               loop->loc);
   }
 
   int width_;
@@ -740,8 +747,8 @@ bool CanProveIndependent(const PrimExpr &expression, PrimVar variable,
                          sym::Analyzer analyzer) {
   PrimVar other(variable->name + "_independent", variable.ty());
   PrimExpr prepared = PrepareExprForAnalyzer(expression, 1, analyzer);
-  return analyzer->CanProveEqual(prepared,
-                                 Substitute(prepared, {{variable, other}}));
+  return tl::arith::CanProveEqual(analyzer, prepared,
+                                  Substitute(prepared, {{variable, other}}));
 }
 
 bool IsExprInvariantInVectorBoundary(const PrimExpr &expression,
@@ -753,22 +760,26 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expression,
   PrimVar ordinal("ordinal", variable.ty());
   PrimExpr prepared = PrepareExprForAnalyzer(expression, width, analyzer);
   prepared = Substitute(
-      prepared, {{variable, prim::cast(minimum, variable.ty()) + ordinal}});
-  analyzer->Bind(ordinal, Range(MakeConst(ordinal.ty(), 0), extent));
+      prepared, {{variable, tl::CastValue(minimum, variable.ty()) + ordinal}});
+  tl::arith::Bind(analyzer, ordinal,
+                  Range(tl::MakeConst(ordinal.ty(), 0), extent));
   PrimExpr aligned = floordiv(ordinal, width) * width;
-  if (analyzer->CanProveEqual(prepared,
-                              Substitute(prepared, {{ordinal, aligned}})))
+  if (tl::arith::CanProveEqual(analyzer, prepared,
+                               Substitute(prepared, {{ordinal, aligned}})))
     return true;
   PrimVar lane("lane", variable.ty());
   PrimVar group("group", variable.ty());
-  PrimExpr zero = MakeConst(variable.ty(), 0);
-  analyzer->Bind(lane, Range(zero, MakeConst(variable.ty(), width)));
-  analyzer->Bind(group,
-                 Range(zero, analyzer->Simplify(ceildiv(extent, width))));
-  PrimExpr grouped = analyzer->Simplify(
-      Substitute(prepared, {{ordinal, group * width + lane}}));
-  PrimExpr base = analyzer->Simplify(Substitute(grouped, {{lane, zero}}));
-  return analyzer->CanProveEqual(grouped, base);
+  PrimExpr zero = tl::MakeConst(variable.ty(), 0);
+  tl::arith::Bind(analyzer, lane,
+                  Range(zero, tl::MakeConst(variable.ty(), width)));
+  tl::arith::Bind(
+      analyzer, group,
+      Range(zero, tl::arith::Simplify(analyzer, ceildiv(extent, width))));
+  PrimExpr grouped = tl::arith::Simplify(
+      analyzer, Substitute(prepared, {{ordinal, group * width + lane}}));
+  PrimExpr base =
+      tl::arith::Simplify(analyzer, Substitute(grouped, {{lane, zero}}));
+  return tl::arith::CanProveEqual(analyzer, grouped, base);
 }
 
 bool IndicesCanVectorize(const PrimExpr &expression, const PrimVar &variable,
@@ -778,7 +789,7 @@ bool IndicesCanVectorize(const PrimExpr &expression, const PrimVar &variable,
   ICHECK_GE(width, 1);
   if (width == 1)
     return true;
-  if (!analyzer->CanProveEqual(floormod(extent, width), 0))
+  if (!tl::arith::CanProveEqual(analyzer, floormod(extent, width), 0))
     return false;
   if (allow_broadcast &&
       IsExprInvariantInVectorBoundary(expression, variable, extent, width,
@@ -787,22 +798,28 @@ bool IndicesCanVectorize(const PrimExpr &expression, const PrimVar &variable,
   PrimVar ordinal("ordinal", variable.ty());
   PrimExpr prepared = PrepareExprForAnalyzer(expression, width, analyzer);
   prepared = Substitute(
-      prepared, {{variable, prim::cast(minimum, variable.ty()) + ordinal}});
-  PrimExpr zero = MakeConst(ordinal.ty(), 0);
-  PrimExpr first = analyzer->Simplify(Substitute(prepared, {{ordinal, zero}}));
-  if (!analyzer->CanProveEqual(floormod(first, width), 0))
+      prepared, {{variable, tl::CastValue(minimum, variable.ty()) + ordinal}});
+  PrimExpr zero = tl::MakeConst(ordinal.ty(), 0);
+  PrimExpr first =
+      tl::arith::Simplify(analyzer, Substitute(prepared, {{ordinal, zero}}));
+  if (!tl::arith::CanProveEqual(analyzer, floormod(first, width), 0))
     return false;
   PrimVar lane("lane", ordinal.ty());
   PrimVar group("group", ordinal.ty());
-  analyzer->Bind(lane, Range(zero, MakeConst(ordinal.ty(), width)));
-  analyzer->Bind(group,
-                 Range(zero, analyzer->Simplify(floordiv(extent, width))));
-  PrimExpr grouped = analyzer->Simplify(
-      Substitute(prepared, {{ordinal, group * width + lane}}));
-  PrimExpr base = analyzer->Simplify(Substitute(grouped, {{lane, zero}}));
-  if (!analyzer->CanProveEqual(grouped, base + prim::cast(lane, base.ty())))
+  tl::arith::Bind(analyzer, lane,
+                  Range(zero, tl::MakeConst(ordinal.ty(), width)));
+  tl::arith::Bind(
+      analyzer, group,
+      Range(zero, tl::arith::Simplify(analyzer, floordiv(extent, width))));
+  PrimExpr grouped = tl::arith::Simplify(
+      analyzer, Substitute(prepared, {{ordinal, group * width + lane}}));
+  PrimExpr base =
+      tl::arith::Simplify(analyzer, Substitute(grouped, {{lane, zero}}));
+  if (!tl::arith::CanProveEqual(analyzer, grouped,
+                                base + tl::CastValue(lane, base.ty())))
     return false;
-  return allow_broadcast || analyzer->CanProveEqual(floormod(base, width), 0);
+  return allow_broadcast ||
+         tl::arith::CanProveEqual(analyzer, floormod(base, width), 0);
 }
 
 int MaxVectorLoadBits(const Target &target, bool global_only_access) {

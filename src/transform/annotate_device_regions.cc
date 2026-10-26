@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file annotate_device_regions.cc
  * \brief Split device function from host.
@@ -11,7 +12,7 @@
 namespace tvm::tl {
 namespace {
 
-class DeviceRegionAnnotater : public tirx::StmtExprMutator {
+class DeviceRegionAnnotater : public tvm::tl::StmtExprMutator {
 public:
   explicit DeviceRegionAnnotater(Target target) : target_(std::move(target)) {}
 
@@ -34,7 +35,7 @@ private:
                         DictAttrs({{"target", target_}}),
                         SeqStmt(ffi::GetRef<Stmt>(node)), {}, node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   Target target_;

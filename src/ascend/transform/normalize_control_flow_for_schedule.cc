@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file normalize_control_flow_for_schedule.cc
  * \brief Normalize control flow ahead of AutoSchedule.
@@ -33,14 +34,14 @@
 namespace tvm::tl {
 namespace {
 
-class ControlFlowNormalizer : public tirx::StmtExprMutator {
+class ControlFlowNormalizer : public tvm::tl::StmtExprMutator {
 protected:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     if (node->attrs->dict.count("tl.ascend_stage") ||
         node->attrs->dict.count("tilelang_assume") ||
         node->attrs->dict.count("tl.assume_requires_runtime_check"))
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     return ffi::Unchanged{};
   }
 
@@ -83,7 +84,7 @@ protected:
   ffi::UnchangedOr<Stmt> Mutate_(const IfNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto conditional = StmtExprMutator::Mutate_(node, mode)
+    auto conditional = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                            .ValueOrUnchanged(original)
                            .as_or_throw<If>();
     if (conditional->condition.as<VarNode>())
@@ -101,7 +102,7 @@ protected:
       return ffi::Unchanged{};
     }
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto loop = StmtExprMutator::Mutate_(node, mode)
+    auto loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                     .ValueOrUnchanged(original)
                     .as_or_throw<For>();
     ffi::Array<Stmt> snapshots;

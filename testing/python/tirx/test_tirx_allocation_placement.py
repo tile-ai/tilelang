@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
 
-from tilelang._compat import stmt_functor
+from tilelang._compat import ir, stmt_functor
 from tilelang._compat.tensor import TensorView
 
 pytestmark = pytest.mark.usefixtures("native_tirx_passes")
@@ -12,7 +12,7 @@ pytestmark = pytest.mark.usefixtures("native_tirx_passes")
 def lower(body, parameters=()):
     function = tirx.Function(list(parameters), body, ret_type=ir.TupleType([])).with_attr("global_symbol", "allocation_test")
     module = tvm_ffi.get_global_func("tl.transform.PlanAndUpdateBufferAllocationLocation")()(ir.IRModule({"main": function}))
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -23,7 +23,7 @@ def nodes(root, kind):
     return result
 
 
-def test_private_scratch_sinks_to_innermost_use_and_executes():
+def test_private_scratch_sinks_to_innermost_use_and_executes(compile_tilelang):
     scratch = TensorView.create("scratch", [1], "int32", scope="local")
     output = TensorView.create("output", [3, 4], "int32")
     outer, inner = ir.Var("outer", "int32"), ir.Var("inner", "int32")
@@ -39,13 +39,13 @@ def test_private_scratch_sinks_to_innermost_use_and_executes():
     inner_loop = nodes(module, ir.For)[0]
     assert isinstance(inner_loop.body.seq[0], ir.Bind)
     assert inner_loop.body.seq[0].var.same_as(scratch.tensor)
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((3, 4), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(3)[:, None] * 10 + np.arange(4))
 
 
-def test_loop_header_and_carried_state_keep_allocation_outside():
+def test_loop_header_and_carried_state_keep_allocation_outside(compile_tilelang):
     bound = TensorView.create("bound", [1], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index = ir.Var("index", "int32")
@@ -53,7 +53,7 @@ def test_loop_header_and_carried_state_keep_allocation_outside():
     module = lower(body, [output.tensor])
     loop = nodes(module, ir.For)[0]
     assert not nodes(loop.body, ir.Bind)
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), [4, 4, 4, 4])
@@ -97,7 +97,7 @@ def test_allocation_initializers_are_not_moved_across_writes():
     assert not nodes(nodes(module, ir.For)[0], ir.Bind)
 
 
-def test_private_scratch_does_not_sink_into_vectorized_loop():
+def test_private_scratch_does_not_sink_into_vectorized_loop(compile_tilelang):
     scratch = TensorView.create("scratch", [4], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index = ir.Var("index", "int32")
@@ -112,14 +112,14 @@ def test_private_scratch_does_not_sink_into_vectorized_loop():
     module = lower([scratch.allocate(), loop], [output.tensor])
     assert module["main"].body.seq[0].var.same_as(scratch.tensor)
     assert not nodes(nodes(module, ir.For)[0], ir.Bind)
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(4) + 1)
 
 
 @pytest.mark.parametrize("reset", ["first", "every"])
-def test_loop_carried_storage_is_only_sunk_after_a_complete_reset(reset):
+def test_loop_carried_storage_is_only_sunk_after_a_complete_reset(reset, compile_tilelang):
     scratch = TensorView.create("scratch", [2], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index = ir.Var("index", "int32")
@@ -133,14 +133,14 @@ def test_loop_carried_storage_is_only_sunk_after_a_complete_reset(reset):
     module = lower([scratch.allocate(), body], [output.tensor])
     outer = nodes(module, ir.For)[-1]
     assert bool(nodes(outer.body, ir.Bind)) == (reset == "every")
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), [1, 1, 1, 1] if reset == "every" else [1, 2, 3, 4])
 
 
 @pytest.mark.parametrize("exit_kind", [ir.Break, ir.Continue])
-def test_incomplete_reset_with_early_exit_keeps_loop_carried_storage(exit_kind):
+def test_incomplete_reset_with_early_exit_keeps_loop_carried_storage(exit_kind, compile_tilelang):
     scratch = TensorView.create("scratch", [2], "int32", scope="local")
     output = TensorView.create("output", [4], "int32")
     index = ir.Var("index", "int32")
@@ -164,7 +164,7 @@ def test_incomplete_reset_with_early_exit_keeps_loop_carried_storage(exit_kind):
     module = lower([scratch.allocate(), body], [output.tensor])
     outer = nodes(module, ir.For)[-1]
     assert not nodes(outer.body, ir.Bind)
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     actual = runtime.empty((4,), "int32")
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), [1, 2, 3, 4])

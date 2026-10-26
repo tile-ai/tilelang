@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,6 +25,9 @@
 
 #ifndef TILELANG_TRANSFORM_COMMON_LOOP_FUSION_UTILS_H_
 #define TILELANG_TRANSFORM_COMMON_LOOP_FUSION_UTILS_H_
+#include "op/prim.h"
+
+#include "transform/common/loop_aware_mutator.h"
 
 #include "compat/visit.h"
 #include "op/parallel.h"
@@ -61,11 +65,10 @@ private:
   bool has_fragment_access_{false};
 };
 
-class ParallelLoopFuser : public tirx::StmtExprMutatorWithAnalyzer {
+class ParallelLoopFuser : public ::tvm::tl::LoopAwareMutator {
 public:
   explicit ParallelLoopFuser(sym::Analyzer analyzer)
-      : StmtExprMutatorWithAnalyzer(analyzer),
-        analyzer_context_(std::move(analyzer)) {}
+      : LoopAwareMutator(analyzer), analyzer_context_(std::move(analyzer)) {}
 
   static Stmt Fuse(const Stmt &statement) {
     return ffi::make_object<ParallelLoopFuser>(sym::Analyzer())
@@ -81,7 +84,7 @@ protected:
     FragmentAccessDetector detector;
     detector.Collect(node->body);
     if (detector.HasFragmentAccess() || PreserveParallelLoopNest(node)) {
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     }
     std::vector<const ForNode *> loops;
     std::vector<int64_t> extents;
@@ -93,11 +96,11 @@ protected:
       if (current != node && !current->annotations.empty()) {
         break;
       }
-      auto extent =
-          GetConstInt(analyzer_->Simplify(current->end - current->begin));
+      auto extent = GetConstInt(
+          tl::arith::Simplify(analyzer_, current->end - current->begin));
       if (!extent || *extent <= 0 || (*extent & (*extent - 1)) != 0 ||
           total > std::numeric_limits<int64_t>::max() / *extent) {
-        return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+        return LoopAwareMutator::Mutate_(node, mode);
       }
       total *= *extent;
       bits = std::max(bits, current->var.ty().bits());
@@ -108,7 +111,7 @@ protected:
                     : nullptr;
     }
     if (loops.size() < 2) {
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     }
     if (total > std::numeric_limits<int32_t>::max()) {
       bits = 64;
@@ -124,16 +127,19 @@ protected:
     ffi::Map<PrimVar, PrimExpr> replacements;
     int64_t stride = 1;
     for (size_t axis = loops.size(); axis-- > 0;) {
-      PrimExpr index = FloorMod(FloorDiv(fused_var, MakeConst(type, stride)),
-                                MakeConst(type, extents[axis]));
-      replacements.Set(loops[axis]->var,
-                       Cast(loops[axis]->var.ty(), analyzer_->Simplify(index)));
+      PrimExpr index =
+          FloorMod(FloorDiv(fused_var, tl::MakeConst(type, stride)),
+                   tl::MakeConst(type, extents[axis]));
+      replacements.Set(
+          loops[axis]->var,
+          Cast(loops[axis]->var.ty(), tl::arith::Simplify(analyzer_, index)));
       stride *= extents[axis];
     }
-    PrimExpr extent = MakeConst(type, total);
+    PrimExpr extent = tl::MakeConst(type, total);
     Stmt body = Substitute(loops.back()->body, replacements);
-    For result(fused_var, MakeConst(type, 0), extent, MakeConst(type, 1),
-               ForKind::kParallel, SeqStmt(body), node->annotations, node->loc);
+    For result(fused_var, tl::MakeConst(type, 0), extent,
+               tl::MakeConst(type, 1), ForKind::kParallel, SeqStmt(body),
+               node->annotations, node->loc);
     if (auto annotation = node->annotations.Get(attr::kParallelLoopLayout)) {
       auto layout = annotation.value().as_or_throw<Fragment>();
       result.CopyOnWrite()->annotations.Set(

@@ -1,8 +1,14 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file simplify.cc
  * \brief Statement simplifier based on analyzer and remove useless parameters
  * of TL PrimFunc.
  */
+
+#include "compat/region.h"
+#include "transform/common/loop_aware_mutator.h"
 
 #include "compat/expr.h"
 #include "compat/visit.h"
@@ -93,7 +99,7 @@ bool ContainsVolatileStorage(const tirx::Function &function) {
   return found;
 }
 
-class UnusedBindRemover : public tirx::StmtExprMutator {
+class UnusedBindRemover : public tvm::tl::StmtExprMutator {
 public:
   UnusedBindRemover(std::unordered_set<const VarNode *> used,
                     bool volatile_storage)
@@ -118,15 +124,15 @@ private:
       changed = true;
       return SeqStmt({}, node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
   std::unordered_set<const VarNode *> used_;
   bool volatile_storage_;
 };
 
-class StmtSimplifier : public tirx::StmtExprMutatorWithAnalyzer {
+class StmtSimplifier : public ::tvm::tl::LoopAwareMutator {
 public:
-  using Parent = tirx::StmtExprMutatorWithAnalyzer;
+  using Parent = ::tvm::tl::LoopAwareMutator;
   using Parent::Mutate;
 
   StmtSimplifier(sym::Analyzer analyzer, SimplifyConfig config,
@@ -155,11 +161,11 @@ private:
   };
 
   PrimExpr SimplifyBoolean(const PrimExpr &expression) {
-    PrimExpr simplified = analyzer_->Simplify(expression);
-    if (analyzer_->CanProve(simplified)) {
+    PrimExpr simplified = tl::arith::Simplify(analyzer_, expression);
+    if (tl::arith::CanProve(analyzer_, simplified)) {
       return IntImm::Bool(true);
     }
-    if (analyzer_->CanProve(!simplified)) {
+    if (tl::arith::CanProve(analyzer_, !simplified)) {
       return IntImm::Bool(false);
     }
     return simplified;
@@ -192,7 +198,7 @@ private:
       return false;
     }
     for (size_t axis = 0; axis < first.size(); ++axis) {
-      if (!analyzer_->CanProve(first[axis] == second[axis])) {
+      if (!tl::arith::CanProve(analyzer_, first[axis] == second[axis])) {
         return false;
       }
     }
@@ -219,7 +225,8 @@ private:
       if (tensor.same_as(known.tensor) &&
           indices.size() == known.indices.size()) {
         for (size_t axis = 0; axis < indices.size(); ++axis) {
-          if (analyzer_->CanProve(indices[axis] != known.indices[axis])) {
+          if (tl::arith::CanProve(analyzer_,
+                                  indices[axis] != known.indices[axis])) {
             return false;
           }
         }
@@ -237,18 +244,18 @@ private:
     }
     auto value =
         std::move(result).ValueOrUnchanged(input).as_or_throw<PrimExpr>();
-    return analyzer_->Simplify(value);
+    return tl::arith::Simplify(analyzer_, value);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const FloorDivNode *node,
                                      ffi::InplaceMode mode) final {
     PrimExpr original = ffi::GetRef<PrimExpr>(node);
     PrimExpr value = Parent::Mutate_(node, mode).ValueOrUnchanged(original);
-    auto bound = analyzer_->const_int_bound(value);
+    auto bound = tl::arith::ConstIntBoundOf(analyzer_, value);
     if (bound->min_value == bound->max_value &&
         bound->min_value != sym::ConstIntBound::kNegInf &&
         bound->max_value != sym::ConstIntBound::kPosInf) {
-      return MakeConst(value.ty(), bound->min_value);
+      return tl::MakeConst(value.ty(), bound->min_value);
     }
     return value;
   }
@@ -302,7 +309,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const BindNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto binding = StmtExprMutator::Mutate_(node, mode)
+    auto binding = tvm::tirx::StmtExprMutator::Mutate_(node, mode)
                        .ValueOrUnchanged(original)
                        .as_or_throw<Bind>();
     if (auto tensor = binding->var.as<tirx::TensorVar>()) {
@@ -332,7 +339,7 @@ private:
                           value->as<FloatImmNode>() || value->as<VarNode>() ||
                           value->ty().MatchesCode(kDLInt);
       if (config_->enable_simplify_let_inline && inline_value) {
-        analyzer_->Bind(variable.value(), value.value());
+        tl::arith::Bind(analyzer_, variable.value(), value.value());
         VarRemapSet(variable.value(), value.value());
       }
     }
@@ -345,12 +352,12 @@ private:
     PrimExpr substituted = Substitute(condition, condition_bindings_);
     PrimExpr value = Mutate(substituted, mode).ValueOrUnchanged(substituted);
     propagate_now_ = saved;
-    value = analyzer_->Simplify(value);
+    value = tl::arith::Simplify(analyzer_, value);
     if (config_->transitively_prove_inequalities) {
-      if (analyzer_->CanProve(value)) {
+      if (tl::arith::CanProve(analyzer_, value)) {
         return IntImm::Bool(true);
       }
-      if (analyzer_->CanProve(!value)) {
+      if (tl::arith::CanProve(analyzer_, !value)) {
         return IntImm::Bool(false);
       }
     }
@@ -382,7 +389,7 @@ private:
       }
       auto body =
           Mutate(selected.value(), mode).ValueOrUnchanged(selected.value());
-      return RegionStmt(tirx::scope_op(), {}, {}, DictAttrs(), body, {},
+      return RegionStmt(::tvm::tl::scope_op(), {}, {}, DictAttrs(), body, {},
                         node->loc);
     }
     auto incoming = known_;
@@ -404,8 +411,8 @@ private:
     if (node->else_case) {
       constraint_scope_.WithNewScope([&]() {
         if (SideEffect(condition) == CallEffectKind::kPure) {
-          constraint_scope_.Current().Emplace(analyzer_,
-                                              analyzer_->Simplify(!predicate));
+          constraint_scope_.Current().Emplace(
+              analyzer_, tl::arith::Simplify(analyzer_, !predicate));
         }
         else_case = Mutate(node->else_case.value(), mode)
                         .ValueOrUnchanged(node->else_case.value());
@@ -421,14 +428,16 @@ private:
         SideEffect(node->begin) == CallEffectKind::kPure &&
         SideEffect(node->end) == CallEffectKind::kPure &&
         SideEffect(node->step) == CallEffectKind::kPure &&
-        analyzer_->CanProve((node->step > 0 && node->begin >= node->end) ||
-                            (node->step < 0 && node->begin <= node->end))) {
+        tl::arith::CanProve(analyzer_,
+                            (node->step > 0 && node->begin >= node->end) ||
+                                (node->step < 0 && node->begin <= node->end))) {
       return SeqStmt({}, node->loc);
     }
     known_.clear();
-    auto result = !preserve_ws_schedule_ && analyzer_->CanProve(node->step > 0)
-                      ? Parent::Mutate_(node, mode)
-                      : StmtExprMutator::Mutate_(node, mode);
+    auto result =
+        !preserve_ws_schedule_ && tl::arith::CanProve(analyzer_, node->step > 0)
+            ? Parent::Mutate_(node, mode)
+            : tvm::tirx::StmtExprMutator::Mutate_(node, mode);
     known_.clear();
     return result;
   }
@@ -444,7 +453,7 @@ private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
     const auto *operation = node->op.as<OpNode>();
-    bool transparent = node->op.same_as(tirx::scope_op()) ||
+    bool transparent = node->op.same_as(::tvm::tl::scope_op()) ||
                        (operation && operation->name == "tl.scope");
     if (!transparent) {
       known_.clear();
@@ -504,7 +513,7 @@ private:
     if (config_->apply_constraints_to_boolean_branches &&
         SideEffect(left) == CallEffectKind::kPure &&
         SideEffect(right) == CallEffectKind::kPure) {
-      With<sym::ConstraintContext> constraint(analyzer_, left);
+      With<tl::arith::ConstraintContext> constraint(analyzer_, left);
       right = Mutate(right, mode).ValueOrUnchanged(right);
       right = SimplifyBoolean(right);
     } else {
@@ -513,7 +522,7 @@ private:
     if (config_->apply_constraints_to_boolean_branches &&
         SideEffect(left) == CallEffectKind::kPure &&
         SideEffect(right) == CallEffectKind::kPure) {
-      With<sym::ConstraintContext> constraint(analyzer_, right);
+      With<tl::arith::ConstraintContext> constraint(analyzer_, right);
       left = SimplifyBoolean(left);
     }
     return left && right;
@@ -526,16 +535,16 @@ private:
     bool pure = SideEffect(left) == CallEffectKind::kPure &&
                 SideEffect(right) == CallEffectKind::kPure;
     if (config_->apply_constraints_to_boolean_branches && pure) {
-      With<sym::ConstraintContext> constraint(analyzer_,
-                                              analyzer_->Simplify(!left));
+      With<tl::arith::ConstraintContext> constraint(
+          analyzer_, tl::arith::Simplify(analyzer_, !left));
       right = Mutate(right, mode).ValueOrUnchanged(right);
       right = SimplifyBoolean(right);
     } else {
       right = Mutate(right, mode).ValueOrUnchanged(right);
     }
     if (config_->apply_constraints_to_boolean_branches && pure) {
-      With<sym::ConstraintContext> constraint(analyzer_,
-                                              analyzer_->Simplify(!right));
+      With<tl::arith::ConstraintContext> constraint(
+          analyzer_, tl::arith::Simplify(analyzer_, !right));
       left = SimplifyBoolean(left);
     }
     bool stable_reads = !volatile_storage_ &&

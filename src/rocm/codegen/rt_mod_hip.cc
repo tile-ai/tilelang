@@ -1,16 +1,40 @@
+#include "transform/tirx_passes.h"
+
 #include "backend/common/codegen/native_codegen.h"
 #include "codegen_hip.h"
 #include "config.h"
+#include "tirx_compat/build_common.h"
+#include "tirx_compat/rocm_fallback_module.h"
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/support/env.h>
 #include <tvm/tirx/transform.h>
 
 namespace tvm::codegen {
 namespace {
 
+ffi::Module BuildHIPSourceModule(IRModule module, ffi::String source,
+                                 ffi::Optional<ffi::Bytes> binary) {
+  auto functions = ExtractFuncInfo(module);
+  ffi::Map<ffi::String, ffi::String> sources{{"hip", source}};
+  if (binary) {
+    TVM_FFI_CHECK(binary.value().size() != 0, ValueError)
+        << "ROCm compilation returned an empty binary";
+    if (!support::GetEnv<bool>("TVM_TIRX_COMPILE_FORCE_FALLBACK", false)) {
+      if (auto create = ffi::Function::GetGlobal("ffi.Module.create.rocm")) {
+        return (*create)(*binary, "hsaco", functions, sources)
+            .cast<ffi::Module>();
+      }
+    }
+  }
+  return target::ROCmFallbackModuleCreate(binary.value_or(ffi::Bytes()),
+                                          "hsaco", std::move(functions),
+                                          std::move(sources));
+}
+
 ffi::Module BuildTileLangHIP(IRModule module, Target target, bool source_only) {
   module = tl::PrepareNativeCodegen(std::move(module), target);
-  module = tirx::transform::StmtSimplify()(std::move(module));
+  module = tvm::tl::tirx_passes::StmtSimplify()(std::move(module));
   CodeGenTileLangHIP generator;
   generator.Init(false);
   generator.ConfigureModule(module);
@@ -36,15 +60,15 @@ ffi::Module BuildTileLangHIP(IRModule module, Target target, bool source_only) {
       binary = ffi::Bytes(text.data(), text.size());
     }
   }
-  return ffi::Function::GetGlobalRequired("target.build.rocm_from_source")(
-             module, source, binary)
-      .cast<ffi::Module>();
+  return BuildHIPSourceModule(std::move(module), std::move(source),
+                              std::move(binary));
 }
 
 } // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   ffi::reflection::GlobalDef()
+      .def("tl.codegen.rocm_from_source", BuildHIPSourceModule)
       .def("target.build.tilelang_hip",
            [](IRModule module, Target target) {
              return BuildTileLangHIP(std::move(module), std::move(target),

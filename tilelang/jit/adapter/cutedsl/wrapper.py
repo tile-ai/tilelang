@@ -1,6 +1,8 @@
 """CuTe compilation and launch metadata derived from native TIRx modules."""
 
-from tvm_tirx import ir, sym, tirx
+from tilelang._compat import ir
+from tvm_tirx import tirx
+from tilelang._compat import sym
 
 from tilelang._compat.stmt_functor import ir_transform, post_order_visit
 from tilelang.jit.adapter.native import _with_cuda_stream, raw_host_function

@@ -1,6 +1,6 @@
 # Installation Guide
 
-This checkout uses standalone `tvm_tirx`; it does not contain or support the former `3rdparty/tvm` submodule. Build and install the paired, patched dependency described in [the migration guide](../../MIGRATION_TIRX.md) before building TileLang wheels. An unpatched `apache-tvm-tirx==0.1.0a2` package does not provide the required compiler extensions. PyPI and nightly commands in this guide refer to published releases rather than the local migration.
+This checkout uses unmodified standalone `tvm_tirx` source at the commit pinned in `TVM_TIRX_COMMIT`; it does not contain the former `3rdparty/tvm` submodule. Build and install `apache-tvm-tirx==0.1.0a2` with the C++ exports and backend settings described in [the migration guide](../../MIGRATION_TIRX.md) before building TileLang wheels. No TIRx source patch is required, but an arbitrary prebuilt wheel may lack those exports. PyPI and nightly commands in this guide refer to published releases rather than the local migration.
 
 ## Installing with pip
 

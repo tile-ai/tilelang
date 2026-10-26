@@ -53,7 +53,7 @@ def simplify_and_compare(before, expected, config=None):
         def visit(node):
             if (
                 isinstance(node, ir.RegionStmt)
-                and node.op.name == "tirx.scope"
+                and node.op.name == "tl.scope"
                 and not len(node.attrs)
                 and not node.body_params
                 and not node.result_vars
@@ -848,7 +848,7 @@ def test_simplify_keeps_bind_reading_volatile_buffer(annotation):
         allocation = ir.Bind(source.tensor, ir.Call("tirx.alloc_tensor", [], attrs=allocation_attrs, ty_args=[source.tensor.ty]))
         body = ir.SeqStmt([allocation, alias.declare(source.data), body])
         if annotation == "volatile_scope":
-            body = ir.RegionStmt("tirx.scope", [], [], ir.DictAttrs({"volatile_scope": source.tensor}), body)
+            body = ir.RegionStmt("tl.scope", [], [], ir.DictAttrs({"volatile_scope": source.tensor}), body)
         return tvm.IRModule.from_expr(tirx.PrimFunc([], body))
 
     volatile_read = tirx.Bind(value, alias.load(0))
@@ -929,7 +929,7 @@ def test_simplify_keeps_bind_used_in_metadata_objects(site):
     body = tirx.BufferStore(output, 1.0, [0])
 
     if site == "region":
-        body = ir.RegionStmt("tirx.scope", [], [], ir.DictAttrs(metadata), body)
+        body = ir.RegionStmt("tl.scope", [], [], ir.DictAttrs(metadata), body)
     elif site == "allocation":
         scratch = tirx.decl_buffer((1,), "float32", scope="local")
         body = tirx.SeqStmt([ir.Bind(scratch, ir.Call("tirx.alloc_tensor", [], attrs=metadata, ty_args=[scratch.ty])), body])

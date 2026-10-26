@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
@@ -38,7 +39,7 @@ def test_signed_loops_detect_nonadjacent_carried_conflicts(bounds, cross_thread)
 
 
 @pytest.mark.parametrize("bounds", [(0, 7, 1), (12, -2, -2)])
-def test_distant_loop_carried_exchange_executes(bounds):
+def test_distant_loop_carried_exchange_executes(bounds, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
@@ -47,7 +48,7 @@ def test_distant_loop_carried_exchange_executes(bounds):
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(module, target=target)
+    executable = compile_tilelang(module, target=target)
     output = runtime.empty((4, 128), "int32", device=device)
     executable(output)
     expected = np.arange(4, dtype="int32")[:, None] * 128 + (np.arange(128, dtype="int32") + 64) % 128

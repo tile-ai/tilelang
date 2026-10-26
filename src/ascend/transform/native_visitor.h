@@ -1,5 +1,8 @@
+#include "compat/metadata.h"
 #ifndef TILELANG_ASCEND_TRANSFORM_NATIVE_VISITOR_H_
 #define TILELANG_ASCEND_TRANSFORM_NATIVE_VISITOR_H_
+
+#include "transform/common/loop_aware_mutator.h"
 
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/stmt_functor_with_analyzer.h>
@@ -65,10 +68,10 @@ protected:
 #undef TL_ASCEND_MUTATE_EXPR
 };
 
-using NativeMutator = NativeMutatorBase<tirx::StmtExprMutator>;
-using AnalyzerMutator = NativeMutatorBase<tirx::StmtExprMutatorWithAnalyzer>;
+using NativeMutator = NativeMutatorBase<tvm::tl::StmtExprMutator>;
+using AnalyzerMutator = NativeMutatorBase<::tvm::tl::LoopAwareMutator>;
 
-class AnalysisVisitor : public tirx::StmtExprVisitor {
+class AnalysisVisitor : public tvm::tl::StmtExprVisitor {
 public:
   void VisitStmt(const Stmt &statement) { Visit(statement); }
   void VisitExpr(const Expr &expression) { Visit(expression); }
@@ -77,7 +80,7 @@ public:
 protected:
 #define TL_ASCEND_VISIT_STMT(Node)                                             \
   virtual void VisitStmt_(const Node *node) {                                  \
-    tirx::StmtExprVisitor::Visit_(node);                                       \
+    tvm::tl::StmtExprVisitor::Visit_(node);                                    \
   }                                                                            \
   ffi::Optional<ffi::VisitInterrupt> Visit_(const Node *node) override {       \
     VisitStmt_(node);                                                          \
@@ -99,7 +102,7 @@ protected:
 
 #define TL_ASCEND_VISIT_EXPR(Node)                                             \
   virtual void VisitExpr_(const Node *node) {                                  \
-    tirx::StmtExprVisitor::Visit_(node);                                       \
+    tvm::tl::StmtExprVisitor::Visit_(node);                                    \
   }                                                                            \
   ffi::Optional<ffi::VisitInterrupt> Visit_(const Node *node) override {       \
     VisitExpr_(node);                                                          \

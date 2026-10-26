@@ -1,7 +1,9 @@
 #include "common/pipeline_async.h"
 #include "common/pipeline_replay.h"
 #include "common/pipeline_utils.h"
+#include "compat/metadata.h"
 #include "cuda/transform/ws_analysis.h"
+#include "op/prim.h"
 
 #include <tvm/tirx/transform.h>
 
@@ -59,8 +61,8 @@ For NarrowPipelineGuard(For loop) {
     upper = std::clamp(upper, lower, *end);
     SeqStmt body = conditional->then_case;
     loop.CopyOnWrite()->body = body;
-    loop.CopyOnWrite()->begin = MakeConst(loop->begin.ty(), lower);
-    loop.CopyOnWrite()->end = MakeConst(loop->end.ty(), upper);
+    loop.CopyOnWrite()->begin = tl::MakeConst(loop->begin.ty(), lower);
+    loop.CopyOnWrite()->end = tl::MakeConst(loop->end.ty(), upper);
     begin = lower;
     end = upper;
   }
@@ -90,7 +92,7 @@ bool PipelineHasTransitiveTma(const PipelineBody &body, const Target &target) {
   return false;
 }
 
-class PipelineAsyncOccurrences : public StmtExprVisitor {
+class PipelineAsyncOccurrences : public tvm::tl::StmtExprVisitor {
 public:
   std::vector<const CallNode *> calls;
   bool manual_schedule = false;
@@ -98,16 +100,16 @@ public:
 private:
   Optional<VisitInterrupt> Visit_(const CallNode *node) final {
     calls.push_back(node);
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const RegionStmtNode *node) final {
     manual_schedule |= node->attrs->dict.count("tl.ws_schedule") != 0;
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 };
 
-class ClosedPipelineCPAsync : public StmtExprMutator {
+class ClosedPipelineCPAsync : public tvm::tl::StmtExprMutator {
 public:
   SeqStmt Run(const SeqStmt &body) {
     PostOrderVisit(body, [&](const ObjectRef &object) {
@@ -197,7 +199,7 @@ private:
   std::unordered_set<const StmtNode *> controls_;
 };
 
-class PipelinePlanner : public StmtExprMutator {
+class PipelinePlanner : public tvm::tl::StmtExprMutator {
 public:
   PipelinePlanner(Target target, PipelineReadOnlySet readonly)
       : target_(std::move(target)), readonly_(std::move(readonly)) {}
@@ -207,7 +209,7 @@ private:
     MemoryAliases saved = aliases_;
     auto saved_threads = threads_;
     auto saved_constraints = constraints_;
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     aliases_ = std::move(saved);
     threads_ = std::move(saved_threads);
     constraints_ = std::move(saved_constraints);
@@ -225,7 +227,7 @@ private:
         constraints_.AddConstr(node->var.as_or_throw<PrimVar>(),
                                Range(0, thread_extents_[axis]));
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
@@ -242,14 +244,14 @@ private:
         if (auto variable = threads_.Get(axis))
           constraints_.AddConstr(*variable, Range(0, extents.value()[axis]));
     }
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     constraints_ = std::move(previous);
     thread_extents_ = std::move(previous_extents);
     return result;
   }
 
   UnchangedOr<Stmt> Mutate_(const ForNode *node, InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(node, mode)
+    For loop = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(GetRef<For>(node))
                    .as_or_throw<For>();
     auto explicit_stage = loop->annotations.Get("tl_pipeline_stage");

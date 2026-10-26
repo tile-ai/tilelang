@@ -1,3 +1,4 @@
+#include "compat/analyzer.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/transform.h>
@@ -100,10 +101,11 @@ public:
 private:
   PrimExpr Halve(const PrimExpr &value, const char *description) {
     PrimExpr pair = IntImm(value.ty(), 2);
-    TVM_FFI_CHECK(analyzer_->CanProve(FloorMod(value, pair) == 0), ValueError)
+    TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, FloorMod(value, pair) == 0),
+                  ValueError)
         << "RewriteFp4ToFp4x2: " << description
         << " must be even (two fp4 codes per byte), got " << value;
-    return analyzer_->Simplify(FloorDiv(value, pair));
+    return tl::arith::Simplify(analyzer_, FloorDiv(value, pair));
   }
 
   Type RewriteType(const Type &type) {
@@ -125,7 +127,8 @@ private:
              "pair axis";
       auto shape = tensor->shape;
       auto strides = geometry.value().get<1>();
-      TVM_FFI_CHECK(analyzer_->CanProve(strides.back() == 1), ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, strides.back() == 1),
+                    ValueError)
           << "RewriteFp4ToFp4x2 requires contiguous innermost fp4 elements";
       shape.Set(shape.size() - 1, Halve(shape.back(), "fp4 shape"));
       ffi::Optional<tirx::Layout> layout;
@@ -156,7 +159,8 @@ private:
         << "RewriteFp4ToFp4x2 expects flat accesses; run FlattenBuffer first";
     PrimExpr index = VisitExpr(indices[0]).as_or_throw<PrimExpr>();
     if (const auto *ramp = index.as<RampNode>()) {
-      TVM_FFI_CHECK(analyzer_->CanProve(ramp->stride == 1), ValueError)
+      TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, ramp->stride == 1),
+                    ValueError)
           << "RewriteFp4ToFp4x2 requires contiguous fp4 vector accesses";
       PrimExpr base = Halve(ramp->base, "fp4 vector base");
       PrimExpr lanes = Halve(ramp->lanes, "fp4 vector lanes");

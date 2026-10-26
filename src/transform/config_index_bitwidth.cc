@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "../op/builtin.h"
 #include "common/index_legalizer.h"
 #include "common/int64_promoter.h"
@@ -5,17 +9,16 @@
 #include "compat/visit.h"
 #include "support/check.h"
 
-#include <tvm/tirx/data_type_rewriter.h>
+#include "transform/common/data_type_rewriter.h"
 #include <tvm/tirx/stmt_functor_with_analyzer.h>
 #include <tvm/tirx/transform.h>
 
 namespace tvm::tl {
 
-class IndexLegalizer : public tirx::StmtExprMutatorWithAnalyzer {
+class IndexLegalizer : public ::tvm::tl::LoopAwareMutator {
 public:
   explicit IndexLegalizer(sym::Analyzer analyzer)
-      : StmtExprMutatorWithAnalyzer(analyzer),
-        analyzer_context_(std::move(analyzer)) {}
+      : LoopAwareMutator(analyzer), analyzer_context_(std::move(analyzer)) {}
 
 private:
   ffi::Array<PrimExpr> Legalize(const ffi::Array<PrimExpr> &indices) {
@@ -28,7 +31,7 @@ private:
         PrimType type = expression.value().ty();
         if (!type.MatchesCode(kDLInt) || type.bits() >= 64 || !type.IsScalar())
           return;
-        auto bounds = analyzer_->const_int_bound(expression.value());
+        auto bounds = tl::arith::ConstIntBoundOf(analyzer_, expression.value());
         int64_t maximum = (int64_t{1} << (type.bits() - 1)) - 1;
         int64_t minimum = -(int64_t{1} << (type.bits() - 1));
         promote = bounds->max_value > maximum || bounds->min_value < minimum;
@@ -39,7 +42,7 @@ private:
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                      ffi::InplaceMode mode) final {
-    TensorLoad load = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    TensorLoad load = LoopAwareMutator::Mutate_(node, mode)
                           .ValueOrUnchanged(ffi::GetRef<PrimExpr>(node))
                           .as_or_throw<TensorLoad>();
     load.CopyOnWrite()->indices = Legalize(load->indices);
@@ -48,7 +51,7 @@ private:
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
-    TensorStore store = StmtExprMutatorWithAnalyzer::Mutate_(node, mode)
+    TensorStore store = LoopAwareMutator::Mutate_(node, mode)
                             .ValueOrUnchanged(ffi::GetRef<Stmt>(node))
                             .as_or_throw<TensorStore>();
     store.CopyOnWrite()->indices = Legalize(store->indices);
@@ -72,7 +75,7 @@ tvm::transform::Pass ConfigIndexBitwidth() {
     if (auto width = context->GetConfig<int64_t>(kConfigIndexBitwidth)) {
       TVM_FFI_CHECK(width.value() == 32 || width.value() == 64, ValueError)
           << "tl.config_index_bitwidth must be 32 or 64";
-      function = ffi::make_object<tirx::IndexDataTypeNormalizer>(
+      function = ffi::make_object<tl::IndexDataTypeNormalizer>(
                      PrimType::Int(width.value()))
                      ->Rewrite(function);
     }

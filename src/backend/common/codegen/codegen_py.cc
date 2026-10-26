@@ -1,8 +1,10 @@
+#include "compat/analyzer.h"
 /*!
  * \file codegen_py.cc
  */
-#include "codegen_py.h"
 #include "backend/common/codegen/codegen_utils.h"
+#include "codegen_py.h"
+#include "compat/region.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
@@ -60,7 +62,7 @@ PrimExpr PythonTensorSize(const TensorVar &tensor) {
   PrimExpr size(1);
   for (const auto &extent : tensor.shape())
     size = size * extent;
-  return sym::Analyzer()->Simplify(size);
+  return tl::arith::Simplify(sym::Analyzer(), size);
 }
 
 void CodeGenTileLangPY::PrintType(const Type &type, std::ostream &os) {
@@ -573,7 +575,7 @@ void CodeGenTileLangPY::PrintAllocTensor_(const BindNode *op,
 }
 
 void CodeGenTileLangPY::Dispatch_(const RegionStmtNode *op) {
-  TVM_FFI_CHECK(op->op.same_as(tirx::scope_op()), ValueError)
+  TVM_FFI_CHECK(op->op.same_as(::tvm::tl::scope_op()), ValueError)
       << "Python codegen does not support region " << op->op;
   PrintStmt_(op->body);
 }

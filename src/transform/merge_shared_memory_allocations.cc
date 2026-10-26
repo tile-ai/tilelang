@@ -1,5 +1,7 @@
 #include "common/memory_access.h"
 #include "common/storage_size.h"
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
 
 #include <tvm/tirx/op/region.h>
 #include <tvm/tirx/transform.h>
@@ -73,7 +75,7 @@ const CallNode *CompletedTmaStore(const SeqStmtNode *sequence, size_t index) {
   return remaining && remaining->value == 0 ? store.call : nullptr;
 }
 
-class SharedAllocationCollector : public StmtExprVisitor {
+class SharedAllocationCollector : public tvm::tl::StmtExprVisitor {
 public:
   explicit SharedAllocationCollector(MemoryAliases aliases)
       : aliases_(std::move(aliases)) {}
@@ -106,14 +108,14 @@ private:
     bool previous = concurrent_;
     if (auto concurrent = node->attrs->dict.Get("tl.ws_concurrent"))
       concurrent_ |= GetIntAnnotation(*concurrent).value_or(0) != 0;
-    auto result = StmtExprVisitor::Visit_(node);
+    auto result = tvm::tl::StmtExprVisitor::Visit_(node);
     concurrent_ = previous;
     return result;
   }
 
   Optional<VisitInterrupt> Visit_(const ForNode *node) final {
     parameters.emplace(node->body.get(), Array<Var>{node->var});
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const BindNode *node) final {
@@ -157,7 +159,7 @@ private:
                         name.find("wgmma") != std::string::npos ||
                         name.find("tcgen05") != std::string::npos);
     }
-    auto result = StmtExprVisitor::Visit_(node);
+    auto result = tvm::tl::StmtExprVisitor::Visit_(node);
     asynchronous_ = saved;
     inside_completed_store_ = previous_completed;
     return result;
@@ -182,7 +184,7 @@ struct SharedSlot {
   bool reusable;
 };
 
-class SharedArenaRewriter : public StmtExprMutator {
+class SharedArenaRewriter : public tvm::tl::StmtExprMutator {
 public:
   std::unordered_map<const BindNode *, Stmt> replacements;
   std::unordered_map<const SeqStmtNode *, std::map<size_t, Array<Stmt>>>
@@ -192,7 +194,7 @@ private:
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
     if (auto found = replacements.find(node); found != replacements.end())
       return found->second;
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
@@ -320,8 +322,8 @@ private:
           ValueError)
           << "Shared allocation annotations must be lowered before arena "
              "merging";
-      PrimExpr bytes =
-          analyzer->Simplify(GetBufferStorageSizeBytes(allocation->tensor));
+      PrimExpr bytes = tl::arith::Simplify(
+          analyzer, GetBufferStorageSizeBytes(allocation->tensor));
       TVM_FFI_CHECK(SideEffect(bytes) == CallEffectKind::kPure, ValueError)
           << "Shared allocation sizes must be side-effect-free";
       for (const Var &dependency : tvm::UndefinedVars(bytes))
@@ -350,7 +352,7 @@ private:
                      (aggressive_ ||
                       candidate.type.WithLanes(1) ==
                           allocation->tensor.dtype().WithLanes(1)) &&
-                     analyzer->CanProve(bytes <= candidate.bytes);
+                     tl::arith::CanProve(analyzer, bytes <= candidate.bytes);
             });
       }
       if (slot != slots.end()) {
@@ -358,14 +360,14 @@ private:
         slot->last = last;
         slot->reusable = reusable;
       } else {
-        PrimExpr offset =
-            analyzer->Simplify(FloorDiv(total + IntImm::Int64(alignment - 1),
-                                        IntImm::Int64(alignment)) *
-                               IntImm::Int64(alignment));
+        PrimExpr offset = tl::arith::Simplify(
+            analyzer, FloorDiv(total + IntImm::Int64(alignment - 1),
+                               IntImm::Int64(alignment)) *
+                          IntImm::Int64(alignment));
         slots.push_back({offset, bytes, allocation->tensor.dtype(), alignment,
                          last, reusable});
         offsets.push_back(offset);
-        total = analyzer->Simplify(offset + bytes);
+        total = tl::arith::Simplify(analyzer, offset + bytes);
       }
     }
     TensorType arena_type({total}, PrimType::UInt(8),

@@ -1,4 +1,6 @@
 #include "codegen_ascend.h"
+#include "compat/analyzer.h"
+#include "op/prim.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,7 +34,7 @@ using ffi::GetRef;
 using namespace prim;
 
 namespace {
-PrimExpr MakeZero(PrimType type) { return MakeConst(type, 0); }
+PrimExpr MakeZero(PrimType type) { return tl::MakeConst(type, 0); }
 bool IsOne(const PrimExpr &value) { return tl::GetConstInt(value) == 1; }
 bool is_zero(const PrimExpr &value) { return tl::GetConstInt(value) == 0; }
 ffi::Map<ffi::String, ffi::Any> Attributes(const CallNode *node) {
@@ -2093,8 +2095,8 @@ void CodeGenTileLangAscend::Dispatch_(const CallNode *op, std::ostream &os) {
       const auto *ramp = index.as<RampNode>();
       PrimExpr base = ramp ? ramp->base : index;
       int lanes = PythonDType(index).lanes();
-      PrimExpr elem_idx = analyzer_->Simplify(
-          floordiv(base, MakeConst(PythonDType(base), lanes)));
+      PrimExpr elem_idx = tl::arith::Simplify(
+          analyzer_, floordiv(base, tl::MakeConst(PythonDType(base), lanes)));
       os << "(&(" << GetVarID(buf_var) << "[";
       PrintExpr(elem_idx, os);
       os << "]))";
@@ -2114,9 +2116,10 @@ void CodeGenTileLangAscend::Dispatch_(const CallNode *op, std::ostream &os) {
           const auto *ramp = idx.as<RampNode>();
           ICHECK(ramp) << "Expected a Ramp index for packed fp4 L0/L1 access, "
                        << "got " << idx;
-          idx = analyzer_->Simplify(
-              floordiv(ramp->base, MakeConst(PythonDType(ramp->base),
-                                             PythonDType(idx).lanes())));
+          idx = tl::arith::Simplify(
+              analyzer_,
+              floordiv(ramp->base, tl::MakeConst(PythonDType(ramp->base),
+                                                 PythonDType(idx).lanes())));
         }
         if (!is_zero(idx)) {
           os << " + ";
@@ -2138,9 +2141,11 @@ void CodeGenTileLangAscend::Dispatch_(const CallNode *op, std::ostream &os) {
       PrimExpr base = ramp ? ramp->base : index;
       int lanes = PythonDType(index).lanes();
       PrimExpr byte_idx =
-          lanes > 1 ? analyzer_->Simplify(
-                          floordiv(base, MakeConst(PythonDType(base), lanes)))
-                    : base;
+          lanes > 1
+              ? tl::arith::Simplify(
+                    analyzer_,
+                    floordiv(base, tl::MakeConst(PythonDType(base), lanes)))
+              : base;
       os << "(&(((";
       PrintStorageScope(runtime::MemoryScope(fp4_scope), os);
       os << "float4_e2m1x2_t*)" << GetVarID(buf_var) << ")[";
@@ -2795,8 +2800,8 @@ bool CodeGenTileLangAscend::VectorAccessIsAligned(const PrimExpr &index,
   }
   // Prove the ramp base is divisible by the vector width.
   PrimExpr ramp_base = base.Eval();
-  PrimExpr lanes_const = MakeConst(PythonDType(ramp_base), lanes);
-  return analyzer_->CanProveEqual(floormod(ramp_base, lanes_const),
+  PrimExpr lanes_const = tl::MakeConst(PythonDType(ramp_base), lanes);
+  return tl::arith::CanProveEqual(analyzer_, floormod(ramp_base, lanes_const),
                                   MakeZero(PythonDType(ramp_base)));
 }
 
@@ -2844,11 +2849,11 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const TensorLoadNode *op,
     }
     PrimExpr lane_index =
         ramp ? (ramp->base +
-                ramp->stride * MakeConst(PythonDType(ramp->base), i))
+                ramp->stride * tl::MakeConst(PythonDType(ramp->base), i))
              : index;
     std::string lane_ref =
         GetBufferRef(elem_dtype, op->source.as_or_throw<TensorVar>().get(),
-                     analyzer_->Simplify(lane_index));
+                     tl::arith::Simplify(analyzer_, lane_index));
     init << lane_ref;
   }
   init << "}";
@@ -2951,8 +2956,8 @@ bool CodeGenTileLangAscend::EmitOutOfVFBroadcastStore(
   SSAOperationScope ssa_scope(this);
   std::string value = SSAGetID(PrintExpr(broadcast->value), elem_dtype);
   for (int i = 0; i < lanes->value; ++i) {
-    PrimExpr lane_index =
-        analyzer_->Simplify(ramp->base + MakeConst(PythonDType(ramp->base), i));
+    PrimExpr lane_index = tl::arith::Simplify(
+        analyzer_, ramp->base + tl::MakeConst(PythonDType(ramp->base), i));
     PrintIndent();
     stream << GetBufferRef(elem_dtype, op->dest.as_or_throw<TensorVar>().get(),
                            lane_index)
@@ -2997,10 +3002,10 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const TensorStoreNode *op) {
   std::string value = SSAGetID(PrintExpr(op->value), value_dtype);
   for (int i = 0; i < lanes; ++i) {
     PrimExpr lane_index =
-        ramp->base + ramp->stride * MakeConst(PythonDType(ramp->base), i);
+        ramp->base + ramp->stride * tl::MakeConst(PythonDType(ramp->base), i);
     std::string lane_ref =
         GetBufferRef(elem_dtype, op->dest.as_or_throw<TensorVar>().get(),
-                     analyzer_->Simplify(lane_index));
+                     tl::arith::Simplify(analyzer_, lane_index));
     std::ostringstream lane_val;
     PrintVecElemLoad(value, value_dtype, i, lane_val);
     PrintIndent();
@@ -3204,7 +3209,8 @@ void CodeGenTileLangAscend::PrintAllocTensor(const BindNode *op,
     if (tl::IsSSBuffer(tensor)) {
       ICHECK(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 2)
           << "SS buffers require a MIX kernel with two AIVs";
-      auto elements = tl::GetConstInt(sym::Analyzer()->Simplify(
+      auto elements = tl::GetConstInt(tl::arith::Simplify(
+          sym::Analyzer(),
           floordiv(tl::GetBufferStorageSizeBytes(tensor),
                    static_cast<int64_t>(tensor.dtype().StorageBytes()))));
       ICHECK(elements.has_value() && elements.value() > 0 &&
@@ -3242,7 +3248,7 @@ void CodeGenTileLangAscend::PrintAllocTensor(const BindNode *op,
     std::string vid = AllocVarID(tensor.get());
     ffi::Optional<PrimExpr> init;
     if (!dtype.MatchesCode(kDLOpaqueHandle)) {
-      init = MakeConst(dtype, 0);
+      init = tl::MakeConst(dtype, 0);
     }
     auto init_it = annotations.find(tl::attr::kLocalVarInit);
     if (init_it != annotations.end()) {

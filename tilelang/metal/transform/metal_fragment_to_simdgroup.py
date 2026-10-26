@@ -1,6 +1,6 @@
 """Give legacy Metal GEMM accumulators a native simdgroup tensor type."""
 
-import tvm_ffi
+from tilelang._compat.structural import structural_mutate
 from tvm_tirx import ir
 from tvm_tirx.tirx.transform import function_pass
 
@@ -52,7 +52,7 @@ def _metal_fragment_to_simdgroup(function, module, context):
         allocation = ir.Call(value.op, list(value.args), attrs=value.attrs, ty_args=[variable.ty], loc=value.loc)
         return ir.Bind(variable, allocation, loc=binding.loc)
 
-    return tvm_ffi.structural_mutate(function, [(ir.Var, mutate_var), (ir.Bind, mutate_bind)])
+    return structural_mutate(function, [(ir.Var, mutate_var), (ir.Bind, mutate_bind)])
 
 
 MetalFragmentToSimdgroup = function_pass(_metal_fragment_to_simdgroup, opt_level=0, name="tl.MetalFragmentToSimdgroup")

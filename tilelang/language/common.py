@@ -177,6 +177,29 @@ from .tile_schedule import (
 )
 
 
+def scope(*, attrs=None):
+    """Create a lexical TileLang region with optional owner metadata."""
+    from tvm_tirx.tirx.script import ir_builder
+
+    return ir_builder.region("tl.scope", [], attrs=attrs)
+
+
+def launch_thread(thread_tag, extent, *, attrs=None, body_params=None):
+    from contextlib import contextmanager
+    from tvm_tirx.tirx.script import ir_builder
+
+    native = ir_builder.launch_thread(thread_tag, extent, body_params=body_params)
+    if not attrs:
+        return native
+
+    @contextmanager
+    def annotated_launch():
+        with native as thread, scope(attrs=attrs):
+            yield thread
+
+    return annotated_launch()
+
+
 def import_source(source: str | None = None):
     """Import C-like source before generated declarations and function bodies.
 
@@ -292,6 +315,7 @@ _LOCAL_EXPORTS = (
     "has_let_value",
     "im2col",
     "import_source",
+    "scope",
     "index_to_coordinates",
     "inline",
     "loop_break",

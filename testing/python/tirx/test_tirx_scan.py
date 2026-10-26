@@ -8,7 +8,7 @@ from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
 
-pytestmark = pytest.mark.usefixtures("native_layouts")
+pytestmark = pytest.mark.usefixtures("native_layouts", "native_operator_helpers")
 
 
 def scan_operator(source, destination, name="cumsum", axis=0, reverse=False):

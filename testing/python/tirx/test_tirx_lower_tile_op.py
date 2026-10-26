@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 import tvm_ffi
@@ -46,14 +44,11 @@ def cuda_target():
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("CUDA device unavailable")
-    root = Path(__file__).resolve().parents[3]
     return Target(
         {
             "kind": "cuda",
             "arch": "sm_" + device.compute_version.replace(".", ""),
-            "backend_config": {
-                "cuda": {"compiler": "nvcc", "nvcc": [f"-I{root / 'src'}", f"-I{root / '3rdparty' / 'cutlass' / 'include'}"]}
-            },
+            "backend_config": {"cuda": {"compiler": "nvcc"}},
         },
         host="c",
     )
@@ -150,7 +145,7 @@ def test_fragment_pointer_bindings_follow_physical_scope_remapping(native_layout
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("size,threads", [(256, 32), (253, 64), (31, 128)])
-def test_fragment_fill_parallel_layout_lowering_runs_on_gpu(size, threads):
+def test_fragment_fill_parallel_layout_lowering_runs_on_gpu(size, threads, compile_tilelang):
     target = cuda_target()
     source = TensorView.create("source", [size], "float32")
     output = TensorView.create("output", [size], "float32")
@@ -171,7 +166,7 @@ def test_fragment_fill_parallel_layout_lowering_runs_on_gpu(size, threads):
     body = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(threads)], [thread], None, body)
     lowered = lower(module(body, [source, output], target), target)
     assert not any(loop.kind == ir.ForKind.PARALLEL for loop in nodes(lowered, ir.For))
-    executable = tirx.compile(lowered, target=target)
+    executable = compile_tilelang(lowered, target=target)
     expected = np.arange(size, dtype="float32")
     actual = runtime.empty((size,), "float32", device=runtime.cuda(0))
     executable(runtime.tensor(expected, device=runtime.cuda(0)), actual)
@@ -181,7 +176,7 @@ def test_fragment_fill_parallel_layout_lowering_runs_on_gpu(size, threads):
 @pytest.mark.gpu
 @pytest.mark.parametrize("dtype", ["float16", "float32"])
 @pytest.mark.parametrize("predicated", [False, True])
-def test_async_copy_injection_preserves_zero_fill_and_visibility(dtype, predicated):
+def test_async_copy_injection_preserves_zero_fill_and_visibility(dtype, predicated, compile_tilelang):
     target = cuda_target()
     source = TensorView.create("source", [128], dtype)
     output = TensorView.create("output", [128], dtype)
@@ -204,7 +199,7 @@ def test_async_copy_injection_preserves_zero_fill_and_visibility(dtype, predicat
         lowered = transform("transform.VectorizeLoop", lowered, True)
         lowered = transform("transform.LowerAccessPtr", lowered)
     assert tirx.analysis.check_well_formed(lowered)
-    executable = tirx.compile(lowered, target=target)
+    executable = compile_tilelang(lowered, target=target)
     values = np.arange(128, dtype=dtype)
     actual = runtime.empty((128,), dtype, device=runtime.cuda(0))
     executable(runtime.tensor(values, device=runtime.cuda(0)), actual)
@@ -218,7 +213,7 @@ def test_async_copy_injection_preserves_zero_fill_and_visibility(dtype, predicat
 @pytest.mark.parametrize("sliced", [False, True])
 @pytest.mark.parametrize("repeat", [False, True])
 @pytest.mark.parametrize("fuse_barriers", [False, True])
-def test_tma_copy_lowering_allocates_and_reuses_native_barriers(dtype, sliced, repeat, fuse_barriers):
+def test_tma_copy_lowering_allocates_and_reuses_native_barriers(dtype, sliced, repeat, fuse_barriers, compile_tilelang):
     target = cuda_target()
     if int(runtime.cuda(0).compute_version.split(".")[0]) < 9:
         pytest.skip("TMA requires compute capability 9.0 or newer")
@@ -266,7 +261,7 @@ def test_tma_copy_lowering_allocates_and_reuses_native_barriers(dtype, sliced, r
     assert any(call.op.name == "tl.mbarrier_init" for call in nodes(lowered, ir.Call))
     if sliced:
         assert any(call.op.name == "tirx.cuda.tensormap_encode_tiled" for call in nodes(lowered, ir.Call))
-    executable = tirx.compile(lowered, target=target)
+    executable = compile_tilelang(lowered, target=target)
     values = (np.arange(np.prod(source_shape)).reshape(source_shape) % 113).astype(dtype)
     actual = runtime.tensor(np.zeros(output_shape, dtype=dtype), device=runtime.cuda(0))
     executable(runtime.tensor(values, device=runtime.cuda(0)), actual)

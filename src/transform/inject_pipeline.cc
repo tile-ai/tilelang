@@ -1,3 +1,9 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "compat/region.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "common/pipeline_async.h"
 #include "common/pipeline_replay.h"
 #include "common/pipeline_utils.h"
@@ -22,7 +28,7 @@ struct PipelineTensor {
 
 using PipelineTensorMap = std::unordered_map<const VarNode *, PipelineTensor>;
 
-class PipelineVersionRewriter : public StmtExprMutator {
+class PipelineVersionRewriter : public tvm::tl::StmtExprMutator {
 public:
   PipelineVersionRewriter(PipelineTensorMap tensors, PipelineTensorMap scalars,
                           PrimExpr iteration)
@@ -31,7 +37,7 @@ public:
 
 private:
   PrimExpr Version(const PipelineTensor &tensor) const {
-    return FloorMod(iteration_, MakeConst(iteration_.ty(), tensor.depth));
+    return FloorMod(iteration_, tl::MakeConst(iteration_.ty(), tensor.depth));
   }
 
   Array<PrimExpr> Indices(const PipelineTensor &tensor,
@@ -57,7 +63,7 @@ private:
       return TensorLoad(found->second.storage, {Version(found->second)});
     if (auto found = tensors_.find(node); found != tensors_.end())
       return found->second.storage;
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
@@ -68,7 +74,7 @@ private:
       return TensorStore(found->second.storage, {Version(found->second)}, value,
                          node->loc);
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
@@ -89,9 +95,9 @@ private:
           PrimExpr address = snapshot ? PrimExpr(*snapshot) : index;
           Range written = *found->second.written_range;
           PrimExpr condition =
-              address >= prim::cast(written->begin, address.ty()) &&
+              address >= tl::CastValue(written->begin, address.ty()) &&
               address <
-                  prim::cast(written->begin + written->extent, address.ty());
+                  tl::CastValue(written->begin + written->extent, address.ty());
           PrimExpr versioned =
               TensorLoad(found->second.storage,
                          {Version(found->second), address}, node->loc);
@@ -105,7 +111,7 @@ private:
                           Indices(found->second, node->indices, mode),
                           node->loc);
       }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
@@ -116,7 +122,7 @@ private:
         return TensorStore(
             found->second.storage, Indices(found->second, node->indices, mode),
             Mutate(node->value, mode).ValueOrUnchanged(node->value), node->loc);
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const TensorRegionNode *node,
@@ -129,11 +135,12 @@ private:
           Range written = *found->second.written_range;
           TVM_FFI_CHECK(
               node->region.size() == 1 &&
-                  analyzer->CanProve(node->region[0]->begin >=
-                                     written->begin) &&
-                  analyzer->CanProve(node->region[0]->begin +
-                                         node->region[0]->extent <=
-                                     written->begin + written->extent),
+                  tl::arith::CanProve(analyzer, node->region[0]->begin >=
+                                                    written->begin) &&
+                  tl::arith::CanProve(analyzer,
+                                      node->region[0]->begin +
+                                              node->region[0]->extent <=
+                                          written->begin + written->extent),
               ValueError)
               << "Partially versioned pipeline regions must remain inside the "
                  "overwritten interval";
@@ -147,7 +154,7 @@ private:
         return TensorRegion(found->second.storage, ranges, TensorRegionType(),
                             node->loc);
       }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
@@ -181,11 +188,12 @@ private:
       if (!attrs->dict.count(attr::kPipelineMbarPhaseExpr)) {
         attrs.CopyOnWrite()->dict.Set(
             attr::kPipelineMbarPhaseExpr,
-            FloorMod(iteration_, MakeConst(iteration_.ty(), 2)));
+            FloorMod(iteration_, tl::MakeConst(iteration_.ty(), 2)));
         call.CopyOnWrite()->attrs = attrs;
       }
     }
-    return StmtExprMutator::Mutate_(call.get(), mode).ValueOrUnchanged(call);
+    return tvm::tl::StmtExprMutator::Mutate_(call.get(), mode)
+        .ValueOrUnchanged(call);
   }
 
   PipelineTensorMap tensors_;
@@ -193,15 +201,15 @@ private:
   PrimExpr iteration_;
 };
 
-class PipelineInjector : public StmtExprMutatorWithAnalyzer {
+class PipelineInjector : public LoopAwareMutator {
 public:
   PipelineInjector(sym::AnalyzerObj *analyzer, Optional<Target> target,
                    PipelineReadOnlySet readonly)
-      : StmtExprMutatorWithAnalyzer(analyzer), target_(std::move(target)),
+      : LoopAwareMutator(analyzer), target_(std::move(target)),
         readonly_(std::move(readonly)) {}
 
 private:
-  using Base = StmtExprMutatorWithAnalyzer;
+  using Base = LoopAwareMutator;
 
   static Bind Allocate(const TensorVar &tensor,
                        Optional<Attrs> attributes = std::nullopt) {
@@ -294,8 +302,8 @@ private:
     node = nested.get();
     TVM_FFI_CHECK(node->kind == ForKind::kDefault, ValueError)
         << "Only serial loops can be software pipelined";
-    TVM_FFI_CHECK(analyzer_->CanProve(node->step > 0) ||
-                      analyzer_->CanProve(node->step < 0),
+    TVM_FFI_CHECK(tl::arith::CanProve(analyzer_, node->step > 0) ||
+                      tl::arith::CanProve(analyzer_, node->step < 0),
                   ValueError)
         << "Software-pipelined loop step must have a provably nonzero sign";
     auto replay = PipelineReplayMask(node->body, aliases_, readonly_,
@@ -340,9 +348,9 @@ private:
       return For(node->var, node->begin, node->end, node->step, node->kind,
                  SeqStmt(statements), attrs, node->loc);
     }
-    PrimExpr iterations = analyzer_->Simplify(
-        Max(MakeConst(node->var.ty(), 0),
-            -FloorDiv(node->begin - node->end, node->step)));
+    PrimExpr iterations = tl::arith::Simplify(
+        analyzer_, Max(tl::MakeConst(node->var.ty(), 0),
+                       -FloorDiv(node->begin - node->end, node->step)));
     PrimVar clock("pipeline_time", node->var.ty());
     std::unordered_map<const VarNode *, std::pair<int, int>> lifetimes;
     std::unordered_set<const VarNode *> writes, internal;
@@ -385,7 +393,7 @@ private:
         new_layouts.Set(expanded, layout.value()->Expand({PrimExpr(depth)}));
       if (!internal.count(storage)) {
         Array<Range> ranges{Range::FromMinExtent(
-            FloorMod(iterations - 1, MakeConst(iterations.ty(), depth)),
+            FloorMod(iterations - 1, tl::MakeConst(iterations.ty(), depth)),
             PrimExpr(1))};
         for (const PrimExpr &extent : original.shape())
           ranges.push_back(partial.value_or(Range(PrimExpr(0), extent)));
@@ -436,15 +444,14 @@ private:
         [&](size_t left, size_t right) { return order[left] < order[right]; });
     Array<Stmt> pipeline;
     for (size_t index : execution) {
-      PrimExpr ordinal = clock - MakeConst(clock.ty(), stages[index]);
+      PrimExpr ordinal = clock - tl::MakeConst(clock.ty(), stages[index]);
       PrimExpr iteration = node->begin + ordinal * node->step;
       Stmt statement = Substitute(body.statements[index].statement,
                                   {{node->var, iteration}});
       auto rewriter = make_object<PipelineVersionRewriter>(
           tensors, scalar_tensors, ordinal);
       statement = rewriter->Mutate(statement).ValueOrUnchanged(statement);
-      statement =
-          *tirx::RenewDef(tirx::Function({}, SeqStmt({statement})))->body;
+      statement = *tl::RenewDef(tirx::Function({}, SeqStmt({statement})))->body;
       int wait = asynchronous.WaitBefore(index, body, stages, order);
       if (wait >= 0)
         pipeline.push_back(PipelineAsyncWait(wait));
@@ -452,7 +459,7 @@ private:
         auto marker = make_object<PipelineAsyncMarker>(*target_);
         statement = marker->Mutate(statement).ValueOrUnchanged(statement);
         statement =
-            RegionStmt(scope_op(), {}, {},
+            RegionStmt(::tvm::tl::scope_op(), {}, {},
                        DictAttrs({{kPipelineCPAsyncScope, IntImm::Bool(true)}}),
                        SeqStmt({statement}));
       }
@@ -475,8 +482,8 @@ private:
     annotations.Set("tl_pipelined_num_stages", PrimExpr(distance + 1));
     annotations.Set("tl.pipeline_injected", IntImm::Bool(true));
     Stmt pipeline_loop =
-        For(clock, MakeConst(clock.ty(), 0), iterations + distance,
-            MakeConst(clock.ty(), 1), ForKind::kDefault, SeqStmt(pipeline),
+        For(clock, tl::MakeConst(clock.ty(), 0), iterations + distance,
+            tl::MakeConst(clock.ty(), 1), ForKind::kDefault, SeqStmt(pipeline),
             annotations, node->loc);
     Array<Stmt> active{pipeline_loop};
     if (!asynchronous.group_last.empty())
@@ -487,8 +494,8 @@ private:
     DictAttrs attributes;
     if (!new_layouts.empty())
       attributes = DictAttrs({{"layout_map", new_layouts}});
-    return RegionStmt(scope_op(), {}, {}, attributes, SeqStmt(prefix), {},
-                      node->loc);
+    return RegionStmt(::tvm::tl::scope_op(), {}, {}, attributes,
+                      SeqStmt(prefix), {}, node->loc);
   }
 
   MemoryAliases aliases_;

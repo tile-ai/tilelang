@@ -7,7 +7,7 @@ from tvm_tirx.target import Target
 
 from tilelang._compat.tensor import TensorView
 
-pytestmark = pytest.mark.usefixtures("native_tirx_passes", "ascend_codegen")
+pytestmark = pytest.mark.usefixtures("native_operator_helpers", "ascend_codegen")
 
 
 def _function(parameters, body):

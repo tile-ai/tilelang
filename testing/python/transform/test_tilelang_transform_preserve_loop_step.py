@@ -74,7 +74,7 @@ def _build_loop_source(backend, start, stop, step, kind, unroll_factor=None, lex
     pointer = ir.Var("output", ir.PtrType("int32"))
     body = output.store(index, index)
     if lexical_scope:
-        body = ir.RegionStmt("tirx.scope", [], [], {}, body)
+        body = ir.RegionStmt("tl.scope", [], [], {}, body)
     annotations = {} if unroll_factor is None else {"pragma_unroll_factor": unroll_factor}
     body = ir.SeqStmt(
         [

@@ -55,7 +55,9 @@ def normalize_target(target: str | Mapping[str, object] | Target, *, host=None) 
         if len(tokens) == 1:
             return Target(kind, host=normalize_target(host) if host is not None else None)
         config = {"kind": kind}
-        schema = TargetKind.options_from_name(kind)
+        schema = dict(TargetKind.options_from_name(kind))
+        if kind == "cuda":
+            schema["code"] = "Array<str>"
         index = 1
         while index < len(tokens):
             option = tokens[index]
@@ -75,4 +77,26 @@ def normalize_target(target: str | Mapping[str, object] | Target, *, host=None) 
             index += 1
     else:
         raise TypeError(f"Expected a target string, mapping, or Target, got {type(target).__name__}")
+    if config.get("kind") == "cuda" and "code" in config:
+        from tilelang.contrib.nvcc import get_target_code_list
+
+        codes = get_target_code_list(config.pop("code"))
+        backend_config = dict(config.get("backend_config", {}))
+        tilelang_config = dict(backend_config.get("tilelang", {}))
+        if "code" in tilelang_config and list(tilelang_config["code"]) != codes:
+            raise ValueError("Conflicting CUDA code and backend_config.tilelang.code")
+        tilelang_config["code"] = codes
+        backend_config["tilelang"] = tilelang_config
+        config["backend_config"] = backend_config
     return Target(config, host=normalize_target(host) if host is not None else None)
+
+
+def native_backend_target(target: Target) -> Target:
+    """Remove TileLang-owned toolchain options before native backend resolution."""
+    backend_config = dict(target.attrs.get("backend_config", {}))
+    if "tilelang" not in backend_config:
+        return target
+    backend_config.pop("tilelang")
+    config = dict(target.export())
+    config["backend_config"] = backend_config
+    return Target(config, host=target.host)

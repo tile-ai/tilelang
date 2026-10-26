@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -99,10 +102,10 @@ public:
     PrimExpr bits = PitchBits(storage.value());
     PrimExpr width = IntImm(bits.ty(), ElementBits(tensor.dtype()));
     sym::Analyzer analyzer;
-    ICHECK(analyzer->CanProveEqual(FloorMod(bits, width), 0))
+    ICHECK(tl::arith::CanProveEqual(analyzer, FloorMod(bits, width), 0))
         << "Multi-buffer pitch is not divisible by alias element width: "
         << tensor;
-    PrimExpr pitch = analyzer->Simplify(FloorDiv(bits, width));
+    PrimExpr pitch = tl::arith::Simplify(analyzer, FloorDiv(bits, width));
     PrimExpr count = IntImm(PrimType::Int(32), versions->second);
     ffi::Array<PrimExpr> shape{count};
     for (const PrimExpr &extent : tensor.shape())
@@ -216,7 +219,7 @@ private:
         info.UsesCounter()
             ? PrimExpr(TensorLoad(info.counter, {IntImm::Int32(0)}))
             : CalculateIterationCount(info.owners.front().loop);
-    return prim::cast(
+    return tl::CastValue(
         FloorMod(iteration, IntImm(iteration.ty(), info.num_versions)),
         PrimType::Int(32));
   }
@@ -310,7 +313,7 @@ private:
                                  ffi::InplaceMode mode) final {
     const MultiBufferInfo *info = Find(node->source);
     if (!info)
-      return tirx::StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     int extent =
         broadcast_storages_.count(info->storage) ? info->num_versions : 1;
     ffi::Array<Range> ranges{

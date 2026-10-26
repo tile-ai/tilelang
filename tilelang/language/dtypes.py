@@ -156,7 +156,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False):
             variable.tilelang_size_var = True
         return variable
     value = args[0]
-    return value.astype(primitive) if isinstance(value, native_ir.Expr) else native_ir.const(value, primitive)
+    return ir.cast(value, primitive)
 
 
 @functools.cache
@@ -344,7 +344,8 @@ def get_tvm_dtype(value: AnyDType) -> dtype:
 @tvm_ffi.register_global_func("tl.tvm_ffi.resolve_output_storage_dtype", override=True)
 def resolve_torch_storage_dtype(value: AnyDType) -> dtype:
     """Return the TileLang dtype describing PyTorch's physical storage."""
-    return dtype(get_tvm_dtype(value).as_torch())
+    storage = ir.custom_dtype_storage(native_ir.PrimType(get_tvm_dtype(value)))
+    return dtype(dtype(storage.dtype).as_torch())
 
 
 if TYPE_CHECKING:

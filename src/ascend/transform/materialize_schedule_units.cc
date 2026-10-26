@@ -107,7 +107,7 @@ private:
 
   Stmt RewriteStmt(const Stmt &statement) {
     if (const auto *region = statement.as<RegionStmtNode>()) {
-      if (region->op.same_as(Op::Get("tirx.scope")) &&
+      if (region->op.same_as(Op::Get("tl.scope")) &&
           region->attrs->dict.empty() && region->args.empty() &&
           region->body_params.empty() && region->result_vars.empty())
         return RewriteStmt(region->body);

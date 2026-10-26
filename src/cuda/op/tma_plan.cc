@@ -1,5 +1,7 @@
+#include "compat/analyzer.h"
 #include "cuda/op/copy.h"
 #include "layout/utils.h"
+#include "op/prim.h"
 #include "op/utils.h"
 
 #include <limits>
@@ -22,9 +24,9 @@ int64_t TMABytesFromElements(int64_t elements, PrimType type) {
 PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, PrimType type) {
   int bits = IsFP4UnpackedType(type) ? 4 : type.bits();
   PrimExpr wide = Cast(PrimType::Int(64), elements);
-  return FloorDiv(wide * MakeConst(PrimType::Int(64), bits) +
-                      MakeConst(PrimType::Int(64), 7),
-                  MakeConst(PrimType::Int(64), 8));
+  return FloorDiv(wide * tl::MakeConst(PrimType::Int(64), bits) +
+                      tl::MakeConst(PrimType::Int(64), 7),
+                  tl::MakeConst(PrimType::Int(64), 8));
 }
 
 struct BulkCopyTile {
@@ -129,13 +131,12 @@ BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
 
 PrimExpr TMABulkCopyPlan::SharedOffset(std::optional<PrimExpr> rest_idx) const {
   PrimType index_type = PrimType::Int(64);
-  PrimExpr offset = prim::cast(
+  PrimExpr offset = tl::CastValue(
       cute::AsConstOrPrimExpr(shared_offset, index_type), index_type);
   if (rest_idx.has_value()) {
-    offset =
-        offset +
-        prim::cast(cute::AsConstOrPrimExpr(rest_to_smem(*rest_idx), index_type),
-                   index_type);
+    offset = offset + tl::CastValue(cute::AsConstOrPrimExpr(
+                                        rest_to_smem(*rest_idx), index_type),
+                                    index_type);
   }
   return offset;
 }
@@ -144,20 +145,21 @@ Expr TMABulkCopyPlan::SharedPointer(std::optional<PrimExpr> rest_idx,
                                     int access_mask) const {
   PrimExpr bit_offset =
       Cast(PrimType::Int(64), SharedOffset(rest_idx)) *
-      MakeConst(PrimType::Int(64), shared_tensor.dtype().bits());
+      tl::MakeConst(PrimType::Int(64), shared_tensor.dtype().bits());
   sym::Analyzer analyzer;
-  PrimExpr byte_bits = MakeConst(PrimType::Int(64), 8);
-  TVM_FFI_CHECK(analyzer->CanProve(FloorMod(bit_offset, byte_bits) ==
-                                   MakeConst(PrimType::Int(64), 0)),
-                ValueError)
+  PrimExpr byte_bits = tl::MakeConst(PrimType::Int(64), 8);
+  TVM_FFI_CHECK(
+      tl::arith::CanProve(analyzer, FloorMod(bit_offset, byte_bits) ==
+                                        tl::MakeConst(PrimType::Int(64), 0)),
+      ValueError)
       << "TMA shared offsets must be byte aligned";
   DictAttrs attrs(ffi::Map<ffi::String, ffi::Any>{
       {attr::kAccessRegion, NormalizeToBufferRegion(shared_tensor)},
-      {attr::kAccessExtent, MakeConst(PrimType::Int(64), box_size)},
+      {attr::kAccessExtent, tl::MakeConst(PrimType::Int(64), box_size)},
       {attr::kAccessMask, PrimExpr(access_mask)}});
   return Call(shared_tensor.ty()->DataPtrType(), tirx::ptr_byte_offset_op(),
               {shared_tensor.data(),
-               analyzer->Simplify(FloorDiv(bit_offset, byte_bits))},
+               tl::arith::Simplify(analyzer, FloorDiv(bit_offset, byte_bits))},
               attrs);
 }
 
@@ -172,14 +174,14 @@ TMABulkCopyPlan::TmaCoords(std::optional<PrimExpr> rest_idx) const {
     steps = steps + rest_to_tma_mode(*rest_idx);
   }
   for (int64_t axis = 0; axis < static_cast<int64_t>(desc.rank); axis++) {
-    PrimExpr coordinate =
-        prim::cast(cute::AsConstOrPrimExpr(tma_coords[axis], coordinate_type),
-                   coordinate_type);
+    PrimExpr coordinate = tl::CastValue(
+        cute::AsConstOrPrimExpr(tma_coords[axis], coordinate_type),
+        coordinate_type);
     if (rest_idx.has_value()) {
       coordinate =
           coordinate +
-          prim::cast(cute::AsConstOrPrimExpr(steps[axis], coordinate_type),
-                     coordinate_type);
+          tl::CastValue(cute::AsConstOrPrimExpr(steps[axis], coordinate_type),
+                        coordinate_type);
     }
     out.push_back(coordinate);
   }
@@ -192,7 +194,7 @@ Stmt TMABulkCopyPlan::EmitInstructions(
     TVM_FFI_CHECK_LE(rest_size, std::numeric_limits<int32_t>::max(), ValueError)
         << "Too many TMA instructions";
     PrimVar loop_var("tma_box", PrimType::Int(32));
-    return For(loop_var, PrimExpr(0), MakeConst(loop_var.ty(), rest_size),
+    return For(loop_var, PrimExpr(0), tl::MakeConst(loop_var.ty(), rest_size),
                PrimExpr(1), ForKind::kUnrolled, SeqStmt(make_copy(loop_var)));
   }
   return make_copy(std::nullopt);

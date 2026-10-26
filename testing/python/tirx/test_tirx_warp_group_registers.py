@@ -21,9 +21,9 @@ def kernel(producers=128, total=384, hints=(), custom=False, simt=False, nested=
         producer.insert(0, local.store(0, 1))
     branch = ir.If(thread < producers, producer, output.store(thread, 2))
     if nested:
-        branch = ir.RegionStmt("tirx.scope", [], [], None, [ir.Evaluate(0), branch])
+        branch = ir.RegionStmt("tl.scope", [], [], None, [ir.Evaluate(0), branch])
     marker = "kCustomWarpSpecialization" if custom else "kWarpSpecializationScope"
-    body = ir.RegionStmt("tirx.scope", [], [], {marker: True}, branch)
+    body = ir.RegionStmt("tl.scope", [], [], {marker: True}, branch)
     body = [*[ir.Evaluate(ir.Call(f"tl.{name}", list(arguments))) for name, arguments in hints], body]
     if simt:
         body.insert(0, local.allocate())

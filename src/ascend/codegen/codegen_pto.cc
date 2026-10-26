@@ -1,3 +1,6 @@
+#include "compat/analyzer.h"
+#include "compat/metadata.h"
+#include "op/prim.h"
 /*!
  * \file ascend/codegen/codegen_pto.cc
  * \brief Utility to generate PTO Python source.
@@ -41,12 +44,12 @@ namespace codegen {
 using namespace tirx;
 using ffi::Map;
 using ffi::ObjectRef;
-using ffi::StructuralEqual;
 using tl::PostOrderVisit;
+using tl::StructuralEqual;
 using tl::Substitute;
 
 namespace {
-PrimExpr MakeZero(PrimType type) { return MakeConst(type, 0); }
+PrimExpr MakeZero(PrimType type) { return tl::MakeConst(type, 0); }
 bool UsesVar(const ffi::ObjectRef &root,
              const std::function<bool(const VarNode *)> &predicate) {
   bool found = false;
@@ -479,7 +482,7 @@ bool IsPowerOfTwo(int64_t value) {
 
 void CheckContiguousRampStride(const Expr &index, const char *access_kind) {
   if (const auto *ramp = index.as<RampNode>()) {
-    PrimExpr stride_expr = sym::Analyzer()->Simplify(ramp->stride);
+    PrimExpr stride_expr = tl::arith::Simplify(sym::Analyzer(), ramp->stride);
     int64_t stride = 0;
     ICHECK(TryGetConstInt(stride_expr, &stride) && stride == 1)
         << "PTO SIMT vector " << access_kind
@@ -554,21 +557,23 @@ PrimExpr ElementIndexToByteOffsetExpr(const PrimExpr &elem_index,
         << context << " packed dtype bit width must divide one byte, got "
         << dtype;
     int64_t pack_factor = 8 / elem_bits;
-    PrimExpr pack = MakeConst(PythonDType(elem_index), pack_factor);
-    PrimExpr elem_mod = analyzer->Simplify(floormod(elem_index, pack));
+    PrimExpr pack = tl::MakeConst(PythonDType(elem_index), pack_factor);
+    PrimExpr elem_mod =
+        tl::arith::Simplify(analyzer, floormod(elem_index, pack));
     int64_t remainder = 0;
     ICHECK(!TryGetConstInt(elem_mod, &remainder) || remainder == 0)
         << context << " expects a packed-byte-aligned logical offset, got "
         << elem_index << " for " << dtype;
-    return analyzer->Simplify(FloorDiv(elem_index, pack));
+    return tl::arith::Simplify(analyzer, FloorDiv(elem_index, pack));
   }
 
   ICHECK_EQ(elem_bits % 8, 0)
       << context << " physical element width must be byte-aligned, got "
       << dtype << " (" << elem_bits << " bits)";
   int64_t elem_bytes = elem_bits / 8;
-  return analyzer->Simplify(elem_index *
-                            MakeConst(PythonDType(elem_index), elem_bytes));
+  return tl::arith::Simplify(
+      analyzer,
+      elem_index * tl::MakeConst(PythonDType(elem_index), elem_bytes));
 }
 
 int64_t ElementsToBytesCeil(int64_t elements, PrimType dtype) {
@@ -861,8 +866,9 @@ PrimExpr VectorBufferElemIndex(const Expr &index) {
   if (const auto *ramp = index.as<RampNode>()) {
     int lanes = PythonDType(GetRef<Expr>(ramp)).lanes();
     if (lanes > 0) {
-      return sym::Analyzer()->Simplify(
-          floordiv(ramp->base, MakeConst(PythonDType(ramp->base), lanes)));
+      return tl::arith::Simplify(
+          sym::Analyzer(),
+          floordiv(ramp->base, tl::MakeConst(PythonDType(ramp->base), lanes)));
     }
   }
   return index.as_or_throw<PrimExpr>();
@@ -893,14 +899,15 @@ bool GetAddressOfIndex(const Expr &expr, PrimExpr *index,
     auto source_dtype =
         GetAnnotatedPointerDtype(call->args[0], PrimType::UInt(8));
     auto target_dtype = GetAnnotatedPointerDtype(expr, PrimType::UInt(8));
-    PrimExpr bits = prim::cast(base_index, PrimType::Int(64)) *
+    PrimExpr bits = tl::CastValue(base_index, PrimType::Int(64)) *
                     IntImm::Int64(PhysicalElementBits(source_dtype));
     if (call->op.same_as(tirx::ptr_byte_offset_op())) {
-      bits = bits + prim::cast(call->args[1].as_or_throw<PrimExpr>(),
-                               PrimType::Int(64)) *
+      bits = bits + tl::CastValue(call->args[1].as_or_throw<PrimExpr>(),
+                                  PrimType::Int(64)) *
                         IntImm::Int64(8);
     }
-    *index = sym::Analyzer()->Simplify(
+    *index = tl::arith::Simplify(
+        sym::Analyzer(),
         FloorDiv(bits, IntImm::Int64(PhysicalElementBits(target_dtype))));
     return true;
   }
@@ -944,9 +951,9 @@ bool GetAddressOfIndex(const Expr &expr, PrimExpr *index,
 }
 
 struct PTOModeState {
-  std::array<PrimExpr, 3> guards{MakeConst(PrimType::Bool(), false),
-                                 MakeConst(PrimType::Bool(), false),
-                                 MakeConst(PrimType::Bool(), false)};
+  std::array<PrimExpr, 3> guards{tl::MakeConst(PrimType::Bool(), false),
+                                 tl::MakeConst(PrimType::Bool(), false),
+                                 tl::MakeConst(PrimType::Bool(), false)};
 };
 
 struct PTOModeFlowState {
@@ -978,14 +985,14 @@ private:
     State state;
     for (size_t mode = 0; mode < state.guards.size(); ++mode)
       state.guards[mode] =
-          MakeConst(PrimType::Bool(), (mask & (1U << mode)) != 0);
+          tl::MakeConst(PrimType::Bool(), (mask & (1U << mode)) != 0);
     return state;
   }
 
   uint8_t Mask(const State &state) {
     uint8_t result = 0;
     for (size_t mode = 0; mode < state.guards.size(); ++mode)
-      if (!analyzer_->CanProve(!state.guards[mode],
+      if (!tl::arith::CanProve(analyzer_, !state.guards[mode],
                                sym::ProofStrength::kSymbolicBound))
         result |= 1U << mode;
     return result;
@@ -994,8 +1001,8 @@ private:
   State Merge(const State &first, const State &second) {
     State result;
     for (size_t mode = 0; mode < result.guards.size(); ++mode)
-      result.guards[mode] =
-          analyzer_->Simplify(first.guards[mode] || second.guards[mode]);
+      result.guards[mode] = tl::arith::Simplify(
+          analyzer_, first.guards[mode] || second.guards[mode]);
     return result;
   }
 
@@ -1005,15 +1012,15 @@ private:
     State result;
     for (size_t mode = 0; mode < result.guards.size(); ++mode)
       result.guards[mode] =
-          analyzer_->Simplify(state.guards[mode] && condition);
+          tl::arith::Simplify(analyzer_, state.guards[mode] && condition);
     return result;
   }
 
   State SetMode(const State &state, size_t mode) {
     State result;
-    PrimExpr reachable = MakeConst(PrimType::Bool(), false);
+    PrimExpr reachable = tl::MakeConst(PrimType::Bool(), false);
     for (const PrimExpr &guard : state.guards)
-      reachable = analyzer_->Simplify(reachable || guard);
+      reachable = tl::arith::Simplify(analyzer_, reachable || guard);
     result.guards[mode] = reachable;
     return result;
   }
@@ -1046,7 +1053,7 @@ private:
   }
 
   FlowState VisitStmt_(const IfNode *op, State state) final {
-    PrimExpr condition = analyzer_->Simplify(op->condition);
+    PrimExpr condition = tl::arith::Simplify(analyzer_, op->condition);
     FlowState then_out = VisitStmt(op->then_case, Restrict(state, condition));
     FlowState else_out =
         op->else_case
@@ -1060,28 +1067,28 @@ private:
   FlowState VisitStmt_(const ForNode *op, State state) final {
     PrimExpr enters = (op->step > 0 && op->begin < op->end) ||
                       (op->step < 0 && op->begin > op->end);
-    if (analyzer_->CanProve(!enters)) {
+    if (tl::arith::CanProve(analyzer_, !enters)) {
       VisitStmt(op->body, {});
       return {state, {}, {}};
     }
     PrimExpr one_trip =
         enters && ((op->step > 0 && op->begin + op->step >= op->end) ||
                    (op->step < 0 && op->begin + op->step <= op->end));
-    if (analyzer_->CanProve(one_trip)) {
-      With<sym::ConstraintContext> scope(analyzer_, op->var == op->begin);
+    if (tl::arith::CanProve(analyzer_, one_trip)) {
+      With<tl::arith::ConstraintContext> scope(analyzer_, op->var == op->begin);
       FlowState body_out = VisitStmt(op->body, state);
       State exits = Merge(Merge(body_out.fallthrough, body_out.breaks),
                           body_out.continues);
       Map<PrimVar, PrimExpr> values{{op->var, op->begin}};
       for (PrimExpr &guard : exits.guards)
-        guard = analyzer_->Simplify(Substitute(guard, values));
+        guard = tl::arith::Simplify(analyzer_, Substitute(guard, values));
       return {exits, {}, {}};
     }
-    return AnalyzeLoop(op->body, state, analyzer_->CanProve(enters));
+    return AnalyzeLoop(op->body, state, tl::arith::CanProve(analyzer_, enters));
   }
 
   FlowState VisitStmt_(const WhileNode *op, State state) final {
-    PrimExpr condition = analyzer_->Simplify(op->condition);
+    PrimExpr condition = tl::arith::Simplify(analyzer_, op->condition);
     if (IsZero(condition)) {
       VisitStmt(op->body, {});
       return {state, {}, {}};
@@ -1454,8 +1461,9 @@ class MixedSectionLocalVarAnalyzer {
         AnalyzeExpr(op->step, defined);
       }
       VarSet body_out = VisitStmt(op->body, defined);
-      return sym::Analyzer()->CanProve((op->end - op->begin) > 0) ? body_out
-                                                                  : defined;
+      return tl::arith::CanProve(sym::Analyzer(), (op->end - op->begin) > 0)
+                 ? body_out
+                 : defined;
     }
 
     VarSet VisitStmt_(const WhileNode *op, VarSet defined) final {
@@ -1549,8 +1557,9 @@ class MixedSectionLocalVarAnalyzer {
 
     VarSet VisitStmt_(const ForNode *op, VarSet defined) final {
       VarSet body_out = VisitStmt(op->body, defined);
-      return sym::Analyzer()->CanProve((op->end - op->begin) > 0) ? body_out
-                                                                  : defined;
+      return tl::arith::CanProve(sym::Analyzer(), (op->end - op->begin) > 0)
+                 ? body_out
+                 : defined;
     }
 
     VarSet VisitStmt_(const WhileNode *op, VarSet defined) final {
@@ -1982,7 +1991,7 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       has_uniform_const_copy_pad_value = false;
     } else if (!saw_copy_pad_value) {
       uniform_const_copy_pad_value_ = value;
-    } else if (!ffi::StructuralEqual()(uniform_const_copy_pad_value_, value)) {
+    } else if (!tl::StructuralEqual()(uniform_const_copy_pad_value_, value)) {
       has_uniform_const_copy_pad_value = false;
     }
     saw_copy_pad_value = true;
@@ -2392,7 +2401,7 @@ std::string CodeGenTileLangPTO::GetPointerExpr(const VarNode *buffer_var,
   PrimExpr ptr_index = index.as_or_throw<PrimExpr>();
   if (const auto *ramp = index.as<RampNode>()) {
     CheckContiguousRampStride(index, "pointer address");
-    ptr_index = sym::Analyzer()->Simplify(ramp->base);
+    ptr_index = tl::arith::Simplify(sym::Analyzer(), ramp->base);
   }
 
   std::string index_str;
@@ -2456,7 +2465,7 @@ std::string CodeGenTileLangPTO::GetVectorLocalRef(const VarNode *buffer_var,
 std::string
 CodeGenTileLangPTO::GetMutableVectorRef(const Expr &address,
                                         const std::string &op_name) {
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
   const VarNode *buffer_var = nullptr;
   ICHECK(GetAddressOfIndex(address, &dst_index, &buffer_var))
       << "PTO " << op_name
@@ -2784,8 +2793,8 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallNode *op) {
 
   const VarNode *dst_var = nullptr;
   const VarNode *src_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr src_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr src_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
@@ -2816,11 +2825,12 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallNode *op) {
       RemoveOutermostParentheses(PrintExpr_(op->args[6]));
   if (data_select == 0) {
     sym::Analyzer padding_analyzer;
-    ICHECK(
-        padding_analyzer->CanProveEqual(op->args[5].as_or_throw<PrimExpr>(),
-                                        MakeZero(PythonDType(op->args[5]))) &&
-        padding_analyzer->CanProveEqual(op->args[6].as_or_throw<PrimExpr>(),
-                                        MakeZero(PythonDType(op->args[6]))))
+    ICHECK(tl::arith::CanProveEqual(padding_analyzer,
+                                    op->args[5].as_or_throw<PrimExpr>(),
+                                    MakeZero(PythonDType(op->args[5]))) &&
+           tl::arith::CanProveEqual(padding_analyzer,
+                                    op->args[6].as_or_throw<PrimExpr>(),
+                                    MakeZero(PythonDType(op->args[6]))))
         << "PTO GM->UB MTE cannot use left/right padding when dataSelect == 0";
   }
   int64_t l2_cache_ctrl = 0;
@@ -2887,8 +2897,8 @@ std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallNode *op) {
 
   const VarNode *dst_var = nullptr;
   const VarNode *src_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr src_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr src_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
@@ -3051,14 +3061,16 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
   PrimExpr elem_index = index.as_or_throw<PrimExpr>();
   if (const auto *ramp = index.as<RampNode>()) {
     CheckContiguousRampStride(index, context);
-    elem_index = analyzer->Simplify(ramp->base);
+    elem_index = tl::arith::Simplify(analyzer, ramp->base);
   }
 
   PrimExpr byte_offset =
       ElementIndexToByteOffsetExpr(elem_index, dtype, context, analyzer);
-  PrimExpr offset_mod = analyzer->Simplify(
-      floormod(byte_offset, MakeConst(PythonDType(byte_offset), 32)));
-  if (!analyzer->CanProveEqual(offset_mod, MakeZero(PythonDType(offset_mod)))) {
+  PrimExpr offset_mod = tl::arith::Simplify(
+      analyzer,
+      floormod(byte_offset, tl::MakeConst(PythonDType(byte_offset), 32)));
+  if (!tl::arith::CanProveEqual(analyzer, offset_mod,
+                                MakeZero(PythonDType(offset_mod)))) {
     int64_t offset_remainder = 0;
     ICHECK(!TryGetConstInt(offset_mod, &offset_remainder))
         << context << " address must be 32-byte aligned, but element offset "
@@ -3089,21 +3101,24 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
   bool has_const_left = TryGetConstInt(left_padding, &left);
   bool has_const_right = TryGetConstInt(right_padding, &right);
   if (!has_const_left) {
-    ICHECK(analyzer->CanProve(left_padding.as_or_throw<PrimExpr>() >=
-                              MakeZero(PythonDType(left_padding))))
+    ICHECK(
+        tl::arith::CanProve(analyzer, left_padding.as_or_throw<PrimExpr>() >=
+                                          MakeZero(PythonDType(left_padding))))
         << context << " requires a non-negative left padding count, got "
         << left_padding;
   }
   if (!has_const_right) {
-    ICHECK(analyzer->CanProve(right_padding.as_or_throw<PrimExpr>() >=
-                              MakeZero(PythonDType(right_padding))))
+    ICHECK(
+        tl::arith::CanProve(analyzer, right_padding.as_or_throw<PrimExpr>() >=
+                                          MakeZero(PythonDType(right_padding))))
         << context << " requires a non-negative right padding count, got "
         << right_padding;
   }
   if (uses_padding) {
     if (!has_const_len) {
-      ICHECK(analyzer->CanProve(burst_len.as_or_throw<PrimExpr>() >=
-                                MakeZero(PythonDType(burst_len))))
+      ICHECK(
+          tl::arith::CanProve(analyzer, burst_len.as_or_throw<PrimExpr>() >=
+                                            MakeZero(PythonDType(burst_len))))
           << context << " requires a non-negative burst length, got "
           << burst_len;
     }
@@ -3209,8 +3224,8 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallNode *op) {
 
   const VarNode *dst_var = nullptr;
   const VarNode *src_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr src_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr src_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
@@ -3232,10 +3247,10 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallNode *op) {
          "storage dtypes, got source "
       << src_dtype << " and destination " << dst_dtype;
   ValidateUBCopyLayout_(
-      dst_index, dst_dtype, MakeConst(PrimType::Int(32), 1),
-      MakeConst(PrimType::Int(32), 0), MakeConst(PrimType::Int(32), 0),
-      MakeConst(PrimType::Int(32), 0), MakeConst(PrimType::Int(32), 0), false,
-      "PTO L0C->UB MTE destination");
+      dst_index, dst_dtype, tl::MakeConst(PrimType::Int(32), 1),
+      tl::MakeConst(PrimType::Int(32), 0), tl::MakeConst(PrimType::Int(32), 0),
+      tl::MakeConst(PrimType::Int(32), 0), tl::MakeConst(PrimType::Int(32), 0),
+      false, "PTO L0C->UB MTE destination");
 
   std::string src = GetAccPtrExpr(op->args[1], src_dtype);
   // Cube-local L1/L0C/UB allocations are represented as byte addresses in the
@@ -3262,7 +3277,7 @@ CodeGenTileLangPTO::GetLocalByteAddrExpr(const Expr &index, PrimType elem_dtype,
   PrimExpr elem_index = index.as_or_throw<PrimExpr>();
   if (const auto *ramp = index.as<RampNode>()) {
     CheckContiguousRampStride(index, "local pointer offset");
-    elem_index = sym::Analyzer()->Simplify(ramp->base);
+    elem_index = tl::arith::Simplify(sym::Analyzer(), ramp->base);
   }
 
   int64_t const_index = 0;
@@ -3303,7 +3318,7 @@ CodeGenTileLangPTO::GetLocalByteAddrExpr(const Expr &index, PrimType elem_dtype,
 std::string CodeGenTileLangPTO::GetLocalPtrExpr(const Expr &expr,
                                                 const std::string &space,
                                                 PrimType fallback_dtype) {
-  PrimExpr index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr index = tl::MakeConst(PrimType::Int(32), 0);
   const VarNode *buffer_var = nullptr;
   ICHECK(GetAddressOfIndex(expr, &index, &buffer_var))
       << "PTO local pointer expects address_of/tvm_access_ptr, got " << expr;
@@ -3351,7 +3366,7 @@ std::string CodeGenTileLangPTO::GetLocalPtrExpr(const Expr &expr,
 }
 
 std::string CodeGenTileLangPTO::GetE8M0ScalePtrExpr(const Expr &expr) {
-  PrimExpr index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr index = tl::MakeConst(PrimType::Int(32), 0);
   const VarNode *buffer_var = nullptr;
   ICHECK(GetAddressOfIndex(expr, &index, &buffer_var))
       << "PTO E8M0 scale pointer expects address_of/tvm_access_ptr, got "
@@ -3663,12 +3678,14 @@ void CodeGenTileLangPTO::ValidateFractalAddressAlignment_(
       << context << " requires a scalar or packed-FP4 dtype, got " << dtype;
   sym::Analyzer analyzer;
   int64_t elem_bytes = is_fp4_packed ? 1 : dtype.StorageBytes();
-  PrimExpr byte_offset =
-      analyzer->Simplify(index.as_or_throw<PrimExpr>() *
-                         MakeConst(PythonDType(index), elem_bytes));
-  PrimExpr offset_mod = analyzer->Simplify(
-      floormod(byte_offset, MakeConst(PythonDType(byte_offset), 32)));
-  if (!analyzer->CanProveEqual(offset_mod, MakeZero(PythonDType(offset_mod)))) {
+  PrimExpr byte_offset = tl::arith::Simplify(
+      analyzer, index.as_or_throw<PrimExpr>() *
+                    tl::MakeConst(PythonDType(index), elem_bytes));
+  PrimExpr offset_mod = tl::arith::Simplify(
+      analyzer,
+      floormod(byte_offset, tl::MakeConst(PythonDType(byte_offset), 32)));
+  if (!tl::arith::CanProveEqual(analyzer, offset_mod,
+                                MakeZero(PythonDType(offset_mod)))) {
     int64_t remainder = 0;
     ICHECK(!TryGetConstInt(offset_mod, &remainder))
         << context << " address must be 32-byte aligned, but element offset "
@@ -3771,8 +3788,8 @@ void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallNode *op) {
 
   const VarNode *dst_var = nullptr;
   const VarNode *src_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr src_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr src_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
@@ -3858,7 +3875,7 @@ void CodeGenTileLangPTO::EmitAscendFillL1(const CallNode *op) {
       << "tl.ascend_fill_l1 expects exactly 7 arguments";
 
   const VarNode *dst_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   std::string dst_scope;
   GetCopyEndpoint_(op->args[0], "PTO L1 fill destination", &dst_var, &dst_index,
@@ -3933,8 +3950,8 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallNode *op,
 
   const VarNode *dst_var = nullptr;
   const VarNode *src_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr src_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr src_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
@@ -3984,7 +4001,7 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallNode *op,
   }
 
   const VarNode *sf_var = nullptr;
-  PrimExpr sf_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr sf_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType sf_dtype = PrimType::Void();
   std::string sf_scope;
   GetCopyEndpoint_(op->args[9], "PTO MX scale-factor L1 source", &sf_var,
@@ -4049,8 +4066,8 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallNode *op, bool is_ca) {
 
   const VarNode *dst_var = nullptr;
   const VarNode *sf_var = nullptr;
-  PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
-  PrimExpr sf_index = MakeConst(PrimType::Int(32), 0);
+  PrimExpr dst_index = tl::MakeConst(PrimType::Int(32), 0);
+  PrimExpr sf_index = tl::MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   PrimType sf_dtype = PrimType::Void();
   std::string dst_scope;
@@ -4205,7 +4222,7 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
 
   auto get_endpoint = [&](size_t arg_index, const char *context) {
     const VarNode *buffer_var = nullptr;
-    PrimExpr index = MakeConst(PrimType::Int(32), 0);
+    PrimExpr index = tl::MakeConst(PrimType::Int(32), 0);
     PrimType dtype = PrimType::Void();
     std::string scope;
     GetCopyEndpoint_(op->args[arg_index], context, &buffer_var, &index, &dtype,
@@ -4339,9 +4356,9 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
       return;
     }
 
-    PrimExpr condition = MakeConst(PrimType::Int(32), 0);
-    PrimExpr true_value = MakeConst(PrimType::Int(32), 0);
-    PrimExpr false_value = MakeConst(PrimType::Int(32), 0);
+    PrimExpr condition = tl::MakeConst(PrimType::Int(32), 0);
+    PrimExpr true_value = tl::MakeConst(PrimType::Int(32), 0);
+    PrimExpr false_value = tl::MakeConst(PrimType::Int(32), 0);
     if (const auto *select = unit_flag_expr.as<SelectNode>()) {
       condition = select->condition;
       true_value = select->true_value;
@@ -4375,8 +4392,9 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
   };
 
   sym::Analyzer analyzer;
-  emit_for_unit_flag(emit_for_unit_flag,
-                     analyzer->Simplify(op->args[6].as_or_throw<PrimExpr>()));
+  emit_for_unit_flag(
+      emit_for_unit_flag,
+      tl::arith::Simplify(analyzer, op->args[6].as_or_throw<PrimExpr>()));
 }
 
 void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToGm(const CallNode *op) {
@@ -6892,10 +6910,10 @@ void CodeGenTileLangPTO::Dispatch_(const ForNode *op) {
   PrimType entry_pad_value_dtype = current_copy_pad_value_dtype_;
 
   sym::Analyzer analyzer;
-  PrimExpr start = analyzer->Simplify(op->begin);
-  PrimExpr extent = analyzer->Simplify((op->end - op->begin));
-  PrimExpr step = analyzer->Simplify(op->step);
-  PrimExpr stop = analyzer->Simplify(start + extent);
+  PrimExpr start = tl::arith::Simplify(analyzer, op->begin);
+  PrimExpr extent = tl::arith::Simplify(analyzer, (op->end - op->begin));
+  PrimExpr step = tl::arith::Simplify(analyzer, op->step);
+  PrimExpr stop = tl::arith::Simplify(analyzer, start + extent);
   std::string vid = AllocVarID(op->var.get());
   std::string begin = RemoveOutermostParentheses(PrintExpr_(start));
   std::string end = RemoveOutermostParentheses(PrintExpr_(stop));
@@ -6930,7 +6948,7 @@ void CodeGenTileLangPTO::Dispatch_(const ForNode *op) {
       TryGetConstInt(step, &step_value)) {
     tl::PostOrderVisit(op->body, [&](const ObjectRef &node) {
       const VarNode *buffer = nullptr;
-      PrimExpr index = MakeConst(PrimType::Int(32), 0);
+      PrimExpr index = tl::MakeConst(PrimType::Int(32), 0);
       if (const auto *load = node.as<TensorLoadNode>()) {
         if (load->indices.size() == 1) {
           buffer = load->source.as_or_throw<TensorVar>().get();
@@ -7199,7 +7217,7 @@ void CodeGenTileLangPTO::Dispatch_(const RegionStmtNode *op) {
 
 void CodeGenTileLangPTO::Dispatch_(const IfNode *op) {
   // Fold compile-time conditions; keep runtime control flow as native Python.
-  PrimExpr cond_simp = sym::Analyzer()->Simplify(op->condition);
+  PrimExpr cond_simp = tl::arith::Simplify(sym::Analyzer(), op->condition);
   if (const auto *imm = cond_simp.as<IntImmNode>()) {
     if (imm->value != 0) {
       PrintStmt_(op->then_case);
@@ -7749,8 +7767,8 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const TensorStoreNode *op) {
         RemoveOutermostParentheses(PrintExpr_(broadcast->value));
     PrintIndent();
     stream << tmp << " = " << value << "\n";
-    PrimExpr lane_index = analyzer->Simplify(
-        base_index + MakeConst(PythonDType(base_index), lane));
+    PrimExpr lane_index = tl::arith::Simplify(
+        analyzer, base_index + tl::MakeConst(PythonDType(base_index), lane));
     PrintIndent();
     EmitScalarStore(op->dest.as_or_throw<TensorVar>().get(), tmp, lane_index);
   }

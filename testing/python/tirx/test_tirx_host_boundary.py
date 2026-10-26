@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 import tvm_ffi
 
-from tvm_tirx import ir, runtime, target, tirx
+from tvm_tirx import runtime, target, tirx
+from tilelang._compat import ir
 from tilelang._compat import stmt_functor
 from tilelang._compat.tensor import TensorView
 
@@ -12,13 +13,13 @@ pytestmark = pytest.mark.usefixtures("native_layouts")
 
 def transform(name, function, *args):
     result = tvm_ffi.get_global_func(f"tl.transform.{name}")(*args)(ir.IRModule({"main": function}))["main"]
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
     ir.assert_structural_equal(result, ir.load_json(ir.save_json(result)))
-    ir.assert_structural_equal(result, tirx.renew_def(result))
+    ir.assert_structural_equal(result, ir.renew_def(result))
     return result
 
 
-def scope(body, attrs=None, operation="tirx.scope", args=None, params=None):
+def scope(body, attrs=None, operation="tl.scope", args=None, params=None):
     return ir.RegionStmt(ir.Op.get(operation), args or [], params or [], ir.DictAttrs(attrs or {}), body)
 
 
@@ -87,7 +88,7 @@ def test_explicit_device_target_and_separate_kernels_are_preserved():
     assert kinds == ["c", "cuda"]
 
 
-def test_global_allocations_keep_host_condition_and_alias_capture():
+def test_global_allocations_keep_host_condition_and_alias_capture(*, compile_tilelang):
     enabled = ir.Var("enabled", "bool")
     output = TensorView.create("output", [1], "int32")
     allocation = TensorView.create("temporary", [2], "int32")
@@ -109,7 +110,7 @@ def test_global_allocations_keep_host_condition_and_alias_capture():
         result, None, lambda node: node.body if isinstance(node, ir.RegionStmt) and node.op.name == "tirx.device_scope" else None
     )
     executable_function = executable_function.with_attr("global_symbol", "conditional_allocation")
-    executable = tirx.compile(executable_function, target="llvm")
+    executable = compile_tilelang(executable_function, target="llvm")
     for condition, expected in [(False, 7), (True, 19)]:
         actual = runtime.tensor(np.array([7], dtype="int32"))
         executable(condition, actual)
@@ -143,7 +144,7 @@ def test_global_allocation_rejects_device_local_shape():
 
 def split(function):
     module = tvm_ffi.get_global_func("tl.transform.SplitHostDevice")()(ir.IRModule({"main": function}))
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -180,7 +181,7 @@ def test_split_remaps_nonrestrict_host_aliases():
 
 
 @pytest.mark.parametrize("kind", ["c", "cuda"])
-def test_split_lifts_host_evaluable_device_assumptions(kind):
+def test_split_lifts_host_evaluable_device_assumptions(kind, compile_tilelang, compile_lowered_cpu):
     size = ir.Var("size", "int32")
     output = TensorView.create("output", [1], "int32")
     body = [ir.Evaluate(ir.Call("prim.assume", [size > 0])), output.store(0, size + 7)]
@@ -202,7 +203,8 @@ def test_split_lifts_host_evaluable_device_assumptions(kind):
     module = split(function)
     assert len(collect(module["main"], ir.AssertStmt)) >= 1
     assert not collect(module["assumed_kernel_kernel"], ir.AssertStmt)
-    executable = tirx.compile(module, target=device_target)
+    compiler = compile_lowered_cpu if kind == "c" else compile_tilelang
+    executable = compiler(module, target=device_target)
     actual = runtime.empty((1,), "int32", device=device)
     executable(5, actual)
     np.testing.assert_array_equal(actual.numpy(), [12])
@@ -236,7 +238,7 @@ def test_cpu_launch_metadata_survives_materialization(parallel):
     with ir.transform.PassContext(config={"tl.cpu_parallel": parallel}):
         module = tvm_ffi.get_global_func("tl.cpu.transform.LowerCPUKernelLaunch")()(module)
     module = tvm_ffi.get_global_func("tl.transform.MaterializeKernelLaunch")(False, False, None, None, None)(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     loops = list(reversed(collect(module, ir.For)))
     assert len(loops) == 2
     assert int(loops[0].annotations["tl.cpu_num_threads"]) == 4
@@ -250,7 +252,7 @@ def test_cpu_launch_metadata_survives_materialization(parallel):
 
 @pytest.mark.gpu
 @pytest.mark.parametrize("annotation_site", ["function", "region"])
-def test_cluster_launch_uses_native_runtime_and_preserves_argument_order(annotation_site):
+def test_cluster_launch_uses_native_runtime_and_preserves_argument_order(annotation_site, *, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A CUDA device is required")
@@ -276,7 +278,7 @@ def test_cluster_launch_uses_native_runtime_and_preserves_argument_order(annotat
     module = split(function)
     lower = tvm_ffi.get_global_func("tl.transform.LowerDeviceKernelLaunch")()
     module = lower(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, lower(module))
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     tags = list(module["cluster_test_kernel"].attrs["tirx.kernel_launch_params"])
@@ -285,7 +287,7 @@ def test_cluster_launch_uses_native_runtime_and_preserves_argument_order(annotat
     assert len(calls) == 1
     assert [int(argument) for argument in list(calls[0].args)[2:5]] == [2, 1, 1]
     actual = runtime.empty((4,), "int32", device=device)
-    executable = tirx.compile(module, target=device_target)
+    executable = compile_tilelang(module, target=device_target)
     executable(actual)
     np.testing.assert_array_equal(actual.numpy(), [9, 10, 11, 12])
 

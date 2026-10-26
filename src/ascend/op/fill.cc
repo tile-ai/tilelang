@@ -1,10 +1,12 @@
+#include "compat/analyzer.h"
 /*!
  * \file tl/ascend/op/fill.cc
  * \brief Ascend implementation for tl.fill lowering.
  */
 
-#include "backend/common/op/fill.h"
 #include "ascend/op/utils.h"
+#include "backend/common/op/fill.h"
+#include "op/prim.h"
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
@@ -29,12 +31,15 @@ size_t LogicalAxisIndex(size_t ndim, LogicalAxis axis) {
 }
 
 Expr MakeL1BasePtr(const FillNode &op) {
-  auto I = [](int64_t value) { return MakeConst(PrimType::Int(32), value); };
+  auto I = [](int64_t value) {
+    return tl::MakeConst(PrimType::Int(32), value);
+  };
   size_t ndim = op.region.size();
   Array<PrimExpr> indices;
   for (size_t i = 0; i < ndim; ++i) {
-    indices.push_back(i + 2 < ndim ? op.region[i]->begin
-                                   : MakeConst(op.region[i]->begin.ty(), 0));
+    indices.push_back(i + 2 < ndim
+                          ? op.region[i]->begin
+                          : tl::MakeConst(op.region[i]->begin.ty(), 0));
   }
   PrimExpr matrix_elements =
       op.dst.shape()[ndim - 2] * op.dst.shape()[ndim - 1];
@@ -63,8 +68,9 @@ Stmt LowerL1Fill(const FillNode &op, const LowerArgs &lower_args,
       << op.dst->name;
 
   for (size_t i = 0; i + 2 < op.region.size(); ++i) {
-    ICHECK(analyzer->CanProveEqual(op.region[i]->extent,
-                                   MakeConst(op.region[i]->extent.ty(), 1)))
+    ICHECK(
+        tl::arith::CanProveEqual(analyzer, op.region[i]->extent,
+                                 tl::MakeConst(op.region[i]->extent.ty(), 1)))
         << "Ascend L1 fill supports one matrix at a time; leading axis " << i
         << " of buffer " << op.dst->name << " has extent "
         << op.region[i]->extent;
@@ -75,16 +81,18 @@ Stmt LowerL1Fill(const FillNode &op, const LowerArgs &lower_args,
   const Range &row16_range =
       op.region[LogicalAxisIndex(op.region.size(), info.row16_axis)];
   auto is_aligned = [&](const PrimExpr &value, const PrimExpr &alignment) {
-    return analyzer->CanProveEqual(FloorMod(value, Cast(value.ty(), alignment)),
-                                   MakeConst(value.ty(), 0));
+    return tl::arith::CanProveEqual(
+        analyzer, FloorMod(value, Cast(value.ty(), alignment)),
+        tl::MakeConst(value.ty(), 0));
   };
   ICHECK(is_aligned(c0_range->begin, info.c0) &&
          is_aligned(c0_range->extent, info.c0))
       << "Ascend L1 fill requires a C0-aligned region on buffer "
       << op.dst->name << ", got " << c0_range << " with C0=" << info.c0;
 
-  PrimExpr fill_value = analyzer->Simplify(op.value);
-  ICHECK(analyzer->CanProveEqual(fill_value, MakeConst(fill_value.ty(), 0)))
+  PrimExpr fill_value = tl::arith::Simplify(analyzer, op.value);
+  ICHECK(tl::arith::CanProveEqual(analyzer, fill_value,
+                                  tl::MakeConst(fill_value.ty(), 0)))
       << "Ascend L1 fill currently supports only zero, got " << op.value;
 
   int bits = op.dst.dtype().bits();
@@ -96,23 +104,26 @@ Stmt LowerL1Fill(const FillNode &op, const LowerArgs &lower_args,
          "or exactly 32 bits, got "
       << op.dst.dtype();
 
-  PrimExpr dst_pitch_blocks = analyzer->Simplify(info.outer1 * info.row_frac);
-  PrimExpr c0_start = analyzer->Simplify(FloorDiv(c0_range->begin, info.c0));
+  PrimExpr dst_pitch_blocks =
+      tl::arith::Simplify(analyzer, info.outer1 * info.row_frac);
+  PrimExpr c0_start =
+      tl::arith::Simplify(analyzer, FloorDiv(c0_range->begin, info.c0));
   PrimExpr repeat_times =
-      analyzer->Simplify(FloorDiv(c0_range->extent, info.c0));
+      tl::arith::Simplify(analyzer, FloorDiv(c0_range->extent, info.c0));
   PrimExpr row_start = row16_range->begin;
   PrimExpr block_num = row16_range->extent;
-  PrimExpr dst_gap = analyzer->Simplify(dst_pitch_blocks - block_num);
-  PrimExpr byte_offset =
-      analyzer->Simplify((c0_start * dst_pitch_blocks + row_start) *
-                         MakeConst(c0_range->begin.ty(), 32));
+  PrimExpr dst_gap =
+      tl::arith::Simplify(analyzer, dst_pitch_blocks - block_num);
+  PrimExpr byte_offset = tl::arith::Simplify(
+      analyzer, (c0_start * dst_pitch_blocks + row_start) *
+                    tl::MakeConst(c0_range->begin.ty(), 32));
   int fill_word_bits = bits <= 16 ? 16 : 32;
 
   return Evaluate(
       Call(PrimType::Void(), ascend_fill_l1(),
-           {MakeL1BasePtr(op), byte_offset, MakeConst(PrimType::UInt(32), 0),
-            repeat_times, block_num, dst_gap,
-            MakeConst(PrimType::Int(32), fill_word_bits)}));
+           {MakeL1BasePtr(op), byte_offset,
+            tl::MakeConst(PrimType::UInt(32), 0), repeat_times, block_num,
+            dst_gap, tl::MakeConst(PrimType::Int(32), fill_word_bits)}));
 }
 
 Stmt LowerAscendFill(const FillNode &op, const LowerArgs &lower_args,

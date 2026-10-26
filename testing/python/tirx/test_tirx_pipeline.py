@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 from tvm_tirx.target import Target
 
 from tilelang._compat import stmt_functor
@@ -17,7 +18,7 @@ def apply(body, parameters, *, plan=False, target=None):
     if plan:
         module = tvm_ffi.get_global_func("tl.transform.PipelinePlanning")()(module)
     module = tvm_ffi.get_global_func("tl.transform.InjectSoftwarePipeline")()(module)
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
     ir.assert_structural_equal(module, ir.load_json(ir.save_json(module)))
     return module
 
@@ -59,7 +60,7 @@ def test_pipeline_reordering_checks_independent_thread_footprints(offset, materi
 
 @pytest.mark.parametrize("extent", [0, 1, 2, 5, 17])
 @pytest.mark.parametrize("planned", [False, True])
-def test_pipeline_ring_executes_with_short_and_empty_loops(extent, planned):
+def test_pipeline_ring_executes_with_short_and_empty_loops(extent, planned, *, compile_tilelang):
     source = TensorView.create("source", [max(1, extent)], "int32")
     output = TensorView.create("output", [max(1, extent)], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
@@ -79,7 +80,7 @@ def test_pipeline_ring_executes_with_short_and_empty_loops(extent, planned):
         module, lambda node: allocations.append(node) if isinstance(node, ir.Bind) and isinstance(node.var.ty, tirx.TensorType) else None
     )
     assert any(list(map(int, allocation.var.ty.shape)) == [3, 1] for allocation in allocations)
-    executable = tirx.compile(module, target="c")
+    executable = compile_tilelang(module, target="c")
     values = np.arange(max(1, extent), dtype="int32")
     actual = runtime.tensor(np.full(max(1, extent), -99, dtype="int32"))
     executable(runtime.tensor(values), actual)
@@ -88,7 +89,7 @@ def test_pipeline_ring_executes_with_short_and_empty_loops(extent, planned):
 
 
 @pytest.mark.parametrize("stages,order", [([1, 0], [0, 1]), ([0, 0], [1, 0])])
-def test_pipeline_reorders_disjoint_slices_without_versioning_initialized_state(stages, order):
+def test_pipeline_reorders_disjoint_slices_without_versioning_initialized_state(stages, order, *, compile_tilelang):
     temporary = TensorView.create("temporary", [2], "int32", scope="local")
     output = TensorView.create("output", [9], "int32")
     iteration = ir.Var("iteration", "int32")
@@ -106,12 +107,12 @@ def test_pipeline_reorders_disjoint_slices_without_versioning_initialized_state(
         [output.tensor],
     )
     actual = runtime.empty((9,), "int32")
-    tirx.compile(module, target="c")(actual)
+    compile_tilelang(module, target="c")(actual)
     np.testing.assert_array_equal(actual.numpy(), [73] * 8 + [7])
 
 
 @pytest.mark.parametrize("begin,end,step", [(2, 19, 3), (18, 1, -3)])
-def test_pipeline_preserves_nonunit_and_descending_iteration(begin, end, step):
+def test_pipeline_preserves_nonunit_and_descending_iteration(begin, end, step, *, compile_tilelang):
     output = TensorView.create("output", [20], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
     index = ir.Var("index", "int32")
@@ -126,14 +127,14 @@ def test_pipeline_preserves_nonunit_and_descending_iteration(begin, end, step):
     )
     module = apply(body, [output.tensor])
     actual = runtime.tensor(np.full(20, -1, dtype="int32"))
-    tirx.compile(module, target="c")(actual)
+    compile_tilelang(module, target="c")(actual)
     expected = np.full(20, -1, dtype="int32")
     for index in range(begin, end, step):
         expected[index] = index + 100
     np.testing.assert_array_equal(actual.numpy(), expected)
 
 
-def test_scalar_memory_reads_are_versioned_without_replay():
+def test_scalar_memory_reads_are_versioned_without_replay(*, compile_tilelang):
     source = TensorView.create("source", [19], "int32")
     output = TensorView.create("output", [19], "int32")
     index = ir.Var("index", "int32")
@@ -151,12 +152,12 @@ def test_scalar_memory_reads_are_versioned_without_replay():
     module = apply(body, [source.tensor, output.tensor])
     values = np.arange(19, dtype="int32")
     actual = runtime.empty((19,), "int32")
-    tirx.compile(module, target="c")(runtime.tensor(values), actual)
+    compile_tilelang(module, target="c")(runtime.tensor(values), actual)
     np.testing.assert_array_equal(actual.numpy(), values * 4)
 
 
 @pytest.mark.parametrize("no_alias", [False, True])
-def test_auto_pipeline_replays_only_readonly_non_aliasing_indices(no_alias):
+def test_auto_pipeline_replays_only_readonly_non_aliasing_indices(no_alias, *, compile_tilelang):
     source = TensorView.create("source", [7], "int32")
     indices = TensorView.create("indices", [7], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
@@ -183,15 +184,15 @@ def test_auto_pipeline_replays_only_readonly_non_aliasing_indices(no_alias):
         assert "software_pipeline_replayable_scalar_binds" not in planned_loop.annotations
     lowered = tvm_ffi.get_global_func("tl.transform.InjectSoftwarePipeline")()(planned)
     lowered = tvm_ffi.get_global_func("tl.transform.LowerTileOp")()(lowered)
-    assert tirx.analysis.check_well_formed(lowered)
+    assert ir.check_well_formed(lowered)
     values = np.arange(7, dtype="int32") * 11
     positions = np.arange(6, -1, -1, dtype="int32")
     actual = runtime.empty((7,), "int32")
-    tirx.compile(lowered, target="c")(runtime.tensor(values), runtime.tensor(positions), actual)
+    compile_tilelang(lowered, target="c")(runtime.tensor(values), runtime.tensor(positions), actual)
     np.testing.assert_array_equal(actual.numpy(), values[positions])
 
 
-def test_scalar_side_effects_execute_once_per_iteration(tilelang_builders):
+def test_scalar_side_effects_execute_once_per_iteration(tilelang_builders, *, compile_tilelang):
     counter = TensorView.create("counter", [1], "int32")
     output = TensorView.create("output", [13], "int32")
     index = ir.Var("index", "int32")
@@ -201,11 +202,11 @@ def test_scalar_side_effects_execute_once_per_iteration(tilelang_builders):
         index, 0, 13, 1, ir.ForKind.DEFAULT, [ir.Bind(value, call), output.store(index, value + value)], annotations=annotations([0, 2])
     )
     imported = '#ifdef __cplusplus\nextern "C"\n#endif\nint32_t next_value(int32_t *counter) { return (*counter)++; }\n'
-    body = ir.RegionStmt("tirx.scope", [], [], {"pragma_import_c": imported}, loop)
+    body = ir.RegionStmt("tl.scope", [], [], {"pragma_import_c": imported}, loop)
     module = apply(body, [counter.tensor, output.tensor])
     actual = runtime.empty((13,), "int32")
     count = runtime.tensor(np.array([0], dtype="int32"))
-    tirx.compile(module, target="c")(count, actual)
+    compile_tilelang(module, target="c")(count, actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(13, dtype="int32") * 2)
     np.testing.assert_array_equal(count.numpy(), [13])
 
@@ -262,10 +263,10 @@ def test_auto_planner_pipelines_copy_and_consumer():
     )
     module = tvm_ffi.get_global_func("tl.transform.PipelinePlanning")()(ir.IRModule({"main": function}))
     assert list(map(int, module["main"].body.seq[1].annotations["software_pipeline_stage"])) == [0, 2]
-    assert tirx.analysis.check_well_formed(module)
+    assert ir.check_well_formed(module)
 
 
-def test_nested_pipeline_annotations_are_consumed():
+def test_nested_pipeline_annotations_are_consumed(*, compile_tilelang):
     output = TensorView.create("output", [3, 7], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local")
     outer = ir.Var("outer", "int32")
@@ -285,11 +286,11 @@ def test_nested_pipeline_annotations_are_consumed():
     stmt_functor.post_order_visit(module, lambda node: loops.append(node) if isinstance(node, ir.For) else None)
     assert all("software_pipeline_stage" not in loop.annotations for loop in loops)
     actual = runtime.empty((3, 7), "int32")
-    tirx.compile(module, target="c")(actual)
+    compile_tilelang(module, target="c")(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(21, dtype="int32").reshape(3, 7))
 
 
-def test_pipeline_preserves_physical_strides_and_buffer_alignment():
+def test_pipeline_preserves_physical_strides_and_buffer_alignment(*, compile_tilelang):
     output = TensorView.create("output", [11], "int32")
     temporary = TensorView.create("temporary", [1], "int32", scope="local", strides=[3], elem_offset=2, data_alignment=128)
     index = ir.Var("index", "int32")
@@ -304,12 +305,12 @@ def test_pipeline_preserves_physical_strides_and_buffer_alignment():
     )
     module = apply(loop, [output.tensor])
     actual = runtime.empty((11,), "int32")
-    tirx.compile(module, target="c")(actual)
+    compile_tilelang(module, target="c")(actual)
     np.testing.assert_array_equal(actual.numpy(), np.arange(11, dtype="int32"))
 
 
 @pytest.mark.parametrize("extent", [0, 2, 17])
-def test_shared_copy_pipeline_executes_on_cuda(extent, tilelang_builders):
+def test_shared_copy_pipeline_executes_on_cuda(extent, tilelang_builders, *, compile_tilelang):
     from pathlib import Path
     from tvm_tirx.ir.transform import PassContext
 
@@ -354,6 +355,6 @@ def test_shared_copy_pipeline_executes_on_cuda(extent, tilelang_builders):
         module = tvm_ffi.get_global_func("tl.transform.ThreadSync")("shared")(module)
     values = np.arange(max(1, extent) * 128, dtype="float32").reshape(max(1, extent), 128)
     actual = runtime.tensor(np.full(values.shape, -1, dtype="float32"), device=device)
-    tirx.compile(module, target=target)(runtime.tensor(values, device=device), actual)
+    compile_tilelang(module, target=target)(runtime.tensor(values, device=device), actual)
     expected = values * 2 + 3 if extent else np.full(values.shape, -1, dtype="float32")
     np.testing.assert_array_equal(actual.numpy(), expected)

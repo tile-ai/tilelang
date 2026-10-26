@@ -135,7 +135,7 @@ def test_nvcc_compile_cuda_honors_tilelang_timeout(monkeypatch):
     assert fake_proc.killed
     assert "timed out after 0.25 seconds" in message
     assert "Command:" in message
-    assert "-arch=sm_120" in message
+    assert "-arch compute_120 -code compute_120" in message
     assert "-gencode" not in message
     assert "Source:" in message
 

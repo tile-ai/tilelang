@@ -92,9 +92,9 @@ def test_implicit_shape_assumption_is_checked_before_launch(execution_backend):
 
 
 @pytest.mark.parametrize("participants", [(), (3,), (3, 64)])
-def test_explicit_thread_sync_uses_native_storage_sync(participants):
+def test_explicit_thread_sync_uses_the_matching_storage_sync_owner(participants):
     operation = T.sync_threads(*participants)
-    assert operation.op.name == "tirx.gpu_storage_sync"
+    assert operation.op.name == ("tl.gpu_storage_sync" if participants else "tirx.gpu_storage_sync")
     assert operation.ty == ir.PrimType("void")
     assert operation.args[0].value == "shared"
     assert [int(value) for value in operation.args[1:]] == list(participants)

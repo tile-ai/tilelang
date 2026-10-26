@@ -8,6 +8,7 @@
 
 #ifndef TVM_TL_ASCEND_OP_UTILS_H_
 #define TVM_TL_ASCEND_OP_UTILS_H_
+#include "op/prim.h"
 
 #include <tvm/tirx/op/memory.h>
 
@@ -112,7 +113,7 @@ inline Expr MakeAscendLeadingDimAccessPtr(const TensorRegion &region,
   for (int i = std::max(0, n - 2); n >= 2 && i < n; ++i) {
     const auto &r = leading[i];
     leading.Set(
-        i, Range::FromMinExtent(prim::MakeConst(r->begin.ty(), 0), r->extent));
+        i, Range::FromMinExtent(tl::MakeConst(r->begin.ty(), 0), r->extent));
   }
   return MakeAccessPtrFromRegion(
       TensorRegion(region->source, leading, TensorRegionType()), rw_mask);

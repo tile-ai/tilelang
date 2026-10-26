@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 
@@ -7,13 +8,13 @@
 namespace tvm::tl {
 namespace {
 
-class AccessPtrLowerer : public tirx::StmtExprMutator {
+class AccessPtrLowerer : public tvm::tl::StmtExprMutator {
 private:
   ffi::UnchangedOr<Expr> Mutate_(const CallNode *call,
                                  ffi::InplaceMode inplace_mode) final {
     Expr original = ffi::GetRef<Expr>(call);
-    Expr visited =
-        StmtExprMutator::Mutate_(call, inplace_mode).ValueOrUnchanged(original);
+    Expr visited = tvm::tl::StmtExprMutator::Mutate_(call, inplace_mode)
+                       .ValueOrUnchanged(original);
     Call result = visited.as_or_throw<Call>();
     if (result->op.same_as(access_ptr())) {
       return LowerAccessPtrCall(result);

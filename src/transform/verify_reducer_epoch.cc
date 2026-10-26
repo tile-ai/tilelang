@@ -1,4 +1,5 @@
 #include "common/reducer.h"
+#include "compat/metadata.h"
 
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -26,7 +27,7 @@ struct Epoch {
   std::vector<EpochContext> context;
 };
 
-class ReducerEpochVerifier : public StmtExprVisitor {
+class ReducerEpochVerifier : public tvm::tl::StmtExprVisitor {
 public:
   void Run(const tirx::Function &function) {
     for (const Var &parameter : function->params) {
@@ -72,7 +73,7 @@ private:
           << "Reducer allocation appears more than once";
       return Visit(node->value);
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   Optional<VisitInterrupt> Visit_(const ForNode *node) final {
@@ -178,7 +179,7 @@ private:
       epoch.state = EpochState::kFinalized;
       return Visit(operation->dst);
     }
-    return StmtExprVisitor::Visit_(node);
+    return tvm::tl::StmtExprVisitor::Visit_(node);
   }
 
   std::unordered_map<const VarNode *, Epoch> epochs_;

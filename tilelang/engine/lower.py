@@ -4,19 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import nullcontext
+
+from tvm_tirx.ir import CallingConv
+from tvm_tirx.target import Target
+
 import tilelang.transform
 from tilelang import tvm as tvm
 from tilelang._compat.tvm import tirx
-from tvm_tirx.ir import CallingConv
-from tvm_tirx.target import Target
-from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.backend.module import BackendContext, create_backend_context
+from tilelang.engine.param import CompiledArtifact, KernelParam
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.instrumentation import (
     compile_pass_instrumentation,
     current_compile_pass_instrumentation,
     instrument_current_pass_context,
 )
+from tilelang.transform import _tirx_passes
 
 
 def is_cpu_device_backend(target: Target):
@@ -76,10 +79,10 @@ def host_codegen(
         Resolved backend, device target, host target, and execution policy.
     """
     target_host = context.target_host
-    host_mod = tirx.transform.BindTarget(target_host)(host_mod)
+    host_mod = _tirx_passes.BindTarget(target_host)(host_mod)
     host_mod = tirx.transform.FP8StorageLegalize()(host_mod)
     host_mod = tirx.transform.BF16StorageLegalize()(host_mod)
-    host_mod = tirx.transform.LowerTVMBuiltin()(host_mod)
+    host_mod = _tirx_passes.LowerTVMBuiltin()(host_mod)
     host_mod = tilelang.transform.LowerIntrin()(host_mod)
     combine_context_call = getattr(tirx.transform, "CombineContextCall", None)
     if combine_context_call is not None:
@@ -90,7 +93,7 @@ def host_codegen(
 
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
-    device_mod = tirx.transform.StmtSimplify()(device_mod)
+    device_mod = _tirx_passes.StmtSimplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
     return device_mod
 

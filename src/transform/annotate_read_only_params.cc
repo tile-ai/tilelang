@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #include <tvm/ir/op.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -25,7 +26,7 @@ bool IsAddress(const Expr &expression) {
          expression.as<TensorRegionNode>();
 }
 
-class ParameterOrigins : public tirx::StmtExprVisitor {
+class ParameterOrigins : public tvm::tl::StmtExprVisitor {
 public:
   explicit ParameterOrigins(const AliasMap &aliases) : aliases_(aliases) {}
 
@@ -56,14 +57,14 @@ private:
         return Visit(load->source);
       }
     }
-    return StmtExprVisitor::Visit_(call);
+    return tvm::tl::StmtExprVisitor::Visit_(call);
   }
 
   const AliasMap &aliases_;
   ParameterSet origins_;
 };
 
-class ReadWriteMarker : public tirx::StmtExprVisitor {
+class ReadWriteMarker : public tvm::tl::StmtExprVisitor {
 public:
   explicit ReadWriteMarker(const ffi::Array<Var> &parameters) {
     for (const Var &parameter : parameters) {
@@ -107,7 +108,7 @@ private:
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const BindNode *binding) final {
-    auto interrupted = StmtExprVisitor::Visit_(binding);
+    auto interrupted = tvm::tl::StmtExprVisitor::Visit_(binding);
     if (!interrupted.has_value() && IsAddress(binding->var)) {
       aliases_[binding->var.get()] = Origins(binding->value);
       if (HasReadOnlyAccessContract(binding->value))
@@ -119,7 +120,7 @@ private:
   ffi::Optional<ffi::VisitInterrupt>
   Visit_(const TensorStoreNode *statement) final {
     MarkWritten(statement->dest);
-    return StmtExprVisitor::Visit_(statement);
+    return tvm::tl::StmtExprVisitor::Visit_(statement);
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const CallNode *call) final {
@@ -130,7 +131,7 @@ private:
       else
         for (const TensorRegion &region : operation->GetAccessRegions().writes)
           MarkWritten(region->source);
-      return StmtExprVisitor::Visit_(call);
+      return tvm::tl::StmtExprVisitor::Visit_(call);
     }
     static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
     if (effects.get(call->op, CallEffectKind::kOpaque) >=
@@ -140,7 +141,7 @@ private:
           MarkWritten(argument);
       }
     }
-    return StmtExprVisitor::Visit_(call);
+    return tvm::tl::StmtExprVisitor::Visit_(call);
   }
 
   AliasMap aliases_;

@@ -225,7 +225,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
   auto name = function->GetAttr<String>("global_symbol");
   TVM_FFI_CHECK(name.has_value(), ValueError)
       << "GEMM lowering must return a named native function";
-  return RegionStmt(Op::Get("tirx.scope"), {}, {},
+  return RegionStmt(Op::Get("tl.scope"), {}, {},
                     DictAttrs({{"name_hint", name.value()},
                                {tl::attr::kLexicalAllocScope, true}}),
                     function->body.value());

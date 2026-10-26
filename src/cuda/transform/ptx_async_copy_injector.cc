@@ -1,3 +1,7 @@
+#include "compat/analyzer.h"
+#include "op/prim.h"
+#include "transform/common/loop_aware_mutator.h"
+
 #include "cuda/transform/ptx_async_copy_injector.h"
 
 #include "compat/expr.h"
@@ -19,11 +23,10 @@ using namespace tirx;
 
 namespace {
 
-class PTXAsyncCopyInjector : public StmtExprMutatorWithAnalyzer {
+class PTXAsyncCopyInjector : public LoopAwareMutator {
 public:
   PTXAsyncCopyInjector(sym::Analyzer analyzer, bool explicit_async)
-      : StmtExprMutatorWithAnalyzer(analyzer), explicit_async_(explicit_async) {
-  }
+      : LoopAwareMutator(analyzer), explicit_async_(explicit_async) {}
 
   Stmt Rewrite(const Stmt &statement) {
     return Mutate(statement).ValueOrUnchanged(statement).as_or_throw<Stmt>();
@@ -61,7 +64,8 @@ private:
     int saved_lanes = vector_lanes_;
     bool pushed = false;
     if (node->kind == ForKind::kVectorized) {
-      auto extent = GetConstInt(analyzer_->Simplify(node->end - node->begin));
+      auto extent =
+          GetConstInt(tl::arith::Simplify(analyzer_, node->end - node->begin));
       TVM_FFI_CHECK(extent && *extent >= 0, ValueError)
           << "Vectorized async copies require a constant loop extent";
       if (*extent > 1 &&
@@ -73,7 +77,7 @@ private:
         pushed = true;
       }
     }
-    auto result = StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+    auto result = LoopAwareMutator::Mutate_(node, mode);
     if (pushed)
       vector_loops_.pop_back();
     vector_lanes_ = saved_lanes;
@@ -82,7 +86,7 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const SeqStmtNode *node, InplaceMode mode) final {
     if (explicit_async_)
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     Array<Stmt> statements;
     SyncState state = pending_;
     for (const Stmt &statement : node->seq) {
@@ -111,7 +115,7 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const IfNode *node, InplaceMode mode) final {
     if (explicit_async_)
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     SyncState before = pending_;
     SeqStmt then_case = SeqStmt(Rewrite(node->then_case));
     SyncState after_then = pending_;
@@ -128,15 +132,15 @@ private:
                             InplaceMode mode) final {
     TensorVar destination = node->dest.as_or_throw<TensorVar>();
     if (!IsSharedBuffer(destination))
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     Optional<PrimExpr> predicate;
     const TensorLoadNode *load =
         MatchLoad(node->value.as_or_throw<PrimExpr>(), &predicate);
     if (!load)
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     auto statement = TryInject(load, node, predicate);
     if (!statement)
-      return StmtExprMutatorWithAnalyzer::Mutate_(node, mode);
+      return LoopAwareMutator::Mutate_(node, mode);
     injected_ = true;
     if (!explicit_async_)
       pending_ = {true, true};
@@ -216,14 +220,17 @@ private:
 
   bool Contiguous(const PrimExpr &offset) {
     for (const auto &loop : vector_loops_) {
-      PrimExpr previous = analyzer_->Simplify(
-          tl::Substitute(offset, {{loop.variable, loop.begin}}));
+      PrimExpr previous = tl::arith::Simplify(
+          analyzer_, tl::Substitute(offset, {{loop.variable, loop.begin}}));
       for (int lane = 1; lane < loop.extent; ++lane) {
-        PrimExpr current = analyzer_->Simplify(tl::Substitute(
-            offset, {{loop.variable,
-                      loop.begin + MakeConst(loop.variable.ty(), lane)}}));
-        if (!analyzer_->CanProveEqual(current - previous,
-                                      MakeConst(current.ty(), 1)))
+        PrimExpr current = tl::arith::Simplify(
+            analyzer_,
+            tl::Substitute(
+                offset,
+                {{loop.variable,
+                  loop.begin + tl::MakeConst(loop.variable.ty(), lane)}}));
+        if (!tl::arith::CanProveEqual(analyzer_, current - previous,
+                                      tl::MakeConst(current.ty(), 1)))
           return false;
         previous = current;
       }
@@ -344,7 +351,7 @@ private:
     if (const auto *loop = statement.as<ForNode>())
       return AnalyzeRegion(loop->body);
     if (const auto *region = statement.as<RegionStmtNode>()) {
-      if (region->op->name == "tirx.scope" || region->op->name == "tl.scope") {
+      if (region->op->name == "tl.scope" || region->op->name == "tl.scope") {
         return AnalyzeRegion(region->body);
       }
     }

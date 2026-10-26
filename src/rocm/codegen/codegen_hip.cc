@@ -1,8 +1,10 @@
+#include "compat/analyzer.h"
 /*!
  * \file target/codegen.cc
  */
 
 #include "codegen_hip.h"
+#include "op/prim.h"
 #include "support/check.h"
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -182,7 +184,7 @@ private:
       if (source_type.bits() < result_type.bits()) {
         ICHECK_EQ(result_type.bits() % source_type.bits(), 0);
         int factor = result_type.bits() / source_type.bits();
-        PrimExpr packed = MakeConst(result_bits, 0);
+        PrimExpr packed = tl::MakeConst(result_bits, 0);
         for (int component = 0; component < factor; ++component) {
           PrimExpr value =
               VectorLaneScalarizer(lane_ * factor + component)(node->args[0]);
@@ -225,7 +227,7 @@ private:
         return Call(value.ty(), tirx::call_pure_extern_op(),
                     {StringImm("__habs"), value})
             .as_or_throw<PrimExpr>();
-      return Select(value >= MakeConst(value.ty(), 0), value, -value);
+      return Select(value >= tl::MakeConst(value.ty(), 0), value, -value);
     }
     return Call(result_type.WithLanes(1), node->op, arguments, node->attrs,
                 node->ty_args, node->loc)
@@ -379,7 +381,7 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const tirx::Function &function,
             .starts_with("threadIdx."))
       threads = threads * region->args[1].as_or_throw<PrimExpr>();
   });
-  auto count = tl::GetConstInt(sym::Analyzer()->Simplify(threads));
+  auto count = tl::GetConstInt(tl::arith::Simplify(sym::Analyzer(), threads));
   if (count && *count >= 64)
     output << " __launch_bounds__(" << *count << ")";
 }
@@ -2174,7 +2176,7 @@ void CodeGenTileLangHIP::Dispatch_(const BindNode *op) {
     } else if (scope == "local.var") {
       // Single-element variable: emit an initializer so the value is defined.
       // Default to 0; respect the user-provided tl.local_var_init annotation.
-      PrimExpr init = prim::MakeConst(tensor.dtype(), 0);
+      PrimExpr init = tl::MakeConst(tensor.dtype(), 0);
       auto init_it = annotations.find(tl::attr::kLocalVarInit);
       if (init_it != annotations.end()) {
         PrimExpr user_init = (*init_it).second.cast<PrimExpr>();

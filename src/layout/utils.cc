@@ -1,11 +1,13 @@
+#include "compat/analyzer.h"
 /*!
  * \file layout/utils.cc
  * \brief Some arith tools for layout & fragment inference
  *
  */
 
-#include "utils.h"
+#include "op/prim.h"
 #include "support/check.h"
+#include "utils.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/sym/iter_affine_map.h>
@@ -49,7 +51,7 @@ Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
 
 std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
   sym::Analyzer analyzer;
-  return GetConstInt(analyzer->Simplify(expr));
+  return GetConstInt(tl::arith::Simplify(analyzer, expr));
 }
 
 bool CanProveDivisible(const PrimExpr &lhs, const PrimExpr &rhs) {
@@ -107,7 +109,7 @@ public:
 Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
                                       const std::vector<IterSplitExpr> &splits,
                                       const sym::Analyzer &analyzer) {
-  PrimExpr expected_lower_factor = MakeConst(mark->source.ty(), 1);
+  PrimExpr expected_lower_factor = tl::MakeConst(mark->source.ty(), 1);
   std::vector<bool> used(splits.size(), false);
   std::vector<IterSplitExpr> results;
   size_t i = 0;
@@ -117,8 +119,9 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
     for (; j < splits.size(); ++j) {
       if (used[j])
         continue;
-      if (!used[j] && analyzer->CanProveEqual(splits[j]->lower_factor,
-                                              expected_lower_factor)) {
+      if (!used[j] &&
+          tl::arith::CanProveEqual(analyzer, splits[j]->lower_factor,
+                                   expected_lower_factor)) {
         break;
       }
       if (lowest == splits.size() ||
@@ -135,27 +138,29 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
           << " and " << expected_lower_factor;
       results.emplace_back(
           mark, expected_lower_factor,
-          analyzer->Simplify(
-              FloorDiv(splits[lowest]->lower_factor, expected_lower_factor)),
+          tl::arith::Simplify(analyzer, FloorDiv(splits[lowest]->lower_factor,
+                                                 expected_lower_factor)),
           1);
       expected_lower_factor = splits[lowest]->lower_factor;
     } else {
       used[j] = true;
       i++;
-      expected_lower_factor =
-          analyzer->Simplify(splits[j]->lower_factor * splits[j]->extent);
+      expected_lower_factor = tl::arith::Simplify(
+          analyzer, splits[j]->lower_factor * splits[j]->extent);
     }
   }
   // Iter split normalization may over-approximate the original mark span.
   // Treat over-coverage as fully covered instead of synthesizing a zero-extent
   // leftover iterator, which later normalizes into division by zero.
   bool covers_full_iter =
-      analyzer->CanProveEqual(expected_lower_factor, mark->extent) ||
-      analyzer->CanProve(expected_lower_factor > mark->extent);
+      tl::arith::CanProveEqual(analyzer, expected_lower_factor, mark->extent) ||
+      tl::arith::CanProve(analyzer, expected_lower_factor > mark->extent);
   if (!covers_full_iter) {
     results.emplace_back(
         mark, expected_lower_factor,
-        analyzer->Simplify(FloorDiv(mark->extent, expected_lower_factor)), 1);
+        tl::arith::Simplify(analyzer,
+                            FloorDiv(mark->extent, expected_lower_factor)),
+        1);
   }
   return results;
 }
@@ -337,18 +342,18 @@ CompressIterator(const PrimExpr &expr, const Array<LayoutAxis> input_iters,
   auto domains = ToVMap(input_iters);
   Map<PrimVar, PrimExpr> other_origins;
   for (const auto &[variable, domain] : domains) {
-    analyzer->Bind(variable, domain, true);
+    tl::arith::Bind(analyzer, variable, domain, true);
     if (!variable.same_as(var))
       other_origins.Set(variable, domain->begin);
   }
   PrimExpr baseline = Substitute(expr, {{var, domains[var]->begin}});
   PrimExpr contribution =
-      analyzer->Simplify(Substitute(expr - baseline, other_origins));
+      tl::arith::Simplify(analyzer, Substitute(expr - baseline, other_origins));
   PrimExpr separated = baseline + contribution;
-  PrimExpr normalized =
-      analyzer->CanProve(expr == separated, sym::ProofStrength::kSymbolicBound)
-          ? analyzer->Simplify(separated)
-          : analyzer->Simplify(expr);
+  PrimExpr normalized = tl::arith::CanProve(analyzer, expr == separated,
+                                            sym::ProofStrength::kSymbolicBound)
+                            ? tl::arith::Simplify(analyzer, separated)
+                            : tl::arith::Simplify(analyzer, expr);
   auto iter_sum = sym::NormalizeToIterSum(normalized, domains, analyzer);
   IterMarkSplitCollector collector;
   collector.Collect({iter_sum});
@@ -369,7 +374,7 @@ CompressIterator(const PrimExpr &expr, const Array<LayoutAxis> input_iters,
   for (const auto &split : splits) {
     extent *= split->extent;
   }
-  extent = analyzer->Simplify(extent);
+  extent = tl::arith::Simplify(analyzer, extent);
 
   auto new_var = PrimVar(var->name, var.ty());
   auto new_iter_var = LayoutAxis(Range(0, extent), new_var);
@@ -384,8 +389,8 @@ CompressIterator(const PrimExpr &expr, const Array<LayoutAxis> input_iters,
   }
 
   IterSumMutator mutator(replace_map);
-  PrimExpr reaplced =
-      analyzer->Simplify(NormalizeIterMapToExpr(mutator.Mutate(iter_sum)));
+  PrimExpr reaplced = tl::arith::Simplify(
+      analyzer, NormalizeIterMapToExpr(mutator.Mutate(iter_sum)));
 
   return {reaplced, new_iter_var};
 }
@@ -449,18 +454,19 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
     }
     // Check each physical index component for equality.
     for (size_t i = 0; i < small_physical.size(); i++) {
-      auto diff = analyzer->Simplify(small_physical[i] - large_physical[i]);
-      if (!analyzer->CanProve(diff == 0)) {
+      auto diff =
+          tl::arith::Simplify(analyzer, small_physical[i] - large_physical[i]);
+      if (!tl::arith::CanProve(analyzer, diff == 0)) {
         return false;
       }
     }
   }
 
   PrimVar rep_small("__checking_frag_contains_rep");
-  analyzer->Bind(rep_small,
-                 Range(IntImm(small_frag->ReplicateExtent().ty(), 0),
-                       small_frag->ReplicateExtent()),
-                 true); // Bind the replicate extent of small_frag.
+  tl::arith::Bind(analyzer, rep_small,
+                  Range(IntImm(small_frag->ReplicateExtent().ty(), 0),
+                        small_frag->ReplicateExtent()),
+                  true); // Bind the replicate extent of small_frag.
   // Derive thread for small_frag.
   auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
 
@@ -483,9 +489,9 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
       large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
 
   // Simplify the difference between the threads.
-  auto diff = analyzer->Simplify(thread - check_thread);
+  auto diff = tl::arith::Simplify(analyzer, thread - check_thread);
   // If the difference is zero, the threads match and the access is valid.
-  return analyzer->CanProve(diff == 0);
+  return tl::arith::CanProve(analyzer, diff == 0);
 }
 
 } // namespace tl

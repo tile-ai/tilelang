@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 from tvm_tirx.target import Target
 from tilelang._compat.tirx import PrimFunc
+from tilelang._compat import ir
 from tvm_tirx.codegen.executable import Executable
 from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
@@ -231,7 +232,7 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         self.execution_backend = execution_backend
-        func_binary = func.script(show_meta=True).encode()
+        func_binary = ir.script(func, show_meta=True).encode()
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),

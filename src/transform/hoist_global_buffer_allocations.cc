@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \brief Hoist global buffer allocations to the top of the block (host side).
  * \file hoist_global_buffer_allocations.cc
@@ -15,7 +16,7 @@
 namespace tvm::tl {
 namespace {
 
-class DeviceAllocationCollector : public tirx::StmtExprMutator {
+class DeviceAllocationCollector : public tvm::tl::StmtExprMutator {
 public:
   explicit DeviceAllocationCollector(const RegionStmt &region) {
     ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
@@ -38,7 +39,7 @@ private:
     const auto *call = node->value.as<CallNode>();
     if (!tensor || tensor->scope().name() != "global" || !call ||
         !call->op.same_as(tirx::alloc_tensor_op())) {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     for (const Var &variable : UndefinedVars(node->value)) {
       TVM_FFI_CHECK(!definitions_.count(variable.get()), ValueError)
@@ -53,7 +54,7 @@ private:
   std::unordered_set<const VarNode *> definitions_;
 };
 
-class GlobalAllocationHoister : public tirx::StmtExprMutator {
+class GlobalAllocationHoister : public tvm::tl::StmtExprMutator {
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
                                  ffi::InplaceMode mode) final {
@@ -61,7 +62,7 @@ private:
                          node->op->name == "tirx.device_scope" ||
                          node->op->name == "tl.launch_grid";
     if (!device_region) {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     auto collector = ffi::make_object<DeviceAllocationCollector>(
         ffi::GetRef<RegionStmt>(node));

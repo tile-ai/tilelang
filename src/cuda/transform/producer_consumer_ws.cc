@@ -1,6 +1,7 @@
 #include "auto_schedule/preprocess_ir.h"
 #include "auto_schedule/role_based_scheduler.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
@@ -16,7 +17,7 @@ namespace {
 using namespace ffi;
 using namespace tirx;
 
-class ProducerConsumerPlanner : public StmtExprMutator {
+class ProducerConsumerPlanner : public tvm::tl::StmtExprMutator {
 public:
   ProducerConsumerPlanner(Target target, Array<Var> readonly)
       : target_(std::move(target)), readonly_(std::move(readonly)) {}
@@ -59,7 +60,7 @@ private:
           }
         }
     } else {
-      region = StmtExprMutator::Mutate_(node, mode)
+      region = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                    .ValueOrUnchanged(region)
                    .as_or_throw<RegionStmt>();
     }

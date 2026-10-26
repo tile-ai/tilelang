@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
+from tilelang._compat import ir
 
 from tilelang._compat.tensor import TensorView
 from tilelang.transform import MergeIfStmt
@@ -73,10 +74,10 @@ def test_merging_keeps_bindings_in_distinct_lexical_scopes():
     second = ir.If(condition, [ir.Bind(second_value, 2), output.store(1, second_value)], None)
     result = transform([first, second], [condition, output.tensor])
     first_scope, second_scope = result.body.seq[0].then_case.seq
-    assert first_scope.op.name == second_scope.op.name == "tirx.scope"
+    assert first_scope.op.name == second_scope.op.name == "tl.scope"
     assert first_scope.body.seq[0].var.same_as(first_value)
     assert second_scope.body.seq[0].var.same_as(second_value)
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
 
 
 def test_merge_preserves_first_guard_location():
@@ -88,7 +89,7 @@ def test_merge_preserves_first_guard_location():
 
 
 @pytest.mark.parametrize("condition", [False, True])
-def test_native_cpu_execution_after_merge(condition):
+def test_native_cpu_execution_after_merge(condition, *, compile_tilelang):
     output = TensorView.create("output", [2], "int32")
     condition_var = ir.Var("condition", "bool")
     first_value = ir.Var("value", "int32")
@@ -96,7 +97,7 @@ def test_native_cpu_execution_after_merge(condition):
     first = ir.If(condition_var, [ir.Bind(first_value, 11), output.store(0, first_value)], None)
     second = ir.If(condition_var, [ir.Bind(second_value, 23), output.store(1, second_value)], None)
     function = transform([first, second], [output.tensor, condition_var])
-    executable = tirx.compile(function, target="c")
+    executable = compile_tilelang(function, target="c")
     actual = runtime.tensor(np.full(2, -1, dtype="int32"))
     executable(actual, condition)
     expected = [11, 23] if condition else [-1, -1]

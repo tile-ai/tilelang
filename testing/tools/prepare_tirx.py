@@ -1,4 +1,4 @@
-"""Build or install the explicitly selected standalone TileLang/TIRx dependency pair."""
+"""Build or install TileLang's pinned, unmodified standalone TIRx dependency."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ import zipfile
 
 
 PROJECT = Path(__file__).resolve().parents[2]
+EXTENSION_EXPORTS = PROJECT / "cmake" / "tirx_extension_exports.cmake"
 BACKENDS = ("CUDA", "ROCM", "METAL", "LLVM", "OPENCL", "VULKAN", "Z3")
 FALSE_VALUES = {"0", "off", "false", "no", ""}
 
@@ -67,16 +68,24 @@ def validate_source(source, revision, project=PROJECT):
     for relative in ("include/tvm/tirx/type.h", "python/tvm_tirx/__init__.py", "3rdparty/tvm-ffi/CMakeLists.txt"):
         if not (source / relative).is_file():
             raise ValueError(f"Incomplete standalone TIRx checkout: missing {relative}")
-    if (source / ".git").exists():
-        actual = run(["git", "-C", source, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-        if actual != revision:
-            raise ValueError(f"TIRx checkout is at {actual}, expected the paired revision {revision}")
+    if not (source / ".git").exists():
+        raise ValueError("TIRx source must be a Git checkout so the pinned revision and unmodified source can be verified")
+    actual = run(["git", "-C", source, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if actual != revision:
+        raise ValueError(f"TIRx checkout is at {actual}, expected the upstream revision {revision}")
+    dirty = run(
+        ["git", "-C", source, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    if dirty:
+        raise ValueError(f"TIRx source must be unmodified at {revision}:\n{dirty}")
     return source
 
 
 def definitions_from_environment(environment, platform=sys.platform, command_line=()):
     defaults = {"CUDA": "AUTO", "ROCM": "OFF", "METAL": "ON" if platform == "darwin" else "OFF", "LLVM": "OFF", "Z3": "ON"}
-    definitions = {"TVM_TIRX_EXPORT_ALL_SYMBOLS": "ON"}
+    definitions = {"CMAKE_PROJECT_tvm_tirx_INCLUDE": str(EXTENSION_EXPORTS)}
     for backend in BACKENDS:
         definitions[f"TVM_TIRX_USE_{backend}"] = environment.get(
             f"TVM_TIRX_USE_{backend}", environment.get(f"USE_{backend}", defaults.get(backend, "OFF"))
@@ -95,8 +104,10 @@ def definitions_from_environment(environment, platform=sys.platform, command_lin
         if not separator or not name:
             raise ValueError("CMake definitions must use NAME=VALUE")
         definitions[name] = value
-    if definitions["TVM_TIRX_EXPORT_ALL_SYMBOLS"].lower() in FALSE_VALUES:
-        raise ValueError("TileLang requires TVM_TIRX_EXPORT_ALL_SYMBOLS=ON")
+    if "TVM_TIRX_EXPORT_ALL_SYMBOLS" in definitions:
+        raise ValueError("TVM_TIRX_EXPORT_ALL_SYMBOLS is obsolete; TileLang owns its extension export policy")
+    if definitions["CMAKE_PROJECT_tvm_tirx_INCLUDE"] != str(EXTENSION_EXPORTS):
+        raise ValueError("TileLang requires its CMAKE_PROJECT_tvm_tirx_INCLUDE export hook")
     return definitions
 
 
@@ -134,7 +145,7 @@ def validate_backends(configuration, definitions):
         if setting in FALSE_VALUES or setting == "auto":
             continue
         if not any(directory.glob(f"*tvm_runtime_{backend.lower()}.*")):
-            raise ValueError(f"Paired TIRx package lacks the requested {backend} runtime; build that backend or provide a matching wheel")
+            raise ValueError(f"TIRx package lacks the requested {backend} runtime; build that backend or provide a matching wheel")
 
 
 def provision(arguments):
@@ -142,7 +153,7 @@ def provision(arguments):
     pinned_revision = validate_revision((PROJECT / "TVM_TIRX_COMMIT").read_text().strip())
     revision = validate_revision(arguments.revision or pinned_revision)
     if revision != pinned_revision:
-        raise ValueError("Update TVM_TIRX_COMMIT with the paired revision; environment variables cannot override the source pin")
+        raise ValueError("Update TVM_TIRX_COMMIT with the upstream revision; environment variables cannot override the source pin")
     output = arguments.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     uv = uv_command()
@@ -188,12 +199,12 @@ def provision(arguments):
                 source = PROJECT.parent / "tvm-tirx"
             else:
                 raise ValueError(
-                    "Provide TVM_TIRX_SOURCE, TVM_TIRX_WHEEL, or TVM_TIRX_REPOSITORY for the patched dependency; stock PyPI TIRx is not a fallback"
+                    "Provide TVM_TIRX_SOURCE, TVM_TIRX_WHEEL, or TVM_TIRX_REPOSITORY for the pinned dependency with TileLang's C++ exports"
                 )
             source = validate_source(source, revision)
             metadata = project_metadata(source / "pyproject.toml", uv)
             if metadata["project"]["version"] != version:
-                raise ValueError(f"The selected checkout must provide the paired version {version}")
+                raise ValueError(f"The selected checkout must provide the pinned version {version}")
             run(
                 [
                     *uv,
@@ -239,7 +250,7 @@ def provision(arguments):
     run([*uv, "pip", "install", "--python", arguments.python, f"apache-tvm-tirx=={version}", "--find-links", output])
     configuration = installed_configuration(arguments.python)
     if configuration["version"] != version:
-        raise ValueError("The interpreter did not select the paired standalone package")
+        raise ValueError("The interpreter did not select the pinned standalone package")
     validate_backends(configuration, definitions)
     exported = {
         "TILELANG_USE_INSTALLED_TIRX": "ON",
@@ -277,7 +288,7 @@ def main():
     try:
         provision(arguments)
     except (ValueError, subprocess.CalledProcessError) as error:
-        parser.exit(1, f"Paired TIRx provisioning failed: {error}\n")
+        parser.exit(1, f"Standalone TIRx provisioning failed: {error}\n")
 
 
 if __name__ == "__main__":

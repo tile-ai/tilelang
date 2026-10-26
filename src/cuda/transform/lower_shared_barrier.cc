@@ -1,5 +1,8 @@
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "cuda/op/builtin.h"
+#include "op/gpu.h"
+#include "op/prim.h"
 
 #include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/op/memory.h>
@@ -13,7 +16,7 @@ using namespace tirx;
 
 namespace {
 
-class SharedBarrierRewriter : public StmtExprMutator {
+class SharedBarrierRewriter : public tvm::tl::StmtExprMutator {
 public:
   explicit SharedBarrierRewriter(bool disable_shuffle)
       : disable_shuffle_(disable_shuffle) {}
@@ -24,11 +27,11 @@ private:
       if (auto replacement = tensors_.Get(tensor.value()))
         return replacement.value();
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
-    Expr result = StmtExprMutator::Mutate_(node, mode)
+    Expr result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(GetRef<Expr>(node));
     if (node->op.same_as(access_ptr()) || node->op.same_as(address_of_op()) ||
         node->op.same_as(tensor_data_ptr_op())) {
@@ -49,7 +52,7 @@ private:
         threads_.Set(tag, node->body_params[0].as_or_throw<PrimVar>());
       }
     }
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     threads_ = previous;
     return result;
   }
@@ -57,10 +60,10 @@ private:
   UnchangedOr<Stmt> Mutate_(const BindNode *node, InplaceMode mode) final {
     auto tensor = node->var.as<TensorVar>();
     if (!tensor)
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     String scope = tensor.value().scope().name();
     if (scope != "shared.barrier" && scope != "shared.cluster_barrier") {
-      return StmtExprMutator::Mutate_(node, mode);
+      return tvm::tl::StmtExprMutator::Mutate_(node, mode);
     }
     TVM_FFI_CHECK(threads_.count("threadIdx.x"), ValueError)
         << "Shared barriers must be allocated inside a CUDA thread launch";
@@ -96,15 +99,15 @@ private:
       }
       initialization.push_back(Evaluate(
           Call(PrimType::Void(), mbarrier_init(),
-               {TensorLoad(physical, {MakeConst(PrimType::Int(32), slot)}),
+               {TensorLoad(physical, {tl::MakeConst(PrimType::Int(32), slot)}),
                 count})));
     }
     PrimExpr leader = Call(PrimType::Bool(), tl_shuffle_elect(), {PrimExpr(0)})
                           .as_or_throw<PrimExpr>();
     if (disable_shuffle_) {
-      leader = MakeConst(PrimType::Bool(), true);
+      leader = tl::MakeConst(PrimType::Bool(), true);
       for (const auto &[tag, variable] : threads_)
-        leader = leader && variable == MakeConst(variable.ty(), 0);
+        leader = leader && variable == tl::MakeConst(variable.ty(), 0);
     }
     Array<Stmt> statements{
         Bind(physical,
@@ -114,7 +117,7 @@ private:
         If(leader, SeqStmt(initialization)),
         Evaluate(Call(PrimType::Void(), ptx_fence_barrier_init(), {})),
         Evaluate(
-            Call(std::nullopt, gpu_storage_sync_op(),
+            Call(std::nullopt, tl::StorageSyncOp(),
                  {StringImm(scope == "shared.cluster_barrier" ? "cluster"
                                                               : "shared")}))};
     return SeqStmt(statements, node->loc);

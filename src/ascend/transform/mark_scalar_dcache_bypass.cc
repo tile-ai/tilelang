@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 /*!
  * \file mark_scalar_dcache_bypass.cc
  * \brief Rewrite scalar BufferLoad/BufferStore on global buffers that have
@@ -84,7 +85,7 @@ struct GlobalWrites {
   }
 };
 
-class ScalarDcacheBypassRewriter : public tirx::StmtExprMutator {
+class ScalarDcacheBypassRewriter : public tvm::tl::StmtExprMutator {
 public:
   explicit ScalarDcacheBypassRewriter(GlobalWrites writes)
       : writes_(std::move(writes)) {}
@@ -96,7 +97,7 @@ protected:
                                 node->op.same_as(tirx::address_of_op()))) {
       if (const auto *load = node->args[0].as<TensorLoadNode>()) {
         ffi::Array<Expr> arguments;
-        arguments.push_back(StmtExprMutator::Mutate_(load, mode)
+        arguments.push_back(tvm::tl::StmtExprMutator::Mutate_(load, mode)
                                 .ValueOrUnchanged(ffi::GetRef<PrimExpr>(load)));
         for (size_t index = 1; index < node->args.size(); ++index) {
           arguments.push_back(
@@ -107,7 +108,7 @@ protected:
         return result;
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtNode *node,
@@ -115,7 +116,7 @@ protected:
     bool previous = inside_vf_;
     auto name = node->attrs.GetAttr<ffi::String>("name_hint").value_or("");
     inside_vf_ = inside_vf_ || name == "SIMT_VF" || name == "SIMD_VF";
-    auto result = StmtExprMutator::Mutate_(node, mode);
+    auto result = tvm::tl::StmtExprMutator::Mutate_(node, mode);
     inside_vf_ = previous;
     return result;
   }
@@ -123,8 +124,8 @@ protected:
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadNode *node,
                                      ffi::InplaceMode mode) final {
     PrimExpr original = ffi::GetRef<PrimExpr>(node);
-    auto value =
-        StmtExprMutator::Mutate_(node, mode).ValueOrUnchanged(original);
+    auto value = tvm::tl::StmtExprMutator::Mutate_(node, mode)
+                     .ValueOrUnchanged(original);
     auto load = value.as_or_throw<TensorLoad>();
     if (load->indices.size() != 1 || !load.ty().IsScalar() ||
         !ShouldBypass(load->source))
@@ -137,7 +138,7 @@ protected:
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
                                  ffi::InplaceMode mode) final {
     Stmt original = ffi::GetRef<Stmt>(node);
-    auto store = StmtExprMutator::Mutate_(node, mode)
+    auto store = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                      .ValueOrUnchanged(original)
                      .as_or_throw<TensorStore>();
     if (store->indices.size() != 1 || !store->value.ty().IsScalar() ||

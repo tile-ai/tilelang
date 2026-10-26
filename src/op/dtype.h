@@ -5,6 +5,13 @@
 
 namespace tvm::tl {
 
+inline bool IsCustomDType(PrimType type) {
+  return static_cast<int>(type.code()) >= 129;
+}
+
+void RegisterCustomDType(ffi::String name, int code, PrimType storage_type);
+PrimType CustomDTypeStorage(PrimType type);
+
 inline constexpr DLDataTypeCode kTensorFloat32 =
     static_cast<DLDataTypeCode>(130);
 inline constexpr DLDataTypeCode kFloat4E2M1Unpacked =

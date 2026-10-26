@@ -28,7 +28,7 @@ class _MarkHostMetalContextMutator(PyStmtExprMutator):
             and value.op.name == "tirx.call_packed_lowered"
         ):
             return ir.RegionStmt(
-                "tirx.scope",
+                "tl.scope",
                 [],
                 [],
                 {"metal_context": True},

@@ -1,7 +1,9 @@
+from tilelang.transform import _tirx_passes
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, sym, tirx
+from tvm_tirx import runtime, sym, tirx
+from tilelang._compat import ir
 from tvm_tirx.ir.prim import Cast, if_then_else
 from tvm_tirx.target import Target
 
@@ -38,7 +40,7 @@ def test_decouple_native_tensors(direction):
     store = ir.TensorStore(destination, [index], Cast(destination.ty.dtype, ir.TensorLoad(source, [index])))
     result = transform(make_loop(store, index), [memory, local])
     region = result.body.seq[0]
-    assert region.op.name == "tirx.scope"
+    assert region.op.name == "tl.scope"
     allocation, first, second = region.body.seq
     assert isinstance(allocation, ir.Bind)
     assert allocation.value.op.name == "tirx.alloc_tensor"
@@ -176,17 +178,17 @@ def test_storage_rewrite_preserves_region_allocation_boundary():
     index = ir.Var("index", "int32")
     loop = make_loop(ir.TensorStore(memory, [index], Cast("float32", index)), index)
     function = transform(make_loop(loop, outer, end=2, kind=ir.ForKind.DEFAULT), [memory]).with_attr("target", Target("c"))
-    module = tirx.transform.VectorizeLoop(enable_vectorize=False)(ir.IRModule({"main": function}))
-    result = tirx.transform.StorageRewrite()(module)["main"]
+    module = _tirx_passes.VectorizeLoop(enable_vectorize=False)(ir.IRModule({"main": function}))
+    result = _tirx_passes.StorageRewrite()(module)["main"]
     assert isinstance(result.body.seq[0], ir.For)
     region = result.body.seq[0].body.seq[0]
-    assert region.op.name == "tirx.scope"
+    assert region.op.name == "tl.scope"
     assert isinstance(region.body.seq[0], ir.Bind)
 
 
 @pytest.mark.parametrize("begin,extent", [(-3, 4), (2, 4), (2, 0), (2, 1)])
 @pytest.mark.parametrize("index_type", ["int32", "int64"])
-def test_native_cpu_execution_preserves_loop_domain(begin, extent, index_type):
+def test_native_cpu_execution_preserves_loop_domain(begin, extent, index_type, *, compile_tilelang):
     memory = tensor("memory", shape=(8,))
     index = ir.Var("index", index_type)
     start = ir.const(begin, index_type)
@@ -198,8 +200,8 @@ def test_native_cpu_execution_preserves_loop_domain(begin, extent, index_type):
         step=ir.const(1, index_type),
     )
     function = transform(loop, [memory])
-    module = tirx.transform.VectorizeLoop(enable_vectorize=False)(ir.IRModule({"main": function}))
-    executable = tirx.compile(module, target="c")
+    module = _tirx_passes.VectorizeLoop(enable_vectorize=False)(ir.IRModule({"main": function}))
+    executable = compile_tilelang(module, target="c")
     actual = runtime.tensor(np.full(8, -999, dtype="float32"))
     executable(actual)
     expected = np.full(8, -999, dtype="float32")
@@ -208,7 +210,7 @@ def test_native_cpu_execution_preserves_loop_domain(begin, extent, index_type):
 
 
 @pytest.mark.gpu
-def test_decoupled_native_kernel_executes_on_cuda():
+def test_decoupled_native_kernel_executes_on_cuda(*, compile_tilelang):
     device = runtime.cuda(0)
     if not device.exist:
         pytest.skip("A TIRx CUDA runtime and CUDA device are required")
@@ -220,12 +222,12 @@ def test_decoupled_native_kernel_executes_on_cuda():
     loop = make_loop(ir.TensorStore(memory, [offset], value), index, end=4)
     launch = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(32)], [thread], None, loop)
     function = transform(launch, [memory])
-    assert collect_nodes(function, ir.RegionStmt)[0].op.name == "tirx.scope"
+    assert collect_nodes(function, ir.RegionStmt)[0].op.name == "tl.scope"
     target = Target(
         {"kind": "cuda", "arch": f"sm_{device.compute_version.replace('.', '')}", "backend_config": {"cuda": {"compiler": "nvcc"}}},
         host="c",
     )
-    executable = tirx.compile(function, target=target)
+    executable = compile_tilelang(function, target=target)
     values = np.arange(128, dtype="float32")
     actual = runtime.tensor(values, device=device)
     executable(actual)

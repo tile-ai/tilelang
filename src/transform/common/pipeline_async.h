@@ -1,3 +1,4 @@
+#include "compat/metadata.h"
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_ASYNC_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_ASYNC_H_
 
@@ -257,13 +258,13 @@ inline Stmt PipelineAsyncWait(int pending) {
                         StringImm("wait_group"), StringImm("")}));
 }
 
-class PipelineAsyncMarker : public StmtExprMutator {
+class PipelineAsyncMarker : public tvm::tl::StmtExprMutator {
 public:
   explicit PipelineAsyncMarker(Target target) : target_(std::move(target)) {}
 
 private:
   UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
-    Call result = StmtExprMutator::Mutate_(node, mode)
+    Call result = tvm::tl::StmtExprMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(ffi::GetRef<Call>(node))
                       .as_or_throw<Call>();
     auto operation = ParseOperator(result);

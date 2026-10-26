@@ -7,7 +7,7 @@ from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScal
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import retrieve_ptr
 from tilelang._compat.tvm import tirx
-from tvm_tirx.sym import Analyzer
+from tilelang._compat.sym import Analyzer
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 

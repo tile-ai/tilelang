@@ -1,5 +1,7 @@
 #include "backend/common/target_utils.h"
+#include "compat/analyzer.h"
 #include "compat/expr.h"
+#include "compat/metadata.h"
 #include "compat/visit.h"
 #include "cuda/op/builtin.h"
 #include "op/utils.h"
@@ -27,7 +29,7 @@ MatchAccess(const Expr &tensor, const Array<PrimExpr> &indices, PrimType type) {
   if (!source || !IsGlobalBuffer(*source) || indices.size() != 1 ||
       !source.value().ty()->HasDefaultLayout())
     return std::nullopt;
-  PrimExpr base = sym::Analyzer()->Simplify(indices[0]);
+  PrimExpr base = tl::arith::Simplify(sym::Analyzer(), indices[0]);
   if (const auto *ramp = base.as<RampNode>()) {
     if (!IsOne(ramp->stride))
       return std::nullopt;
@@ -47,7 +49,7 @@ PrimExpr BitCast(PrimExpr value, PrimType type) {
   return Call(type, reinterpret_op(), {value}).as_or_throw<PrimExpr>();
 }
 
-class GlobalMemoryLowerer : public StmtExprMutator {
+class GlobalMemoryLowerer : public tvm::tl::StmtExprMutator {
 public:
   GlobalMemoryLowerer(bool unguarded, bool predicated)
       : unguarded_(unguarded), predicated_(predicated) {}
@@ -76,7 +78,7 @@ private:
       if (const auto *division = object.as<FloorModNode>())
         divisor = division->b;
       if (divisor && divisor.value().ty().MatchesCode(kDLInt, kDLUInt)) {
-        safe &= analyzer_->CanProve(*divisor != 0);
+        safe &= tl::arith::CanProve(analyzer_, *divisor != 0);
       }
       if (const auto *call = object.as<CallNode>();
           call && call->op.same_as(prim::if_then_else_op())) {
@@ -127,7 +129,7 @@ private:
         return Load(*access, predicate_, mode);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreNode *node,
@@ -138,7 +140,7 @@ private:
         return Store(node, *access, std::nullopt, mode);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const IfNode *node, InplaceMode mode) final {
@@ -156,7 +158,7 @@ private:
         }
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   UnchangedOr<Expr> Mutate_(const CallNode *node, InplaceMode mode) final {
@@ -192,7 +194,7 @@ private:
         }
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return tvm::tl::StmtExprMutator::Mutate_(node, mode);
   }
 
   bool unguarded_;

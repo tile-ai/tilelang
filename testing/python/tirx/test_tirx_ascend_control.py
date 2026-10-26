@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import tvm_ffi
-from tvm_tirx import ir, runtime, tirx
+from tvm_tirx import runtime, tirx
 
-from tilelang._compat import stmt_functor
+from tilelang._compat import ir, stmt_functor
 from tilelang._compat.tensor import TensorView
 
 pytestmark = pytest.mark.usefixtures("ascend_codegen")
@@ -21,13 +21,13 @@ def _scope(name, body, **attrs):
 
 def _apply(name, body, parameters=(), config=None):
     function = tirx.Function(list(parameters), body, ret_type=ir.TupleType([])).with_attr("global_symbol", "main")
-    assert tirx.analysis.check_well_formed(function)
+    assert ir.check_well_formed(function)
     with ir.transform.PassContext(config=config or {}):
         result = tvm_ffi.get_global_func("tl.transform." + name)()(ir.IRModule({"main": function}))["main"]
-    assert tirx.analysis.check_well_formed(result)
+    assert ir.check_well_formed(result)
     restored = ir.load_json(ir.save_json(result))
     ir.assert_structural_equal(result, restored)
-    assert tirx.analysis.check_well_formed(restored)
+    assert ir.check_well_formed(restored)
     return result
 
 
@@ -95,7 +95,7 @@ def test_while_counter_survives_versions_and_increments_before_continue():
 
 
 @pytest.mark.parametrize("begin,end,step", [(0, 8, 2), (8, -1, -3), (3, 3, -2), (0, 3, -2)])
-def test_explicit_unroll_preserves_step_and_native_ssa(begin, end, step):
+def test_explicit_unroll_preserves_step_and_native_ssa(begin, end, step, compile_tilelang):
     output = TensorView.create("output", [16], "int32")
     local = TensorView.create("local", [1], "int32", scope="local")
     index = ir.Var("index", "int32")
@@ -112,7 +112,7 @@ def test_explicit_unroll_preserves_step_and_native_ssa(begin, end, step):
     assert not _nodes(result, ir.For)
     definitions = [binding.var for binding in _nodes(result, ir.Bind)]
     assert len({hash(variable) for variable in definitions}) == len(range(begin, end, step))
-    executable = tirx.compile(result, target="c")
+    executable = compile_tilelang(result, target="c")
     actual = runtime.tensor(np.full(16, -99, dtype="int32"))
     executable(actual)
     expected = np.full(16, -99, dtype="int32")
@@ -184,7 +184,7 @@ def test_manual_buffer_versions_become_native_region_metadata(count):
     restored_root = _nodes(restored, ir.RegionStmt)[0]
     storage = _nodes(restored_root, ir.Bind)[0].var
     assert int(restored_root.attrs["tl.buffer_version"][storage]) == count
-    renewed = tirx.renew_def(result)
+    renewed = ir.renew_def(result)
     renewed_root = _nodes(renewed, ir.RegionStmt)[0]
     new_storage = _nodes(renewed_root, ir.Bind)[0].var
     assert not new_storage.same_as(tensor.tensor)
@@ -267,7 +267,7 @@ def test_ascend_noop_removal_keeps_bindings_and_drops_dead_storage():
     assert [binding.var.name for binding in _nodes(result, ir.Bind)] == ["value"]
 
 
-def test_ascend_noop_dataflow_does_not_leak_between_branches():
+def test_ascend_noop_dataflow_does_not_leak_between_branches(compile_tilelang):
     storage = TensorView.create("storage", [1], "int32")
     output = TensorView.create("output", [1], "int32")
     flag = ir.Var("flag", "int32")
@@ -275,7 +275,7 @@ def test_ascend_noop_dataflow_does_not_leak_between_branches():
     result = _apply(
         "AscendRemoveNoOp", body, [storage.tensor, output.tensor, flag], {"tl.AscendRemoveNoOp": {"use_dataflow_analysis": True}}
     )
-    executable = tirx.compile(result, target="c")
+    executable = compile_tilelang(result, target="c")
     data = runtime.tensor(np.array([7], dtype="int32"))
     actual = runtime.tensor(np.array([-1], dtype="int32"))
     executable(data, actual, 0)

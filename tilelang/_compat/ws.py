@@ -7,7 +7,7 @@ import warnings
 
 import tvm_ffi
 from tvm_tirx import ir, sym, tirx
-from tvm_tirx.tirx.function import renew_def
+from .ir import renew_def
 
 from tilelang.warp_specialize import WSOpRef, WSPipeline, WSRole, WSSchedule, WSScope, WSSync, WSSyncKind
 from . import stmt_functor
@@ -65,7 +65,7 @@ def _strip_markers(statement):
                 and not attributes
                 and not node.body_params
                 and not node.result_vars
-                and node.op.name in ("tirx.scope", "tl.scope")
+                and node.op.name in ("tl.scope", "tl.scope")
             ):
                 return node.body
             return _region(node, node.body, attributes)
@@ -190,7 +190,7 @@ class _Program:
                 self._operation(child.identifier, statement, scope, guards, child.identifier)
                 self._parse(loop.body, child)
                 return
-            if not identifier and statement.op.name in ("tl.scope", "tirx.scope"):
+            if not identifier and statement.op.name in ("tl.scope", "tl.scope"):
                 if statement.body_params or statement.result_vars:
                     raise ValueError("Scheduled lexical scopes cannot introduce unplaced scalar bindings")
                 if scope.identifier == WSScope.ROOT:
@@ -1180,7 +1180,7 @@ class _Materializer:
                     end = idle.pop(0) + 1
                 condition = ir.prim.And(self.thread >= begin * 32, self.thread < end * 32)
                 roles.append(ir.If(condition, _call("tl.set_max_nreg", ir.const(count), ir.const(int(count > 64))), None))
-        bodies.append(ir.RegionStmt("tirx.scope", [], [], ir.DictAttrs({"tl.ws_concurrent": True}), roles))
+        bodies.append(ir.RegionStmt("tl.scope", [], [], ir.DictAttrs({"tl.ws_concurrent": True}), roles))
         attributes = _attrs(self.region.attrs)
         attributes.update(self.program.attributes)
         attributes.pop("tl.ws_schedule")
@@ -1210,7 +1210,7 @@ def materialize_ws_schedule(function):
     def schedules(statement):
         if isinstance(statement, ir.SeqStmt):
             return [schedule for child in statement.seq for schedule in schedules(child)]
-        if isinstance(statement, ir.RegionStmt) and statement.op.name in ("tirx.scope", "tl.scope"):
+        if isinstance(statement, ir.RegionStmt) and statement.op.name in ("tl.scope", "tl.scope"):
             if "tl.ws_schedule" in statement.attrs:
                 return [statement.attrs["tl.ws_schedule"]]
             return schedules(statement.body)
