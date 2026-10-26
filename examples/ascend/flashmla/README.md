@@ -66,10 +66,12 @@ fixed loop extent; they do not shorten this example's pipeline loop.
 
 ## Reproduce
 
-The kernel branch includes the native NZ-copy, AIV-stream-selection, and manual
-pipe-order compiler changes. It starts at main `d85a70a`; apply the remaining
-compiler prerequisites and placement-API migration listed in
-[WORKTREES.md](WORKTREES.md) before compiling the staged kernel.
+This example includes the native NZ-copy, AIV-stream-selection, and manual
+pipe-order compiler changes. Apply [#3623](https://github.com/tile-ai/tilelang/pull/3623)
+and [#3624](https://github.com/tile-ai/tilelang/pull/3624) before compiling the staged
+kernel; [WORKTREES.md](WORKTREES.md) explains the required compiler support.
+The staged kernel uses `T.annotate_buffer_addresses` with explicit physical
+version counts for its L1 placement.
 The historical integrated compiler was based on main `876a59e`; its
 [rebase validation record](results/staged-main-rebase-2026-10-20.json) covers
 the initial native build, host tests, and kernel source generation. The
@@ -173,7 +175,7 @@ See `RESULTS.md` for the measured results, environment, and limitations.
 The historical manual-kernel measurements and newer staged measurements are
 reported separately, including the pre-rebase `9c46d1c` manual-order validation in
 [staged-manual-order-2026-10-20.json](results/staged-manual-order-2026-10-20.json).
-The current compiler's complete performance results are in
+The historical integrated compiler's complete performance results are in
 [prefill](results/staged-main-rebase-prefill-bench-2026-10-20.json) and
 [decode](results/staged-main-rebase-decode-bench-2026-10-20.json), with every
 measured launch retained.

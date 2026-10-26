@@ -386,7 +386,7 @@ def sparse_attention(
             ss = T.alloc_ss((2,), "uint32")
             ss_pairs = T.view(ss, shape=(1,), dtype="uint64")
             ss_result = T.alloc_ss((1,), "uint32")
-            T.annotate_l1_offsets(
+            T.annotate_buffer_addresses(
                 {
                     kv_l1_0: 0,
                     q_l1: 131072,
@@ -410,10 +410,10 @@ def sparse_attention(
             )
             if q_prefetch:
                 T.annotate_manual_multi_buffer({q_l1: 2 * nb})
-            else:
-                T.annotate_buffer_versions({q_l1: 1})
             T.annotate_buffer_versions(
                 {
+                    # Query slots are explicit in the shape; keep one physical allocation.
+                    q_l1: 1,
                     kv_l1_0: 4,
                     kv_l1_1: 4,
                     s_l1: 2,

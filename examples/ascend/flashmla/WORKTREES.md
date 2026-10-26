@@ -1,9 +1,8 @@
 # FlashMLA compiler prerequisites
 
-The kernel branch contains the manual and persistent staged kernels, runners,
+This example contains the manual and persistent staged kernels, runners,
 historical measurement records, and support for native NZ copies, AIV stream
-selection, and manual pipe ordering. The compiler snapshot is based on upstream
-`d85a70a97218fec25856f8b5c969f167ad96dc1e`.
+selection, and manual pipe ordering.
 Apply the remaining compiler prerequisites before building the staged kernel.
 The source does not use `T.IssuePhase`.
 
@@ -13,26 +12,20 @@ Included compiler support:
 - AIV stream selection outside scheduled pipelines.
 - Manual source order across physical phase ties on each shared core and pipe.
 
-Remaining support in this compiler snapshot:
+Remaining compiler prerequisites:
 
-- Preserve Cube configuration-register dependencies across manual stages.
-- Preserve complete periodic buffer lifetimes, including externally preloaded
-  values and sibling accesses: [#3606](https://github.com/tile-ai/tilelang/pull/3606).
-- Place versioned on-chip buffers at exact byte offsets:
-  [#3607](https://github.com/tile-ai/tilelang/pull/3607).
-- Preserve physical allocation/view remapping and pointer element units during
-  layout lowering.
-- Preserve independent Cube view layouts on shared storage rings.
-- Update the compiler base to include partial UB-to-L1 NZ copies with correct
-  pitches, compact allocations, and access footprints, already merged upstream
-  in [#3530](https://github.com/tile-ai/tilelang/pull/3530).
+- [#3623](https://github.com/tile-ai/tilelang/pull/3623) preserves physical
+  allocation/view remapping, pointer element units, and independent Cube view
+  layouts on shared storage rings.
+- [#3624](https://github.com/tile-ai/tilelang/pull/3624) preserves Cube
+  configuration-register dependencies across manual stages.
 
-The buffer-placement prerequisite now provides `T.annotate_buffer_offsets` for
-UB, L1, L0A/L0B/L0C, and SS buffers, with an explicit fixed
-`T.annotate_buffer_versions` count required for every placed buffer. The staged
-kernel still calls the earlier `T.annotate_l1_offsets` API. Integrating the new
-placement prerequisite also requires migrating that call and adding the explicit
-fixed version count for `q_l1` on the prefetched-query path.
+The staged kernel uses `T.annotate_buffer_addresses` for exact L1 byte addresses
+and supplies an explicit fixed `T.annotate_buffer_versions` count for every
+placed buffer. `q_l1` has one physical allocation on both query paths: the
+prefetched-query path already includes its two slots in the buffer shape.
+Its `T.annotate_manual_multi_buffer` annotation tracks the full query-slot
+period without adding another physical version dimension.
 
 The staged kernel requires Cube-view layout support across aliases. QK allocates
 one four-version L0B buffer; PV uses a same-shape `T.view` with a different layout.
@@ -48,7 +41,7 @@ The historical measurements below used the integrated kernel at
 That compiler was based on upstream main `876a59e`; its documentation was
 committed as `6bdfe6e`. The historical integration still contained an unused
 IssuePhase API. These identities describe the recorded experiments, not the
-compiler available on an unmodified checkout of the new example branch.
+compiler available on an unmodified checkout of this example.
 
 - [RESULTS.md](RESULTS.md) contains the historical measurement tables and limitations.
 - [Rebase record](results/staged-main-rebase-2026-10-20.json) records the native build, host checks, and lowering identities.
@@ -60,6 +53,10 @@ split compiler branches. Re-run the documented commands on a chosen integrated
 compiler revision before attributing those timings to a new build.
 
 ## Dependencies already in main
+
+Complete periodic buffer lifetimes (#3606), exact on-chip buffer placement
+(#3607), and partial UB-to-L1 NZ copies with correct pitches, compact allocations,
+and access footprints (#3530) are already upstream.
 
 SS buffer versioning and fixed-version UB reuse (#3514), independent AIV
 execution and cross-core synchronization (#3485), partial L0 copies and layout
