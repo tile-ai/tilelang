@@ -473,6 +473,16 @@ private:
           CheckCopy(call);
           return;
         }
+        if (call && task_analysis_detail::IsCrossCoreSyncCall(call) &&
+            call->args.size() == 3 && call->args[0].as<IntImmNode>() &&
+            call->args[1].as<StringImmNode>()) {
+          // These intrinsics order their pipe without accessing tensor storage.
+          // Keep the calls and their resource effects intact; only their scalar
+          // flag operand contributes accesses to this footprint analysis. A
+          // mutable flag expression still prevents refinement.
+          CheckPure(call->args[2]);
+          return;
+        }
       }
       result_.complete = false;
     }
