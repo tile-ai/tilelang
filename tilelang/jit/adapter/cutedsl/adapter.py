@@ -446,7 +446,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((v for v in param_values if isinstance(v, torch.Tensor)), None)
-        if first_tensor is None:
+        # A kernel whose only tensors are out_idx outputs has no argument to
+        # infer the device from; allocate on the current device, as the CUDA
+        # adapters do.
+        if first_tensor is not None:
+            device = first_tensor.device
+        elif torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+        else:
             raise ValueError("Expected at least one torch.Tensor argument to infer CUDA device")
 
         args: list[Any] = []
@@ -454,7 +461,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         # Outputs written on a caller-supplied stream are allocated on that stream.
         alloc_stream = None
         if stream is not None and self.result_idx:
-            alloc_stream = output_allocation_stream(stream, first_tensor.device)
+            alloc_stream = output_allocation_stream(stream, device)
 
         # tensor pointers
         with torch.cuda.stream(alloc_stream):
@@ -483,7 +490,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                                 f"{shape[-1]} elements of {self.params[i].dtype} is not a multiple of {pack}"
                             )
                         shape = [*shape[:-1], shape[-1] // pack]
-                    tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
+                    tensor = torch.empty(*shape, dtype=dtype, device=device)
                     param_values[i] = tensor
                 else:
                     tensor = param_values[i]
@@ -500,10 +507,11 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        # Get device_id from first tensor for multi-GPU support
-        if not first_tensor.is_cuda:
-            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {first_tensor.device}")
-        device_id = first_tensor.device.index or 0
+        # Get device_id from the first tensor, or the current device when the
+        # kernel takes no tensor input, for multi-GPU support
+        if first_tensor is not None and not first_tensor.is_cuda:
+            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {device}")
+        device_id = device.index or 0
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
