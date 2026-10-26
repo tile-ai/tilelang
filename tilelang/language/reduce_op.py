@@ -46,7 +46,9 @@ def reduce(
             (default 1 = scalar, current behaviour). When batch > 1 the
             compiler emits ceil(N/batch) batched AllReduce calls each sharing
             a single pair of barriers, reducing total barrier count by batch×.
-            batch must evenly divide the per-thread output element count N.
+            N is the per-thread output element count, which depends on the
+            target's fragment layout. batch is an upper bound: lowering uses
+            the largest divisor of N not exceeding it and warns if that differs.
         annotations (dict, optional): Additional lowering controls. The CUDA
             dialect exposes ``nan_propagate`` on reduce_max/min/absmax as a
             typed keyword (lowering to __hmax_nan/__hmin_nan); it rides here

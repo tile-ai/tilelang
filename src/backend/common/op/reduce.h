@@ -948,7 +948,10 @@ template <typename Impl> struct ReduceLowerer {
         stmts.push_back(reduce_local);
       }
 
-      const int batch = op.batch;
+      // N depends on the fragment layout the target picks, so a batch that
+      // fits one architecture may not fit another. Treat batch as an upper
+      // bound and use the largest divisor of N that does not exceed it.
+      int batch = op.batch;
       if (batch > 1) {
         int64_t N_total = 1;
         for (const auto &s : clear_buffer->shape) {
@@ -957,11 +960,17 @@ template <typename Impl> struct ReduceLowerer {
                                   "constant output shape";
           N_total *= *p;
         }
-        ICHECK_LE(batch, N_total)
-            << "ReduceOp: batch=" << batch
-            << " exceeds per-thread output element count N=" << N_total;
-        ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
-                                      << " must evenly divide N=" << N_total;
+        int fitted = static_cast<int>(std::min<int64_t>(batch, N_total));
+        while (N_total % fitted != 0) {
+          --fitted;
+        }
+        if (fitted != batch) {
+          LOG(WARNING) << "ReduceOp: batch=" << batch
+                       << " does not fit the per-thread output element "
+                          "count N="
+                       << N_total << ", using batch=" << fitted;
+        }
+        batch = fitted;
       }
 
       bool use_batch = batch > 1;

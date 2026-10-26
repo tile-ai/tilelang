@@ -407,6 +407,27 @@ def test_sm80_batch_reduce_uses_named_barrier():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_120a"])
+def test_batch_reduce_fits_batch_to_target_layout(arch):
+    """sm_100+ loads 256-bit vectors, so each thread owns 2 rows instead of 4
+    and batch=4 must be fitted to the layout rather than rejected."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((64, 128), T.float16), B: T.Tensor((64,), T.float16)):
+        with T.Kernel(1, threads=256):
+            src = T.alloc_fragment((64, 128), T.float16)
+            dst = T.alloc_fragment((64,), T.float16)
+            T.copy(A, src)
+            T.reduce_sum(src, dst, dim=1, batch=4)
+            T.copy(dst, B)
+
+    target = {"kind": "cuda", "arch": arch}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(kernel, target=target)
+    assert "run_batch" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_reduce_partial_thread_barrier_rejects_non_power_of_two_width():
     with pytest.raises(Exception, match="positive power of two"):
         _make_partial_warp_reduce_kernel()
