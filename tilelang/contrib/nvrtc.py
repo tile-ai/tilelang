@@ -5,8 +5,8 @@ import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
 from tvm.target import Target
 from tilelang.env import CUDA_HOME
+from . import nvcc
 from .cuda_include import discover_cuda_include_paths
-from .nvcc import get_target_arch, get_target_arch_and_code
 
 
 @cache
@@ -17,11 +17,13 @@ def get_nvrtc_version() -> tuple[int, int]:
     return (major, minor)
 
 
-def get_compile_options(cuda_home: str | None = None) -> list[str]:
-    """Return CUDA header paths and compatibility defines for NVRTC."""
-    include_paths = discover_cuda_include_paths(cuda_home or CUDA_HOME or "/usr/local/cuda")
+def default_compile_options(compile_flags: list[str] | str | None = None) -> list[str]:
+    """Extend the common CUDA compile options with NVRTC header compatibility."""
+    options = nvcc.default_compile_options(compile_flags)
+    include_paths = discover_cuda_include_paths(CUDA_HOME or "/usr/local/cuda")
     major = get_nvrtc_version()[0]
-    options = [*(f"-I{path}" for path in include_paths), f"-D__CUDACC_VER_MAJOR__={major}"]
+    options += [f"-I{path}" for path in include_paths if f"-I{path}" not in options]
+    options.append(f"-D__CUDACC_VER_MAJOR__={major}")
     # CUDA <13 uses the legacy cuda/std search root. CUDA 13 exposes it
     # through include/cccl; adding the deeper root can expose private CCCL
     # headers whose tuple declarations conflict with CuTe under NVRTC.
@@ -65,9 +67,9 @@ def compile_cuda(
         The bytearray of the cubin or ptx code.
     """
     if arch is None:
-        arch, _ = get_target_arch_and_code(Target.current(allow_none=True))
+        arch, _ = nvcc.get_target_arch_and_code(Target.current(allow_none=True))
     elif isinstance(arch, int):
-        arch = get_target_arch(divmod(arch, 10))
+        arch = nvcc.get_target_arch(divmod(arch, 10))
     prefix = "compute" if target_format == "ptx" else "sm"
     arch_option = f"--gpu-architecture={prefix}_{arch}"
 

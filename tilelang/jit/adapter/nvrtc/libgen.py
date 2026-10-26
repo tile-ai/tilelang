@@ -17,7 +17,6 @@ Key responsibilities:
 from __future__ import annotations
 import importlib
 import logging
-import os.path as osp
 import tempfile
 from types import ModuleType
 
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 if is_nvrtc_available:
     import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda, get_compile_options
+    from tilelang.contrib.nvrtc import compile_cuda, default_compile_options
 else:
     raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
@@ -165,31 +164,10 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
-            from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
-
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             libpath = src.name.replace(".cu", ".cubin")
 
-            project_root = osp.join(osp.dirname(__file__), "..", "..")
-            if CUTLASS_INCLUDE_DIR is None:
-                cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
-            else:
-                cutlass_path = CUTLASS_INCLUDE_DIR
-
-            if TILELANG_TEMPLATE_PATH is None:
-                tl_template_path = osp.abspath(osp.join(project_root, "src"))
-            else:
-                tl_template_path = TILELANG_TEMPLATE_PATH
-
-            options = [
-                f"-I{tl_template_path}",
-                f"-I{cutlass_path}",
-                *get_compile_options(),
-            ]
-
-            if self.compile_flags:
-                options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
-
+            options = default_compile_options(self.compile_flags)
             cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)

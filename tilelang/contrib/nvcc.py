@@ -231,47 +231,39 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         return data
 
 
-def default_compile_options(compile_flags: list[str] | None = None) -> list[str]:
+def default_compile_options(compile_flags: list[str] | str | None = None) -> list[str]:
     """
-    Build a set of default NVCC compile options for TileLang generated sources.
+    Build common CUDA compile options for TileLang generated sources.
 
     Includes C++ standard and common include paths (TileLang templates, CUTLASS,
     CUDA include). Merges user-provided compile flags if given.
 
     Parameters
     ----------
-    compile_flags : Optional[List[str]]
-        Additional flags to include. Items are split on whitespace.
+    compile_flags : Optional[Union[List[str], str]]
+        Additional flags to include. Shell quoting and repeated flags are preserved.
 
     Returns
     -------
     List[str]
-        A list of flags suitable for NVCC's command line.
+        Flags shared by NVCC and NVRTC, including caller overrides.
     """
     # Match libgen.py: tl_templates require C++20 (explicit lambda template
     # parameters used in tl_templates/cuda/reduce.h).
     options: list[str] = ["-std=c++20"]
-    try:
-        if TILELANG_TEMPLATE_PATH:
-            options.append(f"-I{TILELANG_TEMPLATE_PATH}")
-    except Exception:
-        pass
-    try:
-        if CUTLASS_INCLUDE_DIR:
-            options.append(f"-I{CUTLASS_INCLUDE_DIR}")
-    except Exception:
-        pass
-    try:
-        if CUDA_HOME:
-            options.append(f"-I{os.path.join(CUDA_HOME, 'include')}")
-    except Exception:
-        pass
+    for include_path in (TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR):
+        if include_path:
+            options.append(f"-I{include_path}")
+    if CUDA_HOME:
+        options.append(f"-I{os.path.join(CUDA_HOME, 'include')}")
 
     # Preserve user flags exactly, including repeated tokens required by NVCC
     # (e.g., multiple "-gencode" pairs or repeated "-Xcompiler" entries).
     if compile_flags:
         import shlex
 
+        if isinstance(compile_flags, str):
+            compile_flags = [compile_flags]
         for flag in compile_flags:
             # Split each string like a shell would, preserving quoted args
             tokens = shlex.split(flag) if isinstance(flag, str) else [str(flag)]
