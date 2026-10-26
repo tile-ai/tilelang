@@ -35,8 +35,9 @@ required below; the PR description should explain what its evidence establishes.
 Follow the [AI-assisted contribution policy](../../../CONTRIBUTING.md#ai-assisted-contributions).
 When preparing a new PR description, offer the contributor a choice about
 including the agent's name. Ask early enough to answer while patch inspection
-and validation continue. Reuse an explicit preference for this PR or a standing
-preference from the conversation; do not ask again on each invocation or push.
+and validation continue, or combine this choice with the final title confirmation.
+Reuse an explicit preference for this PR or a standing preference from the
+conversation; do not ask again on each invocation or push.
 For an existing PR, preserve its disclosure unless the user requests a change.
 Commit-only work does not need this question.
 
@@ -125,6 +126,29 @@ def test_cuda_packed_codegen(op): ...
   that the whole suite passed.
 - Reinspect the final staged diff and ensure the recorded validation matches
   commands that actually completed successfully.
+
+## Confirm the PR Title
+
+Follow the [title guidelines](../../../CONTRIBUTING.md#pull-request-titles).
+Complete the patch inspection, validation, and PR description before asking.
+Before opening a PR or changing its title, show the exact proposed title and
+ask the contributor to confirm it or supply a replacement. Use a structured
+question tool when available and permitted for confirmation; otherwise ask in
+plain text. Ask in the contributor's language while keeping the proposed title
+in English. The optional disclosure choice may share the prompt, but title
+confirmation does not imply consent to disclosure.
+
+Use a title already supplied or confirmed by the contributor without asking
+again. Explicit permission to choose the title without confirmation also
+satisfies this step. Preserve an existing PR's title unless a change is needed
+or requested; updates that keep the title unchanged and commit/push-only work
+do not need this question. If a previously confirmed title changes, confirm
+the new text unless the contributor has delegated title selection.
+
+A preselected choice, timeout, or unanswered question is not confirmation.
+Without a supplied or confirmed title or delegated title selection, keep PR
+creation or renaming pending, including in non-interactive runs. Complete
+the otherwise authorized preparation so only the title decision remains.
 
 ## Commit, Push, and Verify
 

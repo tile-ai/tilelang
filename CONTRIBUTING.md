@@ -7,6 +7,7 @@ That would be awesome if you want to contribute something to TileLang!
 - [Report Bugs](#report-bugs)
 - [Ask Questions](#ask-questions)
 - [Submit Pull Requests](#submit-pull-requests)
+  - [Pull request titles](#pull-request-titles)
   - [Pull request descriptions](#pull-request-descriptions)
   - [AI-assisted contributions](#ai-assisted-contributions)
   - [Testing policy](#testing-policy)
@@ -34,6 +35,12 @@ Please ask questions in issues.
 ## Submit Pull Requests
 
 All pull requests are super welcomed and greatly appreciated! Issues in need of a solution are marked with a [`♥ help`](https://github.com/tile-ai/tilelang/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%99%A5+help%22) label if you're looking for somewhere to start.
+
+### Pull request titles
+
+Use a concise English title with a specific bracketed component tag, such as
+`[CI] Skip backend tests for documentation-only PRs`. Describe the concrete
+change and keep the title aligned with the final diff.
 
 ### Pull request descriptions
 
@@ -80,6 +87,13 @@ AI-assisted contributions are welcome. The submitting contributor is responsible
 for understanding the change, reviewing the complete diff, verifying the PR
 description and reported validation results, and addressing review feedback.
 Clearly distinguish verified behavior from assumptions and untested claims.
+
+Before opening a PR or changing its title, an agent should show the exact
+proposed title and ask the contributor to confirm or replace it. A title supplied
+by the contributor, or explicit permission to choose the title without asking,
+satisfies this step. Do not repeat confirmation when the title is unchanged.
+The [submission skill](.agents/skills/tilelang-submit-pr/SKILL.md#confirm-the-pr-title)
+describes this interaction.
 
 You may optionally include `AI assistance: <tool name>` in the PR description.
 Disclosing the tool is not a requirement for review or merging. The repository's
