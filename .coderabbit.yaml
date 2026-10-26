@@ -2,6 +2,9 @@ language: en-US
 
 reviews:
   high_level_summary: false
+  auto_review:
+    ignore_title_keywords:
+      - "[Do not review]"
   suggested_labels: true
   auto_apply_labels: true
   labeling_instructions:
@@ -388,6 +391,16 @@ reviews:
         changes policy.
 
         Do not suggest failing CI for existing advisory backlog.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - files: "CONTRIBUTING.md"
+        applyTo: "**/*"
+      - files: "docs/developer_guide/cpp_style.md"
+        applyTo: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
+      - files: "docs/developer_guide/testing_style.md"
+        applyTo: "testing/**,examples/**"
 
 issue_enrichment:
   auto_enrich:
