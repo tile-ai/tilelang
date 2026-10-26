@@ -121,6 +121,10 @@ private:
   std::unordered_set<const VarNode *> raw_pointer_vars_;
   std::unordered_set<const VarNode *> zero_like_vars_;
 
+  // Name of the register-resident RNG state declared by T.rng_init.
+  const std::string rng_state_name_ = "__rng_state";
+  bool rng_state_declared_ = false;
+
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
 
