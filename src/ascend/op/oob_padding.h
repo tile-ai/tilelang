@@ -84,7 +84,7 @@ struct BoundedDMACopyRanges {
  * (`0 <= min < shape`); only the upper end of the tile may exceed its shape.
  * Negative or fully out-of-bounds non-singleton origins are outside this
  * helper's contract, except for the leading batch axis of 3-D GM->L1 copies:
- * nonnegative batch origins may be fully out of bounds and produce only fills.
+ * nonnegative batch origins may be fully out of bounds and skip the copy.
  * The clamped ranges preserve possibly-zero semantic extents for empty dynamic
  * extents and fixed/singleton-axis validity. Returns the original ranges with
  * `clamped == false` when no clamp is needed or the shape structure is

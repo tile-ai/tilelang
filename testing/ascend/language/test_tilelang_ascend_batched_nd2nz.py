@@ -61,10 +61,10 @@ def batch_tail_copy(batch_begin, rows=16, copy_rows=16, cols=16, copy_cols=16, d
 
 
 @pytest.mark.parametrize("batch_begin", [0, 2, 3, 5])
-def test_batched_nd2nz_batch_tail_padding(batch_begin):
+def test_batched_nd2nz_skips_batch_tail(batch_begin):
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
         source = tilelang.lower(batch_tail_copy(batch_begin), target="ascend").kernel_source
-    assert "asc_fill_l1(" in source
+    assert "asc_fill_l1(" not in source
     valid_batches = max(3 - batch_begin, 0)
     if valid_batches:
         assert source.count("asc_copy_gm2l1_nd2nz(") == 1
@@ -92,7 +92,7 @@ def test_batched_nd2nz_dynamic_batch_tail(auto_schedule):
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": auto_schedule}):
         source = tilelang.lower(main, target="ascend").kernel_source
     assert "asc_copy_gm2l1_nd2nz(" in source
-    assert "asc_fill_l1(" in source
+    assert "asc_fill_l1(" not in source
     assert "if (" in source  # A fully out-of-bounds batch must not issue a DMA.
 
 
@@ -117,6 +117,7 @@ def test_single_matrix_oob_preserves_legacy_behavior():
         (4, 0, 32, 32, False, 4),
         (3, 1, 32, 32, False, 4),
         (3, 3, 32, 32, False, 4),
+        (3, 3, 20, 20, False, 4),
         (3, 1, 20, 20, False, 4),
         (3, 0, 20, 20, True, 4),
         (3, 0, 32, 32, False, 2),
@@ -126,6 +127,7 @@ def test_single_matrix_oob_preserves_legacy_behavior():
         "in-bounds",
         "batch-tail",
         "all-batches-oob",
+        "all-batches-oob-with-m-n-tails",
         "batch-m-n-tails",
         "dynamic-batch-m-n-tails",
         "larger-destination",
@@ -152,7 +154,7 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
             b = T.alloc_l0b((32, 32), dtype)
             acc = T.alloc_l0c((32, 32), "float32")
             begin = block * 2 if dynamic else batch_begin
-            # Seed every matrix with nonzero data so missing fills cannot pass.
+            # Seed every matrix to detect missing M/N fills or writes to skipped batches.
             T.copy(poison, target)
             T.copy(source[begin : begin + copy_batches, :32, :32], target[1:5, :, :])
             T.copy(identity, weight)
@@ -167,14 +169,14 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
     torch_dtype = getattr(torch, dtype)
     source = ((torch.arange(source_batches * rows * cols).reshape(source_batches, rows, cols) % 31) + 1).to(torch_dtype)
     expected = torch.full((num_blocks, 5, 32, 32), -7.0)
-    expected[:, 1 : 1 + copy_batches] = 0
     for block in range(num_blocks):
         begin = block * 2 if dynamic else batch_begin
         valid_batches = min(copy_batches, max(source_batches - begin, 0))
+        expected[block, 1 : 1 + valid_batches] = 0
         expected[block, 1 : 1 + valid_batches, :rows, :cols] = source[begin : begin + valid_batches].float()
     identity = torch.eye(32, dtype=torch_dtype, device="npu")
     poison = torch.full((5, 32, 32), -7.0, dtype=torch_dtype, device="npu")
     actual = kernel(source.npu(), identity, poison)
     torch.npu.synchronize()
-    # Batch 0 and extra destination capacity must retain their sentinels.
+    # Batch 0, skipped batches, and extra capacity must retain their sentinels.
     torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)

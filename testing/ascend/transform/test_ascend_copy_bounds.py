@@ -191,24 +191,14 @@ def test_mx_padding_rejects_an_incomplete_physical_scale_group():
 
 
 @pytest.mark.parametrize("batch_begin", [0, 2, 3, 5])
-def test_batch_tail_fill_region(batch_begin):
+def test_batch_tail_clamps_without_fill(batch_begin):
     before = _copy_module((3, 16, 32), (5, 16, 32), [batch_begin, 0, 0], [4, 16, 32], dst_min=[1, 0, 0], dst_extent=[4, 16, 32])
     after = transform.AscendInsertOOBPadding()(before)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     valid_batches = max(3 - batch_begin, 0)
     assert int(copy.args[0].args[2]) == valid_batches
     assert int(copy.args[1].args[2]) == valid_batches
-    (fill,) = calls(after, "tl.tileop.fill")
-    assert [int(x) for x in fill.args[0].args[2:]] == [1, 16, 32]
-    loops = nodes(after, tirx.For)
-    first_batch = fill.args[0].args[0].indices[0]
-    if 4 - valid_batches > 1:
-        (loop,) = loops
-        assert int(loop.extent) == 4 - valid_batches
-        first_batch = tirx.stmt_functor.substitute(first_batch, {loop.loop_var: 0})
-    else:
-        assert not loops
-    assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches
+    assert not calls(after, "tl.tileop.fill")
 
 
 @pytest.mark.parametrize("rank", [2, 3])
@@ -243,14 +233,7 @@ def test_batch_padding_leaves_extra_destination_capacity_untouched(batch_begin):
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     valid_batches = max(3 - batch_begin, 0)
     assert int(copy.args[0].args[2]) == valid_batches
-    (fill,) = calls(after, "tl.tileop.fill")
-    loops = nodes(after, tirx.For)
-    first_batch = fill.args[0].args[0].indices[0]
-    if loops:
-        (loop,) = loops
-        assert int(loop.extent) == 2 - valid_batches
-        first_batch = tirx.stmt_functor.substitute(first_batch, {loop.loop_var: 0})
-    assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches
+    assert not calls(after, "tl.tileop.fill")
 
 
 def test_batch_symbolic_origins_use_common_axis_clamping():
@@ -260,3 +243,21 @@ def test_batch_symbolic_origins_use_common_axis_clamping():
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     assert copy.args[0].args[0].indices[0].same_as(origin)
     assert copy.args[1].args[0].indices[0].same_as(origin)
+
+
+@pytest.mark.parametrize("batch_begin", [1, 3])
+def test_matrix_tail_fills_only_valid_batches(batch_begin):
+    before = _copy_module((3, 20, 10), (5, 32, 32), [batch_begin, 0, 0], [4, 32, 32], dst_min=[1, 0, 0], dst_extent=[4, 32, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    fills = calls(after, "tl.tileop.fill")
+    if batch_begin == 3:
+        assert not fills
+        return
+    assert len(fills) == 2  # M and N tails, with no whole-batch fill.
+    loops = nodes(after, tirx.For)
+    assert len(loops) == 2
+    for loop in loops:
+        assert int(loop.extent) == 2
+        (fill,) = calls(loop.body, "tl.tileop.fill")
+        first_batch = tirx.stmt_functor.substitute(fill.args[0].args[0].indices[0], {loop.loop_var: 0})
+        assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1
