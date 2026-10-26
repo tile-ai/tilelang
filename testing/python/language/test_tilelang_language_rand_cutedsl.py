@@ -83,7 +83,45 @@ def test_rand_matches_cuda(M, seed):
 
     # Normals run the same Box-Muller transform over the same samples.
     assert torch.equal(got[3].view(torch.int32), ref[3].view(torch.int32)), "normal float32 differs"
-    assert torch.equal(got[4].view(torch.int64), ref[4].view(torch.int64)), "normal float64 differs"
+    # curand's double pair uses libdevice's sincospi, which CuTeDSL does not
+    # expose; sin(pi * v) differs from it by a few ulps on some architectures.
+    torch.testing.assert_close(got[4], ref[4], rtol=1e-13, atol=1e-13)
+
+
+@tilelang.testing.requires_cuda
+def test_double_normal_keeps_the_stream():
+    _require_cutedsl()
+    M, seed = 64, 42
+    assert torch.equal(
+        _tail_after_double_normal("cutedsl", M, seed),
+        _tail_after_double_normal("cuda", M, seed),
+    ), "integer draws after double normals diverged from the CUDA backend"
+
+
+def tail_kernel(M, seed=42):
+    """Draw double normals, then integers: the integers pin the generator position."""
+
+    @T.prim_func
+    def kernel(
+        F: T.Tensor((M,), "float64"),
+        A: T.Tensor((M,), "uint32"),
+    ):
+        with T.Kernel(1, threads=1):
+            T.rng_init(seed, 0, 0)
+            for i in T.Parallel(M):
+                F[i] = T.rng_rand_float(bit=64, dist="normal")
+            for i in T.Parallel(M):
+                A[i] = T.rng_rand()
+
+    return kernel
+
+
+def _tail_after_double_normal(target, M, seed):
+    mod = tilelang.compile(tail_kernel(M, seed), target=target)
+    F = torch.zeros(M, dtype=torch.float64, device="cuda")
+    A = torch.zeros(M, dtype=torch.uint32, device="cuda")
+    mod(F, A)
+    return A
 
 
 @tilelang.testing.requires_cuda
