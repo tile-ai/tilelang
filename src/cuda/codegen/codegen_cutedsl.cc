@@ -1258,6 +1258,42 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << B_layout << "\", \"" << A_dtype << "\", \"" << B_dtype << "\", \""
            << C_dtype << "\", " << a_ref << ", " << a_bias << ", " << b_ref
            << ", " << b_bias << ", " << c_ref << ", " << c_bias << ")\n";
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
+    // Same 21 arguments as the CUDA codegen: nine configuration strings, the
+    // A/B/C pointer and element-offset pairs, the two scale pointers (read as
+    // one 32-bit word each) and the four scale selectors.
+    ICHECK_EQ(op->args.size(), 21U);
+    std::vector<std::string> config;
+    for (int i = 0; i < 9; ++i) {
+      if (i == 5) {
+        config.push_back(std::to_string(Downcast<IntImm>(op->args[i])->value));
+      } else {
+        config.push_back(Downcast<StringImm>(op->args[i])->value);
+      }
+    }
+    ICHECK(config[0] == "float32" && config[1] == "m16n8k64" &&
+           config[2] == "row" && config[3] == "col" &&
+           config[4] == "mxf4nvf4" && config[5] == "4" && config[6] == "e2m1" &&
+           config[7] == "e2m1" && config[8] == "ue4m3")
+        << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
+        << config[0] << ", shape=" << config[1] << ", A_layout=" << config[2]
+        << ", B_layout=" << config[3] << ", kind=" << config[4]
+        << ", scale_vec_size=" << config[5] << ", A_dtype=" << config[6]
+        << ", B_dtype=" << config[7] << ", scale_type=" << config[8]
+        << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+    PrintIndent();
+    stream << "tl.ptx_mma_block_scale(";
+    for (int i = 0; i < 9; ++i) {
+      stream << (i == 5 ? config[i] : "\"" + config[i] + "\"") << ", ";
+    }
+    for (int i = 9; i < 15; i += 2) {
+      stream << GetVarPtr_(op->args[i]) << ", " << PrintExpr_(op->args[i + 1])
+             << ", ";
+    }
+    for (int i = 15; i < 21; ++i) {
+      stream << PrintExpr_(op->args[i]) << (i == 20 ? ")\n" : ", ");
+    }
   } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     LOG(FATAL) << "Currently unsupported op: " << op->op;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {

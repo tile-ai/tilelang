@@ -39,6 +39,8 @@ import cutlass.cute as cute
 from cutlass.cute.typing import Int, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
 from cutlass.impl_utils import check_value_in
 
+from .utils import as_byte_ptr
+
 _TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a", "sm_121", "sm_121a"]
 
 
@@ -104,17 +106,17 @@ def mbarrier_cp_async_arrive_noinc(mbar_ptr: Pointer, *, loc=None, ip=None) -> N
 
 def _cp_async_dst_ptr(dst):
     if isinstance(dst, cute.Tensor):
-        return dst.iterator
+        return as_byte_ptr(dst.iterator)
     if isinstance(dst, cute.Pointer):
-        return dst
+        return as_byte_ptr(dst)
     raise ValueError(f"Invalid destination type: {type(dst)}")
 
 
 def _cp_async_src_ptr(src):
     if isinstance(src, cute.Tensor):
-        return src.iterator
+        return as_byte_ptr(src.iterator)
     if isinstance(src, cute.Pointer):
-        return src
+        return as_byte_ptr(src)
     raise ValueError(f"Invalid source type: {type(src)}")
 
 
@@ -186,6 +188,7 @@ def tma_load(
     """
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, _TMA_ARCHES, "arch")
+    smem_ptr = as_byte_ptr(smem_ptr)
 
     if not isinstance(crd, tuple) and isinstance(tma_desc, cute.Pointer):
         # Legacy signature: tma_load(smem_ptr, gmem_ptr, mbar, size)
@@ -258,7 +261,7 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     tma_desc_ptr = _as_tensormap_ptr(tma_desc, loc=loc, ip=ip)
     prims.cp_async_bulk_tensor_global_shared_cta(
         tma_descriptor=tma_desc_ptr,
-        src_mem=smem_ptr,
+        src_mem=as_byte_ptr(smem_ptr),
         coordinates=[Int32(i) for i in crd],
         mode=prims.TMAStoreMode.TILE,
         loc=loc,
@@ -292,7 +295,7 @@ def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, 
 
     prims.cp_async_bulk_tensor_reduce(
         tma_descriptor=tma_desc_ptr,
-        src_mem=smem_ptr,
+        src_mem=as_byte_ptr(smem_ptr),
         red_kind=prims.TMARedux.ADD,
         coordinates=[Int32(i) for i in crd],
         mode=prims.TMAStoreMode.TILE,
