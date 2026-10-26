@@ -15,13 +15,13 @@ from tvm import tirx
 _CROSS_AIV_ERROR = "does not support synchronization between AIV0 and AIV1"
 
 
-def _writers(*, stride=None, extra=None, hint=None, copies=1):
+def _writers(*, stride=None, extra=None, hint=None, copies=1, sync=False):
     params = []
     if stride == "dynamic":
         stride = tirx.Var("gm_stride", "int32")
         params.append(stride)
     state = tirx.decl_buffer((1,), "int32", name="state")
-    if extra in ("mutable_index", "mutable_guard", "mutable_layout"):
+    if extra in ("mutable_index", "mutable_guard", "mutable_layout", "mutable_sync"):
         params.append(state)
     gm = tirx.decl_buffer(
         (640 if extra in ("alias", "different_iterations") else 512,),
@@ -58,7 +58,22 @@ def _writers(*, stride=None, extra=None, hint=None, copies=1):
         if extra == "opaque" and sid == 1:
             # A copy does not describe everything an escaped pointer can access.
             operations.insert(0, tirx.Evaluate(tirx.call_extern("int32", "opaque_write", gm.data)))
-        tasks.append(unit(tirx.For(stage, 0, 4, tirx.ForKind.SERIAL, seq(*operations)), core=1 if sid == 0 else 4))
+        body = tirx.For(stage, 0, 4, tirx.ForKind.SERIAL, seq(*operations))
+        if sync:
+            phase = tirx.Var(f"phase{sid}", "int32")
+            flag = state[0] % 4 if extra == "mutable_sync" else phase + 4
+            body = tirx.For(
+                phase,
+                0,
+                2,
+                tirx.ForKind.SERIAL,
+                seq(
+                    tirx.IfThenElse(phase == 0, body, None),
+                    tirx.Evaluate(T.ascend_sync_inter_arrive("PIPE_MTE3", flag)),
+                    tirx.Evaluate(T.ascend_sync_inter_wait("PIPE_MTE3", flag)),
+                ),
+            )
+        tasks.append(unit(body, core=1 if sid == 0 else 4))
     annotations = {"tl.split_subcores": True}
     hints = []
     if hint in ("storage_negative", "leaf_overrides_storage"):
@@ -79,6 +94,27 @@ def test_plain_dense_interleaved_copies_are_disjoint(stride):
     after = transform.InsertSync()(_writers(stride=stride))
     assert len(calls(after, "tl.tileop.ascend_copy")) == 2
     assert not calls(after, "tl.ascend_cross_core_set_flag")
+
+
+def test_explicit_inter_core_flags_preserve_disjoint_compound_footprints():
+    before = _writers(sync=True)
+    after = transform.InsertSync()(before)
+    assert len(calls(after, "tl.tileop.ascend_copy")) == 2
+    for operation in ("set", "wait"):
+        name = f"tl.ascend_cross_core_{operation}_flag"
+        original = calls(before, name)
+        preserved = calls(after, name)
+        assert len(original) == len(preserved) == 2
+        for expected, actual in zip(original, preserved):
+            tvm.ir.assert_structural_equal(expected, actual)
+
+
+@pytest.mark.parametrize("extra", ["opaque", "different_iterations", "mutable_sync"])
+def test_explicit_flags_do_not_hide_unsupported_or_overlapping_accesses(extra):
+    # A modulo-bounded flag still reads mutable memory. Explicit synchronization
+    # must not grant unrelated accesses a blanket no-conflict exemption.
+    with pytest.raises(tvm.error.InternalError, match=_CROSS_AIV_ERROR):
+        transform.InsertSync()(_writers(extra=extra, sync=True))
 
 
 @pytest.mark.parametrize("stride", [0, "dynamic", 2])
@@ -173,4 +209,56 @@ def test_full_lowering_preserves_assumption_diagnostic_guards(target, explicit):
     with determine_target(target, return_object=True), tvm.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_strided_store_with_assumption(explicit), target=target, enable_device_compile=False)
     assert not calls(snapshots["tl.InsertSync"], "tl.ascend_cross_core_set_flag")
+    assert artifact.kernel_source
+
+
+def _strided_store_with_phase_barriers():
+    num_tokens = T.dynamic("num_tokens")
+
+    @T.prim_func
+    def main(src: T.Tensor((512,), "float32"), dst: T.Tensor((num_tokens,), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((256,), "float32")
+            T.assume(num_tokens <= 512)
+            T.copy(src[sid * 256 : sid * 256 + 256], ub)
+            count = T.ceildiv(num_tokens - sid * 64, 128)
+            with T.PerCoreTask():
+                for phase in T.serial(2):
+                    store_this_phase = T.if_then_else(phase == 0, True, False)
+                    if store_this_phase:
+                        with T.Task():
+                            for stage in T.serial(count):
+                                begin = stage * 128 + sid * 64
+                                size = T.min(num_tokens - begin, 64)
+                                T.copy(ub[stage * 64 : stage * 64 + size], dst[begin : begin + size])
+                    for _ in T.serial(T.if_then_else(phase == 0, 1, 0)):
+                        T.ascend_sync_inter_arrive("PIPE_MTE3", phase + 4)
+                        T.ascend_sync_inter_wait("PIPE_MTE3", phase + 4)
+
+    return main
+
+
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_full_lowering_preserves_strided_stores_with_phase_barriers(target):
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_before_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots["before"] = mod
+
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots["after"] = mod
+
+    with determine_target(target, return_object=True), tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_strided_store_with_phase_barriers(), target=target, enable_device_compile=False)
+    for operation in ("set", "wait"):
+        name = f"tl.ascend_cross_core_{operation}_flag"
+        original = calls(snapshots["before"], name)
+        preserved = calls(snapshots["after"], name)
+        assert len(original) == len(preserved) == 2
+        for expected, actual in zip(original, preserved):
+            tvm.ir.assert_structural_equal(expected, actual)
     assert artifact.kernel_source
