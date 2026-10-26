@@ -129,6 +129,20 @@ def _recast_fp4_unpack_smem_ptr(ptr, swizzle_=None, *, loc=None, ip=None):
     return _cute_ir.recast_iter(res_ty, ptr.value, loc=loc, ip=ip)
 
 
+def as_byte_ptr(ptr):
+    """A ``Uint8`` view of a sub-byte element pointer, for byte-addressed instructions.
+
+    Instructions such as TMA, cp.async and ldmatrix take a raw address, which a
+    pointer to packed FP4/FP6/INT4 elements cannot be lowered to directly. The
+    addresses they take are at least byte aligned, so the view is exact. The view
+    is rebuilt from the integer address because ``cute.recast_ptr`` needs a static
+    alignment, which a dynamically offset sub-byte pointer no longer carries.
+    """
+    if isinstance(ptr, cute.Pointer) and ptr.dtype.width < 8:
+        return cute.make_ptr(cutlass.Uint8, ptr.toint(), ptr.memspace, assumed_align=1)
+    return ptr
+
+
 def recast_ptr(ptr, swizzle_=None, dtype=None):
     if dtype is Float4E2M1FN_unpack and getattr(ptr, "memspace", None) == AddressSpace.smem:
         return _recast_fp4_unpack_smem_ptr(ptr, swizzle_)

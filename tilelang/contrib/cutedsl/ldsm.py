@@ -42,11 +42,14 @@ from cutlass._mlir import ir  # noqa: F401
 from cutlass.cute.typing import Pointer, Int32  # noqa: F401
 import cutlass.cute as cute
 
+from .utils import as_byte_ptr
+
 
 def _ldmatrix(smem_ptr, local_ptr, num, transpose, loc=None, ip=None):
     """Internal helper for ldmatrix operations"""
     layout = prims.MMALayout.COL if transpose else prims.MMALayout.ROW
     assert num in [1, 2, 4]
+    smem_ptr = as_byte_ptr(smem_ptr)
     ptr = smem_ptr.llvm_ptr if hasattr(smem_ptr, "llvm_ptr") else smem_ptr
     out_i32 = prims.ldmatrix(ptr, num=num, layout=layout, loc=loc, ip=ip)
     out = cute.make_tensor(cute.recast_ptr(local_ptr, dtype=cute.Int32), num)
@@ -60,6 +63,7 @@ def _ldmatrix(smem_ptr, local_ptr, num, transpose, loc=None, ip=None):
 def _stmatrix(smem_ptr, values, transpose, loc=None, ip=None, shape=None):
     """Internal helper for stmatrix operations"""
     layout = prims.MMALayout.COL if transpose else prims.MMALayout.ROW
+    smem_ptr = as_byte_ptr(smem_ptr)
     ptr = smem_ptr.llvm_ptr if hasattr(smem_ptr, "llvm_ptr") else smem_ptr
     num = len(values)
     assert num in [1, 2, 4]
