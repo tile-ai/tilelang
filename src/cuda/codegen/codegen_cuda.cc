@@ -6003,6 +6003,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // float32 broadcast with 8 lanes lowers to ulonglong4 (each ulonglong holds
+  // two float32 lanes). Pack the bits of both lanes with `__float_as_uint`.
+  // Reading them through `*(unsigned long long*)&make_float2(v, v)` takes the
+  // address of a temporary, which nvrtc rejects with "expression must be an
+  // lvalue or a function designator". This path is hit when a 256-bit
+  // vectorized loop divides by or fills with a float32 scalar.
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -6010,7 +6016,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "(((unsigned long long)__float_as_uint(" << v
+         << ")) | ((unsigned long long)__float_as_uint(" << v << ") << 32))";
     }
     os << ')';
     return;
