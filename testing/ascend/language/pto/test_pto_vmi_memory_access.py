@@ -16,15 +16,12 @@ visible to the scheduler.  This file verifies:
   candidate moves the source position into it; descriptor base + instruction
   offset always equals the original access address after the normal
   negative-index legalization.
-* Physical envelopes: ordinary continuous loads round up to full physical
-  vectors; ordinary broadcast declares the single element it actually reads;
-  ``dintlv`` loads declare both results and a two-input ``dintlv`` store
-  declares the full 2*N span (its PTODSL attribute is emitted as ``intlv``);
-  group envelopes cover all groups (slot/broadcast count one element per
-  group, a static negative stride relocates the lowest address and compensates
-  with the instruction offset, a padded row-major view declares its logical
-  prefix from the buffer origin, and a whole tight buffer is used only when
-  its envelope and every axis start are proven compatible with the buffer).
+* Physical envelopes: ordinary loads round up to full physical vectors; group
+  envelopes cover all groups (a slot counts one element per group, a static
+  negative stride relocates the lowest address and compensates with the
+  instruction offset, a padded row-major view declares its logical prefix from
+  the buffer origin, and a whole tight buffer is used only when its envelope
+  and every axis start are proven compatible with the buffer).
   A dynamic group or block stride is rejected instead of falling back to a
   fabricated range; a static negative stride is rejected only when no complete
   descriptor preserves the address; ``block_stride`` extents are measured in
@@ -230,16 +227,14 @@ def _assert_descriptor_error(build, op, reason, *, explicit=False, descriptor=Tr
     return message
 
 
-def _ptr_position(call, op_name):
-    if op_name == "tl.vmi.vstore" and "dist_mode" in call.annotations:
-        return 2
+def _ptr_position(op_name):
     return 1 if op_name == "tl.vmi.vstore" else 0
 
 
 def _descriptor(artifact, op_name):
     """Return (descriptor_offset, extent, rw_mask, instruction_offset)."""
     func, call = _single(artifact, op_name)
-    ptr_pos = _ptr_position(call, op_name)
+    ptr_pos = _ptr_position(op_name)
     ptr = _resolve_binding(call.args[ptr_pos], func)
     assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr"), (
         f"{op_name} address is not an access descriptor: {ptr!r}"
@@ -492,86 +487,7 @@ def test_elem_offset_counted_exactly_once():
 
 
 # ---------------------------------------------------------------------------
-# Ordinary broadcast
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("dtype", "size"),
-    [("int8", 256), (F16, 128), (F32, 128)],
-    ids=["b8", "b16", "b32"],
-)
-def test_ordinary_broadcast_declares_the_single_read_element(dtype, size):
-    """brc reads one source element; the automatic descriptor declares it."""
-
-    # A b8 broadcast at 64 physically reads the single element at 64 and
-    # stores [128,384).  The declared footprint is that one element, not the
-    # broadcast output width, so a mid-row position on a multi-dimensional
-    # buffer is never misread as a cross-row access.
-    @T.prim_func
-    def main(A: T.Tensor((512,), dtype), C: T.Tensor((512,), dtype)):
-        with T.Kernel(1):
-            work = T.alloc_shared((512,), dtype)
-            T.copy(A, work)
-            with T.SimdVF():
-                mask = T.vmi.create_mask(size, size=size)
-                v = T.vmi.vload(work[64], size=size, dist_mode="brc")
-                T.vmi.vstore(v, work[128], mask)
-            T.copy(work, C)
-
-    artifact = _lower_pto(main)
-    assert _descriptor(artifact, "tl.vmi.vload") == (64, 1, 1, 0)
-    assert 'dist_mode="brc"' in artifact.kernel_source
-
-    kernel = _compile_pto(main)
-    assert "pto.vmi.vload(" in kernel.get_kernel_source()
-
-
-@pytest.mark.parametrize(
-    ("row", "col"),
-    [(0, 64), (0, 127)],
-    ids=["mid-column", "row-end"],
-)
-def test_ordinary_broadcast_from_a_mid_row_position_is_accepted(row, col):
-    """A broadcast never crosses a row: on a tight row-major buffer any legal
-    start position is accepted.  Non-tight layouts still need the existing
-    layout checks; a transposed-view broadcast is not exempted here."""
-
-    @T.prim_func
-    def main(A: T.Tensor((256,), F32), C: T.Tensor((128,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((2, 128), F32)
-            out = T.alloc_shared((128,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                v = T.vmi.vload(work[row, col], size=128, dist_mode="brc")
-                T.vmi.vstore(v, out[0])
-            T.copy(out, C)
-
-    assert _vload_descriptor(main) == (row * 128 + col, 1, 1, 0)
-
-
-def test_explicit_broadcast_descriptor_needs_only_the_single_element():
-    """An explicit broadcast descriptor is checked against the real envelope.
-
-    The instruction reads exactly the element at the pointer; the explicit
-    form declares that single element, the same as the automatic form.
-    """
-
-    @T.prim_func
-    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((256,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                p = T.access_ptr(work[32], "r", extent=1)
-                v = T.vmi.vload(p, 0, size=64, dist_mode="brc")
-                T.vmi.vstore(v, work[128])
-            T.copy(work, C)
-
-    assert _vload_descriptor(main) == (32, 1, 1, 0)
-
-
-# ---------------------------------------------------------------------------
-# Physical-vector rounding of ordinary continuous loads
+# Physical-vector rounding of ordinary loads
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     ("dtype", "size", "expected"),
@@ -582,7 +498,7 @@ def test_explicit_broadcast_descriptor_needs_only_the_single_element():
     ],
     ids=["b8", "b16", "b32-size80"],
 )
-def test_continuous_load_covers_full_physical_vectors(dtype, size, expected):
+def test_ordinary_load_covers_full_physical_vectors(dtype, size, expected):
     @T.prim_func
     def main(A: T.Tensor((1024,), dtype), C: T.Tensor((1024,), dtype)):
         with T.Kernel(1):
@@ -595,55 +511,6 @@ def test_continuous_load_covers_full_physical_vectors(dtype, size, expected):
 
     assert _vload_descriptor(main) == (64, expected, 1, 0)
     assert _vstore_descriptor(main) == (512, size, 2, 0)
-
-
-# ---------------------------------------------------------------------------
-# dintlv load / two-input store
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("size", [64, 128], ids=["single-vl", "multi-vl"])
-def test_dintlv_load_declares_both_results(size):
-    @T.prim_func
-    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((512,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                # Each result has `size` lanes: the store mask must match.
-                mask = T.vmi.create_mask(size, size=size)
-                even, odd = T.vmi.vload(work[64], size=size, dist_mode="dintlv")
-                T.vmi.vstore(even, work[320], mask)
-                T.vmi.vstore(odd, work[384], mask)
-            T.copy(work, C)
-
-    artifact = _lower_pto(main)
-    assert _descriptor(artifact, "tl.vmi.vload") == (64, 2 * size, 1, 0)
-
-
-@pytest.mark.parametrize("mask_lanes", [0, 10, 64], ids=["all-false", "partial", "all-true"])
-def test_dintlv_store_declares_full_two_input_span(mask_lanes):
-    """The store may-write span is 2*N regardless of the ineffective mask."""
-
-    @T.prim_func
-    def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((512,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                mask = T.vmi.create_mask(mask_lanes, size=64)
-                even, odd = T.vmi.vload(work[64], size=64, dist_mode="dintlv")
-                T.vmi.vstore((even, odd), work[192], mask, dist_mode="dintlv")
-            T.copy(work, C)
-
-    artifact = _lower_pto(main)
-    assert _descriptor(artifact, "tl.vmi.vstore") == (192, 128, 2, 0)
-
-    source = artifact.kernel_source
-    vstore_line = next(ln.strip() for ln in source.splitlines() if "vmi.vstore" in ln)
-    # IR/API keep "dintlv"; only the PTODSL attribute is mapped to "intlv".
-    assert 'dist_mode="intlv"' in vstore_line, vstore_line
-    assert 'dist_mode="dintlv"' not in vstore_line, vstore_line
-    _, store_call = _single(artifact, "tl.vmi.vstore")
-    assert store_call.annotations["dist_mode"].value == "dintlv"
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +602,7 @@ def test_group_ordinary_envelope_covers_all_groups():
     assert _vload_descriptor(main) == (64, 192, 1, 0)
 
 
-def test_group_slot_and_broadcast_use_one_element_per_group():
+def test_group_slot_uses_one_element_per_group():
     @T.prim_func
     def slot(A: T.Tensor((768,), F32), C: T.Tensor((768,), F32)):
         with T.Kernel(1):
@@ -751,18 +618,6 @@ def test_group_slot_and_broadcast_use_one_element_per_group():
 
     assert _vload_descriptor(slot) == (64, 449, 1, 0)
     assert _vstore_descriptor(slot) == (256, 449, 2, 0)
-
-    @T.prim_func
-    def group_brc(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((512,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                v = T.vmi.vload(work[64], size=128, group=2, stride=128, dist_mode="brc")
-                T.vmi.vstore(v, work[256], group=2, stride=128)
-            T.copy(work, C)
-
-    assert _vload_descriptor(group_brc) == (64, 129, 1, 0)
 
 
 def test_group_static_negative_stride_relocates_lowest_address():
@@ -2238,11 +2093,6 @@ def _vmi_body_kernel(body):
             "vload-to-dtype",
             lambda work, mask: T.vmi.vload(work[0], size=64, to_dtype=F16),
             "unexpected keyword argument 'to_dtype'",
-        ),
-        (
-            "vload-unpack",
-            lambda work, mask: T.vmi.vload(work[0], size=64, dist_mode="unpack"),
-            "does not support dist_mode='unpack'",
         ),
         (
             "vstore-pmode",

@@ -319,23 +319,8 @@ def _normalize_pto_vcvt_rounding(mode, *, context: str, allowed=None):
     return normalized
 
 
-def _validate_pto_load_modes(
-    context: str,
-    *,
-    dist_mode,
-    group,
-    stride,
-    block_stride,
-    allow_group_brc: bool,
-    allowed_dist_modes,
-):
-    if dist_mode is not None and dist_mode not in allowed_dist_modes:
-        expected = ", ".join(repr(mode) for mode in sorted(allowed_dist_modes, key=str))
-        raise TypeError(f"{context} does not support dist_mode={dist_mode!r}; expected one of {expected}")
-
+def _validate_pto_memory_modes(context: str, *, group, stride, block_stride):
     if group is not None:
-        if dist_mode is not None and (not allow_group_brc or dist_mode != "brc"):
-            raise TypeError(f"{context} does not allow dist_mode together with group")
         if block_stride is not None:
             raise TypeError(f"{context} does not allow block_stride together with group")
         if stride is None:
@@ -343,8 +328,6 @@ def _validate_pto_load_modes(
         return
 
     if block_stride is not None:
-        if dist_mode is not None:
-            raise TypeError(f"{context} does not allow dist_mode together with block_stride")
         if stride is not None:
             raise TypeError(f"{context} does not allow stride together with block_stride")
         return
@@ -682,7 +665,6 @@ def vload(
     size,
     stride=None,
     block_stride=None,
-    dist_mode=None,
     group=None,
     loc=None,
     ip=None,
@@ -697,14 +679,11 @@ def vload(
     read-only lanes cannot fault; they carry undefined values that the
     compute and store masks must keep out of valid outputs.
     """
-    _validate_pto_load_modes(
+    _validate_pto_memory_modes(
         "T.vmi.vload(...)",
-        dist_mode=dist_mode,
         group=group,
         stride=stride,
         block_stride=block_stride,
-        allow_group_brc=True,
-        allowed_dist_modes={None, "continuous", "dintlv", "brc"},
     )
     if size is None:
         raise TypeError("T.vmi.vload(...) requires size")
@@ -715,9 +694,7 @@ def vload(
     if is_packed_fp4:
         if size % 2:
             raise ValueError("T.vmi.vload(...) requires an even FP4 lane count for packed FP4 storage")
-        if dist_mode == "dintlv":
-            raise TypeError('T.vmi.vload(...) does not support packed FP4 with dist_mode="dintlv"')
-        if group is not None or block_stride is not None or dist_mode == "brc":
+        if group is not None or block_stride is not None:
             raise TypeError("T.vmi.vload(...) only supports contiguous packed FP4 loads")
 
     result_dtype = _vector_result_dtype(source, size, elem_dtype=source_elem)
@@ -726,15 +703,11 @@ def vload(
         "size": size,
         "stride": stride,
         "block_stride": block_stride,
-        "dist_mode": dist_mode,
         "group": group,
         "loc": loc,
         "ip": ip,
     }
-    call = _call_vmi("vload", result_dtype, ptr, extra_offset, **attrs)
-    if dist_mode == "dintlv":
-        return _wrap_pair(call)
-    return call
+    return _call_vmi("vload", result_dtype, ptr, extra_offset, **attrs)
 
 
 @_scope_guarded
@@ -746,47 +719,30 @@ def vstore(
     *,
     stride=None,
     block_stride=None,
-    dist_mode=None,
     group=None,
     loc=None,
     ip=None,
 ):
-    """Store a VMI vector to either `a_ub[0]`-style buffer loads or ptr+offset form."""
+    """Store one VMI vector to either `a_ub[0]`-style buffer loads or ptr+offset form."""
     if mask is None and _looks_like_mask(offset):
         mask = offset
         offset = None
-    _validate_pto_load_modes(
+    _validate_pto_memory_modes(
         "T.vmi.vstore(...)",
-        dist_mode=dist_mode,
         group=group,
         stride=stride,
         block_stride=block_stride,
-        allow_group_brc=False,
-        allowed_dist_modes={None, "continuous", "dintlv"},
     )
     if group is not None and mask is not None:
         raise TypeError("T.vmi.vstore(...) group mode does not take a mask operand")
-    value_dtype = None
-    if dist_mode == "dintlv":
-        if isinstance(values, VmiPair):
-            value_dtype = _element_dtype_of(values)
-            values = tuple(values)
-        elif not _is_sequence(values) or len(values) != 2:
-            raise TypeError('T.vmi.vstore(...) with dist_mode="dintlv" requires an (even, odd) pair')
-        else:
-            _require_same_vreg_type(values[0], values[1], context="T.vmi.vstore(...)", allow_packed_fp4=True)
-    elif isinstance(values, VmiPair) or _is_sequence(values):
-        raise TypeError('T.vmi.vstore(...) expects a single VMI vector unless dist_mode="dintlv"')
+    if isinstance(values, VmiPair) or _is_sequence(values):
+        raise TypeError("T.vmi.vstore(...) expects one VMI vector")
 
-    store_lanes = _lanes_of(values[0]) if _is_sequence(values) else _lanes_of(values)
-    value_args = list(values) if _is_sequence(values) else [values]
-    if value_dtype is None:
-        value_dtype = _element_dtype_of(values[0]) if _is_sequence(values) else _element_dtype_of(values)
+    store_lanes = _lanes_of(values)
+    value_dtype = _element_dtype_of(values)
     if str(value_dtype) == "float4_e2m1fn":
         if store_lanes % 2:
             raise ValueError("T.vmi.vstore(...) requires an even FP4 lane count for packed FP4 storage")
-        if dist_mode == "dintlv":
-            raise TypeError('T.vmi.vstore(...) does not support packed FP4 with dist_mode="dintlv"')
         if group is not None or block_stride is not None:
             raise TypeError("T.vmi.vstore(...) only supports contiguous packed FP4 stores")
     elif mask is not None:
@@ -818,13 +774,12 @@ def vstore(
     return _call_vmi(
         "vstore",
         "void",
-        *value_args,
+        values,
         ptr,
         extra_offset,
         mask,
         stride=stride,
         block_stride=block_stride,
-        dist_mode=dist_mode,
         group=group,
         loc=loc,
         ip=ip,

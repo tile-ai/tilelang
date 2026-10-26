@@ -6,7 +6,7 @@ rewrites and UB merging.  It consumes the final device TIR, resolves the real
 destination byte address and proves the alignment required by PTO store
 operations:
 
-* an ordinary default/continuous explicit-mask ``tl.vmi.vstore`` requires a
+* an ordinary explicit-mask ``tl.vmi.vstore`` requires a
   provably 32-byte-aligned destination;
 * the implicit per-point writeback (``1PT_B8/B16/B32``) selected when the
   value has 1/2/4/8 logical lanes and the store mask is a recognized
@@ -15,8 +15,8 @@ operations:
 
 Covered here:
 
-* matcher boundaries: default and continuous full-mask stores pass; stores
-  with no mask, a ``dintlv``/``group`` distribution annotation or a scatter
+* matcher boundaries: ordinary full-mask stores pass; stores with no mask, a
+  ``group`` address annotation or a scatter
   op stay untouched; the diagnostics distinguish a provably misaligned
   destination from one whose alignment cannot be proven;
 * the instruction offset's actual resulting-pointer element unit: inherited
@@ -238,25 +238,8 @@ def _ordinary_case(dtype="float32", lanes=64, offset=0):
 # Matcher boundaries
 # ---------------------------------------------------------------------------
 class TestMatcher:
-    def test_default_and_continuous_full_mask_pass(self):
+    def test_ordinary_full_mask_passes(self):
         _accept(_ordinary_case(offset=8))
-        root, alloc = _root()
-        value = _value("float32", 64)
-        func = _func(
-            tirx.SeqStmt(
-                [
-                    alloc,
-                    _store(
-                        value,
-                        _access("float32", root, 8),
-                        _imm("int32", 0),
-                        _seed(64),
-                        annotations={"dist_mode": tirx.StringImm("continuous")},
-                    ),
-                ]
-            )
-        )
-        _accept(func)
 
     def test_ordinary_store_misaligned_and_unknown_reasons_differ(self):
         misaligned = _reject(_ordinary_case(offset=7))
@@ -284,7 +267,7 @@ class TestMatcher:
         assert "destination is misaligned" not in unknown
         assert "cannot prove alignment for every execution" in unknown
 
-    @pytest.mark.parametrize("case", ["no_mask", "dintlv", "group", "vscatter"])
+    @pytest.mark.parametrize("case", ["no_mask", "group", "vscatter"])
     def test_unmatched_forms_are_untouched(self, case):
         root, alloc = _root()
         ptr = _access("float32", root, 1)
@@ -293,16 +276,6 @@ class TestMatcher:
         statements = [alloc]
         if case == "no_mask":
             statements.append(tirx.Evaluate(tirx.Call(value.dtype, _OP_VSTORE, [value, ptr, _imm("int32", 1)])))
-        elif case == "dintlv":
-            statements.append(
-                _store(
-                    value,
-                    ptr,
-                    _imm("int32", 1),
-                    mask,
-                    annotations={"dist_mode": tirx.StringImm("dintlv")},
-                )
-            )
         elif case == "group":
             statements.append(
                 _store(

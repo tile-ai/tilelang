@@ -23,7 +23,7 @@
  *
  * This pass consumes the final device TIR after LowerDeviceKernelLaunch and
  * the final layout and UB rewrites. It currently checks destination alignment
- * for default/continuous explicit-mask VMI stores of b8/b16/b32 data.
+ * for ordinary explicit-mask VMI stores of b8/b16/b32 data.
  * Ordinary masked stores require provable 32-byte alignment. Stores selected
  * for 1PT_B8/B16/B32 writeback require natural element alignment (1/2/4 bytes):
  * the value must have 1/2/4/8 lanes and the mask must be a recognized
@@ -122,7 +122,7 @@ struct Proof {
 
 } // namespace
 
-/*! Checker for explicit-mask continuous VMI stores.  Traversal is scoped:
+/*! Checker for ordinary explicit-mask VMI stores.  Traversal is scoped:
  * loop/branch/attribute bodies push and pop the pointer/pure-definition
  * maps, and the Analyzer provides the existing range/condition facts. */
 class PTOMaskedStoreAlignmentChecker final
@@ -611,7 +611,7 @@ private:
 
   // Mask seeds recognized by the PTO backend for 1PT_B8/B16/B32 writeback:
   //
-  // * A default/continuous vstore with 1/2/4/8 data lanes can use point
+  // * An ordinary vstore with 1/2/4/8 data lanes can use point
   //   writeback when its create_mask(active, size) seed has the same lane
   //   count and a compile-time active count at least as large as size.
   //   This selects full-active pset_b32 PAT_ALL and one point store per
@@ -815,24 +815,15 @@ private:
 
   StoreMatch MatchStore(const CallNode *op) const {
     StoreMatch match;
-    // Default continuous masked form only: no mode-changing annotations.
-    for (const auto &[key_ref, value] : op->annotations) {
-      const std::string key = key_ref;
-      if (key == "dist_mode") {
-        const auto *mode = value.as<StringImmNode>();
-        if (mode == nullptr || (mode->value != "continuous")) {
-          return match;
-        }
-        continue;
-      }
-      if (key == "group" || key == "stride" || key == "block_stride" ||
-          key == "repeat_stride" || key == "pmode") {
+    // Ordinary masked form only: no dist_mode or address-mode annotations.
+    for (const auto &entry : op->annotations) {
+      const std::string key = entry.first;
+      if (key == "dist_mode" || key == "group" || key == "stride" ||
+          key == "block_stride" || key == "repeat_stride" || key == "pmode") {
         return match;
       }
     }
-    // Masked ordinary form is (value, ptr, instruction_offset, mask).  The
-    // dintlv no-mask form also has four positional arguments but carries
-    // dist_mode="dintlv" and was rejected above.
+    // Masked ordinary form is (value, ptr, instruction_offset, mask).
     if (op->args.size() != 4U) {
       return match;
     }

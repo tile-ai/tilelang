@@ -20,8 +20,7 @@ generated-source order and MTE sync pair:
 * a padded view whose low group is written by DMA and read by a static
   negative group stride, with both groups initialized for the reference;
 * an explicit descriptor crossing a row (seeded row-0 tail plus a DMA
-  row-1 head) read as one 128-lane load;
-* an ordinary broadcast descriptor fed by a real DMA producer.
+  row-1 head) read as one 128-lane load.
 
 The runtime branch kernel is a separate dispatch case: a runtime ``k``
 inside ``0 <= k <= 1`` selects ``input[0:64]`` or ``input[64:128]`` through a
@@ -29,7 +28,7 @@ real ``if``.  It runs both branch values (four trials, two per value), which
 is the coverage this case needs; it is not expanded to 20 trials.
 
 The remaining cases each run a small fixed number of seeded trials (3-5) and
-cover one device-numerics representative per access mode: block_stride, FP4
+cover one device-numerics representative per access form: block_stride, FP4
 raw packed bytes (buffer and explicit-pointer forms), a packed (PK) narrowing
 store, an explicit ``access_ptr`` plus extra offset, and gather/scatter with
 non-zero bases (direct and explicit-pointer forms).  The device numerical
@@ -667,40 +666,6 @@ def test_cross_row_descriptor_20_trials(npu):
     def make_case(trial):
         a = _float_inputs((64,), trial)
         return [a], torch.cat([torch.full((64,), 23.0), a])
-
-    _run_trials(kernel, make_case, npu, trials=20)
-
-
-# ---------------------------------------------------------------------------
-# Ordinary broadcast: one-element descriptor fed by a real DMA producer
-# ---------------------------------------------------------------------------
-def _broadcast_descriptor_kernel():
-    @T.prim_func
-    def main(A: T.Tensor((256,), F32), C: T.Tensor((128,), F32)):
-        with T.Kernel(1):
-            work = T.alloc_shared((2, 128), F32)
-            out = T.alloc_shared((128,), F32)
-            T.copy(A, work)
-            with T.SimdVF():
-                v = T.vmi.vload(work[0, 64], size=128, dist_mode="brc")
-                T.vmi.vstore(v, out[0])
-            T.copy(out, C)
-
-    return main
-
-
-def test_broadcast_descriptor_20_trials(npu):
-    kernel, source = _compile(_broadcast_descriptor_kernel())
-    assert 'dist_mode="brc"' in source, source
-    _assert_mte2_to_v_then_load(
-        source.splitlines(),
-        lambda line: "mte_gm_ub" in line,
-        "size=128)",
-    )
-
-    def make_case(trial):
-        a = _float_inputs((256,), trial)
-        return [a], a[64].reshape(1).expand(128).clone()
 
     _run_trials(kernel, make_case, npu, trials=20)
 

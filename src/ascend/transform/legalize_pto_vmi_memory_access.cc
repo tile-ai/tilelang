@@ -201,6 +201,19 @@ std::optional<ObjectRef> FindAnnotation(const CallNode *call, const char *key) {
   return (*it).second;
 }
 
+// vload/vstore have no dist_mode parameter: their access shape is described
+// only by stride, block_stride and group.  Reject the annotation before parsing
+// operands, computing an envelope or constructing a descriptor, so it can never
+// be interpreted as a supported layout or silently dropped.
+void RejectDistModeAnnotation(const CallNode *call, const std::string &op_name,
+                              const Span &span) {
+  if (FindAnnotation(call, "dist_mode").has_value()) {
+    Fail(op_name + " does not accept a dist_mode annotation; remove it and "
+                   "regenerate the VMI memory access",
+         span);
+  }
+}
+
 std::optional<PrimExpr> AnnotationExpr(const CallNode *call, const char *key,
                                        const std::string &op_name,
                                        const Span &span) {
@@ -224,20 +237,6 @@ std::optional<int64_t> AnnotationInt(const CallNode *call, const char *key,
     return std::nullopt;
   }
   return ConstInt(expr.value());
-}
-
-std::optional<std::string> AnnotationString(const CallNode *call,
-                                            const char *key,
-                                            const std::string &op_name,
-                                            const Span &span) {
-  std::optional<ObjectRef> value = FindAnnotation(call, key);
-  if (!value.has_value()) {
-    return std::nullopt;
-  }
-  if (const auto *imm = value->as<StringImmNode>()) {
-    return std::string(imm->value.c_str(), imm->value.size());
-  }
-  Fail(op_name + " annotation `" + key + "` must be a string", span);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,34 +674,19 @@ std::optional<PrimExpr> WholeBufferSpan(arith::Analyzer *analyzer,
 // Access envelope
 // ---------------------------------------------------------------------------
 struct VmiModes {
-  std::optional<std::string> dist_mode;
   std::optional<PrimExpr> stride;
   std::optional<PrimExpr> block_stride;
   std::optional<PrimExpr> group;
 };
 
 VmiModes ParseModes(const CallNode *call, const std::string &op_name,
-                    bool is_load, const Span &span) {
+                    const Span &span) {
   VmiModes modes;
-  modes.dist_mode = AnnotationString(call, "dist_mode", op_name, span);
   modes.stride = AnnotationExpr(call, "stride", op_name, span);
   modes.block_stride = AnnotationExpr(call, "block_stride", op_name, span);
   modes.group = AnnotationExpr(call, "group", op_name, span);
 
-  if (modes.dist_mode.has_value()) {
-    const std::string &mode = modes.dist_mode.value();
-    bool supported =
-        mode == "continuous" || mode == "dintlv" || (is_load && mode == "brc");
-    if (!supported) {
-      Fail(op_name + " does not support dist_mode=\"" + mode + "\"", span);
-    }
-  }
-
   if (modes.group.has_value()) {
-    if (modes.dist_mode.has_value() &&
-        (!is_load || modes.dist_mode.value() != "brc")) {
-      Fail(op_name + " does not allow dist_mode together with group", span);
-    }
     if (modes.block_stride.has_value()) {
       Fail(op_name + " does not allow block_stride together with group", span);
     }
@@ -713,10 +697,6 @@ VmiModes ParseModes(const CallNode *call, const std::string &op_name,
   }
 
   if (modes.block_stride.has_value()) {
-    if (modes.dist_mode.has_value()) {
-      Fail(op_name + " does not allow dist_mode together with block_stride",
-           span);
-    }
     if (modes.stride.has_value()) {
       Fail(op_name + " does not allow stride together with block_stride", span);
     }
@@ -748,9 +728,8 @@ std::pair<int64_t, int64_t> GroupEnvelope(const VmiModes &modes, int64_t lanes,
                                           const std::string &op_name,
                                           const Span &span) {
   int64_t group = GroupConstant(modes.group, op_name, span);
-  bool brc = modes.dist_mode.has_value() && modes.dist_mode.value() == "brc";
   int64_t per_group;
-  if (brc || lanes <= group) {
+  if (lanes <= group) {
     per_group = 1;
   } else {
     per_group = CeilDiv(lanes, group, op_name, span);
@@ -821,9 +800,6 @@ std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
                                            DataType elem_dtype, bool is_load,
                                            const std::string &op_name,
                                            const Span &span) {
-  if (modes.dist_mode.has_value() && modes.dist_mode.value() == "dintlv") {
-    return {0, CheckedMul(2, lanes, op_name, span)};
-  }
   if (modes.group.has_value()) {
     return GroupEnvelope(modes, lanes, elem_dtype, is_load, op_name, span);
   }
@@ -834,9 +810,6 @@ std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
     // Genuine FP4 descriptors stay in logical element units; the later
     // RewriteFp4ToFp4x2 performs the single physical packing.
     return {0, lanes};
-  }
-  if (modes.dist_mode.has_value() && modes.dist_mode.value() == "brc") {
-    return {0, 1};
   }
   if (is_load) {
     int bits = elem_dtype.bits();
@@ -1883,12 +1856,10 @@ private:
   PrimExpr ProcessCall(const CallNode *call, bool is_load) {
     const std::string op_name = is_load ? "T.vmi.vload" : "T.vmi.vstore";
     const Span span = call->span;
-    VmiModes modes = ParseModes(call, op_name, is_load, span);
-    const bool dintlv =
-        modes.dist_mode.has_value() && modes.dist_mode.value() == "dintlv";
+    RejectDistModeAnnotation(call, op_name, span);
+    VmiModes modes = ParseModes(call, op_name, span);
 
     PrimExpr value0;
-    PrimExpr value1;
     PrimExpr mask;
     bool has_mask = false;
     int address_index = 0;
@@ -1910,36 +1881,17 @@ private:
       }
       lanes = size.value();
     } else {
-      if (dintlv) {
-        if (call->args.size() != 4 && call->args.size() != 5) {
-          Fail(op_name +
-                   " with dist_mode=\"dintlv\" requires an (even, odd) value "
-                   "pair, a pointer address and an instruction offset",
-               span);
-        }
-        value0 = call->args[0];
-        value1 = call->args[1];
-        address_index = 2;
-        if (value0.dtype() != value1.dtype()) {
-          Fail(op_name + " requires identical VMI vector types", span);
-        }
-        has_mask = call->args.size() == 5;
-        if (has_mask) {
-          mask = call->args[4];
-        }
-      } else {
-        if (call->args.size() != 3 && call->args.size() != 4) {
-          Fail(op_name +
-                   " requires a value, a pointer address and an instruction "
-                   "offset",
-               span);
-        }
-        value0 = call->args[0];
-        address_index = 1;
-        has_mask = call->args.size() == 4;
-        if (has_mask) {
-          mask = call->args[3];
-        }
+      if (call->args.size() != 3 && call->args.size() != 4) {
+        Fail(op_name +
+                 " requires a value, a pointer address and an instruction "
+                 "offset",
+             span);
+      }
+      value0 = call->args[0];
+      address_index = 1;
+      has_mask = call->args.size() == 4;
+      if (has_mask) {
+        mask = call->args[3];
       }
       // A one-lane VMI value has a scalar TIR dtype, so lane count is not a
       // provenance check.  This pass admits the value exactly as the frontend
@@ -1983,13 +1935,8 @@ private:
                  " requires an even FP4 lane count for packed FP4 storage",
              span);
       }
-      if (dintlv) {
-        Fail(op_name + " does not support packed FP4 with dist_mode=\"dintlv\"",
-             span);
-      }
       if (is_load) {
-        if (modes.group.has_value() || modes.block_stride.has_value() ||
-            (modes.dist_mode.has_value() && modes.dist_mode.value() == "brc")) {
+        if (modes.group.has_value() || modes.block_stride.has_value()) {
           Fail(op_name + " only supports contiguous packed FP4 loads", span);
         }
       } else if (modes.group.has_value() || modes.block_stride.has_value()) {
@@ -2039,12 +1986,7 @@ private:
       args.push_back(pointer);
       args.push_back(new_offset);
     } else {
-      if (dintlv) {
-        args.push_back(value0);
-        args.push_back(value1);
-      } else {
-        args.push_back(value0);
-      }
+      args.push_back(value0);
       args.push_back(pointer);
       args.push_back(new_offset);
       if (has_mask) {
@@ -2196,16 +2138,7 @@ void ScanResidualAutomaticAddresses(const Stmt &stmt) {
       op_name = "T.vmi.vload";
     } else if (is_store || is_scatter) {
       op_name = is_store ? "T.vmi.vstore" : "T.vmi.vscatter";
-      bool dintlv = false;
-      if (is_store) {
-        if (std::optional<ObjectRef> mode = FindAnnotation(call, "dist_mode")) {
-          if (const auto *imm = mode->as<StringImmNode>()) {
-            dintlv =
-                std::string(imm->value.c_str(), imm->value.size()) == "dintlv";
-          }
-        }
-      }
-      address_index = dintlv ? 2 : 1;
+      address_index = 1;
     } else {
       op_name = "T.vmi.vgather";
       address_index = 0;

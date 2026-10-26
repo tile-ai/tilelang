@@ -76,14 +76,11 @@ def _vload(source, offset=0, *, elem="float32", size=64, **annotations):
     )
 
 
-def _vstore(value, destination, offset=0, mask=None, *, dintlv=False, **annotations):
-    args = list(value) if dintlv else [value]
-    args.extend([destination, offset if isinstance(offset, tirx.PrimExpr) else _int(offset)])
+def _vstore(value, destination, offset=0, mask=None, **annotations):
+    args = [value, destination, offset if isinstance(offset, tirx.PrimExpr) else _int(offset)]
     if mask is not None:
         args.append(mask)
     attrs = {key: _annotation(val) for key, val in annotations.items() if val is not None}
-    if dintlv:
-        attrs["dist_mode"] = _annotation("dintlv")
     return tirx.call_intrin("void", tvm.ir.Op.get("tl.vmi.vstore"), *args, annotations=attrs or None)
 
 
@@ -140,11 +137,6 @@ def _constant(value):
     return int(value.value)
 
 
-def _is_dintlv(call):
-    mode = call.annotations.get("dist_mode")
-    return mode is not None and _annotation_text(call.annotations, "dist_mode") == "dintlv"
-
-
 def _assert_no_raw_address(body):
     names = (
         "tl.vmi.vload",
@@ -156,9 +148,7 @@ def _assert_no_raw_address(body):
         for call in _vmi_calls(body, name):
             if name.endswith("vload"):
                 address_index = 0
-            elif name.endswith("vstore"):
-                address_index = 2 if _is_dintlv(call) else 1
-            elif name.endswith("vscatter"):
+            elif name.endswith("vstore") or name.endswith("vscatter"):
                 address_index = 1
             else:
                 address_index = 0
@@ -242,17 +232,16 @@ def _view(owner, shape, *, name="view", strides=None, elem_offset=0, dtype=None,
 # Ordinary descriptor construction and envelopes
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
-    "size,annotations,extent",
+    "size,extent",
     [
-        (64, {}, 64),
-        (80, {}, 128),
-        (128, {"dist_mode": "brc"}, 1),
+        (64, 64),
+        (80, 128),
     ],
-    ids=["load64", "load-tail80", "brc128"],
+    ids=["load64", "load-tail80"],
 )
-def test_continuous_broadcast_and_load_tail(size, annotations, extent):
+def test_ordinary_load_envelope(size, extent):
     work = _buffer((512,))
-    call = _vload(_load(work, [_int(64)]), size=size, **annotations)
+    call = _vload(_load(work, [_int(64)]), size=size)
 
     body = _run(_evaluate(call))
 
@@ -260,12 +249,10 @@ def test_continuous_broadcast_and_load_tail(size, annotations, extent):
     _assert_plan(out, address_index=0, b=64, e=extent, d=0, rw=1)
     assert out.dtype == call.dtype, "the VMI result dtype is preserved"
     assert _constant(out.annotations["size"]) == size
-    for key, value in annotations.items():
-        assert _annotation_text(out.annotations, key) == str(value)
     _assert_no_raw_address(body)
 
 
-def test_store_masks_and_dintlv():
+def test_store_mask_keeps_full_extent():
     work = _buffer((512,))
     value = _vec("value")
     mask = _mask("mask")
@@ -277,21 +264,6 @@ def test_store_masks_and_dintlv():
     assert out.args[0].same_as(value)
     assert out.args[3].same_as(mask), "the user mask is preserved and never shrinks the store extent"
     _assert_no_raw_address(body)
-
-    even = _vec("even")
-    odd = _vec("odd")
-    call = _vstore((even, odd), _load(work, [_int(0)]), mask=mask, dintlv=True)
-    body = _run(_evaluate(call))
-    (out,) = _vmi_calls(body, "tl.vmi.vstore")
-    _assert_plan(out, address_index=2, b=0, e=128, d=0, rw=2)
-    assert out.args[0].same_as(even) and out.args[1].same_as(odd)
-    assert out.args[4].same_as(mask)
-    assert _annotation_text(out.annotations, "dist_mode") == "dintlv"
-
-    call = _vload(_load(work, [_int(0)]), size=64, dist_mode="dintlv")
-    body = _run(_evaluate(call))
-    (out,) = _vmi_calls(body)
-    _assert_plan(out, address_index=0, b=0, e=128, d=0, rw=1)
 
 
 def test_group_and_block_envelopes():
@@ -339,13 +311,6 @@ def test_negative_index_and_group_candidates():
     body = _run(normalized)
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=448, e=64, d=0, rw=1)
-
-    work2 = _buffer((4, 64))
-    call = _vload(_load(work2, [_int(2), _int(-32)]), size=64, dist_mode="brc")
-    body = _run(_legalize_negative(_evaluate(call)))
-    (out,) = _vmi_calls(body)
-    # The normalized row-major address is 2*64+32, never 2*64-32.
-    _assert_plan(out, address_index=0, b=160, e=1, d=0, rw=1)
 
     # A padded view relocates to its origin and declares the padded prefix.
     padded = _buffer((4, 64), strides=(128, 1), elem_offset=16)
