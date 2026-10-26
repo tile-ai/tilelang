@@ -247,8 +247,8 @@ def _make_cross_core_reuse_program(
             output = T.alloc_shared((16, 16), "float32")
             T.annotate_buffer_versions({output: (versions, "counter") if counter else versions})
             for tile in T.serial(8):
-                # Pass input: Fixpipe produces UB. GEMM and layout inference
-                # are not prerequisites for this synchronization contract.
+                # Fixpipe produces UB. The fixture infers canonical layouts
+                # before scheduling; no GEMM or device execution is needed.
                 T.dual_copy(accum, output, unit_flag_ctrl=3)
                 if reserve_last_slot:
                     T.ascend_sync_inter_arrive("PIPE_FIX", 15)
@@ -281,8 +281,8 @@ def _make_serial_protocols(count):
     return main
 
 
-def _insert_sync(program):
-    before = schedule(program, through="ResolveCore", auto_schedule=False)
+def _insert_sync(program, *, infer_layouts=False):
+    before = schedule(program, through="ResolveCore", auto_schedule=False, infer_layouts=infer_layouts)
     return ascend_transform.InsertSync()(before)
 
 
@@ -385,7 +385,7 @@ def test_legal_sparse_flags_remain_unchanged():
 )
 def test_cross_core_rings_fit_available_slots(versions, counter, vector_stage, reserve_slot):
     program = _make_cross_core_reuse_program(versions, vector_stage, reserve_slot, counter)
-    mod = _insert_sync(program)
+    mod = _insert_sync(program, infer_layouts=True)
     for operation in ("set", "wait"):
         generated = [call.args[2] for call in calls(mod, "tl.ascend_cross_core_" + operation + "_flag") if int(call.args[0]) == 4]
         assert generated

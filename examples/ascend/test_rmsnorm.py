@@ -12,7 +12,7 @@ from example_rmsnorm import rms_norm_fwd, ref_program
 def test_rmsnorm(d):
     batch, eps = 128, 1e-6  # Two rows per core exercise buffer reuse.
     x, weight = torch.randn(batch, d), torch.randn(d)
-    kernel = tilelang.compile(rms_norm_fwd(batch, d), target="ascend", out_idx=[1, 3])
+    kernel = tilelang.compile(rms_norm_fwd(batch, d), out_idx=[1, 3])
     y, rstd = kernel(x.flatten().npu(), weight.npu(), eps)
     torch.testing.assert_close(y.cpu().reshape(batch, d), ref_program(x, weight, eps), rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(rstd.cpu(), torch.rsqrt(x.square().mean(-1) + eps), rtol=1e-5, atol=1e-5)

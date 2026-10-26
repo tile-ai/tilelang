@@ -1,5 +1,4 @@
-"""Ascend auto-schedule annotations: multi-buffer version control and memory
-capacity overrides consumed by the Z3 scheduler."""
+"""Ascend storage placement, multi-buffer versions and scheduling capacity annotations."""
 
 from tvm.tirx import IntImm
 from tvm.tirx.script.builder.ir import sblock_attr
@@ -8,12 +7,75 @@ _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shar
 
 __all__ = [
     "annotate_buffer_versions",
+    "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
 ]
 
 
 _VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter")
+
+
+# Physical pools on dav-3510: (base alignment, capacity), in bytes.
+_BUFFER_PLACEMENT_SCOPES = {
+    "shared.dyn": (32, 248 * 1024),
+    "shared.l1": (512, 512 * 1024),
+    "shared.l0a": (512, 64 * 1024),
+    "shared.l0b": (512, 64 * 1024),
+    "shared.l0c": (1024, 256 * 1024),
+    "shared.ss": (32, 3 * 1024),
+}
+
+
+def annotate_buffer_addresses(buffer_addresses: dict):
+    """Place on-chip buffers at exact byte addresses within their memory pools.
+
+    Supports UB, L1, L0A, L0B, L0C and SS in the Ascend scheduled pipeline.
+    Each placed storage must also have an explicit positive version count in
+    :func:`annotate_buffer_versions`, including ``1`` for unversioned storage.
+    A mode without a count, inferred versions, and manual multi-buffer metadata
+    alone do not satisfy this requirement. Annotation order does not matter.
+
+    Addresses are non-negative Python integers, aligned to 32 bytes for UB/SS,
+    512 for L1/L0A/L0B, and 1024 for L0C. A placement includes all physical
+    versions and layout padding; views of one storage share the same base.
+    Bound L0 scale-factor handles follow their data buffer's placement.
+
+    Partial maps are allowed. Other allocations in a placed pool use the first
+    aligned free interval, without storage reuse. Overlap is rejected even for
+    disjoint lifetimes or positive conflict hints. Different pools and private
+    AIV UBs have independent addresses; common UB storage reserves both UBs.
+    Placement does not change synchronization or ownership.
+
+    Every allocation in a placed pool must have a positive static physical size
+    and fit its hardware capacity, including the 32 KiB UB reservation for SIMT.
+    Pools without placements retain their ordinary allocation behavior.
+
+    Example
+    -------
+    >>> T.annotate_buffer_versions({left: 2, accum: 1})
+    >>> T.annotate_buffer_addresses({left: 262144, accum: 1024})
+    """
+    if not buffer_addresses:
+        raise ValueError("annotate_buffer_addresses requires a non-empty placement map")
+    addresses = {}
+    for buffer, address in buffer_addresses.items():
+        scope = buffer.scope()
+        if scope not in _BUFFER_PLACEMENT_SCOPES:
+            raise ValueError(
+                f"annotate_buffer_addresses does not support storage scope {scope!r}; "
+                "expected UB, L1, L0A, L0B, L0C or SS. Place bound L0 scale-factor handles through their data buffer."
+            )
+        alignment, capacity = _BUFFER_PLACEMENT_SCOPES[scope]
+        if isinstance(address, bool) or not isinstance(address, int) or address < 0 or address % alignment:
+            raise ValueError(f"{scope} byte address must be a non-negative integer divisible by {alignment}, got {address!r}")
+        if address >= capacity:
+            raise ValueError(f"{scope} byte address must be below the {capacity}-byte capacity, got {address}")
+        data = buffer.data
+        if data in addresses and int(addresses[data]) != address:
+            raise ValueError(f"Aliases of one storage require the same byte address: {buffer}")
+        addresses[data] = IntImm("int64", address)
+    return sblock_attr({"tl.ascend_buffer_addresses": addresses})
 
 
 def annotate_buffer_versions(buffer_versions_map: dict):

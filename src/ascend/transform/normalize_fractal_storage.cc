@@ -73,6 +73,7 @@ public:
     arith::Analyzer analyzer;
     analyzer.z3_prover.SetRLimit(50000);
     FractalStorageNormalizer rewriter(&analyzer);
+    rewriter.canonical_layouts_ = collector.layouts;
     rewriter.MarkBufferMapShapes(func);
     for (const auto &[buffer, layout] : collector.layouts) {
       if (!IsAscendFractalLayout(layout) ||
@@ -183,7 +184,7 @@ private:
     }
     buffers_.Set(buffer, padded);
     canonical_buffers_.Set(buffer->data, padded);
-    layouts_.Set(buffer, padded_layout);
+    canonical_layouts_.Set(padded, padded_layout);
   }
 
   Array<PrimExpr> RewriteIndices_(const Buffer &buffer,
@@ -233,6 +234,44 @@ private:
       args.push_back(range->extent);
     original.CopyOnWrite()->args = std::move(args);
     return original;
+  }
+  Call NormalizeL0Copy_(Call call) {
+    AscendCopy copy(call->args, call->annotations);
+    for (const auto &ranges : {copy->src_range, copy->dst_range})
+      for (const Range &range : ranges)
+        if (analyzer_->CanProve(range->extent <= 0))
+          return call;
+    BufferRegion source;
+    Optional<BufferRegion> destination;
+    Optional<PrimExpr> pitch;
+    if (IsL0SFBuffer(copy->dst)) {
+      // SF handles carry the effective shape of their bound data tile and
+      // have no independent storage. Only the L1 source is a transfer region.
+      source = ascend::GetL1ToL0SFSourceRegion(*copy.get(), canonical_layouts_,
+                                               analyzer_);
+    } else {
+      auto regions = ascend::GetL1ToL0CopyRegions(
+          *copy.get(), canonical_layouts_, analyzer_);
+      source = regions.source;
+      destination = regions.destination;
+      pitch = regions.pitch;
+    }
+    auto *writer = call.CopyOnWrite();
+    writer->args.Set(0, MakeRegion_(source, Downcast<Call>(writer->args[0])));
+    if (destination.defined()) {
+      writer->args.Set(
+          1, MakeRegion_(destination.value(), Downcast<Call>(writer->args[1])));
+      // Preserve the original compact pitch if the destination was larger
+      // than the actual transfer. This also makes repeated normalization
+      // stable.
+      AscendFractalRegionInfo normalized;
+      ICHECK(TryExtractAscendFractalRegion(canonical_layouts_[copy->dst],
+                                           destination.value()->region,
+                                           &normalized));
+      if (!analyzer_->CanProveEqual(normalized.outer1->extent, pitch.value()))
+        writer->annotations.Set("l0_pitch", pitch.value());
+    }
+    return call;
   }
   Call NormalizeFixpipeCopy_(Call call) {
     constexpr int kFixpipeAlignmentBytes = 32;
@@ -396,6 +435,10 @@ private:
     if (IsAscendCopyCall(op)) {
       Copy copy(op->args, op->annotations);
       Call call = Downcast<Call>(Parent::VisitExpr_(op));
+      if (IsL1Buffer(copy->src) &&
+          (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst) ||
+           IsL0SFBuffer(copy->dst)))
+        return NormalizeL0Copy_(call);
       if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst))
         return NormalizeFixpipeCopy_(call);
       if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst) ||
@@ -467,9 +510,11 @@ private:
     if (auto value = op->annotations.Get(attr::kLayoutMap)) {
       Map<Buffer, Layout> layouts;
       for (const auto &[buffer, layout] :
-           value.value().cast<Map<Buffer, Layout>>())
-        layouts.Set(buffers_.Get(buffer).value_or(buffer),
-                    layouts_.Get(buffer).value_or(layout));
+           value.value().cast<Map<Buffer, Layout>>()) {
+        Buffer rewritten = buffers_.Get(buffer).value_or(buffer);
+        layouts.Set(rewritten,
+                    canonical_layouts_.Get(rewritten).value_or(layout));
+      }
       block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layouts);
     }
     return block;
@@ -477,7 +522,7 @@ private:
   Map<Var, Buffer> anchors_;
   Map<Var, Buffer> canonical_buffers_;
   Map<Buffer, Buffer> buffers_;
-  Map<Buffer, Layout> layouts_;
+  LayoutMap canonical_layouts_;
   Map<Buffer, Layout> logical_maps_;
 };
 } // namespace
