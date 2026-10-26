@@ -196,7 +196,12 @@ private:
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
   bool IsAscendCubeKernel(const PrimFunc &func) const;
-  bool IsAscendMixedKernel(const PrimFunc &func) const;
+  struct AscendKernelSections {
+    bool has_cube{false};
+    bool has_vector{false};
+    bool has_vector_subcores{false};
+  };
+  AscendKernelSections GetAscendKernelSections(const PrimFunc &func) const;
 
   bool current_function_has_gemm_{false};
   bool current_function_is_cube_{false};
