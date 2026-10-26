@@ -219,6 +219,7 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
 void CodeGenTileLangCuTeDSL::InitFuncState_(const PrimFunc &f) {
   raw_pointer_vars_.clear();
   zero_like_vars_.clear();
+  rng_state_declared_ = false;
   cluster_dims_ = ClusterInfoExtractor().extract(f);
   CodeGenTileLangPY::InitFuncState_(f);
 }
@@ -450,6 +451,37 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
   } else {
     PrintType(dt, dtype_str);
   }
+  // A side-effecting scalar must run once per lane: `T.rng_rand()` advances the
+  // generator on every call, so a filled tensor would repeat one draw. Emit one
+  // call per lane instead; the lanes are indexed by literals.
+  if (const CallNode *call = op->value.as<CallNode>();
+      call && (call->op.same_as(tl::rng_rand()) ||
+               call->op.same_as(tl::rng_rand_float()))) {
+    int lanes = static_cast<int>(Downcast<Integer>(op->lanes)->value);
+    std::string vec = name_supply_->FreshName("_rng_vec");
+    std::ostringstream rng_dtype;
+    PrintType(op->value.dtype(), rng_dtype);
+    PrintIndent();
+    stream << vec << " = tl.make_rmem_tensor((" << lanes << ",), "
+           << rng_dtype.str() << ")\n";
+    // curand's 64-bit uniform helper draws a whole block for two results, so a
+    // two-lane store has to go through it to stay on the same stream.
+    if (lanes == 2 && op->value.dtype().is_float() &&
+        op->value.dtype().bits() == 64 &&
+        Downcast<StringImm>(call->args[0])->value == "uniform") {
+      PrintIndent();
+      stream << "tl.rng_uniform2_double(" << rng_state_name_ << ", " << vec
+             << ")\n";
+    } else {
+      for (int i = 0; i < lanes; ++i) {
+        PrintIndent();
+        stream << vec << "[" << i << "] = " << PrintExpr_(op->value) << "\n";
+      }
+    }
+    os << vec << ".load()";
+    return;
+  }
+
   os << "tl.make_filled_tensor((" << PrintExpr_(op->lanes) << ",), "
      << dtype_str.str() << "(" << PrintExpr_(op->value) << ")).load()";
 }
@@ -1964,6 +1996,18 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
               load->buffer.get(),
               LinearizeBufferIndices_(load->buffer.get(), load->indices))
        << ", " << DTypeToString(dtype) << ")";
+  } else if (op->op.same_as(tl::rng_rand())) {
+    ICHECK(rng_state_declared_)
+        << "T.rng_rand requires a preceding T.rng_init in the same kernel";
+    os << "tl.rng_rand(" << rng_state_name_ << ")";
+  } else if (op->op.same_as(tl::rng_rand_float())) {
+    ICHECK(rng_state_declared_) << "T.rng_rand_float requires a preceding "
+                                   "T.rng_init in the same kernel";
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.rng_rand_float expects the distribution name.";
+    os << "tl.rng_rand_float(" << rng_state_name_ << ", "
+       << (op->dtype.bits() == 64 ? "64" : "32") << ", \""
+       << Downcast<StringImm>(op->args[0])->value << "\")";
   } else if (op->op.same_as(tl::ldg32()) || op->op.same_as(tl::ldg64()) ||
              op->op.same_as(tl::ldg128()) || op->op.same_as(tl::ldg256()) ||
              op->op.same_as(tl::lds32()) || op->op.same_as(tl::lds64()) ||
@@ -3579,6 +3623,17 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const EvaluateNode *op) {
     std::string msg_expr = PrintExpr_(call->args[1]);
     PrintIndent();
     stream << "tl.runtime_assert(" << cond << ", " << msg_expr << ")\n";
+  } else if (call && call->op.same_as(tl::rng_init())) {
+    ICHECK_EQ(call->args.size(), 4U)
+        << "tl.rng_init expects seed, sequence, offset and the generator name";
+    rng_state_declared_ = true;
+    PrintIndent();
+    stream << rng_state_name_ << " = tl.rng_state()\n";
+    PrintIndent();
+    stream << "tl.rng_init(" << rng_state_name_ << ", "
+           << PrintExpr_(call->args[0]) << ", " << PrintExpr_(call->args[1])
+           << ", " << PrintExpr_(call->args[2]) << ", generator=\""
+           << Downcast<StringImm>(call->args[3])->value << "\")\n";
   } else if (call && call->op.same_as(tvm::tl::sync_warp())) {
     PrintIndent();
     stream << "tl.sync_warp(";
