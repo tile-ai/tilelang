@@ -1293,13 +1293,74 @@ def test_reduce_fp8_e4m3_dst_runtime(reduce_fn, torch_op):
     assert torch.allclose(out.float(), ref, atol=1e-1)
 
 
-def _make_fp4_reduce_kernel(reduce_fn, M, N):
-    # fp16 I/O holding exact fp4 values avoids packed-fp4 tensors on the host.
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(("dtype", "op"), [(T.float4_e2m1fn, "sum"), (T.float4_e2m1fn, "max"), (T.int4, "min"), ("uint4", "bitand")])
+@pytest.mark.parametrize("scope", ["local", "local.fragment"])
+def test_reduce_rejects_subbyte_accumulator(dtype, op, scope):
     @T.prim_func
-    def kernel(A: T.Tensor((M, N), T.float16), B: T.Tensor((M,), T.float16)):
+    def kernel(A: T.Tensor((1, 128), T.int32), B: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_buffer((1, 128), T.int32, scope=scope)
+            dst = T.alloc_buffer((1,), dtype, scope=scope)
+            T.copy(A, src)
+            # Exercise the native contract, including TIR that bypasses Python.
+            T.evaluate(
+                T.call_intrin("handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), op, 1, True)
+            )
+            T.copy(dst, B)
+
+    with pytest.raises(ValueError, match=f"sub-byte accumulator dtype {dtype}"):
+        tilelang.lower(kernel, target="cuda")
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float4_e2m1fn, T.int4])
+@pytest.mark.parametrize("legacy", [False, True], ids=["v2", "legacy"])
+def test_finalize_reducer_rejects_subbyte_accumulator(dtype, legacy):
+    @T.prim_func
+    def kernel(A: T.Tensor((128,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            acc = T.alloc_reducer((1,), dtype, op="sum", replication="all" if legacy else None)
+            if legacy:
+                T.clear(acc)
+                for i in T.Parallel(128):
+                    acc[0] += T.cast(A[i], dtype)
+                T.finalize_reducer(acc)
+                T.copy(acc, B)
+            else:
+                T.reducer_init(acc)
+                for i in T.Parallel(128):
+                    T.reducer_update(acc[0], A[i])
+                dst = T.alloc_fragment((1,), dtype)
+                T.finalize_reducer(acc, dst)
+                T.copy(dst, B)
+
+    with pytest.raises(ValueError, match=f"sub-byte accumulator dtype {dtype}"):
+        tilelang.lower(kernel, target="cuda")
+
+
+def test_reduce_bool_accumulator_runtime():
+    @T.prim_func
+    def kernel(A: T.Tensor((2, 128), T.bool), B: T.Tensor((2,), T.bool)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((2, 128), T.bool)
+            dst = T.alloc_fragment((2,), T.bool)
+            T.copy(A, src)
+            T.reduce_bitor(src, dst, dim=1)
+            T.copy(dst, B)
+
+    a = torch.zeros((2, 128), device="cuda", dtype=torch.bool)
+    a[1, -1] = True
+    torch.testing.assert_close(_compile(kernel)(a), a.any(dim=1))
+
+
+def _make_fp4_reduce_kernel(reduce_fn, M, N, dtype):
+    # FP16 input holding exact FP4 values avoids packed FP4 tensors on the host.
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float16), B: T.Tensor((M,), dtype)):
         with T.Kernel(1, threads=128):
             src = T.alloc_fragment((M, N), T.float4_e2m1fn)
-            dst = T.alloc_fragment((M,), T.float4_e2m1fn)
+            dst = T.alloc_fragment((M,), dtype)
             T.copy(A, src)
             reduce_fn(src, dst, dim=1)
             T.copy(dst, B)
@@ -1309,34 +1370,22 @@ def _make_fp4_reduce_kernel(reduce_fn, M, N):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
-@pytest.mark.parametrize(("reduce_fn", "torch_op"), [(T.reduce_max, "max"), (T.reduce_min, "min")], ids=["max", "min"])
-@pytest.mark.parametrize(("M", "N"), [(32, 64), (2, 512), (1, 1024)])
-def test_reduce_fp4_dst_runtime(reduce_fn, torch_op, M, N):
-    """reduce_max/reduce_min into a float4_e2m1fn dst failed to compile
-    (ambiguous shuffle and comparison) and a bare max/min compared raw
-    encodings (GH-2998)."""
-    k = _compile(_make_fp4_reduce_kernel(reduce_fn, M, N))
+@pytest.mark.parametrize(
+    ("reduce_fn", "torch_op"), [(T.reduce_sum, "sum"), (T.reduce_max, "amax"), (T.reduce_min, "amin")], ids=["sum", "max", "min"]
+)
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+def test_reduce_fp4_input_wider_accumulator_runtime(reduce_fn, torch_op, dtype):
+    M, N = 1, 1024
+    k = _compile(_make_fp4_reduce_kernel(reduce_fn, M, N, dtype))
 
     vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4], dtype=torch.float16)
     vals = torch.cat([vals, -vals])
     a = vals[torch.randint(0, len(vals), (M, N))].cuda()
     # A unique extremum in the last column must reach the other warps.
-    a[:, -1] = 6 if torch_op == "max" else -6
+    a[:, -1] = -6 if torch_op == "amin" else 6
     out = k(a)
-    ref = getattr(a, torch_op)(dim=1).values
+    ref = getattr(a.to(getattr(torch, dtype)), torch_op)(dim=1)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
-
-
-@tilelang.testing.requires_cuda
-def test_reduce_fp4_cross_warp_workspace_codegen():
-    target = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm.target.Target(target):
-        artifact = tilelang.lower(_make_fp4_reduce_kernel(T.reduce_max, 1, 1024), target=target)
-    (device_func,) = artifact.device_mod.functions.values()
-    # AllReduce indexes one byte-sized fp4_e2_t per thread, even though
-    # ordinary FP4 buffers pack two elements into each byte.
-    assert "tl::AllReduce<tl::MaxOp, 128, 1," in artifact.kernel_source
-    assert int(device_func.attrs["dyn_shared_memory_buf"]) >= 128
 
 
 def _make_non_finite_const_kernel(dtype):
