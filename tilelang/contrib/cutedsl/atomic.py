@@ -8,6 +8,7 @@ __all__ = [
     "AtomicAdd",
     "AtomicAddRet",
     "AtomicAddx2",
+    "AtomicAddx2Ret",
     "AtomicAddx4",
     "AtomicAddx4Ret",
     "AtomicMax",
@@ -253,6 +254,42 @@ def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
     else:
         for i in range(2):
             AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+
+
+def AtomicAddx2Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 2 consecutive elements, returning the previous values.
+
+    Follows ``AtomicAddx2Ret`` in ``src/tl_templates/cuda/atomic.h``:
+
+    * float16/bfloat16: one packed ``f16x2`` / ``bf16x2`` atomic (a CAS loop for
+      bf16 below sm_90) with generic addressing, so shared memory works too.
+    * float32: one ``atom.global.add.v2.f32`` on sm_90+, two scalar atomics below.
+
+    Args:
+        dst_ptr: Pointer to destination (2 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    vals = _load_from_src(src_values, 2)
+    if dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16):
+        lo, hi = _atomic_add_packed2_ret(dst_ptr, vals[0], vals[1], dst_ptr.dtype, loc=loc, ip=ip)
+        prev_bits = cute.make_rmem_tensor((2,), cutlass.Int16)
+        prev_bits[0] = cutlass.Int16(lo)
+        prev_bits[1] = cutlass.Int16(hi)
+        target = "float16" if dst_ptr.dtype == cutlass.Float16 else "bfloat16"
+        return bitcast(prev_bits.load(), target)
+
+    if dst_ptr.dtype != cutlass.Float32:
+        raise NotImplementedError(f"AtomicAddx2Ret does not support a {dst_ptr.dtype} destination")
+
+    out = cute.make_rmem_tensor((2,), cutlass.Float32)
+    if _arch_at_least(90):
+        prev = _f32_vector_atomic(dst_ptr, vals, loc=loc, ip=ip)
+        for i in range(2):
+            out[i] = cutlass.Float32(prev[i])
+    else:
+        for i in range(2):
+            out[i] = AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+    return out.load()
 
 
 def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):

@@ -70,6 +70,17 @@ def _shfl_sync_typed(mask, val, offset, mask_and_clamp, kind, *, loc=None, ip=No
         shuffled_i32 = prims.shfl_sync(mask, val_i32, offset, mask_and_clamp, kind, loc=loc, ip=ip)
         shuffled_i16 = Int16(arith.trunci(Int16.mlir_type, shuffled_i32.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
         return shuffled_i16.bitcast(val_type, loc=loc, ip=ip)
+    if isinstance(val, Numeric) and val.width == 64:
+        # Two 32-bit shuffles of the low and high words, as CUDA's 64-bit overloads.
+        bits = val.bitcast(Int64, loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+        shift = arith.constant(Int64.mlir_type, 32, loc=loc, ip=ip)
+        words = []
+        for word in (bits, arith.shrui(bits, shift, loc=loc, ip=ip)):
+            word_i32 = Int32(arith.trunci(Int32.mlir_type, word, loc=loc, ip=ip))
+            shuffled = prims.shfl_sync(mask, word_i32, offset, mask_and_clamp, kind, loc=loc, ip=ip)
+            words.append(arith.extui(Int64.mlir_type, Int32(shuffled).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+        joined = arith.ori(words[0], arith.shli(words[1], shift, loc=loc, ip=ip), loc=loc, ip=ip)
+        return Int64(joined).bitcast(val_type, loc=loc, ip=ip)
     return prims.shfl_sync(mask, val, offset, mask_and_clamp, kind, loc=loc, ip=ip)
 
 
@@ -348,8 +359,8 @@ def warp_reduce_sum(value):
 
 
 def warp_reduce_max(value):
-    """Warp-level parallel reduction: max across all 32 lanes."""
-    from .reduce import max as tl_max
+    """Warp-level parallel reduction: max across all 32 lanes (tl::MaxOp semantics)."""
+    from .math import fast_max as tl_max
 
     value = tl_max(value, _shfl_xor_sync(value, 16))
     value = tl_max(value, _shfl_xor_sync(value, 8))
@@ -360,8 +371,8 @@ def warp_reduce_max(value):
 
 
 def warp_reduce_min(value):
-    """Warp-level parallel reduction: min across all 32 lanes."""
-    from .reduce import min as tl_min
+    """Warp-level parallel reduction: min across all 32 lanes (tl::MinOp semantics)."""
+    from .math import fast_min as tl_min
 
     value = tl_min(value, _shfl_xor_sync(value, 16))
     value = tl_min(value, _shfl_xor_sync(value, 8))
