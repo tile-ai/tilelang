@@ -6261,8 +6261,22 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       return;
     }
     p->PrintType(op->dtype, os);
-    os << '(' << FlexibleHexFormat(op->value) << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(';
+    // Use valid FP32 constants and let the conversion constructor handle
+    // saturation and NaNs according to the destination format.
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        os << '-';
+      }
+      os << "CUDART_INF_F";
+      p->need_math_constants_h_ = true;
+    } else if (std::isnan(op->value)) {
+      os << "CUDART_NAN_F";
+      p->need_math_constants_h_ = true;
+    } else {
+      os << FlexibleHexFormat(op->value) << 'f';
+      os << "/*" << std::scientific << op->value << "*/";
+    }
     os << ')';
     return;
   }
