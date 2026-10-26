@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -292,7 +293,7 @@ private:
     }
     if (sequence.empty())
       return tirx::Evaluate(0);
-    return tirx::SeqStmt(std::move(sequence));
+    return tirx::SeqStmt::Flatten(std::move(sequence));
   }
 
   tirx::Stmt VisitStmt_(const tirx::AllocBufferNode *op) final {
@@ -355,6 +356,15 @@ private:
     return buffer;
   }
 
+  PrimExpr VisitExpr_(const tirx::VarNode *op) final {
+    auto allocation = allocations_.find(op);
+    if (allocation == allocations_.end())
+      return ffi::GetRef<tirx::Var>(op);
+    // Raw storage pointers can escape through extern calls or handle values.
+    // Reuse the typed access_ptr rewrite, conservatively allowing reads/writes.
+    return VisitExpr(allocation->second->buffer.access_ptr(3));
+  }
+
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
     if (!op->op.same_as(tirx::builtin::tvm_access_ptr()))
       return tirx::StmtExprMutator::VisitExpr_(op);
@@ -410,15 +420,18 @@ private:
 };
 
 template <typename Planner>
-tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
-                            bool disable_reuse, const Planner &planner) {
+tirx::Stmt
+MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
+                 bool disable_reuse, const Planner &planner,
+                 const std::unordered_set<std::string> &required_scopes = {}) {
   AllocateCollector collector;
   collector(stmt);
   auto run = [&](SharedMemoryRewriter &rewriter,
                  const AllocationMap &allocations,
                  const AllocationOrder &allocation_order,
                  const std::string &target_scope) {
-    if (disable_reuse || target_scope == "shared.ss") {
+    if (disable_reuse ||
+        (target_scope == "shared.ss" && !required_scopes.count(target_scope))) {
       rewriter.PlanNoReuse();
     } else {
       rewriter.SetPlan(planner(stmt, allocations, allocation_order,
@@ -427,7 +440,8 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
     stmt = rewriter(std::move(stmt));
   };
 
-  if (collector.dyn_shmem_allocs.size() > 1) {
+  if (collector.dyn_shmem_allocs.size() > 1 ||
+      required_scopes.count("shared.dyn")) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs, verbose,
                                   align_bytes);
     run(rewriter, collector.dyn_shmem_allocs, collector.dyn_shmem_order, "");
@@ -440,7 +454,7 @@ tirx::Stmt MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
   std::sort(scopes.begin(), scopes.end());
   for (const std::string &scope : scopes) {
     const AllocationMap &allocations = collector.ascend_scope_allocs.at(scope);
-    if (allocations.size() <= 1)
+    if (allocations.size() <= 1 && !required_scopes.count(scope))
       continue;
     auto order = collector.ascend_scope_order.find(scope);
     const AllocationOrder empty_order;
