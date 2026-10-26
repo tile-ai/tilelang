@@ -413,6 +413,7 @@ class AutoTuner:
             target_host=self.compile_args.target_host,
             verbose=self.compile_args.verbose,
             pass_configs=merged,
+            compile_flags=self.compile_args.compile_flags,
         )
 
     def _default_compile(
