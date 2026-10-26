@@ -88,12 +88,13 @@ def gemm(M_DIM=8192, K_DIM=8192, N_DIM=8192, dtype="bfloat16", dst_dtype="float1
 
 
 def gemm_subregion(dtype="float16", dst_dtype="float16", split="M"):
-    """Compact GEMM into ``acc[:, :n]`` on a wider L0C, then on-path dual_copy.
+    """Compact GEMM into a larger L0C, then on-path dual_copy.
 
     M-split pipe-1 offset uses the L0C row pitch (64), not the copied N (32).
+    N-split copies a compact 32x64 result into two 32x32 UBs.
     """
-    TILE_M = TILE_N = TILE_K = 64
-    REGION_M, REGION_N, REGION_K = 64, 32, 32
+    TILE_M, TILE_N, TILE_K = 64, 64 if split == "M" else 128, 64
+    REGION_M, REGION_N, REGION_K = (64, 32, 32) if split == "M" else (32, 64, 32)
     dst_shape = (REGION_M // 2, REGION_N) if split == "M" else (REGION_M, REGION_N // 2)
 
     @T.prim_func
@@ -133,6 +134,7 @@ def gemm_dynamic_tail(dtype="float16", dst_dtype="float16", split="M"):
     UB is the full half-tile. The copied extent is
     ``min(sizes[0], tile_half / unit) * unit`` so rewrite sees a symbolic
     region and does not demand a static 2:1. Host passes 192.
+    Explicit l0_pitch retains the full GEMM result's 256-row storage pitch.
     """
     TILE_M = TILE_N = TILE_K = 256
     dst_shape = (TILE_M // 2, TILE_N) if split == "M" else (TILE_M, TILE_N // 2)
@@ -158,6 +160,7 @@ def gemm_dynamic_tail(dtype="float16", dst_dtype="float16", split="M"):
                 T.dual_copy(
                     acc[0 : T.max(T.min(T.int32(sizes[0]), TILE_M // 2), 0) * 2, 0:TILE_N],
                     tmp,
+                    l0_pitch=TILE_M // 16,
                 )
                 T.dual_copy(tmp, C)
 
@@ -182,6 +185,7 @@ def gemm_dynamic_tail(dtype="float16", dst_dtype="float16", split="M"):
             T.dual_copy(
                 acc[0:TILE_M, 0 : T.max(T.min(T.int32(sizes[0]), TILE_N // 32), 0) * 32],
                 tmp,
+                l0_pitch=TILE_M // 16,
             )
             T.dual_copy(tmp, C)
 
@@ -220,11 +224,12 @@ def _assert_onpath_rel(c, expected, thresh, label):
 
 def run_subregion(dtype="float16", dst_dtype="float16", split="M", thresh=2e-2):
     device = torch.device("npu")
+    region_m, region_n = (64, 32) if split == "M" else (32, 64)
     x = torch.randn(64, 64, dtype=getattr(torch, dtype), device=device) * 0.25
-    w = torch.randn(64, 64, dtype=getattr(torch, dtype), device=device) * 0.25
+    w = torch.randn(64 if split == "M" else 128, 64, dtype=getattr(torch, dtype), device=device) * 0.25
     expected = ref_program(
-        x[:, :32].contiguous(),
-        w[:32, :32].contiguous(),
+        x[:region_m, :32].contiguous(),
+        w[:region_n, :32].contiguous(),
         dst_dtype,
     )
     return check_onpath_accuracy(
@@ -296,7 +301,7 @@ if __name__ == "__main__":
 
     for dst_dtype, thresh in [("float16", 2e-2), ("bfloat16", 5e-2)]:
         for split in ["M", "N"]:
-            print(f"\n=== compact column-slice acc[:, :32] fp32 -> {dst_dtype}, {split}-split ===")
+            print(f"\n=== compact subregion fp32 -> {dst_dtype}, {split}-split ===")
             run_subregion(dtype="float16", dst_dtype=dst_dtype, split=split, thresh=thresh)
 
     for dst_dtype, thresh in [("float16", 2e-2), ("bfloat16", 5e-2)]:

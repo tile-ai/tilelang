@@ -1,6 +1,6 @@
 """NPU accuracy tests for L0C fp32 -> UB f16/bf16 dual_copy on-path cast.
 
-Covers a compact-N column slice (64x32 GEMM in 64x64 L0C), a dynamic
+Covers compact results (64x32 for M-split, 32x64 for N-split), a dynamic
 over-half tail (192 in a 256 tile), plus a small full-tile smoke check.
 """
 
@@ -24,7 +24,7 @@ requires_ascendc_onpath_quant = pytest.mark.skipif(
 @pytest.mark.parametrize("split", ["M", "N"])
 @pytest.mark.parametrize("dst_dtype,thresh", DST_CASES)
 def test_onpath_compact_subregion(split, dst_dtype, thresh):
-    """64x64 L0C alloc, compact gemm+dual_copy on acc[:, :32]."""
+    """Compact GEMM; N-split uses 32-wide pipes in a 64x128 L0C allocation."""
     run_subregion(dtype="float16", dst_dtype=dst_dtype, split=split, thresh=thresh)
 
 

@@ -130,19 +130,6 @@ static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
   return 0; // NoQuant
 }
 
-// FIXPIPE src_stride is the stored L0C NZ M-pitch, not the copied row count.
-// A row prefix of a full-width GEMM still walks the allocation M; a compact
-// MAD whose N is also sliced uses the compact region M.
-PrimExpr GetL0CFixPipeSrcStride(const AscendFractalLayoutInfo &info,
-                                const AscendFractalRegionInfo &region,
-                                const PrimExpr &copied_cols,
-                                arith::Analyzer *analyzer) {
-  if (analyzer->CanProveEqual(copied_cols, info.cols)) {
-    return info.outer1 * info.row_frac;
-  }
-  return region.outer1->extent * info.row_frac;
-}
-
 void CheckCompactL0Region(const Buffer &buffer, const Array<Range> &ranges,
                           arith::Analyzer *analyzer,
                           const std::string &description) {
@@ -716,8 +703,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                                          &compact_src_region))
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
-    loop_src_stride = GetL0CFixPipeSrcStride(info, compact_src_region,
-                                             src_inner.size, analyzer);
+    // Default to the compact source tile. A prefix of a larger stored result
+    // must retain that result's pitch through an explicit l0_pitch.
+    loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
     if (op.l0_pitch.defined()) {
       PrimExpr compact_pitch = op.l0_pitch.value();
       With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
@@ -756,9 +744,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     auto make_cc_to_ub = [&](const PrimExpr &src_p, const PrimExpr &dual_ctl,
                              const PrimExpr &sub_id, const PrimExpr &unit_flag,
                              const PrimExpr &inner, const PrimExpr &rows) {
+      Call pitched_src = Downcast<Call>(src_p);
+      pitched_src.CopyOnWrite()->annotations.Set(
+          attr::kL0AccessPitch, FloorDiv(loop_src_stride, info.row_frac));
       return Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
                   {dst_ptr,
-                   src_p,
+                   pitched_src,
                    sid,
                    inner,
                    rows,
@@ -819,10 +810,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           }
           With<arith::ConstraintContext> nonempty_pipe(
               analyzer, has_data && width > zero);
-          TVM_FFI_CHECK(analyzer->CanProveEqual(
-                            FloorMod(width, make_const(width.dtype(), 32)), zero),
-                        ValueError)
-              << "Ascend N-split on-path cast dual_copy requires each non-empty "
+          TVM_FFI_CHECK(
+              analyzer->CanProveEqual(
+                  FloorMod(width, make_const(width.dtype(), 32)), zero),
+              ValueError)
+              << "Ascend N-split on-path cast dual_copy requires each "
+                 "non-empty "
                  "pipe n_size to be a multiple of 32 for ND output; cannot "
                  "prove this for pipe "
               << pipe << " with n_size=" << width << ".";

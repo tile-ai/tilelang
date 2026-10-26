@@ -56,6 +56,7 @@ def dual_copy(
     *,
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     l2_cache_ctrl: int | str = 0,
+    l0_pitch: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """Copy a region using an M- or N-split across the two AIVs.
 
@@ -66,6 +67,8 @@ def dual_copy(
 
     L0C on-path cast (fp32 → f16/bf16) is restricted to L0C → UB; use
     ``T.copy(l0c, gm)`` or L0C→UB then UB ``dual_copy`` for GM output.
+    L0C copies default to compact source-region storage. When draining a prefix
+    of a larger result, pass its stored M pitch in 16-row blocks as ``l0_pitch``.
 
     With auto-scheduling disabled, write a manual mixed kernel as ``T.Kernel``
     containing explicit ``T.Cube()`` and ``T.Vector()`` blocks, and place each
@@ -179,6 +182,7 @@ def dual_copy(
         annotations=annotations,
         unit_flag_ctrl=unit_flag_ctrl,
         l2_cache_ctrl=l2_cache_ctrl,
+        l0_pitch=l0_pitch,
     )
 
 

@@ -246,24 +246,25 @@ def test_frontend_rejects_fp8_dual_copy():
         gemm_dual_copy("float8_e4m3fn", "M")
 
 
-def compact_column_slice_dual_copy(split, alloc=64, region_n=32):
-    """Compact MAD into ``acc[:, :region_n]`` on an ``alloc x alloc`` L0C."""
-    region_m = alloc
-    dst_shape = (region_m // 2, region_n) if split == "M" else (region_m, region_n // 2)
+def compact_column_slice_dual_copy(split, alloc=64, region_n=32, region_m=None, dst_dtype="float16"):
+    """Compact L0-input MAD followed by a plain or split L0C drain."""
+    alloc_m, alloc_n = (alloc, alloc) if isinstance(alloc, int) else alloc
+    region_m = alloc_m if region_m is None else region_m
+    dst_shape = (region_m // 2, region_n) if split == "M" else (region_m, region_n // 2 if split == "N" else region_n)
 
     @T.prim_func
     def main(
-        A: T.Buffer((alloc, alloc), "float16"),
-        B: T.Buffer((alloc, alloc), "float16"),
-        C: T.Buffer(dst_shape, "float16"),
+        A: T.Buffer((alloc_m, alloc_n), "float16"),
+        B: T.Buffer((alloc_n, alloc_n), "float16"),
+        C: T.Buffer((region_m, region_n), dst_dtype),
     ):
         with T.Kernel(1):
-            a_l1 = T.alloc_l1((alloc, alloc), "float16")
-            b_l1 = T.alloc_l1((alloc, alloc), "float16")
-            a_l0 = T.alloc_l0a((alloc, alloc), "float16")
-            b_l0 = T.alloc_l0b((alloc, alloc), "float16")
-            acc = T.alloc_l0c((alloc, alloc), "float32")
-            tmp = T.alloc_shared(dst_shape, "float16")
+            a_l1 = T.alloc_l1((alloc_m, alloc_n), "float16")
+            b_l1 = T.alloc_l1((alloc_n, alloc_n), "float16")
+            a_l0 = T.alloc_l0a((alloc_m, alloc_n), "float16")
+            b_l0 = T.alloc_l0b((alloc_n, alloc_n), "float16")
+            acc = T.alloc_l0c((alloc_m, alloc_n), "float32")
+            tmp = T.alloc_shared(dst_shape, dst_dtype)
 
             T.copy(A, a_l1)
             T.copy(B, b_l1)
@@ -276,8 +277,12 @@ def compact_column_slice_dual_copy(split, alloc=64, region_n=32):
                 transpose_B=True,
                 clear_accum=True,
             )
-            T.dual_copy(acc[0:region_m, 0:region_n], tmp)
-            T.copy(tmp, C)
+            if split is None:
+                T.copy(acc[0:region_m, 0:region_n], tmp)
+                T.copy(tmp, C)
+            else:
+                T.dual_copy(acc[0:region_m, 0:region_n], tmp)
+                T.dual_copy(tmp, C)
 
     return main
 
@@ -332,6 +337,7 @@ def dynamic_prefix_onpath_dual_copy(split, max_units, unit, dst_dtype="float16")
                 T.dual_copy(
                     acc[0 : T.max(T.min(T.int32(sizes[0]), max_units), 0) * unit, 0:TILE_N],
                     tmp,
+                    l0_pitch=TILE_M // 16,
                 )
                 T.copy(tmp, C)
 
@@ -355,6 +361,7 @@ def dynamic_prefix_onpath_dual_copy(split, max_units, unit, dst_dtype="float16")
             T.dual_copy(
                 acc[0:TILE_M, 0 : T.max(T.min(T.int32(sizes[0]), max_units), 0) * unit],
                 tmp,
+                l0_pitch=TILE_M // 16,
             )
             T.copy(tmp, C)
 
@@ -422,6 +429,7 @@ def dynamic_over_half_onpath_dual_copy(split, unit_flag_ctrl=3, n_unit=32):
                     ],
                     tmp,
                     unit_flag_ctrl=unit_flag_ctrl,
+                    l0_pitch=TILE_M // 16,
                 )
                 T.copy(tmp, C)
 
@@ -456,6 +464,7 @@ def dynamic_over_half_onpath_dual_copy(split, unit_flag_ctrl=3, n_unit=32):
                 ],
                 tmp,
                 unit_flag_ctrl=unit_flag_ctrl,
+                l0_pitch=TILE_M // 16,
             )
             T.copy(tmp, C)
 
@@ -510,12 +519,10 @@ def test_onpath_dual_dynamic_single_pipe_when_src_fits_tile_half(split):
         assert "32" in copy_inner, (copy_inner, source)
 
 
-@pytest.mark.parametrize("split", ["M", "N"])
-def test_column_slice_second_pipe_offset(split):
-    # Keep the compact N-split's two ND output widths divisible by 32.
-    alloc, region_n = (64, 32) if split == "M" else (128, 64)
-    region_m = alloc
-    source = _kernel_source(compact_column_slice_dual_copy(split, alloc, region_n))
+@pytest.mark.parametrize("split,dst_dtype", [("M", "float16"), ("N", "float16"), ("N", "bfloat16")])
+def test_column_slice_second_pipe_offset(split, dst_dtype):
+    alloc, region_m, region_n = ((64, 64), 64, 32) if split == "M" else ((64, 128), 32, 64)
+    source = _kernel_source(compact_column_slice_dual_copy(split, alloc, region_n, region_m, dst_dtype))
     args = _cc_to_ub_argument_lists(source)
     assert len(args) == 2, source
     if split == "M":
@@ -526,9 +533,11 @@ def test_column_slice_second_pipe_offset(split):
         assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
         assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
     for call_args in args:
-        assert _unwrap_c_api_arg(call_args[5]) == str(alloc), (call_args[5], alloc, source)
+        assert _unwrap_c_api_arg(call_args[5]) == str(region_m), (call_args[5], region_m, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
+    if split == "N":
+        assert re.search(r"\+\s*1024\b", args[1][1]), (args[1][1], source)
 
 
 def test_m_split_compact_2d_uses_alloc_row_stride():
@@ -575,6 +584,30 @@ def test_m_split_compact_2d_uses_alloc_row_stride():
         assert _unwrap_c_api_arg(call_args[5]) == str(region_m), (call_args[5], region_m, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
+
+
+@pytest.mark.parametrize("dst_dtype,split", [("float32", None), ("float32", "N"), ("float16", "N"), ("bfloat16", "N")])
+def test_full_n_compact_result_uses_region_m(dst_dtype, split):
+    source = _kernel_source(compact_column_slice_dual_copy(split, region_n=64, region_m=32, dst_dtype=dst_dtype))
+    for args in _cc_to_ub_argument_lists(source):
+        assert _unwrap_c_api_arg(args[5]) == "32", source
+
+
+@pytest.mark.parametrize("dst_dtype", ["float16", "bfloat16"])
+def test_compact_n_split_accuracy(dst_dtype):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("Ascend NPU unavailable")
+    generator = torch.Generator().manual_seed(37)
+    a = torch.randint(-4, 5, (64, 128), generator=generator).to(torch.float16) / 8
+    b = torch.randint(-4, 5, (128, 128), generator=generator).to(torch.float16) / 8
+    expected = (a[:32, :64].float() @ b[:64, :64].float().T).to(getattr(torch, dst_dtype))
+    func = compact_column_slice_dual_copy("N", (64, 128), 64, 32, dst_dtype)
+    compiled = tilelang.compile(func, out_idx=-1, target="ascend")
+    actual = compiled(a.npu(), b.npu())
+    torch.npu.synchronize()
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
 
 
 def test_lowering_rejects_odd_m():

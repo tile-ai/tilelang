@@ -598,7 +598,8 @@ private:
         stride_offset *= new_shape[i];
       }
       if (auto pitch = access_ptr_call->annotations.Get(attr::kL0AccessPitch)) {
-        ICHECK(IsL0ABuffer(original_buffer) || IsL0BBuffer(original_buffer));
+        ICHECK(IsL0ABuffer(original_buffer) || IsL0BBuffer(original_buffer) ||
+               IsL0CBuffer(original_buffer));
         ICHECK_GE(new_shape.size(), 4);
         size_t n = new_shape.size();
         // Only the matrix's outer0 stride changes. Leading planes keep the
