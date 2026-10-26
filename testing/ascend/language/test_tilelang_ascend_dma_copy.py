@@ -7,6 +7,71 @@ import tilelang.testing
 from tilelang.ascend import language as T
 
 
+def _fp8_matrix_copy_kernel(dtype, route):
+    m = n = 32
+    k = 128
+    gm_trans_a, gm_trans_b = route == "gm-transpose-a", route == "gm-transpose-b"
+    l0_trans_a, l0_trans_b = route == "l0-transpose-a", route == "l0-transpose-b"
+    a_shape = (k, m) if gm_trans_a or l0_trans_a else (m, k)
+    b_shape = (k, n) if gm_trans_b or l0_trans_b else (n, k)
+    a_tile = (k, m) if l0_trans_a else (m, k)
+    b_tile = (k, n) if l0_trans_b else (n, k)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(a_shape, dtype),
+        B: T.Tensor(b_shape, dtype),
+        SA: T.Tensor((2, m), "uint16"),
+        SB: T.Tensor((2, n), "uint16"),
+        O: T.Tensor((m, n), "float32"),
+    ):
+        with T.Kernel(1):
+            a1 = T.alloc_l1(a_tile, dtype)
+            b1 = T.alloc_l1(b_tile, dtype)
+            a0 = T.alloc_l0a(a_tile, dtype)
+            b0 = T.alloc_l0b(b_tile, dtype)
+            sa1 = T.alloc_l1((m, 2), "uint16")
+            sb1 = T.alloc_l1((n, 2), "uint16")
+            sa0 = T.alloc_l0a_sf(a0, sf_shape=(m, 2))
+            sb0 = T.alloc_l0b_sf(b0, sf_shape=(n, 2))
+            acc = T.alloc_l0c((m, n), "float32")
+            T.copy(A, a1, transpose=gm_trans_a)
+            T.copy(B, b1, transpose=gm_trans_b)
+            T.copy(SA, sa1, transpose=True)
+            T.copy(SB, sb1, transpose=True)
+            T.copy(a1, a0)
+            T.copy(b1, b0)
+            T.copy(sa1, sa0)
+            T.copy(sb1, sb0)
+            T.gemm_blockscaled(a0, b0, acc, sa0, sb0, transpose_A=l0_trans_a, transpose_B=not l0_trans_b, clear_accum=True)
+            T.copy(acc, O)
+
+    return main
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
+@pytest.mark.parametrize("route", ["normal", "gm-transpose-a", "gm-transpose-b", "l0-transpose-a", "l0-transpose-b"])
+def test_fp8_matrix_copy_with_mx_scales(dtype, route):
+    kernel = tilelang.compile(_fp8_matrix_copy_kernel(dtype, route), target="ascend", out_idx=-1)
+    torch_dtype = getattr(torch, dtype)
+    for seed in (0, 1):
+        generator = torch.Generator().manual_seed(seed)
+        a = (torch.randint(-4, 5, (32, 128), generator=generator).float() / 8).to(torch_dtype)
+        b = (torch.randint(-4, 5, (32, 128), generator=generator).float() / 8).to(torch_dtype)
+        sa = torch.randint(125, 130, (32, 4), dtype=torch.uint8, generator=generator)
+        sb = torch.randint(125, 130, (32, 4), dtype=torch.uint8, generator=generator)
+        a_input = a.T.contiguous() if route in ("gm-transpose-a", "l0-transpose-a") else a
+        b_input = b.T.contiguous() if route in ("gm-transpose-b", "l0-transpose-b") else b
+        actual = kernel(
+            a_input.npu(), b_input.npu(), sa.view(torch.uint16).T.contiguous().npu(), sb.view(torch.uint16).T.contiguous().npu()
+        )
+        torch.npu.synchronize()
+        a_scaled = a.float() * torch.pow(2.0, sa.float() - 127).repeat_interleave(32, dim=1)
+        b_scaled = b.float() * torch.pow(2.0, sb.float() - 127).repeat_interleave(32, dim=1)
+        torch.testing.assert_close(actual.cpu(), a_scaled @ b_scaled.T, rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.parametrize("src_width,ub_width,cols", [(4, 64, 4), (8, 16, 4), (64, 1, 1)])
 def test_strided_dma_roundtrip(src_width, ub_width, cols):
     @T.prim_func

@@ -24,9 +24,6 @@ template <> struct vec<fp8_e4_t> {
 template <> struct vec<fp8_e5_t> {
   using type = vector_f8e5m2;
 };
-template <> struct vec<float8_e5m2_t> {
-  using type = vector_f8e5m2;
-};
 template <> struct vec<float8_e8m0_t> {
   using type = vector_f8e8m0;
 };
