@@ -77,7 +77,7 @@ def compile_cuda(
     if target_format not in ["cubin", "ptx"]:
         raise ValueError("target_format must be cubin or ptx")
 
-    final_options = ["-default-device"]
+    final_options = ["-default-device", "-lineinfo"]
     if get_nvrtc_version() >= (12, 8):
         final_options += ["-pch"]
     if arch is not None:

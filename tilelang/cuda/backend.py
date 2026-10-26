@@ -99,13 +99,6 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options.append("--ptxas-options=--verbose")
         options.append("-w")
 
-    if (
-        compiler == "nvrtc"
-        and cfg.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES, False)
-        and not any(flag in {"-lineinfo", "--lineinfo"} for flag in options)
-    ):
-        options.append("-lineinfo")
-
     cache_key = CUDABinaryCache.make_key(
         code=code,
         target_kind=target.kind.name,
