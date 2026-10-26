@@ -103,5 +103,23 @@ def test_fill_int8_negative():
         torch.testing.assert_close(out, ref)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64"])
+def test_fill_float_constants(dtype):
+    values = (1e-40, -1e-40, 1.17e-38, 1.0 + 2**-30)
+
+    @T.prim_func
+    def main(out: T.Tensor((4, 32), dtype)):
+        with T.Kernel(1, threads=32):
+            T.fill(out[0, :], T.cast(T.float64(values[0]), dtype))
+            T.fill(out[1, :], T.cast(T.float64(values[1]), dtype))
+            T.fill(out[2, :], T.cast(T.float64(values[2]), dtype))
+            T.fill(out[3, :], T.cast(T.float64(values[3]), dtype))
+
+    kernel = tilelang.compile(main, out_idx=[0], target="cuda")
+    expected = torch.tensor(values, dtype=torch.float64).to(getattr(torch, dtype))[:, None].expand(4, 32)
+    torch.testing.assert_close(kernel().cpu(), expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     test_matmul()
