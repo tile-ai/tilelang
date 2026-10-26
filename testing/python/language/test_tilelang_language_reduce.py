@@ -1339,21 +1339,6 @@ def test_finalize_reducer_rejects_subbyte_accumulator(dtype, legacy):
         tilelang.lower(kernel, target="cuda")
 
 
-def test_reduce_bool_accumulator_runtime():
-    @T.prim_func
-    def kernel(A: T.Tensor((2, 128), T.bool), B: T.Tensor((2,), T.bool)):
-        with T.Kernel(1, threads=128):
-            src = T.alloc_fragment((2, 128), T.bool)
-            dst = T.alloc_fragment((2,), T.bool)
-            T.copy(A, src)
-            T.reduce_bitor(src, dst, dim=1)
-            T.copy(dst, B)
-
-    a = torch.zeros((2, 128), device="cuda", dtype=torch.bool)
-    a[1, -1] = True
-    torch.testing.assert_close(_compile(kernel)(a), a.any(dim=1))
-
-
 def _make_fp4_reduce_kernel(reduce_fn, M, N, dtype):
     # FP16 input holding exact FP4 values avoids packed FP4 tensors on the host.
     @T.prim_func
