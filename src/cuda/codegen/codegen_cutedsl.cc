@@ -985,13 +985,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_GE(pol->value, 0);
     ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
     auto eviction_policy = eviction_policy_names_[pol->value];
-    // Simplify the code by using the default eviction policy
-    if (eviction_policy != "EVICT_NORMAL") {
-      LOG(FATAL) << "Eviction policy " << eviction_policy
-                 << " is not supported currently";
-    } else {
-      ss << "tl.tma_load(";
-    }
+    ss << "tl.tma_load(";
     auto desc = op->args[0];
     ss << PrintExpr_(desc) << ", ";
     ss << PrintExpr_(op->args[1]) << ", ";
@@ -1006,6 +1000,112 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         Downcast<Bool>(op->annotations["use_2cta"])->value) {
       ss << ", use_2cta=True";
     }
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
+    }
+    ss << ")\n";
+    PrintIndent();
+    stream << ss.str();
+  } else if (op->op.same_as(tl::tma_load_multicast())) {
+    std::ostringstream ss;
+    ICHECK_GE(op->args.size(), 5)
+        << "tma_load_multicast requires desc, mbar, smem, mask, coordinates "
+           "and eviction policy";
+    auto pol = op->args[op->args.size() - 1].as<IntImmNode>();
+    ICHECK(pol) << "Eviction policy must be IntImm";
+    ICHECK_GE(pol->value, 0);
+    ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
+    auto eviction_policy = eviction_policy_names_[pol->value];
+    ss << "tl.tma_load_multicast(";
+    ss << PrintExpr_(op->args[0]) << ", ";
+    ss << PrintExpr_(op->args[1]) << ", ";
+    ss << PrintBytePointerExpr_(op->args[2]) << ", ";
+    ss << PrintExpr_(op->args[3]) << ", (";
+    for (size_t i = 4; i < op->args.size() - 1; i++) {
+      if (i > 4)
+        ss << ", ";
+      ss << PrintExpr_(op->args[i]);
+    }
+    ss << ")";
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
+    }
+    ss << ")\n";
+    PrintIndent();
+    stream << ss.str();
+  } else if (op->op.same_as(tl::tma_load_gather4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 9U)
+        << "tma_load_gather4 expects desc, mbar, smem, col, r0..r3 and "
+           "eviction policy";
+    auto pol = op->args[op->args.size() - 1].as<IntImmNode>();
+    ICHECK(pol) << "Eviction policy must be IntImm";
+    ICHECK_GE(pol->value, 0);
+    ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
+    auto eviction_policy = eviction_policy_names_[pol->value];
+    ss << "tl.tma_load_gather4(";
+    ss << PrintExpr_(op->args[0]) << ", ";
+    ss << PrintExpr_(op->args[1]) << ", ";
+    ss << PrintBytePointerExpr_(op->args[2]) << ", ";
+    ss << PrintExpr_(op->args[3]) << ", (";
+    for (size_t i = 4; i < op->args.size() - 1; i++) {
+      if (i > 4)
+        ss << ", ";
+      ss << PrintExpr_(op->args[i]);
+    }
+    ss << ")";
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
+    }
+    ss << ")\n";
+    PrintIndent();
+    stream << ss.str();
+  } else if (op->op.same_as(tl::tma_store_scatter4())) {
+    std::ostringstream ss;
+    ICHECK_EQ(op->args.size(), 8U)
+        << "tma_store_scatter4 expects desc, smem, col, r0..r3 and eviction "
+           "policy";
+    auto pol = op->args[op->args.size() - 1].as<IntImmNode>();
+    ICHECK(pol) << "Eviction policy must be IntImm";
+    ICHECK_GE(pol->value, 0);
+    ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
+    auto eviction_policy = eviction_policy_names_[pol->value];
+    ss << "tl.tma_store_scatter4(";
+    ss << PrintExpr_(op->args[0]) << ", ";
+    ss << PrintBytePointerExpr_(op->args[1]) << ", ";
+    ss << PrintExpr_(op->args[2]) << ", (";
+    for (size_t i = 3; i < op->args.size() - 1; i++) {
+      if (i > 3)
+        ss << ", ";
+      ss << PrintExpr_(op->args[i]);
+    }
+    ss << ")";
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
+    }
+    ss << ")\n";
+    PrintIndent();
+    stream << ss.str();
+  } else if (op->op.same_as(tl::tma_store_cluster())) {
+    ICHECK_EQ(op->args.size(), 5U) << "tma_store_cluster requires 5 args";
+    std::ostringstream ss;
+    ss << "tl.tma_store_cluster(";
+    ss << PrintBytePointerExpr_(op->args[0]) << ", ";
+    ss << PrintBytePointerExpr_(op->args[1]) << ", ";
+    ss << PrintExpr_(op->args[2]) << ", ";
+    ss << PrintExpr_(op->args[3]) << ", ";
+    ss << PrintExpr_(op->args[4]);
+    ss << ")\n";
+    PrintIndent();
+    stream << ss.str();
+  } else if (op->op.same_as(tl::ptx_cluster_store())) {
+    ICHECK_EQ(op->args.size(), 4U);
+    std::ostringstream ss;
+    ss << "tl.cluster_store(";
+    ss << PrintExpr_(op->args[0]) << ", ";
+    ss << PrintExpr_(op->args[1]) << ", ";
+    ss << PrintExpr_(op->args[2]) << ", ";
+    ss << PrintExpr_(op->args[3]);
     ss << ")\n";
     PrintIndent();
     stream << ss.str();
@@ -1019,10 +1119,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_GE(pol->value, 0);
     ICHECK_LT(static_cast<size_t>(pol->value), eviction_policy_names_.size());
     auto eviction_policy = eviction_policy_names_[pol->value];
-    if (eviction_policy != "EVICT_NORMAL") {
-      LOG(FATAL) << "Eviction policy " << eviction_policy
-                 << " is not supported currently";
-    }
 
     auto desc = op->args[0];
     ss << "tl.tma_load(";
@@ -1040,7 +1136,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         ss << ", ";
       ss << PrintExpr_(op->args[i]);
     }
-    ss << "))\n";
+    ss << ")";
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
+    }
+    ss << ")\n";
     PrintIndent();
     stream << ss.str();
   } else if (op->op.same_as(tl::tma_store())) {
@@ -1063,13 +1163,20 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       ss << "tl.tma_reduce(";
       auto desc = op->args[0];
       ss << PrintExpr_(desc) << ", ";
-      ss << PrintExpr_(op->args[1]) << ", (";
+      ss << PrintBytePointerExpr_(op->args[1]) << ", (";
       for (size_t i = 2; i < op->args.size() - 2; i++) {
         if (i > 2)
           ss << ", ";
         ss << PrintExpr_(op->args[i]);
       }
-      ss << "))\n";
+      ss << ")";
+      auto reduce_eviction_idx = op->args[op->args.size() - 1].as<IntImmNode>();
+      ICHECK(reduce_eviction_idx) << "Eviction policy must be IntImm";
+      auto reduce_eviction = eviction_policy_names_[reduce_eviction_idx->value];
+      if (reduce_eviction != "EVICT_NORMAL") {
+        ss << ", eviction_kind=\"" << reduce_eviction << "\"";
+      }
+      ss << ")\n";
       PrintIndent();
       stream << ss.str();
       return;
@@ -1092,7 +1199,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ss << "tl.tma_store(";
     auto desc = op->args[0];
     ss << PrintExpr_(desc) << ", ";
-    ss << PrintExpr_(op->args[1]) << ", (";
+    ss << PrintBytePointerExpr_(op->args[1]) << ", (";
     for (size_t i = 2; i < op->args.size() - 2; i++) {
       if (i > 2)
         ss << ", ";
@@ -1100,7 +1207,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     }
     ss << ")";
     if (eviction_policy != "EVICT_NORMAL") {
-      ss << ", eviction_kind = nvvm.EvictKind." << eviction_policy.substr(6);
+      ss << ", eviction_kind=\"" << eviction_policy << "\"";
     }
     ss << ")\n";
     PrintIndent();

@@ -10,7 +10,11 @@ __all__ = [
     # TMA operations
     "extract_tensormap_ptr",
     "tma_load",
+    "tma_load_multicast",
+    "tma_load_gather4",
     "tma_store",
+    "tma_store_scatter4",
+    "tma_store_cluster",
     "tma_reduce",
     "tma_store_arrive",
     "tma_store_wait",
@@ -34,6 +38,10 @@ import cutlass
 
 import cutlass._mlir.dialects.cute as _cute_ir
 import cutlass._mlir.dialects.cute_nvgpu as _cute_nvgpu_ir
+import cutlass._mlir.dialects.nvvm as _nvvm_ir
+from cutlass._mlir_helpers.dialect_proxy import DialectAutoConvertProxy
+
+_nvvm = DialectAutoConvertProxy(_nvvm_ir)
 
 import cutlass.cute as cute
 from cutlass.cute.typing import Int, Int32, Int16, Uint64, Pointer, Union  # noqa: F401
@@ -42,6 +50,20 @@ from cutlass.impl_utils import check_value_in
 from .utils import as_byte_ptr
 
 _TMA_ARCHES = ["sm_90", "sm_90a", "sm_100a", "sm_110", "sm_120", "sm_120a", "sm_121", "sm_121a"]
+
+# CacheHintSm90 from tl_templates/cuda/copy_sm90.h, passed as the L2 cache hint
+# operand of the TMA instructions.
+_EVICTION_HINTS = {
+    "EVICT_NORMAL": 0x1000000000000000,
+    "EVICT_FIRST": 0x12F0000000000000,
+    "EVICT_LAST": 0x14F0000000000000,
+}
+
+
+def _eviction_hint(eviction_kind):
+    if eviction_kind not in _EVICTION_HINTS:
+        raise ValueError(f"Unknown eviction policy {eviction_kind!r}; expected one of {sorted(_EVICTION_HINTS)}")
+    return Uint64(_EVICTION_HINTS[eviction_kind])
 
 
 class _MbarrierPointerAdapter:
@@ -171,6 +193,7 @@ def tma_load(
     use_2cta: Constexpr[bool] = False,
     im2col_offsets=None,
     *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
     loc=None,
     ip=None,
 ) -> None:
@@ -185,10 +208,14 @@ def tma_load(
     :type smem_ptr:                  Pointer
     :param crd:                      Coordinates tuple for the tensor access
     :type crd:                       tuple[Int, ...]
+    :param eviction_kind:            L2 eviction policy: EVICT_NORMAL, EVICT_FIRST
+                                     or EVICT_LAST
+    :type eviction_kind:             str
     """
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, _TMA_ARCHES, "arch")
     smem_ptr = as_byte_ptr(smem_ptr)
+    l2_cache_hint = _eviction_hint(eviction_kind)
 
     if not isinstance(crd, tuple) and isinstance(tma_desc, cute.Pointer):
         # Legacy signature: tma_load(smem_ptr, gmem_ptr, mbar, size)
@@ -218,7 +245,7 @@ def tma_load(
                 coordinates=coordinates,
                 mbar=_MbarrierPointerAdapter(mbar),
                 im2col_offsets=im2col_offsets,
-                l2_cache_hint=Uint64(0x1000000000000000),
+                l2_cache_hint=l2_cache_hint,
                 mode=mode,
                 group=prims.CTAGroup.CTA_2,
                 loc=loc,
@@ -231,7 +258,7 @@ def tma_load(
                 coordinates=coordinates,
                 mbar=mbar,
                 im2col_offsets=im2col_offsets,
-                l2_cache_hint=Uint64(0x1000000000000000),
+                l2_cache_hint=l2_cache_hint,
                 mode=mode,
                 loc=loc,
                 ip=ip,
@@ -239,7 +266,85 @@ def tma_load(
 
 
 @dsl_user_op
-def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+def tma_load_multicast(
+    tma_desc,
+    mbar: cute.Pointer,
+    smem_ptr: cute.Pointer,
+    multicast_mask: Int,
+    crd: Int | tuple[Int, ...],
+    *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
+    loc=None,
+    ip=None,
+) -> None:
+    """Load one tile from global memory into every CTA of a cluster at once.
+
+    Every receiving CTA waits on its own mbarrier at the same shared-memory
+    offset, which the hardware signals with ``complete_tx``.
+
+    :param multicast_mask: bit per CTA rank selecting the receivers
+    :type multicast_mask: Int
+    """
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, _TMA_ARCHES, "arch")
+    if isinstance(crd, tuple):
+        coordinates = [Int32(i) for i in crd]
+    else:
+        coordinates = [Int32(crd)]
+    prims.cp_async_bulk_tensor_shared_cluster_global(
+        dst_mem=as_byte_ptr(smem_ptr),
+        tma_descriptor=_as_tensormap_ptr(tma_desc, loc=loc, ip=ip),
+        coordinates=coordinates,
+        mbar=_MbarrierPointerAdapter(mbar),
+        im2col_offsets=[],
+        multicast_mask=Int16(multicast_mask),
+        l2_cache_hint=_eviction_hint(eviction_kind),
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def tma_load_gather4(
+    tma_desc,
+    mbar: cute.Pointer,
+    smem_ptr: cute.Pointer,
+    col: Int,
+    rows: tuple[Int, Int, Int, Int],
+    *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
+    loc=None,
+    ip=None,
+) -> None:
+    """Load four rows of one 2-D tile with ``.tile::gather4`` (sm_100+)."""
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, ["sm_100a", "sm_110", "sm_120a", "sm_121a"], "arch")
+    # The gather4 form carries {col, r0, r1, r2, r3}; the primitives wrapper
+    # rejects anything but two coordinates, so reach the dialect op directly.
+    _nvvm.cp_async_bulk_tensor_shared_cluster_global(
+        as_byte_ptr(smem_ptr),
+        _as_tensormap_ptr(tma_desc, loc=loc, ip=ip),
+        [Int32(col)] + [Int32(r) for r in rows],
+        mbar,
+        [],
+        l2_cache_hint=cutlass.Int64(_eviction_hint(eviction_kind)),
+        mode=_nvvm_ir.TMALoadMode.TILE_GATHER4,
+        is_cta_only=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def tma_store(
+    tma_desc,
+    smem_ptr: cute.Pointer,
+    crd: Int | tuple[Int, ...],
+    *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
+    loc=None,
+    ip=None,
+) -> None:
     """
     Store data from shared memory to global memory using TMA (Tensor Memory Access).
 
@@ -249,6 +354,9 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
     :type smem_ptr:                  Pointer
     :param crd:                      Coordinates tuple for the tensor access
     :type crd:                       tuple[Int, ...]
+    :param eviction_kind:            L2 eviction policy: EVICT_NORMAL, EVICT_FIRST
+                                     or EVICT_LAST
+    :type eviction_kind:             str
     """
     arch = CuTeDSL._get_dsl().envar.arch
     check_value_in(arch, _TMA_ARCHES, "arch")
@@ -264,13 +372,78 @@ def tma_store(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, l
         src_mem=as_byte_ptr(smem_ptr),
         coordinates=[Int32(i) for i in crd],
         mode=prims.TMAStoreMode.TILE,
+        l2_cache_hint=_eviction_hint(eviction_kind),
         loc=loc,
         ip=ip,
     )
 
 
 @dsl_user_op
-def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, loc=None, ip=None) -> None:
+def tma_store_scatter4(
+    tma_desc,
+    smem_ptr: cute.Pointer,
+    col: Int,
+    rows: tuple[Int, Int, Int, Int],
+    *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
+    loc=None,
+    ip=None,
+) -> None:
+    """Store four rows of one 2-D tile with ``.tile::scatter4`` (sm_100a+)."""
+    arch = CuTeDSL._get_dsl().envar.arch
+    check_value_in(arch, ["sm_100a", "sm_110", "sm_120a", "sm_121a"], "arch")
+    # Same coordinate-count restriction as tma_load_gather4.
+    _nvvm.cp_async_bulk_tensor_global_shared_cta(
+        _as_tensormap_ptr(tma_desc, loc=loc, ip=ip),
+        as_byte_ptr(smem_ptr),
+        [Int32(col)] + [Int32(r) for r in rows],
+        l2_cache_hint=cutlass.Int64(_eviction_hint(eviction_kind)),
+        mode=_nvvm_ir.TMAStoreMode.TILE_SCATTER4,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def tma_store_cluster(
+    dst: cute.Pointer,
+    src: cute.Pointer,
+    dst_cta: Int,
+    size_bytes: Int32,
+    mbar: cute.Pointer,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """Copy a byte range into a peer CTA's shared memory with ``cp.async.bulk``.
+
+    The completion barrier announced to the peer is the one at the same
+    shared-memory offset as ``mbar``. Call from a single thread.
+    """
+    dst_ptr = prims.mapa(as_byte_ptr(dst), Int32(dst_cta))
+    mbar_ptr = prims.mapa(mbar, Int32(dst_cta))
+    prims.mbarrier_arrive_expect_tx(mbar_ptr, Int32(size_bytes))
+    prims.fence_proxy("async_shared", space=prims.SharedSpace.shared_cta)
+    prims.cp_async_bulk_shared_cluster_shared_cta(
+        dst_mem=dst_ptr,
+        src_mem=as_byte_ptr(src),
+        mbar=mbar_ptr,
+        size=Int32(size_bytes),
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def tma_reduce(
+    tma_desc,
+    smem_ptr: cute.Pointer,
+    crd: Int | tuple[Int, ...],
+    *,
+    eviction_kind: Constexpr[str] = "EVICT_NORMAL",
+    loc=None,
+    ip=None,
+) -> None:
     """
     Reduce data from shared memory to global memory using TMA with atomic ADD reduction.
 
@@ -299,6 +472,7 @@ def tma_reduce(tma_desc, smem_ptr: cute.Pointer, crd: Int | tuple[Int, ...], *, 
         red_kind=prims.TMARedux.ADD,
         coordinates=[Int32(i) for i in crd],
         mode=prims.TMAStoreMode.TILE,
+        l2_cache_hint=_eviction_hint(eviction_kind),
         loc=loc,
         ip=ip,
     )
