@@ -204,11 +204,12 @@ by the complete physical matrix footprint, including layout padding.
 
 The batched path is selected when the leading source extent is not provably
 at most one. Existing 2D copies and single-matrix selections retain their behavior.
-For the batched path, requested source and destination batch counts must match. The source batch
-origin must be nonnegative; a source batch tail beyond the GM tensor is clipped
-and the corresponding destination matrices are filled with zero. Every requested
-destination axis (batch, rows and columns) must remain provably in bounds;
-invalid destination ranges are rejected before DMA clipping or padding.
+The batch axis uses the same extent checks and tail clipping as the matrix axes;
+it has no additional equality or origin-proof checks. Larger destination batch
+regions are allowed: extra batches outside the source request are left untouched.
+Source batch tails beyond the GM tensor are clipped and the missing requested
+matrices are filled with zero. As with existing matrix copies, negative origins
+are outside the supported tail-padding contract.
 Matrix tails use the existing OOB clipping and L1 padding; padding is emitted
 separately for each batch. The destination must use a canonical matrix layout.
 This batched path is not supported by the PTO target.

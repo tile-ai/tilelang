@@ -126,8 +126,9 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   AscendCopy matrix_copy(*copy);
   if (batched) {
     PrimExpr valid_batches = bounded.dst[0]->extent;
+    // Extra destination capacity is not part of the source request.
     PrimExpr missing_batches =
-        analyzer->Simplify(copy->dst_range[0]->extent - valid_batches);
+        analyzer->Simplify(copy->src_range[0]->extent - valid_batches);
     if (!analyzer->CanProve(missing_batches <= 0)) {
       Array<Range> batch_tail = copy->dst_range;
       batch_tail.Set(

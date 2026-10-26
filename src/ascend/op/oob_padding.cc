@@ -98,29 +98,6 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     bool batched = op.src_range.size() == 3 && op.dst_range.size() == 3 &&
                    !analyzer->CanProve(op.src_range[0]->extent <= 1,
                                        arith::ProofStrength::kSymbolicBound);
-    if (batched) {
-      ICHECK(analyzer->CanProveEqual(op.src_range[0]->extent,
-                                     op.dst_range[0]->extent))
-          << "Batched GM->L1 copy requires matching batch counts.";
-      ICHECK(analyzer->CanProve(op.src_range[0]->min >= 0))
-          << "Batched GM->L1 copy requires a nonnegative source batch origin.";
-      // Batch padding uses the requested destination region. Keep these
-      // checks local to the new batched path; single-matrix copies are
-      // unchanged.
-      for (size_t axis = 0; axis < op.dst_range.size(); ++axis) {
-        const Range &range = op.dst_range[axis];
-        ICHECK(analyzer->CanProve(range->min >= 0,
-                                  arith::ProofStrength::kSymbolicBound) &&
-               analyzer->CanProve(range->extent >= 0,
-                                  arith::ProofStrength::kSymbolicBound) &&
-               analyzer->CanProve(range->min + range->extent <=
-                                      op.dst->shape[axis],
-                                  arith::ProofStrength::kSymbolicBound))
-            << "Batched GM->L1 copy requires an in-bounds destination axis "
-            << axis << "; buffer " << op.dst->name << " has range " << range
-            << " and axis extent " << op.dst->shape[axis] << ".";
-      }
-    }
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling", batched);
     StridedLayout dst_layout = NormalizeTrailingMTE2DLayout(

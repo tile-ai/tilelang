@@ -81,26 +81,6 @@ def test_batched_nd2nz_batch_and_matrix_tails():
     assert "asc_fill_l1(" in source
 
 
-@pytest.mark.parametrize(
-    "source_shape,destination_shape,axis",
-    [
-        ((2, 32, 16), (2, 16, 16), 1),
-        ((2, 16, 32), (2, 16, 16), 2),
-        ((4, 16, 16), (2, 16, 16), 0),
-    ],
-    ids=["row", "column", "batch"],
-)
-def test_batched_nd2nz_rejects_out_of_bounds_destination(source_shape, destination_shape, axis):
-    @T.prim_func
-    def main(source: T.Tensor(source_shape, T.bfloat16)):
-        with T.Kernel(1):
-            target = T.alloc_l1(destination_shape, T.bfloat16)
-            T.copy(source, target[: source_shape[0], : source_shape[1], : source_shape[2]])
-
-    with pytest.raises(Exception, match=f"in-bounds destination axis {axis}"):
-        tilelang.lower(main, target="ascend")
-
-
 @pytest.mark.parametrize("auto_schedule", [False, True])
 def test_batched_nd2nz_dynamic_batch_tail(auto_schedule):
     @T.prim_func
@@ -132,17 +112,27 @@ def test_single_matrix_oob_preserves_legacy_behavior():
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
 @pytest.mark.parametrize(
-    "source_batches,batch_begin,rows,cols,dynamic",
+    "source_batches,batch_begin,rows,cols,dynamic,copy_batches",
     [
-        (4, 0, 32, 32, False),
-        (3, 1, 32, 32, False),
-        (3, 3, 32, 32, False),
-        (3, 1, 20, 20, False),
-        (3, 0, 20, 20, True),
+        (4, 0, 32, 32, False, 4),
+        (3, 1, 32, 32, False, 4),
+        (3, 3, 32, 32, False, 4),
+        (3, 1, 20, 20, False, 4),
+        (3, 0, 20, 20, True, 4),
+        (3, 0, 32, 32, False, 2),
+        (3, 2, 20, 20, False, 2),
     ],
-    ids=["in-bounds", "batch-tail", "all-batches-oob", "batch-m-n-tails", "dynamic-batch-m-n-tails"],
+    ids=[
+        "in-bounds",
+        "batch-tail",
+        "all-batches-oob",
+        "batch-m-n-tails",
+        "dynamic-batch-m-n-tails",
+        "larger-destination",
+        "larger-destination-batch-m-n-tails",
+    ],
 )
-def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dynamic):
+def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dynamic, copy_batches):
     import torch
 
     pytest.importorskip("torch_npu")
@@ -164,7 +154,7 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
             begin = block * 2 if dynamic else batch_begin
             # Seed every matrix with nonzero data so missing fills cannot pass.
             T.copy(poison, target)
-            T.copy(source[begin : begin + 4, :32, :32], target[1:5, :, :])
+            T.copy(source[begin : begin + copy_batches, :32, :32], target[1:5, :, :])
             T.copy(identity, weight)
             T.copy(weight, b)
             # Multiplication by identity exposes all L1 elements, including tails.
@@ -177,14 +167,14 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
     torch_dtype = getattr(torch, dtype)
     source = ((torch.arange(source_batches * rows * cols).reshape(source_batches, rows, cols) % 31) + 1).to(torch_dtype)
     expected = torch.full((num_blocks, 5, 32, 32), -7.0)
-    expected[:, 1:] = 0
+    expected[:, 1 : 1 + copy_batches] = 0
     for block in range(num_blocks):
         begin = block * 2 if dynamic else batch_begin
-        valid_batches = min(4, max(source_batches - begin, 0))
+        valid_batches = min(copy_batches, max(source_batches - begin, 0))
         expected[block, 1 : 1 + valid_batches, :rows, :cols] = source[begin : begin + valid_batches].float()
     identity = torch.eye(32, dtype=torch_dtype, device="npu")
     poison = torch.full((5, 32, 32), -7.0, dtype=torch_dtype, device="npu")
     actual = kernel(source.npu(), identity, poison)
     torch.npu.synchronize()
-    # Batch 0 is outside the copy destination and must retain its sentinel.
+    # Batch 0 and extra destination capacity must retain their sentinels.
     torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)

@@ -231,3 +231,32 @@ def test_single_matrix_symbolic_origin_preserves_legacy_behavior(rank):
         lowered = transform.AscendLowerTileOp()(after)
     (dma,) = calls(lowered, "tl.ascend_copy_gm_to_cbuf")
     assert len(dma.args) == 12
+
+
+@pytest.mark.parametrize("batch_begin", [0, 2, 3])
+def test_batch_padding_leaves_extra_destination_capacity_untouched(batch_begin):
+    before = _copy_module((3, 16, 32), (5, 16, 32), [batch_begin, 0, 0], [2, 16, 32], dst_min=[1, 0, 0], dst_extent=[4, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    if batch_begin == 0:
+        tvm.ir.assert_structural_equal(after, before)
+        return
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    valid_batches = max(3 - batch_begin, 0)
+    assert int(copy.args[0].args[2]) == valid_batches
+    (fill,) = calls(after, "tl.tileop.fill")
+    loops = nodes(after, tirx.For)
+    first_batch = fill.args[0].args[0].indices[0]
+    if loops:
+        (loop,) = loops
+        assert int(loop.extent) == 2 - valid_batches
+        first_batch = tirx.stmt_functor.substitute(first_batch, {loop.loop_var: 0})
+    assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches
+
+
+def test_batch_symbolic_origins_use_common_axis_clamping():
+    origin = tirx.Var("origin", "int32")
+    before = _copy_module((8, 16, 32), (8, 16, 32), [origin, 0, 0], [2, 16, 32], dst_min=[origin, 0, 0], dst_extent=[2, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    assert copy.args[0].args[0].indices[0].same_as(origin)
+    assert copy.args[1].args[0].indices[0].same_as(origin)
