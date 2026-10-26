@@ -22,6 +22,14 @@ Base the description on the complete final diff and actual validation records;
 revise it when the implementation or scope changes. The contributor remains
 responsible for the description and any claims it makes.
 
+Put supporting evidence in the problem or approach explanation: describe the
+before/after behavior or a relevant regression test's result and what it checks.
+Use comparable measurements for performance claims. Identify important unverified
+behavior. Do not automatically append a `Validation` section or a routine list
+of passing formatting/test commands. Include commands and environment details
+when they help reproduce or interpret a claim. Keep performing the validation
+required below; the PR description should explain what its evidence establishes.
+
 ## Optional AI Assistance Disclosure
 
 Follow the [AI-assisted contribution policy](../../../CONTRIBUTING.md#ai-assisted-contributions).
@@ -127,8 +135,9 @@ def test_cuda_packed_codegen(op): ...
 - Prefer the existing writable fork remote and never force-push without explicit
   authorization. For an existing PR, verify its repository and head branch
   before pushing.
-- Write concise English PR text with specific bracketed component tags and list
-  only completed validation. Do not create a draft unless the user requests it.
+- Write concise English PR text with specific bracketed component tags, following
+  the shared description guidance above. Do not create a draft unless the user
+  requests it.
 - After pushing, verify that the PR's reported head SHA equals the pushed commit
   and report newly triggered checks as pending, passing, or failing separately.
   Do not wait for CI unless the user asks for monitoring.

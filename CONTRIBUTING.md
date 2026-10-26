@@ -43,28 +43,36 @@ A small change may need only a few sentences; scale the detail to the change
 and combine or remove template sections that do not help explain it.
 
 - **Problem:** Describe the original and expected behavior, with a linked issue
-  or a small example when useful. For a bug fix, state whether the failure was
-  confirmed on current main or the intended base revision; say if it was not
-  reproduced. For a feature, explain the concrete use case and why existing
-  functionality is insufficient.
-- **Approach:** Explain the root cause and how the change addresses it. When
-  adding an API, compiler pass, abstraction, or backend-specific behavior,
-  explain why it belongs at that layer. For a nontrivial design choice, describe
-  the main alternative and the reason for the chosen approach.
+  or a small example when useful. For a bug fix, describe the triggering input
+  and observed failure on current main or the intended base revision; identify
+  the tested revision, or say the failure was not reproduced. For a feature,
+  explain the concrete use case and why existing functionality is insufficient.
+- **Approach:** Explain the root cause and how the change addresses it. Support
+  a bug-fix claim with the changed behavior for the same input, or identify a
+  relevant regression test, its result, and what it checks. When adding an API,
+  compiler pass, abstraction, or backend-specific behavior, explain why it belongs
+  at that layer. For a nontrivial design choice, describe the main alternative
+  and the reason for the chosen approach.
 - **Scope and tradeoffs:** Identify affected backends or execution modes,
   compatibility changes, and known limitations where relevant. Keep independent
   fixes, features, and cleanups in separate PRs when they can be reviewed on
   their own.
-- **Validation:** Report commands that actually ran, their results, and relevant
-  hardware or toolchain details. Distinguish local results from CI and identify
-  untested behavior. Performance claims need a comparable baseline and
-  measurement conditions; include end-to-end costs when moving work to the host
-  or adding allocations, synchronization, or per-call preparation.
+
+Put evidence alongside the claim it supports. Performance claims need comparable
+before/after measurements and relevant hardware or toolchain settings; include
+end-to-end costs when moving work to the host or adding allocations,
+synchronization, or per-call preparation. Include commands and environment
+details when they help reproduce or interpret a result, and clearly identify
+important behavior that remains unverified.
+
+A separate validation section or a routine list of passing lint/test commands
+is not required. Documentation changes and simple cleanups usually do not need
+to repeat CI results in the description.
 
 Keep the description aligned with the final diff when the scope changes during
 review. The [PR template](.github/PULL_REQUEST_TEMPLATE.md) provides short prompts
 for this information. Regression coverage follows the [testing policy](#testing-policy)
-below; explaining validation does not require adding a new test file.
+below; providing evidence does not require adding a new test file.
 
 ### AI-assisted contributions
 

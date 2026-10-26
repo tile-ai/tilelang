@@ -5,8 +5,8 @@ explain it, and remove these prompts before submitting. -->
 ## Problem
 
 <!-- What behavior or use case motivates this change? Link the issue or include
-a small example when useful. For a bug fix, state the base revision used to
-confirm the failure, or explain that it has not been reproduced. -->
+a small example when useful. For a bug fix, describe the triggering input and
+observed failure on the tested base revision, or say it has not been reproduced. -->
 
 ## Approach
 
@@ -14,10 +14,10 @@ confirm the failure, or explain that it has not been reproduced. -->
 tradeoffs and alternatives, affected backends, compatibility changes, and
 limitations. Keep independent changes out of this PR. -->
 
-## Validation
-
-<!-- List commands actually run and their results. Include relevant hardware,
-toolchain, and performance baseline details. State what remains untested. -->
+<!-- Support the claims above with relevant evidence: for a bug fix, describe
+the changed behavior for the same input or identify a regression test, what it
+checks, and its result; for a performance change, provide comparable measurements and their
+conditions. State important behavior that remains unverified. -->
 
 <!-- Optional disclosure, only if you choose to include it:
 AI assistance: <tool name>
