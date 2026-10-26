@@ -11,6 +11,8 @@ __all__ = [
     "SumOp",
     "MaxOp",
     "MinOp",
+    "MaxOpNan",
+    "MinOpNan",
     "BitAndOp",
     "BitOrOp",
     "BitXorOp",
@@ -28,20 +30,22 @@ import cutlass
 import cutlass.cute as cute
 from cutlass.experimental import primitives as prims
 
+from .math import cuda_max, cuda_min, fast_max, fast_min, max_nan, min_nan
+
 
 def min(a, b, c=None):
-    """Type-preserving min for scalar CuTeDSL values."""
-    result = cutlass.min(a, b)
+    """Type-preserving min for scalar CuTeDSL values, with CUDA float semantics."""
+    result = cuda_min(a, b)
     if c is not None:
-        result = cutlass.min(result, c)
+        result = cuda_min(result, c)
     return result
 
 
 def max(a, b, c=None):
-    """Type-preserving max for scalar CuTeDSL values."""
-    result = cutlass.max(a, b)
+    """Type-preserving max for scalar CuTeDSL values, with CUDA float semantics."""
+    result = cuda_max(a, b)
     if c is not None:
-        result = cutlass.max(result, c)
+        result = cuda_max(result, c)
     return result
 
 
@@ -54,20 +58,35 @@ class SumOp:
 
 
 class MaxOp:
-    """Max reduction operator"""
+    """Max reduction operator, as tl::MaxOp (tl::fast_max)"""
 
     @staticmethod
     def __call__(x, y):
-        return max(x, y)
+        return fast_max(x, y)
+
+
+class MaxOpNan:
+    """NaN-propagating max reduction operator (tl::MaxOpNan: __hmax_nan for 16-bit floats)"""
+
+    @staticmethod
+    def __call__(x, y):
+        return max_nan(x, y)
 
 
 class MinOp:
-    """Min reduction operator"""
+    """Min reduction operator, as tl::MinOp (tl::fast_min)"""
 
     @staticmethod
     def __call__(x, y):
-        # Use cutlass.min which is JIT-friendly
-        return min(x, y)
+        return fast_min(x, y)
+
+
+class MinOpNan:
+    """NaN-propagating min reduction operator (tl::MinOpNan: __hmin_nan for 16-bit floats)"""
+
+    @staticmethod
+    def __call__(x, y):
+        return min_nan(x, y)
 
 
 class BitAndOp:

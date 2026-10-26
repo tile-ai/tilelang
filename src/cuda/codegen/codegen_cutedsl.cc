@@ -1117,11 +1117,19 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     int num = Downcast<IntImm>(op->args[1])->value;
     bool is_shape_encoded =
         op->args.size() >= 4 && op->args.back().as<StringImmNode>();
+    std::string shape = "m8n8";
     if (is_shape_encoded) {
-      ICHECK_EQ(Downcast<StringImm>(op->args.back())->value, "m8n8")
-          << "CuTeDSL stmatrix codegen only supports m8n8";
+      shape = Downcast<StringImm>(op->args.back())->value;
+      ICHECK(shape == "m8n8" || shape == "m16n8")
+          << "CuTeDSL stmatrix codegen supports m8n8 and m16n8, got " << shape;
+      // PTX only defines the transposed b8 store for m16n8.
+      ICHECK(shape == "m8n8" || trans == 1)
+          << "stmatrix m16n8 requires the transposed form";
     }
-    std::string func_name = "tl.ptx_stmatrix_x" + std::to_string(num);
+    std::string func_name =
+        std::string(shape == "m16n8" ? "tl.ptx_stmatrix_m16n8_x"
+                                     : "tl.ptx_stmatrix_x") +
+        std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
@@ -1165,6 +1173,11 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::pack_b16())) {
     os << "tl.pack_half2(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::pack_b8x4())) {
+    ICHECK_EQ(op->args.size(), 4U) << "tl.pack_b8x4 expects four arguments";
+    os << "tl.pack_b8x4(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", "
+       << PrintExpr_(op->args[3]) << ")";
   } else if (op->op.same_as(tl::sync_grid())) {
     PrintIndent();
     stream << "tl.sync_grid()\n";
@@ -2071,14 +2084,21 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     ICHECK_EQ(op->args.size(), 3U);
     os << "((" << PrintExpr_(op->args[0]) << " * " << PrintExpr_(op->args[1])
        << ") + " << PrintExpr_(op->args[2]) << ")";
-  } else if (op->op.same_as(tl::max2()) || op->op.same_as(tl::max2_nan())) {
+  } else if (op->op.same_as(tl::max2()) || op->op.same_as(tl::min2()) ||
+             op->op.same_as(tl::max2_nan()) || op->op.same_as(tl::min2_nan())) {
     ICHECK_EQ(op->args.size(), 2U);
-    os << "tl.max2(" << PrintExpr_(op->args[0]) << ", "
+    const char *name = op->op.same_as(tl::max2())       ? "tl.max2"
+                       : op->op.same_as(tl::min2())     ? "tl.min2"
+                       : op->op.same_as(tl::max2_nan()) ? "tl.max2_nan"
+                                                        : "tl.min2_nan";
+    os << name << "(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
-  } else if (op->op.same_as(tl::min2()) || op->op.same_as(tl::min2_nan())) {
+  } else if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2U);
-    os << "tl.min2(" << PrintExpr_(op->args[0]) << ", "
-       << PrintExpr_(op->args[1]) << ")";
+    // Scalar fp16/bf16 lower to __hmax_nan/__hmin_nan in the CUDA codegen and
+    // every other type to tl::fast_max/fast_min; the helpers do the same.
+    os << (op->op.same_as(tl::max_nan()) ? "tl.max_nan(" : "tl.min_nan(")
+       << PrintExpr_(op->args[0]) << ", " << PrintExpr_(op->args[1]) << ")";
   } else if (op->op.same_as(tl::abs2())) {
     ICHECK_EQ(op->args.size(), 1U);
     os << "tl.abs2(" << PrintExpr_(op->args[0]) << ")";
@@ -2108,6 +2128,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // value
     os << "tl.AtomicAddx2(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
+    // atomic_addx2_ret_elem_op(dst_ptr, src_ptr[, memory_order]) -> returns the
+    // previous value of the two lanes
+    const std::string dst = PrintExpr_(op->args[0]);
+    const std::string src = PrintExpr_(op->args[1]);
+    std::string call = "tl.AtomicAddx2Ret(" + dst + ", " + src + ")";
+    PrintVecHelperResult_(op->dtype, call, os);
   } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
     // value

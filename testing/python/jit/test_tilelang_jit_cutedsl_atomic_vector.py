@@ -47,6 +47,45 @@ def atomic_addx4_prev_kernel(dtype):
 
 
 @tilelang.jit(target="cutedsl")
+def atomic_addx2_prev_kernel(dtype):
+    @T.prim_func
+    def kernel(
+        Dst: T.Tensor((2 + GUARD,), dtype),
+        Val: T.Tensor((2,), dtype),
+        Prev: T.Tensor((2,), dtype),
+    ):
+        with T.Kernel(1, threads=1):
+            Prev[0:2] = T.atomic_addx2(Dst[0], Val[0], return_prev=True)
+
+    return kernel
+
+
+@tilelang.jit(target="cutedsl")
+def atomic_addx2_prev_shared_kernel(dtype):
+    """Contended x2 atomics with return on a shared-memory destination."""
+
+    @T.prim_func
+    def kernel(
+        Init: T.Tensor((2 + GUARD,), dtype),
+        Val: T.Tensor((2,), dtype),
+        Out: T.Tensor((2 + GUARD,), dtype),
+        Prev: T.Tensor((THREADS, 2), dtype),
+    ):
+        with T.Kernel(1, threads=THREADS):
+            tx = T.get_thread_binding()
+            S = T.alloc_shared((2 + GUARD,), dtype)
+            if tx < 2 + GUARD:
+                S[tx] = Init[tx]
+            T.sync_threads()
+            Prev[tx, 0:2] = T.atomic_addx2(S[0], Val[0], return_prev=True)
+            T.sync_threads()
+            if tx < 2 + GUARD:
+                Out[tx] = S[tx]
+
+    return kernel
+
+
+@tilelang.jit(target="cutedsl")
 def atomic_addxn_global_kernel(dtype, width):
     """Every thread adds the same ``width`` values to the same destination."""
     atomic_addxn = T.atomic_addx2 if width == 2 else T.atomic_addx4
@@ -103,6 +142,42 @@ def test_cutedsl_atomic_addx4_return_prev(dtype):
     expected_prev = torch.arange(1, 5, device="cuda", dtype=torch_dtype)
     torch.testing.assert_close(prev, expected_prev, atol=0, rtol=0)
     torch.testing.assert_close(dst, torch.cat([expected_prev + val, tail_before]), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_cutedsl_atomic_addx2_return_prev(dtype):
+    _require_cutedsl()
+    torch_dtype = getattr(torch, dtype)
+    dst = torch.arange(1, 2 + GUARD + 1, device="cuda", dtype=torch_dtype)
+    val = torch.tensor([10, 20], device="cuda", dtype=torch_dtype)
+    prev = torch.zeros(2, device="cuda", dtype=torch_dtype)
+    tail_before = dst[2:].clone()
+
+    kernel = atomic_addx2_prev_kernel(dtype)
+    assert "tl.AtomicAddx2Ret(" in kernel.get_kernel_source()
+    kernel(dst, val, prev)
+
+    expected_prev = torch.tensor([1, 2], device="cuda", dtype=torch_dtype)
+    torch.testing.assert_close(prev, expected_prev, atol=0, rtol=0)
+    torch.testing.assert_close(dst, torch.cat([expected_prev + val, tail_before]), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+def test_cutedsl_atomic_addx2_return_prev_shared(dtype):
+    _require_cutedsl()
+    init, val, expected = _values(2, dtype)
+    out = torch.zeros_like(init)
+    prev = torch.zeros(THREADS, 2, device="cuda", dtype=init.dtype)
+    atomic_addx2_prev_shared_kernel(dtype)(init, val, out, prev)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    # The pair is updated as one word, so the returned pairs are exactly the
+    # THREADS successive states init + k * val, in some order.
+    steps = torch.arange(THREADS, device="cuda", dtype=init.dtype)[:, None]
+    states = init[:2][None, :] + steps * val[None, :]
+    order = torch.argsort(prev[:, 0].float())
+    torch.testing.assert_close(prev[order], states, atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda

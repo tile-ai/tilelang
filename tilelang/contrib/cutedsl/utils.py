@@ -58,6 +58,7 @@ __all__ = [
     "warpgroup_reg_alloc",
     "warpgroup_reg_dealloc",
     "pack_half2",
+    "pack_b8x4",
     "as_pointer",
 ]
 
@@ -400,10 +401,18 @@ def shuffle_elect(thread_extent):
 
 
 def sync_thread_partial(barrier_id=None, thread_count=None):
+    """
+    Synchronize at a CTA barrier, as tl::__sync_thread_partial (bar.sync id, count).
+
+    The CUDA template defaults the count to 0, which ``bar.sync`` treats as all
+    CTA threads; a missing or static zero count emits the count-less form.
+    """
     from .reduce import bar_sync_ptx
 
     barrier_id = 0 if barrier_id is None else barrier_id
-    thread_count = 0 if thread_count is None else thread_count
+    if thread_count is None or (isinstance(thread_count, int) and thread_count == 0):
+        prims.barrier_cta_sync(barrier_id)
+        return
     bar_sync_ptx(barrier_id, thread_count)
 
 
@@ -484,3 +493,31 @@ def pack_half2(x, y):
         return Int32(packed_xy)
 
     return pack_half2_impl(x, y)
+
+
+@dsl_user_op
+def pack_b8x4(x0, x1, x2, x3, *, loc=None, ip=None) -> Int32:
+    """
+    Pack the raw bytes of four 8-bit values into one 32-bit word.
+
+    Matches tl::pack_b8x4: ``(x3 << 24) | (x2 << 16) | (x1 << 8) | x0`` over the
+    bit patterns, so int8/uint8 and FP8 values pack the same way.
+    """
+    i8_type = mlir_ir.IntegerType.get_signless(8)
+    packed = None
+    for i, value in enumerate((x0, x1, x2, x3)):
+        if isinstance(value, int):
+            value = Uint8(value & 0xFF)
+        if isinstance(value, Numeric):
+            if value.width != 8:
+                raise TypeError(f"pack_b8x4 expects 8-bit values, got {type(value).__name__}")
+            if not isinstance(value, (Int8, Uint8)):
+                value = value.bitcast(Uint8, loc=loc, ip=ip)
+        value_ir = value.ir_value(loc=loc, ip=ip) if hasattr(value, "ir_value") else value
+        if value_ir.type != i8_type:
+            value_ir = llvm.bitcast(i8_type, value_ir, loc=loc, ip=ip)
+        word = arith.extui(Int32.mlir_type, value_ir, loc=loc, ip=ip)
+        if i:
+            word = arith.shli(word, arith.constant(Int32.mlir_type, 8 * i, loc=loc, ip=ip), loc=loc, ip=ip)
+        packed = word if packed is None else arith.ori(packed, word, loc=loc, ip=ip)
+    return Int32(packed)
