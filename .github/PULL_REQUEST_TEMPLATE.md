@@ -10,8 +10,9 @@ confirm the failure, or explain that it has not been reproduced. -->
 
 ## Approach
 
-<!-- Explain the fix or design and any material alternative, affected backend,
-compatibility change, or limitation. Keep independent changes out of this PR. -->
+<!-- Explain the fix or design and why you chose this approach. Describe relevant
+tradeoffs and alternatives, affected backends, compatibility changes, and
+limitations. Keep independent changes out of this PR. -->
 
 ## Validation
 
