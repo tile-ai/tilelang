@@ -27,6 +27,39 @@ from tilelang.tools.pass_timing import create_pass_timing_tool
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
+def _with_device_compile_flags(
+    pass_configs: dict[str, Any],
+    compile_flags: list[str] | str | None,
+) -> dict[str, Any]:
+    """Fold ``compile_flags`` into the pass configs that reach the device codegen.
+
+    The grouped path compiles the merged device module itself and then builds the
+    per-config ``JITKernel`` objects with ``from_database=True``, so it never runs
+    ``JITKernel``'s own merge of ``self.compile_flags``. The device backends read
+    the flags only from the pass configs (``cuda/backend.py`` and
+    ``ascend/backend.py`` both look up ``TL_DEVICE_COMPILE_FLAGS`` there), so
+    without this the flags the cache identity was computed from would never reach
+    the compiler.
+
+    Existing entries keep their order and precede the explicit flags, matching
+    what ``JITKernel`` does when it merges the same two sources.
+    """
+    if compile_flags is None:
+        return pass_configs
+
+    existing = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
+    if existing is None:
+        existing = []
+    elif isinstance(existing, str):
+        existing = [existing]
+    else:
+        existing = list(existing)
+
+    flags = [compile_flags] if isinstance(compile_flags, str) else list(compile_flags)
+    pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = [*existing, *flags]
+    return pass_configs
+
+
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
@@ -45,6 +78,7 @@ def compile_grouped_unit_tvm_ffi(
     tools = [timing_tool] if timing_tool is not None else []
     with compile_pass_instrumentation(name="grouped-tvm-ffi", tools=tools):
         pass_configs = normalize_pass_configs(compile_args.pass_configs)
+        pass_configs = _with_device_compile_flags(pass_configs, compile_args.compile_flags)
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
