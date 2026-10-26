@@ -327,9 +327,6 @@ PrimExpr ReducerV2Identity(ReducerV2OpType op, DataType dtype) {
       return make_const(dtype, signed_min());
     if (is_uint)
       return make_const(dtype, 0);
-    // E8M0 conversion takes the magnitude, so -Inf is not a lower bound.
-    if (dtype.is_float8_e8m0fnu())
-      return make_const(dtype, std::ldexp(1.0, -127));
     return make_const(dtype, -INFINITY);
   case ReducerV2OpType::kMin:
     if (is_int)

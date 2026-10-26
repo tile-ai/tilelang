@@ -205,9 +205,6 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
       scalar = make_const(op.dst->dtype, SignedMin(bits));
     } else if (is_uint) {
       scalar = make_const(op.dst->dtype, 0);
-    } else if (dst_dtype.is_float8_e8m0fnu()) {
-      // E8M0 conversion takes the magnitude, so -Inf is not a lower bound.
-      scalar = make_const(dst_dtype, std::ldexp(1.0, -127));
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }

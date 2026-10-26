@@ -1395,42 +1395,6 @@ def test_blackwell_non_finite_const_matches_runtime_conversion(dtype):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("op", ["max", "min"])
-@pytest.mark.parametrize("deferred", [False, True], ids=["local", "reducer"])
-def test_reduce_fp8_e8m0_identity_codegen(op, deferred):
-    reduce_fn = T.reduce_max if op == "max" else T.reduce_min
-    dtype = T.float8_e8m0fnu
-
-    @T.prim_func
-    def kernel(A: T.Tensor((4,), T.float32), B: T.Tensor((1,), T.float32)):
-        with T.Kernel(1, threads=1):
-            if deferred:
-                acc = T.alloc_reducer((1,), dtype, op=op)
-                T.reducer_init(acc)
-                for i in T.Parallel(4):
-                    T.reducer_update(acc[0], T.cast(A[i], dtype))
-                result = T.alloc_fragment((1,), dtype)
-                T.finalize_reducer(acc, result)
-                B[0] = T.cast(result[0], T.float32)
-            else:
-                src = T.alloc_local((4,), dtype)
-                dst = T.alloc_local((1,), dtype)
-                for i in T.serial(4):
-                    src[i] = T.cast(A[i], dtype)
-                reduce_fn(src, dst, dim=0)
-                B[0] = T.cast(dst[0], T.float32)
-
-    target = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm.target.Target(target):
-        source = tilelang.lower(kernel, target=target).kernel_source
-    if op == "max":
-        assert "fp8_e8_t(0x1p-127f" in source
-        assert "-CUDART_INF_F" not in source
-    else:
-        assert "fp8_e8_t(CUDART_INF_F)" in source
-
-
-@tilelang.testing.requires_cuda
 def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
     k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))
     src = k.get_kernel_source()
