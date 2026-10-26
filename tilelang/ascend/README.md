@@ -202,7 +202,9 @@ With the Ascend C target, `T.copy` can transfer a three-dimensional
 The source batch and row strides are preserved; destination batches are spaced
 by the complete physical matrix footprint, including layout padding.
 
-Requested source and destination batch counts must match. The source batch
+The batched path is selected when the leading source extent is not provably
+at most one. Existing 2D copies and single-matrix selections retain their behavior.
+For the batched path, requested source and destination batch counts must match. The source batch
 origin must be nonnegative; a source batch tail beyond the GM tensor is clipped
 and the corresponding destination matrices are filled with zero. Every requested
 destination axis (batch, rows and columns) must remain provably in bounds;

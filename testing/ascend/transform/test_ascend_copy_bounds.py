@@ -211,10 +211,23 @@ def test_batch_tail_fill_region(batch_begin):
     assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1 + valid_batches
 
 
-@pytest.mark.parametrize("axis", [0, 1])
-def test_l1_destination_rejects_negative_origin(axis):
-    dst_min = [0, 0]
-    dst_min[axis] = -1
-    before = _copy_module((16, 16), (16, 16), [0, 0], [16, 16], dst_min=dst_min)
-    with pytest.raises(tvm.error.InternalError, match=f"in-bounds destination axis {axis}"):
-        transform.AscendInsertOOBPadding()(before)
+@pytest.mark.parametrize("rank", [2, 3])
+def test_single_matrix_symbolic_origin_preserves_legacy_behavior(rank):
+    # A fixed selector need not have a statically provable nonnegative origin.
+    origin = tirx.Var("origin", "int32")
+    dst_origin = origin * 16 if rank == 2 else origin
+    if rank == 2:
+        before = _copy_module((32, 16), (32, 16), [0, 0], [16, 16], dst_min=[dst_origin, 0], dst_extent=[16, 16])
+    else:
+        before = _copy_module((4, 16, 16), (4, 16, 16), [origin, 0, 0], [1, 16, 16], dst_min=[origin, 0, 0], dst_extent=[1, 16, 16])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    assert tvm.arith.Analyzer().can_prove_equal(copy.args[1].args[0].indices[0], dst_origin)
+    assert not nodes(after, tirx.IfThenElse)
+
+    target = tvm.target.Target("ascend")
+    after["main"] = after["main"].with_attr("target", target)
+    with target:
+        lowered = transform.AscendLowerTileOp()(after)
+    (dma,) = calls(lowered, "tl.ascend_copy_gm_to_cbuf")
+    assert len(dma.args) == 12

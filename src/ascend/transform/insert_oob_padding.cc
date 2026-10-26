@@ -109,10 +109,11 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   // not receive a row fill.
   if (!bounded.clamped)
     return stmts;
+  bool batched = copy->src_range.size() == 3 && copy->dst_range.size() == 3 &&
+                 !analyzer->CanProve(copy->src_range[0]->extent <= 1,
+                                     arith::ProofStrength::kSymbolicBound);
   StridedLayout src_layout = NormalizeMTE2DLayout(
-      copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding",
-      copy->src_range.size() == 3 && copy->dst_range.size() == 3 &&
-          !analyzer->CanProveEqual(copy->src_range[0]->extent, Integer(1)));
+      copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding", batched);
   size_t src_inner_axis = static_cast<size_t>(src_layout.modes[0].axis);
   size_t src_row_axis = static_cast<size_t>(src_layout.modes[1].axis);
   PrimExpr valid_src_rows = bounded.src[src_row_axis]->extent;
@@ -123,7 +124,7 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   PrimExpr valid_cols = needs_transpose ? valid_src_rows : valid_src_cols;
 
   AscendCopy matrix_copy(*copy);
-  if (copy->src_range.size() == 3 && copy->dst_range.size() == 3) {
+  if (batched) {
     PrimExpr valid_batches = bounded.dst[0]->extent;
     PrimExpr missing_batches =
         analyzer->Simplify(copy->dst_range[0]->extent - valid_batches);

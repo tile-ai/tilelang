@@ -547,7 +547,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     }
   } else if (dma_path == DMAPath::kGMToL1) {
     bool batched = src_range.size() == 3 && dst_range.size() == 3 &&
-                   !analyzer->CanProveEqual(src_range[0]->extent, I(1));
+                   !analyzer->CanProve(src_range[0]->extent <= I(1),
+                                       arith::ProofStrength::kSymbolicBound);
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, src_range, analyzer, "Ascend GM->L1 copy", batched);
     StridedLayout dst_region_layout = NormalizeTrailingMTE2DLayout(

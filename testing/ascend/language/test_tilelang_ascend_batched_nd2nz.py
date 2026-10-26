@@ -84,24 +84,19 @@ def test_batched_nd2nz_batch_and_matrix_tails():
 @pytest.mark.parametrize(
     "source_shape,destination_shape,axis",
     [
-        ((32, 16), (16, 16), 0),
-        ((16, 32), (16, 16), 1),
+        ((2, 32, 16), (2, 16, 16), 1),
+        ((2, 16, 32), (2, 16, 16), 2),
         ((4, 16, 16), (2, 16, 16), 0),
     ],
     ids=["row", "column", "batch"],
 )
-def test_nd2nz_rejects_out_of_bounds_destination(source_shape, destination_shape, axis):
+def test_batched_nd2nz_rejects_out_of_bounds_destination(source_shape, destination_shape, axis):
     @T.prim_func
     def main(source: T.Tensor(source_shape, T.bfloat16)):
         with T.Kernel(1):
             target = T.alloc_l1(destination_shape, T.bfloat16)
-            if len(source_shape) == 2:
-                T.copy(source, target[: source_shape[0], : source_shape[1]])
-            else:
-                T.copy(source, target[: source_shape[0], :, :])
+            T.copy(source, target[: source_shape[0], : source_shape[1], : source_shape[2]])
 
-    # Previously the 32x16 -> 16x16 case clipped the DMA but emitted a fill
-    # starting at target + 512 bytes, beyond the 512-byte L1 allocation.
     with pytest.raises(Exception, match=f"in-bounds destination axis {axis}"):
         tilelang.lower(main, target="ascend")
 
@@ -121,7 +116,7 @@ def test_batched_nd2nz_dynamic_batch_tail(auto_schedule):
     assert "if (" in source  # A fully out-of-bounds batch must not issue a DMA.
 
 
-def test_batched_nd2nz_single_missing_batch():
+def test_single_matrix_oob_preserves_legacy_behavior():
     @T.prim_func
     def main(source: T.Tensor((3, 16, 16), T.bfloat16)):
         with T.Kernel(1):
@@ -131,7 +126,7 @@ def test_batched_nd2nz_single_missing_batch():
 
     source = tilelang.lower(main, target="ascend").kernel_source
     assert "asc_copy_gm2l1_nd2nz(" not in source
-    assert "asc_fill_l1(" in source
+    assert "asc_fill_l1(" not in source
 
 
 @tilelang.testing.requires_ascend
