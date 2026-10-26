@@ -12,6 +12,52 @@ to inspect or test changes does not authorize committing, pushing, opening a PR,
 or changing an existing PR. When updating an existing PR, push its current head
 branch instead of opening a duplicate PR.
 
+## Prepare the PR Description
+
+Read [Pull request descriptions](../../../CONTRIBUTING.md#pull-request-descriptions)
+for the shared contribution requirements, and use the
+[PR template](../../../.github/PULL_REQUEST_TEMPLATE.md) where helpful. Keep the
+detail proportional to the change rather than filling every heading mechanically.
+Base the description on the complete final diff and actual validation records;
+revise it when the implementation or scope changes. The contributor remains
+responsible for the description and any claims it makes.
+
+## Optional AI Assistance Disclosure
+
+Follow the [AI-assisted contribution policy](../../../CONTRIBUTING.md#ai-assisted-contributions).
+When preparing a new PR description, offer the contributor a choice about
+including the agent's name. Ask early enough to answer while patch inspection
+and validation continue. Reuse an explicit preference for this PR or a standing
+preference from the conversation; do not ask again on each invocation or push.
+For an existing PR, preserve its disclosure unless the user requests a change.
+Commit-only work does not need this question.
+
+Use the host's structured question tool when available and permitted in the
+current mode, such as `request_user_input_async`, `request_user_input`, or its
+equivalent. The client renders the choices; a skill cannot guarantee a native
+dialog on every host. If structured questions are unavailable, ask once in
+plain text. In a non-interactive run, use an existing explicit preference or
+omit the field.
+
+Ask in the user's language, showing the exact proposed text. For example, when
+Codex is the known tool used for this contribution:
+
+> Would you like to include `AI assistance: Codex` in the PR description?
+>
+> - Omit agent information (default).
+> - Include `AI assistance: Codex`.
+
+Allow free text for another tool name or multiple tools. Use only tool names
+known from the session or supplied by the contributor; do not guess a model
+version or imply that this agent authored the entire PR.
+
+Include the field only after an explicit opt-in. A preselected option, timeout,
+or unanswered question is not opt-in. Give the contributor a reasonable chance
+to respond while continuing independent preparation. If no answer arrives,
+proceed with the otherwise authorized task without adding the field; do not
+make optional disclosure a publication gate. Do not persist a global preference
+or change Git author/commit metadata as a side effect of this choice.
+
 ## Inspect the Patch
 
 - Check the worktree, branch, upstream, remotes, Git identity, PR head, and base.
@@ -75,8 +121,9 @@ def test_cuda_packed_codegen(op): ...
 ## Commit, Push, and Verify
 
 - Stage only the intended files and commit with the configured human identity.
-  Keep commit messages and public PR text free of automation traces and local
-  machine paths.
+  Keep commit messages and public PR text free of unsolicited generated-by
+  footers and local machine paths. The optional PR-body disclosure above is
+  allowed when the contributor opts in.
 - Prefer the existing writable fork remote and never force-push without explicit
   authorization. For an existing PR, verify its repository and head branch
   before pushing.

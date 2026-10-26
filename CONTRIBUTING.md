@@ -7,6 +7,8 @@ That would be awesome if you want to contribute something to TileLang!
 - [Report Bugs](#report-bugs)
 - [Ask Questions](#ask-questions)
 - [Submit Pull Requests](#submit-pull-requests)
+  - [Pull request descriptions](#pull-request-descriptions)
+  - [AI-assisted contributions](#ai-assisted-contributions)
   - [Testing policy](#testing-policy)
 - [Coding Style](#coding-style)
 - [Setup Development Environment](#setup-development-environment)
@@ -33,7 +35,48 @@ Please ask questions in issues.
 
 All pull requests are super welcomed and greatly appreciated! Issues in need of a solution are marked with a [`♥ help`](https://github.com/tile-ai/tilelang/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%99%A5+help%22) label if you're looking for somewhere to start.
 
-If you're new to contributing to TileLang, you can follow the following guidelines before submitting a pull request.
+### Pull request descriptions
+
+Give reviewers enough context to understand the problem, the proposed solution,
+and the evidence behind it. These expectations apply to all contributions.
+A small change may need only a few sentences; scale the detail to the change
+and combine or remove template sections that do not help explain it.
+
+- **Problem:** Describe the original and expected behavior, with a linked issue
+  or a small example when useful. For a bug fix, state whether the failure was
+  confirmed on current main or the intended base revision; say if it was not
+  reproduced. For a feature, explain the concrete use case and why existing
+  functionality is insufficient.
+- **Approach:** Explain the root cause and how the change addresses it. When
+  adding an API, compiler pass, abstraction, or backend-specific behavior,
+  explain why it belongs at that layer. For a nontrivial design choice, describe
+  the main alternative and the reason for the chosen approach.
+- **Scope and tradeoffs:** Identify affected backends or execution modes,
+  compatibility changes, and known limitations where relevant. Keep independent
+  fixes, features, and cleanups in separate PRs when they can be reviewed on
+  their own.
+- **Validation:** Report commands that actually ran, their results, and relevant
+  hardware or toolchain details. Distinguish local results from CI and identify
+  untested behavior. Performance claims need a comparable baseline and
+  measurement conditions; include end-to-end costs when moving work to the host
+  or adding allocations, synchronization, or per-call preparation.
+
+Keep the description aligned with the final diff when the scope changes during
+review. The [PR template](.github/PULL_REQUEST_TEMPLATE.md) provides short prompts
+for this information. Regression coverage follows the [testing policy](#testing-policy)
+below; explaining validation does not require adding a new test file.
+
+### AI-assisted contributions
+
+AI-assisted contributions are welcome. The submitting contributor is responsible
+for understanding the change, reviewing the complete diff, verifying the PR
+description and reported validation results, and addressing review feedback.
+Clearly distinguish verified behavior from assumptions and untested claims.
+
+You may optionally include `AI assistance: <tool name>` in the PR description.
+Disclosing the tool is not a requirement for review or merging. The repository's
+submission skill offers this choice when preparing a new PR and adds the field
+only when the contributor opts in.
 
 ### Testing policy
 
