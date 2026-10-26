@@ -1,4 +1,4 @@
-"""Output tiling and AIV transforms shared by the BF16 and FP8 kernel families."""
+"""Output tiling and AIV transforms shared by the BF16 and quantized kernels."""
 
 import tilelang.ascend.language as T
 
@@ -216,8 +216,8 @@ def stochastic_round_bf16(values, n_idx, num_rows, num_cols):
                 column[0] = T.simd.vadds(column[0], T.uint32(64), mask)
 
 
-def make_store_output(config, major_a, major_b, *, blockscaled=False, epilogue_kind="identity"):
-    """Drain all MAD tiles in a block; GM stores exclude FP8 load/fixpipe padding."""
+def make_store_output(config, major_a, major_b, *, blockscaled=False, epilogue_kind="identity", operand_bits=8):
+    """Drain all MAD tiles in a block; GM stores exclude MX load/fixpipe padding."""
     MAD_M, MAD_N = config.mad_m, config.mad_n
     num_mad_m_tiles = config.block_m // MAD_M
     num_mad_n_tiles = config.block_n // MAD_N
@@ -260,12 +260,12 @@ def make_store_output(config, major_a, major_b, *, blockscaled=False, epilogue_k
                 m_mad_idx = m_mad_tile_idx * MAD_M
                 if m_mad_idx < actual_m:
                     eff_mad_m = clamp(actual_m - m_mad_idx, 0, MAD_M)
-                    load_mad_m = align_up(eff_mad_m, 32) if blockscaled and major_a == Major.MN else eff_mad_m
+                    load_mad_m = align_up(eff_mad_m, 256 // operand_bits) if blockscaled and major_a == Major.MN else eff_mad_m
                     for n_mad_tile_idx in T.Unroll(num_mad_n_tiles, explicit=True):
                         n_mad_idx = n_mad_tile_idx * MAD_N
                         if n_mad_idx < actual_n:
                             eff_mad_n = clamp(actual_n - n_mad_idx, 0, MAD_N)
-                            load_mad_n = align_up(eff_mad_n, 32) if blockscaled and major_b == Major.MN else eff_mad_n
+                            load_mad_n = align_up(eff_mad_n, 256 // operand_bits) if blockscaled and major_b == Major.MN else eff_mad_n
                             if config.direct_store:
                                 T.copy(
                                     l0c[m_mad_tile_idx, n_mad_tile_idx, 0:eff_mad_m, 0:eff_mad_n],

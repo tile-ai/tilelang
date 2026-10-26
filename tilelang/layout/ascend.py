@@ -111,7 +111,8 @@ def make_strided_slice(phys_buf, layout, logical_region):
 
     The result is a plain strided Buffer sharing ``phys_buf``'s data pointer,
     with explicit shape (extents) and strides pointing at the sub-region's
-    base element. No layout knowledge is needed by the consumer.
+    base element, including ``phys_buf.elem_offset``. No layout knowledge is
+    needed by the consumer.
 
     Args:
         phys_buf: The physical (remapped) buffer, e.g. with NZ shape

@@ -407,7 +407,7 @@ Layout makeAscendNDLayout(const Buffer &buffer) {
 // 1. MapRegionBounds(logical_region) → physical region (one Range per output
 // dim)
 // 2. Compute row-major strides from phys_buf shape (or use existing strides)
-// 3. offset = sum(phys_region[i].min * strides[i])
+// 3. offset = phys_buf.elem_offset + sum(phys_region[i].min * strides[i])
 // 4. shape  = [phys_region[i].extent for each dim]
 // 5. Return Buffer(same data, shape, strides, offset)
 tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
@@ -434,7 +434,7 @@ tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
   }
 
   // Flat offset and shape from phys_region.
-  PrimExpr offset = make_const(DataType::Int(64), 0);
+  PrimExpr offset = cast(DataType::Int(64), phys_buf->elem_offset);
   Array<PrimExpr> shape;
   shape.reserve(n);
   for (int i = 0; i < n; ++i) {

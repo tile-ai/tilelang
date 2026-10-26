@@ -1104,6 +1104,43 @@ def test_partial_sync_warp_multiple_still_lowered():
     assert not _storage_syncs(guard)
 
 
+def test_partial_sync_ids_unique_across_storage_scopes():
+    """The pipeline runs ThreadSync once for "shared" and once for "shared.dyn".
+    Two disjoint thread ranges must not end up on the same named barrier: each
+    `bar.sync id, count` would then complete the other group's phases (seen as a
+    hang in the warp-specialised sparse-MLA forward kernel)."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        D = T.alloc_buffer((64,), dtype="float32", scope="shared.dyn")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 64:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] += S[63 - tx]
+        if tx >= 64:
+            for i in range(2):
+                D[tx - 64] = T.float32(1)
+                acc[0] += D[127 - tx]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    lowered = mod["main"]
+    static_syncs = _storage_syncs(lowered, "shared", arg_count=3)
+    dynamic_syncs = _storage_syncs(lowered, "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(static_syncs, 64)
+    _assert_partial_sync_params(dynamic_syncs, 64)
+    static_ids = {int(call.args[1]) for call in static_syncs}
+    dynamic_ids = {int(call.args[1]) for call in dynamic_syncs}
+    assert not static_ids & dynamic_ids, f"disjoint thread ranges share named barriers {static_ids & dynamic_ids}"
+
+
 # =============================================================================
 # Tests for flat Bind definitions inside the recorded constraint sets
 #
