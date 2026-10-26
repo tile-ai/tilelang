@@ -7,8 +7,10 @@ width-derived placement.
 """
 
 import pytest
+import torch
 import tilelang
 import tilelang.testing
+from torch.sparse._semi_structured_conversions import _calculate_meta_reordering_scatter_offsets
 from tvm import tirx
 
 from tilelang.layout import make_cutlass_metadata_layout
@@ -19,10 +21,18 @@ def _metadata_buffer(dtype, shape=(64, 8)):
 
 
 @pytest.mark.parametrize("meta_dtype", ["uint16", "int16"])
-def test_sm8x_metadata_layout_accepts_16_bit_operands(meta_dtype):
-    """fp16/bf16 operands pair with a 16-bit metadata buffer."""
-    layout = make_cutlass_metadata_layout(_metadata_buffer(meta_dtype), "float16", arch="8.0")
-    assert layout is not None
+@pytest.mark.parametrize("mma_dtype", ["float16", "bfloat16", "float32"])
+def test_sm8x_metadata_layout_accepts_16_bit_metadata(mma_dtype, meta_dtype):
+    """fp16/bf16/fp32 (TF32) use CUTLASS's 16-bit metadata layout."""
+    m, k = 64, 8
+    layout = make_cutlass_metadata_layout(_metadata_buffer(meta_dtype, (m, k)), mma_dtype, arch="8.0")
+    expected = _calculate_meta_reordering_scatter_offsets(m, k, torch.int16, "cpu").tolist()
+    actual = []
+    for i in range(m):
+        for j in range(k):
+            row, col = layout.map_forward_index([i, j])
+            actual.append(int(row) * k + int(col))
+    assert actual == expected
 
 
 @pytest.mark.parametrize("meta_dtype", ["uint32", "int32"])
@@ -33,7 +43,7 @@ def test_sm8x_metadata_layout_accepts_32_bit_operands(mma_dtype, meta_dtype):
     assert layout is not None
 
 
-@pytest.mark.parametrize("mma_dtype,meta_dtype", [("float16", "uint32"), ("float8_e4m3", "uint16")])
+@pytest.mark.parametrize("mma_dtype,meta_dtype", [("float16", "uint32"), ("float32", "uint32"), ("float8_e4m3", "uint16")])
 def test_sm8x_metadata_layout_rejects_mismatched_metadata_width(mma_dtype, meta_dtype):
     """A supported operand paired with the wrong metadata width is rejected."""
     with pytest.raises(ValueError) as exc_info:
@@ -44,7 +54,6 @@ def test_sm8x_metadata_layout_rejects_mismatched_metadata_width(mma_dtype, meta_
 @pytest.mark.parametrize(
     "mma_dtype",
     [
-        "float32",  # supported on the sm90 arm, not on sm8x
         "float8_e4m3fn",  # torch-canonical spelling of a supported fp8 dtype
         "float8_e4m3fnuz",
         "not_a_dtype",

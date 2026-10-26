@@ -125,7 +125,7 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
 
-    if mma_dtype in [T.float16, T.bfloat16]:
+    if mma_dtype in [T.float16, T.bfloat16, T.float32]:
         if buffer.dtype not in [T.uint16, T.int16]:
             raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
     elif mma_dtype in ["float8_e4m3", "float8_e5m2", T.int8, T.uint8]:
