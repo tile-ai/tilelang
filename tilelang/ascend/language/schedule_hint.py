@@ -149,6 +149,8 @@ def Stage(stage: int):
     mode) each share one physical value across stages. Their setters overwrite
     that value; readers retain the reaching setter in logical stage order and
     must precede the next physical overwrite, at most one pipeline round away.
+    Loop-entry readers must also consume the incoming value before a setter
+    overwrites it during pipeline startup.
     Independent set/use groups can therefore use nonadjacent stages.
     Conditional setters and opaque effects retain conservative dependencies.
     Scalar buffers, copied scalar snapshots, and control/pipe fences keep their

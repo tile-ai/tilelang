@@ -333,7 +333,16 @@ def test_manual_configuration_regions_include_nested_writers(mode):
 
 
 @pytest.mark.parametrize("mode", ["padding", "atomic"])
-def test_manual_configuration_generations_use_one_physical_state(mode):
+@pytest.mark.parametrize(
+    "stages, reader_first",
+    [
+        pytest.param([0, 0, 3, 3], False, id="independent-generations"),
+        pytest.param([0, 0, 0, 0], True, id="live-in-same-stage"),
+        pytest.param([0, 0, 1, 1], True, id="live-in-overwritten"),
+        pytest.param([3, 3, 4, 4], True, id="live-in-overwritten-nonzero-stage"),
+    ],
+)
+def test_manual_configuration_generations_use_one_physical_state(mode, stages, reader_first):
     a = tirx.decl_buffer((16,), "float32", name="A")
     ub = [tirx.decl_buffer((16,), "float32", name=f"ub{i}", scope="shared.dyn") for i in range(2)]
     outputs = [tirx.decl_buffer((16,), "float32", name=f"O{i}") for i in range(2)]
@@ -349,10 +358,17 @@ def test_manual_configuration_generations_use_one_physical_state(mode):
         else [copy(buf, out) for buf, out in zip(ub, outputs)]
     )
     operations = [tirx.Evaluate(setters[0]), readers[0], tirx.Evaluate(setters[1]), readers[1]]
-    stages = [0, 0, 3, 3]
+    if reader_first:
+        operations[0], operations[1] = operations[1], operations[0]
     body = seq(*(unit(op, core=1, stage=stage, cost=(1, 1)) for op, stage in zip(operations, stages)))
     loop = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"enable_offset": True})
     before = kernel(unit(loop, core=None, stage=-1), buffers=ub, params=[a, *outputs])
+    if reader_first and stages[0] != stages[-1]:
+        # The last writer is inactive during startup. The first writer must
+        # not overwrite the incoming value before the first reader consumes it.
+        with pytest.raises(RuntimeError, match="Manual schedule constraints are infeasible"):
+            transform.AutoSchedule()(before)
+        return
     after = transform.AutoSchedule()(before)
     children = after["main"].body.block.body.body.body.seq
     assert [int(child.node["stage"]) for child in children] == stages

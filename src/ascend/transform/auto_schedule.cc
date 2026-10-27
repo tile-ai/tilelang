@@ -568,6 +568,15 @@ bool AddConfigurationPhaseDependencies(
       int64_t overwrite_wrap = overwrite <= writer ? 1 : 0;
       add(writer, reader, wrap, latencies[writer]);
       add(reader, overwrite, overwrite_wrap - wrap, 0);
+      if (distance == 1) {
+        // On entry there is no previous iteration's writer. Protect the
+        // incoming value from every setter active in the reader's first
+        // physical round; higher-stage setters have not started yet.
+        for (size_t initial_overwrite : writers) {
+          if (stages[initial_overwrite] == stages[reader])
+            add(reader, initial_overwrite, 0, 0);
+        }
+      }
     }
     if (effects[reader].write_mask & reg) {
       writer = reader;
