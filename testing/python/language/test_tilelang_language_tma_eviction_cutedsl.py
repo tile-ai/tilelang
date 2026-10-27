@@ -49,11 +49,14 @@ def test_tma_eviction_cutedsl(load_policy, store_policy):
     mod = tilelang.compile(_roundtrip_kernel(N, load_policy, store_policy), out_idx=[1], target="cutedsl")
 
     # Correctness alone would hold if the hint were dropped, so also check that
-    # the policy reaches the TMA calls.
+    # each policy reaches its own TMA call.
     source = mod.get_kernel_source()
-    policies = {f"EVICT_{p.removeprefix('evict_').upper()}" for p in (load_policy, store_policy)}
-    for policy in policies:
-        assert f'eviction_kind="{policy}"' in source, policy
+    load_call = next(line for line in source.splitlines() if "tl.tma_load(" in line)
+    store_call = next(line for line in source.splitlines() if "tl.tma_store(" in line)
+    load_kind = load_policy.removeprefix("evict_").upper()
+    store_kind = store_policy.removeprefix("evict_").upper()
+    assert f'eviction_kind="EVICT_{load_kind}"' in load_call, load_call
+    assert f'eviction_kind="EVICT_{store_kind}"' in store_call, store_call
 
     A = torch.randn(N, N, device="cuda", dtype=torch.float32)
     B = mod(A)
