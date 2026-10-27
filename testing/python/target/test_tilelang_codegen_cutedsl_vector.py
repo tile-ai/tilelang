@@ -64,6 +64,37 @@ def test_cutedsl_codegen_hoists_loop_bound_lets():
         assert line.rstrip().endswith("):"), line
 
 
+def test_cutedsl_boolean_vector_cast_keeps_the_lane_count():
+    """A ``boolx2`` value casts straight to two ``int32`` lanes.
+
+    Booleans report 8 bits, so the 32-bit alignment used for narrow *float*
+    vector casts padded the result to four lanes and stored a two-lane value
+    into a four-element tensor.
+    """
+    try:
+        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+
+        check_cutedsl_available()
+    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
+        pytest.skip(f"CuTeDSL is not available: {err}")
+
+    n = 64
+
+    @T.prim_func
+    def prog(A: T.Tensor((n,), "float32"), B: T.Tensor((n,), "int32")):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding(0)
+            for j in T.vectorized(2):
+                B[tx * 2 + j] = T.cast(A[tx * 2 + j] > T.float32(0.5), "int32")
+
+    source = _lower_cutedsl(prog).kernel_source
+    assert "make_rmem_tensor((4,), cutlass.Int32)" not in source
+
+    kernel = tilelang.compile(prog, target="cutedsl", out_idx=[1])
+    a = torch.randn(n, device="cuda")
+    assert torch.equal(kernel(a), (a > 0.5).to(torch.int32))
+
+
 def test_cutedsl_shared_dyn_vector_buffer_roundtrip():
     """A vector-typed ``shared.dyn`` buffer is scalar-backed, so indices scale.
 
