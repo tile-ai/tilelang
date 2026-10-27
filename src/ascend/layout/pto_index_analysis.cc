@@ -1,8 +1,7 @@
 /*!
  * \file pto_index_analysis.cc
- * \brief Low-level read-only index/address analysis shared by the PTO
- * Parallel layout planning and the Verify/Vectorize consumers
- * (see pto_index_analysis.h).
+ * \brief Low-level read-only index/address analysis shared by PTO lane-layout
+ * planning and the PTO Verify/Vectorize consumers (see pto_index_analysis.h).
  */
 
 #include "pto_index_analysis.h"

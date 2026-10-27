@@ -25,6 +25,7 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "ascend/layout/pto_parallel_layout.h"
 #include "ascend/op/utils.h"
 #include "ascend/target_utils.h"
 #include "ascend/transform/vf_regions.h"
@@ -291,8 +292,7 @@ public:
                                                   bind_var_to_expr_,
                                                   false,
                                                   strict_layout_map,
-                                                  candidate_vector_size_limit,
-                                                  in_pto_simd_vf},
+                                                  candidate_vector_size_limit},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -606,6 +606,14 @@ public:
 
     // Copy the annotated layout map to local variable
     Map<Buffer, Layout> layout_map = annotated_layout_map_;
+
+    for (const auto &unit : pto_parallel_units_) {
+      ICHECK(!pto_loop_layouts_.count(unit.root));
+      Fragment layout =
+          pto::InferPtoParallelLayout(unit.root, unit.lane_bounds);
+      pto_loop_layouts_.Set(unit.root, layout);
+    }
+
     Map<Buffer, Layout> strict_layout_map;
     int num_infer = infer_list_.size();
 
@@ -704,12 +712,6 @@ public:
         if (for_infer->LoopLayoutRequiresPaddingGuard()) {
           padding_guard_map.Set(for_infer->GetRoot(), Bool(true));
         }
-        if (in_pto_simd_vf_vec_[i]) {
-          // PTO lane layouts carry no SIMT thread predicate; the vectorize
-          // pass consumes the lane fragment directly.
-          pto_simd_parallel_roots.insert(for_infer->GetRoot().get());
-          continue;
-        }
         // thread_index should be defined if we rely on it
         ICHECK(thread_index.defined())
             << "thread_index is not defined. Cannot retrieve predicate.";
@@ -718,6 +720,18 @@ public:
           predicate_map.Set(for_infer->GetRoot(), predicate.value());
         }
       }
+    }
+
+    // PTO lane layouts were solved from the deferred unit list before generic
+    // inference. Merge them here so this result collection also runs when the
+    // worklist is empty.
+    for (const auto &[root, layout] : pto_loop_layouts_) {
+      ICHECK(layout.defined());
+      ICHECK(!for_map.count(root))
+          << "PTO and generic layout inference produced duplicate results for "
+          << root;
+      for_map.Set(root, layout);
+      pto_simd_parallel_roots.insert(root.get());
     }
 
     return {layout_map, for_map, predicate_map, padding_guard_map,
@@ -962,6 +976,89 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
+      PostOrderVisit(
+          op->body, [this](const ObjectRef &node) {
+            if (auto *buffer_load = node.as<BufferLoadNode>()) {
+              if (buffer_load->buffer.defined() &&
+                  buffer_load->buffer->data.defined()) {
+                if (buffer_data_to_buffers_.count(buffer_load->buffer->data)) {
+                  // Check if this buffer is already in the list
+                  auto buffers =
+                      buffer_data_to_buffers_[buffer_load->buffer->data];
+                  bool found = false;
+                  for (const auto &buf : buffers) {
+                    if (buf.same_as(buffer_load->buffer)) {
+                      found = true;
+                      break;
+                    }
+                  }
+                  if (!found) {
+                    buffers.push_back(buffer_load->buffer);
+                    buffer_data_to_buffers_.Set(buffer_load->buffer->data,
+                                                buffers);
+                    DLOG(INFO)
+                        << "[AscendLayoutInference] BufferStore: added buffer "
+                        << buffer_load->buffer
+                        << " buffer.get() = " << buffer_load->buffer.get()
+                        << " data = " << buffer_load->buffer->data.get();
+                  }
+                } else {
+                  buffer_data_to_buffers_.Set(buffer_load->buffer->data,
+                                              {buffer_load->buffer});
+                  DLOG(INFO)
+                      << "[AscendLayoutInference] BufferStore: new buffer "
+                      << buffer_load->buffer
+                      << " buffer.get() = " << buffer_load->buffer.get()
+                      << " data = " << buffer_load->buffer->data.get();
+                }
+              }
+            } else if (auto *buffer_store = node.as<BufferStoreNode>()) {
+              if (buffer_store->buffer.defined() &&
+                  buffer_store->buffer->data.defined()) {
+                if (buffer_data_to_buffers_.count(buffer_store->buffer->data)) {
+                  auto buffers =
+                      buffer_data_to_buffers_[buffer_store->buffer->data];
+                  bool found = false;
+                  for (const auto &buf : buffers) {
+                    if (buf.same_as(buffer_store->buffer)) {
+                      found = true;
+                      break;
+                    }
+                  }
+                  if (!found) {
+                    buffers.push_back(buffer_store->buffer);
+                    buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                                buffers);
+                    DLOG(INFO)
+                        << "[AscendLayoutInference] BufferStore: added buffer "
+                        << buffer_store->buffer
+                        << " buffer.get() = " << buffer_store->buffer.get()
+                        << " data = " << buffer_store->buffer->data.get();
+                  }
+                } else {
+                  buffer_data_to_buffers_.Set(buffer_store->buffer->data,
+                                              {buffer_store->buffer});
+                  DLOG(INFO)
+                      << "[AscendLayoutInference] BufferStore: new buffer "
+                      << buffer_store->buffer
+                      << " buffer.get() = " << buffer_store->buffer.get()
+                      << " data = " << buffer_store->buffer->data.get();
+                }
+              }
+            }
+          });
+
+      if (InsidePtoSimdVF()) {
+        // PTO lane layouts are built from the original nest and stay outside
+        // the generic layout worklist. Only the outermost Parallel root of a
+        // unit is recorded; nested Parallel layers are part of this unit.
+        // Defer inference until collection has finished so later constraint
+        // producers (e.g. Fragment buffers) can be collected first.
+        pto_parallel_units_.push_back(
+            {GetRef<For>(op), CurrentPtoLaneBounds()});
+        return;
+      }
+
       auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
@@ -979,70 +1076,6 @@ private:
             reducer_update_sites_[update.reducer->data.get()].push_back(
                 ReducerUpdateSiteRecord{op_idx, update.indices, update.value});
             addToUseList(update.reducer);
-          }
-        }
-        if (auto *buffer_load = node.as<BufferLoadNode>()) {
-          if (buffer_load->buffer.defined() &&
-              buffer_load->buffer->data.defined()) {
-            if (buffer_data_to_buffers_.count(buffer_load->buffer->data)) {
-              // Check if this buffer is already in the list
-              auto buffers = buffer_data_to_buffers_[buffer_load->buffer->data];
-              bool found = false;
-              for (const auto &buf : buffers) {
-                if (buf.same_as(buffer_load->buffer)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) {
-                buffers.push_back(buffer_load->buffer);
-                buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
-                DLOG(INFO)
-                    << "[AscendLayoutInference] BufferStore: added buffer "
-                    << buffer_load->buffer
-                    << " buffer.get() = " << buffer_load->buffer.get()
-                    << " data = " << buffer_load->buffer->data.get();
-              }
-            } else {
-              buffer_data_to_buffers_.Set(buffer_load->buffer->data,
-                                          {buffer_load->buffer});
-              DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer "
-                         << buffer_load->buffer
-                         << " buffer.get() = " << buffer_load->buffer.get()
-                         << " data = " << buffer_load->buffer->data.get();
-            }
-          }
-        } else if (auto *buffer_store = node.as<BufferStoreNode>()) {
-          if (buffer_store->buffer.defined() &&
-              buffer_store->buffer->data.defined()) {
-            if (buffer_data_to_buffers_.count(buffer_store->buffer->data)) {
-              auto buffers =
-                  buffer_data_to_buffers_[buffer_store->buffer->data];
-              bool found = false;
-              for (const auto &buf : buffers) {
-                if (buf.same_as(buffer_store->buffer)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) {
-                buffers.push_back(buffer_store->buffer);
-                buffer_data_to_buffers_.Set(buffer_store->buffer->data,
-                                            buffers);
-                DLOG(INFO)
-                    << "[AscendLayoutInference] BufferStore: added buffer "
-                    << buffer_store->buffer
-                    << " buffer.get() = " << buffer_store->buffer.get()
-                    << " data = " << buffer_store->buffer->data.get();
-              }
-            } else {
-              buffer_data_to_buffers_.Set(buffer_store->buffer->data,
-                                          {buffer_store->buffer});
-              DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer "
-                         << buffer_store->buffer
-                         << " buffer.get() = " << buffer_store->buffer.get()
-                         << " data = " << buffer_store->buffer->data.get();
-            }
           }
         }
       });
@@ -1318,6 +1351,13 @@ private:
         nodes_in_tileops.insert(node.get());
       });
     }
+    // PTO lane units are not in infer_list_stmt_ but their accesses are still
+    // inside a TileOp-equivalent unit, not floating accesses.
+    for (const auto &unit : pto_parallel_units_) {
+      PostOrderVisit(unit.root, [&](const ObjectRef &node) {
+        nodes_in_tileops.insert(node.get());
+      });
+    }
 
     // Step 2: Use a visitor to scan for floating accesses while tracking thread
     // context
@@ -1427,6 +1467,10 @@ private:
   // [0, 1) — no synthetic fallback Var is ever created.
   IterVar thread_binding_;
   std::vector<RegionThreadScope> region_thread_scope_stack_;
+  struct PtoParallelUnit {
+    For root;
+    Range lane_bounds;
+  };
   // PTO SIMD_VF nesting stack. Only non-empty on the PTO target: entering a
   // SIMD_VF block under a non-PTO target keeps the stack empty so the
   // AscendC SIMD path is untouched.
@@ -1436,6 +1480,14 @@ private:
   std::vector<PtoSimdVFContext> pto_simd_ctx_stack_;
   // Whether the whole function targets PTO (keys contain "pto").
   bool target_is_pto_ = false;
+  // PTO units captured during traversal. Each retains the original outermost
+  // For and the lane bounds of the region it was collected from. Inference is
+  // deferred until collection completes.
+  std::vector<PtoParallelUnit> pto_parallel_units_;
+  // PTO lane layouts keyed by the original outermost For node. These roots
+  // are solved directly from the nest and never enter infer_list_ or the
+  // generic layout worklist.
+  Map<For, Fragment> pto_loop_layouts_;
   // Per-infer-list flag: this op was collected inside a PTO SIMD_VF block.
   std::vector<bool> in_pto_simd_vf_vec_;
   // Lane bounds [0, L) captured when the op was collected (valid only when

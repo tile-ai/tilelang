@@ -26,8 +26,9 @@
 
 #include "../../layout/layout.h"
 #include "../../op/builtin.h"
-#include "../../op/pto_index_analysis.h"
 #include "../target_utils.h"
+#include "ascend/layout/pto_index_analysis.h"
+#include "ascend/layout/pto_parallel_layout.h"
 
 namespace tvm {
 namespace tl {
@@ -84,9 +85,8 @@ struct MemoryAccess {
 };
 
 // PtoAnalysisError, SubstituteVar, ResolveIndexAliases and
-// IsSupportedAddressExpr live in src/op/pto_index_analysis.h (included
-// above) so the layout-planning code in src/op and the consumers here
-// share one implementation.
+// IsSupportedAddressExpr live in pto_index_analysis.h (included above) so
+// PTO lane-layout planning and the consumers here share one implementation.
 
 /*!
  * \brief The inverse lane mapping of a 1D PTO parallel loop.

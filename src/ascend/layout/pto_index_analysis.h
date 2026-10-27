@@ -1,25 +1,23 @@
 /*!
  * \file pto_index_analysis.h
- * \brief Low-level read-only index/address analysis shared by the PTO
- * Parallel layout planning (src/op/parallel.cc) and the Verify/Vectorize
- * consumers (src/ascend/transform/parallel_to_pto_utils.cc).
+ * \brief Low-level read-only index/address analysis shared by PTO lane-layout
+ * planning and the PTO Verify/Vectorize consumers.
  *
- * These helpers live in src/op so both layers can depend on them without
- * an op -> ascend/transform reverse include. They are the single
- * implementation of the bind-alias resolution rules (cycle/depth failure,
- * expression-size budget, loaded-value identity) and the address-node
- * whitelist; planning and consuming code must not re-derive their own
- * variants.
+ * These helpers are the single implementation of the bind-alias resolution
+ * rules (cycle/depth failure, expression-size budget, loaded-value identity)
+ * and the address-node whitelist; planning and consuming code must not
+ * re-derive their own variants.
  */
 
-#ifndef TVM_TL_OP_PTO_INDEX_ANALYSIS_H_
-#define TVM_TL_OP_PTO_INDEX_ANALYSIS_H_
+#ifndef TVM_TL_ASCEND_LAYOUT_PTO_INDEX_ANALYSIS_H_
+#define TVM_TL_ASCEND_LAYOUT_PTO_INDEX_ANALYSIS_H_
 
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -68,4 +66,4 @@ std::pair<int64_t, int64_t> CheckedPtoPadding(int64_t extent, int64_t lanes);
 } // namespace tl
 } // namespace tvm
 
-#endif // TVM_TL_OP_PTO_INDEX_ANALYSIS_H_
+#endif // TVM_TL_ASCEND_LAYOUT_PTO_INDEX_ANALYSIS_H_

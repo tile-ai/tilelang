@@ -35,9 +35,9 @@ std::string AccessPatternToString(AccessPattern pattern) {
   }
 }
 
-// SubstituteVar, ResolveIndexAliases and IsSupportedAddressExpr moved to
-// src/op/pto_index_analysis.cc: the layout-planning code in
-// src/op and the consumers here share that single implementation.
+// SubstituteVar, ResolveIndexAliases and IsSupportedAddressExpr live in
+// pto_index_analysis.cc; PTO lane-layout planning and the consumers here share
+// that single implementation.
 
 PtoInverseMapping InvertPtoLaneLayout(const For &loop) {
   auto anno = loop->annotations.Get(attr::kPtoParallelLoopLayout);

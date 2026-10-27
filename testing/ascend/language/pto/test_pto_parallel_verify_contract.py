@@ -306,6 +306,27 @@ def _k_mixed_vmi(E, lanes, dtype="float32"):
     return main
 
 
+def _k_pto_only(E, lanes, dtype="float32"):
+    """A SIMD_VF Parallel unit with no other TileOp in the kernel.
+
+    The generic layout worklist is empty, so the PTO lane layout is the only
+    loop result AscendLayoutInference has to merge.
+    """
+
+    P = _ceil_to_lanes(E, lanes)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            a = T.alloc_shared((P,), dtype)
+            b = T.alloc_shared((P,), dtype)
+            with T.SimdVF(lanes=lanes):
+                for i in T.Parallel(E):
+                    b[i] = a[i] + a[i]
+
+    return main
+
+
 # ---------------------------------------------------------------------------
 # Mapping contract
 # ---------------------------------------------------------------------------
@@ -355,6 +376,20 @@ def test_lane_matrix_agrees_with_the_annotation(lanes):
     assert _as_int(loop.extent) == E
     block = _simd_vf_block(mod)
     assert _as_int(block.annotations[_LANES_ATTR]) == lanes, "the lanes annotation must match the request"
+    fragment = _fragment_of(loop)
+    assert _input_shape(fragment) == [P]
+    assert _as_int(fragment.get_thread_size()) == lanes
+
+
+@pytest.mark.pto
+def test_pto_only_unit_is_collected_without_a_generic_worklist():
+    E, lanes = 150, 128
+    P = _ceil_to_lanes(E, lanes)
+    mod, _ = _lower_capture(_k_pto_only(E, lanes))
+    loop = _single_pto_parallel_loop(mod)
+
+    assert _as_int(loop.extent) == E
+    assert _SIMT_LAYOUT_ATTR not in loop.annotations
     fragment = _fragment_of(loop)
     assert _input_shape(fragment) == [P]
     assert _as_int(fragment.get_thread_size()) == lanes
