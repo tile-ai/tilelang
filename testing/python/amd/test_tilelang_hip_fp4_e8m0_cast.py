@@ -60,15 +60,17 @@ def test_float_to_fp4_rounds_to_nearest_even():
 
 
 @tilelang.testing.requires_cdna
-def test_float_to_e8m0_keeps_the_exponent():
-    # Powers of two are exact, other values keep their exponent (round toward
-    # zero, like __nv_fp8_e8m0), NaN stays NaN.
+def test_float_to_e8m0_rounds_up_to_a_power_of_two():
+    # As __nv_fp8_e8m0(float) (cudaRoundPosInf, __NV_SATFINITE): powers of two
+    # are exact, other magnitudes round up, NaN stays NaN.
     x = torch.tensor([2.0**e for e in range(-20, 21)] + [3.0, 0.75, 1000.0, float("nan")], dtype=torch.float32)
-    expected = torch.where(x.isnan(), x, torch.exp2(torch.floor(torch.log2(x))))
-    # E8M0 has no sign; zero and float32 subnormals give the smallest scale, infinities saturate to the largest.
-    edge = [0.0, -0.0, 2.0**-149, -3.0, float("inf"), -float("inf")]
+    expected = torch.where(x.isnan(), x, torch.exp2(torch.ceil(torch.log2(x))))
+    # E8M0 has no sign. Results below 2^-127 (zero, subnormals up to 2^-127) clip
+    # to it, and results above 2^127 (large finite values, infinities) saturate to it.
+    edge = [0.0, -0.0, 2.0**-149, 2.0**-127 + 2.0**-149, -3.0, 1.5 * 2.0**127, float("inf"), -float("inf")]
+    edge_expected = [2.0**-127] * 3 + [2.0**-126, 4.0] + [2.0**127] * 3
     x = torch.cat([x, torch.tensor(edge, dtype=torch.float32)])
-    expected = torch.cat([expected, torch.tensor([2.0**-127] * 3 + [2.0, 2.0**127, 2.0**127], dtype=torch.float32)])
+    expected = torch.cat([expected, torch.tensor(edge_expected, dtype=torch.float32)])
 
     y = torch.empty_like(x, device="cuda")
     _roundtrip(x.numel(), T.float8_e8m0fnu)(x.cuda(), y)

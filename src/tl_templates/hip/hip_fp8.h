@@ -161,19 +161,27 @@ __device__ __forceinline__ void tl_fp8x2_set_lane(PackedType &packed, int lane,
 
 // E8M0 (float8_e8m0fnu): a bare biased power-of-two exponent, 0xFF is NaN.
 // HIP ships no native type, so this mirrors __nv_fp8_e8m0, whose float
-// constructor rounds toward zero (i.e. keeps the float32 exponent bits).
+// constructor uses cudaRoundPosInf and __NV_SATFINITE: |val| rounds up to a
+// power of two, results below 2^-127 clip to it, results above 2^127 saturate
+// to it, and NaN converts to 0xFF.
 struct fp8_e8_t {
   unsigned char data;
   __device__ fp8_e8_t() {}
   __device__ fp8_e8_t(float val) {
-    uint32_t exponent = (__float_as_uint(val) >> 23) & 0xFF;
+    uint32_t bits = __float_as_uint(val);
+    uint32_t exponent = (bits >> 23) & 0xFF;
+    uint32_t mantissa = bits & 0x7FFFFF;
     if (val != val) {
       data = 0xFF;
-    } else if (exponent == 0xFF) {
-      data = 0xFE; // saturate +-inf to the largest finite scale
-    } else {
-      data = static_cast<unsigned char>(exponent);
+      return;
     }
+    // Subnormals up to 2^-127 (mantissa <= 2^22) keep exponent 0, i.e. clip to
+    // 2^-127.
+    if (exponent != 0xFF && mantissa != 0 &&
+        (exponent != 0 || mantissa > 0x400000u)) {
+      ++exponent;
+    }
+    data = static_cast<unsigned char>(exponent == 0xFF ? 0xFE : exponent);
   }
   __device__ operator float() const {
     if (data == 0xFF) {
