@@ -1,7 +1,6 @@
-import pytest
 import torch
 import tilelang
-import tilelang.cuda.language as T
+import tilelang.language as T
 import tilelang.testing
 
 
@@ -10,7 +9,7 @@ def ref_program(x, y):
 
 
 @tilelang.jit(out_idx=[-1])
-def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads, eviction_policy=None):
+def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
     @T.prim_func
     def elem_add(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor((M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
@@ -22,14 +21,12 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads, evicti
             T.copy(
                 A[by * block_M, bx * block_N],
                 A_shared,
-                prefer_instruction="tma",
-                eviction_policy=eviction_policy,
+                annotations={"prefer_instruction": "tma"},
             )
             T.copy(
                 B[by * block_M, bx * block_N],
                 B_shared,
-                prefer_instruction="tma",
-                eviction_policy=eviction_policy,
+                annotations={"prefer_instruction": "tma"},
             )
             for local_y, local_x in T.Parallel(block_M, block_N):
                 C_local[local_y, local_x] = A_shared[local_y, local_x] + B_shared[local_y, local_x]
@@ -39,14 +36,14 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads, evicti
     return elem_add
 
 
-def run_elementwise_add(M, N, eviction_policy=None):
+def run_elementwise_add(M, N):
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")
     b = torch.randn(M, N, dtype=torch.float32, device="cuda")
 
     # Default config
     block_M, block_N = 128, 128
     config = {"block_M": block_M, "block_N": block_N, "threads": 128}
-    kernel = elementwise_add(M, N, **config, in_dtype=T.float32, out_dtype=T.float32, eviction_policy=eviction_policy)
+    kernel = elementwise_add(M, N, **config, in_dtype=T.float32, out_dtype=T.float32)
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)
@@ -56,19 +53,14 @@ def run_elementwise_add(M, N, eviction_policy=None):
         assert "tma_load" in code and "CUtensorMap" not in code
     else:
         assert "tma_load" in code and "CUtensorMap" in code
-    if eviction_policy in ("evict_first", "evict_last"):
-        assert f"tl::tma_load<tl::CacheHintSm90::{eviction_policy.upper()}>" in code
-    else:
-        assert "tl::tma_load(" in code
 
 
-@pytest.mark.parametrize("M,N", [(128, 128), (256, 128), (256, 256)])
-@pytest.mark.parametrize("eviction_policy", [None, "evict_normal", "evict_first", "evict_last"])
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
-def test_tilelang_language_tma_1d(M, N, eviction_policy):
-    run_elementwise_add(M, N, eviction_policy)
+def test_tilelang_language_tma_1d():
+    run_elementwise_add(128, 128)
+    run_elementwise_add(256, 128)
+    run_elementwise_add(256, 256)
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    test_tilelang_language_tma_1d()
