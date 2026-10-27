@@ -317,10 +317,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        # A null stream is resolved against the current CUDA context.
-        launch_device = first_tensor.device if first_tensor is not None else None
-        with torch.cuda.device(launch_device):
-            self._forward_from_prebuild_lib(*args, stream=stream)
+        self._forward_from_prebuild_lib(*args, stream=stream)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]
