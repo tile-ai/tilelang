@@ -27,6 +27,7 @@ cdef class CythonKernelWrapper:
         # Add new cache attributes
         list param_dtypes              # Cache for parameter dtypes
         list param_shapes              # Cache for parameter shapes as native Python lists
+        object output_shape_resolver   # Resolves compound output extents from runtime inputs
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the adapter (None = CUDA default)
 
@@ -53,6 +54,10 @@ cdef class CythonKernelWrapper:
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
+
+    def set_output_shape_resolver(self, resolver):
+        self.output_shape_resolver = resolver
+        return self
 
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
@@ -236,10 +241,14 @@ cdef class CythonKernelWrapper:
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):
                                 ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]
-                                if ref_id == 0:
+                                if tensor_list[ref_tensor_idx] is None:
+                                    shape.append(self.output_shape_resolver.resolve_dim(i, dim_index, tensor_list))
+                                elif ref_id == 0:
                                     shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                                 else:
                                     shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * stride_scale)
+                    elif isinstance(s, tirx.PrimExpr):
+                        shape.append(self.output_shape_resolver.resolve_dim(i, dim_index, tensor_list))
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
 

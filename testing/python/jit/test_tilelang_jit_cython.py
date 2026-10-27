@@ -101,7 +101,7 @@ def test_scalar_parameter_output_shapes(backend, rows, trailing_shape, cached, m
 
 
 def test_scalar_parameter_output_shape_disk_cache(tmp_path, monkeypatch):
-    """Load scalar shapes through the disk cache and the real Cython adapter."""
+    """Load scalar and expression shapes through the disk cache and the real Cython adapter."""
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -114,7 +114,7 @@ def test_scalar_parameter_output_shape_disk_cache(tmp_path, monkeypatch):
 
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
     rows = tvm.tirx.Var("rows", "int64")
-    output = tvm.tirx.decl_buffer((rows,), "float32", name="output")
+    output = tvm.tirx.decl_buffer((rows, rows * 2), "float32", name="output")
     source = tvm.tirx.decl_buffer((1,), "float32", name="source")
     func = tvm.tirx.PrimFunc(
         [rows, output.data, source.data],
@@ -150,17 +150,22 @@ def test_scalar_parameter_output_shape_disk_cache(tmp_path, monkeypatch):
     assert restored is not None
     for size in (0, 3, 5):
         result = restored(size, torch.empty(1), stream=0)
-        assert result.shape == (size,)
+        assert result.shape == (size, size * 2)
         args = lib.call.call_args.args
         assert len(args) == 4  # Three authored parameters and the stream.
         assert args[0].value == size
 
 
+@pytest.mark.parametrize("backend", ["cython", "pto"])
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
-def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
+def test_dynamic_symbol_shared_by_shape_and_stride(backend, present):
     """Each non-null carrier must retain whether it supplies a shape or stride."""
     from tilelang.engine.param import KernelParam
-    from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
+
+    if backend == "cython":
+        from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter as Adapter, CythonKernelWrapper as Wrapper
+    else:
+        from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter as Adapter, PTOKernelWrapper as Wrapper
 
     size = tvm.tirx.Var("size", "int64")
     a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
@@ -168,7 +173,7 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     func = tvm.tirx.PrimFunc(
         [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
     )
-    adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
+    adapter = Adapter.__new__(Adapter)
     adapter.ir_module = tvm.IRModule({"main": func})
     adapter.result_idx = []
     adapter.target = tvm.target.Target("c")
@@ -180,16 +185,18 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
 
     lib = CaptureLibrary()
     params = [KernelParam.from_buffer(buffer) for buffer in (a_buffer, b_buffer)]
-    wrapper = CythonKernelWrapper([], params, lib)
+    wrapper = Wrapper([], params, lib, lambda: torch.device("cpu"), lambda device: 0)
     wrapper.set_dynamic_symbolic_map(adapter._process_dynamic_symbolic())
     wrapper.set_dynamic_symbolic_sources(adapter._process_dynamic_symbolic_sources())
     wrapper.set_ptr_map(adapter._process_ptr_map())
     wrapper.set_buffer_dtype_map(adapter._process_buffer_dtype())
-    wrapper.set_buffer_device_map(adapter._process_buffer_device())
-    shapes, strides, contiguous = adapter._process_static_buffer_infos()
+    wrapper.set_buffer_device_map({buffer.name: (i, torch.device("cpu")) for i, buffer in enumerate((a_buffer, b_buffer))})
+    shapes, strides, contiguous, *extra = adapter._process_static_buffer_infos()
     wrapper.set_static_shape_map(shapes)
     wrapper.set_static_strides_map(strides)
     wrapper.set_static_contiguous_list(contiguous)
+    if backend == "pto":
+        wrapper.set_dynamic_strides_map(extra[0])
 
     a = torch.empty_strided((2, 3), (4, 1)) if present[0] else None
     b = torch.empty((4,)) if present[1] else None

@@ -872,7 +872,7 @@ class TLCPUSourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
+                    if isinstance(dim, tvm.tirx.Var) and dim not in prim_func.params and (dim.name not in dynamic_symbolic_set):
                         dynamic_symbolic_set[dim.name] = str(dim.dtype)
         return list(dynamic_symbolic_set.items())
 

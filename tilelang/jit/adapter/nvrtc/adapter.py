@@ -9,6 +9,7 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
@@ -55,18 +56,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         # Cache parameter information during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
-        self.param_shapes = []
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    # Keep tirx.Var for dynamic dimensions
-                    native_shape.append(dim)
-                else:
-                    native_shape.append(dim)
-            self.param_shapes.append(native_shape)
+        self.output_shape_resolver = OutputShapeResolver(self.prim_func, self.result_idx)
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
 
@@ -126,18 +116,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         # Cache parameter information during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         adapter.param_dtypes = [param.torch_dtype() for param in params]
-        adapter.param_shapes = []
-        for param in params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    # Keep tirx.Var for dynamic dimensions
-                    native_shape.append(dim)
-                else:
-                    native_shape.append(dim)
-            adapter.param_shapes.append(native_shape)
+        adapter.output_shape_resolver = OutputShapeResolver(adapter.prim_func, adapter.result_idx)
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
 
@@ -304,13 +283,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = self.param_dtypes[i]
-                    shape = []
-                    # Now working with native Python list, no FFI calls needed
-                    for s in self.param_shapes[i]:
-                        if isinstance(s, tirx.Var):
-                            shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                        else:  # Already converted to Python int during initialization
-                            shape.append(s)
+                    shape = self.output_shape_resolver(i, param_values)
                     if device is None:
                         device = torch.cuda.current_device()
                     tensor = torch.empty(*shape, dtype=dtype, device=device)
