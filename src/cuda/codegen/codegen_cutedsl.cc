@@ -880,8 +880,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
         casted << "(" << value << ")";
         return casted.str();
       }
-      if (branch_dtype == result_dtype || !branch_dtype.is_scalar() ||
-          !result_dtype.is_scalar()) {
+      if (!branch_dtype.is_scalar() || !result_dtype.is_scalar()) {
         return value;
       }
       const bool integer_like =
@@ -889,7 +888,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
           (result_dtype.is_int() || result_dtype.is_uint());
       const bool float_like =
           branch_dtype.is_float() && result_dtype.is_float();
+      // CuTeDSL joins the branches of a dynamic ternary by type, and it infers
+      // a bare buffer subscript or literal less precisely than TIR (a `uint32`
+      // load mixed with an unsigned literal joins as `Int32` vs `Uint32`).
+      // Spell the result type out on every scalar branch.
       if (!integer_like && !float_like) {
+        return value;
+      }
+      if (value.rfind("cutlass.", 0) == 0) {
         return value;
       }
       std::ostringstream casted;
@@ -2456,8 +2462,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
   std::string cond = PrintExpr_(op->condition);
   std::string t = PrintExpr_(op->true_value);
   std::string f = PrintExpr_(op->false_value);
+  DataType result_dtype = op->dtype;
   auto cast_branch = [&](std::string value, DataType branch_dtype) {
-    DataType result_dtype = op->dtype;
     if (result_dtype.is_uint() && result_dtype.bits() == 8 &&
         result_dtype.is_scalar()) {
       std::ostringstream casted;
@@ -2465,15 +2471,22 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
       casted << "(" << value << ")";
       return casted.str();
     }
-    if (branch_dtype == result_dtype || !branch_dtype.is_scalar() ||
-        !result_dtype.is_scalar()) {
+    if (!branch_dtype.is_scalar() || !result_dtype.is_scalar()) {
       return value;
     }
     const bool integer_like =
         (branch_dtype.is_int() || branch_dtype.is_uint()) &&
         (result_dtype.is_int() || result_dtype.is_uint());
     const bool float_like = branch_dtype.is_float() && result_dtype.is_float();
+    // A dynamic `if`/ternary joins its branches by type, and CuTeDSL infers the
+    // type of a bare buffer subscript or literal less precisely than TIR (a
+    // `uint32` load mixed with an unsigned literal joins as `Int32` vs
+    // `Uint32`). Spell out the result type on every scalar branch so both
+    // sides are unambiguous.
     if (!integer_like && !float_like) {
+      return value;
+    }
+    if (value.rfind("cutlass.", 0) == 0) {
       return value;
     }
     std::ostringstream casted;
