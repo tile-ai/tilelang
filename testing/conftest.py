@@ -42,6 +42,27 @@ else:
     np.random.seed(0)
 
 
+@pytest.fixture(autouse=True)
+def _restore_kernel_cache_state():
+    """Undo ``tilelang.disable_cache()`` leaking into later tests.
+
+    Several tests disable the global kernel cache and never restore it, so the
+    next test on the same xdist worker silently takes the uncached compile path
+    — no ``cache.compile`` phase, no disk cache — and fails for reasons that
+    have nothing to do with what it asserts.
+    """
+    from tilelang.env import CacheState
+
+    was_enabled = CacheState.is_enabled()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            CacheState.enable()
+        else:
+            CacheState.disable()
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-perf",
