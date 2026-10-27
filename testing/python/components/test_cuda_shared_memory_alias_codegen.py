@@ -29,7 +29,7 @@ def test_dynamic_shared_memory_merge_emits_named_aliases():
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
+    assert "extern __shared__ __align__(16) uchar buf_dyn_shmem[];" in source
     assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
     assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
     assert "A_shared" in source
@@ -64,7 +64,7 @@ def test_single_dynamic_fp4_allocation_uses_packed_size():
 
     artifact = tilelang.lower(kernel, target="cuda")
 
-    assert "extern __shared__ __align__(1024) fp4_e2_t A_shared[];" in artifact.kernel_source
+    assert "extern __shared__ __align__(16) fp4_e2_t A_shared[];" in artifact.kernel_source
     assert _get_dynamic_shared_memory_bytes(artifact) == 64
 
 
@@ -83,7 +83,7 @@ def test_merged_dynamic_fp4_allocations_use_packed_sizes_and_offsets():
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
+    assert "extern __shared__ __align__(16) uchar buf_dyn_shmem[];" in source
     assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
     assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
     assert _get_dynamic_shared_memory_bytes(artifact) == 128
