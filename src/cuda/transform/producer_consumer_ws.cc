@@ -1767,6 +1767,7 @@ private:
     shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
     consumer_prelude_live_seed_ = {};
+    shared_prelude_buffers_ = {};
     producer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
         rewritten_producer, buffer_data_to_buffer_));
     consumer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
@@ -1825,6 +1826,7 @@ private:
         if (!buffer.defined() ||
             !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer)) ||
             !block_alloc_buffers.count(buffer) ||
+            shared_prelude_buffers_.count(buffer) ||
             producer_buffer_remap.count(buffer)) {
           return;
         }
@@ -2422,12 +2424,22 @@ private:
         bool to_consumer = placement == PreludeStmtPlacement::kConsumerOnly ||
                            placement == PreludeStmtPlacement::kDuplicateToBoth;
         if (placement == PreludeStmtPlacement::kKeepSharedPrelude) {
+          Stmt kept = stmt;
           if (auto it = rewriter_->common_prelude_rewrites_.find(stmt);
               it != rewriter_->common_prelude_rewrites_.end()) {
-            new_seq->push_back(it->second);
-          } else {
-            new_seq->push_back(stmt);
+            kept = it->second;
           }
+          // The statement runs for every thread before the split, so the
+          // buffers it touches keep their block-wide layout and must not be
+          // cloned for the producer.
+          LocalAccessSummary kept_access = LocalAccessCollector::Collect(
+              kept, rewriter_->buffer_data_to_buffer_);
+          rewriter_->shared_prelude_buffers_.insert(
+              kept_access.read_buffers.begin(), kept_access.read_buffers.end());
+          rewriter_->shared_prelude_buffers_.insert(
+              kept_access.write_buffers.begin(),
+              kept_access.write_buffers.end());
+          new_seq->push_back(kept);
           continue;
         }
         if (!across_control_flow) {
@@ -2515,6 +2527,10 @@ private:
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
   Array<IfThenElse> guarded_producer_prelude_;
+  // Buffers touched by statements that stay in the shared prelude. They cannot
+  // be cloned for the producer: the shared statement runs before the partition
+  // split, so both branches must keep pointing at the same buffer.
+  BufferSet shared_prelude_buffers_;
 };
 
 // ---------------------------------------------------------------------------
