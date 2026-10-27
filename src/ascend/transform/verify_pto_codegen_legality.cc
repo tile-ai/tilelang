@@ -53,8 +53,8 @@
 #include "arith/ir_visitor_with_analyzer.h"
 #include "tirx/transform/ir_utils.h"
 
-#include "../../op/builtin.h"
 #include "../target_utils.h"
+#include "ascend/op/builtin.h"
 
 namespace tvm {
 namespace tl {
