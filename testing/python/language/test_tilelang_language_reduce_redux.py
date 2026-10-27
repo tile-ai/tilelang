@@ -82,12 +82,16 @@ def _compile_ptx(program, arch):
         ("bitand", "int32", 32, 1, "sm_80", "redux.sync.and.b32"),
         ("bitor", "uint32", 32, 2, "sm_80", "redux.sync.or.b32"),
         ("bitxor", "int32", 64, 2, "sm_80", "redux.sync.xor.b32"),
+        ("sum", "int16", 32, 1, "sm_80", "redux.sync.add"),
+        ("max", "uint16", 32, 1, "sm_80", "redux.sync.max.s32"),
         ("max", "float32", 32, 1, "sm_100a", "redux.sync.max.f32"),
         ("min", "float32", 128, 1, "sm_100a", "redux.sync.min.f32"),
         ("max", "float32", 64, 1, "sm_100f", "redux.sync.max.f32"),
         ("max", "float32", 32, 1, "sm_103a", "redux.sync.max.f32"),
         ("min", "float32", 128, 1, "sm_103a", "redux.sync.min.f32"),
         ("max", "float32", 64, 1, "sm_103f", "redux.sync.max.f32"),
+        ("max", "float16", 32, 1, "sm_100a", "redux.sync.max.f32"),
+        ("min", "bfloat16", 32, 1, "sm_103a", "redux.sync.min.f32"),
     ],
 )
 def test_reduce_redux_ptx(operation, dtype, width, batch, arch, instruction):
@@ -113,7 +117,6 @@ def test_reduce_redux_ptx(operation, dtype, width, batch, arch, instruction):
         ("max", "int64", 32, 1, 1, "sm_100a"),
         ("max", "float64", 32, 1, 1, "sm_100a"),
         ("max", "float64", 32, 1, 1, "sm_103a"),
-        ("max", "float16", 32, 1, 1, "sm_100a"),
         ("max", "float32", 32, 1, 2, "sm_100a"),
         ("max", "float16", 32, 1, 2, "sm_100a"),
         ("min", "bfloat16", 32, 1, 2, "sm_100a"),
@@ -121,6 +124,26 @@ def test_reduce_redux_ptx(operation, dtype, width, batch, arch, instruction):
 )
 def test_reduce_redux_fallback_ptx(operation, dtype, width, scale, batch, arch):
     _, ptx = _compile_ptx(_make_kernel(operation, dtype, width, scale=scale, batch=batch), arch)
+    assert "redux.sync" not in ptx
+    assert "shfl.sync.bfly" in ptx
+
+
+@tilelang.testing.requires_cuda
+def test_warp_reduce_unsupported_operator_ptx():
+    source = """
+#include <tl_templates/cuda/reduce.h>
+
+struct ProductOp {
+    TL_DEVICE uint32_t operator()(uint32_t left, uint32_t right) {
+        return left * right;
+    }
+};
+
+extern "C" __global__ void reduce_unsupported(const uint32_t* inputs, uint32_t* outputs) {
+    outputs[threadIdx.x] = tl::warp_reduce(inputs[threadIdx.x], ProductOp());
+}
+"""
+    ptx = nvcc.compile_cuda(source, target_format="ptx", arch="sm_80", options=nvcc.default_compile_options()).decode()
     assert "redux.sync" not in ptx
     assert "shfl.sync.bfly" in ptx
 
@@ -191,16 +214,19 @@ def _reference(inputs, operation, clear):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("operation", _REDUCERS)
-@pytest.mark.parametrize("dtype", ["int32", "uint32"])
+@pytest.mark.parametrize(
+    ("operation", "dtype"),
+    [(operation, dtype) for operation in _REDUCERS for dtype in ("int32", "uint32")] + [("sum", "int16"), ("max", "uint16")],
+)
 @pytest.mark.parametrize(
     ("width", "batch", "clear", "execution_backend"),
     [(32, 1, True, "auto"), (64, 1, False, "auto"), (128, 2, True, "auto"), (64, 2, False, "auto"), (64, 2, False, "nvrtc")],
 )
 def test_reduce_redux_integer_runtime(operation, dtype, width, batch, clear, execution_backend):
     generator = torch.Generator().manual_seed(42)
-    lower = -(2**31) if dtype == "int32" else 0
-    upper = 2**31 if dtype == "int32" else 2**32
+    dtype_info = torch.iinfo(getattr(torch, dtype))
+    lower = dtype_info.min
+    upper = dtype_info.max + 1
     inputs = torch.randint(lower, upper, (4, width, 1), generator=generator, dtype=torch.int64)
     inputs[:, 0, 0] = lower
     inputs[:, 1, 0] = upper - 1
@@ -222,9 +248,13 @@ def test_reduce_redux_layout_runtime(width, scale, thread_offset):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("operation", ["max", "min"])
-@pytest.mark.parametrize(("width", "execution_backend"), [(32, "auto"), (128, "auto"), (32, "nvrtc")])
-def test_reduce_redux_float_runtime(operation, width, execution_backend):
-    inputs = torch.zeros((4, width, 1), device="cuda")
+@pytest.mark.parametrize(
+    ("dtype", "width", "execution_backend"),
+    [("float32", 32, "auto"), ("float32", 128, "auto"), ("float32", 32, "nvrtc"), ("float16", 32, "auto"), ("bfloat16", 128, "auto")],
+)
+def test_reduce_redux_float_runtime(operation, dtype, width, execution_backend):
+    torch_dtype = getattr(torch, dtype)
+    inputs = torch.zeros((4, width, 1), dtype=torch_dtype, device="cuda")
     inputs[0, :, 0] = float("nan")
     inputs[0, 1, 0] = 3.0
     inputs[1, 0, 0] = float("inf")
@@ -232,9 +262,11 @@ def test_reduce_redux_float_runtime(operation, width, execution_backend):
     inputs[2, :, 0] = -0.0
     inputs[3, :, 0] = -0.0
     inputs[3, 0, 0] = 0.0
-    compiled = tilelang.compile(_make_kernel(operation, "float32", width), out_idx=-1, execution_backend=execution_backend)
+    compiled = tilelang.compile(_make_kernel(operation, dtype, width), out_idx=-1, execution_backend=execution_backend)
     actual = compiled(inputs)
-    expected = torch.tensor([[3.0], [float("inf") if operation == "max" else -float("inf")], [-0.0], [0.0]], device="cuda")
+    expected = torch.tensor(
+        [[3.0], [float("inf") if operation == "max" else -float("inf")], [-0.0], [0.0]], dtype=torch_dtype, device="cuda"
+    )
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert torch.signbit(actual[2]).all()
 

@@ -188,14 +188,16 @@ Compute primitives
   target‑selected instruction; explicit `T.tcgen05_gemm_blockscaled` /
   `T.mma_gemm_blockscaled`.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
-  The CUDA cross-thread reduction uses hardware `redux.sync` for eligible
-  warp-aligned, full-warp groups with unit thread stride: scalar `int32`/`uint32`
-  sum, min, max, and bitwise operations on SM80+, and scalar FP32 min/max on
-  `sm_100a`/`sm_100f` and `sm_103a`/`sm_103f` targets. This also
-  applies to the final warp stage of larger reductions and unpacked batched
-  reductions. Sub-warp, strided, packed, and other dtype/operator combinations
-  retain the shuffle implementation, as do targets without the required
-  instructions. Cross-warp shared-memory exchanges and barriers are unchanged.
+  The CUDA cross-thread reduction delegates warp-aligned, full-warp groups with
+  unit thread stride to the same helper as `T.warp_reduce_*`. The helper selects
+  hardware `redux.sync` for scalar `int32`/`uint32` sum, min, max, and bitwise
+  operations on SM80+, promoting smaller scalar integers to 32 bits. Scalar FP32
+  min/max uses redux on `sm_100a`/`sm_100f` and `sm_103a`/`sm_103f` targets, with
+  scalar FP16/BF16 promoted to FP32. This also applies to the final warp stage
+  of larger reductions and unpacked batched reductions. Sub-warp, strided,
+  packed, FP64, and unsupported dtype/operator combinations retain the shuffle
+  implementation, as do targets without the required instructions. Cross-warp
+  shared-memory exchanges and barriers are unchanged.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).

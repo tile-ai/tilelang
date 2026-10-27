@@ -256,7 +256,7 @@ struct AllReduce {
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return x;
-    } else if constexpr (use_warp_reduce<T>) {
+    } else if constexpr (full_warp) {
       return warp_reduce(x, Reducer());
     } else {
       return butterfly_reduce_scalar(x, red_buf);
@@ -269,7 +269,7 @@ struct AllReduce {
   static TL_DEVICE void run_batch(T *x, T *red_buf = nullptr) {
     if constexpr (threads == scale) {
       return;
-    } else if constexpr (use_warp_reduce<T>) {
+    } else if constexpr (full_warp) {
 #pragma unroll
       for (int index = 0; index < batch_size; ++index) {
         x[index] = warp_reduce(x[index], Reducer());
@@ -280,16 +280,8 @@ struct AllReduce {
   }
 
 private:
-  template <typename Value>
-  static constexpr bool use_warp_reduce =
-      threads == 32 && scale == 1 && thread_offset % 32 == 0 &&
-      (((std::is_same_v<Value, int32_t> || std::is_same_v<Value, uint32_t>) &&
-        (std::is_same_v<Reducer, SumOp> || std::is_same_v<Reducer, MaxOp> ||
-         std::is_same_v<Reducer, MinOp> || std::is_same_v<Reducer, BitAndOp> ||
-         std::is_same_v<Reducer, BitOrOp> ||
-         std::is_same_v<Reducer, BitXorOp>)) ||
-       (std::is_same_v<Value, float> &&
-        (std::is_same_v<Reducer, MaxOp> || std::is_same_v<Reducer, MinOp>)));
+  static constexpr bool full_warp =
+      threads == 32 && scale == 1 && thread_offset % 32 == 0;
 
   using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
                          batch_size, workspace_stride>;
@@ -371,26 +363,23 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   }
 #endif
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-  auto run_reduce_sync = [&](auto val) {
+  if constexpr (std::is_integral_v<T> && sizeof(T) <= 4) {
+    using ReduceType =
+        std::conditional_t<std::is_same_v<T, uint32_t>, uint32_t, int32_t>;
+    ReduceType value_cast = static_cast<ReduceType>(value);
     if constexpr (std::is_same_v<ReduceOp, SumOp>) {
-      return __reduce_add_sync(mask, val);
+      return static_cast<T>(__reduce_add_sync(mask, value_cast));
     } else if constexpr (std::is_same_v<ReduceOp, MaxOp>) {
-      return __reduce_max_sync(mask, val);
+      return static_cast<T>(__reduce_max_sync(mask, value_cast));
     } else if constexpr (std::is_same_v<ReduceOp, MinOp>) {
-      return __reduce_min_sync(mask, val);
+      return static_cast<T>(__reduce_min_sync(mask, value_cast));
     } else if constexpr (std::is_same_v<ReduceOp, BitAndOp>) {
-      return __reduce_and_sync(mask, val);
+      return static_cast<T>(__reduce_and_sync(mask, value_cast));
     } else if constexpr (std::is_same_v<ReduceOp, BitOrOp>) {
-      return __reduce_or_sync(mask, val);
+      return static_cast<T>(__reduce_or_sync(mask, value_cast));
     } else if constexpr (std::is_same_v<ReduceOp, BitXorOp>) {
-      return __reduce_xor_sync(mask, val);
+      return static_cast<T>(__reduce_xor_sync(mask, value_cast));
     }
-  };
-
-  if constexpr (std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
-    return run_reduce_sync(value);
-  } else if constexpr (std::is_integral_v<T> && sizeof(T) <= 4) {
-    return static_cast<T>(run_reduce_sync(static_cast<int32_t>(value)));
   }
 #endif
   value = op(value, tl::shfl_xor_sync(mask, value, 16));
