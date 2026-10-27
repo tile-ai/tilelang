@@ -1222,6 +1222,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       ss << ")";
       auto reduce_eviction_idx = op->args[op->args.size() - 1].as<IntImmNode>();
       ICHECK(reduce_eviction_idx) << "Eviction policy must be IntImm";
+      ICHECK_GE(reduce_eviction_idx->value, 0);
+      ICHECK_LT(static_cast<size_t>(reduce_eviction_idx->value),
+                eviction_policy_names_.size());
       auto reduce_eviction = eviction_policy_names_[reduce_eviction_idx->value];
       if (reduce_eviction != "EVICT_NORMAL") {
         ss << ", eviction_kind=\"" << reduce_eviction << "\"";
