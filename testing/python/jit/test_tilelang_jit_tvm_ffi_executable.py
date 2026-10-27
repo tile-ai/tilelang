@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from tilelang import tvm
+from tilelang.engine.param import KernelParam
 from tilelang.jit.kernel import JITKernel
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.adapter import tvm_ffi as tvm_ffi_adapter
@@ -114,6 +115,26 @@ def test_preloaded_executable_is_reused():
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
     assert created == []
+
+
+@pytest.mark.parametrize(
+    "input_dtype, output_dtype, expected_shape",
+    [("int4", "float32", (3, 28)), ("int4", "int4", (3, 14)), ("float32", "float32", (3, 14))],
+)
+def test_packed_input_output_shape(input_dtype, output_dtype, expected_shape):
+    rows, cols = tirx.Var("rows", "int32"), tirx.Var("cols", "int32")
+    source = tirx.decl_buffer((rows, cols), input_dtype, name="source")
+    output = tirx.decl_buffer((rows, cols * 2), output_dtype, name="output")
+    adapter, _ = _make_adapter()
+    adapter._test_prim_func = tirx.PrimFunc(
+        [source.data, output.data], tirx.Evaluate(0), buffer_map={source.data: source, output.data: output}
+    )
+    adapter.params = [KernelParam.from_buffer(source), KernelParam.from_buffer(output)]
+    adapter.result_idx = [1]
+    tensor = torch.empty((3, 7), dtype=adapter.params[0].torch_dtype())
+    result = adapter._convert_torch_func()(tensor)
+    assert result.shape == expected_shape
+    assert result.dtype == adapter.params[1].torch_dtype()
 
 
 def test_disk_cached_library_can_be_exported(tmp_path):
