@@ -30,7 +30,7 @@ def _roundtrip(n, dtype):
 
 
 def _reference_fp4(x: torch.Tensor) -> torch.Tensor:
-    """Round to nearest E2M1 value, ties to the even code, saturate at 6."""
+    """Round to nearest E2M1 value, ties to the even code, saturate at 6; NaN of either sign gives +6."""
     values = torch.tensor(FP4_VALUES, dtype=torch.float32)
     mag = x.abs().clamp(max=6.0)
     diff = (mag[:, None] - values[None, :]).abs()
@@ -39,7 +39,7 @@ def _reference_fp4(x: torch.Tensor) -> torch.Tensor:
     candidates = diff == best
     even = candidates & (torch.arange(8) % 2 == 0)
     code = torch.where(even.any(dim=1), even.int().argmax(dim=1), candidates.int().argmax(dim=1))
-    return torch.copysign(values[code], x)
+    return torch.where(x.isnan(), torch.full_like(x, 6.0), torch.copysign(values[code], x))
 
 
 @tilelang.testing.requires_cdna
@@ -50,7 +50,8 @@ def test_float_to_fp4_rounds_to_nearest_even():
     exact = list(FP4_VALUES)
     other = [0.1, 0.3, 0.6, 0.9, 1.1, 2.2, 2.9, 4.4, 5.5, 7.0, 100.0]
     vals = ties + exact + other
-    x = torch.tensor(vals + [-v for v in vals] + [0.0] * (64 - 2 * len(vals)), dtype=torch.float32)
+    nans = [float("nan"), -float("nan")]
+    x = torch.tensor(vals + [-v for v in vals] + nans + [0.0] * (64 - 2 * len(vals) - 2), dtype=torch.float32)
 
     y = torch.empty_like(x, device="cuda")
     _roundtrip(x.numel(), T.float4_e2m1fn)(x.cuda(), y)

@@ -12,11 +12,13 @@
 #include <type_traits>
 
 // Float to E2M1 bits (bit3 = sign): round to nearest, ties to even, saturate
-// to +-6, as __nv_cvt_float_to_fp4(x, __NV_E2M1, cudaRoundNearest) does.
+// to +-6, and NaN (E2M1 has none) to +6, as
+// __nv_cvt_float_to_fp4(x, __NV_E2M1, cudaRoundNearest) does.
 TL_DEVICE uint8_t __tl_float_to_fp4_bits(float x) {
   const float fp4_vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-  uint8_t sign = signbit(x) ? 1u : 0u;
-  x = fminf(fabsf(x), 6.0f);
+  bool is_nan = x != x;
+  uint8_t sign = (signbit(x) && !is_nan) ? 1u : 0u;
+  x = fminf(fabsf(x), 6.0f); // fminf returns 6 for NaN
   uint8_t best = 0u;
   float best_diff = x;
   for (uint8_t i = 1u; i < 8u; ++i) {
