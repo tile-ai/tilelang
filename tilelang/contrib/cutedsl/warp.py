@@ -23,6 +23,7 @@ __all__ = [
     "__match_any_sync",
     "__match_all_sync",
     "__popc",
+    "__clz",
     "warp_reduce_sum",
     "warp_reduce_max",
     "warp_reduce_min",
@@ -81,7 +82,7 @@ def _shfl_sync_typed(mask, val, offset, mask_and_clamp, kind, *, loc=None, ip=No
             words.append(arith.extui(Int64.mlir_type, Int32(shuffled).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
         joined = arith.ori(words[0], arith.shli(words[1], shift, loc=loc, ip=ip), loc=loc, ip=ip)
         return Int64(joined).bitcast(val_type, loc=loc, ip=ip)
-    return prims.shfl_sync(mask, val, offset, mask_and_clamp, kind, loc=loc, ip=ip)
+    return val_type(prims.shfl_sync(mask, val, offset, mask_and_clamp, kind, loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -341,6 +342,23 @@ def __popc(val, *, loc=None, ip=None) -> Int32:
     Uses MLIR math.ctpop; no inline PTX is needed for the unpredicated form.
     """
     return Int32(_math.ctpop(Int32(val).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+
+
+@dsl_user_op
+def __clz(val, *, loc=None, ip=None) -> Int32:
+    """
+    Count leading zero bits in a 32-bit value, like CUDA ``__clz``.
+
+    ``math.ctlz`` leaves the result for zero undefined unless told otherwise, so
+    ask for the CUDA definition (0 and 32 respectively).
+    """
+    return Int32(
+        _math.ctlz(
+            Int32(val).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 def _shfl_xor_sync(val, lane_mask):
