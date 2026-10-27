@@ -461,12 +461,20 @@ jobs:
           fi
 
   ascend:
-    name: Test for Ascend
+    name: Test for ${{ matrix.backend.name }}
     if: |
       github.repository_owner == 'tile-ai' &&
       needs.lint.outputs.run_tests == 'true' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: AscendC
+            target: ascend
+          - name: PTO
+            target: pto
     runs-on: linux-amd64-a5-4
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
@@ -537,54 +545,46 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-      - name: Run AscendC examples
-        id: ascendc-examples
+      - name: Run ${{ matrix.backend.name }} examples
+        id: backend-examples
         if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
         shell: bash
         env:
-          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_DEFAULT_TARGET: ${{ matrix.backend.target }}
           TILELANG_EXECUTION_BACKEND: auto
         run: |
           source .venv/bin/activate
           python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
 
-      - name: Run PTO examples
-        id: pto-examples
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
-        shell: bash
-        env:
-          TILELANG_DEFAULT_TARGET: pto
-          TILELANG_EXECUTION_BACKEND: auto
-        run: |
-          source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
-
+      # Run the shared regression suite once, including its explicit PTO cases.
       - name: Run Ascend unit tests
         id: ascend-unit-tests
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.backend.target == 'ascend' && steps.ascend-build.outcome == 'success' }}
         shell: bash
         run: |
           source .venv/bin/activate
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 testing/ascend
 
-      - name: Summarize Ascend results
+      - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
         shell: bash
         env:
+          BACKEND_NAME: ${{ matrix.backend.name }}
+          TEST_TARGET: ${{ matrix.backend.target }}
           BUILD_RESULT: ${{ steps.ascend-build.outcome }}
-          ASCENDC_RESULT: ${{ steps.ascendc-examples.outcome }}
-          PTO_RESULT: ${{ steps.pto-examples.outcome }}
+          EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
           UNIT_RESULT: ${{ steps.ascend-unit-tests.outcome }}
         run: |
           {
-            echo "### Test for Ascend"
+            echo "### Test for ${BACKEND_NAME}"
             echo
             echo "| Step | Result |"
             echo "| --- | --- |"
             echo "| Build | ${BUILD_RESULT} |"
-            echo "| AscendC examples | ${ASCENDC_RESULT} |"
-            echo "| PTO examples | ${PTO_RESULT} |"
-            echo "| Unit tests | ${UNIT_RESULT} |"
+            echo "| ${BACKEND_NAME} examples | ${EXAMPLES_RESULT} |"
+            if [[ "${TEST_TARGET}" == "ascend" ]]; then
+              echo "| Unit tests | ${UNIT_RESULT} |"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
