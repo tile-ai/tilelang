@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import tilelang.testing
+
 from tilelang.profiler import Profiler, TensorSupplyType, bench, torch_bench
 from tilelang.utils import device as device_utils
 
@@ -132,7 +134,8 @@ def test_cuda_graph_stream_uses_explicit_device(monkeypatch, accelerator):
             yield
 
     @contextmanager
-    def capture(graph):
+    def capture(graph, *, stream):
+        assert stream.device == state.current == 2
         yield
 
     monkeypatch.setattr(torch.cuda, "Stream", stream)
@@ -150,6 +153,34 @@ def test_cuda_graph_stream_uses_explicit_device(monkeypatch, accelerator):
     assert state.events == [2] * 20
     assert state.synchronizations == [(2, 2), (2, 2)]
     assert state.current == 0
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.multi_gpu
+@pytest.mark.parametrize("device_order", [(0, 1), (1, 0)])
+@pytest.mark.parametrize("initial_device", [0, 1])
+def test_cuda_graph_benchmark_replays_after_switching_devices(device_order, initial_device):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Requires two CUDA devices")
+
+    with torch.cuda.device(initial_device):
+        caller_stream = torch.cuda.Stream()
+        with torch.cuda.stream(caller_stream):
+            for device_index in device_order:
+                values = torch.zeros(8, device=f"cuda:{device_index}")
+                bench.do_bench(
+                    lambda values=values: values.add_(1),
+                    backend="cudagraph",
+                    device=device_index,
+                    _n_warmup=1,
+                    _n_repeat=2,
+                    cache_size=1,
+                )
+                # One initial call, five pilot calls, one warmup, and ten graph
+                # replays containing two calls each. Capture itself does not execute.
+                torch.testing.assert_close(values, torch.full_like(values, 27), rtol=0, atol=0)
+                assert torch.cuda.current_device() == initial_device
+                assert torch.cuda.current_stream() == caller_stream
 
 
 @pytest.mark.parametrize("explicit", [False, True])
