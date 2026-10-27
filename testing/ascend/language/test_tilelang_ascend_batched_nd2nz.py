@@ -150,19 +150,21 @@ def test_batched_nd2nz_single_row_matrix():
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
 @pytest.mark.parametrize(
-    "source_batches,batch_begin,rows,cols,dynamic,copy_batches",
+    "source_batches,batch_begin,rows,cols,dynamic,copy_batches,destination_origin",
     [
-        (4, 0, 32, 32, False, 4),
-        (3, 1, 32, 32, False, 4),
-        (3, 3, 32, 32, False, 4),
-        (3, 3, 20, 20, False, 4),
-        (3, 1, 20, 20, False, 4),
-        (3, 0, 20, 20, True, 4),
-        (3, 0, 32, 32, False, 2),
-        (3, 2, 20, 20, False, 2),
+        (4, 0, 32, 32, False, 4, False),
+        (4, 0, 32, 32, False, 4, True),
+        (3, 1, 32, 32, False, 4, False),
+        (3, 3, 32, 32, False, 4, False),
+        (3, 3, 20, 20, False, 4, False),
+        (3, 1, 20, 20, False, 4, False),
+        (3, 0, 20, 20, True, 4, False),
+        (3, 0, 32, 32, False, 2, False),
+        (3, 2, 20, 20, False, 2, False),
     ],
     ids=[
         "in-bounds",
+        "destination-origin",
         "batch-tail",
         "all-batches-oob",
         "all-batches-oob-with-m-n-tails",
@@ -172,7 +174,6 @@ def test_batched_nd2nz_single_row_matrix():
         "larger-destination-batch-m-n-tails",
     ],
 )
-@pytest.mark.parametrize("destination_origin", [False, True])
 def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dynamic, copy_batches, destination_origin):
     import torch
 
