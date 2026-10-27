@@ -266,6 +266,19 @@ public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    // ThreadSync runs once per storage scope ("shared", then "shared.dyn").
+    // The earlier run has already assigned named-barrier ids; a fresh
+    // numbering would hand the same id to a disjoint thread range, and two
+    // groups syncing on one `bar.sync id, count` complete each other's phases.
+    PostOrderVisit(stmt, [&rewriter](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call && call->op.same_as(builtin::tvm_storage_sync()) &&
+          call->args.size() == 3) {
+        if (const auto *id = call->args[1].as<IntImmNode>()) {
+          rewriter.used_barrier_ids_.insert(static_cast<size_t>(id->value));
+        }
+      }
+    });
     return rewriter(std::move(stmt));
   }
 
@@ -348,10 +361,13 @@ private:
     }
 
     size_t barrier_id =
-        barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
+    while (used_barrier_ids_.count(barrier_id)) {
+      ++barrier_id;
+    }
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
+    used_barrier_ids_.insert(barrier_id);
     barrier_id_map_[key] = barrier_id;
     thread_count_map_[key] = thread_count;
 
@@ -430,6 +446,9 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  // Named-barrier ids already taken in this function, including those assigned
+  // by an earlier ThreadSync run for another storage scope.
+  std::unordered_set<size_t> used_barrier_ids_;
   int warp_size_;
 };
 
@@ -1234,8 +1253,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
           e.scope = scope;
+          // address_of does not specify how its consumer uses the pointer, so
+          // conservatively record both reads and writes. Keeping the read is
+          // necessary to preserve loop-carried barriers: a write-only summary
+          // can hoist the sync needed by the next iteration's opaque read.
+          e.type = kRead;
+          curr_stmt_.access.emplace_back(e);
+          e.type = kWrite;
           curr_stmt_.access.emplace_back(e);
         }
         ConstrVisitor::VisitExpr_(load);

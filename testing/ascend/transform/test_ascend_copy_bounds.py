@@ -99,17 +99,17 @@ def test_dynamic_copy_clamps_extents_without_guarding_the_first_write():
         assert actual == [int(group_value < 4), row_count, 64]
 
 
-def _mx_operand_copy(layout, actual_k, k_alloc=128):
-    mn = 32
+def _mx_operand_copy(layout, actual_k, k_alloc=128, dtype="float8_e4m3fn"):
+    mn = 64 if dtype == "float4_e2m1fn" else 32
     src_transposed = layout != "k-contiguous"
     dst_transposed = layout == "mn-contiguous"
     src_shape = (k_alloc, mn) if src_transposed else (mn, k_alloc)
     dst_shape = (k_alloc, mn) if dst_transposed else (mn, k_alloc)
-    a = tirx.decl_buffer(src_shape, "float8_e4m3fn", name="A")
-    l1 = tirx.decl_buffer(dst_shape, "float8_e4m3fn", name="l1", scope="shared.l1")
+    a = tirx.decl_buffer(src_shape, dtype, name="A")
+    l1 = tirx.decl_buffer(dst_shape, dtype, name="l1", scope="shared.l1")
     scale = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="scale", scope="shared.l1")
-    l0a = tirx.decl_buffer(dst_shape, "float8_e4m3fn", name="l0a", scope="shared.l0a")
-    l0b = tirx.decl_buffer((mn, k_alloc), "float8_e4m3fn", name="l0b", scope="shared.l0b")
+    l0a = tirx.decl_buffer(dst_shape, dtype, name="l0a", scope="shared.l0a")
+    l0b = tirx.decl_buffer((mn, k_alloc), dtype, name="l0b", scope="shared.l0b")
     sfa = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfa", scope="shared.l0a.sf")
     sfb = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfb", scope="shared.l0b.sf")
     acc = tirx.decl_buffer((mn, mn), "float32", name="acc", scope="shared.l0c")
@@ -141,18 +141,25 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
 
 
 @pytest.mark.parametrize(
-    "layout, actual_k, tail",
+    "dtype, layout, actual_k, tail",
     [
-        ("k-contiguous", 65, (96, 32)),
-        ("mn-contiguous", 65, (65, 63)),
-        ("transpose-to-k-contiguous", 65, (96, 32)),
-        ("k-contiguous", 33, None),
-        ("mn-contiguous", 64, None),
-        ("transpose-to-k-contiguous", 33, None),
+        ("float8_e4m3fn", "k-contiguous", 65, (96, 32)),
+        ("float8_e4m3fn", "mn-contiguous", 65, (65, 63)),
+        ("float8_e4m3fn", "transpose-to-k-contiguous", 65, (96, 32)),
+        ("float8_e4m3fn", "k-contiguous", 33, None),
+        ("float8_e4m3fn", "mn-contiguous", 64, None),
+        ("float8_e4m3fn", "transpose-to-k-contiguous", 33, None),
+        ("float4_e2m1fn", "k-contiguous", 4, None),
+        ("float4_e2m1fn", "k-contiguous", 34, None),
+        ("float4_e2m1fn", "mn-contiguous", 4, (4, 60)),
+        ("float4_e2m1fn", "mn-contiguous", 34, (34, 30)),
+        ("float4_e2m1fn", "mn-contiguous", 66, (66, 62)),
+        ("float4_e2m1fn", "mn-contiguous", 64, None),
+        ("float4_e2m1fn", "transpose-to-k-contiguous", 66, None),
     ],
 )
-def test_mx_copy_pads_only_the_unwritten_k_tail(layout, actual_k, tail):
-    before, l1 = _mx_operand_copy(layout, actual_k)
+def test_mx_copy_pads_only_the_unwritten_k_tail(dtype, layout, actual_k, tail):
+    before, l1 = _mx_operand_copy(layout, actual_k, dtype=dtype)
     after = transform.AscendInsertOOBPadding()(before)
     fills = calls(after, "tl.tileop.fill")
     assert len(fills) == (tail is not None)
@@ -165,7 +172,8 @@ def test_mx_copy_pads_only_the_unwritten_k_tail(layout, actual_k, tail):
     k_axis = 0 if layout == "mn-contiguous" else 1
     start, extent = tail
     assert [int(index) for index in dst.args[0].indices] == ([start, 0] if k_axis == 0 else [0, start])
-    assert [int(size) for size in dst.args[2:]] == ([extent, 32] if k_axis == 0 else [32, extent])
+    mn = 64 if dtype == "float4_e2m1fn" else 32
+    assert [int(size) for size in dst.args[2:]] == ([extent, mn] if k_axis == 0 else [mn, extent])
     # Padding must follow the GM write and precede the MX operand's L1 read.
     copies = calls(after, "tl.tileop.ascend_copy")
     operations = nodes(after, tirx.Call)

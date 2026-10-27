@@ -18,6 +18,7 @@ cdef class PTOKernelWrapper:
         object static_strides_map      # Maps buffer variables to their corresponding static strides
         object dynamic_strides_map    # Maps buffers to runtime stride validation metadata
         object scalar_param_vars      # Maps scalar params to their TIR vars, None elsewhere
+        object output_scalar_dim_map  # (output index, dimension index) -> scalar argument index
         object static_contiguous_list  # A list contains contiguous buffers
         object ptr_map                 # Maps pointer arguments to their corresponding buffer indices
         list result_idx                # Indices of output tensors in the params list
@@ -40,6 +41,7 @@ cdef class PTOKernelWrapper:
         self.param_storage_metadata = [(-1, 1) for _ in params]
         self.dynamic_strides_map = {}
         self.scalar_param_vars = None
+        self.output_scalar_dim_map = {}
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = get_current_device
@@ -81,6 +83,10 @@ cdef class PTOKernelWrapper:
 
     def set_dynamic_strides_map(self, dynamic_strides_map):
         self.dynamic_strides_map = dynamic_strides_map
+        return self
+
+    def set_output_scalar_dim_map(self, output_scalar_dim_map):
+        self.output_scalar_dim_map = output_scalar_dim_map
         return self
 
     def set_scalar_param_vars(self, scalar_param_vars):
@@ -320,7 +326,11 @@ cdef class PTOKernelWrapper:
                 dtype = self.param_dtypes[i]
                 shape = []
                 # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
+                for dim_index, s in enumerate(self.param_shapes[i]):
+                    scalar_index = self.output_scalar_dim_map.get((i, dim_index))
+                    if scalar_index is not None:
+                        shape.append(tensor_list[scalar_index])
+                        continue
                     if isinstance(s, tirx.Var):
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):

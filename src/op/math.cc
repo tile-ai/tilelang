@@ -4,7 +4,6 @@
  *
  */
 
-#include "builtin.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/builtin.h>

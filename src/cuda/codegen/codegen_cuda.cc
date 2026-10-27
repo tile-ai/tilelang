@@ -5000,37 +5000,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       TryEmitPackedMathCall_(call, os)) {
     return true;
   }
-  if (op->op.same_as(tl::clamp())) {
-    ICHECK_EQ(op->args.size(), 3);
-    need_math_h_ = true;
-    DataType dtype = op->dtype;
-    std::vector<PrimExpr> args(op->args.begin(), op->args.end());
-    for (const PrimExpr &arg : args) {
-      ICHECK_EQ(arg.dtype(), dtype)
-          << "tl.clamp operands must have matching types";
-    }
-    if (!dtype.is_scalar()) {
-      // The vector emitters cache printed expressions. Bind effectful inputs
-      // before using them so identical calls (or loads around an atomic) are
-      // still evaluated independently, once per argument.
-      for (PrimExpr &arg : args) {
-        if (SideEffect(arg) > CallEffectKind::kPure) {
-          Var value("clamp_arg", dtype);
-          arg = Let(value, arg, value);
-        }
-      }
-    }
-    if (dtype.is_scalar()) {
-      os << "tl::clamp(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
-         << ", " << PrintExpr(args[2]) << ")";
-    } else if ((dtype.is_float16() || dtype.is_bfloat16()) &&
-               CanEmitPackedX2Math(dtype)) {
-      EmitPackedX2Call("clamp2", dtype, args, os);
-    } else {
-      EmitPerLaneScalarCall("tl::clamp", dtype, args, os);
-    }
-    return true;
-  } else if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
+  if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
     // Round-to-nearest multiply / fused multiply-add with a guaranteed
     // instruction boundary (never re-contracted or split by NVCC). Scalar
     // forms reuse the IEEE intrinsic names with the fixed "rn" mode; even
@@ -6291,8 +6261,22 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       return;
     }
     p->PrintType(op->dtype, os);
-    os << '(' << FlexibleHexFormat(op->value) << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(';
+    // Use valid FP32 constants and let the conversion constructor handle
+    // saturation and NaNs according to the destination format.
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        os << '-';
+      }
+      os << "CUDART_INF_F";
+      p->need_math_constants_h_ = true;
+    } else if (std::isnan(op->value)) {
+      os << "CUDART_NAN_F";
+      p->need_math_constants_h_ = true;
+    } else {
+      os << FlexibleHexFormat(op->value) << 'f';
+      os << "/*" << std::scientific << op->value << "*/";
+    }
     os << ')';
     return;
   }

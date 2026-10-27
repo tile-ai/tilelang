@@ -12,7 +12,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 
 from .libgen import NVRTCLibraryGenerator
@@ -146,6 +146,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = NVRTCLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.libpath = adapter.lib_generator.libpath
         adapter.pymodule = adapter.lib_generator.pymodule
         adapter.function_names = adapter.pymodule._function_names
 
@@ -289,21 +290,31 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)
+        device = first_tensor.device if first_tensor is not None else None
+
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if stream is not None and self.result_idx:
+            if device is None:
+                device = torch.device("cuda", torch.cuda.current_device())
+            alloc_stream = output_allocation_stream(stream, device)
 
         # Allocate output tensors in their PrimFunc parameter positions.
-        for i in range(len(self.params)):
-            if i in self.result_idx:
-                dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
-                device = first_tensor.device if first_tensor is not None else torch.cuda.current_device()
-                tensor = torch.empty(*shape, dtype=dtype, device=device)
-                param_values[i] = tensor
+        with torch.cuda.stream(alloc_stream):
+            for i in range(len(self.params)):
+                if i in self.result_idx:
+                    dtype = self.param_dtypes[i]
+                    shape = []
+                    # Now working with native Python list, no FFI calls needed
+                    for s in self.param_shapes[i]:
+                        if isinstance(s, tirx.Var):
+                            shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
+                        else:  # Already converted to Python int during initialization
+                            shape.append(s)
+                    if device is None:
+                        device = torch.cuda.current_device()
+                    tensor = torch.empty(*shape, dtype=dtype, device=device)
+                    param_values[i] = tensor
 
         # dynamic symbolics
         args = list(param_values)

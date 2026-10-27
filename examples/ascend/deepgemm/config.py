@@ -93,9 +93,11 @@ def select_gemm_config(d: GemmDesc) -> GemmConfig:
 
 def execution_config(d: GemmDesc, config: GemmConfig) -> GemmConfig:
     """Adapt the selected configuration to the supported kernel features."""
-    if d.a_dtype not in ("bfloat16", "float8_e4m3fn") or d.a_dtype != d.b_dtype:
-        # TODO: implement native FP4 and FP8 x FP4 dequant kernels separately.
-        raise NotImplementedError("FP4 and FP8 dequant kernels are not implemented")
+    if (d.a_dtype, d.b_dtype) == ("float8_e4m3fn", "float4_e2m1fn_x2"):
+        # TODO: implement the FP8 x FP4 dequant kernel selected by Nightly's heuristic.
+        raise NotImplementedError("FP8 x FP4 (FP8 dequant) kernels are not implemented")
+    if d.a_dtype not in ("bfloat16", "float8_e4m3fn", "float4_e2m1fn_x2") or d.a_dtype != d.b_dtype:
+        raise NotImplementedError("Only BF16/BF16, FP8/FP8 and FP4/FP4 kernels are implemented")
     num_blocks = config.num_blocks
     if d.gemm_type in (GemmType.Normal, GemmType.Batched):
         # Launch only cores that own an output tile.
