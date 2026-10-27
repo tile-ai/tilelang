@@ -18,16 +18,21 @@ def _require_cutedsl():
 
 
 def _roundtrip_kernel(N: int, load_policy: str, store_policy: str):
+    """Explicit TMA copies, since a plain T.copy of a small tile may not use TMA."""
 
     @T.prim_func
     def kernel(
-        A: T.Tensor((N,), "float32"),
-        B: T.Tensor((N,), "float32"),
+        A: T.Tensor((N, N), "float32"),
+        B: T.Tensor((N, N), "float32"),
     ):
         with T.Kernel(1, threads=128):
-            s = T.alloc_shared((N,), "float32")
-            T.copy(A, s, eviction_policy=load_policy)
-            T.copy(s, B, eviction_policy=store_policy)
+            s = T.alloc_shared((N, N), "float32")
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(A, s, barrier=mbar, eviction_policy=load_policy)
+            T.barrier_arrive(mbar)
+            T.barrier_wait(mbar, 0)
+            T.tma_copy(s, B, eviction_policy=store_policy)
+            T.tma_store_wait(0)
 
     return kernel
 
@@ -40,9 +45,17 @@ def _roundtrip_kernel(N: int, load_policy: str, store_policy: str):
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_eviction_cutedsl(load_policy, store_policy):
     _require_cutedsl()
-    N = 1024
+    N = 32
     mod = tilelang.compile(_roundtrip_kernel(N, load_policy, store_policy), out_idx=[1], target="cutedsl")
-    A = torch.randn(N, device="cuda", dtype=torch.float32)
+
+    # Correctness alone would hold if the hint were dropped, so also check that
+    # the policy reaches the TMA calls.
+    source = mod.get_kernel_source()
+    policies = {f"EVICT_{p.removeprefix('evict_').upper()}" for p in (load_policy, store_policy)}
+    for policy in policies:
+        assert f'eviction_kind="{policy}"' in source, policy
+
+    A = torch.randn(N, N, device="cuda", dtype=torch.float32)
     B = mod(A)
     torch.testing.assert_close(B, A)
 
