@@ -76,6 +76,48 @@ def test_gather_scatter_basic():
     run_gather_scatter(N=64, K=64, K_box=64)
 
 
+def gather_scatter_constant_rows_program(N: int = 64, K: int = 64, K_box: int = 64):
+    """Exercise Python integer row indices through both TMA frontend helpers."""
+
+    @T.prim_func
+    def main(
+        Src: T.Tensor((N, K), "float16"),
+        Dst: T.Tensor((N, K), "float16"),
+    ):
+        with T.Kernel(1, 1, threads=128) as (bx, by):
+            smem = T.alloc_shared((4, K_box), "float16")
+            mbar = T.alloc_barrier(1)
+
+            if T.shuffle_elect(128):
+                T.mbarrier_expect_tx(mbar, T.tma_gather4_bytes(K_box, "float16"))
+                T.tma_gather4(Src, smem, 0, [5, 17, 42, 9], barrier=mbar)
+                T.barrier_arrive(mbar)
+            T.mbarrier_wait_parity(mbar, 0)
+
+            if T.shuffle_elect(128):
+                T.tma_scatter4(smem, Dst, 0, [5, 17, 42, 9])
+                T.tma_store_arrive()
+            T.tma_store_wait(0, read=False)
+
+    return main
+
+
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_gather_scatter_constant_rows_compile():
+    program = gather_scatter_constant_rows_program()
+    kernel = tilelang.compile(
+        program,
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
+    src = kernel.get_kernel_source()
+    assert "tma_load_gather4" in src
+    assert "tma_store_scatter4" in src
+
+
 # Swizzled round-trip: LowerBulkGather4 infers desc.swizzle from the annotated
 # shared layout via DetectSwizzleMode. K_box * 2 bytes must match the swizzle
 # period: 64→128B, 32→64B, 16→32B fp16.

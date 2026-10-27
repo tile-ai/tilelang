@@ -37,6 +37,7 @@
 #include "transform/common/pipeline_utils.h"
 #include "transform/loop_partition.h"
 
+#include "ascend/transform/buffer_addresses.h"
 #include "ascend/transform/buffer_alias.h"
 #include "ascend/transform/buffer_version.h"
 #include "ascend/transform/vf_regions.h"
@@ -327,6 +328,9 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
+    ICHECK(!op->annotations.count(kBufferAddresses))
+        << kBufferAddresses << " requires the Ascend scheduled pipeline; "
+        << "enable TL_ENABLE_AUTO_SCHEDULE";
     Map<String, Any> previous_block_annotations = block_annotations_;
     Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
     block_annotations_ = op->annotations;
@@ -1293,6 +1297,12 @@ private:
       }
     }
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (op->attr_key == tl::kBufferAddresses) {
+      AttrStmt attribute = Downcast<AttrStmt>(std::move(stmt));
+      attribute.CopyOnWrite()->node =
+          RemapBufferAddresses(ParseBufferAddresses(op->node), var_remap_);
+      return attribute;
+    }
     if (op->attr_key == tl::kAivStorageMap) {
       AivStorageMap remapped;
       for (const auto &[storage, sid] : op->node.cast<AivStorageMap>()) {
