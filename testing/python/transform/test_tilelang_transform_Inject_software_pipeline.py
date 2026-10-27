@@ -20,6 +20,40 @@ def _check(original, transformed):
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
 
 
+@pytest.mark.parametrize("stages,orders", [([1, 0], [0, 1]), ([0, 0], [1, 0])])
+@pytest.mark.parametrize("offset", [1, 32])
+@pytest.mark.parametrize("thread_form", ["unmaterialized", "attr", "for"])
+def test_inject_software_pipeline_checks_cross_thread_raw_reordering(stages, orders, offset, thread_form):
+    @T.prim_func
+    def before(B: T.Tensor((64,), T.int32)):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            shared = T.alloc_shared((64,), T.int32)
+            shared[tx + 32] = 0
+            for k in T.serial(2, annotations={"software_pipeline_stage": stages, "software_pipeline_order": orders}):
+                shared[tx] = k
+                B[k * 32 + tx] = shared[tx + offset]
+
+    mod = tvm.IRModule.from_expr(before)
+    if thread_form != "unmaterialized":
+        mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(mod)
+    if thread_form == "for":
+
+        def to_thread_binding(node):
+            if isinstance(node, tvm.tirx.AttrStmt) and node.attr_key == "thread_extent":
+                iv = node.node
+                return tvm.tirx.For(iv.var, 0, node.value, tvm.tirx.ForKind.THREAD_BINDING, node.body, thread_binding=iv)
+
+        func = mod["before"]
+        mod = tvm.IRModule.from_expr(func.with_body(tvm.tirx.stmt_functor.ir_transform(func.body, None, to_thread_binding)))
+    # Without materialized thread bounds, even the two halves may overlap.
+    if offset == 1 or thread_form == "unmaterialized":
+        with pytest.raises(tvm.error.InternalError, match="later stage|cannot be reordered"):
+            tl.transform.InjectSoftwarePipeline()(mod)
+    else:
+        tl.transform.InjectSoftwarePipeline()(mod)
+
+
 def _count_attrs_and_calls(func):
     attr_count = Counter(node.attr_key for node in collect_nodes(func, tvm.tirx.AttrStmt))
     call_count = Counter(call.op.name for call in collect_nodes(func, tvm.tirx.Call) if isinstance(call.op, tvm.ir.Op))
@@ -474,6 +508,91 @@ def test_inject_software_pipeline_expands_annotated_layout():
     assert layout_map[shared.data].is_equal(layout.expand([2]))
 
 
+@pytest.mark.parametrize("first,second", [(2, 4), (4, 2), (3, 1), (1, 3), (3, 3)])
+@pytest.mark.parametrize("flat_alloc", [False, True])
+def test_inject_software_pipeline_sibling_buffers(first, second, flat_alloc):
+    layout = Layout([8, 16], lambda i, j: i * 16 + j)
+    allocate = T.alloc_buffer if flat_alloc else T.sblock_alloc_buffer
+
+    @T.prim_func
+    def before(A: T.Tensor((16, 8, 16), T.float16), B: T.Tensor((16, 8, 16), T.float16)):
+        with T.sblock("root"):
+            shared = allocate((8, 16), T.float16, scope="shared.dyn")
+            T.annotate_layout({shared: layout})
+            for k in T.serial(
+                8,
+                annotations={"software_pipeline_stage": [0, first - 1], "software_pipeline_order": [0, 1]},
+            ):
+                with T.sblock("load_first"):
+                    T.reads(A[k, 0:8, 0:16])
+                    T.writes(shared[0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        shared[i, j] = A[k, i, j]
+                with T.sblock("store_first"):
+                    T.reads(shared[0:8, 0:16])
+                    T.writes(B[k, 0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        B[k, i, j] = shared[i, j]
+            for k in T.serial(
+                8,
+                16,
+                annotations={"software_pipeline_stage": [0, second - 1], "software_pipeline_order": [0, 1]},
+            ):
+                with T.sblock("load_second"):
+                    T.reads(A[k, 0:8, 0:16])
+                    T.writes(shared[0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        shared[i, j] = A[k, i, j]
+                with T.sblock("store_second"):
+                    T.reads(shared[0:8, 0:16])
+                    T.writes(B[k, 0:8, 0:16])
+                    for i, j in T.grid(8, 16):
+                        B[k, i, j] = shared[i, j]
+            # Ordinary scratch-buffer uses must also address the expanded view.
+            shared[0, 0] = A[0, 0, 0]
+            B[0, 0, 0] = shared[0, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    func = mod["main"]
+    block = _find_block_with_layout_map(func)
+    layout_map = block.annotations["layout_map"]
+    shared_data = next(iter(layout_map.keys()))
+    if flat_alloc:
+        shared = _find_alloc_buffer(func, shared_data)
+    else:
+        shared = next(buffer for buffer in block.alloc_buffers if buffer.data.same_as(shared_data))
+
+    capacity = max(first, second)
+    assert [int(dim) for dim in shared.shape] == [capacity, 8, 16]
+    assert layout_map[shared.data].is_equal(layout.expand([capacity]))
+
+    analyzer = tvm.arith.Analyzer()
+    moduli = set()
+    accesses = [
+        node
+        for node_type in (tvm.tirx.BufferLoad, tvm.tirx.BufferStore)
+        for node in collect_nodes(func, node_type)
+        if node.buffer.data.same_as(shared.data)
+    ]
+    for node in accesses:
+        assert node.buffer.same_as(shared)
+        assert len(node.indices) == 3
+        version = analyzer.simplify(node.indices[0])
+        bound = analyzer.const_int_bound(version)
+        assert 0 <= bound.min_value <= bound.max_value < capacity
+        if isinstance(version, tvm.tirx.FloorMod):
+            moduli.add(int(version.b))
+    for node in collect_nodes(func, tvm.tirx.SBlock):
+        for region in list(node.reads) + list(node.writes):
+            if region.buffer.data.same_as(shared.data):
+                assert region.buffer.same_as(shared)
+                assert len(region.region) == 3
+
+    assert accesses
+    assert moduli == {stages for stages in (first, second) if stages > 1}
+
+
 def _collect_leading_bind_names(mod, block_names):
     leading_binds = {name: [] for name in block_names}
     for node in collect_nodes(mod["main"], tvm.tirx.SBlock):
@@ -490,10 +609,6 @@ def _collect_leading_bind_names(mod, block_names):
         leading_binds[str(node.name_hint)].append(names)
 
     return leading_binds
-
-
-def _collect_direct_bind_names(mod):
-    return [str(node.body.var.name) for node in collect_nodes(mod["main"], tvm.tirx.SBlock) if isinstance(node.body, tvm.tirx.Bind)]
 
 
 def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
@@ -601,7 +716,8 @@ def test_inject_software_pipeline_rejects_side_effecting_replay_mask():
         tl.transform.InjectSoftwarePipeline()(mod)
 
 
-def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
+@pytest.mark.parametrize("replay_input", [False, True])
+def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer(replay_input):
     @T.prim_func
     def before(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
         shared = T.alloc_buffer((16,), dtype=T.float32, scope="shared")
@@ -623,7 +739,7 @@ def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
                     T.reads(A[base + tx])
                     T.writes(shared[tx])
                     shared[tx] = A[base + tx]
-                value: T.float32 = shared[tx]
+                value: T.float32 = shared[tx] + T.cast(base, T.float32) if replay_input else shared[tx]
                 with T.sblock("store"):
                     T.reads()
                     T.writes(B[base + tx])
@@ -633,13 +749,14 @@ def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer():
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
-    direct_binds = _collect_direct_bind_names(mod)
+    value_binds = [node for node in collect_nodes(mod["main"], tvm.tirx.Bind) if str(node.var.name).startswith("value")]
 
     assert leading_binds["copy"]
     assert leading_binds["store"]
     assert all(names[0].startswith("base") for names in leading_binds["copy"])
     assert all(names[0].startswith("base") for names in leading_binds["store"])
-    assert any(name.startswith("value") for name in direct_binds)
+    assert value_binds
+    _assert_no_undefined_vars(mod["main"])
     assert all(not any(name.startswith("value") for name in names) for names in leading_binds["store"])
 
 
@@ -717,6 +834,90 @@ def test_inject_software_pipeline_replays_scalar_bind_dependencies():
         assert names[0].startswith("base")
         assert names[1].startswith("offset")
     _assert_no_undefined_vars(mod["main"])
+
+
+@pytest.mark.parametrize("stages,orders", [([1, 0], [0, 1]), ([0, 0], [1, 0])])
+@pytest.mark.parametrize(
+    "shape,strides,write_index,read_index,aliases",
+    [
+        ((2,), (0,), (0,), (1,), True),
+        ((2, 2), (1, 1), (0, 1), (1, 0), True),
+        ((2,), (2,), (0,), (1,), False),
+    ],
+)
+def test_inject_software_pipeline_checks_physical_strided_regions(stages, orders, shape, strides, write_index, read_index, aliases):
+    tir = tvm.tirx
+    shared = tir.decl_buffer(shape, "int32", name="shared", scope="shared", strides=strides)
+    output = tir.decl_buffer((2,), "int32", name="B")
+    k = tir.Var("k", "int32")
+    loop = tir.For(
+        k,
+        0,
+        2,
+        tir.ForKind.SERIAL,
+        tir.SeqStmt(
+            [
+                tir.BufferStore(shared, k, list(write_index)),
+                tir.BufferStore(output, tir.BufferLoad(shared, list(read_index)), [k]),
+            ]
+        ),
+        annotations={"software_pipeline_stage": stages, "software_pipeline_order": orders},
+    )
+    body = tir.SeqStmt([tir.AllocBuffer(shared), tir.BufferStore(shared, 0, list(read_index)), loop])
+    mod = tvm.IRModule.from_expr(tir.PrimFunc([output.data], body, buffer_map={output.data: output}))
+    if aliases:
+        with pytest.raises(tvm.error.InternalError, match="later stage|cannot be reordered"):
+            tl.transform.InjectSoftwarePipeline()(mod)
+    else:
+        tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@pytest.mark.parametrize("row_stride", [0, 16, 32])
+def test_inject_software_pipeline_checks_threaded_strided_regions(row_stride):
+    tir = tvm.tirx
+    shared = tir.decl_buffer((2, 32), "int32", name="shared", scope="shared", strides=(row_stride, 1))
+    output = tir.decl_buffer((64,), "int32", name="B")
+    tx, k = tir.Var("tx", "int32"), tir.Var("k", "int32")
+    loop = tir.For(
+        k,
+        0,
+        2,
+        tir.ForKind.SERIAL,
+        tir.SeqStmt(
+            [
+                tir.BufferStore(shared, k, [0, tx]),
+                tir.BufferStore(output, tir.BufferLoad(shared, [1, tx]), [k * 32 + tx]),
+            ]
+        ),
+        annotations={"software_pipeline_stage": [1, 0], "software_pipeline_order": [0, 1]},
+    )
+    thread = tir.IterVar(tvm.ir.Range(0, 32), tx, tir.IterVar.ThreadIndex, "threadIdx.x")
+    body = tir.SeqStmt([tir.AllocBuffer(shared), tir.For(tx, 0, 32, tir.ForKind.THREAD_BINDING, loop, thread_binding=thread)])
+    mod = tvm.IRModule.from_expr(tir.PrimFunc([output.data], body, buffer_map={output.data: output}))
+    if row_stride < 32:
+        with pytest.raises(tvm.error.InternalError, match="later stage"):
+            tl.transform.InjectSoftwarePipeline()(mod)
+    else:
+        tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@pytest.mark.parametrize("offset,versions", [(0, 2), (1, 2), (32, 1)])
+def test_inject_software_pipeline_versions_thread_regions(offset, versions):
+    @T.prim_func
+    def before(A: T.Tensor((64,), T.float32), B: T.Tensor((64,), T.float32)):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            shared = T.alloc_shared((64,), T.float32)
+            shared[tx + 32] = 0
+            for k in T.serial(2, annotations={"software_pipeline_stage": [0, 1], "software_pipeline_order": [0, 1]}):
+                shared[tx] = A[k * 32 + tx]
+                B[k * 32 + tx] = shared[tx + offset]
+
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    buffers = [buffer for block in collect_nodes(mod["before"], tvm.tirx.SBlock) for buffer in block.alloc_buffers]
+    (shared,) = [buffer for buffer in buffers if buffer.name == "shared"]
+    assert [int(dim) for dim in shared.shape] == ([2, 64] if versions == 2 else [64])
 
 
 if __name__ == "__main__":

@@ -302,6 +302,15 @@ artifact loading, argument/stream binding, launch, and runtime lifetime. It may
 invoke target-owned compiler callbacks during Build, but those callbacks do not
 make JIT/Runtime a target-backend implementation area.
 
+A target's `ExecutionBackendSpec` may provide an optional `wrap_callable`
+callback. It receives the execution callable and the kernel's `PrimFunc`, and
+returns the callable to install. Shared JIT invokes it once per fresh adapter
+after compilation, disk-cache loading, or grouped compilation. It uses the
+already selected spec in `BackendContext`; adapters do not import target-owned
+decorators. The default `None` preserves the original callable. Wrappers must
+preserve arguments, return values, and exception propagation. Optional framework
+imports and target-specific configuration belong in the target-owned callback.
+
 Only add a new execution backend when no existing implementation can consume
 the target output or drive its runtime API. That is a separate integration
 task. Concrete adapters currently live under `tilelang/jit/adapter`, while

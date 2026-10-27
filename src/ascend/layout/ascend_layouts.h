@@ -51,8 +51,8 @@ Layout makeAscendNDLayout(const tirx::Buffer &buffer);
 ///
 /// Produces a Buffer sharing phys_buf->data, with:
 ///   - shape = physical extents (from MapRegionBounds)
-///   - strides = row-major strides of phys_buf shape
-///   - elem_offset = sum(phys_region[i].min * strides[i])
+///   - strides = phys_buf strides, or row-major strides inferred from its shape
+///   - elem_offset = phys_buf.elem_offset + sum(min_i * stride_i)
 ///
 /// The result is a plain strided buffer — no layout knowledge needed by
 /// the consumer.
@@ -126,6 +126,15 @@ bool TryExtractAscendFractalLayout(const Layout &layout,
 bool TryExtractAscendFractalRegion(const Layout &layout,
                                    const ffi::Array<Range> &logical_region,
                                    AscendFractalRegionInfo *out);
+
+namespace attr {
+
+// Copy lowering transfers the destination pitch to its tvm_access_ptr.
+// LowerTileOp uses it to remap matrix offsets while retaining the allocation's
+// leading-plane / buffer-version stride.
+constexpr const char *kL0AccessPitch = "tl.ascend_l0_access_pitch";
+
+} // namespace attr
 
 } // namespace tl
 } // namespace tvm

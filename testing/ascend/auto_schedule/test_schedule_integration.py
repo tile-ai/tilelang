@@ -10,7 +10,7 @@ import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import nodes, calls, allocated_buffer
+from testing.ascend._ir import nodes, calls, allocated_buffer, statements
 
 TILE = 16
 STEPS = 4
@@ -189,6 +189,105 @@ def test_oob_copy_padding_does_not_serialize_mte2():
     # Grouping the MTE2 writes must preserve the handoff to the L1 consumer.
     for operation in ("set", "wait"):
         assert [call for call in calls(after, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE2_MTE1"]
+
+
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float4_e2m1fn"], ids=["fp8", "fp4"])
+@pytest.mark.parametrize("transpose", [False, True], ids=["k-contiguous", "mn-contiguous"])
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_per_core_mx_copy_padding_survives_lowering(dtype, transpose, explicit_task):
+    mn, k_alloc = 64, 128
+    shape = (k_alloc, mn) if transpose else (mn, k_alloc)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((mn, k_alloc), dtype),
+        B: T.Tensor((mn, k_alloc), dtype),
+        SA: T.Tensor((2, mn), "uint16"),
+        SB: T.Tensor((2, mn), "uint16"),
+        C: T.Tensor((mn, mn), "float32"),
+        actual_k: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_l1(shape, dtype)
+            b = T.alloc_l1(shape, dtype)
+            sa = T.alloc_l1((mn, 2), "uint16")
+            sb = T.alloc_l1((mn, 2), "uint16")
+            a0 = T.alloc_l0a(shape, dtype)
+            b0 = T.alloc_l0b(shape, dtype)
+            sa0 = T.alloc_l0a_sf(a0, sf_shape=(mn, 2))
+            sb0 = T.alloc_l0b_sf(b0, sf_shape=(mn, 2))
+            acc = T.alloc_l0c((mn, mn), "float32")
+            k = T.min(T.max(actual_k, 65), k_alloc)
+            # OOB insertion, rather than the DSL, creates the conditional fill.
+            with T.PerCoreTask():
+                if explicit_task:
+                    with T.Task():
+                        if transpose:
+                            T.copy(A[:, :k], a[:k, :], transpose=True)
+                        else:
+                            T.copy(A[:, :k], a[:, :k])
+                else:
+                    if transpose:
+                        T.copy(A[:, :k], a[:k, :], transpose=True)
+                    else:
+                        T.copy(A[:, :k], a[:, :k])
+            if transpose:
+                T.copy(B[:, :k], b[:k, :], transpose=True)
+            else:
+                T.copy(B[:, :k], b[:, :k])
+            T.copy(SA, sa, transpose=True)
+            T.copy(SB, sb, transpose=True)
+            T.copy(a, a0)
+            T.copy(b, b0)
+            T.copy(sa, sa0)
+            T.copy(sb, sb0)
+            T.gemm_blockscaled(a0, b0, acc, sa0, sb0, transpose_A=transpose, transpose_B=not transpose, clear_accum=True)
+            T.copy(acc, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits", "tl.InsertSync"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend", enable_device_compile=False)
+    assert artifact.kernel_source and artifact.device_mod
+    needs_fill = transpose or dtype == "float8_e4m3fn"
+    for name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits"):
+        (group,) = [node for node in nodes(snapshots[name], tirx.AttrStmt) if node.attr_key == "tl.ascend_per_core_task"]
+        assert len(calls(group, "tl.tileop.ascend_copy")) == 1
+        assert len(calls(group, "tl.tileop.fill")) == int(needs_fill)
+        if needs_fill:
+            (task,) = [node for node in nodes(group, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+            assert calls(task.body.seq[0], "tl.tileop.ascend_copy")
+            (guard,) = nodes(task, tirx.IfThenElse)
+            assert len(calls(guard, "tl.tileop.fill")) == 1
+
+    scheduled = snapshots["tl.InsertSync"]
+    assert not [call for call in calls(scheduled, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # InsertSync may coalesce the A/B handoff. Completion must follow the
+    # PerCoreTask copy and padding, rather than sit inside a padding guard.
+    operations = [(stmt.value, parents) for stmt, parents in statements(scheduled) if isinstance(stmt, tirx.Evaluate)]
+    notify_idx = next(
+        idx
+        for idx, (call, _) in enumerate(operations)
+        if isinstance(call, tirx.Call) and call.op.name == "tl.ascend_set_flag" and call.args[0].value == "MTE2_MTE1"
+    )
+    notify, parents = operations[notify_idx]
+    assert not any(isinstance(parent, tirx.IfThenElse) for parent in parents)
+    before_notify = [call for call, _ in operations[:notify_idx] if isinstance(call, tirx.Call)]
+    assert sum(call.op.name == "tl.tileop.ascend_copy" for call in before_notify) >= 1
+    assert sum(call.op.name == "tl.tileop.fill" for call in before_notify) >= int(needs_fill)
+    assert any(
+        isinstance(call, tirx.Call)
+        and call.op.name == "tl.ascend_wait_flag"
+        and call.args[0].value == "MTE2_MTE1"
+        and call.args[1].same_as(notify.args[1])
+        for call, _ in operations[notify_idx + 1 :]
+    )
 
 
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
@@ -586,7 +685,7 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     T.copy(ub, C[i, :, :])
                     progress += 1
 
-    resolved = schedule(main, through="ResolveCore", auto_schedule=False)
+    resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
     assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
     masks = {
@@ -872,3 +971,289 @@ def test_scalar_snapshot_precedes_pipeline_update():
     a = torch.arange(16, dtype=torch.float32)
     result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
     torch.testing.assert_close(result.cpu(), 2 * (a.cumsum(0) - a), rtol=0, atol=0)
+
+
+def _placed_versioned_kernel(b_address, unlimit=False, rows=16):
+    @T.prim_func
+    def main(A: T.Tensor((4, rows, 16), "bfloat16"), B: T.Tensor((4, 16, 16), "bfloat16"), C: T.Tensor((4, rows, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_l1((rows, 16), "bfloat16")
+            b = T.alloc_l1((16, 16), "bfloat16")
+            a_view = T.view(a, shape=(rows, 16))
+            aq = T.alloc_l0a((rows, 16), "bfloat16")
+            bk = T.alloc_l0b((16, 16), "bfloat16")
+            c = T.alloc_l0c((rows, 16), "float32")
+            T.annotate_buffer_versions({a: 2, b: 2, aq: 2, bk: 2, c: 2})
+            T.annotate_buffer_addresses({a: 0, a_view: 0, b: b_address, aq: 512, bk: 1024, c: 2048})
+            if unlimit:
+                T.annotate_unlimit_memory("shared.l1")
+            for i in T.Pipelined(4, num_stages=2, annotations={"enable_offset": True}):
+                with T.Stage(0), T.Task():
+                    T.copy(A[i, :, :], a)
+                    T.copy(B[i, :, :], b)
+                with T.Stage(1):
+                    T.copy(a_view, aq)
+                    T.copy(b, bk)
+                    T.gemm(aq, bk, c, transpose_B=True, clear_accum=True)
+                    T.copy(c, C[i, :, :])
+
+    return main
+
+
+def test_pipeline_preserves_addresses_across_versions_layout_remap_and_flatten():
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.MaterializeMultiBuffer", "tl.LowerScheduledTIR", "tl.AscendLowerTileOp", "tl.MergeUBAllocations"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_placed_versioned_kernel(262144), target="ascend")
+    physical = snapshots["tl.MaterializeMultiBuffer"]
+    buffers = [buffer for block in nodes(physical, tirx.SBlock) for buffer in block.alloc_buffers if buffer.scope() == "shared.l1"]
+    assert len(buffers) == 2 and all(int(buffer.shape[0]) == 2 for buffer in buffers)
+    for stage in ("tl.LowerScheduledTIR", "tl.AscendLowerTileOp"):
+        mod = snapshots[stage]
+        (placement,) = [node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.ascend_buffer_addresses"]
+        storages = [
+            buffer.data
+            for block in nodes(mod, tirx.SBlock)
+            for buffer in block.alloc_buffers
+            if buffer.scope() in ("shared.l1", "shared.l0a", "shared.l0b", "shared.l0c")
+        ]
+        assert len(placement.node) == 5
+        assert all(any(key.same_as(storage) for storage in storages) for key in placement.node)
+        assert sorted(int(address) for address in placement.node.values()) == [0, 512, 1024, 2048, 262144]
+    merged = snapshots["tl.MergeUBAllocations"]
+    allocations = [node for func in merged.functions.values() for node in nodes(func, tirx.AllocBuffer)]
+    (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.l1.dyn"]
+    assert int(allocation.buffer.shape[0]) == 262144 + 1024
+    for scope, expected_bytes in [("shared.l0a.dyn", 1536), ("shared.l0b.dyn", 2048), ("shared.l0c.dyn", 4096)]:
+        (allocation,) = [node for node in allocations if node.buffer.scope() == scope]
+        assert int(allocation.buffer.shape[0]) == expected_bytes
+    assert not any(
+        node.attr_key == "tl.ascend_buffer_addresses" for func in merged.functions.values() for node in nodes(func, tirx.AttrStmt)
+    )
+    assert artifact.kernel_source and artifact.device_mod
+
+
+def test_overlap_is_checked_after_automatic_versions_expand():
+    # Each logical tile is only 512 bytes, but two physical versions occupy 1024.
+    with pytest.raises(tvm.error.InternalError, match="Buffer placements overlap"):
+        tilelang.lower(_placed_versioned_kernel(512), target="ascend")
+
+
+def test_fractal_padding_is_included_in_the_physical_footprint():
+    # Two 17x16 BF16 logical tiles take 1088 bytes, but padded 32x16 tiles
+    # take 2048. An address of 1536 therefore overlaps only after padding.
+    with pytest.raises(tvm.error.InternalError, match="Buffer placements overlap"):
+        tilelang.lower(_placed_versioned_kernel(1536, rows=17), target="ascend")
+
+
+@pytest.mark.parametrize("unlimit", [False, True])
+def test_holes_and_versions_cannot_exceed_physical_capacity(unlimit):
+    # The original tile fits; the final second version crosses the L1 boundary.
+    with pytest.raises(tvm.error.InternalError, match="capacity of 524288 bytes"):
+        tilelang.lower(_placed_versioned_kernel(524288 - 512, unlimit), target="ascend")
+
+
+def test_unscheduled_pipeline_rejects_placement_instead_of_dropping_it():
+    with (
+        pytest.raises(tvm.error.InternalError, match="requires the Ascend scheduled pipeline"),
+        tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}),
+    ):
+        tilelang.lower(_placed_versioned_kernel(262144), target="ascend")
+
+
+def _placed_ub_kernel(address=64, versions=2, simt=False):
+    @T.prim_func
+    def main(A: T.Tensor((4, 64), "float32"), C: T.Tensor((4, 64), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            alias = T.view(ub, shape=(64,))
+            # Placement may precede the version declaration and use an alias.
+            T.annotate_buffer_addresses({alias: address})
+            if versions == 1:
+                T.annotate_buffer_versions({ub: 1})
+            else:
+                T.annotate_buffer_versions({ub: (versions, "counter")})
+            for i in T.Pipelined(4, num_stages=2):
+                T.copy(A[i, :], ub)
+                if simt:
+                    with T.SimtVF(threads=32):
+                        for j in T.Parallel(64):
+                            ub[j] = ub[j] + 1.0
+                T.copy(alias, C[i, :])
+
+    return main
+
+
+@pytest.mark.parametrize("versions,simt", [(1, False), (2, False), (2, True)])
+def test_ub_placement_survives_version_and_vf_lowering(versions, simt):
+    with tvm.target.Target("ascend"):
+        artifact = tilelang.lower(_placed_ub_kernel(versions=versions, simt=simt), target="ascend")
+    allocations = [node for func in artifact.device_mod.functions.values() for node in nodes(func, tirx.AllocBuffer)]
+    (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.dyn"]
+    assert int(allocation.buffer.shape[0]) == 64 + versions * 256
+    assert "__ubuf__" in artifact.kernel_source
+
+
+def test_simt_context_limits_placement_after_full_lowering():
+    with pytest.raises(tvm.error.InternalError, match="capacity of 221184 bytes"), tvm.target.Target("ascend"):
+        tilelang.lower(_placed_ub_kernel(address=216 * 1024 - 256, simt=True), target="ascend")
+
+
+@pytest.mark.parametrize("owner", [0, 1], ids=["aiv0", "aiv1"])
+def test_ub_placement_keeps_only_active_subcore_storage(owner):
+    @T.prim_func
+    def main(A: T.Tensor((16, 16), "float32"), C: T.Tensor((16, 16), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            cube = T.alloc_l1((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            T.annotate_buffer_versions({ub: 1})
+            T.annotate_buffer_addresses({ub: 64})
+            T.copy(A, cube)
+            if sid == owner:
+                T.copy(A, ub)
+                T.copy(ub, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AssignCore":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    (root,) = [block for block in nodes(snapshots["tl.AssignCore"], tirx.SBlock) if "tl.ascend_buffer_addresses" in block.annotations]
+    (buffer,) = [buffer for buffer in root.alloc_buffers if buffer.scope() == "shared.dyn"]
+    addresses = root.annotations["tl.ascend_buffer_addresses"]
+    assert len(addresses) == 1 and int(addresses[buffer.data]) == 64
+    assert int(root.annotations["tl.buffer_versions_map"][buffer.data]) == 1
+    assert int(root.annotations["tl.aiv_storage_map"][buffer.data]) == owner
+
+    allocations = [node for func in artifact.device_mod.functions.values() for node in nodes(func, tirx.AllocBuffer)]
+    (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.dyn"]
+    assert int(allocation.buffer.shape[0]) == 64 + 16 * 16 * 4
+    assert artifact.kernel_source
+
+
+@pytest.mark.parametrize("place_live", [False, True])
+@pytest.mark.parametrize("dead_use", ["unused", "constant-branch"])
+def test_placement_drops_eliminated_allocations(place_live, dead_use):
+    @T.prim_func
+    def main(A: T.Tensor((64,), "float32"), C: T.Tensor((64,), "float32")):
+        with T.Kernel(1) as bx:
+            live = T.alloc_shared((64,), "float32")
+            dead = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({live: 1, dead: 1})
+            if place_live:
+                T.annotate_buffer_addresses({live: 512, dead: 64})
+            else:
+                T.annotate_buffer_addresses({dead: 64})
+            if dead_use == "constant-branch" and bx >= 1:
+                T.copy(A, dead)
+            T.copy(A, live)
+            T.copy(live, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendRemoveNoOp":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    after = snapshots["tl.AscendRemoveNoOp"]
+    addresses = [node.node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_buffer_addresses"]
+    assert len(addresses) == int(place_live)
+    if place_live:
+        (storage,) = addresses[0]
+        assert int(addresses[0][storage]) == 512
+        assert any(storage.same_as(node.buffer.data) for node in nodes(after, tirx.AllocBuffer))
+    allocations = [
+        node.buffer
+        for func in artifact.device_mod.functions.values()
+        for node in nodes(func, tirx.AllocBuffer)
+        if node.buffer.scope() == "shared.dyn"
+    ]
+    (allocation,) = allocations
+    assert int(allocation.shape[0]) * tvm.DataType(allocation.dtype).bits // 8 == (512 if place_live else 0) + 256
+    assert artifact.kernel_source
+
+
+@pytest.mark.parametrize("pointer_kind", ["raw", "access_ptr"])
+@pytest.mark.parametrize("address", [0, 64])
+@pytest.mark.parametrize("dtype,ctype", [("int32", "int32_t"), ("float16", "half")])
+def test_placement_rewrites_extern_storage_pointers(pointer_kind, address, dtype, ctype):
+    @T.prim_func
+    def main(out: T.Tensor((1,), dtype)):
+        with T.Kernel(1):
+            T.import_source(f"__aicore__ inline {ctype} read_second(__ubuf__ {ctype}* p) {{ return p[1]; }}\n")
+            a = T.alloc_shared((8,), dtype)
+            T.annotate_buffer_versions({a: 1})
+            T.annotate_buffer_addresses({a: address})
+            with T.Task():
+                a[0] = T.Cast(dtype, 100)
+                a[1] = T.Cast(dtype, 200)
+                if pointer_kind == "raw":
+                    out[0] = T.call_extern(dtype, "read_second", a.data) + a[0]
+                else:
+                    out[0] = T.call_extern(dtype, "read_second", T.access_ptr(a[0], "r", extent=2)) + a[0]
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.MergeUBAllocations":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    merged = snapshots["tl.MergeUBAllocations"]
+    (allocation,) = [
+        node.buffer for func in merged.functions.values() for node in nodes(func, tirx.AllocBuffer) if node.buffer.scope() == "shared.dyn"
+    ]
+    (external,) = [
+        call for func in merged.functions.values() for call in calls(func, "tirx.call_extern") if call.args[0].value == "read_second"
+    ]
+    pointer = external.args[1]
+    assert pointer.op.name == "tirx.tvm_access_ptr"
+    assert pointer.args[0].dtype == dtype
+    assert pointer.args[1].same_as(allocation.data)
+    assert int(tvm.arith.Analyzer().simplify(pointer.args[2])) * tvm.DataType(dtype).bits // 8 == address
+    assert artifact.kernel_source
+
+
+def _placed_ss_kernel():
+    @T.prim_func
+    def main(seed: T.Tensor((16, 16), "float16"), out: T.Tensor((4, 2), "uint32")):
+        with T.MixedKernel(1) as (_, sid):
+            words = T.alloc_ss((2,), "uint32")
+            cube = T.alloc_l1((16, 16), "float16")
+            T.annotate_buffer_versions({words: 2})
+            T.annotate_buffer_addresses({words: 96})
+            T.copy(seed, cube)
+            for i in T.Pipelined(4, num_stages=2, annotations={"enable_offset": True}):
+                with T.Stage(0):
+                    words[sid] = T.Cast("uint32", (i + 1) * (100 + sid))
+                with T.Stage(1):
+                    out[i, 0] = words[0]
+                    out[i, 1] = words[1]
+
+    return main
+
+
+def test_ss_placement_survives_cross_core_version_lowering():
+    artifact = tilelang.lower(_placed_ss_kernel(), target="ascend")
+    allocations = [node for func in artifact.device_mod.functions.values() for node in nodes(func, tirx.AllocBuffer)]
+    (allocation,) = [node for node in allocations if node.buffer.scope() == "shared.ss.dyn"]
+    assert int(allocation.buffer.shape[0]) == 128  # Start at byte 96; two 8-byte versions, rounded to 32.
+    assert "volatile __ssbuf__ uint8_t" in artifact.kernel_source

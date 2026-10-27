@@ -9,7 +9,7 @@
  * insert copy control flow: LowerDMACopy derives both empty-tile and
  * fixed/singleton-axis in-bounds guards from the clamped ranges after
  * AutoSchedule. For a padded GM->L1 copy it appends the
- * padding fill(s) as semantic tl.fill statements. For FP8 L1 data consumed
+ * padding fill(s) as semantic tl.fill statements. For FP8/FP4 L1 data consumed
  * by an MX scale-bearing L1->L0 copy, it also emits DeepGEMM-compatible
  * K-tail fills. Each copy and its padding form one MTE2 task, with any
  * MX tail predicate guarding only the fill inside that task.
@@ -238,7 +238,7 @@ private:
   VarAxisMap result_;
 };
 
-// Build DeepGEMM's fill_tail_block for an actual-sized FP8 GM->L1 copy. The
+// Build DeepGEMM's fill_tail_block for an actual-sized MX GM->L1 copy. The
 // destination allocation retains the full static tile geometry while the copy
 // ranges carry actual_mn/actual_k. LayoutInference has already tagged the L1
 // buffer as MajorK or MajorMN, so the physical fill can be selected without
@@ -249,11 +249,10 @@ Optional<Stmt> MakeMxKTailFill(const Copy &copy, LogicalAxis semantic_k_axis,
   if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst)) {
     return std::nullopt;
   }
-  // FP4 has a different logical-K-to-byte mapping. Keep this automatic path
-  // scoped to dense FP8; existing full-region OOB padding still handles FP4.
   // Fill geometry is defined entirely by the destination L1 region and its
   // semantic K axis, so a GM->L1 transpose does not change it.
-  if (copy->dst->dtype.lanes() != 1 || !copy->dst->dtype.is_float8() ||
+  if (copy->dst->dtype.lanes() != 1 ||
+      (!copy->dst->dtype.is_float8() && !copy->dst->dtype.is_float4_e2m1fn()) ||
       copy->dst_range.size() != copy->dst->shape.size() ||
       copy->dst_range.size() < 2) {
     return std::nullopt;
@@ -283,7 +282,7 @@ Optional<Stmt> MakeMxKTailFill(const Copy &copy, LogicalAxis semantic_k_axis,
   auto C = [&](int64_t value) { return make_const(actual_k.dtype(), value); };
   PrimExpr k64 = analyzer->Simplify(FloorDiv(actual_k + C(63), C(64)) * C(64));
   ICHECK(analyzer->CanProveEqual(FloorMod(shape_k, C(64)), C(0)))
-      << "Ascend MX FP8 K-tail fill requires the L1 K allocation extent to "
+      << "Ascend MX K-tail fill requires the L1 K allocation extent to "
          "be divisible by 64, got "
       << shape_k << " for buffer " << copy->dst->name << " with shape "
       << copy->dst->shape << " and layout kind " << static_cast<int>(info.kind);
@@ -293,16 +292,19 @@ Optional<Stmt> MakeMxKTailFill(const Copy &copy, LogicalAxis semantic_k_axis,
   Array<Range> fill_region = copy->dst_range;
   PrimExpr needs_fill;
   if (is_k_major) {
-    PrimExpr nz32 =
-        analyzer->Simplify(FloorDiv(actual_k + C(31), C(32)) * C(32));
-    needs_fill = analyzer->Simplify(nz32 < k64);
-    fill_region.Set(k_axis,
-                    Range::FromMinExtent(nz32, analyzer->Simplify(k64 - nz32)));
+    // GM->L1 already clears one complete C0, including 64 logical FP4
+    // elements. Only MX values beyond that hardware padding need a fill.
+    int64_t c0 = 256 / copy->dst->dtype.bits();
+    PrimExpr padded_k =
+        analyzer->Simplify(FloorDiv(actual_k + C(c0 - 1), C(c0)) * C(c0));
+    needs_fill = analyzer->Simplify(padded_k < k64);
+    fill_region.Set(k_axis, Range::FromMinExtent(
+                                padded_k, analyzer->Simplify(k64 - padded_k)));
     fill_region.Set(mn_axis, Range::FromMinExtent(C(0), shape_mn));
   } else {
     ICHECK(analyzer->CanProveEqual(FloorMod(shape_mn, info.c0), C(0)))
-        << "Ascend MX FP8 K-tail fill requires a MajorMN extent divisible by "
-           "the FP8 C0 width, got MN="
+        << "Ascend MX K-tail fill requires a MajorMN extent divisible by "
+           "the operand C0 width, got MN="
         << shape_mn << " and C0=" << info.c0;
     PrimExpr tail_k = analyzer->Simplify(k64 - actual_k);
     needs_fill = analyzer->Simplify(actual_k < k64);

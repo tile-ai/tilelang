@@ -94,7 +94,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
       reduce::CheckAllReduceWidth(reducing_threads, scale,
                                   "tl.finalize_reducer");
 
-      bool use_batch = effective_batch > 1 &&
+      bool use_batch = effective_batch > 1 && layout_batch_size > 0 &&
                        reducing_threads > Impl::WarpSize(lower_args.target);
 
       if (use_batch) {
@@ -106,9 +106,17 @@ template <typename Impl> struct FinalizeReducerLowerer {
             workspace_stride, lower_args.target);
         int ws_size = workspace_stride * static_cast<int>(effective_batch);
         PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
-        Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
-        step_stmts.push_back(
-            Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+
+        // The remapped buffer has compact physical storage.
+        Buffer flat_buffer = buffer.GetFlattenedBuffer();
+        for (int64_t offset = 0; offset < layout_batch_size;
+             offset += effective_batch) {
+          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                              {BufferLoad(flat_buffer, {Integer(offset)})});
+          Array<PrimExpr> args = {StringImm(allreduce), ptr, workspace};
+          step_stmts.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+        }
         continue;
       }
 
