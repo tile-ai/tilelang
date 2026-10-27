@@ -94,6 +94,7 @@ def _rng_vector_local(distribution, unrolled):
     return main
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("distribution", ["uniform", "normal"])
 @pytest.mark.parametrize("unrolled", [False, True], ids=["literal", "unrolled"])
 def test_pto_rng_vector_local_lane_offsets(distribution, unrolled):
@@ -109,6 +110,7 @@ def test_pto_rng_vector_local_lane_offsets(distribution, unrolled):
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.pto
 @pytest.mark.parametrize("distribution", ["uniform", "normal"])
 @pytest.mark.parametrize("unrolled", [False, True], ids=["literal", "unrolled"])
 def test_pto_rng_vector_local_advances_each_lane(distribution, unrolled):

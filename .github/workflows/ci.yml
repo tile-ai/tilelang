@@ -473,8 +473,10 @@ jobs:
         backend:
           - name: AscendC
             target: ascend
+            unit_markers: not pto
           - name: PTO
             target: pto
+            unit_markers: pto
     runs-on: linux-amd64-a5-4
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
@@ -556,24 +558,24 @@ jobs:
           source .venv/bin/activate
           python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
 
-      # Run the shared regression suite once, including its explicit PTO cases.
-      - name: Run Ascend unit tests
-        id: ascend-unit-tests
-        if: ${{ !cancelled() && matrix.backend.target == 'ascend' && steps.ascend-build.outcome == 'success' }}
+      - name: Run ${{ matrix.backend.name }} unit tests
+        id: backend-unit-tests
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
         shell: bash
+        env:
+          TEST_MARKERS: ${{ matrix.backend.unit_markers }}
         run: |
           source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 testing/ascend
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
 
       - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
         shell: bash
         env:
           BACKEND_NAME: ${{ matrix.backend.name }}
-          TEST_TARGET: ${{ matrix.backend.target }}
           BUILD_RESULT: ${{ steps.ascend-build.outcome }}
           EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
-          UNIT_RESULT: ${{ steps.ascend-unit-tests.outcome }}
+          UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
         run: |
           {
             echo "### Test for ${BACKEND_NAME}"
@@ -582,9 +584,7 @@ jobs:
             echo "| --- | --- |"
             echo "| Build | ${BUILD_RESULT} |"
             echo "| ${BACKEND_NAME} examples | ${EXAMPLES_RESULT} |"
-            if [[ "${TEST_TARGET}" == "ascend" ]]; then
-              echo "| Unit tests | ${UNIT_RESULT} |"
-            fi
+            echo "| Unit tests | ${UNIT_RESULT} |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
