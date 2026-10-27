@@ -3411,10 +3411,11 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
     }
   }
 
-  DataType registered_dtype = ((scope == "shared" || scope == "local") &&
-                               alloc_dtype.is_fixed_length_vector())
-                                  ? alloc_dtype.element_of()
-                                  : alloc_dtype;
+  DataType registered_dtype =
+      ((scope == "shared" || scope == "local" || scope == "shared.dyn") &&
+       alloc_dtype.is_fixed_length_vector())
+          ? alloc_dtype.element_of()
+          : alloc_dtype;
   RegisterHandleType_(op->buffer->data.get(), registered_dtype);
 }
 
@@ -4049,8 +4050,10 @@ std::string CodeGenTileLangCuTeDSL::GetBufferPtr_(const BufferNode *buffer,
   }
   if (scope.empty())
     scope = GetPtrStorageScope(buffer->data);
+  // Vector-typed shared / shared.dyn / local buffers are backed by a scalar
+  // storage type (see AllocBufferNode), so their indices are lane-scaled.
   const bool scalarized_local_vector_buffer =
-      (scope == "local" || scope == "shared") &&
+      (scope == "local" || scope == "shared" || scope == "shared.dyn") &&
       buffer_element_dtype.is_fixed_length_vector();
   // CuTeDSL only supports i1 (Boolean) in rmem; use Uint8 for gmem pointers.
   DataType effective_dtype = scalarized_local_vector_buffer
@@ -4206,8 +4209,10 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
   }
 
   DataType buffer_element_dtype = buffer->dtype;
+  // Vector-typed shared / shared.dyn / local buffers are backed by a scalar
+  // storage type (see AllocBufferNode), so their indices are lane-scaled.
   const bool scalarized_local_vector_buffer =
-      (scope == "local" || scope == "shared") &&
+      (scope == "local" || scope == "shared" || scope == "shared.dyn") &&
       buffer_element_dtype.is_fixed_length_vector();
   // CuTeDSL only supports i1 (Boolean) in rmem. For gmem/shared bool buffers,
   // use Uint8 instead (matches PyTorch's torch.bool memory layout).
@@ -4297,6 +4302,12 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     }
   } else if (scalarized_local_vector_buffer &&
              t == buffer_element_dtype.element_of()) {
+    if (scope == "shared.dyn") {
+      // shared.dyn tensors are declared with shape (1,), so subscripting them
+      // would read out of bounds; take the pointer path instead.
+      return "tl.make_tensor_at_offset(" + vid + ".iterator, " +
+             scalarized_index_str + ", (1,), div_by=1)[0]";
+    }
     return vid + "[" + index_str + "]";
   } else {
     const int num = t.bits() * t.lanes();
