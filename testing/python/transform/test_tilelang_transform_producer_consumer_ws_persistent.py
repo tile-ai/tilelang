@@ -853,6 +853,37 @@ def producer_prelude_before_outer_serial():
     return main
 
 
+def producer_prelude_only_before_outer_serial():
+    """Only the producer has a prelude, and it sits before the outer loop.
+
+    Nothing is extracted into a branch, so the rebuilt WS body is the only
+    thing that can point the pipelined copy at the cloned local. The
+    accumulator is never cleared here: this shape is for the transform's
+    output, not for numerics.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 160), T.float16),
+        B: T.Tensor((64, 160), T.float16),
+        C: T.Tensor((128, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            k_off = T.alloc_local((1,), T.int32)
+            k_off[0] = 1
+            for p in T.serial(2):
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, (k + k_off[0]) * 32], A_s)
+                    T.copy(B[0, (k + k_off[0]) * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+                T.copy(C_l, C[p * 64, 0])
+
+    return main
+
+
 def _compile_ws(func):
     assert "tl_tiled_ws_applied" in _apply_ws_pass(func)["main"].script()
     return tilelang.compile(
@@ -870,6 +901,16 @@ def _prelude_inputs(K=128):
     A = torch.randn(64, K, dtype=torch.float16, device="cuda")
     B = torch.randn(64, K, dtype=torch.float16, device="cuda")
     return A, B, A.float() @ B.float().T
+
+
+@tilelang.testing.requires_cuda
+def test_ws_prelude_only_before_outer_loop_uses_the_cloned_local():
+    """The guarded prelude writes the cloned local, so the loop must read it."""
+    script = _apply_ws_pass(producer_prelude_only_before_outer_serial())["main"].script()
+    assert "tl_tiled_ws_applied" in script
+    assert "k_off_producer_ws[0] = 1" in script, "guarded prelude does not initialize the clone"
+    assert "k_off_producer_ws[0]) * 32" in script, "pipelined copy reads the original local"
+    assert "k_off[0]) * 32" not in script
 
 
 @tilelang.testing.requires_cuda
