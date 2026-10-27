@@ -464,13 +464,31 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
     PrintIndent();
     stream << vec << " = tl.make_rmem_tensor((" << lanes << ",), "
            << rng_dtype.str() << ")\n";
-    // curand's 64-bit uniform helper draws a whole block for two results, so a
-    // two-lane store has to go through it to stay on the same stream.
-    if (lanes == 2 && op->value.dtype().is_float() &&
-        op->value.dtype().bits() == 64 &&
-        Downcast<StringImm>(call->args[0])->value == "uniform") {
+    // curand's vector helpers do not always agree with repeating the scalar
+    // form: the 64-bit uniform takes a whole block for two results, and the
+    // normal helpers generate a fresh pair without touching the scalar
+    // Box-Muller cache. Use the matching helper wherever the CUDA codegen does.
+    const DataType value_dtype = op->value.dtype();
+    const bool is_float = value_dtype.is_float();
+    const int bits = value_dtype.bits();
+    std::string helper;
+    if (call->op.same_as(tl::rng_rand_float())) {
+      const std::string dist = Downcast<StringImm>(call->args[0])->value;
+      if (dist == "uniform" && bits == 64 && lanes == 2) {
+        helper = "rng_uniform2_double";
+      } else if (dist == "normal" && bits == 32 && lanes == 2) {
+        helper = "rng_normal2";
+      } else if (dist == "normal" && bits == 32 && lanes == 4) {
+        helper = "rng_normal4";
+      } else if (dist == "normal" && bits == 64 && lanes == 2) {
+        helper = "rng_normal2_double";
+      }
+    }
+    ICHECK(helper.empty() || is_float)
+        << "rng vector helper chosen for a non-float draw";
+    if (!helper.empty()) {
       PrintIndent();
-      stream << "tl.rng_uniform2_double(" << rng_state_name_ << ", " << vec
+      stream << "tl." << helper << "(" << rng_state_name_ << ", " << vec
              << ")\n";
     } else {
       for (int i = 0; i < lanes; ++i) {

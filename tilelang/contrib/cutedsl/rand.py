@@ -5,13 +5,25 @@ This is a port of the ``curandStatePhilox4_32_10_t`` part of
 because it has to survive across conditional code, which is how curand keeps
 it in a local struct.
 
-Uniform integers, uniform floats and both normal siblings reproduce curand
-bit for bit, including the Box-Muller transform and its cached second sample.
+Integers and uniform floats reproduce curand bit for bit. The normals run the
+same Box-Muller transform with the same cached sibling and the same fast
+sin/cos, but that approximation is not bit-identical to curand's ``__sincosf``
+for every input, and the double pair uses ``sincospi``, which CuTeDSL does not
+expose; both agree to a few ulps and the generator position always matches.
 """
 
 from __future__ import annotations
 
-__all__ = ["rng_state", "rng_init", "rng_rand", "rng_rand_float", "rng_uniform2_double"]
+__all__ = [
+    "rng_state",
+    "rng_init",
+    "rng_rand",
+    "rng_rand_float",
+    "rng_uniform2_double",
+    "rng_normal2",
+    "rng_normal4",
+    "rng_normal2_double",
+]
 
 import struct
 
@@ -242,6 +254,44 @@ def rng_uniform2_double(state, out, *, loc=None, ip=None) -> None:
     x0, x1, y0, y1 = _rand4(state)
     out[0] = _uniform_double_hq(x0, x1)
     out[1] = _uniform_double_hq(y0, y1)
+
+
+def _fresh_pair32(state):
+    """One Box-Muller pair from two fresh draws, leaving the cache untouched."""
+    return _box_muller32(rng_rand(state), rng_rand(state))
+
+
+@dsl_user_op
+def rng_normal2(state, out, *, loc=None, ip=None) -> None:
+    """Two float32 normals, like ``curand_normal2``.
+
+    curand's vector helpers generate a fresh pair and keep the scalar
+    Box-Muller cache as it is, so a later scalar draw still returns its
+    sibling.
+    """
+    first, second = _fresh_pair32(state)
+    out[0] = first
+    out[1] = second
+
+
+@dsl_user_op
+def rng_normal4(state, out, *, loc=None, ip=None) -> None:
+    """Four float32 normals from one block, like ``curand_normal4``."""
+    x0, x1, x2, x3 = _rand4(state)
+    first, second = _box_muller32(x0, x1)
+    third, fourth = _box_muller32(x2, x3)
+    out[0] = first
+    out[1] = second
+    out[2] = third
+    out[3] = fourth
+
+
+@dsl_user_op
+def rng_normal2_double(state, out, *, loc=None, ip=None) -> None:
+    """Two float64 normals from one block, like ``curand_normal2_double``."""
+    first, second = _box_muller64(*_rand4(state))
+    out[0] = first
+    out[1] = second
 
 
 @dsl_user_op
