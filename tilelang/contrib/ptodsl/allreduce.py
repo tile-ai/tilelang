@@ -92,17 +92,20 @@ def _redux_integer_compat(op, value, *, with_signedness):
     return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), raw_value.type))
 
 
-def _redux_add(value):
+def redux_add(value):
+    """Sum reduce across warp lanes."""
     # redux_add takes no signedness argument.
     return _redux_integer_compat(pto.redux_add, value, with_signedness=False)
 
 
-def _redux_max(value):
+def redux_max(value):
+    """Max reduce across warp lanes."""
     # redux_max/min require an explicit integer signedness.
     return _redux_integer_compat(pto.redux_max, value, with_signedness=True)
 
 
-def _redux_min(value):
+def redux_min(value):
+    """Min reduce across warp lanes."""
     return _redux_integer_compat(pto.redux_min, value, with_signedness=True)
 
 
@@ -140,9 +143,9 @@ _REDUCER_COMBINE = {
 }
 
 _REDUCER_REDUX = {
-    "sum": _redux_add,
-    "max": _redux_max,
-    "min": _redux_min,
+    "sum": redux_add,
+    "max": redux_max,
+    "min": redux_min,
 }
 
 # Run the si32 strategy on the signless carrier with identity constants typed
@@ -497,6 +500,9 @@ def simt_allreduce_min(value, *, threads, scale=1, thread_offset=0, scratch=None
 
 
 __all__ = [
+    "redux_add",
+    "redux_max",
+    "redux_min",
     "simt_allreduce_sum",
     "simt_allreduce_max",
     "simt_allreduce_min",

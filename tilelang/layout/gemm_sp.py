@@ -125,15 +125,28 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
 
-    if mma_dtype in [T.float16, T.bfloat16] and buffer.dtype not in [T.uint16, T.int16]:
-        raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
-
-    if mma_dtype in ["float8_e4m3", "float8_e5m2", T.int8, T.uint8] and buffer.dtype not in [T.uint32, T.int32]:
-        raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
+    if mma_dtype in [T.float16, T.bfloat16, T.float32]:
+        if buffer.dtype not in [T.uint16, T.int16]:
+            raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
+    elif mma_dtype in ["float8_e4m3", "float8_e5m2", T.int8, T.uint8]:
+        if buffer.dtype not in [T.uint32, T.int32]:
+            raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
+    else:
+        # Without this the dtype guard above is a pair of allowlists with no
+        # fallback, so any other spelling falls through to the width-derived
+        # placement below and silently gets the wrong layout. The sm90 arm
+        # rejects unlisted dtypes the same way.
+        raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
     m, k = buffer.shape
     group = 32 if buffer.dtype.bits == 16 else 16
     interweave = 4 if buffer.dtype.bits == 16 else 2
+
+    # ref: https://github.com/pytorch/pytorch/blob/18acb4f62d1557fb068bfeec4622967885484da6/torch/sparse/_semi_structured_conversions.py#L72-L81
+    if m % group != 0:
+        raise ValueError(f"metadata M={m} must be a multiple of {group}")
+    if k % 2 != 0:
+        raise ValueError(f"metadata K={k} must be even")
 
     def ColumnMajorInterleaved(i: int, j: int) -> int:
         i = i // group * group + (i % 8) * interweave + (i % group) // 8

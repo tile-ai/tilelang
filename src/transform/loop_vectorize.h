@@ -53,13 +53,15 @@ int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+// The supplied context is read-only. Planning adds local bindings only to its
+// own clone; callers must not supply bindings from before a loop rewrite.
+int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
                      const LayoutMap &layout_map = {});
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);
 
-For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
                   const LayoutMap &layout_map = {}, int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
@@ -67,13 +69,19 @@ For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer);
 
-// Check if expr is invariant within vector boundaries
-bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
+// Check if expr is invariant within groups of consecutive unit-step iterations.
+// The minimum defaults to zero.
+bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
+                                     const PrimExpr &extent,
                                      int target_vectorized_size,
-                                     arith::Analyzer *analyzer);
+                                     arith::Analyzer *analyzer,
+                                     const PrimExpr &min = 0);
 
 /*!
  * \brief Check whether an element-offset expression supports a vector width.
+ *
+ * For unit-step loops, iteration k has logical index min + k in
+ * [min, min + extent). The minimum defaults to zero.
  *
  * With allow_broadcast=true, offsets invariant within a vector group are
  * accepted. For example, loading A[i // 4] at width 4 can load one element and
@@ -84,15 +92,15 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
  * simplify to a unit-stride Ramp whose base is divisible by the vector width.
  * Atomic destinations use this mode: four atomic additions to B[i // 4] update
  * the same element, whereas AtomicAddx4 would update four consecutive elements.
- * Alignment must hold for every group, not just at var == 0.
+ * Alignment must hold for every group, not just at the first iteration.
  *
  * The flag applies only to the analyzed address; an atomic's source value may
  * still broadcast. If the check fails, the planner can try a smaller width.
  */
-bool IndicesCanVectorize(const PrimExpr &expr, Var var,
-                         const PrimExpr &iter_var_size,
-                         int target_vectorized_size, arith::Analyzer *analyzer,
-                         bool allow_broadcast = true);
+bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
+                         const PrimExpr &extent, int target_vectorized_size,
+                         arith::Analyzer *analyzer, bool allow_broadcast = true,
+                         const PrimExpr &min = 0);
 
 } // namespace tl
 } // namespace tvm
