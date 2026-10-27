@@ -6,6 +6,8 @@ bits (1.0 came back as 0.5, 6.0 as 4.0); ``T.float8_e8m0fnu`` had no type at
 all. The FP4 types exist on gfx950, E8M0 on every ROCm target.
 """
 
+import math
+
 import pytest
 import torch
 import tilelang
@@ -19,9 +21,9 @@ def _arch():
     return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
 
 
-def _roundtrip(n, dtype):
+def _roundtrip(n, dtype, source=T.float32):
     @T.prim_func
-    def kernel(X: T.Tensor((n,), T.float32), Y: T.Tensor((n,), T.float32)):
+    def kernel(X: T.Tensor((n,), source), Y: T.Tensor((n,), T.float32)):
         with T.Kernel(1, threads=n):
             for i in T.Parallel(n):
                 Y[i] = T.cast(T.cast(X[i], dtype), T.float32)
@@ -74,6 +76,32 @@ def test_float_to_e8m0_rounds_up_to_a_power_of_two():
 
     y = torch.empty_like(x, device="cuda")
     _roundtrip(x.numel(), T.float8_e8m0fnu)(x.cuda(), y)
+
+    torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0, equal_nan=True)
+
+
+def _e8m0_of(v: float) -> float:
+    """|v| rounded up to a power of two in [2^-127, 2^127], computed from the double itself."""
+    if math.isnan(v):
+        return math.nan
+    if v == 0 or math.isinf(v):
+        return 2.0**-127 if v == 0 else 2.0**127
+    mantissa, exponent = math.frexp(abs(v))  # |v| = mantissa * 2^exponent, 0.5 <= mantissa < 1
+    return 2.0 ** min(max(exponent - 1 if mantissa == 0.5 else exponent, -127), 127)
+
+
+@tilelang.testing.requires_cdna
+def test_double_to_e8m0_rounds_the_double_itself():
+    # As __nv_fp8_e8m0(double), without rounding to float first: that would make
+    # the first three values powers of two (1, 2^-127, -1), which stay unchanged.
+    vals = [1 + 2.0**-25, 2.0**-127 * (1 + 2.0**-30), -(1 + 2.0**-40), 2.0**-127 * (1 - 2.0**-30)]
+    vals += [2.0**e for e in range(-20, 21)] + [3.0, 0.75, 1000.0, 2.0**-1074, 2.0**-130, 0.0, -0.0]
+    vals += [2.0**127 * (1 + 2.0**-30), 2.0**200, math.inf, -math.inf, math.nan]
+    x = torch.tensor(vals, dtype=torch.float64)
+    expected = torch.tensor([_e8m0_of(v) for v in vals], dtype=torch.float32)
+
+    y = torch.empty(x.numel(), dtype=torch.float32, device="cuda")
+    _roundtrip(x.numel(), T.float8_e8m0fnu, T.float64)(x.cuda(), y)
 
     torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0, equal_nan=True)
 

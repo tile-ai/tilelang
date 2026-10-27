@@ -1,6 +1,7 @@
 #pragma once
 #include <hip/amd_detail/amd_hip_fp8.h>
 #include <stdint.h>
+#include <type_traits>
 
 #define HIP_FP8_ENABLED 1
 
@@ -182,6 +183,24 @@ struct fp8_e8_t {
       ++exponent;
     }
     data = static_cast<unsigned char>(exponent == 0xFF ? 0xFE : exponent);
+  }
+  // A double converts directly, as with __nv_fp8_e8m0(double): narrowing it to
+  // float first can round it down onto a power of two (1 + 2^-25 to 1.0).
+  // Other argument types keep the float constructor.
+  template <typename T, typename = typename std::enable_if<
+                            std::is_same<T, double>::value>::type>
+  __device__ fp8_e8_t(T val) {
+    uint64_t bits = static_cast<uint64_t>(__double_as_longlong(val));
+    int exponent = static_cast<int>((bits >> 52) & 0x7FF);
+    bool inexact = (bits & 0xFFFFFFFFFFFFFull) != 0;
+    if (val != val) {
+      data = 0xFF;
+      return;
+    }
+    // Zero and subnormal doubles are far below 2^-127 and clip to it.
+    int e8 = exponent == 0 ? 0 : exponent - 1023 + 127 + inexact;
+    data = static_cast<unsigned char>(
+        exponent == 0x7FF || e8 > 254 ? 0xFE : (e8 < 0 ? 0 : e8));
   }
   __device__ operator float() const {
     if (data == 0xFF) {
