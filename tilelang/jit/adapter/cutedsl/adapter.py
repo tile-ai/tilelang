@@ -460,7 +460,9 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {first_tensor.device}")
         device_id = first_tensor.device.index or 0
 
-        self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
+        # A null stream is resolved against the current CUDA context.
+        with torch.cuda.device(first_tensor.device):
+            self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]
