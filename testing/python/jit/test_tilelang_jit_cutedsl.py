@@ -381,5 +381,39 @@ def check_hopper():
     return compute_capability == (9, 0)
 
 
+@tilelang.testing.requires_cuda
+def test_cutedsl_launch_follows_the_torch_stream():
+    """The launch must land on the stream torch is recording.
+
+    Passing the legacy default stream launches nothing into the captured graph
+    and replays a stale result.
+
+    See https://github.com/tile-ai/tilelang/issues/3693.
+    """
+
+    @T.prim_func
+    def copy(X: T.Tensor((1024,), "float32"), Y: T.Tensor((1024,), "float32")):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                Y[bx * 128 + i] = X[bx * 128 + i] * 2.0
+
+    kernel = tilelang.compile(copy, target="cutedsl")
+    x = torch.arange(1024, dtype=torch.float32, device="cuda")
+    y = torch.empty_like(x)
+
+    kernel(x, y)
+    torch.cuda.synchronize()
+    assert torch.equal(y, x * 2.0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        kernel(x, y)
+    x.fill_(1.0)
+    y.fill_(-1.0)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(y, torch.full_like(y, 2.0))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
