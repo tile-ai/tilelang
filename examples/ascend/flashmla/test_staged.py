@@ -13,15 +13,15 @@ def test_last_tile_rescale_across_jobs_and_launches(pipeline_stages):
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
-    torch.npu.set_device(0)
+    device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
     nq, nk, topk = 33, 128, 128
-    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device="npu")
+    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device=device)
     q[:, 32:, :] = 1
-    kv = torch.zeros((nk, 512), dtype=torch.bfloat16, device="npu")
-    indices = torch.arange(topk, dtype=torch.int32, device="npu").expand(nq, topk).contiguous()
-    sink = torch.zeros(64, dtype=torch.float32, device="npu")
-    lengths = torch.full((nq,), topk, dtype=torch.int32, device="npu")
+    kv = torch.zeros((nk, 512), dtype=torch.bfloat16, device=device)
+    indices = torch.arange(topk, dtype=torch.int32, device=device).expand(nq, topk).contiguous()
+    sink = torch.zeros(64, dtype=torch.float32, device=device)
+    lengths = torch.full((nq,), topk, dtype=torch.int32, device=device)
     kernel = compile_prefill(nq, nk, topk, sink=False, scale=0.5, pipeline_stages=pipeline_stages)
 
     # Only AIV1 requests rescaling, on the last KV tile. The second query job
@@ -45,19 +45,19 @@ def test_index_group_tail_and_query_state():
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
-    torch.npu.set_device(0)
+    device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
     # Eleven KV tiles cross the 640-index group boundary and rotate versions
     # by an odd count. Block 0 processes three distinct queries.
     nq, nk, topk = 65, 704, 704
-    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device="npu")
-    row_values = (torch.arange(nk, device="npu") % 7).to(torch.bfloat16)
+    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device=device)
+    row_values = (torch.arange(nk, device=device) % 7).to(torch.bfloat16)
     kv = row_values[:, None].expand(nk, 512).contiguous()
     indices = (torch.arange(topk)[None, :] + torch.arange(nq)[:, None] * 11) % nk
     indices[:, ::17] = -1
-    indices = indices.to(device="npu", dtype=torch.int32)
-    lengths = torch.tensor([704, 640, 64, 0], dtype=torch.int32).repeat(17)[:nq].to("npu")
-    sink = torch.zeros(64, dtype=torch.float32, device="npu")
+    indices = indices.to(device=device, dtype=torch.int32)
+    lengths = torch.tensor([704, 640, 64, 0], dtype=torch.int32).repeat(17)[:nq].to(device)
+    sink = torch.zeros(64, dtype=torch.float32, device=device)
     kernel = compile_prefill(nq, nk, topk, sink=False, variable_lengths=True)
     out, maximum, lse = kernel(q, kv, indices, sink, lengths)
     torch.npu.synchronize()
@@ -79,21 +79,21 @@ def test_alternating_rescale_and_accumulate():
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
-    torch.npu.set_device(0)
+    device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
     nq, nk = 65, 448
-    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device="npu")
+    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device=device)
     q[:, 32:, :] = 1
     q[1::2, 32:, :] = -1
     tile_values = torch.tensor([0, 1, 1, 2, 2, 3, 3], dtype=torch.bfloat16)
     values = tile_values.repeat_interleave(64)
-    kv = values[:, None].expand(nk, 512).contiguous().to("npu")
+    kv = values[:, None].expand(nk, 512).contiguous().to(device)
     indices = torch.arange(nk, dtype=torch.int32).expand(nq, nk).clone()
     indices[2::4] = indices[2::4].flip(1)
     indices[3::4] = indices[3::4].flip(1)
-    indices = indices.to("npu")
-    sink = torch.zeros(64, dtype=torch.float32, device="npu")
-    lengths = torch.full((nq,), nk, dtype=torch.int32, device="npu")
+    indices = indices.to(device)
+    sink = torch.zeros(64, dtype=torch.float32, device=device)
+    lengths = torch.full((nq,), nk, dtype=torch.int32, device=device)
     kernel = compile_prefill(nq, nk, nk, sink=False, scale=0.5)
 
     # Alternating large score jumps exercise conditional handoffs; reversed
@@ -119,18 +119,18 @@ def test_query_prefetch_boundaries(nb):
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
-    torch.npu.set_device(0)
+    device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
     # Three query jobs force the two-Q path to reuse its first physical slot.
     nq, nk, topk = 65, nb * 64, nb * 64
-    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device="npu")
-    row_values = (torch.arange(nk, device="npu") % 7).to(torch.bfloat16)
+    q = torch.zeros((nq, 64, 512), dtype=torch.bfloat16, device=device)
+    row_values = (torch.arange(nk, device=device) % 7).to(torch.bfloat16)
     kv = row_values[:, None].expand(nk, 512).contiguous()
     indices = (torch.arange(topk)[None, :] + torch.arange(nq)[:, None] * 11) % nk
     indices[:, ::17] = -1
-    indices = indices.to(device="npu", dtype=torch.int32)
-    lengths = torch.tensor([0, 1, 63, 64, 65, topk - 1, topk], dtype=torch.int32).repeat(10)[:nq].to("npu")
-    sink = torch.zeros(64, dtype=torch.float32, device="npu")
+    indices = indices.to(device=device, dtype=torch.int32)
+    lengths = torch.tensor([0, 1, 63, 64, 65, topk - 1, topk], dtype=torch.int32).repeat(10)[:nq].to(device)
+    sink = torch.zeros(64, dtype=torch.float32, device=device)
     kernel = compile_prefill(nq, nk, topk, sink=False, variable_lengths=True)
     out, maximum, lse = kernel(q, kv, indices, sink, lengths)
     torch.npu.synchronize()
@@ -178,7 +178,7 @@ def test_decode_independent_lengths_and_group_tails(flashmla_reference, extra_fo
     from examples.ascend.flashmla.decode import prepare_decode
 
     lib, ref, quant, kk = flashmla_reference
-    torch.npu.set_device(0)
+    device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
     fp8 = quant.KVCacheLayout.V41_FP8Sparse
     fmt = quant.KVCacheLayout.V41_FP4Sparse if extra_format == "fp4" else fp8
@@ -211,7 +211,7 @@ def test_decode_independent_lengths_and_group_tails(flashmla_reference, extra_fo
     try:
         torch.set_default_dtype(torch.bfloat16)
         torch.set_float32_matmul_precision("high")
-        with torch.device("npu:0"):
+        with device:
             inputs = lib.generate_testcase_for_decode(fixture_param)
             inputs.p = p
             inputs.kv_scope.t = p
