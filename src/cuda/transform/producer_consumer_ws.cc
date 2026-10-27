@@ -1863,8 +1863,11 @@ private:
 
     // If branch-local prelude init/copy was extracted, rebuild with it inside
     // the corresponding WS branch so each branch initializes its own local
-    // state before entering the pipelined loop.
-    if (!extracted_producer_init_.empty() ||
+    // state before entering the pipelined loop. The same rebuild is needed
+    // when only the producer's buffers were cloned: the placeholder still
+    // holds the pre-remap loop, which would read the original buffers while
+    // the guarded prelude writes the clones.
+    if (!producer_buffer_remap.empty() || !extracted_producer_init_.empty() ||
         !extracted_consumer_init_.empty()) {
       Stmt enriched_producer = rewritten_producer;
       if (!extracted_producer_init_.empty()) {
