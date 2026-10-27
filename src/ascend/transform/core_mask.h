@@ -28,21 +28,43 @@ namespace tl {
 using CoreMask = uint8_t;
 
 constexpr CoreMask kCoreUnassigned = 0;
-constexpr CoreMask kCoreVector = 1U << 0;
+constexpr CoreMask kCoreVector0 = 1U << 0;
 constexpr CoreMask kCoreCube = 1U << 1;
-constexpr CoreMask kCoreBroadcast = kCoreVector | kCoreCube;
-constexpr std::array<CoreMask, 2> kConcreteCores = {kCoreVector, kCoreCube};
+constexpr CoreMask kCoreVector1 = 1U << 2;
+constexpr CoreMask kCoreVector = kCoreVector0 | kCoreVector1;
+constexpr CoreMask kCoreAll = kCoreVector | kCoreCube;
+constexpr std::array<CoreMask, 3> kConcreteCores = {kCoreVector0, kCoreCube,
+                                                    kCoreVector1};
+
+constexpr CoreMask VectorCore(int sid) {
+  return sid == 0 ? kCoreVector0 : kCoreVector1;
+}
+
+constexpr CoreMask VectorCoreMask(int num_aiv_subcores) {
+  return num_aiv_subcores == 1 ? kCoreVector0 : kCoreVector;
+}
+
+constexpr bool IsVectorCore(CoreMask core) {
+  return core == kCoreVector0 || core == kCoreVector1;
+}
+
+constexpr int VectorSid(CoreMask core) { return core == kCoreVector1 ? 1 : 0; }
 
 constexpr bool IsValidCoreMask(CoreMask mask) {
-  return (mask & static_cast<CoreMask>(~kCoreBroadcast)) == 0;
+  return (mask & static_cast<CoreMask>(~kCoreAll)) == 0;
 }
 
 constexpr bool IsConcreteCore(CoreMask mask) {
-  return mask == kCoreVector || mask == kCoreCube;
+  return IsVectorCore(mask) || mask == kCoreCube;
+}
+
+// A vector task may execute the same body on every participating AIV.
+constexpr bool IsCoreLocalMask(CoreMask mask) {
+  return IsConcreteCore(mask) || mask == kCoreVector;
 }
 
 constexpr bool HasCore(CoreMask mask, CoreMask core) {
-  return IsConcreteCore(core) && (mask & core) != 0;
+  return core != kCoreUnassigned && (mask & core) == core;
 }
 
 } // namespace tl

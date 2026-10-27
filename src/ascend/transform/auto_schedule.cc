@@ -63,6 +63,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/buffer_addresses.h"
 #include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
@@ -104,37 +105,34 @@ inline bool HasSimtVF(const tirx::Stmt &stmt) {
 }
 
 inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
-  constexpr int64_t kPhysicalUnifiedBufferSize = 248 * 1024;
-  constexpr int64_t kSimtVFThreadContextSize = 32 * 1024;
-  return HasSimtVF(kernel_body)
-             ? kPhysicalUnifiedBufferSize - kSimtVFThreadContextSize
-             : kPhysicalUnifiedBufferSize;
+  return HasSimtVF(kernel_body) ? kAscendUBMemoryBytes - kAscendSimtContextBytes
+                                : kAscendUBMemoryBytes;
 }
 
 inline int64_t GetL1MemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 512 * 1024; // 512 KB L1 cache on Ascend
+    return kAscendL1MemoryBytes;
   }
   return 0;
 }
 
 inline int64_t GetL0CMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 256 * 1024; // 256 KB L0C buffer on Ascend
+    return kAscendL0CMemoryBytes;
   }
   return 0;
 }
 
 inline int64_t GetL0AMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 64 * 1024; // 64 KB L0A buffer on Ascend
+    return kAscendL0ABMemoryBytes;
   }
   return 0;
 }
 
 inline int64_t GetL0BMemoryLimit(Target target) {
   if (TargetIsAscend(target)) {
-    return 64 * 1024; // 64 KB L0B buffer on Ascend
+    return kAscendL0ABMemoryBytes;
   }
   return 0;
 }
@@ -151,6 +149,32 @@ bool HasVarDependency(const IRStructure *a, const IRStructure *b);
 
 // Check if two IRStructures have resource dependency (use same hardware
 // resource)
+CoreMask NodeCoreMask(const IRStructure *node) {
+  if (node->IsTask()) {
+    CoreMask mask = static_cast<const TaskNode *>(node)->GetCoreMask();
+    return mask == kCoreUnassigned ? kCoreAll : mask;
+  }
+  CoreMask mask = kCoreUnassigned;
+  for (const auto &child : static_cast<const ControlNode *>(node)->children)
+    mask |= NodeCoreMask(child.get());
+  return mask;
+}
+
+int64_t NodeResourceMask(const IRStructure *node) {
+  if (node->IsControl()) {
+    int64_t result = 0;
+    for (const auto &child : static_cast<const ControlNode *>(node)->children)
+      result |= NodeResourceMask(child.get());
+    return result;
+  }
+  int64_t result = 0;
+  CoreMask cores = NodeCoreMask(node);
+  for (size_t i = 0; i < kConcreteCores.size(); ++i)
+    if (HasCore(cores, kConcreteCores[i]))
+      result |= static_cast<int64_t>(node->GetPipeMask()) << (8 * i);
+  return result;
+}
+
 bool HasResourceDependency(const IRStructure *a, const IRStructure *b,
                            uint16_t mask = UINT16_MAX);
 
@@ -186,6 +210,10 @@ public:
   // Set memory limit for a given buffer scope (e.g. "shared", "shared.l1")
   void SetStorageGroups(L0StorageGroups groups) {
     storage_groups_ = std::move(groups);
+  }
+
+  void SetAivStorages(AivStorageMap storages) {
+    aiv_storages_ = std::move(storages);
   }
 
   void SetMemoryLimit(const std::string &scope, int64_t bytes) {
@@ -262,6 +290,7 @@ private:
 
   L0StorageGroups storage_groups_;
   std::map<std::string, int64_t> memory_limits_;
+  AivStorageMap aiv_storages_;
   BufferVersionMap buffer_version_overrides_;
   BufferVersionMap manual_buffer_versions_;
   MultiBufferOwnerMap multi_buffer_owners_;
@@ -346,7 +375,10 @@ bool HasVarDependency(const IRStructure *a, const IRStructure *b) {
 
 bool HasResourceDependency(const IRStructure *a, const IRStructure *b,
                            uint16_t mask) {
-  if (((a->GetPipeMask() & b->GetPipeMask()) & mask) != 0)
+  int64_t core_pipes = 0;
+  for (size_t i = 0; i < kConcreteCores.size(); ++i)
+    core_pipes |= static_cast<int64_t>(mask & kAllResourcePipes) << (8 * i);
+  if ((NodeResourceMask(a) & NodeResourceMask(b) & core_pipes) != 0)
     return true;
   return (a->GetHbmMask() & b->GetHbmMask()) != 0;
 }
@@ -507,7 +539,7 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
       iis.push_back(node->GetII());
 
       // Pass pipe mask directly as resource flags
-      resource_flags.push_back(static_cast<int64_t>(node->GetPipeMask()));
+      resource_flags.push_back(NodeResourceMask(node));
     }
 
     // Variable (Let-var write -> read) data dependencies
@@ -529,7 +561,9 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
       if (wmask == 0)
         continue;
       for (size_t j = 0; j < n; ++j) {
-        if (j == i || (wmask & nodes[j]->GetSpecialReadMask()) == 0)
+        if (j == i || (wmask & nodes[j]->GetSpecialReadMask()) == 0 ||
+            (!(wmask & static_cast<uint16_t>(SpecialRegister::kLoopControl)) &&
+             (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) == 0))
           continue;
         if (i < j) {
           data_deps.emplace_back(i, j, latencies[i]);
@@ -538,7 +572,8 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
         }
       }
       for (size_t j = i + 1; j < n; ++j) {
-        if ((wmask & nodes[j]->GetSpecialWriteMask()) != 0)
+        if ((wmask & nodes[j]->GetSpecialWriteMask()) != 0 &&
+            (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) != 0)
           data_deps.emplace_back(i, j, latencies[i]);
       }
     }
@@ -570,12 +605,11 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     // Collect resource dependencies
     for (size_t i = 0; i < n; ++i) {
       for (size_t j = i + 1; j < n; ++j) {
-        uint16_t shared_pipes =
-            nodes[i]->GetPipeMask() & nodes[j]->GetPipeMask();
         if (HasResourceDependency(nodes[i], nodes[j])) {
           resource_deps.emplace_back(i, j);
         }
-        if (manual_schedule && shared_pipes != 0) {
+        if (manual_schedule &&
+            (NodeResourceMask(nodes[i]) & NodeResourceMask(nodes[j])) != 0) {
           pipe_order_deps.emplace_back(i, j);
         }
       }
@@ -764,7 +798,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     const IRStructure *node = nodes[i];
     latencies.push_back(node->GetLatency());
     iis.push_back(node->GetII());
-    resource_flags.push_back(static_cast<int64_t>(node->GetPipeMask()));
+    resource_flags.push_back(NodeResourceMask(node));
   }
 
   // Keep one representative Buffer per storage for shape/scope accounting.
@@ -819,8 +853,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       visit(r->buffer);
   };
   enumerate_buffers([&](const Buffer &buffer) {
-    if (!IsSharedBuffer(buffer) && !IsL1Buffer(buffer) &&
-        !IsL0CBuffer(buffer) && !IsL0ABuffer(buffer) && !IsL0BBuffer(buffer)) {
+    if (!IsAscendOnChipBuffer(buffer)) {
       return; // Only consider on-chip buffers for multi-buffer
     }
     if (seen_storages.insert(buffer->data).second)
@@ -839,25 +872,39 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       scope = "shared.l0a";
     } else if (IsL0BBuffer(buffer)) {
       scope = "shared.l0b";
+    } else if (IsSSBuffer(buffer)) {
+      scope = "shared.ss";
     } else {
       scope = "shared";
     }
-    int group_id = scope_to_group[scope];
+    if (scope == "shared") {
+      if (auto sid = aiv_storages_.Get(storage))
+        scope += ".aiv" + std::to_string(sid.value()->value);
+    }
+    int group_id = scope_to_group.at(scope);
+    std::vector<int> groups{group_id};
+    if (scope == "shared" && scope_to_group.count("shared.aiv0")) {
+      groups.push_back(scope_to_group.at("shared.aiv0"));
+      groups.push_back(scope_to_group.at("shared.aiv1"));
+    }
     if (!ctrl->IsMultiBufferEligible(storage)) {
       // These buffers cannot be multi-buffered, and cannot share memory with
       // other buffers either, so we directly reduce the capacity of the
       // memory group by their size
-      group_capacities[group_id] -= get_buffer_size(buffer);
+      for (int group : groups)
+        group_capacities[group] -= get_buffer_size(buffer);
     } else {
       auto override_it = buffer_version_overrides_.find(storage);
       if (override_it != buffer_version_overrides_.end()) {
         int override_val = (*override_it).second;
         annotated_storage_versions[storage] = override_val;
-        group_capacities[group_id] -= get_buffer_size(buffer) * override_val;
+        for (int group : groups)
+          group_capacities[group] -= get_buffer_size(buffer) * override_val;
       } else {
         size_t id = storage_sizes.size();
         storage_version_id.emplace(storage, id);
-        group_indices[group_id].push_back((int64_t)id);
+        for (int group : groups)
+          group_indices[group].push_back((int64_t)id);
         storage_sizes.push_back(get_buffer_size(buffer));
       }
     }
@@ -866,6 +913,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // Validate buffer capacities upfront: if the minimum requirement (one
   // version of each eligible buffer) already exceeds the remaining capacity,
   // Z3 will never find a feasible solution.
+  // Only apply this bound when choosing versions; fixed allocations may reuse
+  // storage downstream, so their raw size sum is not a physical capacity check.
   for (size_t g = 0; g < group_capacities.size(); ++g) {
     int64_t capacity = group_capacities[g];
     const auto &idxs = group_indices[g];
@@ -912,7 +961,9 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     if (wmask == 0)
       continue;
     for (size_t j = 0; j < n; ++j) {
-      if (j == i || (wmask & nodes[j]->GetSpecialReadMask()) == 0)
+      if (j == i || (wmask & nodes[j]->GetSpecialReadMask()) == 0 ||
+          (!(wmask & static_cast<uint16_t>(SpecialRegister::kLoopControl)) &&
+           (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) == 0))
         continue;
       if (i < j) {
         data_deps.emplace_back(i, j, 0, latencies[i]);
@@ -923,7 +974,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       }
     }
     for (size_t j = i + 1; j < n; ++j) {
-      if ((wmask & nodes[j]->GetSpecialWriteMask()) == 0)
+      if ((wmask & nodes[j]->GetSpecialWriteMask()) == 0 ||
+          (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) == 0)
         continue;
       data_deps.emplace_back(i, j, 0, latencies[i]);
       data_deps.emplace_back(j, i, 1, latencies[j]);
@@ -976,12 +1028,12 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // Collect resource dependencies
   for (size_t i = 0; i < n; ++i) {
     for (size_t j = i + 1; j < n; ++j) {
-      uint16_t shared_pipes = nodes[i]->GetPipeMask() & nodes[j]->GetPipeMask();
       if (HasResourceDependency(nodes[i], nodes[j],
                                 ~((uint16_t)ResourcePipe::kScalar))) {
         resource_deps.emplace_back(i, j);
       }
-      if (manual_schedule && shared_pipes != 0) {
+      if (manual_schedule &&
+          (NodeResourceMask(nodes[i]) & NodeResourceMask(nodes[j])) != 0) {
         pipe_order_deps.emplace_back(i, j);
       }
     }
@@ -1340,13 +1392,24 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetStorageGroups(groups);
   int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
+  if (auto value = metadata.kernel_root->annotations.Get(kAivStorageMap)) {
+    unit_builder.SetAivStorages(value.value().cast<AivStorageMap>());
+    unit_builder.SetMemoryLimit("shared.aiv0", shared_mem_limit);
+    unit_builder.SetMemoryLimit("shared.aiv1", shared_mem_limit);
+  }
   unit_builder.SetMemoryLimit("shared.l1", GetL1MemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0c", GetL0CMemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0a", GetL0AMemoryLimit(target));
   unit_builder.SetMemoryLimit("shared.l0b", GetL0BMemoryLimit(target));
+  // One SS pool is shared by AIC and both AIVs, unlike per-AIV UB storage.
+  unit_builder.SetMemoryLimit("shared.ss", kAscendSSMemoryBytes);
   constexpr int64_t kUnlimitedMemory = 1LL << 40;
   for (const String &scope : metadata.unlimit_memory_scopes) {
     unit_builder.SetMemoryLimit(scope, kUnlimitedMemory);
+    if (scope == "shared") {
+      unit_builder.SetMemoryLimit("shared.aiv0", kUnlimitedMemory);
+      unit_builder.SetMemoryLimit("shared.aiv1", kUnlimitedMemory);
+    }
   }
   unit_builder.SetBufferVersionOverrides(metadata.buffer_versions);
   unit_builder.SetManualBufferVersions(metadata.manual_buffer_versions);
@@ -1385,7 +1448,31 @@ tvm::transform::Pass AutoSchedule() {
               context.root, context.outer_ctx, MakeAutoScheduleExtraInfo);
           BufferVersionMap buffer_version_overrides =
               scheduled_tir.metadata.buffer_versions;
+          BufferAddresses addresses;
+          if (auto value = context.root->annotations.Get(kBufferAddresses)) {
+            addresses = ParseBufferAddresses(value.value());
+            // Validate before AutoSchedule replaces frontend overrides with
+            // inferred counts. A mode-only annotation does not fix storage
+            // size.
+            for (const auto &[storage, address] : addresses) {
+              auto versions = buffer_version_overrides.Get(storage);
+              ICHECK(versions.has_value() && versions.value() > 0)
+                  << kBufferAddresses
+                  << " requires an explicit version count in "
+                  << "T.annotate_buffer_versions for storage " << storage;
+            }
+          }
           ScheduleSingleKernel(context.root->body, target, &scheduled_tir);
+          for (const auto &[storage, address] : addresses) {
+            int requested = buffer_version_overrides.at(storage);
+            int selected =
+                scheduled_tir.metadata.buffer_versions.Get(storage).value_or(1);
+            ICHECK_EQ(selected, requested)
+                << "Cannot place storage " << storage << ": requested "
+                << requested << " versions but AutoSchedule selected "
+                << selected
+                << "; the buffer must be eligible for the requested versions";
+          }
           WarnOnUnappliedBufferVersionOverrides(
               buffer_version_overrides, scheduled_tir.metadata.buffer_versions);
           return EncodeScheduledTIR(std::move(scheduled_tir));

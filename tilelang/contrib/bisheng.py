@@ -11,6 +11,7 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from tilelang.env import env
 from tvm.base import py_str
 from tvm.contrib import utils
 from tvm.target import Target
@@ -170,7 +171,7 @@ def compile_ascend(
     if target_format not in {"o", "so", "aibin"}:
         raise ValueError(f"Unsupported Ascend target format: {target_format}")
 
-    temp = utils.tempdir()
+    temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     # Use .asc suffix so bisheng auto-detects the language without ``-x asc``
     temp_code = temp.relpath("tl_kernel.asc")
     suffix = "so" if target_format == "so" else ("aibin" if target_format == "aibin" else "o")

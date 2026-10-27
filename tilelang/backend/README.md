@@ -145,12 +145,15 @@ The public compiler or JIT entry creates one immutable `BackendContext`:
 context = create_backend_context(target, target_host, execution_backend)
 ```
 
-Context preparation performs three operations:
+Context preparation performs four operations:
 
-1. Normalize the device target and host target.
-2. Select exactly one `BackendModule` using `target.kind.name` and, when
-   needed, `supports_target`.
-3. Resolve one available `ExecutionBackendSpec` from the user request or the
+1. Normalize the device target.
+2. Apply any registered execution-aware target normalization. This lets a
+   backend select a target variant from an explicit execution backend without
+   adding target-specific branches to the shared context factory.
+3. Normalize the host target and select exactly one `BackendModule` using
+   `target.kind.name` and, when needed, `supports_target`.
+4. Resolve one available `ExecutionBackendSpec` from the user request or the
    backend's ordered `auto` preference.
 
 The resulting context binds:
@@ -165,7 +168,9 @@ BackendContext
 
 Cache, lowering, codegen, and JIT code pass the same context instance.
 Backend-specific target parsing and canonicalization belong in the backend
-package; backend selection itself stays in the shared context factory.
+package. A target variant driven by the explicit execution choice registers a
+`register_target_execution_normalizer` callback from that package; backend
+selection itself stays in the shared context factory.
 
 ## Language Dialects
 
@@ -241,6 +246,34 @@ The engine must not contain a `target.kind.name` dispatch table for backend
 codegen. Backend variants, such as CUDA and CuTeDSL, declare their own codegen
 entries in their manifests.
 
+### Shared C-like Source Emission
+
+CUDA, HIP, CPU C, Ascend C++, Metal, and C host codegen inherit
+`CodeGenTileLangCBase` from
+[`src/backend/common/codegen/codegen_c_base.h`](../../src/backend/common/codegen/codegen_c_base.h).
+The base owns statement interception, optional `#line` directives, and final
+source assembly. Python-emitting codegens use their separate Python base.
+
+The output order is backend headers and preamble, imported source, then
+generated declarations, forward declarations, and function bodies. Write
+headers discovered during initialization or traversal to `preamble_stream_`.
+Override `EmitPreamble_(std::ostream&) const` for headers selected after module
+traversal. Keep generated declarations and helper definitions in `decl_stream`;
+they may call imported helpers. Backends must not override `Finish()`.
+
+`T.import_source`, `T.Kernel(prelude=...)`, and raw `pragma_import_c` attributes
+share this ordering. The base intercepts the attributes before backend-specific
+statement dispatch and separates imports with two newlines, including when an
+import ends in a backslash. Imports retain visitation order without
+deduplication. They may use types and macros from backend headers. Macros that
+configure those headers must be supplied through compiler flags, such as
+`compile_flags=["-DENABLE_BF16"]`, because imports follow the headers.
+
+Backend builders pass `tl.emit_line_directives` to `SetEmitLineDirectives`.
+The default is off. A custom `AddFunction` implementation must call
+`PreFunctionBody` after its compiler-generated prologue to emit the function
+entry span before printing the body.
+
 ## Execution Backend Compatibility
 
 A target backend normally does not implement JIT or runtime behavior. It
@@ -268,6 +301,15 @@ The shared execution backend owns cache orchestration, wrapper creation,
 artifact loading, argument/stream binding, launch, and runtime lifetime. It may
 invoke target-owned compiler callbacks during Build, but those callbacks do not
 make JIT/Runtime a target-backend implementation area.
+
+A target's `ExecutionBackendSpec` may provide an optional `wrap_callable`
+callback. It receives the execution callable and the kernel's `PrimFunc`, and
+returns the callable to install. Shared JIT invokes it once per fresh adapter
+after compilation, disk-cache loading, or grouped compilation. It uses the
+already selected spec in `BackendContext`; adapters do not import target-owned
+decorators. The default `None` preserves the original callable. Wrappers must
+preserve arguments, return values, and exception propagation. Optional framework
+imports and target-specific configuration belong in the target-owned callback.
 
 Only add a new execution backend when no existing implementation can consume
 the target output or drive its runtime API. That is a separate integration

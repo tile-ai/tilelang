@@ -1,8 +1,106 @@
 language: en-US
 
 reviews:
+  high_level_summary: false
+  auto_review:
+    ignore_title_keywords:
+      - "[Do not review]"
+  suggested_labels: true
+  auto_apply_labels: true
+  labeling_instructions:
+    - label: bug
+      instructions: |
+        Apply when the changes fix an identifiable defect, incorrect result,
+        crash, regression, or unintended behavior in existing functionality.
+        Base the decision on the actual fix, not just a BugFix title or an
+        incidental mention of a bug. New capabilities alone are not bug fixes.
+
+    - label: enhancement
+      instructions: |
+        Apply for new capabilities, supported use cases, or substantive
+        performance and API improvements beyond correcting faulty behavior.
+        Do not apply to routine maintenance, mechanical refactoring, dependency
+        bumps, or documentation-only changes without a separate enhancement.
+
+    - label: documentation
+      instructions: |
+        Apply for substantive user or developer documentation, tutorials, API
+        documentation, or documentation build and navigation changes.
+        Do not apply merely because a PR updates its description, code comments,
+        or an example kernel without changing its explanatory documentation.
+
+    - label: dependencies
+      instructions: |
+        Apply when external dependency versions, package requirements, lockfiles,
+        vendored libraries, or third-party submodule pins change.
+        Include dependency resolution and compatibility fixes. Merely using an
+        existing dependency or documenting an installation command is not enough.
+
+    - label: github_actions
+      instructions: |
+        Apply when GitHub Actions workflows, reusable actions, runner selection,
+        permissions, caching, or CI orchestration change, including scripts
+        changed specifically for those workflows. Do not apply to CodeRabbit
+        configuration, local tooling, or tests alone without an Actions change.
+
+    - label: python
+      instructions: |
+        Apply for substantive Python implementation or API changes, interpreter
+        compatibility, Python packaging, or Python-package dependency updates.
+        Do not apply merely because a PR contains a Python reproducer, version
+        metadata, or a regression test for an otherwise backend-only fix.
+
+    - label: arith
+      instructions: |
+        Apply when symbolic integer or index arithmetic, expression simplification,
+        bounds analysis, divisibility, or compiler proof logic changes.
+        Do not apply to ordinary arithmetic inside kernels or tensor operations
+        unless the compiler's arithmetic analysis or rewriting also changes.
+
+    - label: tools
+      instructions: |
+        Apply for developer tooling such as program reducers, IR inspection,
+        pass timing, debugging utilities, lint/style audits, maintenance
+        automation, or development CLIs. Core lowering, scheduling, and runtime
+        changes alone are not tooling changes.
+
+    - label: UX
+      instructions: |
+        Apply when the substantive change improves user-facing API ergonomics,
+        actionable error messages, diagnostics, or developer usability.
+        Do not apply to every bug fix or optimization merely because users
+        benefit; the usability improvement must itself be part of the change.
+
+    - label: ascend
+      instructions: |
+        Apply for substantive Huawei Ascend/CANN backend, NPU execution, kernel,
+        integration, or backend-specific test/example changes.
+        A shared fix can qualify when it addresses a demonstrated Ascend issue.
+        Incidental mentions or a generic all-backend enumeration are not enough.
+
+    - label: metal
+      instructions: |
+        Apply for substantive Apple Metal GPU backend, code generation, runtime,
+        kernel, or backend-specific test/example changes.
+        Do not infer Metal involvement solely from macOS, Apple host hardware,
+        or a macOS CI runner when Metal execution is not affected.
+
+    - label: cpu
+      instructions: |
+        Apply when CPU execution targets, CPU code generation, CPU kernels, or
+        CPU-specific architecture configuration and tests change.
+        This includes CPU targets such as RISC-V. Do not apply merely because
+        host-side code runs on a CPU or launches work on a GPU/NPU.
+
+    - label: windows
+      instructions: |
+        Apply for substantive Windows support or compatibility changes, including
+        Windows toolchains, DLL loading, platform paths, and Windows CI behavior.
+        Do not apply for incidental Windows mentions or generic build changes
+        without an identified Windows-specific effect.
+
   suggested_reviewers: true
-  auto_assign_reviewers: false
+  auto_assign_reviewers: true
   suggested_reviewers_instructions:
     - reviewers:
         - handle: LeiWang1999
@@ -104,8 +202,8 @@ reviews:
         construction, host compiler integration, or platform-specific build behavior.
         Windows HIP changes fit here when they concern build/toolchain integration
         rather than AMD device execution semantics.
-        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 for HIP
-        execution semantics, AMD intrinsics, and wavefront algorithms; involve
+        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 or zhangnju
+        for HIP execution semantics, AMD intrinsics, and wavefront algorithms; involve
         LeiWang1999 for substantive release-wide or cross-backend compatibility
         decisions rather than routine packaging. Never suggest the PR author.
         Path hints: src/metal/, tilelang/metal/, cmake/, CMakeLists.txt,
@@ -132,6 +230,8 @@ reviews:
 
     - reviewers:
         - handle: andyluo7
+          type: user
+        - handle: zhangnju
           type: user
       instructions: |
         Primary scope: ROCm/HIP, AMD kernel behavior, wavefront and intrinsic
@@ -237,19 +337,32 @@ reviews:
         tilelang/testing/ir.py, and source-mapping/diagnostic portions of codegen
         and compiler passes. Match tooling intent, not filenames alone.
 
-  high_level_summary_instructions: |
-    Add a short "C++ style / lint notes" section when the PR changes C++, CI,
-    lint tooling, or C++ style documentation.
-
-    In that section:
-    - Mention whether the PR touches rules documented in docs/developer_guide/cpp_style.md.
-    - Mention the "C++ API Style Audit (warning only)" CI step when relevant.
-    - Focus on warnings introduced or touched by this PR; do not treat historical backlog as blocking.
-    - Clearly separate correctness, build, and test issues from warning-only style suggestions.
-    - Do not recommend blocking merge for advisory TLCPP003/TLCPP004 findings unless the PR
-      introduces a clear API, FFI, or maintainability risk.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
 
   path_instructions:
+    - path: "**/*"
+      instructions: |
+        Base findings on the current PR diff against its merge base, not stale
+        comments or summaries. Trace affected callers, consumers, and existing
+        guards before reporting a defect. For correctness findings, identify the
+        triggering case, violated contract, and observable consequence.
+        Distinguish code evidence from unverified assumptions.
+
+        Separate regressions introduced by the PR and incomplete fixes within its
+        stated scope from pre-existing limitations, unsupported inputs, and
+        design or performance tradeoffs. Treat existing limitations outside the
+        PR's scope as follow-up work unless this change introduces or worsens them.
+
+        Before prescribing a fix, compare sibling operations and backends and
+        existing primitives that enforce the same invariant. Prefer the smallest
+        coherent fix at the layer that owns it. Compare fixing ownership or
+        lifecycle with adding synchronization, wrappers, or special cases.
+        Account for extra synchronization, allocations, per-call host work, and
+        maintenance cost, and explain material tradeoffs. Do not infer an
+        end-to-end speedup from an instruction change alone.
+
     - path: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
       instructions: |
         Review changed C++ against docs/developer_guide/cpp_style.md.
@@ -278,3 +391,117 @@ reviews:
         changes policy.
 
         Do not suggest failing CI for existing advisory backlog.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - files: "CONTRIBUTING.md"
+        applyTo: "**/*"
+      - files: "docs/developer_guide/cpp_style.md"
+        applyTo: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
+      - files: "docs/developer_guide/testing_style.md"
+        applyTo: "testing/**,examples/**"
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: |
+          Apply when an issue reports a concrete defect, incorrect result, crash,
+          regression, or unexpected behavior relative to an existing expectation.
+          This classifies the report, not whether maintainers have confirmed it.
+          General usage questions and requests for new capabilities are not bugs.
+
+      - label: enhancement
+        instructions: |
+          Apply when the primary request is a new capability, supported use case,
+          or substantive performance/API improvement to otherwise valid behavior.
+          Do not use merely because fixing a reported defect would improve the
+          project, or when the issue only asks how to use existing functionality.
+
+      - label: documentation
+        instructions: |
+          Apply when the issue identifies missing, incorrect, outdated, or unclear
+          documentation, tutorials, examples' explanations, or API references,
+          or explicitly requests their improvement. Do not apply just because
+          a bug report links to documentation or includes an explanatory snippet.
+
+      - label: question
+        instructions: |
+          Apply when the primary purpose is a how-to question, conceptual
+          explanation, or help using existing functionality without a clear
+          defect report or feature request. A question mark or the phrase
+          "please help" alone must not turn a concrete bug report into a question.
+
+      - label: dependencies
+        instructions: |
+          Apply when the issue primarily concerns external package versions,
+          dependency resolution, vendored libraries, third-party submodules,
+          or dependency compatibility and installation constraints.
+          Do not infer a dependency problem from a generic build or runtime error.
+
+      - label: github_actions
+        instructions: |
+          Apply when the issue concerns GitHub Actions workflows, runners,
+          permissions, caches, or CI orchestration and infrastructure.
+          Do not apply just because a compiler/runtime bug was observed in CI,
+          and do not treat CodeRabbit configuration as a GitHub Actions workflow.
+
+      - label: python
+        instructions: |
+          Apply when the issue concerns the Python implementation or API layer,
+          interpreter compatibility, Python packaging, or Python-package versions.
+          A Python code sample, stack trace, or version in the environment section
+          alone is not enough when the substantive problem is in another layer.
+
+      - label: arith
+        instructions: |
+          Apply for issues about symbolic integer/index expressions, simplification,
+          bounds or divisibility analysis, and compiler arithmetic proofs such as
+          proving memory accesses stay in bounds. Ordinary numerical kernel math
+          alone is not an arithmetic-analysis issue.
+
+      - label: tools
+        instructions: |
+          Apply for developer-tool issues or requests involving program reduction,
+          IR inspection, pass timing, debugging utilities, lint/style audits,
+          maintenance automation, or development CLIs. A core compiler or runtime
+          problem does not qualify merely because tooling exposed it.
+
+      - label: UX
+        instructions: |
+          Apply when the issue specifically concerns confusing APIs, unhelpful
+          diagnostics, error-message quality, or avoidable user workflow friction.
+          Do not apply merely because a bug, slow kernel, or unsupported feature
+          is frustrating; the usability problem should be explicitly described.
+
+      - label: ascend
+        instructions: |
+          Apply when Huawei Ascend/CANN or NPU execution is substantively involved
+          in the reported behavior, compatibility problem, usage question, or
+          requested feature. Ignore incidental mentions and unselected template
+          options; do not infer an Ascend-specific issue from generic host details.
+
+      - label: metal
+        instructions: |
+          Apply when Metal GPU execution, its backend, or its integration is central
+          to the report, usage question, or feature request.
+          macOS or Apple host hardware in an environment table alone is not enough
+          when the issue does not concern Metal.
+
+      - label: cpu
+        instructions: |
+          Apply when CPU execution as the compilation target, CPU code generation,
+          CPU kernels, or CPU-target architecture support is central to the issue.
+          This includes targets such as RISC-V. Do not infer this label from the
+          host CPU listed in a GPU/NPU issue's environment information.
+
+      - label: windows
+        instructions: |
+          Apply for reported Windows-specific compatibility, installation,
+          toolchain, DLL/path behavior, usage, or platform-support requests.
+          An incidental Windows mention or an unselected operating-system option
+          in a template is not enough to establish Windows relevance.

@@ -12,7 +12,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 
 from .libgen import NVRTCLibraryGenerator
@@ -146,6 +146,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = NVRTCLibraryGenerator(adapter.target, adapter.verbose)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.libpath = adapter.lib_generator.libpath
         adapter.pymodule = adapter.lib_generator.pymodule
         adapter.function_names = adapter.pymodule._function_names
 
@@ -180,7 +181,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         def unique_push_back(v: tirx.Var, entry: tuple[int, int, int, int]):
             self._dynamic_symbolic_candidates_map.setdefault(v, []).append(entry)
             self._dynamic_symbolic_name_candidates_map.setdefault(v.name, []).append(entry)
-            if v in dynamic_symbolic_map or v.name in self._dynamic_symbolic_name_map:
+            if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
             self._dynamic_symbolic_name_map[v.name] = entry
@@ -217,6 +218,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         if v in self._dynamic_symbolic_candidates_map:
             return self._dynamic_symbolic_candidates_map[v]
         if v.name in self._dynamic_symbolic_name_candidates_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
@@ -287,21 +290,31 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)
+        device = first_tensor.device if first_tensor is not None else None
+
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if stream is not None and self.result_idx:
+            if device is None:
+                device = torch.device("cuda", torch.cuda.current_device())
+            alloc_stream = output_allocation_stream(stream, device)
 
         # Allocate output tensors in their PrimFunc parameter positions.
-        for i in range(len(self.params)):
-            if i in self.result_idx:
-                dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
-                device = first_tensor.device if first_tensor is not None else torch.cuda.current_device()
-                tensor = torch.empty(*shape, dtype=dtype, device=device)
-                param_values[i] = tensor
+        with torch.cuda.stream(alloc_stream):
+            for i in range(len(self.params)):
+                if i in self.result_idx:
+                    dtype = self.param_dtypes[i]
+                    shape = []
+                    # Now working with native Python list, no FFI calls needed
+                    for s in self.param_shapes[i]:
+                        if isinstance(s, tirx.Var):
+                            shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
+                        else:  # Already converted to Python int during initialization
+                            shape.append(s)
+                    if device is None:
+                        device = torch.cuda.current_device()
+                    tensor = torch.empty(*shape, dtype=dtype, device=device)
+                    param_values[i] = tensor
 
         # dynamic symbolics
         args = list(param_values)
@@ -311,8 +324,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            if str(self.target).startswith("cuda") and torch.cuda.is_available():
-                stream = torch.cuda.current_stream().cuda_stream
+            if self.target.kind.name == "cuda" and torch.cuda.is_available():
+                device = first_tensor.device if first_tensor is not None else None
+                stream = torch.cuda.current_stream(device).cuda_stream
             else:
                 stream = 0
 

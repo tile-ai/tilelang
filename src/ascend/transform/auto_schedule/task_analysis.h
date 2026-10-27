@@ -176,6 +176,7 @@ struct TaskResourceUsage {
 struct TaskAccessInfo {
   std::vector<BufferRegion> read_regions;
   std::vector<BufferRegion> write_regions;
+  Map<Var, Optional<PrimExpr>> l0_pitches;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
 };
@@ -397,12 +398,15 @@ inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
   return task_analysis_detail::SpecialRegisterWriteAnalyzer::Analyze(stmt);
 }
 
-inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
-  MemoryAccessDetector memory_detector;
+inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
+                                          const LayoutMap &layouts = {}) {
+  MemoryAccessDetector memory_detector(
+      MemoryAccessDetector::AccessMode::kLogical, layouts);
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
   result.read_regions = memory_detector.GetReadRegions();
   result.write_regions = memory_detector.GetWriteRegions();
+  result.l0_pitches = memory_detector.GetL0Pitches();
   result.read_vars = memory_detector.GetReadVars();
   result.write_vars = memory_detector.GetWriteVars();
   return result;
@@ -481,8 +485,8 @@ public:
 
     auto writers = writers_.find(value);
     if (writers == writers_.end())
-      return kCoreBroadcast;
-    CoreMask result = kCoreBroadcast;
+      return kCoreAll;
+    CoreMask result = kCoreAll;
     bool found = false;
     for (const TaskNode *writer : writers->second) {
       if (writer == reader)
@@ -490,19 +494,19 @@ public:
       found = true;
       result &= writer->GetCoreMask();
     }
-    return found ? result : kCoreBroadcast;
+    return found ? result : kCoreAll;
   }
 
   CoreMask GetExpressionCoreMask(const PrimExpr &expr,
                                  const TaskNode *reader = nullptr) const {
     if (!expr.defined())
-      return kCoreBroadcast;
+      return kCoreAll;
     return GetAccessCoreMask(AnalyzeTaskAccesses(Evaluate(expr)), reader);
   }
 
   CoreMask GetAccessCoreMask(const TaskAccessInfo &accesses,
                              const TaskNode *reader = nullptr) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
     for (const BufferRegion &region : accesses.read_regions) {
@@ -566,7 +570,7 @@ private:
   using CoreMap =
       std::unordered_map<Var, CoreMask, ObjectPtrHash, ObjectPtrEqual>;
   CoreMask GetValueInputCoreMask(const TaskNode *task) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Var &var : task->GetReadVars())
       result &= GetValueCoreMask(var, task);
     for (const BufferRegion &region : task->GetReadRegions()) {
@@ -578,7 +582,7 @@ private:
 
   CoreMask GetRegionIndexCoreMask(const BufferRegion &region,
                                   const TaskNode *reader) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Range &range : region->region) {
       result &= GetExpressionCoreMask(range->min, reader);
       result &= GetExpressionCoreMask(range->extent, reader);
@@ -629,6 +633,10 @@ inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
     task->AddReadRegion(region);
   for (const BufferRegion &region : accesses.write_regions)
     task->AddWriteRegion(region);
+  auto pitches = task->GetL0Pitches();
+  for (const auto &[storage, pitch] : accesses.l0_pitches)
+    MergeL0Pitch(&pitches, storage, pitch);
+  task->SetL0Pitches(pitches);
   for (const Var &var : accesses.read_vars)
     task->AddReadVar(var);
   for (const Var &var : accesses.write_vars)

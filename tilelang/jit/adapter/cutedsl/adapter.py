@@ -15,7 +15,7 @@ from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         The mapping encodes:
         - id=0: shape var -> (0, buffer_param_index, dim_index)
         - id=1: stride var -> (1, buffer_param_index, stride_index)
+        - id=2: explicit scalar -> (2, scalar_param_index, -1)
 
         Returns:
             (dynamic_symbolic_map, dynamic_symbolic_order)
@@ -205,8 +206,15 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
-            dynamic_symbolic_order.append(v)
+            if v not in params:
+                dynamic_symbolic_order.append(v)
             self._dynamic_symbolic_name_map[v.name] = entry
+
+        # Explicit scalars already occupy a primary wrapper argument. They
+        # can supply a buffer's dynamic shape without being appended again.
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                unique_push_back(param, (2, i, -1))
 
         # 1) Shapes
         for i, param in enumerate(params):
@@ -240,6 +248,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if v in self.dynamic_symbolic_map:
             return self.dynamic_symbolic_map[v]
         if v.name in self._dynamic_symbolic_name_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
@@ -248,6 +258,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if v in self._dynamic_symbolic_candidates_map:
             return self._dynamic_symbolic_candidates_map[v]
         if v.name in self._dynamic_symbolic_name_candidates_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
@@ -268,6 +280,12 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 has_shape_candidate = True
             elif ref_id == 1:
                 has_stride_candidate = True
+            elif ref_id == 2:
+                value = param_values[buffer_idx]
+                if value is not None:
+                    return value
+                non_tensor_values.append((buffer_idx, value))
+                continue
             else:
                 raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
 
@@ -427,22 +445,28 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         args: list[Any] = []
 
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if stream is not None and self.result_idx:
+            alloc_stream = output_allocation_stream(stream, first_tensor.device)
+
         # tensor pointers
-        for i in range(len(self.params)):
-            if i in self.result_idx:
-                dtype = self.param_dtypes[i]
-                shape = []
-                # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
-                        shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
-                    else:  # Already converted to Python int during initialization
-                        shape.append(s)
-                tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
-                param_values[i] = tensor
-            else:
-                tensor = param_values[i]
-            args.append(tensor)
+        with torch.cuda.stream(alloc_stream):
+            for i in range(len(self.params)):
+                if i in self.result_idx:
+                    dtype = self.param_dtypes[i]
+                    shape = []
+                    # Now working with native Python list, no FFI calls needed
+                    for s in self.param_shapes[i]:
+                        if isinstance(s, tirx.Var):
+                            shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
+                        else:  # Already converted to Python int during initialization
+                            shape.append(s)
+                    tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
+                    param_values[i] = tensor
+                else:
+                    tensor = param_values[i]
+                args.append(tensor)
 
         # dynamic symbolics
         for sym in self.dynamic_symbolic_order:
@@ -450,8 +474,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            if str(self.target).startswith("cuda") and torch.cuda.is_available():
-                stream = torch.cuda.current_stream().cuda_stream
+            if self.target.kind.name == "cuda" and torch.cuda.is_available():
+                stream = torch.cuda.current_stream(first_tensor.device).cuda_stream
             else:
                 stream = 0
 

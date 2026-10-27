@@ -337,6 +337,9 @@ public:
       std::vector<Var> task_storage_order;
       auto get_task_access =
           [&](const BufferRegion &region) -> TaskAccessRegions * {
+        // SS allocations are packed without lifetime reuse.
+        if (IsSSBuffer(region->buffer))
+          return nullptr;
         if (!IsAscendOnChipBuffer(region->buffer) &&
             !IsL0SFBuffer(region->buffer))
           return nullptr;
@@ -1242,11 +1245,17 @@ private:
       IRStructure *child = access.task;
       while (child != nullptr && child->GetParent() != parent_scope)
         child = child->GetParent();
-      if (child == nullptr || !child->IsControl())
+      // An access outside this scope is a boundary of the child lifetime.
+      // Every access inside this scope, however, must be covered by the
+      // selected child. Dropping a direct or single-trip sibling access can
+      // hide the writer of a value that survives across parent iterations.
+      if (child == nullptr)
         continue;
+      if (!child->IsControl())
+        return nullptr;
       auto *candidate = static_cast<ControlNode *>(child);
       if (IsGuaranteedSingleTrip(candidate))
-        continue;
+        return nullptr;
       if (control == nullptr) {
         control = candidate;
       } else if (control != candidate) {
@@ -1294,11 +1303,12 @@ private:
     }
 
     bool parent_live_through = child_result.live_through;
-    if (child_result.promote_live_through_as_live_in) {
+    if (child_result.promote_live_through_as_live_in &&
+        parent_scope == nullptr) {
       // The storage spans the whole child control, so it cannot alias inside
-      // that child. At the parent level the same lifetime is a finite prefix
-      // ending at the child's last read and may alias a later sibling
-      // generation.
+      // that child. Only a non-periodic parent can reduce it to a finite
+      // prefix ending at the child's last read. A loop parent needs the
+      // incoming value again on its next iteration.
       parent_live_through = false;
       child_result.live_out = false;
     }
@@ -1365,7 +1375,7 @@ private:
       }
     }
     child_result.live_through = parent_live_through;
-    child_result.promote_live_through_as_live_in = false;
+    child_result.promote_live_through_as_live_in &= parent_scope != nullptr;
     child_result.generations = std::move(generations);
     child_result.summary_control = control;
     return child_result;

@@ -5,6 +5,7 @@
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
 #include "target/intrin_rule.h"
@@ -89,21 +90,27 @@ struct CUDAFastMathTan : public CUDAMath {
   }
 };
 
-struct CUDAPopcount {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_uint()) {
-      switch (t.bits()) {
-      case 32:
-        return "__popc";
-      case 64:
-        return "__popcll";
-      default:
-        return "";
-      }
-    }
-    return "";
+static PrimExpr DispatchCUDAPopcount(const PrimExpr &e) {
+  const auto *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+  DataType dtype = call->args[0].dtype();
+  const int bits = dtype.bits();
+  if ((!dtype.is_int() && !dtype.is_uint()) ||
+      (bits != 8 && bits != 16 && bits != 32 && bits != 64)) {
+    return e;
   }
-};
+
+  // Preserve the original bit width before widening: int8(-1) has 8 set bits.
+  PrimExpr arg = cast(DataType::UInt(bits, dtype.lanes()), call->args[0]);
+  if (bits < 32) {
+    arg = cast(DataType::UInt(32, dtype.lanes()), arg);
+  }
+  PrimExpr count = Call(
+      DataType::Int(32, dtype.lanes()), builtin::call_pure_extern(),
+      {StringImm(bits == 64 ? "__popcll" : "__popc"), arg}, call->annotations);
+  return cast(call->dtype, count);
+}
 
 struct CUDAWarpIntrinsic {
   const Op operator()(DataType t, const Op &orig_op) const {
@@ -150,7 +157,55 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
               call->annotations);
 }
 
+TVM_REGISTER_OP("tirx.popcount")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAPopcount,
+                               11);
+
 TVM_REGISTER_OP("tirx.rsqrt")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.asin")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.acos")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.asinh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.acosh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.atanh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.log1p")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.atan2")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.hypot")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.copysign")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.ldexp")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.nextafter")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
                                DispatchPureExtern<CUDAMath>);
 
