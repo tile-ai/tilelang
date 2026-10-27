@@ -16,7 +16,7 @@ from tilelang.env import env
 from tvm.contrib import utils
 from tvm.base import py_str
 
-from .rocm import find_hipcc, find_rocm_path, get_rocm_arch
+from .rocm import find_hipcc, find_rocm_path, get_rocm_arch, get_hipcc_subprocess_env
 
 from .hip_resource_info import filter_and_record, hipcc_remark_flag
 
@@ -98,7 +98,7 @@ def compile_hip(code, target_format="hsaco", arch=None, options=None, path_targe
     cmd += ["-o", file_target]
     cmd += [temp_code]
 
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(cmd, env=get_hipcc_subprocess_env(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     (out, _) = proc.communicate()
     out_text = filter_and_record(py_str(out))

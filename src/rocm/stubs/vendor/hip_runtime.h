@@ -48,7 +48,10 @@ typedef struct hipDeviceProp_t hipDeviceProp_t;
 // vendor fallback header.
 typedef enum hipError_t {
   hipSuccess = 0,
+  hipErrorInvalidValue = 1,
   hipErrorDeinitialized = 3,
+  hipErrorSharedObjectSymbolNotFound = 302,
+  hipErrorSharedObjectInitFailed = 303,
   hipErrorUnknown = 999
 } hipError_t;
 

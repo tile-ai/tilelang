@@ -63,7 +63,11 @@ def _detect_rocm_arch() -> str | None:
             return normalize_rocm_arch(getattr(torch.cuda.get_device_properties(0), "gcnArchName", None))
     except Exception:
         pass
-    return None
+    # A standalone HIP SDK can compile and execute without a ROCm Torch wheel.
+    # In particular Windows provides amdgpu-arch instead of rocminfo/HSA.
+    from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
+
+    return normalize_rocm_arch(get_rocm_arch(find_rocm_path()))
 
 
 def _target_from_arch(arch: str | None) -> Target | str:
