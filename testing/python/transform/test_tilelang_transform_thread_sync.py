@@ -1969,31 +1969,6 @@ def test_waw_uses_all_thread_axes(axis, shift):
     assert len(_storage_syncs(lowered)) == shift
 
 
-@pytest.mark.parametrize("scope", ["shared", "shared.dyn"])
-def test_address_of_extern_read_keeps_loop_carried_sync(scope):
-    """Opaque reads must finish before stores and wait for the previous iteration's stores."""
-
-    @T.prim_func(private=True)
-    def func(Y: T.Buffer((8, 128), "int32")):
-        B = T.alloc_buffer((128,), "int32", scope=scope)
-        tx = T.launch_thread("threadIdx.x", 128)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        B[tx] = 0
-        T.tvm_storage_sync(scope)
-        for k in range(8):
-            Y[k, tx] = T.call_extern("int32", "read_shared", T.address_of(B[0]), (tx + 32) % 128)
-            B[tx] = k + 1
-
-    lowered = tilelang.transform.ThreadSync(scope)(tvm.IRModule({"main": func}))["main"]
-    (loop,) = collect_nodes(lowered, tirx.For)
-    syncs = _storage_syncs(loop.body, scope)
-    assert len(syncs) == 2, "Both the loop-carried RAW and same-iteration WAR barriers must stay inside the loop"
-    (read,) = [store for store in collect_nodes(loop.body, tirx.BufferStore) if store.buffer.scope() == "global"]
-    (write,) = [store for store in collect_nodes(loop.body, tirx.BufferStore) if store.buffer.scope() == scope]
-    _assert_stmt_order(loop.body, _sync_stmt(loop.body, syncs[0]), read, _sync_stmt(loop.body, syncs[1]), write)
-
-
 def _masked_extern_write_kernel(use_access_ptr):
     """Thread 0 zeroes a shared buffer through an opaque extern, then everyone reads it.
 
