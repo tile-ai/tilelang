@@ -853,7 +853,12 @@ class Builder(BaseBuilder):
         if value is None:
             value = tuple()
         elif isinstance(value, tuple):
-            value = tuple(self.unwrap_value(v) for v in value)
+            fields = tuple(self.unwrap_value(v) for v in value)
+            if isinstance(getattr(type(value), "_fields", None), tuple):
+                # Preserve the namedtuple type without rerunning its constructor.
+                value = tuple.__new__(type(value), fields)
+            else:
+                value = fields
         else:
             value = self.unwrap_value(value)
         last_macro = self.find_frame_idx(MacroFrame)
