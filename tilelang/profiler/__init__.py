@@ -5,6 +5,7 @@ from typing import Any, Literal
 from collections.abc import Callable
 from functools import partial
 import torch
+from torch.utils._pytree import tree_leaves, tree_map
 from dataclasses import dataclass
 from tilelang.utils.tensor import (
     get_tensor_supply,
@@ -23,22 +24,22 @@ def _synchronize_tensor_devices(*values: Any) -> None:
     """Synchronize each accelerator device referenced by nested tensor values."""
     devices: list[torch.device] = []
 
-    def collect(value: Any) -> None:
+    for value in tree_leaves(values):
         if isinstance(value, torch.Tensor):
             device = value.device
             if device.type in ("cuda", "mps", "npu") and device not in devices:
                 devices.append(device)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                collect(item)
-        elif isinstance(value, dict):
-            for item in value.values():
-                collect(item)
-
-    for value in values:
-        collect(value)
     for device in devices:
         device_synchronize(device)
+
+
+def _snapshot_outputs(outputs: Any) -> Any:
+    """Copy completed outputs before another invocation can overwrite them."""
+
+    outputs = tree_map(lambda value: value.clone() if isinstance(value, torch.Tensor) else value, outputs)
+    # The next callable may use another stream; finish these copies first.
+    _synchronize_tensor_devices(outputs)
+    return outputs
 
 
 @dataclass
@@ -144,6 +145,7 @@ class Profiler:
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
         _synchronize_tensor_devices(ins, ref_outs)
+        ref_outs = _snapshot_outputs(ref_outs)
         lib_outs = self.func(*ins)
         _synchronize_tensor_devices(ins, lib_outs)
 
@@ -202,6 +204,7 @@ class Profiler:
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
         _synchronize_tensor_devices(ins, ref_outs)
+        ref_outs = _snapshot_outputs(ref_outs)
         lib_outs = self.func(*ins)
         _synchronize_tensor_devices(ins, lib_outs)
 
@@ -224,9 +227,12 @@ class Profiler:
         # Used to check no race condition inside the kernel
         ins = self._get_inputs()
         ref_outs = self.func(*ins)
+        _synchronize_tensor_devices(ins, ref_outs)
+        ref_outs = _snapshot_outputs(ref_outs)
 
         for _ in range(repeat):
             lib_outs = self.func(*ins)
+            _synchronize_tensor_devices(ins, lib_outs)
             for lhs, rhs in zip(lib_outs, ref_outs):
                 assert torch.allclose(lhs, rhs), [
                     "result is not consistent",
