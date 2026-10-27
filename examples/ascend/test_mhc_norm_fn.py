@@ -7,10 +7,10 @@ import tilelang
 from example_mhc_norm_fn import (
     mhc_fn_normw_merge_bwd,
     mhc_fn_normw_merge_fwd,
-    mhc_pre_norm_fn_fwd_norm,
+    mhc_reduce_partials_and_rmsnorm_fwd,
     ref_program_fn_normw_merge_bwd,
     ref_program_fn_normw_merge_fwd,
-    ref_program_pre_norm_fn_fwd_norm,
+    ref_program_mhc_reduce_partials_and_rmsnorm_fwd,
 )
 
 
@@ -29,8 +29,8 @@ def test_mhc_fn_normw_merge_fwd(target):
 
 
 @pytest.mark.parametrize("target", ["ascend"])
-def test_mhc_fn_normw_merge_bwd(target):
-    m, n = 128, 512
+@pytest.mark.parametrize("m,n", [(128, 512), (3, 257)])
+def test_mhc_fn_normw_merge_bwd(target, m, n):
     kernel = tilelang.compile(mhc_fn_normw_merge_bwd(m, n), target=target, out_idx=[])
 
     device = torch.device("npu")
@@ -51,12 +51,13 @@ def test_mhc_fn_normw_merge_bwd(target):
 
 
 @pytest.mark.parametrize("target", ["ascend"])
-def test_mhc_pre_norm_fn_fwd_norm(target):
-    num_tokens, mhc_mult3, n_rms_group = 128, 4, 8
-    rms_group_size, rms_eps, n_splits = 896, 1e-6, 4
+@pytest.mark.parametrize("n_rms_group,n_splits,mhc_mult3", [(8, 4, 4), (1, 1, 24)])
+def test_mhc_reduce_partials_and_rmsnorm_fwd(target, n_rms_group, n_splits, mhc_mult3):
+    num_tokens = 128
+    rms_group_size, rms_eps = 896, 1e-6
 
     kernel = tilelang.compile(
-        mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits),
+        mhc_reduce_partials_and_rmsnorm_fwd(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits),
         target=target,
         out_idx=[2, 3, 4],
     )
@@ -67,7 +68,7 @@ def test_mhc_pre_norm_fn_fwd_norm(target):
 
     actual_out_mul, actual_sqrsum, actual_out = kernel(out_mul_splitted, sqrsum_splitted)
     torch.npu.synchronize()
-    expected_out_mul, expected_sqrsum, expected_out = ref_program_pre_norm_fn_fwd_norm(
+    expected_out_mul, expected_sqrsum, expected_out = ref_program_mhc_reduce_partials_and_rmsnorm_fwd(
         out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps
     )
     torch.testing.assert_close(actual_out_mul, expected_out_mul, rtol=1e-5, atol=2e-5)
@@ -78,7 +79,7 @@ def test_mhc_pre_norm_fn_fwd_norm(target):
 if __name__ == "__main__":
     test_mhc_fn_normw_merge_fwd("ascend")
     print("PASS: test_mhc_fn_normw_merge_fwd")
-    test_mhc_fn_normw_merge_bwd("ascend")
+    test_mhc_fn_normw_merge_bwd("ascend", 128, 512)
     print("PASS: test_mhc_fn_normw_merge_bwd")
-    test_mhc_pre_norm_fn_fwd_norm("ascend")
-    print("PASS: test_mhc_pre_norm_fn_fwd_norm")
+    test_mhc_reduce_partials_and_rmsnorm_fwd("ascend", 8, 4, 4)
+    print("PASS: test_mhc_reduce_partials_and_rmsnorm_fwd")

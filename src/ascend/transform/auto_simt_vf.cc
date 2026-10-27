@@ -3,11 +3,11 @@
  * \brief Form Ascend SIMT_VF regions around eligible Parallel computation.
  *
  * One planner follows M1 Analyze, M2 PlanRegions, M3 PlanStorage, and
- * M4 VerifyPlan/Rewrite/VerifyResult.
+ * M4 Rewrite/VerifyResult.
  *
- * Fragment definers join consuming regions when safe. A fragment owned by one
- * VF moves there; cross-VF reuse uses shared.dyn state. Existing VF is opaque.
- * Scalar state uses local.var, not local.fragment[1].
+ * Uniform serial/unrolled loops and branches join a structured region before
+ * storage planning. Cross-invocation values use shared.dyn; existing VF is
+ * opaque. Scalar state uses local.var, not local.fragment[1].
  */
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/copy.h"
@@ -16,10 +16,12 @@
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/reduce.h"
+#include "op/reducer.h"
 #include "op/utils.h"
 #include "support/check.h"
 #include <algorithm>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tvm/ir/attrs.h>
@@ -27,6 +29,7 @@
 #include <tvm/target/target.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -38,6 +41,13 @@
 
 namespace tvm {
 namespace tl {
+tvm::transform::Pass Simplify(bool simplify_arguments);
+namespace transform {
+tvm::transform::Pass UnrollLoopSkipVF();
+}
+namespace ascend {
+tvm::transform::Pass AscendLayoutInference();
+}
 using namespace tirx;
 using namespace ffi;
 namespace {
@@ -59,17 +69,13 @@ const char *ErrorCodeName(ErrorCode code) {
                                  "unsupported_statement", "unsupported_copy",
                                  "unsupported_reduce",    "region_conflict",
                                  "plan_invariant",        "rewrite_invariant"};
-  int index = static_cast<int>(code);
-  return index >= 0 &&
-                 index < static_cast<int>(sizeof(kNames) / sizeof(*kNames))
-             ? kNames[index]
-             : "<unknown>";
+  return kNames[static_cast<int>(code)];
 }
 
-struct Failure {
-  ErrorCode code;
-  std::string detail;
-};
+[[noreturn]] void Reject(ErrorCode code, const char *detail) {
+  TVM_FFI_THROW(InternalError)
+      << "[AutoSimtVF] " << ErrorCodeName(code) << ": " << detail;
+}
 struct CopyInfo {
   Buffer src, dst;
 };
@@ -83,7 +89,7 @@ void AddUnique(std::vector<Buffer> *buffers, const Buffer &buffer) {
 struct UnitSemantics {
   Role role;
   std::optional<CopyInfo> copy;
-  std::optional<Buffer> fragment_dst, reduce_src_fragment;
+  std::optional<Buffer> reduce_src_fragment;
   bool fragment_dst_full_def{
       false}; // This unit replaces the prior fragment value.
   UnitSemantics(Role role, std::optional<CopyInfo> copy = std::nullopt)
@@ -108,12 +114,92 @@ struct UnitAccess {
   }
 };
 
+// No performance migration rule is published: candidates remain on the host.
+enum class ScalarClass { kS1, kS2, kS3, kS4, kS5, kS6 };
+
+struct ScalarDecision {
+  std::vector<int> units;
+  std::vector<int> local_tail_begins;
+  ScalarClass category;
+  std::string position;
+  std::string reason;
+  bool reads_left{false};
+};
+
+// Summarize the entire block, including initialization and loop-carried state.
+// Tile operations, Parallel and existing VF are not host scalar candidates.
+class ScalarFacts : public StmtExprVisitor {
+public:
+  bool scalar{true}, loop{false}, read_memory{false}, shared_write{false};
+  bool unknown_effect{false};
+  UnitAccess access;
+  std::vector<Var> bindings;
+
+  ScalarClass Classify(bool host_consumer) const {
+    if (unknown_effect)
+      return ScalarClass::kS6;
+    if (host_consumer)
+      return ScalarClass::kS5;
+    if (shared_write)
+      return ScalarClass::kS4;
+    if (loop)
+      return ScalarClass::kS3;
+    return read_memory ? ScalarClass::kS2 : ScalarClass::kS1;
+  }
+
+private:
+  void VisitStmt_(const ForNode *op) final {
+    scalar &= op->kind == ForKind::kSerial || op->kind == ForKind::kUnrolled;
+    loop = true;
+    StmtExprVisitor::VisitStmt_(op);
+  }
+  void VisitStmt_(const SBlockNode *op) final { scalar = false; }
+  void VisitStmt_(const BindNode *op) final {
+    bindings.push_back(op->var);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+  void VisitExpr_(const CallNode *op) final {
+    const auto callee = op->op.as<Op>();
+    static const auto effects =
+        Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
+    if (callee && callee.value()->name.find("tl.tileop.") == 0)
+      scalar = false;
+    unknown_effect |= !callee || !effects.count(callee.value()) ||
+                      effects[callee.value()]->value >
+                          static_cast<int>(CallEffectKind::kPure);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const BufferLoadNode *op) final {
+    AddUnique(&access.reads, op->buffer);
+    read_memory |= !IsLocalVarBuffer(op->buffer);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitStmt_(const BufferStoreNode *op) final {
+    AddUnique(&access.writes, op->buffer);
+    shared_write |= !IsLocalVarBuffer(op->buffer);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+};
+
+// This is deliberately a closed policy, not an op/length heuristic or a user
+// switch that can bypass the offline publication and legality requirements.
+const char *SelectScalarPlacement(ScalarClass category) {
+  switch (category) {
+  case ScalarClass::kS4:
+    return "shared_write";
+  case ScalarClass::kS5:
+    return "host_consumer";
+  case ScalarClass::kS6:
+    return "unknown_effect";
+  default:
+    return "no_published_rule";
+  }
+}
+
 enum class AccessEffect { kRead, kFullDef, kUpdate };
 struct AccessEvent {
   int unit{-1};
-  Buffer buffer;
   AccessEffect effect{AccessEffect::kRead};
-  int reaching_def{-1}; // Index in BufferFlow::events; -1 is the entry value.
   bool Reads() const { return effect != AccessEffect::kFullDef; }
   bool Writes() const { return effect != AccessEffect::kRead; }
 };
@@ -122,16 +208,16 @@ struct Unit : UnitSemantics {
   int id{-1}, scope{-1}, order{-1};
   Stmt stmt;
   UnitAccess access;
+  bool host_scalar{false};
   std::vector<int> child_scopes;
-  Span span;
   Unit(int id, int scope, int order, Stmt stmt, UnitSemantics semantics)
       : UnitSemantics(std::move(semantics)), id(id), scope(scope), order(order),
-        stmt(std::move(stmt)), span(this->stmt->span) {}
+        stmt(std::move(stmt)) {}
 };
 
 enum class ChildSlot { kRoot, kLoopBody, kThen, kElse, kAttrBody };
 struct Scope {
-  int id{-1}, parent{-1};
+  int parent{-1};
   ChildSlot slot{ChildSlot::kRoot};
   std::vector<int> units; // units[order] directly yields the unit id.
 };
@@ -140,16 +226,13 @@ struct BufferFlow {
   Buffer original;
   std::vector<AccessEvent> events;
   std::unordered_map<int, int> event_by_unit;
-  int last_def{-1};
-  bool has_alias_view{false}; // Alias/view access retains the root allocation.
+  std::vector<Buffer> aliases;
 };
 
 struct Region {
   int id{-1}, scope{-1}, begin{-1}, end{-1};
 };
-struct Substitution {
-  Buffer from, to;
-};
+using BufferMap = Map<Buffer, Buffer>;
 struct RegionAction {
   std::vector<int> relocated_copies; // Emitted before direct region members.
   std::vector<Buffer> allocations;   // Allocations owned by this VF.
@@ -159,17 +242,16 @@ struct RegionAction {
 
 struct RewritePlan {
   std::vector<Region> regions;
-  std::vector<int>
-      owners; // -1 means unowned; differing scopes mean relocation.
+  std::vector<int> owners; // Includes descendants absorbed by a region.
+  std::unordered_set<int> relocated;
   std::vector<RegionAction> region_actions;
-  std::vector<std::vector<Substitution>> substitutions;
+  std::vector<BufferMap> substitutions;
   std::vector<Buffer> add_allocations, remove_allocations;
   PrimExpr tx_extent;
 };
 
 struct PlannerState {
   PrimFunc original;
-  Stmt logical_body;
   SBlock root_block;
   int root_scope{-1};
   std::vector<Unit> units;
@@ -178,7 +260,7 @@ struct PlannerState {
   std::unordered_set<int64_t> occupied_source_indices;
   int original_vf_count{0};
   RewritePlan plan;
-  std::optional<Failure> failure;
+  std::vector<ScalarDecision> scalar_decisions;
 };
 
 bool IsVFBlock(const String &name_hint) {
@@ -187,7 +269,8 @@ bool IsVFBlock(const String &name_hint) {
 
 bool IsScopedAttr(const String &key) {
   return key == "tl.ascend_stage" || key == "tl.assume" ||
-         key == "tl.assume_requires_runtime_check";
+         key == "tl.assume_requires_runtime_check" || key == "tl.ascend_task" ||
+         key == "tl.ascend_per_core_task";
 }
 
 const SBlockNode *GetBlockNode(const Stmt &stmt) {
@@ -201,6 +284,20 @@ const SBlockNode *GetBlockNode(const Stmt &stmt) {
 bool IsStaticPositiveInt(const PrimExpr &extent) {
   const auto *imm = extent.as<IntImmNode>();
   return imm != nullptr && imm->value > 0;
+}
+
+Array<PrimExpr> HeaderExprs(const Stmt &stmt) {
+  if (const auto *loop = stmt.as<ForNode>()) {
+    Array<PrimExpr> exprs{loop->min, loop->extent};
+    if (loop->step.defined())
+      exprs.push_back(loop->step.value());
+    return exprs;
+  }
+  if (const auto *branch = stmt.as<IfThenElseNode>())
+    return {branch->condition};
+  if (const auto *bind = stmt.as<BindNode>())
+    return {bind->value};
+  return {};
 }
 
 std::vector<std::pair<ChildSlot, Stmt>> GetControlChildren(const Stmt &stmt) {
@@ -218,8 +315,8 @@ std::vector<std::pair<ChildSlot, Stmt>> GetControlChildren(const Stmt &stmt) {
   return children;
 }
 
-std::optional<Stmt> ReplaceControlChild(const Stmt &owner, ChildSlot slot,
-                                        const Stmt &new_body) {
+Stmt ReplaceControlChild(const Stmt &owner, ChildSlot slot,
+                         const Stmt &new_body) {
   if (const auto *loop = owner.as<ForNode>()) {
     ICHECK(slot == ChildSlot::kLoopBody);
     return For(loop->loop_var, loop->min, loop->extent, loop->kind, new_body,
@@ -233,35 +330,19 @@ std::optional<Stmt> ReplaceControlChild(const Stmt &owner, ChildSlot slot,
     return IfThenElse(if_stmt->condition, if_stmt->then_case, new_body,
                       if_stmt->span);
   }
-  if (const auto *attr = owner.as<AttrStmtNode>()) {
-    ICHECK(slot == ChildSlot::kAttrBody && IsScopedAttr(attr->attr_key));
-    return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
-                    attr->span);
-  }
-  return std::nullopt;
+  const auto *attr = owner.as<AttrStmtNode>();
+  ICHECK(attr && slot == ChildSlot::kAttrBody);
+  return AttrStmt(attr->node, attr->attr_key, attr->value, new_body,
+                  attr->span);
 }
-
-class SourceIndexAllocator {
-public:
-  explicit SourceIndexAllocator(std::unordered_set<int64_t> occupied)
-      : occupied_(std::move(occupied)) {}
-  int64_t Next() {
-    while (occupied_.count(next_) != 0)
-      ++next_;
-    return next_++;
-  }
-
-private:
-  int64_t next_{0};
-  std::unordered_set<int64_t> occupied_;
-};
 
 // Capture the thread envelope, root, and candidates; existing VFs stay opaque.
 bool IsStage1Candidate(const Stmt &stmt);
 class InputReader : public StmtExprVisitor {
 public:
-  PrimExpr tx_extent{IntImm(DataType::Int(32), 128)};
+  PrimExpr tx_extent{IntImm(DataType::Int(32), 512)};
   std::vector<Var> thread_vars;
+  Optional<Var> subcore_var;
   Optional<SBlockRealize> root;
   bool has_candidate{false}, outer_thread_var_used{false};
 
@@ -270,7 +351,9 @@ private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
       if (const auto *iv = op->node.as<IterVarNode>()) {
-        if (iv->thread_tag == "threadIdx.x") {
+        if (iv->thread_tag == "cthread") {
+          subcore_var = iv->var;
+        } else if (iv->thread_tag == "threadIdx.x") {
           tx_extent = op->value;
           thread_vars.push_back(iv->var);
         } else if (iv->thread_tag == "threadIdx.y" ||
@@ -421,40 +504,98 @@ private:
   const BufferLoadNode *region_carrier_{nullptr};
 };
 
-bool IsParallelPrivateScalar(Stmt stmt, const Buffer &buffer) {
+// A dominating element definition permits private storage, including local.var.
+// Require identical indices at every access: a neighbour read needs
+// communication.
+bool IsParallelDefinition(Stmt stmt, const Buffer &buffer) {
+  Array<PrimExpr> indices;
   while (const auto *loop = stmt.as<ForNode>()) {
     if (loop->kind != ForKind::kParallel)
       return false;
+    indices.push_back(loop->loop_var);
+    if (!IsLocalVarBuffer(buffer) &&
+        (indices.size() > buffer->shape.size() || !is_zero(loop->min) ||
+         !StructuralEqual()(loop->extent, buffer->shape[indices.size() - 1])))
+      return false;
     stmt = loop->body;
   }
+  if (IsLocalVarBuffer(buffer))
+    indices = {Integer(0)};
+  if (indices.size() != buffer->shape.size())
+    return false;
+  Stmt body = stmt;
   if (const auto *seq = stmt.as<SeqStmtNode>()) {
-    if (seq->seq.empty())
-      return false;
-    stmt = seq->seq.front();
+    for (const Stmt &child : seq->seq) {
+      BufferReadWriteCollector access;
+      access(child);
+      if (access.summary.Accesses(buffer)) {
+        stmt = child;
+        break;
+      }
+    }
   }
   const auto *def = stmt.as<BufferStoreNode>();
-  if (def == nullptr || !def->buffer.same_as(buffer) ||
-      def->predicate.defined())
+  if (!def || !def->buffer.same_as(buffer) || def->predicate.defined() ||
+      !StructuralEqual()(indices, def->indices))
     return false;
   BufferReadWriteCollector inputs;
   inputs(def->value);
-  for (const PrimExpr &index : def->indices)
-    inputs(index);
-  return !inputs.summary.Accesses(buffer);
+  bool valid = !inputs.summary.Accesses(buffer);
+  PostOrderVisit(body, [&](const ObjectRef &obj) {
+    if (const auto *load = obj.as<BufferLoadNode>()) {
+      if (load->buffer->data.same_as(buffer->data))
+        valid &= load->buffer.same_as(buffer) &&
+                 StructuralEqual()(load->indices, indices);
+    } else if (const auto *store = obj.as<BufferStoreNode>()) {
+      if (store->buffer->data.same_as(buffer->data))
+        valid &= store->buffer.same_as(buffer) &&
+                 StructuralEqual()(store->indices, indices);
+    }
+  });
+  return valid;
+}
+
+// Headers may use captured host values and uniform induction variables, but do
+// not re-evaluate mutable memory or unknown calls independently in every lane.
+bool IsUniformHeader(const Stmt &stmt, const Optional<Var> &subcore_var) {
+  bool uniform = true;
+  for (const PrimExpr &expr : HeaderExprs(stmt))
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      // Core participation stays visible to AssignCore. Projecting a false
+      // subcore branch inside a VF would leave an empty, invalid VF block.
+      uniform &= !obj.as<BufferLoadNode>() && !obj.as<CallNode>() &&
+                 (!subcore_var.defined() || !obj.same_as(subcore_var.value()));
+    });
+  if (const auto *loop = stmt.as<ForNode>()) {
+    return uniform &&
+           (loop->kind == ForKind::kSerial ||
+            loop->kind == ForKind::kUnrolled) &&
+           loop->annotations.empty();
+  }
+  return stmt.as<IfThenElseNode>() && uniform;
+}
+
+// Do not lift a loop whose Parallel hides an engine op or opaque side effect.
+// Pure math calls remain eligible even when their operands load GM/UB values.
+bool HasOnlyPureCalls(const Stmt &stmt) {
+  static const auto effects =
+      Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
+  bool safe = true;
+  PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+    if (const auto *call = obj.as<CallNode>()) {
+      auto op = call->op.as<Op>();
+      safe &=
+          op && effects.count(op.value()) &&
+          effects[op.value()]->value <= static_cast<int>(CallEffectKind::kPure);
+    }
+  });
+  return safe;
 }
 
 bool HeaderReadsFragment(const Stmt &stmt) {
   BufferReadWriteCollector reads;
-  if (const auto *branch = stmt.as<IfThenElseNode>()) {
-    reads(branch->condition);
-  } else if (const auto *loop = stmt.as<ForNode>()) {
-    reads(loop->min);
-    reads(loop->extent);
-    if (loop->step.defined())
-      reads(loop->step.value());
-  } else if (const auto *bind = stmt.as<BindNode>()) {
-    reads(bind->value);
-  }
+  for (const PrimExpr &expr : HeaderExprs(stmt))
+    reads(expr);
   return std::any_of(reads.summary.reads.begin(), reads.summary.reads.end(),
                      IsFragmentBuffer);
 }
@@ -462,13 +603,11 @@ bool HeaderReadsFragment(const Stmt &stmt) {
 // M3 helpers for buffer cloning and synthetic copies.
 Buffer CloneBufferWithScope(const Buffer &original, const String &name,
                             const String &scope) {
-  const auto *ptr = original->data->type_annotation.as<PointerTypeNode>();
-  ICHECK(ptr != nullptr) << "fragment data var must have a pointer type";
-  Var data(name, PointerType(PrimType(original->dtype), scope), original->span);
-  return Buffer(data, original->dtype, original->shape, original->strides,
-                original->elem_offset, name, original->data_alignment,
-                original->offset_factor, original->buffer_type,
-                original->axis_separators, original->span);
+  Buffer result = original;
+  result.CopyOnWrite()->data =
+      Var(name, PointerType(PrimType(original->dtype), scope), original->span);
+  result.CopyOnWrite()->name = name;
+  return result;
 }
 
 PrimExpr MakeRegionCall(const Buffer &buffer, int64_t access_mask) {
@@ -516,108 +655,314 @@ Stmt BuildSimtVF(Stmt body, const PrimExpr &tx_extent, int64_t source_index,
 // Applies buffer substitutions to loads and stores during the M4 IR rewrite.
 class LocalBufferRewriter : public StmtExprMutator {
 public:
-  explicit LocalBufferRewriter(const std::vector<Substitution> &substitutions)
+  explicit LocalBufferRewriter(const BufferMap &substitutions)
       : substitutions_(substitutions) {}
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    PrimExpr expr = StmtExprMutator::VisitExpr_(op);
-    const auto *load = expr.as<BufferLoadNode>();
-    if (load == nullptr)
-      return expr;
-    auto to = Lookup(load->buffer);
-    if (!to.has_value())
-      return expr;
-    return BufferLoad(*to, load->indices, load->predicate, load->span);
+    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    if (auto to = substitutions_.Get(load->buffer))
+      load.CopyOnWrite()->buffer = *to;
+    return load;
   }
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    const auto *store = stmt.as<BufferStoreNode>();
-    if (store == nullptr)
-      return stmt;
-    auto to = Lookup(store->buffer);
-    if (!to.has_value())
-      return stmt;
-    return BufferStore(*to, store->value, store->indices, store->predicate,
-                       store->span);
+    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    if (auto to = substitutions_.Get(store->buffer))
+      store.CopyOnWrite()->buffer = *to;
+    return store;
   }
 
 private:
-  std::optional<Buffer> Lookup(const Buffer &from) const {
-    for (const Substitution &substitution : substitutions_) {
-      if (substitution.from.same_as(from))
-        return substitution.to;
-    }
-    return std::nullopt;
-  }
-  const std::vector<Substitution> &substitutions_;
+  const BufferMap &substitutions_;
 };
+
+// Auto Parallel stores describe logical iterations. Mark only stores whose
+// address, value and control are replica-independent. Fragment stores remain
+// unmarked so every private replica is initialized. Explicit VFs stay opaque.
+class LogicalStoreMarker : public StmtExprMutator {
+public:
+  explicit LogicalStoreMarker(const PlannerState &state) {
+    const PrimFunc &func = state.original;
+    for (const Var &param : func->params)
+      uniform_.insert(param.get());
+    for (const auto &[param, buffer] : func->buffer_map)
+      uniform_.insert(buffer->data.get());
+    for (const Buffer &buffer : state.plan.add_allocations)
+      uniform_.insert(buffer->data.get());
+    std::vector<const ForNode *> loops;
+    std::vector<const BindNode *> binds;
+    std::unordered_map<const VarNode *, std::vector<Copy>> input_copies;
+    std::unordered_set<const VarNode *> modified_fragments;
+    PostOrderVisit(func->body, [&](const ObjectRef &obj) {
+      auto escape = [&](const PrimExpr &expr) {
+        if (!expr.dtype().is_handle())
+          return;
+        PostOrderVisit(expr, [&](const ObjectRef &value) {
+          if (const auto *var = value.as<VarNode>())
+            modified_fragments.insert(var);
+          if (const auto *load = value.as<BufferLoadNode>())
+            modified_fragments.insert(load->buffer->data.get());
+        });
+      };
+      if (const auto *call = obj.as<CallNode>()) {
+        auto op = call->op.as<Op>();
+        std::string name = op ? std::string(op.value()->name) : "";
+        if (name != "tl.region" && name.rfind("tl.tileop.", 0) != 0)
+          for (const PrimExpr &arg : call->args)
+            escape(arg);
+      }
+      if (const auto *bind = obj.as<BindNode>())
+        escape(bind->value);
+      if (const auto *block = obj.as<SBlockNode>()) {
+        for (const Buffer &buffer : block->alloc_buffers) {
+          if (IsGlobalBuffer(buffer) || IsSharedBuffer(buffer))
+            uniform_.insert(buffer->data.get());
+        }
+      } else if (const auto *attr = obj.as<AttrStmtNode>()) {
+        const auto *iv = attr->node.as<IterVarNode>();
+        if (iv &&
+            (iv->thread_tag == "cthread" || iv->thread_tag == "blockIdx.x" ||
+             iv->thread_tag == "blockIdx.y" || iv->thread_tag == "blockIdx.z"))
+          uniform_.insert(iv->var.get());
+      } else if (const auto *loop = obj.as<ForNode>()) {
+        if (loop->kind != ForKind::kThreadBinding)
+          loops.push_back(loop);
+      } else if (const auto *bind = obj.as<BindNode>()) {
+        binds.push_back(bind);
+      }
+    });
+    // M1 already summarized every write, including aliases and opaque VFs.
+    // Its copy contract guarantees a whole fragment destination.
+    for (const BufferFlow &flow : state.fragment_flows)
+      for (const AccessEvent &event : flow.events) {
+        if (!event.Writes())
+          continue;
+        const Unit &unit = state.units[event.unit];
+        if (unit.copy &&
+            (IsGlobalBuffer(unit.copy->src) || IsSharedBuffer(unit.copy->src)))
+          input_copies[flow.original->data.get()].push_back(
+              *MatchTileCopy(unit.stmt));
+        else
+          modified_fragments.insert(flow.original->data.get());
+      }
+    // SSA aliases and nested loop bounds may depend on earlier bindings.
+    auto infer_bindings = [&] {
+      size_t previous;
+      do {
+        previous = uniform_.size();
+        for (const auto *loop : loops)
+          if (Safe(loop->min) && Safe(loop->extent) &&
+              (!loop->step.defined() || Safe(loop->step.value())))
+            uniform_.insert(loop->loop_var.get());
+        for (const auto *bind : binds)
+          if (Safe(bind->value))
+            uniform_.insert(bind->var.get());
+      } while (uniform_.size() != previous);
+    };
+    infer_bindings();
+    for (const auto &[data, copies] : input_copies) {
+      bool safe = !modified_fragments.count(data);
+      for (const Copy &copy : copies) {
+        safe &= SafeAddress(copy->src) && SafeAddress(copy->dst, true);
+        for (const auto &ranges : {copy->src_range, copy->dst_range})
+          for (const Range &range : ranges)
+            safe &= Safe(range->min) && Safe(range->extent);
+      }
+      if (safe)
+        replica_inputs_.insert(data);
+    }
+    infer_bindings();
+  }
+
+private:
+  bool Safe(const PrimExpr &expr) const {
+    bool safe = true;
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (const auto *var = obj.as<VarNode>())
+        safe &= uniform_.count(var) != 0;
+      // Purity alone does not exclude lane/shuffle intrinsics. Calls and
+      // unproven private loads deliberately do not establish uniformity.
+      if (obj.as<CallNode>())
+        safe = false;
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        safe &= IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer) ||
+                replica_inputs_.count(load->buffer->data.get());
+        safe &= SafeAddress(load->buffer);
+      }
+    });
+    return safe;
+  }
+
+  bool SafeAddress(const Buffer &buffer, bool copy_dst = false) const {
+    const auto *data = buffer->data.get();
+    if ((!uniform_.count(data) && !replica_inputs_.count(data) && !copy_dst) ||
+        !Safe(buffer->elem_offset))
+      return false;
+    for (const PrimExpr &dim : buffer->shape)
+      if (!Safe(dim))
+        return false;
+    for (const PrimExpr &stride : buffer->strides)
+      if (!Safe(stride))
+        return false;
+    return true;
+  }
+
+  Stmt VisitStmt(const Stmt &stmt) final {
+    // Unknown control constructs do not establish replica-independent paths.
+    if (!stmt.as<SeqStmtNode>() && !stmt.as<ForNode>() &&
+        !stmt.as<IfThenElseNode>() && !stmt.as<AttrStmtNode>() &&
+        !stmt.as<SBlockNode>() && !stmt.as<SBlockRealizeNode>() &&
+        !stmt.as<BufferStoreNode>() && !stmt.as<BindNode>() &&
+        !stmt.as<EvaluateNode>())
+      return stmt;
+    return StmtExprMutator::VisitStmt(stmt);
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    if (op->kind == ForKind::kThreadBinding || !Safe(op->min) ||
+        !Safe(op->extent) || (op->step.defined() && !Safe(op->step.value())))
+      return GetRef<Stmt>(op);
+    parallel_depth_ += op->kind == ForKind::kParallel;
+    Stmt result = StmtExprMutator::VisitStmt_(op);
+    parallel_depth_ -= op->kind == ForKind::kParallel;
+    return result;
+  }
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    return Safe(op->condition) ? StmtExprMutator::VisitStmt_(op)
+                               : GetRef<Stmt>(op);
+  }
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (!IsScopedAttr(op->attr_key) || !Safe(op->value))
+      return GetRef<Stmt>(op);
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    return IsVFBlock(op->name_hint) || !op->annotations.empty()
+               ? GetRef<Stmt>(op)
+               : StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    if (!Safe(op->predicate))
+      return GetRef<Stmt>(op);
+    for (const PrimExpr &value : op->iter_values)
+      if (!Safe(value))
+        return GetRef<Stmt>(op);
+    return StmtExprMutator::VisitStmt_(op);
+  }
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    Stmt stmt = GetRef<Stmt>(op);
+    if (!parallel_depth_ ||
+        (!IsGlobalBuffer(op->buffer) && !IsSharedBuffer(op->buffer)) ||
+        !Safe(op->value) ||
+        (op->predicate.defined() && !Safe(op->predicate.value())))
+      return stmt;
+    for (const PrimExpr &index : op->indices)
+      if (!Safe(index))
+        return stmt;
+    if (!SafeAddress(op->buffer))
+      return stmt;
+    return AttrStmt(op->buffer->data, attr::kParallelMultiplicity,
+                    IntImm(DataType::Int(32), 1), stmt);
+  }
+  std::unordered_set<const VarNode *> uniform_;
+  std::unordered_set<const VarNode *> replica_inputs_;
+  int parallel_depth_{0};
+};
+
+// Validate a temporary candidate through existing pass interfaces. Only a
+// solver with no legal layout triggers replanning; other diagnostics propagate.
+bool CanInferStructuredLayout(PrimFunc func) {
+  try {
+    With<Target> target_scope(
+        func->GetAttr<Target>(tvm::attr::kTarget).value());
+    IRModule mod(Map<GlobalVar, BaseFunc>{{GlobalVar("main"), func}});
+    mod = transform::UnrollLoopSkipVF()(mod);
+    mod = tl::Simplify(true)(mod);
+    ascend::AscendLayoutInference()(mod);
+    return true;
+  } catch (const Error &error) {
+    if (error.message().find("no available layout found") == std::string::npos)
+      throw;
+    return false;
+  }
+}
 
 class AutoSimtVFPlanner {
 public:
-  explicit AutoSimtVFPlanner(PrimFunc func) {
+  explicit AutoSimtVFPlanner(PrimFunc func, bool fuse_serial)
+      : fuse_serial_(fuse_serial) {
     state_.original = std::move(func);
   }
 
   // M1-M3 only build a plan; M4 rewrites after verification, so failures never
   // expose a partially transformed function.
-  std::optional<PrimFunc> Run(const InputReader &reader) {
-    if (!Analyze(reader))
-      return std::nullopt;
-    if (!PlanRegions())
-      return std::nullopt;
+  PrimFunc Run(const InputReader &reader) {
+    Analyze(reader);
+    PlanRegions();
     PlanStorage();
     PlanPrivateScalars();
-    if (!VerifyPlan())
-      return std::nullopt;
-    auto result = Rewrite();
-    if (!result.has_value())
-      return std::nullopt;
-    if (!VerifyResult(*result))
-      return std::nullopt;
+    PrimFunc result = Rewrite();
+    VerifyResult(result);
     return result;
   }
 
-  const Failure &failure() const { return *state_.failure; }
+  bool fused_control() const { return fused_control_; }
+
+  Array<Map<String, Any>> ScalarReport() {
+    PlanScalarScope(state_.root_scope);
+    Array<Map<String, Any>> report;
+    for (const ScalarDecision &decision : state_.scalar_decisions) {
+      Map<String, Any> row;
+      Array<Integer> units;
+      for (int unit : decision.units)
+        units.push_back(Integer(unit));
+      row.Set("units", units);
+      row.Set("category",
+              String("S" +
+                     std::to_string(1 + static_cast<int>(decision.category))));
+      row.Set("position", String(decision.position));
+      row.Set("strategy", String("split"));
+      row.Set("reason", String(decision.reason));
+      row.Set("reads_left", Bool(decision.reads_left));
+      row.Set("whole_candidate", Bool(decision.category <= ScalarClass::kS3 &&
+                                      decision.position != "isolated"));
+      row.Set("local_candidate", String("record_only"));
+      Array<Integer> cuts;
+      for (int unit : decision.local_tail_begins)
+        cuts.push_back(Integer(unit));
+      row.Set("local_tail_begin_units", cuts);
+      report.push_back(row);
+    }
+    return report;
+  }
 
 private:
-  bool Fail(ErrorCode code, std::string detail) {
-    if (!state_.failure.has_value())
-      state_.failure = Failure{code, std::move(detail)};
-    return false;
-  }
-
-  std::optional<UnitSemantics> Reject(ErrorCode code, const char *detail) {
-    Fail(code, detail);
-    return std::nullopt;
-  }
-
   const Unit &U(int id) const { return state_.units[id]; }
   const Scope &S(int id) const { return state_.scopes[id]; }
   bool IsRelocated(int unit_id) const {
     int region = plan.owners[unit_id];
-    return region >= 0 && U(unit_id).scope != plan.regions[region].scope;
+    return region >= 0 && plan.relocated.count(unit_id);
   }
 
   // ---- M1: Statement analysis ----
-  // Build lexical Scope/Unit tables and per-fragment reaching-definition
-  // chains. Existing VFs stay opaque; control bodies become child scopes.
-  bool Analyze(const InputReader &reader) {
+  // Preserve the statement tree and leaf effects. Uniform control can be
+  // absorbed as a whole; host cuts and existing VFs keep their child scopes.
+  void Analyze(const InputReader &reader) {
+    subcore_var_ = reader.subcore_var;
     if (!IsStaticPositiveInt(reader.tx_extent)) {
-      return Fail(ErrorCode::kThreadEnvelope,
-                  "threadIdx.x extent is not a positive static integer");
+      Reject(ErrorCode::kThreadEnvelope,
+             "threadIdx.x extent is not a positive static integer");
     }
     plan.tx_extent = reader.tx_extent;
     Optional<SBlockRealize> root = reader.root;
     if (!root.defined()) {
-      return Fail(ErrorCode::kInputContract, "tilelang_root block not found");
+      Reject(ErrorCode::kInputContract, "tilelang_root block not found");
     }
     state_.root_block = root.value()->block;
-    state_.logical_body = state_.root_block->body;
 
     if (reader.outer_thread_var_used)
-      return Fail(ErrorCode::kInputContract,
-                  "outer thread variable is outside AutoSimtVF Stage1 "
-                  "input contract (rewrite the thread-id guard as an "
-                  "unconditional MainScalar statement)");
+      Reject(ErrorCode::kInputContract,
+             "outer thread variable is outside AutoSimtVF Stage1 "
+             "input contract (rewrite the thread-id guard as an "
+             "unconditional MainScalar statement)");
 
     state_.root_scope = AddScope(/*parent=*/-1, ChildSlot::kRoot);
     for (const Buffer &buffer : state_.root_block->alloc_buffers) {
@@ -626,27 +971,32 @@ private:
       if (buffer->shape.size() == 1) {
         const auto *dim = buffer->shape[0].as<IntImmNode>();
         if (dim != nullptr && dim->value == 1) {
-          return Fail(
+          Reject(
               ErrorCode::kInputContract,
               "local.fragment[1] scalar storage is unsupported; use alloc_var");
         }
       }
       state_.fragment_flows.push_back(BufferFlow{buffer});
     }
-    if (!VisitScope(state_.logical_body, state_.root_scope))
-      return false;
+    VisitScope(state_.root_block->body, state_.root_scope);
+    // Freeze host scalar boundaries before region and storage planning. A later
+    // vector-control decision must not silently absorb a scalar-only block.
+    for (Unit &unit : state_.units) {
+      ScalarFacts facts;
+      facts(unit.stmt);
+      unit.host_scalar = facts.scalar;
+    }
     state_.fragment_flows.erase(std::remove_if(state_.fragment_flows.begin(),
                                                state_.fragment_flows.end(),
                                                [](const BufferFlow &flow) {
                                                  return flow.events.empty();
                                                }),
                                 state_.fragment_flows.end());
-    return true;
   }
 
   int AddScope(int parent, ChildSlot slot) {
     int id = static_cast<int>(state_.scopes.size());
-    state_.scopes.push_back(Scope{id, parent, slot, {}});
+    state_.scopes.push_back(Scope{parent, slot, {}});
     return id;
   }
 
@@ -659,7 +1009,7 @@ private:
   }
 
   // Dynamic engine ranges are allowed; fragment endpoints must be whole.
-  std::optional<UnitSemantics> ClassifyCopy(const Copy &copy) {
+  UnitSemantics ClassifyCopy(const Copy &copy) {
     const Buffer &src = copy->src;
     const Buffer &dst = copy->dst;
     if (IsDedicatedEnginePair(src, dst)) {
@@ -669,9 +1019,9 @@ private:
       Buffer fragment = IsFragmentBuffer(src) ? src : dst;
       auto ranges = IsFragmentBuffer(src) ? copy->src_range : copy->dst_range;
       if (!CoversWholeBuffer(ranges, fragment)) {
-        return Reject(ErrorCode::kUnsupportedCopy,
-                      "partial fragment copy is unsupported; the fragment "
-                      "endpoint must cover the whole allocation");
+        Reject(ErrorCode::kUnsupportedCopy,
+               "partial fragment copy is unsupported; the fragment "
+               "endpoint must cover the whole allocation");
       }
       return UnitSemantics(Role::kFusible, CopyInfo{src, dst});
     }
@@ -680,21 +1030,31 @@ private:
                                                     : Role::kSeed,
                            CopyInfo{src, dst});
     }
-    return Reject(ErrorCode::kUnsupportedCopy,
-                  "unsupported copy scope/dtype combination");
+    Reject(ErrorCode::kUnsupportedCopy,
+           "unsupported copy scope/dtype combination");
   }
 
-  std::optional<UnitSemantics> ClassifyLeaf(const Stmt &stmt) {
+  UnitSemantics ClassifyLeaf(const Stmt &stmt) {
     if (auto copy = MatchTileCopy(stmt))
       return ClassifyCopy(*copy);
     if (auto fill = MatchTileOp<Fill>(stmt, "tl.tileop.fill")) {
       bool full_def = CoversWholeBuffer((*fill)->region, (*fill)->dst);
       if (!full_def && IsFragmentBuffer((*fill)->dst)) {
-        return Reject(ErrorCode::kUnsupportedStatement,
-                      "fill must be static and cover the whole buffer");
+        Reject(ErrorCode::kUnsupportedStatement,
+               "fill must be static and cover the whole buffer");
       }
-      UnitSemantics leaf(IsFillSeed(*fill) ? Role::kSeed : Role::kBoundary);
-      leaf.fragment_dst = (*fill)->dst;
+      bool seed = IsFillSeed(*fill);
+      if (seed && !IsFragmentBuffer((*fill)->dst)) {
+        // Preserve ordinary fill lowering when VF partitioning would
+        // require a padded, non-bijective physical layout.
+        int64_t elements = 1;
+        for (const Range &range : (*fill)->region)
+          elements *= range->extent.as<IntImmNode>()->value;
+        int64_t threads = plan.tx_extent.as<IntImmNode>()->value;
+        seed = elements > 0 &&
+               (elements % threads == 0 || threads % elements == 0);
+      }
+      UnitSemantics leaf(seed ? Role::kSeed : Role::kBoundary);
       leaf.fragment_dst_full_def = full_def;
       return leaf;
     }
@@ -706,12 +1066,10 @@ private:
           !IsFragmentBuffer(reduce_ref->dst) ||
           !CoversWholeBuffer(reduce_ref->srcRegion_->region, reduce_ref->src) ||
           !CoversWholeBuffer(reduce_ref->dstRegion_->region, reduce_ref->dst)) {
-        return Reject(
-            ErrorCode::kUnsupportedReduce,
-            "reduce must be static float32 sum/max on whole fragments");
+        Reject(ErrorCode::kUnsupportedReduce,
+               "reduce must be static float32 sum/max on whole fragments");
       }
       UnitSemantics leaf(Role::kFusible);
-      leaf.fragment_dst = reduce_ref->dst;
       leaf.reduce_src_fragment = reduce_ref->src;
       leaf.fragment_dst_full_def = reduce_ref->clear;
       return leaf;
@@ -722,25 +1080,25 @@ private:
             op != nullptr && op->name.find("tl.tileop.") == 0) {
           if (op->name == "tl.tileop.gemm")
             return UnitSemantics(Role::kBoundary);
-          return Reject(ErrorCode::kUnsupportedStatement,
-                        "tile-op call is outside the Stage1 whitelist");
+          Reject(ErrorCode::kUnsupportedStatement,
+                 "tile-op call is outside the Stage1 whitelist");
         }
       }
       return UnitSemantics(Role::kBoundary);
     }
     if (stmt.as<BindNode>()) {
       if (HeaderReadsFragment(stmt))
-        return Reject(ErrorCode::kUnsupportedStatement,
-                      "fragment load in a scalar binding is unsupported");
+        Reject(ErrorCode::kUnsupportedStatement,
+               "fragment load in a scalar binding is unsupported");
       return UnitSemantics(Role::kBoundary);
     }
     if (stmt.as<BufferStoreNode>())
       return UnitSemantics(Role::kBoundary);
-    return Reject(ErrorCode::kUnsupportedStatement,
-                  "statement is outside the Stage1 whitelist");
+    Reject(ErrorCode::kUnsupportedStatement,
+           "statement is outside the Stage1 whitelist");
   }
 
-  bool VisitScope(const Stmt &body, int scope_id) {
+  void VisitScope(const Stmt &body, int scope_id) {
     std::vector<Stmt> children{body};
     if (const auto *seq = body.as<SeqStmtNode>())
       children.assign(seq->seq.begin(), seq->seq.end());
@@ -756,27 +1114,38 @@ private:
           !existing_vf && !parallel &&
           (loop != nullptr || stmt.as<IfThenElseNode>() || scoped_attr);
       if (control && HeaderReadsFragment(stmt))
-        return Fail(ErrorCode::kInputContract,
-                    "fragment load in a control header is unsupported");
-      std::optional<UnitSemantics> semantics =
-          control || existing_vf ? std::optional{UnitSemantics(Role::kBoundary)}
-          : parallel             ? std::optional{UnitSemantics(Role::kSeed)}
-                                 : ClassifyLeaf(stmt);
-      if (!semantics)
-        return false;
-      int id = AddUnit(stmt, scope_id, order, std::move(*semantics));
+        Reject(ErrorCode::kInputContract,
+               "fragment load in a control header is unsupported");
+      UnitSemantics semantics = control || existing_vf
+                                    ? UnitSemantics(Role::kBoundary)
+                                : parallel ? UnitSemantics(Role::kSeed)
+                                           : ClassifyLeaf(stmt);
+      int id = AddUnit(stmt, scope_id, order, std::move(semantics));
       if (control) {
         for (auto [slot, child_body] : GetControlChildren(stmt)) {
           int child = AddScope(scope_id, slot);
           state_.units[id].child_scopes.push_back(child);
-          if (!VisitScope(child_body, child))
-            return false;
+          VisitScope(child_body, child);
           for (int unit_id : S(child).units) {
             for (const Buffer &buffer : U(unit_id).access.reads)
               AddUnique(&state_.units[id].access.reads, buffer);
             for (const Buffer &buffer : U(unit_id).access.writes)
               AddUnique(&state_.units[id].access.writes, buffer);
           }
+        }
+        bool fusible = fuse_serial_ && IsUniformHeader(stmt, subcore_var_);
+        bool has_work = false;
+        for (int child : U(id).child_scopes)
+          for (int member : S(child).units) {
+            fusible &= U(member).role != Role::kBoundary;
+            const auto *nested = U(member).stmt.as<ForNode>();
+            if (nested && nested->kind == ForKind::kParallel)
+              fusible &= HasOnlyPureCalls(U(member).stmt);
+            has_work = true;
+          }
+        if (fusible && has_work) {
+          state_.units[id].role = Role::kSeed;
+          fused_control_ = true;
         }
         continue;
       }
@@ -792,7 +1161,6 @@ private:
         }
       }
     }
-    return true;
   }
 
   void SummarizeUnitAccess(int unit_id) {
@@ -807,256 +1175,290 @@ private:
     for (BufferFlow &flow : state_.fragment_flows) {
       auto find_access =
           [&](const std::vector<Buffer> &buffers) -> const Buffer * {
+        const Buffer *first = nullptr;
         for (const Buffer &buffer : buffers) {
-          if (buffer->data.same_as(flow.original->data))
-            return &buffer;
+          if (buffer->data.same_as(flow.original->data)) {
+            if (!buffer.same_as(flow.original))
+              AddUnique(&flow.aliases, buffer);
+            if (first == nullptr)
+              first = &buffer;
+          }
         }
-        return nullptr;
+        return first;
       };
       const Buffer *read = find_access(unit.access.reads);
       const Buffer *write = find_access(unit.access.writes);
-      const Buffer *accessed = write != nullptr ? write : read;
-      if (accessed == nullptr)
+      if (!write && !read)
         continue;
-      flow.has_alias_view |= !accessed->same_as(flow.original);
       int index = static_cast<int>(flow.events.size());
       AccessEffect effect = AccessEffect::kRead;
       if (write != nullptr) {
         bool full_def = read == nullptr &&
                         ((unit.copy && IsFragmentBuffer(unit.copy->dst)) ||
                          unit.fragment_dst_full_def);
+        const auto *loop = unit.stmt.as<ForNode>();
+        full_def |= loop && loop->kind == ForKind::kParallel &&
+                    IsParallelDefinition(unit.stmt, *write);
+        // A view may cover only part of its root storage.
+        full_def &= write->same_as(flow.original);
         effect = full_def ? AccessEffect::kFullDef : AccessEffect::kUpdate;
       }
-      flow.events.push_back(
-          AccessEvent{unit.id, *accessed, effect, flow.last_def});
+      flow.events.push_back(AccessEvent{unit.id, effect});
       flow.event_by_unit.emplace(unit.id, index);
-      if (flow.events.back().Writes())
-        flow.last_def = index;
     }
   }
 
-  // ---- M2: Region planning ----
-  // Split scopes into boundary-free windows, grow seeds through fragment flow,
-  // then commit intervals, owners, and safe ancestor-definer relocations.
-  bool IsFragmentCopy(const Unit &unit) const {
-    return unit.copy && IsFragmentEndpointPair(unit.copy->src, unit.copy->dst);
-  }
-
+  // ---- M2: Structured region planning ----
+  // A region owns its direct interval AND every absorbed control descendant.
+  // Storage is deliberately planned only after this partition is final.
   std::optional<int> EventIndex(const BufferFlow &flow, int unit_id) const {
     auto it = flow.event_by_unit.find(unit_id);
     return it == flow.event_by_unit.end() ? std::nullopt
                                           : std::optional<int>(it->second);
   }
 
-  bool UnitsShareValue(int lhs_unit, int rhs_unit) const {
-    for (const BufferFlow &flow : state_.fragment_flows) {
-      auto lhs_index = EventIndex(flow, lhs_unit);
-      auto rhs_index = EventIndex(flow, rhs_unit);
-      if (!lhs_index || !rhs_index)
+  void OwnSubtree(int id, int region) {
+    ICHECK_EQ(plan.owners[id], -1) << "operation has two VF owners";
+    plan.owners[id] = region;
+    for (int child : U(id).child_scopes)
+      for (int member : S(child).units)
+        OwnSubtree(member, region);
+  }
+
+  void PlanScope(int scope_id) {
+    const Scope &scope = S(scope_id);
+    int first = -1;
+    for (int order = 0; order <= static_cast<int>(scope.units.size());
+         ++order) {
+      bool boundary = order == static_cast<int>(scope.units.size()) ||
+                      U(scope.units[order]).role == Role::kBoundary ||
+                      U(scope.units[order]).host_scalar;
+      if (!boundary) {
+        if (first < 0)
+          first = order;
         continue;
-      const AccessEvent &lhs = flow.events[*lhs_index];
-      const AccessEvent &rhs = flow.events[*rhs_index];
-      if (lhs.reaching_def == *rhs_index || rhs.reaching_def == *lhs_index ||
-          (lhs.Reads() && rhs.Reads() &&
-           lhs.reaching_def == rhs.reaching_def)) {
-        return true;
       }
+      if (first >= 0) {
+        int region = static_cast<int>(plan.regions.size());
+        plan.regions.push_back({region, scope_id, first, order - 1});
+        plan.region_actions.emplace_back();
+        for (int i = first; i < order; ++i)
+          OwnSubtree(scope.units[i], region);
+        first = -1;
+      }
+      if (order < static_cast<int>(scope.units.size()))
+        for (int child : U(scope.units[order]).child_scopes)
+          PlanScope(child);
+    }
+  }
+
+  // Close read-only fragment inputs across unrelated host operations. Moving
+  // only within the same scope preserves zero-trip paths and copy multiplicity.
+  // Unlike the Stage1 ancestor-loop special case, no copy is duplicated per VF.
+  void CloseDefiners() {
+    for (const BufferFlow &flow : state_.fragment_flows) {
+      if (!flow.aliases.empty() || flow.events.empty())
+        continue;
+      const Unit &copy = U(flow.events.front().unit);
+      if (!copy.copy || !IsFragmentBuffer(copy.copy->dst) ||
+          flow.events.front().effect != AccessEffect::kFullDef)
+        continue;
+      int old = plan.owners[copy.id], target = -1;
+      if (old < 0 || plan.regions[old].begin != plan.regions[old].end)
+        continue;
+      bool safe = true;
+      for (size_t i = 1; i < flow.events.size(); ++i) {
+        const AccessEvent &event = flow.events[i];
+        int owner = plan.owners[event.unit];
+        safe &= !event.Writes() && owner >= 0 && owner != old &&
+                (target < 0 || owner == target);
+        target = owner;
+      }
+      if (!safe || target < 0)
+        continue;
+      const Region &region = plan.regions[target];
+      if (copy.scope != region.scope || copy.order >= region.begin)
+        continue;
+      for (int i = copy.order + 1; i < region.begin; ++i) {
+        const Unit &crossed = U(S(copy.scope).units[i]);
+        // Only known copy operations may be crossed; unknown effects are cuts.
+        safe &= crossed.copy.has_value();
+        for (const Buffer &read : copy.access.reads)
+          safe &= !crossed.access.Writes(read);
+        if (!state_.original->HasNonzeroAttr(tirx::attr::kNoAlias))
+          for (const Buffer &write : crossed.access.writes)
+            safe &= !IsGlobalBuffer(write);
+      }
+      if (safe) {
+        plan.owners[copy.id] = target;
+        plan.relocated.insert(copy.id);
+        plan.region_actions[target].relocated_copies.push_back(copy.id);
+      }
+    }
+    // The old singleton regions are now empty; compact once before M3.
+    std::vector<int> remap(plan.regions.size(), -1);
+    std::vector<Region> regions;
+    std::vector<RegionAction> actions;
+    for (Region region : plan.regions) {
+      if (region.begin == region.end &&
+          IsRelocated(S(region.scope).units[region.begin]))
+        continue;
+      remap[region.id] = static_cast<int>(regions.size());
+      actions.push_back(std::move(plan.region_actions[region.id]));
+      region.id = remap[region.id];
+      regions.push_back(region);
+    }
+    for (int &owner : plan.owners)
+      if (owner >= 0)
+        owner = remap[owner];
+    plan.regions = std::move(regions);
+    plan.region_actions = std::move(actions);
+  }
+
+  void PlanRegions() {
+    plan.owners.assign(state_.units.size(), -1);
+    PlanScope(state_.root_scope);
+    CloseDefiners();
+    VerifyRegions();
+  }
+
+  // A host scalar block never joins a vector-control region implicitly. Group
+  // adjacent scalar statements so initialization and recurrences stay together.
+  void CollectSubtree(int id, std::unordered_set<int> *ids) const {
+    ids->insert(id);
+    for (int child : U(id).child_scopes)
+      for (int member : S(child).units)
+        CollectSubtree(member, ids);
+  }
+
+  bool HasHostConsumer(const ScalarFacts &facts,
+                       const std::unordered_set<int> &members) const {
+    for (const Unit &consumer : state_.units) {
+      if (members.count(consumer.id) || plan.owners[consumer.id] >= 0)
+        continue;
+      const auto *block = GetBlockNode(consumer.stmt);
+      if (block && IsVFBlock(block->name_hint))
+        continue;
+      // A control unit includes its descendants; inspect only its header here.
+      // Leaf consumers are checked once, including MTE addresses and call args.
+      auto headers = HeaderExprs(consumer.stmt);
+      if (headers.empty() && !consumer.child_scopes.empty())
+        continue;
+      bool used = false;
+      auto check = [&](const ObjectRef &obj) {
+        if (const auto *load = obj.as<BufferLoadNode>())
+          used |= facts.access.Writes(load->buffer);
+        if (const auto *var = obj.as<VarNode>()) {
+          for (const Var &binding : facts.bindings)
+            used |= binding.same_as(GetRef<Var>(var));
+          // A raw pointer escape is an unproved host consumer too.
+          for (const Buffer &written : facts.access.writes)
+            used |= written->data.same_as(GetRef<Var>(var));
+        }
+      };
+      if (headers.empty() && consumer.child_scopes.empty())
+        PostOrderVisit(consumer.stmt, check);
+      else
+        for (const PrimExpr &header : headers)
+          PostOrderVisit(header, check);
+      if (used)
+        return true;
     }
     return false;
   }
 
-  // Relocation preserves reaching definitions and source address dependencies.
-  bool PreservesFlowWhenMoved(const Unit &copy, const Region &target) const {
-    const CopyInfo &info = *copy.copy;
-    if (!IsFragmentBuffer(info.dst))
-      return false;
-    for (int cur = target.scope; cur != copy.scope; cur = S(cur).parent) {
-      if (cur < 0 || S(cur).parent < 0 || S(cur).slot != ChildSlot::kLoopBody)
-        return false;
-    }
-
-    auto it =
-        std::find_if(state_.fragment_flows.begin(), state_.fragment_flows.end(),
-                     [&](const BufferFlow &flow) {
-                       return info.dst->data.same_as(flow.original->data);
-                     });
-    if (it == state_.fragment_flows.end() || it->has_alias_view)
-      return false;
-    auto definer = EventIndex(*it, copy.id);
-    if (!definer || it->events[*definer].effect != AccessEffect::kFullDef)
-      return false;
-    bool has_consumer = false;
-    for (const AccessEvent &event : it->events) {
-      if (event.unit == copy.id)
-        continue;
-      has_consumer = true;
-      const Unit &consumer = U(event.unit);
-      if (event.Writes() || event.reaching_def != *definer ||
-          consumer.scope != target.scope || consumer.order < target.begin ||
-          consumer.order > target.end) {
-        return false;
-      }
-    }
-    if (!has_consumer)
-      return false;
-
-    BufferReadWriteCollector dependencies;
-    dependencies(copy.stmt);
-    const Scope &home = S(copy.scope);
-    for (const Buffer &buffer : dependencies.summary.reads) {
-      if (buffer->data.same_as(info.dst->data))
-        continue;
-      for (int id : home.units) {
-        if (U(id).order > copy.order && U(id).access.Writes(buffer))
-          return false;
-      }
-      for (int cur = target.scope; cur != copy.scope; cur = S(cur).parent) {
-        for (int id : S(cur).units) {
-          if (U(id).access.Writes(buffer))
-            return false;
-        }
-      }
-    }
-    return true;
+  bool IsVFUnit(int id) const {
+    // Scalar positions describe M2 ownership, before MTE legalization.
+    if (plan.owners[id] >= 0)
+      return true;
+    const auto *block = GetBlockNode(U(id).stmt);
+    return block && IsVFBlock(block->name_hint);
   }
 
-  void ClaimAncestorDefinerCopies(const Region &target) {
-    for (const Unit &copy : state_.units) {
-      if (!IsFragmentCopy(copy) || !IsFragmentBuffer(copy.copy->dst) ||
-          copy.scope == target.scope || plan.owners[copy.id] >= 0 ||
-          !PreservesFlowWhenMoved(copy, target))
+  bool VFWrites(int id, const Buffer &buffer) const {
+    int owner = plan.owners[id];
+    if (owner < 0)
+      return U(id).access.Writes(buffer);
+    const Region &region = plan.regions[owner];
+    for (int order = region.begin; order <= region.end; ++order)
+      if (U(S(region.scope).units[order]).access.Writes(buffer))
+        return true;
+    for (int relocated : plan.region_actions[owner].relocated_copies)
+      if (U(relocated).access.Writes(buffer))
+        return true;
+    return false;
+  }
+
+  void PlanScalarScope(int scope_id) {
+    const Scope &scope = S(scope_id);
+    for (size_t cursor = 0; cursor < scope.units.size();) {
+      int id = scope.units[cursor];
+      if (plan.owners[id] >= 0 || !U(id).host_scalar) {
+        if (plan.owners[id] < 0)
+          for (int child : U(id).child_scopes)
+            PlanScalarScope(child);
+        ++cursor;
         continue;
-      plan.owners[copy.id] = target.id;
-      plan.region_actions[target.id].relocated_copies.push_back(copy.id);
+      }
+      size_t begin = cursor;
+      ScalarFacts facts;
+      ScalarDecision decision;
+      std::unordered_set<int> members;
+      while (cursor < scope.units.size()) {
+        int member = scope.units[cursor];
+        if (plan.owners[member] >= 0 || !U(member).host_scalar)
+          break;
+        facts(U(member).stmt);
+        decision.units.push_back(member);
+        CollectSubtree(member, &members);
+        ++cursor;
+      }
+      bool left = begin > 0 && IsVFUnit(scope.units[begin - 1]);
+      bool right = cursor < scope.units.size() && IsVFUnit(scope.units[cursor]);
+      decision.position = left && right ? "bridge"
+                          : right       ? "prefix"
+                          : left        ? "postfix"
+                                        : "isolated";
+      if (left)
+        for (const Buffer &read : facts.access.reads)
+          decision.reads_left |= VFWrites(scope.units[begin - 1], read);
+      decision.category = facts.Classify(HasHostConsumer(facts, members));
+      decision.reason = SelectScalarPlacement(decision.category);
+      // Only record mathematical tails after the complete scalar recurrence.
+      // These are unproved boundaries, never permissions to migrate a slice.
+      if (decision.category <= ScalarClass::kS3) {
+        size_t last_loop = 0;
+        for (size_t i = 0; i < decision.units.size(); ++i) {
+          ScalarFacts part;
+          part(U(decision.units[i]).stmt);
+          if (part.loop)
+            last_loop = i;
+        }
+        for (size_t i = last_loop + 1; i < decision.units.size(); ++i)
+          decision.local_tail_begins.push_back(decision.units[i]);
+      }
+      state_.scalar_decisions.push_back(std::move(decision));
     }
   }
 
-  bool PlanWindow(const Scope &scope, int first, int last) {
-    std::vector<Region> local;
-    for (int order = first; order <= last; ++order) {
-      const Unit &unit = U(scope.units[order]);
-      if (IsRelocated(unit.id) || unit.role != Role::kSeed)
-        continue;
-      local.push_back(Region{/*id=*/-1, scope.id, order, order});
-    }
-    bool has_seed = !local.empty();
-    std::vector<bool> attached(scope.units.size(), false);
-    // Breadth-first growth follows the transitive value chain from each seed.
-    for (Region &region : local) {
-      std::vector<int> members{region.begin};
-      for (size_t cursor = 0; cursor < members.size(); ++cursor) {
-        for (int order = first; order <= last; ++order) {
-          const Unit &unit = U(scope.units[order]);
-          if (IsRelocated(unit.id) || unit.role != Role::kFusible ||
-              std::find(members.begin(), members.end(), order) !=
-                  members.end() ||
-              !UnitsShareValue(unit.id, scope.units[members[cursor]]))
-            continue;
-          members.push_back(order);
-          attached[order] = true;
-          region.begin = std::min(region.begin, order);
-          region.end = std::max(region.end, order);
-        }
-      }
-    }
-
-    // Copies and reductions that cannot join a seed form standalone regions.
-    for (int order = first; order <= last; ++order) {
-      const Unit &unit = U(scope.units[order]);
-      if (IsRelocated(unit.id) || unit.role != Role::kFusible ||
-          attached[order])
-        continue;
-      if (IsFragmentCopy(unit) || unit.reduce_src_fragment) {
-        local.push_back(Region{/*id=*/-1, scope.id, order, order});
-        continue;
-      }
-      return Fail(ErrorCode::kPlanInvariant,
-                  "fusible statement has no region owner");
-    }
-
-    // Normalize connected and adjacent intervals before assigning ownership.
-    std::sort(local.begin(), local.end(), [](const Region &a, const Region &b) {
-      return a.begin != b.begin ? a.begin < b.begin : a.end < b.end;
-    });
-    size_t first_region = plan.regions.size();
-    for (Region &region : local) {
-      if (plan.regions.size() > first_region &&
-          region.begin <= plan.regions.back().end + 1) {
-        plan.regions.back().end = std::max(plan.regions.back().end, region.end);
-      } else {
-        region.id = static_cast<int>(plan.regions.size());
-        plan.regions.push_back(region);
-        plan.region_actions.emplace_back();
-      }
-    }
-    // Commit intervals, then claim legal ancestor definers.
-    for (size_t i = first_region; i < plan.regions.size(); ++i) {
-      const Region &region = plan.regions[i];
-      for (int order = region.begin; order <= region.end; ++order) {
-        int unit_id = scope.units[order];
-        if (IsRelocated(unit_id))
-          continue;
-        int &owner = plan.owners[unit_id];
-        if (owner >= 0) {
-          return Fail(ErrorCode::kPlanInvariant,
-                      "unit has multiple region owners");
-        }
-        owner = region.id;
-      }
-      if (has_seed)
-        ClaimAncestorDefinerCopies(region);
-    }
-    return true;
-  }
-
-  bool PlanRegions() {
-    plan.owners.assign(state_.units.size(), -1);
-    for (size_t i = state_.scopes.size(); i > 0; --i) {
-      const Scope &scope = S(static_cast<int>(i - 1));
-      int first = -1;
-      for (int order = 0; order <= static_cast<int>(scope.units.size());
-           ++order) {
-        bool boundary = order == static_cast<int>(scope.units.size());
-        if (!boundary)
-          boundary = U(scope.units[order]).role == Role::kBoundary;
-        if (boundary) {
-          if (first >= 0 && !PlanWindow(scope, first, order - 1))
-            return false;
-          first = -1;
-        } else if (first < 0) {
-          first = order;
-        }
-      }
-    }
-    return FinalizeRegionIndexAndVerify();
-  }
-
-  bool FinalizeRegionIndexAndVerify() {
+  void VerifyRegions() {
     // Validate owners before M3 consumes the region index.
     for (const Region &region : plan.regions) {
-      if (region.scope < 0 ||
-          region.scope >= static_cast<int>(state_.scopes.size()) ||
-          region.begin < 0 || region.end < region.begin ||
-          region.end >= static_cast<int>(S(region.scope).units.size())) {
-        return Fail(ErrorCode::kPlanInvariant, "invalid region interval");
-      }
       for (int order = region.begin; order <= region.end; ++order) {
         const Unit &covered = U(S(region.scope).units[order]);
         if (covered.role == Role::kBoundary)
-          return Fail(ErrorCode::kRegionConflict,
-                      "continuous SIMT region crosses a boundary");
+          Reject(ErrorCode::kRegionConflict,
+                 "continuous SIMT region crosses a boundary");
       }
     }
     for (const Unit &unit : state_.units) {
-      if (unit.role == Role::kSeed && plan.owners[unit.id] < 0) {
-        return Fail(ErrorCode::kPlanInvariant, "seed has no region owner");
-      }
-      if (unit.role == Role::kFusible && plan.owners[unit.id] < 0) {
-        return Fail(ErrorCode::kPlanInvariant,
-                    "fusible statement has no region owner");
-      }
+      if (unit.host_scalar && plan.owners[unit.id] >= 0)
+        Reject(ErrorCode::kPlanInvariant,
+               "host scalar migration has no published structural rule");
+      if (unit.role != Role::kBoundary && plan.owners[unit.id] < 0)
+        Reject(ErrorCode::kPlanInvariant,
+               "fusible statement has no region owner");
     }
-    return true;
   }
 
   // ---- M3: Storage legalization ----
@@ -1067,23 +1469,62 @@ private:
     bool writes{false}, reload{false}, reduce_source{false};
   };
 
+  // Definite assignment is composed over Seq/If/For, not lexical last_def.
+  // A loop body is checked at entry; only a proven nonempty loop exports defs.
+  // This monotone transfer reaches its fixed point in one pass: definitions
+  // persist, and every possible first-iteration entry read is accounted for.
+  void Transfer(const BufferFlow &flow, int id, bool *defined,
+                RegionFlow *result) const {
+    const Unit &unit = U(id);
+    if (unit.child_scopes.empty()) {
+      auto index = EventIndex(flow, id);
+      if (!index)
+        return;
+      const AccessEvent &event = flow.events[*index];
+      result->reload |= event.Reads() && !*defined;
+      result->writes |= event.Writes();
+      result->reduce_source |=
+          unit.reduce_src_fragment &&
+          flow.original->data.same_as((*unit.reduce_src_fragment)->data);
+      *defined |= event.effect == AccessEffect::kFullDef;
+      return;
+    }
+    bool after = true;
+    for (int child : unit.child_scopes) {
+      bool branch_defined = *defined;
+      for (int member : S(child).units)
+        Transfer(flow, member, &branch_defined, result);
+      after &= branch_defined;
+    }
+    if (const auto *loop = unit.stmt.as<ForNode>()) {
+      if (IsStaticPositiveInt(loop->extent))
+        *defined = after;
+    } else if (const auto *branch = unit.stmt.as<IfThenElseNode>()) {
+      *defined = after && (branch->else_case.defined() || *defined);
+    }
+  }
+
   std::map<int, RegionFlow> SummarizeFlowRegions(const BufferFlow &flow) const {
     std::map<int, RegionFlow> regions;
-    auto consume = [&](const AccessEvent &event) {
-      auto [it, first] = regions.try_emplace(plan.owners[event.unit]);
-      if (first)
-        it->second.reload = event.Reads();
-      it->second.writes |= event.Writes();
-      const Unit &unit = U(event.unit);
-      it->second.reduce_source |=
-          unit.reduce_src_fragment &&
-          event.buffer->data.same_as((*unit.reduce_src_fragment)->data);
-    };
-    // Emission order within each region is relocated copies, then members.
-    for (bool relocated : {true, false})
-      for (const AccessEvent &event : flow.events)
-        if (IsRelocated(event.unit) == relocated)
-          consume(event);
+    for (const AccessEvent &event : flow.events)
+      regions.try_emplace(plan.owners[event.unit]);
+    for (auto &[id, result] : regions) {
+      if (id < 0)
+        continue;
+      const Region &region = plan.regions[id];
+      bool defined = false;
+      for (int copy : plan.region_actions[id].relocated_copies)
+        Transfer(flow, copy, &defined, &result);
+      for (int i = region.begin; i <= region.end; ++i) {
+        int member = S(region.scope).units[i];
+        if (!IsRelocated(member))
+          Transfer(flow, member, &defined, &result);
+      }
+      // The epilogue reads the whole fragment, including paths that skip a
+      // conditional definition or execute a loop zero times.
+      result.reload |=
+          regions.size() > 1 && !regions.count(-1) && result.writes && !defined;
+    }
     return regions;
   }
 
@@ -1113,17 +1554,17 @@ private:
       }
       targets.emplace(region, target);
     }
-    for (const AccessEvent &event : flow.events)
-      plan.substitutions[event.unit].push_back(
-          {event.buffer, targets.at(plan.owners[event.unit])});
-  }
-
-  Buffer RewrittenBuffer(int unit_id, const Buffer &buffer) const {
-    for (const Substitution &substitution : plan.substitutions[unit_id]) {
-      if (substitution.from.same_as(buffer))
-        return substitution.to;
+    for (const AccessEvent &event : flow.events) {
+      Buffer target = targets.at(plan.owners[event.unit]);
+      plan.substitutions[event.unit].Set(flow.original, target);
+      // Every view follows the same region-local storage as its root. Retain
+      // its shape, strides and offset, rather than replacing only one access.
+      for (const Buffer &alias : flow.aliases) {
+        Buffer view = alias;
+        view.CopyOnWrite()->data = target->data;
+        plan.substitutions[event.unit].Set(alias, view);
+      }
     }
-    return buffer;
   }
 
   // A standalone fragment copy may become an ordinary MTE copy after its
@@ -1139,8 +1580,12 @@ private:
     const Unit &unit = U(S(region.scope).units[region.begin]);
     if (!unit.copy || !IsFragmentBuffer(unit.copy->src))
       return false;
-    Buffer src = RewrittenBuffer(unit.id, unit.copy->src);
-    Buffer dst = RewrittenBuffer(unit.id, unit.copy->dst);
+    Buffer src = plan.substitutions[unit.id]
+                     .Get(unit.copy->src)
+                     .value_or(unit.copy->src);
+    Buffer dst = plan.substitutions[unit.id]
+                     .Get(unit.copy->dst)
+                     .value_or(unit.copy->dst);
     if (!IsUbGmPair(src, dst) || src->dtype != dst->dtype)
       return false;
     Copy copy = *MatchTileCopy(unit.stmt);
@@ -1153,19 +1598,16 @@ private:
   void PlanStorage() {
     plan.substitutions.assign(state_.units.size(), {});
     for (const BufferFlow &flow : state_.fragment_flows) {
-      if (flow.has_alias_view)
-        continue;
       // Summarize each region in its eventual emission order before choosing
       // storage.
       auto regions = SummarizeFlowRegions(flow);
-
-      if (regions.size() == 1 && !regions.count(-1) &&
-          !regions.begin()->second.reload) {
+      if (regions.empty() || regions.count(-1))
+        continue;
+      if (regions.size() == 1 && !regions.begin()->second.reload) {
         plan.remove_allocations.push_back(flow.original);
         plan.region_actions[regions.begin()->first].allocations.push_back(
             flow.original);
-      } else if (!regions.empty() && !regions.count(-1) &&
-                 std::any_of(
+      } else if (std::any_of(
                      regions.begin(), regions.end(),
                      [](const auto &entry) { return entry.second.writes; })) {
         PlanStateBacked(flow, regions);
@@ -1194,129 +1636,75 @@ private:
       const auto *loop = U(user).stmt.as<ForNode>();
       if (loop == nullptr || loop->kind != ForKind::kParallel)
         continue;
-      if (!IsParallelPrivateScalar(U(user).stmt, buffer))
+      if (!IsParallelDefinition(U(user).stmt, buffer))
         continue;
       plan.remove_allocations.push_back(buffer);
       plan.region_actions[plan.owners[user]].allocations.push_back(buffer);
     }
   }
 
-  // ---- M4: Plan verification, IR rewrite, and result verification ----
-  // Verify the complete plan before rebuilding, then check Parallel coverage,
-  // VF nesting/counts, and source-index uniqueness on the emitted PrimFunc.
-  bool VerifyPlan() {
-    if (!IsStaticPositiveInt(plan.tx_extent)) {
-      return Fail(ErrorCode::kThreadEnvelope,
-                  "tx extent must be a positive static integer");
-    }
-    if (plan.region_actions.size() != plan.regions.size() ||
-        plan.substitutions.size() != state_.units.size()) {
-      return Fail(ErrorCode::kPlanInvariant,
-                  "action vectors do not match the state");
-    }
-
-    for (const Region &region : plan.regions) {
-      const RegionAction &action = plan.region_actions[region.id];
-      for (const Buffer &buffer : action.allocations) {
-        if (!IsFragmentBuffer(buffer) && !IsLocalVarBuffer(buffer)) {
-          return Fail(ErrorCode::kPlanInvariant,
-                      "VF-owned allocation is not a fragment or local.var");
-        }
-      }
-    }
-    for (int unit_id = 0; unit_id < static_cast<int>(plan.substitutions.size());
-         ++unit_id) {
-      const auto &sites = plan.substitutions[unit_id];
-      for (size_t i = 0; i < sites.size(); ++i) {
-        for (size_t j = i + 1; j < sites.size(); ++j) {
-          if (sites[i].from.same_as(sites[j].from) &&
-              !sites[i].to.same_as(sites[j].to)) {
-            return Fail(ErrorCode::kPlanInvariant,
-                        "conflicting buffer substitutions in one unit");
-          }
-        }
-      }
-    }
-    return true;
+  // ---- M4: IR rewrite and result verification ----
+  int64_t NextSourceIndex() {
+    while (state_.occupied_source_indices.count(next_source_index_))
+      ++next_source_index_;
+    return next_source_index_++;
   }
 
-  std::optional<PrimFunc> Rewrite() {
-    SourceIndexAllocator indices(state_.occupied_source_indices);
-    auto logical_body = RewriteScope(state_.root_scope, &indices);
-    if (!logical_body.has_value())
-      return std::nullopt;
-    Stmt body = SpliceTilelangRoot(state_.original->body, *logical_body);
+  PrimFunc Rewrite() {
+    LogicalStoreMarker marker(state_);
+    Stmt body = SpliceTilelangRoot(state_.original->body,
+                                   RewriteScope(state_.root_scope, &marker));
     PrimFunc result = state_.original;
     result.CopyOnWrite()->body = std::move(body);
     return result;
   }
 
-  Stmt RewriteUnit(const Unit &unit, Stmt stmt) {
-    const auto &sites = plan.substitutions[unit.id];
-    if (!sites.empty()) {
-      stmt = LocalBufferRewriter(sites)(std::move(stmt));
-    }
-    return stmt;
+  Stmt RewriteUnit(const Unit &unit, LogicalStoreMarker *marker) {
+    Stmt stmt = unit.stmt;
+    for (int child : unit.child_scopes)
+      stmt =
+          ReplaceControlChild(stmt, S(child).slot, RewriteScope(child, marker));
+    const BufferMap &replacements = plan.substitutions[unit.id];
+    return replacements.empty() ? stmt
+                                : LocalBufferRewriter(replacements)(stmt);
   }
 
-  std::optional<Stmt> RewriteScope(int scope_id,
-                                   SourceIndexAllocator *indices) {
+  Stmt RewriteScope(int scope_id, LogicalStoreMarker *marker) {
     const Scope &scope = S(scope_id);
     std::vector<Stmt> output;
     for (int cursor = 0; cursor < static_cast<int>(scope.units.size());) {
       int unit_id = scope.units[cursor];
       const Unit &unit = U(unit_id);
       if (IsRelocated(unit_id)) {
-        ++cursor; // emitted at the head of its target VF.
-        continue;
-      }
-      int region_id = plan.owners[unit_id];
-      if (region_id >= 0 && plan.regions[region_id].begin != unit.order)
-        region_id = -1;
-      if (region_id < 0) {
-        Stmt stmt = unit.stmt;
-        for (int child_id : unit.child_scopes) {
-          auto child = RewriteScope(child_id, indices);
-          if (!child.has_value())
-            return std::nullopt;
-          auto replaced = ReplaceControlChild(stmt, S(child_id).slot, *child);
-          if (!replaced.has_value()) {
-            Fail(ErrorCode::kRewriteInvariant,
-                 "control child slot has no rebuild rule");
-            return std::nullopt;
-          }
-          stmt = *replaced;
-        }
-        output.push_back(RewriteUnit(unit, std::move(stmt)));
         ++cursor;
         continue;
       }
-      const Region &region = plan.regions[region_id];
-      const RegionAction &action = plan.region_actions[region_id];
-      if (CanEmitPlainEngineCopy(region)) {
-        ICHECK(region.begin == region.end);
-        const Unit &member = U(scope.units[region.begin]);
-        output.push_back(RewriteUnit(member, member.stmt));
-        cursor = region.end + 1;
+      int owner = plan.owners[unit_id];
+      if (owner < 0 || plan.regions[owner].scope != scope_id) {
+        output.push_back(RewriteUnit(unit, marker));
+        ++cursor;
         continue;
       }
-      std::vector<Stmt> body;
-      body.insert(body.end(), action.prologue.begin(), action.prologue.end());
-      for (int copy_id : action.relocated_copies) {
-        body.push_back(RewriteUnit(U(copy_id), U(copy_id).stmt));
+      const Region &region = plan.regions[owner];
+      ICHECK_EQ(cursor, region.begin);
+      const RegionAction &action = plan.region_actions[owner];
+      if (CanEmitPlainEngineCopy(region)) {
+        output.push_back(RewriteUnit(unit, marker));
+      } else {
+        std::vector<Stmt> body = action.prologue;
+        for (int copy : action.relocated_copies)
+          body.push_back(RewriteUnit(U(copy), marker));
+        for (int order = region.begin; order <= region.end; ++order) {
+          int member = scope.units[order];
+          if (!IsRelocated(member))
+            body.push_back(RewriteUnit(U(member), marker));
+        }
+        body.insert(body.end(), action.epilogue.begin(), action.epilogue.end());
+        Stmt logical_body = (*marker)(SeqStmt::Flatten(body));
+        output.push_back(BuildSimtVF(std::move(logical_body), plan.tx_extent,
+                                     NextSourceIndex(), unit.stmt->span,
+                                     action.allocations));
       }
-      for (int order = region.begin; order <= region.end; ++order) {
-        int member_id = scope.units[order];
-        if (IsRelocated(member_id))
-          continue;
-        const Unit &member = U(member_id);
-        body.push_back(RewriteUnit(member, member.stmt));
-      }
-      body.insert(body.end(), action.epilogue.begin(), action.epilogue.end());
-      Span span = body.empty() ? state_.logical_body->span : body.front()->span;
-      Array<Buffer> allocations = action.allocations;
-      output.push_back(BuildSimtVF(SeqStmt::Flatten(body), plan.tx_extent,
-                                   indices->Next(), span, allocations));
       cursor = region.end + 1;
     }
     return SeqStmt::Flatten(output);
@@ -1393,33 +1781,37 @@ private:
     }
   };
 
-  bool VerifyResult(const PrimFunc &result) {
+  void VerifyResult(const PrimFunc &result) {
     VFStructureScan scan;
     scan(result->body);
     if (scan.parallel_outside_vf != 0 || scan.nested_vf != 0) {
-      return Fail(ErrorCode::kRewriteInvariant,
-                  "Parallel coverage or nested VF invariant failed");
+      Reject(ErrorCode::kRewriteInvariant,
+             "Parallel coverage or nested VF invariant failed");
     }
     int generated_vf_count = 0;
     for (const Region &region : plan.regions)
       generated_vf_count += !CanEmitPlainEngineCopy(region);
     if (scan.vf_count != state_.original_vf_count + generated_vf_count) {
-      return Fail(ErrorCode::kRewriteInvariant,
-                  "existing VF count changed after rewrite");
+      Reject(ErrorCode::kRewriteInvariant,
+             "existing VF count changed after rewrite");
     }
     if (scan.duplicate_index) {
-      return Fail(ErrorCode::kRewriteInvariant,
-                  "duplicate tl.vf_source_index after rewrite");
+      Reject(ErrorCode::kRewriteInvariant,
+             "duplicate tl.vf_source_index after rewrite");
     }
-    return true;
   }
 
+  Optional<Var> subcore_var_;
+  bool fuse_serial_, fused_control_{false};
+  int64_t next_source_index_{0};
   PlannerState state_;
   RewritePlan &plan{state_.plan};
 };
 } // namespace
 namespace transform {
 using namespace tirx::transform;
+TVM_REGISTER_PASS_CONFIG_OPTION("tl.ascend_auto_simt_fuse_serial", Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tl.ascend_auto_simt_report_scalar", Bool);
 Pass AutoSimtVF() {
   auto pass_func = [](PrimFunc func, const IRModule &, PassContext) {
     auto target_opt = func->GetAttr<Target>(tvm::attr::kTarget);
@@ -1430,15 +1822,23 @@ Pass AutoSimtVF() {
     reader(func->body);
     if (!reader.has_candidate)
       return func;
-    AutoSimtVFPlanner planner(func);
-    auto result = planner.Run(reader);
-    if (!result.has_value()) {
-      const Failure &failure = planner.failure();
-      LOG(FATAL) << "[AutoSimtVF] " << ErrorCodeName(failure.code) << ": "
-                 << failure.detail;
-      return func; // unreachable: LOG(FATAL) throws InternalError.
+    bool fuse_serial =
+        PassContext::Current()
+            ->GetConfig<Bool>("tl.ascend_auto_simt_fuse_serial", Bool(true))
+            .value();
+    auto planner = std::make_unique<AutoSimtVFPlanner>(func, fuse_serial);
+    PrimFunc result = planner->Run(reader);
+    if (planner->fused_control() && !CanInferStructuredLayout(result)) {
+      // Replan from untouched logical IR; never undo materialized state copies.
+      planner = std::make_unique<AutoSimtVFPlanner>(func, false);
+      result = planner->Run(reader);
     }
-    return *result;
+    if (PassContext::Current()
+            ->GetConfig<Bool>("tl.ascend_auto_simt_report_scalar", Bool(false))
+            .value())
+      result = WithAttr(result, "tl.auto_simt_scalar_decisions",
+                        planner->ScalarReport());
+    return result;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AutoSimtVF", {});
 }

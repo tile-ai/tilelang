@@ -34,6 +34,26 @@ def mhc_fn_normw_merge_fwd(m, n):
     return main
 
 
+def mhc_fn_normw_merge_fwd_stage2(m, n, threads=128):
+    """Explicit Stage2 counterpart of the elementwise merge forward."""
+    n_blk = 1024 if m * n >= 262144 else 256
+    num_n_blocks = T.ceildiv(n, n_blk)
+
+    @T.prim_func
+    def main(
+        fn: T.Tensor[(m, n), T.float32],
+        normw: T.Tensor[(n,), T.float32],
+        out_fn: T.Tensor[(m, n), T.float32],
+    ) -> None:
+        with T.Kernel(m * num_n_blocks) as pid, T.SimtVF(threads=threads):
+            for i1_n in T.Parallel(n_blk):
+                i_n = pid % num_n_blocks * n_blk + i1_n
+                if i_n < n:
+                    out_fn[pid // num_n_blocks, i_n] = fn[pid // num_n_blocks, i_n] * normw[i_n]
+
+    return main
+
+
 def mhc_fn_normw_merge_bwd(m, n):
     n_blk = 256
 
@@ -60,12 +80,47 @@ def mhc_fn_normw_merge_bwd(m, n):
                         normw_grad_frag[i1_n] += out_fn_grad[i_m, i_n] * fn[i_m, i_n]
 
             for i1_n in T.Parallel(n_blk):
-                normw_grad[pid_n * n_blk + i1_n] += normw_grad_frag[i1_n]
+                i_n = pid_n * n_blk + i1_n
+                if i_n < n:
+                    normw_grad[i_n] += normw_grad_frag[i1_n]
 
     return main
 
 
-def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits):
+def mhc_fn_normw_merge_bwd_stage2(m, n, threads=128):
+    n_blk = 256
+
+    @T.prim_func
+    def main(
+        fn: T.Tensor[(m, n), T.float32],
+        normw: T.Tensor[(n,), T.float32],
+        out_fn_grad: T.Tensor[(m, n), T.float32],
+        fn_grad: T.Tensor[(m, n), T.float32],
+        normw_grad: T.Tensor[(n,), T.float32],
+    ) -> None:
+        with T.Kernel(T.ceildiv(n, n_blk)) as pid_n, T.SimtVF(threads=threads):
+            normw_frag = T.alloc_fragment(n_blk, T.float32)
+            T.copy(normw[pid_n * n_blk], normw_frag)
+
+            normw_grad_frag = T.alloc_fragment(n_blk, T.float32)
+            T.clear(normw_grad_frag)
+
+            for i_m in T.serial(m):
+                for i1_n in T.Parallel(n_blk):
+                    i_n = pid_n * n_blk + i1_n
+                    if i_n < n:
+                        fn_grad[i_m, i_n] += out_fn_grad[i_m, i_n] * normw_frag[i1_n]
+                        normw_grad_frag[i1_n] += out_fn_grad[i_m, i_n] * fn[i_m, i_n]
+
+            for i1_n in T.Parallel(n_blk):
+                i_n = pid_n * n_blk + i1_n
+                if i_n < n:
+                    normw_grad[i_n] += normw_grad_frag[i1_n]
+
+    return main
+
+
+def mhc_reduce_partials_and_rmsnorm_fwd(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits):
     num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
@@ -77,7 +132,6 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
         out: T.Tensor[(num_tokens, mhc_mult3), T.float32],
     ) -> None:
         with T.Kernel(num_tokens) as pid:
-            # Ascend uses a scalar instead of CUDA's one-element RMS fragment.
             rms = T.alloc_var(T.float32)
             out_l = T.alloc_fragment(mhc_mult3, T.float32)
             out_l0 = T.alloc_fragment(mhc_mult3, T.float32)
@@ -87,7 +141,7 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
                 for i_split in T.serial(n_splits):
                     rms += sqrsum_splitted[i_split, pid, k]
                 sqrsum[pid, k] = rms
-                rms = T.rsqrt(rms / rms_group_size + rms_eps)
+                rms = 1.0 / T.sqrt(rms / rms_group_size + rms_eps)
                 for j in T.Parallel(mhc_mult3):
                     out_l0[j] = 0
                     for i_split in T.serial(n_splits):
@@ -95,6 +149,46 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
                     out_l[j] += out_l0[j] * rms
                 T.copy(out_l0, out_mul[pid, k, :])
             T.copy(out_l[:], out[pid, :])
+
+    return main
+
+
+def mhc_reduce_partials_and_rmsnorm_fwd_stage2(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits, threads=128):
+    num_tokens = T.dynamic("num_tokens")
+
+    @T.prim_func
+    def main(
+        out_mul_splitted: T.Tensor[(n_splits, num_tokens, n_rms_group, mhc_mult3), T.float32],
+        sqrsum_splitted: T.Tensor[(n_splits, num_tokens, n_rms_group), T.float32],
+        out_mul: T.Tensor[(num_tokens, n_rms_group, mhc_mult3), T.float32],
+        sqrsum: T.Tensor[(num_tokens, n_rms_group), T.float32],
+        out: T.Tensor[(num_tokens, mhc_mult3), T.float32],
+    ) -> None:
+        with T.Kernel(num_tokens) as pid:
+            rms = T.alloc_var(T.float32)
+            out_s = T.alloc_shared(mhc_mult3, T.float32)
+            with T.SimtVF(threads=threads):
+                out_l = T.alloc_fragment(mhc_mult3, T.float32)
+                T.clear(out_l)
+                T.copy(out_l, out_s)
+            for k in T.serial(n_rms_group):
+                rms = 0
+                for i_split in T.serial(n_splits):
+                    rms += sqrsum_splitted[i_split, pid, k]
+                sqrsum[pid, k] = rms
+                rms = 1.0 / T.sqrt(rms / rms_group_size + rms_eps)
+                with T.SimtVF(threads=threads):
+                    out_l0 = T.alloc_fragment(mhc_mult3, T.float32)
+                    out_l = T.alloc_fragment(mhc_mult3, T.float32)
+                    T.copy(out_s, out_l)
+                    for j in T.Parallel(mhc_mult3):
+                        out_l0[j] = 0
+                        for i_split in T.serial(n_splits):
+                            out_l0[j] += out_mul_splitted[i_split, pid, k, j]
+                        out_l[j] += out_l0[j] * rms
+                    T.copy(out_l, out_s)
+                    T.copy(out_l0, out_mul[pid, k, :])
+            T.copy(out_s[:], out[pid, :])
 
     return main
 
@@ -107,7 +201,7 @@ def ref_program_fn_normw_merge_bwd(fn, normw, out_fn_grad):
     return out_fn_grad * normw, (out_fn_grad * fn).sum(dim=0)
 
 
-def ref_program_pre_norm_fn_fwd_norm(out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps):
+def ref_program_mhc_reduce_partials_and_rmsnorm_fwd(out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps):
     out_mul = out_mul_splitted.sum(dim=0)
     sqrsum = sqrsum_splitted.sum(dim=0)
     rms = torch.rsqrt(sqrsum / rms_group_size + rms_eps)
@@ -150,16 +244,16 @@ if __name__ == "__main__":
     sqrsum_splitted = torch.rand((n_splits, num_tokens, n_rms_group), device=device, dtype=torch.float32)
 
     kernel = tilelang.compile(
-        mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits),
+        mhc_reduce_partials_and_rmsnorm_fwd(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_splits),
         target="ascend",
         out_idx=[2, 3, 4],
     )
     actual_out_mul, actual_sqrsum, actual_out = kernel(out_mul_splitted, sqrsum_splitted)
     torch.npu.synchronize()
-    expected_out_mul, expected_sqrsum, expected_out = ref_program_pre_norm_fn_fwd_norm(
+    expected_out_mul, expected_sqrsum, expected_out = ref_program_mhc_reduce_partials_and_rmsnorm_fwd(
         out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps
     )
     torch.testing.assert_close(actual_out_mul, expected_out_mul, rtol=1e-5, atol=2e-5)
     torch.testing.assert_close(actual_sqrsum, expected_sqrsum, rtol=1e-5, atol=2e-5)
     torch.testing.assert_close(actual_out, expected_out, rtol=1e-5, atol=2e-5)
-    print("PASS: mhc_pre_norm_fn_fwd_norm")
+    print("PASS: mhc_reduce_partials_and_rmsnorm_fwd")

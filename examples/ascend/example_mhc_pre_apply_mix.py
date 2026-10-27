@@ -51,6 +51,42 @@ def mhc_pre_apply_mix_fwd(mhc_mult, hidden, h_blk=1024):
     return main
 
 
+def mhc_pre_apply_mix_fwd_stage2(mhc_mult, hidden, h_blk=1024, threads=128):
+    n = T.dynamic("n")
+    h = hidden
+    mhc = mhc_mult
+    h_blk = math.gcd(h_blk, hidden)
+    h_ctas = h // h_blk
+
+    @T.prim_func
+    def main(
+        x: T.Tensor[(n, mhc, h), T.bfloat16],
+        mix: T.Tensor[(n, mhc), T.float32],
+        o: T.Tensor[(n, h), T.bfloat16],
+    ) -> None:
+        with T.Kernel(n * h_ctas) as pid:
+            pid_n = pid // h_ctas
+            pid_h = pid % h_ctas
+            xs = T.alloc_shared((mhc, h_blk), T.bfloat16)
+            os = T.alloc_shared(h_blk, T.bfloat16)
+            T.copy(x[pid_n, 0, pid_h * h_blk], xs)
+
+            with T.SimtVF(threads=threads):
+                mixl = T.alloc_fragment(mhc, T.float32)
+                T.copy(mix[pid_n, 0], mixl)
+                xl = T.alloc_fragment((mhc, h_blk), T.float32)
+                T.copy(xs, xl)
+                ol = T.alloc_fragment(h_blk, T.float32)
+                T.clear(ol)
+                for i_mhc in T.serial(mhc):
+                    for i1_h in T.Parallel(h_blk):
+                        ol[i1_h] += mixl[i_mhc] * xl[i_mhc, i1_h]
+                T.copy(ol, os)
+            T.copy(os, o[pid_n, pid_h * h_blk])
+
+    return main
+
+
 def ref_program(x, mix):
     return (mix.unsqueeze(-1).float() * x.float()).sum(dim=1).to(torch.bfloat16)
 

@@ -8,8 +8,8 @@ from example_mhc_expand import mhc_expand_bwd, mhc_expand_fwd, ref_program_expan
 
 
 @pytest.mark.parametrize("target", ["ascend"])
-def test_mhc_expand_fwd(target):
-    num_tokens, hidden, mhc_mult = 128, 1280, 4
+@pytest.mark.parametrize("num_tokens,hidden,mhc_mult", [(128, 1280, 4), (33, 129, 3)])
+def test_mhc_expand_fwd(target, num_tokens, hidden, mhc_mult):
     kernel = tilelang.compile(mhc_expand_fwd(hidden, mhc_mult), target=target, out_idx=-1)
 
     device = torch.device("npu")
@@ -21,8 +21,8 @@ def test_mhc_expand_fwd(target):
 
 
 @pytest.mark.parametrize("target", ["ascend"])
-def test_mhc_expand_bwd(target):
-    num_tokens, hidden, mhc_mult = 128, 1280, 4
+@pytest.mark.parametrize("num_tokens,hidden,mhc_mult", [(128, 1280, 4), (33, 129, 3)])
+def test_mhc_expand_bwd(target, num_tokens, hidden, mhc_mult):
     kernel = tilelang.compile(mhc_expand_bwd(hidden, mhc_mult), target=target, out_idx=-1)
 
     device = torch.device("npu")
@@ -34,7 +34,7 @@ def test_mhc_expand_bwd(target):
 
 
 if __name__ == "__main__":
-    test_mhc_expand_fwd("ascend")
+    test_mhc_expand_fwd("ascend", 128, 1280, 4)
     print("PASS: test_mhc_expand_fwd")
-    test_mhc_expand_bwd("ascend")
+    test_mhc_expand_bwd("ascend", 128, 1280, 4)
     print("PASS: test_mhc_expand_bwd")
