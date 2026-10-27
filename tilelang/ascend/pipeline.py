@@ -150,6 +150,11 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    # Block lowering preserves the VMI allocation-kind carriers but
+    # materializes each allocation before them.  Import matches carriers to
+    # the final AllocBuffers by data Var identity and consumes them.
+    if target_is_pto(target):
+        mod = ascend_transform.ImportPTOAllocMarkers()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = ascend_transform.RewriteAscendBufferVersionLayout()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)

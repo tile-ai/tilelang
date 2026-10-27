@@ -7,11 +7,11 @@
 #include "ascend/op/nd2nz.h"
 
 #include "ascend/op/builtin.h"
+#include "ascend/transform/vmi_alloc.h"
 #include "backend/common/codegen/codegen_utils.h"
 #include "backend/common/target_utils.h"
 #include "span_utils.h"
 #include "support/check.h"
-#include "transform/common/vmi_alloc.h"
 #include "tvm/ir/repr.h"
 
 #include <algorithm>

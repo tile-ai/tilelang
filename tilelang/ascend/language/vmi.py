@@ -20,7 +20,7 @@ _Op = tirx.op.Op.get
 # DLDataType codes int=0, uint=1, float=2, bfloat=4, float8=7..14,
 # float6=15..16, float4=17, tfloat32=130 and float4_e2m1_unpacked=131; bool,
 # handle and void are excluded.  The set mirrors IsDataArrayElementType in
-# transform/common/vmi_alloc.h: every numeric width is allowed and
+# ascend/transform/vmi_alloc.h: every numeric width is allowed and
 # instruction-level width limits belong to the individual operations.
 _NUMERIC_ELEMENT_TYPE_CODES = frozenset({0, 1, 2, 4, *range(7, 18), 130, 131})
 
@@ -37,9 +37,11 @@ def alloc_local(shape, vreg_type):
     indexed by compile-time values, such as induction variables from
     ``T.unroll(..., explicit=True)`` on the PTO backend.
 
-    A block-level allocation marker records that the array is an explicit VMI
-    data allocation, so lowering and code generation do not infer that intent
-    from the vector dtype of an ordinary SIMD allocation.
+    This API is valid only inside a ``T.SimdVF()`` scope: VMI allocations are
+    SIMD vector registers, and ordinary ``T.alloc_local`` remains available
+    outside that scope.  A block-level allocation marker records that the array
+    is an explicit VMI data allocation, so lowering and code generation do not
+    infer that intent from the vector dtype of an ordinary SIMD allocation.
     """
     require_vmi_scope("T.vmi.alloc_local(...)")
     dtype = _dtype(vreg_type)
@@ -72,11 +74,15 @@ def alloc_var(dtype, *, size):
     """Allocate a mutable VMI data register slot.
 
     The TIR buffer keeps the numeric element dtype (a single lane is the
-    scalar dtype, more lanes are a vector dtype).  A block-level allocation
-    marker records that the slot is an explicit VMI data register, so lowering
-    and code generation do not have to infer that intent from the vector
-    dtype or from a later store.
+    scalar dtype, more lanes are a vector dtype).
+
+    This API is valid only inside a ``T.SimdVF()`` scope: VMI allocations are
+    SIMD vector registers, and the ordinary ``T.alloc_var`` remains available
+    outside that scope.  A block-level allocation marker records that the slot
+    is an explicit VMI data register, so lowering and code generation do not
+    have to infer that intent from the vector dtype or from a later store.
     """
+    require_vmi_scope("T.vmi.alloc_var(...)")
     lanes = _normalize_lanes(size, context="T.vmi.alloc_var(...)")
     elem = _scalar_dtype(dtype, context="T.vmi.alloc_var(...)")
     from tilelang.language.allocate import alloc_var as _alloc_var

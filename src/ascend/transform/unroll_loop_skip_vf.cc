@@ -31,11 +31,11 @@
 #include <tvm/tirx/transform.h>
 
 #include <limits>
-#include <unordered_set>
 #include <utility>
 
+#include "ascend/transform/attr.h"
+#include "ascend/transform/vmi_alloc.h"
 #include "tir/transforms/ir_utils.h"
-#include "transform/common/vmi_alloc.h"
 
 namespace tvm {
 namespace tl {
@@ -47,58 +47,6 @@ namespace {
 
 /*! \brief Context label used in every diagnostic of this pass. */
 constexpr const char *kContext = "UnrollLoopSkipVF";
-
-// Rebuild a cloned block's `tl.vmi.alloc_kind` map from the positional
-// correspondence of its own alloc_buffers.  Keys come straight from the new
-// allocations' data Vars, so no stale key survives the clone, and every other
-// annotation is preserved unchanged.  A map entry that names an allocation
-// the block does not own means the function skipped NormalizePTOAllocMarkers
-// before unrolling.  `old_annotations` and `old_allocs` must be snapshots
-// taken before the block was cloned: the originals may share storage with
-// the clone's own fields.
-Map<String, Any> RemapVmiAllocKindMap(const Map<String, Any> &old_annotations,
-                                      const Array<Buffer> &old_allocs,
-                                      const SBlock &new_block) {
-  auto annotation = old_annotations.find(tl::attr::kVmiAllocKind);
-  if (annotation == old_annotations.end()) {
-    return new_block->annotations;
-  }
-  vmi::AllocKindMap kinds;
-  vmi::CollectAllocKindMap((*annotation).second, &kinds, kContext);
-  const Array<Buffer> &new_allocs = new_block->alloc_buffers;
-  ICHECK_EQ(old_allocs.size(), new_allocs.size())
-      << kContext << " cloned a block with a different number of allocations";
-  // Every recorded key must belong to one of the block's own allocations.
-  std::unordered_set<const VarNode *> owned;
-  for (const Buffer &buffer : old_allocs) {
-    owned.insert(buffer->data.get());
-  }
-  for (const auto &[data, kind] : kinds) {
-    ICHECK(owned.count(data.get()) != 0U)
-        << kContext << " found `" << tl::attr::kVmiAllocKind
-        << "` entry for allocation `" << data->name_hint
-        << "` on a block that does not own it; run NormalizePTOAllocMarkers "
-           "before unrolling marker-carrying functions";
-  }
-  // Each marked position carries its kind onto the matching clone, so views
-  // of one data Var each keep the entry on their own fresh Var.
-  Map<Var, String> remapped;
-  for (size_t i = 0; i < old_allocs.size(); ++i) {
-    auto kind = kinds.find(old_allocs[i]->data);
-    if (kind != kinds.end()) {
-      remapped.Set(new_allocs[i]->data, (*kind).second);
-    }
-  }
-  Map<String, Any> annotations = new_block->annotations;
-  if (remapped.empty()) {
-    // No locally marked allocation survives the clone, and an empty map is
-    // not a final state, so the key is not carried over.
-    annotations.erase(tl::attr::kVmiAllocKind);
-  } else {
-    annotations.Set(tl::attr::kVmiAllocKind, remapped);
-  }
-  return annotations;
-}
 
 // Renames Var and Buffer definitions in each unrolled body copy so every
 // iteration gets a fresh SSA identity.
@@ -137,23 +85,24 @@ public:
     return new_buffer;
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    // Snapshot the recorded map and the allocations before the base visit.
-    // The extra array reference keeps the mutator from rewriting
-    // alloc_buffers in place, and the clone rebuild needs the original data
-    // Vars even when the block node itself is updated in place.
-    const Map<String, Any> old_annotations = op->annotations;
-    const Array<Buffer> old_allocs = op->alloc_buffers;
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    SBlock block = Downcast<SBlock>(stmt);
-    Map<String, Any> annotations =
-        RemapVmiAllocKindMap(old_annotations, old_allocs, block);
-    if (annotations.same_as(block->annotations)) {
-      return stmt;
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != tl::attr::kVmiAllocKind) {
+      return StmtExprMutator::VisitStmt_(op);
     }
-    auto writer = block.CopyOnWrite();
-    writer->annotations = std::move(annotations);
-    return Stmt(block);
+    // The default AttrStmt mutator visits only value and body, so the carrier
+    // node must be remapped explicitly from the same map used for Buffer
+    // data Vars.  A carrier whose allocation was not rebuilt by this clone
+    // keeps its original Var intact.
+    ffi::String kind;
+    Var data = vmi::DecodeAllocKindCarrier(op, &kind, kContext);
+    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    const auto *attr = stmt.as<AttrStmtNode>();
+    ICHECK(attr != nullptr);
+    auto it = var_remap_.find(data);
+    ffi::Any node =
+        it == var_remap_.end() ? ffi::Any(data) : ffi::Any((*it).second);
+    return AttrStmt(std::move(node), attr->attr_key, attr->value, attr->body,
+                    attr->span);
   }
 
 private:

@@ -698,6 +698,15 @@ def _marked_allocations(fn):
     return [node for node in _allocations(fn) if _MARKER in node.annotations]
 
 
+def _marker_carriers(fn):
+    found = []
+    tirx.stmt_functor.post_order_visit(
+        fn.body,
+        lambda node: found.append(node) if isinstance(node, tirx.AttrStmt) and node.attr_key == _MARKER else None,
+    )
+    return found
+
+
 @pytest.mark.parametrize(
     ("dtype", "pto_type"),
     [("int32", "pto.si32"), ("uint32", "pto.ui32"), ("float32", "pto.f32")],
@@ -722,6 +731,9 @@ def test_single_lane_mutable_slot_annotation_reaches_device_ir(dtype, pto_type):
     assert str(allocation.annotations[_MARKER]) == "data"
     assert allocation.buffer.scope() == "local.var"
     assert str(allocation.buffer.dtype) == dtype
+    # Import consumed the temporary carrier: the kind survives only as the
+    # final allocation annotation, and codegen still classifies the register.
+    assert not _marker_carriers(fn)
     assert f"slot = pto.vmi.vreg(1, {pto_type})" in artifact.kernel_source
 
 
@@ -732,6 +744,7 @@ def test_multi_lane_mutable_slot_annotation_reaches_device_ir():
     (allocation,) = marked
     assert str(allocation.annotations[_MARKER]) == "data"
     assert str(allocation.buffer.dtype) == "float32x4"
+    assert not _marker_carriers(fn)
     assert "slot = pto.vmi.vreg(4, pto.f32)" in artifact.kernel_source
 
 
@@ -741,6 +754,7 @@ def test_explicit_loop_slot_markers_reach_device_ir():
     assert len(marked) == 2, marked
     assert all(str(node.annotations[_MARKER]) == "data" for node in marked)
     assert not marked[0].buffer.data.same_as(marked[1].buffer.data)
+    assert not _marker_carriers(fn)
     assert artifact.kernel_source.count("= pto.vmi.vreg(1, pto.si32)") == 2
     assert "pto.cast(slot" not in artifact.kernel_source
 
@@ -905,6 +919,7 @@ def test_vmi_register_array_markers_reach_device_ir_after_flatten():
     tirx.stmt_functor.post_order_visit(fn.body, visit)
     assert sorted({int(node.indices[0]) for node in stores}) == [0, 1, 2, 3]
     assert sorted({int(node.indices[0]) for node in loads}) == [0, 1, 2, 3]
+    assert not _marker_carriers(fn)
     assert "regs_tl_slot_3 = pto.vmi.vadds(" in artifact.kernel_source
 
 

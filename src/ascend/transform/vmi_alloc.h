@@ -1,24 +1,26 @@
 /*!
  * \file vmi_alloc.h
- * \brief Shared decoding and validation of VMI allocation markers.
+ * \brief Ascend PTO decoding and validation of VMI allocation markers.
  *
- * The marker contract is defined in attr.h.  This header owns the shared
- * parser/contract checks used by early unroll, LowerOpaqueBlock,
- * NormalizePTOAllocMarkers and Ascend PTO code generation, plus the
- * whole-function statement collector consumed only by NormalizePTOAllocMarkers
- * and Ascend PTO code generation.  It must not depend on Ascend code
- * generation.
+ * The marker contract is defined in ascend/transform/attr.h.  A frontend block
+ * map, a scoped AttrStmt carrier, and the final AllocBuffer annotation are the
+ * three representations of the same data Var -> kind metadata.  This header
+ * owns the representation-independent parser/contract checks used by early
+ * unroll, NormalizePTOAllocMarkers, ImportPTOAllocMarkers and Ascend PTO code
+ * generation, plus the whole-function collector used by the normalization,
+ * import and code-generation stages.  It must not depend on code generation.
  */
 
-#ifndef TVM_TL_TRANSFORM_COMMON_VMI_ALLOC_H_
-#define TVM_TL_TRANSFORM_COMMON_VMI_ALLOC_H_
+#ifndef TVM_TL_ASCEND_TRANSFORM_VMI_ALLOC_H_
+#define TVM_TL_ASCEND_TRANSFORM_VMI_ALLOC_H_
 
+#include "ascend/transform/attr.h"
 #include "support/check.h"
-#include "transform/common/attr.h"
 
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,10 +49,17 @@ using AllocationList =
  *
  * `kinds` contains only data Vars with an active allocation.  `allocations`
  * contains every actual allocation/view that shares a marked data Var.
+ * `carrier_datas` and `annotation_datas` record which data Vars already have a
+ * temporary AttrStmt carrier or a final allocation annotation, so a second
+ * normalization emits no duplicate marker authority.
  */
 struct AllocMarkers {
   AllocKindMap kinds;
   AllocationList allocations;
+  std::unordered_set<tirx::Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      carrier_datas;
+  std::unordered_set<tirx::Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      annotation_datas;
 };
 
 /*!
@@ -67,6 +76,36 @@ inline ffi::String CheckAllocKind(const ffi::String &kind,
       << "` and `" << tl::attr::kVmiAllocKindDataArray << "` for `"
       << tl::attr::kVmiAllocKind << "`, got `" << kind << "`";
   return kind;
+}
+
+/*!
+ * \brief Decode one temporary allocation-kind AttrStmt carrier.
+ * \param op The AttrStmt node.
+ * \param kind Receives the validated allocation kind.
+ * \param context Caller description used in diagnostics.
+ * \return The allocation data Var named by the carrier.
+ */
+inline tirx::Var DecodeAllocKindCarrier(const tirx::AttrStmtNode *op,
+                                        ffi::String *kind,
+                                        const char *context) {
+  ICHECK(op != nullptr && kind != nullptr)
+      << context << " received an undefined `" << tl::attr::kVmiAllocKind
+      << "` carrier";
+  ICHECK(op->attr_key == tl::attr::kVmiAllocKind)
+      << context << " expected an `" << tl::attr::kVmiAllocKind
+      << "` carrier, got `" << op->attr_key << "`";
+  const auto *data = op->node.as<tirx::VarNode>();
+  ICHECK(data != nullptr)
+      << context << " `" << tl::attr::kVmiAllocKind
+      << "` carrier node must be an allocation data Var, got "
+      << op->node.GetTypeKey();
+  const auto *value = op->value.as<tirx::StringImmNode>();
+  ICHECK(value != nullptr)
+      << context << " `" << tl::attr::kVmiAllocKind
+      << "` carrier value must be a StringImm allocation kind, got "
+      << op->value.GetTypeKey();
+  *kind = CheckAllocKind(value->value, context);
+  return ffi::GetRef<tirx::Var>(data);
 }
 
 /*!
@@ -274,18 +313,21 @@ FindAllocKind(const ffi::Map<ffi::String, ffi::Any> &annotations,
 /*!
  * \brief Collect marked allocations from a statement.
  *
- * Both block-map and allocation-annotation forms are accepted.  A map entry
- * without an active allocation is a residual entry and is ignored.  Only data
- * Vars that are actually marked get contract checks; unmarked allocations
- * keep their previous, unconstrained behavior.  Every allocation/view that
- * shares a marked data Var is validated, and differing dtypes/lanes are
- * diagnosed.
+ * Block maps, scoped AttrStmt carriers, and final allocation annotations are
+ * all accepted.  A map entry without an active allocation is a residual entry
+ * and is ignored; a carrier without an active allocation is an error because a
+ * consumer emitted it for a real allocation.  Only data Vars that are actually
+ * marked get contract checks; unmarked allocations keep their previous,
+ * unconstrained behavior.  Every allocation/view that shares a marked data Var
+ * is validated, and differing dtypes/lanes are diagnosed.
  */
 inline void CollectAllocMarkers(const tirx::Stmt &stmt, AllocMarkers *markers,
                                 const char *context) {
   ICHECK(markers != nullptr) << context << " received no marker storage";
   markers->kinds.clear();
   markers->allocations.clear();
+  markers->carrier_datas.clear();
+  markers->annotation_datas.clear();
 
   AllocationList all_allocations;
   tirx::PostOrderVisit(stmt, [&](const ffi::ObjectRef &node) {
@@ -303,9 +345,18 @@ inline void CollectAllocMarkers(const tirx::Stmt &stmt, AllocMarkers *markers,
   });
 
   tirx::PostOrderVisit(stmt, [&](const ffi::ObjectRef &node) {
+    if (const auto *attr = node.as<tirx::AttrStmtNode>();
+        attr != nullptr && attr->attr_key == tl::attr::kVmiAllocKind) {
+      ffi::String kind;
+      tirx::Var data = DecodeAllocKindCarrier(attr, &kind, context);
+      markers->carrier_datas.insert(data);
+      MergeAllocKind(&markers->kinds, data, kind, context);
+      return;
+    }
     if (const auto *alloc = node.as<tirx::AllocBufferNode>()) {
       auto kind = FindAllocKind(alloc->annotations, context);
       if (kind.has_value()) {
+        markers->annotation_datas.insert(alloc->buffer->data);
         MergeAllocKind(&markers->kinds, alloc->buffer->data, kind.value(),
                        context);
       }
@@ -331,6 +382,13 @@ inline void CollectAllocMarkers(const tirx::Stmt &stmt, AllocMarkers *markers,
     }
   });
 
+  for (const tirx::Var &data : markers->carrier_datas) {
+    ICHECK(all_allocations.find(data) != all_allocations.end())
+        << context << " found an `" << tl::attr::kVmiAllocKind
+        << "` carrier for data Var `" << data->name_hint
+        << "` without an active allocation";
+  }
+
   for (const auto &[data, kind] : markers->kinds) {
     auto allocation = all_allocations.find(data);
     ICHECK(allocation != all_allocations.end())
@@ -355,4 +413,4 @@ inline void CollectAllocMarkers(const tirx::Stmt &stmt, AllocMarkers *markers,
 } // namespace tl
 } // namespace tvm
 
-#endif // TVM_TL_TRANSFORM_COMMON_VMI_ALLOC_H_
+#endif // TVM_TL_ASCEND_TRANSFORM_VMI_ALLOC_H_

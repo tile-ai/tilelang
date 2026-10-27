@@ -71,27 +71,49 @@ def UnrollLoopSkipVF():
     loops. Non-explicit unroll hints, serial loops, and all VF block interiors
     are preserved for their later lowering stages.
 
-    Each cloned block rebuilds its ``tl.vmi.alloc_kind`` map from its own
-    cloned allocations.  Marker-carrying functions must run
-    ``NormalizePTOAllocMarkers`` first; a map that names allocations the
-    cloned block does not own is rejected with a diagnostic.  Functions
-    without markers need no extra preparation.
+    Each cloned VMI allocation gets a fresh data Var, and the corresponding
+    ``tl.vmi.alloc_kind`` AttrStmt carrier emitted by
+    ``NormalizePTOAllocMarkers`` is remapped to that Var through the same
+    mapping used for buffer loads and stores.  A carrier whose allocation was
+    not rebuilt by the clone keeps its original Var.
     """
     return _ffi_api.UnrollLoopSkipVF()  # type: ignore
 
 
 def NormalizePTOAllocMarkers():
-    """Rebuild VMI allocation markers on the allocations that own them.
+    """Move VMI allocation kinds onto scoped carriers in the owning VF.
 
-    Each SBlock's ``tl.vmi.alloc_kind`` map is rebuilt from the allocations
-    the block itself holds, and each marked statement allocation carries its
-    kind string directly.  Allocations, buffer data variables and numerics
-    stay untouched; entries whose allocation no longer exists are dropped.
-    Run it after binding the Ascend PTO target and before
+    Consumes each SBlock's ``tl.vmi.alloc_kind`` map and emits one
+    ``AttrStmt(data_var, "tl.vmi.alloc_kind", StringImm(kind))`` per marked
+    allocation in the block that actually owns it, in ``alloc_buffers`` order.
+    Carriers for a ``SIMD_VF`` block go inside its existing outer
+    ``tl.simdvf_scope`` statement; carriers for a nested block go in that
+    block's body.  Allocations, data Vars, statement order, and unrelated
+    annotations stay untouched, and marked allocations owned outside a
+    ``SIMD_VF`` are rejected.
+
+    The pass is idempotent: existing carriers and final allocation annotations
+    are not duplicated.  Run it after binding the Ascend PTO target and before
     ``UnrollLoopSkipVF``.  Functions without a PTO target pass through
     unchanged.
     """
     return _ffi_api.NormalizePTOAllocMarkers()  # type: ignore
+
+
+def ImportPTOAllocMarkers():
+    """Attach normalized VMI allocation kinds to final ``AllocBuffer`` nodes.
+
+    Must run immediately after ``LowerOpaqueBlock`` on the PTO target.  It
+    collects the temporary ``tl.vmi.alloc_kind`` AttrStmt carriers and the
+    actual ``AllocBuffer`` statements before rewriting, matches them by data
+    Var identity, writes the kind to the matched allocation's annotations, and
+    removes the consumed carriers while preserving their bodies and order.
+    An orphan carrier or conflicting kinds are rejected.  The final allocation
+    need not be lexically inside ``tl.simdvf_scope``, because lowering
+    materializes it before the scope statement.  Functions without a PTO
+    target pass through unchanged.
+    """
+    return _ffi_api.ImportPTOAllocMarkers()  # type: ignore
 
 
 def LegalizePTOVMIMemoryAccess():
@@ -339,6 +361,7 @@ __all__ = [
     "RestoreWhileLoops",
     "RewriteFp4ToFp4x2",
     "RewriteFlagToBuf",
+    "ImportPTOAllocMarkers",
     "NormalizePTOAllocMarkers",
     "UnrollLoopSkipVF",
     "VectorizeParallelToPTO",
