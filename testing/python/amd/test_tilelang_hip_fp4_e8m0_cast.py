@@ -65,6 +65,10 @@ def test_float_to_e8m0_keeps_the_exponent():
     # zero, like __nv_fp8_e8m0), NaN stays NaN.
     x = torch.tensor([2.0**e for e in range(-20, 21)] + [3.0, 0.75, 1000.0, float("nan")], dtype=torch.float32)
     expected = torch.where(x.isnan(), x, torch.exp2(torch.floor(torch.log2(x))))
+    # E8M0 has no sign; zero and float32 subnormals give the smallest scale, infinities saturate to the largest.
+    edge = [0.0, -0.0, 2.0**-149, -3.0, float("inf"), -float("inf")]
+    x = torch.cat([x, torch.tensor(edge, dtype=torch.float32)])
+    expected = torch.cat([expected, torch.tensor([2.0**-127] * 3 + [2.0, 2.0**127, 2.0**127], dtype=torch.float32)])
 
     y = torch.empty_like(x, device="cuda")
     _roundtrip(x.numel(), T.float8_e8m0fnu)(x.cuda(), y)
