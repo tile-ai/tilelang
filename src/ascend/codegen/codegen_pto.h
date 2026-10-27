@@ -180,14 +180,15 @@ private:
   void EmitGemmRun(const PTOGemmEmitContext &ctx, const std::string &a_mat,
                    const std::string &b_mat, const std::string &acc,
                    const std::string &clear_accum,
-                   const std::string &unit_flag_ctrl, int64_t hf32_mode);
+                   const std::string &unit_flag_ctrl, int64_t buf_offset,
+                   int64_t hf32_mode);
   void
   EmitBlockscaledGemmRun(const PTOGemmEmitContext &ctx,
                          const std::string &a_mat, const std::string &b_mat,
                          const std::string &sfa_mat, const std::string &sfb_mat,
                          const std::string &acc, const std::string &clear_accum,
                          const std::string &sf_k_offset,
-                         const std::string &unit_flag_ctrl);
+                         const std::string &unit_flag_ctrl, int64_t buf_offset);
   std::string LocalVarID(const VarNode *var);
   bool IsLocalVarBuffer(const VarNode *var) const;
   void EmitMixedEntrySnapshot(const VarNode *var);

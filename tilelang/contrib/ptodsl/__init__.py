@@ -18,15 +18,15 @@ from .dcache_bypass import (
     write_gm_bypass_dcache,
 )
 from .gemm import PTOBlockscaledGemmL1Template, PTOGemmL1Template
-from .mixed_kernel import finalize_mixed_kernel, mixed_kernel_section
+from .mixed_kernel import mixed_kernel_section
 from .rng import PhiloxRNG
 from .simd_inst import (
-    vdiv_precise_f32,
     vexp_1ulp_ftz_false,
     vln_1ulp_ftz_false,
     vsqrt_0ulp_ftz_false,
 )
 from .simt import (
+    cast_bool_vector,
     fp8_byte_load,
     fp8_byte_store,
     scalar_binary_fp8,
@@ -49,9 +49,9 @@ __all__ = [
     "ascend_cross_core_set_flag",
     "ascend_cross_core_wait_flag",
     "as_logical_bool",
+    "cast_bool_vector",
     "fp8_byte_load",
     "fp8_byte_store",
-    "finalize_mixed_kernel",
     "if_then_else",
     "logical_not",
     "mixed_kernel_section",
@@ -60,7 +60,6 @@ __all__ = [
     "redux_max",
     "redux_min",
     "scalar_binary_fp8",
-    "vdiv_precise_f32",
     "vexp_1ulp_ftz_false",
     "vln_1ulp_ftz_false",
     "vsqrt_0ulp_ftz_false",

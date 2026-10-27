@@ -39,8 +39,7 @@ def _assert_mixed(source, func):
     decorator = func.decorator_list[0]
     assert ast.unparse(decorator.func) == "pto.jit"
     assert "kernel_kind" not in {keyword.arg for keyword in decorator.keywords}
-    finalizers = _calls(ast.parse(source), "tl.finalize_mixed_kernel")
-    assert sum(ast.unparse(call.args[0]) == func.name for call in finalizers) == 1
+    assert not _calls(ast.parse(source), "tl.finalize_mixed_kernel")
 
 
 def _assert_idle_cube(func):
