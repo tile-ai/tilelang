@@ -13,6 +13,9 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+from tvm import tirx
+
+from testing.ascend._ir import calls, nodes
 
 
 def nd2nz_matmul(
@@ -98,12 +101,38 @@ def test_nd2nz_matmul(M, N, src_dtype, mul_dtype, num_aiv):
 
 @pytest.mark.parametrize("split_dim", [0, 1])
 def test_nd2nz_matmul_reuses_mixed_kernel_sid(split_dim):
-    source = tilelang.lower(nd2nz_matmul(64, 128, "float32", "float32", num_aiv=2, split_dim=split_dim), target="ascend").kernel_source
+    artifact = tilelang.lower(nd2nz_matmul(64, 128, "float32", "float32", num_aiv=2, split_dim=split_dim), target="ascend")
+    source = artifact.kernel_source
 
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1
-    assert source.count("asc_copy_gm2ub_align") == 1
-    assert source.count("asc_copy_ub2l1") == 1
+    assert source.count("asc_copy_gm2ub_align") == 2
+    assert source.count("asc_copy_ub2l1") == 2
+
+    # Static copies are duplicated across mutually exclusive AIV branches;
+    # each subcore must still move only its own half of the matrix once.
+    (func,) = artifact.device_mod.functions.values()
+    (vector,) = [block for block in nodes(func, tirx.SBlock) if block.name_hint == "VECTOR"]
+    (thread,) = [attr for attr in nodes(vector, tirx.AttrStmt) if attr.attr_key == "thread_extent"]
+    assert thread.node.thread_tag == "cthread" and int(thread.value) == 2
+    (selection,) = nodes(vector, tirx.IfThenElse)
+    assert isinstance(selection.condition, tirx.EQ)
+    assert selection.condition.a.same_as(thread.node.var) and int(selection.condition.b) == 0
+
+    tile_shape = (32, 128) if split_dim == 0 else (64, 64)
+    gm_stride = 4096 if split_dim == 0 else 64
+    l1_offsets = []
+    for sid, branch in enumerate((selection.then_case, selection.else_case)):
+        assert branch is not None
+        (load,) = calls(branch, "tl.ascend_copy_gm_to_ubuf")
+        (scatter,) = calls(branch, "tl.ascend_nd2nz_scatter")
+        (store,) = calls(branch, "tl.ascend_nd2nz_post_copy")
+        assert int(load.args[1].args[2]) == sid * gm_stride
+        assert tuple(int(arg) for arg in scatter.args[2:4]) == tile_shape
+        assert tuple(int(arg) for arg in store.args[2:4]) == tile_shape
+        l1_offsets.append(int(store.args[0].args[2]))
+    # FP32 NZ uses eight-column groups, with the full 64-row destination pitch.
+    assert l1_offsets[1] - l1_offsets[0] == (32 * 8 if split_dim == 0 else 64 * 64)
 
 
 if __name__ == "__main__":
