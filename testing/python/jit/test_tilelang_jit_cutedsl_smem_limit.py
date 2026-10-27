@@ -34,8 +34,9 @@ def staged_copy_kernel(n):
 @tilelang.testing.requires_cuda
 def test_cutedsl_rejects_dynamic_smem_above_device_limit():
     _require_cutedsl()
-    limit = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin
-    n = (limit // 4 + 1024 + 127) // 128 * 128
+    # 256 KiB is above the opt-in cap of every architecture (at most 227 KiB),
+    # so the launch must be rejected without querying PyTorch device properties.
+    n = 256 * 1024 // 4
     a = torch.randn(n, device="cuda")
     b = torch.empty_like(a)
     with pytest.raises(RuntimeError, match=r"Failed to set the allowed dynamic shared memory size to \d+ .*at most"):

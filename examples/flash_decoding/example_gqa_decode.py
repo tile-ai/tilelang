@@ -35,7 +35,12 @@ def get_heuristic_config() -> Tuple[Dict, int]:
     print(f"CUDA device capability: {sm_version}")
     # Two pipelined K/V stages need 144 KiB of dynamic shared memory; sm_86/89/120
     # allow about 99 KiB per block.
-    if torch.cuda.get_device_properties(device).shared_memory_per_block_optin < 160 * 1024:
+    optin_smem = getattr(torch.cuda.get_device_properties(device), "shared_memory_per_block_optin", None)
+    if optin_smem is None:
+        # PyTorch < 2.7 does not expose the opt-in limit; fall back to the
+        # per-architecture cap (cudaDevAttrMaxSharedMemoryPerBlockOptin, KiB).
+        optin_smem = 1024 * {80: 163, 87: 163, 90: 227, 100: 227, 103: 227, 110: 227}.get(sm_version, 99)
+    if optin_smem < 160 * 1024:
         cfg = dict(block_N=128, block_H=64, num_split=1, num_stages=0, threads=128)
     else:
         cfg = dict(block_N=128, block_H=64, num_split=8, num_stages=2, threads=128)
