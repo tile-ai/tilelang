@@ -1209,6 +1209,11 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   node->nd2nz = int_or("nd2nz", 0);
   node->dual_dst_ctl = int_or("dual_dst_ctl", 0);
   node->transpose = int_or("transpose", 0);
+  TVM_FFI_CHECK(!(node->transpose != 0 && IsGlobalBuffer(node->src) &&
+                  IsL1Buffer(node->dst) && node->src->dtype.is_float4_e2m1fn()),
+                ValueError)
+      << "FP4 GM->L1 transpose is not supported. Copy to L1 without "
+         "transpose and use L1->L0 transpose loading for GEMM instead.";
   node->data_select = int_or("data_select", 0);
   node->mx_sf_data = std::nullopt;
   node->l2_cache_ctrl = std::nullopt;

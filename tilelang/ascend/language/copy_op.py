@@ -277,6 +277,9 @@ def copy(  # noqa: A001
             memory access. Defaults to None.
         transpose (bool, keyword-only): Ascend GM→L1 only. Emit dn2nz (which
             transposes the N/D mapping) instead of nd2nz. Defaults to False.
+            FP4 GM→L1 transpose is unsupported and raises a compilation error.
+            Copy FP4 to L1 without transpose and use L1→L0 transpose loading
+            selected by the operand layout and GEMM transpose flags instead.
         l0_pitch (int | PrimExpr | None, keyword-only): L0 matrix pitch in
             16-element M/N fractal blocks, not bytes or an inter-block gap.
             For L1→L0A/L0B, overrides the destination pitch; for L0C→UB/GM,

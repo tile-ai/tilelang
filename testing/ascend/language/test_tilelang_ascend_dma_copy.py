@@ -7,9 +7,9 @@ import tilelang.testing
 from tilelang.ascend import language as T
 
 
-def _fp8_matrix_copy_kernel(dtype, route):
-    m = n = 32
-    k = 128
+def _matrix_copy_kernel(dtype, route, m=32, k=128):
+    n = m
+    scale_pairs = k // 64
     gm_trans_a, gm_trans_b = route == "gm-transpose-a", route == "gm-transpose-b"
     l0_trans_a, l0_trans_b = route == "l0-transpose-a", route == "l0-transpose-b"
     a_shape = (k, m) if gm_trans_a or l0_trans_a else (m, k)
@@ -21,8 +21,8 @@ def _fp8_matrix_copy_kernel(dtype, route):
     def main(
         A: T.Tensor(a_shape, dtype),
         B: T.Tensor(b_shape, dtype),
-        SA: T.Tensor((2, m), "uint16"),
-        SB: T.Tensor((2, n), "uint16"),
+        SA: T.Tensor((scale_pairs, m), "uint16"),
+        SB: T.Tensor((scale_pairs, n), "uint16"),
         O: T.Tensor((m, n), "float32"),
     ):
         with T.Kernel(1):
@@ -30,10 +30,10 @@ def _fp8_matrix_copy_kernel(dtype, route):
             b1 = T.alloc_l1(b_tile, dtype)
             a0 = T.alloc_l0a(a_tile, dtype)
             b0 = T.alloc_l0b(b_tile, dtype)
-            sa1 = T.alloc_l1((m, 2), "uint16")
-            sb1 = T.alloc_l1((n, 2), "uint16")
-            sa0 = T.alloc_l0a_sf(a0, sf_shape=(m, 2))
-            sb0 = T.alloc_l0b_sf(b0, sf_shape=(n, 2))
+            sa1 = T.alloc_l1((m, scale_pairs), "uint16")
+            sb1 = T.alloc_l1((n, scale_pairs), "uint16")
+            sa0 = T.alloc_l0a_sf(a0, sf_shape=(m, scale_pairs))
+            sb0 = T.alloc_l0b_sf(b0, sf_shape=(n, scale_pairs))
             acc = T.alloc_l0c((m, n), "float32")
             T.copy(A, a1, transpose=gm_trans_a)
             T.copy(B, b1, transpose=gm_trans_b)
@@ -53,7 +53,7 @@ def _fp8_matrix_copy_kernel(dtype, route):
 @pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float8_e5m2"])
 @pytest.mark.parametrize("route", ["normal", "gm-transpose-a", "gm-transpose-b", "l0-transpose-a", "l0-transpose-b"])
 def test_fp8_matrix_copy_with_mx_scales(dtype, route):
-    kernel = tilelang.compile(_fp8_matrix_copy_kernel(dtype, route), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(_matrix_copy_kernel(dtype, route), target="ascend", out_idx=-1)
     torch_dtype = getattr(torch, dtype)
     for seed in (0, 1):
         generator = torch.Generator().manual_seed(seed)
@@ -70,6 +70,33 @@ def test_fp8_matrix_copy_with_mx_scales(dtype, route):
         a_scaled = a.float() * torch.pow(2.0, sa.float() - 127).repeat_interleave(32, dim=1)
         b_scaled = b.float() * torch.pow(2.0, sb.float() - 127).repeat_interleave(32, dim=1)
         torch.testing.assert_close(actual.cpu(), a_scaled @ b_scaled.T, rtol=1e-5, atol=1e-5)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="PyTorch float4_e2m1fn_x2 dtype is unavailable")
+@pytest.mark.parametrize("route", ["normal", "l0-transpose-a", "l0-transpose-b"])
+def test_fp4_matrix_copy_uses_l0_transpose(route):
+    kernel = tilelang.compile(_matrix_copy_kernel("float4_e2m1fn", route, 64, 64), target="ascend", out_idx=-1)
+    if route != "normal":
+        operand = "a" if route.endswith("a") else "b"
+        assert f"asc_copy_l12l0{operand}_transpose" in kernel.get_kernel_source()
+    values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+    for seed in (0, 1):
+        generator = torch.Generator().manual_seed(seed)
+        a = torch.randint(0, 16, (64, 64), dtype=torch.uint8, generator=generator)
+        b = torch.randint(0, 16, (64, 64), dtype=torch.uint8, generator=generator)
+        if seed == 0:
+            if route == "l0-transpose-a":
+                b = torch.eye(64, dtype=torch.uint8) * 2
+            else:
+                a = torch.eye(64, dtype=torch.uint8) * 2
+        a_input = a.T.contiguous() if route == "l0-transpose-a" else a
+        b_input = b.T.contiguous() if route == "l0-transpose-b" else b
+        a_packed = (a_input[:, ::2] | (a_input[:, 1::2] << 4)).view(torch.float4_e2m1fn_x2)
+        b_packed = (b_input[:, ::2] | (b_input[:, 1::2] << 4)).view(torch.float4_e2m1fn_x2)
+        scales = torch.full((1, 64), 0x7F7F, dtype=torch.uint16).npu()
+        actual = kernel(a_packed.npu(), b_packed.npu(), scales, scales).cpu()
+        torch.testing.assert_close(actual, values[a.long()] @ values[b.long()].T, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("src_width,ub_width,cols", [(4, 64, 4), (8, 16, 4), (64, 1, 1)])
