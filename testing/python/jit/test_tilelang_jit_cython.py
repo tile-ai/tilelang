@@ -156,9 +156,10 @@ def test_scalar_parameter_output_shape_disk_cache(tmp_path, monkeypatch):
         assert args[0].value == size
 
 
+@pytest.mark.parametrize("shared", [True, False])
 @pytest.mark.parametrize("backend", ["cython", "pto"])
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
-def test_dynamic_symbol_shared_by_shape_and_stride(backend, present):
+def test_dynamic_symbol_shared_by_shape_and_stride(backend, present, shared):
     """Each non-null carrier must retain whether it supplies a shape or stride."""
     from tilelang.engine.param import KernelParam
 
@@ -168,8 +169,9 @@ def test_dynamic_symbol_shared_by_shape_and_stride(backend, present):
         from tilelang.jit.adapter.pto.adapter import PTOKernelAdapter as Adapter, PTOKernelWrapper as Wrapper
 
     size = tvm.tirx.Var("size", "int64")
+    shape_size = size if shared else tvm.tirx.Var("size", "int64")
     a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
-    b_buffer = tvm.tirx.decl_buffer((size,), "float32", name="B")
+    b_buffer = tvm.tirx.decl_buffer((shape_size,), "float32", name="B")
     func = tvm.tirx.PrimFunc(
         [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
     )
@@ -180,7 +182,7 @@ def test_dynamic_symbol_shared_by_shape_and_stride(backend, present):
 
     class CaptureLibrary:
         def call(self, *args):
-            self.symbol = args[2].value
+            self.symbols = [arg.value for arg in args[2:-1]]
             return 0
 
     lib = CaptureLibrary()
@@ -199,9 +201,10 @@ def test_dynamic_symbol_shared_by_shape_and_stride(backend, present):
         wrapper.set_dynamic_strides_map(extra[0])
 
     a = torch.empty_strided((2, 3), (4, 1)) if present[0] else None
-    b = torch.empty((4,)) if present[1] else None
+    b = torch.empty((4 if shared else 7,)) if present[1] else None
     wrapper.forward([a, b], stream=0)
-    assert lib.symbol == (4 if any(present) else 0)
+    expected = [4 if any(present) else 0] if shared else [7 if present[1] else 0, 4 if present[0] else 0]
+    assert lib.symbols == expected
 
 
 @tilelang.testing.requires_cuda
