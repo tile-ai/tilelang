@@ -98,9 +98,10 @@ public:
                    ///< When batch > 1, the compiler emits
                    ///< ceil(N/batch) batched AllReduce calls each
                    ///< sharing a single pair of barriers across batch
-                   ///< elements. batch must evenly divide the
-                   ///< per-thread output element count N derived from
-                   ///< the fragment layout.
+                   ///< elements. batch is an upper bound: lowering
+                   ///< uses the largest divisor of the per-thread
+                   ///< output element count N (derived from the
+                   ///< fragment layout) that does not exceed it.
   bool nan_propagate{false}; ///< For fp16/bf16 max/min/absmax: propagate NaN
                              ///< (use __hmax_nan/__hmin_nan) instead of the
                              ///< default __hmax/__hmin which return the
