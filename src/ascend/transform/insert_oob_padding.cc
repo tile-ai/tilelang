@@ -109,9 +109,8 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   // not receive a row fill.
   if (!bounded.clamped)
     return stmts;
-  bool batched = copy->src_range.size() == 3 && copy->dst_range.size() == 3 &&
-                 !analyzer->CanProve(copy->src_range[0]->extent <= 1,
-                                     arith::ProofStrength::kSymbolicBound);
+  bool batched = IsBatchedGMToL1Copy(copy->src, copy->src_range, copy->dst,
+                                     copy->dst_range, analyzer);
   StridedLayout src_layout = NormalizeMTE2DLayout(
       copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding", batched);
   size_t src_inner_axis = static_cast<size_t>(src_layout.modes[0].axis);

@@ -546,9 +546,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       }
     }
   } else if (dma_path == DMAPath::kGMToL1) {
-    bool batched = src_range.size() == 3 && dst_range.size() == 3 &&
-                   !analyzer->CanProve(src_range[0]->extent <= I(1),
-                                       arith::ProofStrength::kSymbolicBound);
+    bool batched =
+        IsBatchedGMToL1Copy(op.src, src_range, op.dst, dst_range, analyzer);
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, src_range, analyzer, "Ascend GM->L1 copy", batched);
     StridedLayout dst_region_layout = NormalizeTrailingMTE2DLayout(
@@ -595,13 +594,18 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                   analyzer->CanProve(src_inner.size > dst_row.size)
             : analyzer->CanProve(src_row.size > dst_row.size) ||
                   analyzer->CanProve(src_inner.size > dst_inner.size);
+    if (batched)
+      source_exceeds_destination |=
+          analyzer->CanProve(src_range[0]->extent > dst_range[0]->extent);
     ICHECK(!source_exceeds_destination)
-        << "Ascend GM->L1 copy requires the mapped 2D source region to fit "
+        << "Ascend GM->L1 copy requires the mapped source region to fit "
            "inside the destination (with axes reversed for transpose), got "
            "source "
         << src_row.size << "x" << src_inner.size << " and destination "
         << dst_row.size << "x" << dst_inner.size
-        << ", transpose=" << geometry_transpose << ".";
+        << ", transpose=" << geometry_transpose
+        << ", source ranges=" << src_range
+        << ", destination ranges=" << dst_range << ".";
 
     PrimExpr physical_inner_elems = valid_inner_elems;
     std::string physical_dtype;

@@ -253,6 +253,24 @@ TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
   return StridedLayout{{inner, row}, raw.offset, raw.elem_bits};
 }
 
+/// Preserve legacy single-matrix normalization before selecting a batch axis.
+inline bool IsBatchedGMToL1Copy(const Buffer &src,
+                                const ffi::Array<Range> &src_range,
+                                const Buffer &dst,
+                                const ffi::Array<Range> &dst_range,
+                                arith::Analyzer *analyzer) {
+  if (src_range.size() != 3 || dst_range.size() != 3 ||
+      analyzer->CanProve(src_range[0]->extent <= 1,
+                         arith::ProofStrength::kSymbolicBound))
+    return false;
+
+  auto src_matrix = TryNormalizeMTE2DLayout(src, src_range, analyzer);
+  auto dst_matrix = TryNormalizeMTE2DLayout(dst, dst_range, analyzer);
+  // A singleton source axis need not be leading, but L1 matrix axes must trail.
+  return !(src_matrix && dst_matrix && dst_matrix->modes[0].axis == 2 &&
+           dst_matrix->modes[1].axis == 1);
+}
+
 /// Require a proven 2D layout for lowering an MTE descriptor.
 inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
                                           const ffi::Array<Range> &range,

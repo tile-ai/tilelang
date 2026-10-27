@@ -95,9 +95,8 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   std::vector<size_t> src_singleton_axes, dst_singleton_axes;
 
   if (dma_path == DMAPath::kGMToL1) {
-    bool batched = op.src_range.size() == 3 && op.dst_range.size() == 3 &&
-                   !analyzer->CanProve(op.src_range[0]->extent <= 1,
-                                       arith::ProofStrength::kSymbolicBound);
+    bool batched = IsBatchedGMToL1Copy(op.src, op.src_range, op.dst,
+                                       op.dst_range, analyzer);
     StridedLayout src_layout = NormalizeMTE2DLayout(
         op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling", batched);
     StridedLayout dst_layout = NormalizeTrailingMTE2DLayout(

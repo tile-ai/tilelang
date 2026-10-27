@@ -109,6 +109,44 @@ def test_single_matrix_oob_preserves_legacy_behavior():
     assert "asc_fill_l1(" not in source
 
 
+@pytest.mark.parametrize("singleton_axis", [1, 2])
+@pytest.mark.parametrize("rows", [16, 20, 32])
+def test_single_matrix_nonleading_singleton(singleton_axis, rows):
+    shape = (rows, 1, 32) if singleton_axis == 1 else (rows, 32, 1)
+
+    @T.prim_func
+    def main(source: T.Tensor(shape, T.bfloat16)):
+        with T.Kernel(1):
+            target = T.alloc_l1((1, 32, 32), T.bfloat16)
+            with T.Cube():
+                T.copy(source[:32, :, :], target)
+
+    with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
+        source = tilelang.lower(main, target="ascend").kernel_source
+    assert source.count("asc_copy_gm2l1_nd2nz(") == 1
+    assert "asc_set_gm2l1_nz_para(1, 1," in source
+    assert ("asc_fill_l1(" in source) == (rows < 32)
+
+
+@pytest.mark.parametrize("dst_batches", [1, 2])
+def test_batched_nd2nz_rejects_smaller_destination(dst_batches):
+    @T.prim_func
+    def main(source: T.Tensor((4, 16, 16), T.bfloat16)):
+        with T.Kernel(1):
+            target = T.alloc_l1((dst_batches, 16, 16), T.bfloat16)
+            with T.Cube():
+                T.copy(source[:, :, :], target[:, :, :])
+
+    with pytest.raises(tvm.error.InternalError, match="source region.*destination"):
+        tilelang.lower(main, target="ascend")
+
+
+def test_batched_nd2nz_single_row_matrix():
+    with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
+        source = tilelang.lower(batch_copy(4, 1, 16, 32, "bfloat16"), target="ascend").kernel_source
+    assert "asc_set_gm2l1_nz_para(4, 1," in source
+
+
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
 @pytest.mark.parametrize(
@@ -134,7 +172,8 @@ def test_single_matrix_oob_preserves_legacy_behavior():
         "larger-destination-batch-m-n-tails",
     ],
 )
-def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dynamic, copy_batches):
+@pytest.mark.parametrize("destination_origin", [False, True])
+def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dynamic, copy_batches, destination_origin):
     import torch
 
     pytest.importorskip("torch_npu")
@@ -156,7 +195,10 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
             begin = block * 2 if dynamic else batch_begin
             # Seed every matrix to detect missing M/N fills or writes to skipped batches.
             T.copy(poison, target)
-            T.copy(source[begin : begin + copy_batches, :32, :32], target[1:5, :, :])
+            if destination_origin:
+                T.copy(source[begin : begin + copy_batches, :32, :32], target[1, 0, 0])
+            else:
+                T.copy(source[begin : begin + copy_batches, :32, :32], target[1:5, :, :])
             T.copy(identity, weight)
             T.copy(weight, b)
             # Multiplication by identity exposes all L1 elements, including tails.
@@ -179,4 +221,84 @@ def test_batched_nd2nz_device(dtype, source_batches, batch_begin, rows, cols, dy
     actual = kernel(source.npu(), identity, poison)
     torch.npu.synchronize()
     # Batch 0, skipped batches, and extra capacity must retain their sentinels.
+    torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
+@pytest.mark.parametrize(
+    "rows,cols,copy_rows,copy_cols,interleaved,transpose,batch_begin",
+    [
+        (32, 32, 32, 32, True, False, 0),
+        (32, 32, 32, 32, False, False, 0),
+        (20, 10, 32, 32, False, False, 1),
+        (32, 64, 32, 64, False, True, 0),
+        (32, 64, 32, 64, True, True, 0),
+        (20, 10, 32, 64, False, True, 1),
+    ],
+    ids=[
+        "interleaved-source",
+        "larger-matrix-pitch",
+        "explicit-column-fill",
+        "transpose-rectangular",
+        "transpose-interleaved-source",
+        "transpose-batch-m-n-tails",
+    ],
+)
+def test_batched_nd2nz_strides_and_transpose_device(dtype, rows, cols, copy_rows, copy_cols, interleaved, transpose, batch_begin):
+    import torch
+
+    pytest.importorskip("torch_npu")
+    source_batches = 3
+    # Leave gaps between source rows, and optionally interleave the batch axis.
+    row_pitch = cols * 2
+    strides = (row_pitch, source_batches * row_pitch, 1) if interleaved else (rows * row_pitch, row_pitch, 1)
+    dst_rows, dst_cols = (copy_cols, copy_rows) if transpose else (copy_rows, copy_cols)
+    # Existing M/N padding requires the destination's full column axis.
+    target_rows, target_cols = (dst_rows, dst_cols) if rows < copy_rows or cols < copy_cols else (64, 64)
+
+    @T.prim_func
+    def main(
+        source: T.StridedTensor((source_batches, rows, cols), strides, dtype),
+        identity: T.Tensor((target_cols, target_cols), dtype),
+        poison: T.Tensor((5, target_rows, target_cols), dtype),
+        output: T.Tensor((5, target_rows, target_cols), "float32"),
+    ):
+        with T.Kernel(1):
+            target = T.alloc_l1((5, target_rows, target_cols), dtype)
+            weight = T.alloc_l1((target_cols, target_cols), dtype)
+            a = T.alloc_l0a((target_rows, target_cols), dtype)
+            b = T.alloc_l0b((target_cols, target_cols), dtype)
+            acc = T.alloc_l0c((target_rows, target_cols), "float32")
+            T.copy(poison, target)
+            T.copy(
+                source[batch_begin : batch_begin + 4, :copy_rows, :copy_cols],
+                target[1:5, :dst_rows, :dst_cols],
+                transpose=transpose,
+            )
+            T.copy(identity, weight)
+            T.copy(weight, b)
+            for batch in T.serial(5):
+                T.copy(target[batch : batch + 1, :, :], a)
+                T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                T.copy(acc, output[batch, :, :])
+
+    kernel = tilelang.compile(main, target="ascend", out_idx=-1, pass_configs={"tl.enable_auto_schedule": True})
+    torch_dtype = getattr(torch, dtype)
+    storage_shape = (rows, source_batches, row_pitch) if interleaved else (source_batches, rows, row_pitch)
+    storage = ((torch.arange(source_batches * rows * row_pitch).reshape(storage_shape) % 31) + 1).to(torch_dtype).npu()
+    source = (storage.permute(1, 0, 2) if interleaved else storage)[:, :, :cols]
+    assert source.stride() == strides
+    valid_batches = min(4, max(source_batches - batch_begin, 0))
+    expected = torch.full((5, target_rows, target_cols), -7.0)
+    expected[1 : 1 + valid_batches, :dst_rows, :dst_cols] = 0
+    values = source[batch_begin : batch_begin + valid_batches].cpu().float()
+    if transpose:
+        values = values.transpose(1, 2)
+    expected[1 : 1 + valid_batches, : values.shape[1], : values.shape[2]] = values
+    identity = torch.eye(target_cols, dtype=torch_dtype, device="npu")
+    poison = torch.full((5, target_rows, target_cols), -7.0, dtype=torch_dtype, device="npu")
+    actual = kernel(source, identity, poison)
+    torch.npu.synchronize()
+    # Check the full allocation: uncopied M/N regions and batches stay untouched.
     torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
