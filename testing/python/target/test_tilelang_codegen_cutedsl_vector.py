@@ -4,10 +4,15 @@ Both regressions were found by ``examples/dequantize_gemm`` and
 ``examples/blocksparse_attention``: a vectorized shift whose amount is a ramp
 printed a Python tuple, and a loop bound that lowered to a ``Let`` printed its
 binding inside ``range(...)``.
+
+The vector buffers themselves are scalar-backed, including the ``shared.dyn``
+scope that ``T.alloc_shared`` defaults to.
 """
 
 import pytest
+import torch
 
+import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
@@ -57,6 +62,39 @@ def test_cutedsl_codegen_hoists_loop_bound_lets():
     assert loop_lines
     for line in loop_lines:
         assert line.rstrip().endswith("):"), line
+
+
+def test_cutedsl_shared_dyn_vector_buffer_roundtrip():
+    """A vector-typed ``shared.dyn`` buffer is scalar-backed, so indices scale.
+
+    ``T.alloc_shared`` defaults to ``shared.dyn``, whose allocation declares the
+    *element* type. The buffer-reference helpers only lane-scaled ``shared`` and
+    ``local``, so a ``shared.dyn`` access kept the vector index against a scalar
+    pointer and touched the wrong bytes.
+    """
+    try:
+        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+
+        check_cutedsl_available()
+    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
+        pytest.skip(f"CuTeDSL is not available: {err}")
+
+    n = 64
+
+    @T.prim_func
+    def prog(A: T.Tensor((n,), "uint8"), B: T.Tensor((n,), "uint8")):
+        with T.Kernel(1, threads=32):
+            S = T.alloc_shared((32,), "uint8x2")
+            tx = T.get_thread_binding(0)
+            S[tx] = A[T.Ramp(tx * 2, 1, 2)]
+            B[T.Ramp(tx * 2, 1, 2)] = S[tx]
+
+    source = _lower_cutedsl(prog).kernel_source
+    assert "get_dyn_smem(cutlass.Uint8" in source
+
+    kernel = tilelang.compile(prog, target="cutedsl", out_idx=[1])
+    a = torch.randint(0, 256, (n,), dtype=torch.uint8, device="cuda")
+    assert torch.equal(kernel(a), a)
 
 
 if __name__ == "__main__":
