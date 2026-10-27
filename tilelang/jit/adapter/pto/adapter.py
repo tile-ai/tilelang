@@ -15,6 +15,7 @@ from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.utils import get_output_scalar_dim_map
 from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
@@ -169,6 +170,15 @@ class PTOKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.runtime_wrapper = PTOKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.runtime_wrapper.set_output_shape_resolver(
+            OutputShapeResolver(
+                self.prim_func,
+                self.result_idx,
+                shape_scale=lambda buffer, dim: _storage_pack_factor(buffer.dtype) if dim == len(buffer.shape) - 1 else 1,
+                stride_scale=lambda buffer: _storage_pack_factor(buffer.dtype),
+                require_unique_names=True,
+            )
+        )
         self.runtime_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.runtime_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.runtime_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
@@ -223,10 +233,11 @@ class PTOKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int]]]:
+    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
 
-        For each dynamic symbol, maps to ALL buffers that carry it as (buffer_idx, dim_idx, storage_scale).
+        For each dynamic symbol, maps to ALL buffers that carry it as
+        (source_kind, buffer_idx, dim_idx, storage_scale), where 0 is a shape and 1 is a stride.
         This allows the Cython wrapper to find a non-None carrier when some buffers are None.
         """
 
@@ -236,7 +247,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int]]] = {}
+        sources: dict[str, list[tuple[int, int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
@@ -246,13 +257,13 @@ class PTOKernelAdapter(BaseKernelAdapter):
                         key = str(dim)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, shape_scale(buffer, j)))
+                        sources[key].append((0, i, j, shape_scale(buffer, j)))
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and stride not in params:
                         key = str(stride)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, stride_scale))
+                        sources[key].append((1, i, j, stride_scale))
         return sources
 
     def _process_scalar_param_vars(self) -> list[tirx.Var | None]:
