@@ -696,10 +696,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   // float8x2), pad the source to aligned width, cast, then return
   // the aligned rmem tensor.  The store path is responsible for
   // extracting only value_lanes elements when writing back.
-  bool is_narrow_unaligned = target_ty.bits() < 32 && lanes > 1 &&
-                             (target_ty.bits() * lanes) % 32 != 0;
+  //
+  // Booleans report 8 bits, so a `boolx2` comparison result would otherwise
+  // be padded to four lanes and stored into a four-element tensor while the
+  // value still carries two lanes.  Integer and boolean vectors cast directly.
+  bool is_narrow_unaligned = !target_ty.is_bool() && target_ty.bits() < 32 &&
+                             lanes > 1 && (target_ty.bits() * lanes) % 32 != 0;
   bool source_is_narrow_unaligned =
-      from_ty.bits() < 32 && from_ty.lanes() > 1 &&
+      !from_ty.is_bool() && from_ty.bits() < 32 && from_ty.lanes() > 1 &&
       (from_ty.bits() * from_ty.lanes()) % 32 != 0;
   int aligned_lanes = is_narrow_unaligned ? (32 / target_ty.bits()) : lanes;
 
