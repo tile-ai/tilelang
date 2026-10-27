@@ -6,22 +6,20 @@ at `a123d0b0191e0da7aa1e044f8644e0989cc63220`.
 
 | Files | Purpose |
 | --- | --- |
-| `manual.py`, `core.py` | BF16 prefill with explicit AIC/AIV scheduling and synchronization |
-| `staged.py` | Persistent prefill and decode with `T.Stage` and compiler-managed buffer versions |
+| `kernel.py` | Persistent prefill and decode with `T.Stage` and compiler-managed buffer versions |
 | `decode.py`, `quantization.py` | Packed FP8 main KV and optional FP8/FP4 extra KV |
-| `manual_intrinsics.h` | Individual hardware instructions used by the manual kernel |
 | `run.py`, `run_decode.py` | Correctness checks and benchmarks against FlashMLA |
-| `test_staged.py` | Regression tests for the staged implementation |
+| `test_flashmla.py` | Kernel regression tests |
 
 The kernels use H=64, Dqk=Dv=512, BF16 Q/output, and topk extents divisible
-by 64. Both support attention sinks, invalid indices, and per-query lengths.
+by 64. Prefill and decode support attention sinks, invalid indices, and per-query lengths.
 Prefill accepts contiguous BF16 KV; decode requires contiguous packed KV pages,
 with each cache smaller than 4 GiB.
 
 ## Run
 
 Build TileLang with Ascend support; see the [backend guide](../../../tilelang/ascend/README.md).
-The staged kernel requires [#3623](https://github.com/tile-ai/tilelang/pull/3623)
+The kernels require [#3623](https://github.com/tile-ai/tilelang/pull/3623)
 for buffer view layouts and [#3624](https://github.com/tile-ai/tilelang/pull/3624)
 for configuration-register dependencies.
 
@@ -41,15 +39,15 @@ From the TileLang repository root, select an idle NPU with
 export PYTHONPATH=.
 export FLASHMLA_REFERENCE=/path/to/FlashMLA
 python examples/ascend/flashmla/run.py --reference "$FLASHMLA_REFERENCE" \
-  --implementation all --mode correctness --output /tmp/flashmla-prefill.json
+  --mode correctness --output /tmp/flashmla-prefill.json
 python examples/ascend/flashmla/run_decode.py --reference "$FLASHMLA_REFERENCE" \
-  --implementation all --mode correctness --output /tmp/flashmla-decode.json
-python -m pytest examples/ascend/flashmla/test_staged.py -q
+  --mode correctness --output /tmp/flashmla-decode.json
+python -m pytest examples/ascend/flashmla/test_flashmla.py -q
 ```
 
 Use `--mode bench --rounds 3 --repeat 10` for benchmarks and `--case N` for
-one case. `--implementation` accepts `reference`, `manual`, `staged`,
-`both` (reference/manual, the default), or `all`.
+one case. `--implementation` accepts `reference`, `tilelang`, or
+`both` (the default).
 Benchmark runners check outputs before timing and write per-launch durations
 to `--output`.
 

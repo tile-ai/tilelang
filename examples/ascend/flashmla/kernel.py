@@ -517,11 +517,11 @@ def sparse_attention(
                         if extra_topk > 0 and extra_fp4:
                             with T.Task():
                                 if k >= nb0:
-                                    dequantize(raw4, scales, nz, None, True)
+                                    dequantize(raw4, scales, nz, True)
                                 else:
-                                    dequantize(raw8, scales, nz, None, False)
+                                    dequantize(raw8, scales, nz, False)
                         else:
-                            dequantize(raw8, scales, nz, None, False)
+                            dequantize(raw8, scales, nz, False)
                     else:
                         with T.SimdVF():
                             nd_mask = T.simd.pset(16)

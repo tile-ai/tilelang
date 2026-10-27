@@ -8,7 +8,7 @@ def rolled(n):
 
 
 @T.macro
-def dequantize(raw, scales, nz, slot, fp4):
+def dequantize(raw, scales, nz, fp4):
     with T.SimdVF():
         m16 = T.simd.pset(16)
         m8 = T.simd.pset(8)
@@ -17,7 +17,7 @@ def dequantize(raw, scales, nz, slot, fp4):
             row_indices = T.simd.vshls(T.simd.vshrs(arange, 5), 8)
             scale_indices = T.simd.vadd(arange, row_indices)
             for row in rolled(8):
-                packed_bits = T.simd.vgather2((raw[slot, row * 4, 256] if slot is not None else raw[row * 4, 256]), scale_indices, m16)
+                packed_bits = T.simd.vgather2(raw[row * 4, 256], scale_indices, m16)
                 packed = T.reinterpret("float8_e4m3fnx256", packed_bits)
                 even = T.simd.vcvt(packed, "float32", m16, part=0)
                 odd = T.simd.vcvt(packed, "float32", m16, part=2)
@@ -28,7 +28,7 @@ def dequantize(raw, scales, nz, slot, fp4):
             row_indices = T.simd.vmuls(T.simd.vshrs(arange, 4), 528)
             scale_indices = T.simd.vadd(arange, row_indices)
             for row in rolled(4):
-                packed = T.simd.vgather2((raw[slot, row * 8, 512] if slot is not None else raw[row * 8, 512]), scale_indices, m16)
+                packed = T.simd.vgather2(raw[row * 8, 512], scale_indices, m16)
                 clamped = T.simd.vmins(packed, 0xE0)
                 bits = T.simd.vshls(clamped, 7)
                 T.simd.vsts(scales[row * 128], T.reinterpret("bfloat16x128", bits), m16)
@@ -47,13 +47,13 @@ def dequantize(raw, scales, nz, slot, fp4):
             for chunk in T.unroll(4):
                 if fp4:
                     scale = T.simd.vld(scales[row * 32 + chunk * 8], "E2B_B16")
-                    bits = T.simd.vld((raw[slot, row, chunk * 64] if slot is not None else raw[row, chunk * 64]), "UNPK4_B8")
+                    bits = T.simd.vld(raw[row, chunk * 64], "UNPK4_B8")
                     packed = T.reinterpret("float4_e2m1fnx512", bits)
                     value = T.simd.vcvt(packed, "bfloat16", m16, part=0)
                     dequant = T.simd.vmul(value, scale, m16)
-                    T.simd.vsstb(dequant, (nz[chunk * 4224 + row * 16] if slot is not None else nz[row, chunk * 128]), 33 << 16, m16)
+                    T.simd.vsstb(dequant, nz[row, chunk * 128], 33 << 16, m16)
                 else:
-                    bits = T.simd.vld((raw[slot, row, chunk * 128] if slot is not None else raw[row, chunk * 128]), "UNPK_B8")
+                    bits = T.simd.vld(raw[row, chunk * 128], "UNPK_B8")
                     packed = T.reinterpret("float8_e4m3fnx256", bits)
                     even = T.simd.vcvt(packed, "float32", m8, part=0)
                     odd = T.simd.vcvt(packed, "float32", m8, part=2)
@@ -61,4 +61,4 @@ def dequantize(raw, scales, nz, slot, fp4):
                     data_bits = T.simd.vor(even_bits, T.reinterpret("uint32x64", odd))
                     value = T.reinterpret("bfloat16x128", data_bits)
                     dequant = T.simd.vmul(value, sf[chunk], m16)
-                    T.simd.vsstb(dequant, (nz[chunk * 4224 + row * 16] if slot is not None else nz[row, chunk * 128]), 33 << 16, m16)
+                    T.simd.vsstb(dequant, nz[row, chunk * 128], 33 << 16, m16)

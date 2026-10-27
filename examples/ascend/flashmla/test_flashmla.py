@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from examples.ascend.flashmla.staged import compile_prefill
+from examples.ascend.flashmla.kernel import compile_prefill
 
 
 @pytest.mark.parametrize("pipeline_stages", [True, False], ids=["pipeline", "flat"])
@@ -229,12 +229,12 @@ def test_decode_independent_lengths_and_group_tails(flashmla_reference, extra_fo
             assert not inputs.kv_scope.indices_in_kvcache.is_contiguous()
             assert not inputs.extra_kv_scope.indices_in_kvcache.is_contiguous()
             torch.npu.synchronize()
-            _, run = prepare_decode(p, inputs, implementation="staged")
+            _, run = prepare_decode(p, inputs)
             out, lse = run()
             torch.npu.synchronize()
             expected = ref.ref_sparse_attn_decode(p, inputs)
-            assert kk.check_is_allclose("staged out", out, expected[0], abs_tol=1e-3, rel_tol=2.01 / 128, cos_diff_tol=5e-6)
-            assert kk.check_is_allclose("staged lse", lse, expected[1], abs_tol=1e-6, rel_tol=8.01 / 65536)
+            assert kk.check_is_allclose("tilelang out", out, expected[0], abs_tol=1e-3, rel_tol=2.01 / 128, cos_diff_tol=5e-6)
+            assert kk.check_is_allclose("tilelang lse", lse, expected[1], abs_tol=1e-6, rel_tol=8.01 / 65536)
     finally:
         torch.set_default_dtype(old_dtype)
         torch.set_float32_matmul_precision(old_precision)
