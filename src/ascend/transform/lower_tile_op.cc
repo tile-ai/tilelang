@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "cuda/op/builtin.h"
@@ -36,6 +37,7 @@
 #include "transform/common/pipeline_utils.h"
 #include "transform/loop_partition.h"
 
+#include "ascend/transform/buffer_addresses.h"
 #include "ascend/transform/buffer_alias.h"
 #include "ascend/transform/buffer_version.h"
 #include "ascend/transform/vf_regions.h"
@@ -332,6 +334,9 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
+    ICHECK(!op->annotations.count(kBufferAddresses))
+        << kBufferAddresses << " requires the Ascend scheduled pipeline; "
+        << "enable TL_ENABLE_AUTO_SCHEDULE";
     Map<String, Any> previous_block_annotations = block_annotations_;
     Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
     block_annotations_ = op->annotations;
@@ -595,6 +600,16 @@ private:
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
         new_offset += forward_indices[i] * stride_offset;
         stride_offset *= new_shape[i];
+      }
+      if (auto pitch = access_ptr_call->annotations.Get(attr::kL0AccessPitch)) {
+        ICHECK(IsL0ABuffer(original_buffer) || IsL0BBuffer(original_buffer));
+        ICHECK_GE(new_shape.size(), 4);
+        size_t n = new_shape.size();
+        // Only the matrix's outer0 stride changes. Leading planes keep the
+        // full allocation size, so compact tails cannot alias adjacent slots.
+        new_offset += forward_indices[n - 4] *
+                      (Downcast<PrimExpr>(pitch.value()) - new_shape[n - 3]) *
+                      new_shape[n - 2] * new_shape[n - 1];
       }
       new_offset = analyzer_->Simplify(new_offset);
       Array<PrimExpr> new_indices;
@@ -1268,6 +1283,12 @@ private:
       }
     }
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (op->attr_key == tl::kBufferAddresses) {
+      AttrStmt attribute = Downcast<AttrStmt>(std::move(stmt));
+      attribute.CopyOnWrite()->node =
+          RemapBufferAddresses(ParseBufferAddresses(op->node), var_remap_);
+      return attribute;
+    }
     if (op->attr_key == tl::kAivStorageMap) {
       AivStorageMap remapped;
       for (const auto &[storage, sid] : op->node.cast<AivStorageMap>()) {

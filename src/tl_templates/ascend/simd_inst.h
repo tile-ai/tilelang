@@ -1047,4 +1047,16 @@ template <typename T> __simd_callee__ inline void mem_bar(T mem_type) {
   ::asc_mem_bar(mem_type);
 }
 
+template <typename T>
+__simd_callee__ inline void vst_x2(vec_t<T> src0, vec_t<T> src1,
+                                   __ubuf__ T *base) {
+  if constexpr (std::is_same<T, float>::value) {
+    asc_storealign_intlv(reinterpret_cast<__ubuf__ uint32_t *>(base),
+                         reinterpret_cast<vector_u32 &>(src0),
+                         reinterpret_cast<vector_u32 &>(src1));
+  } else {
+    asc_storealign_intlv(base, src0, src1);
+  }
+}
+
 } // namespace simd_inst

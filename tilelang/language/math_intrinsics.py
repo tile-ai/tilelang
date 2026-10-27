@@ -439,10 +439,8 @@ COMMON_MATH_INTRINSICS = [
     "abs2",
 ]
 
-# CUDA-only intrinsics: PTX fast-math approximations and IEEE ops with an
-# explicit rounding mode. Registered and lowered only by the CUDA backend,
-# so only the CUDA dialect exports them.
-CUDA_MATH_INTRINSICS = [
+# Fast-math approximations lowered by the CUDA and ROCm backends.
+FAST_MATH_INTRINSICS = [
     "__log",
     "__log2",
     "__log10",
@@ -451,6 +449,12 @@ CUDA_MATH_INTRINSICS = [
     "__sin",
     "__exp10",
     "__exp",
+]
+
+# CUDA-only intrinsics: the PTX fast reciprocal and IEEE ops with an
+# explicit rounding mode. Registered and lowered only by the CUDA backend,
+# so only the CUDA dialect exports them.
+CUDA_MATH_INTRINSICS = [
     "fast_rcp",
     "ieee_add",
     "ieee_sub",
@@ -462,4 +466,4 @@ CUDA_MATH_INTRINSICS = [
     "ieee_fdiv",
 ]
 
-__all__ = CUDA_MATH_INTRINSICS + COMMON_MATH_INTRINSICS
+__all__ = FAST_MATH_INTRINSICS + CUDA_MATH_INTRINSICS + COMMON_MATH_INTRINSICS

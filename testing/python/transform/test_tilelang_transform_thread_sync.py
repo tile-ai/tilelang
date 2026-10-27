@@ -967,6 +967,87 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 
 
 @tilelang.testing.requires_cuda
+def test_cross_thread_waw_with_shifted_partition_requires_sync():
+    """A later writer can target a slot owned by another thread."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        if tx < 6:
+            s[tx + 10] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    syncs = _storage_syncs(lowered)
+    assert len(syncs) == 1
+    first_write = collect_nodes(lowered, tirx.BufferStore)[0]
+    guard = _guard(lowered, _thread_var(lowered) < 6)
+    _assert_stmt_order(lowered, first_write, _sync_stmt(lowered, syncs[0]), guard)
+
+
+@tilelang.testing.requires_cuda
+def test_provably_disjoint_waw_partitions_need_no_sync():
+    """Disjoint write partitions should not acquire a conservative barrier."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        s[tx + 64] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert not _storage_syncs(lowered), "Disjoint partitions need no barrier"
+
+
+@pytest.mark.parametrize("active_threads", [6, 64])
+@tilelang.testing.requires_cuda
+def test_thread_private_waw_needs_no_sync(active_threads):
+    """Thread-private writes remain ordered even when participation differs."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        s[tx] = T.cast(tx, "float32")
+        if tx < active_threads:
+            s[tx] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert not _storage_syncs(lowered), "Thread-private writes need no barrier"
+
+
+@tilelang.testing.requires_cuda
+def test_waw_bind_definition_uses_per_thread_instances():
+    """Bind definitions must not collapse the two WAW thread instances."""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        idx: T.int32 = tx + 10
+        s[idx - 10] = T.cast(tx, "float32")
+        if tx < 6:
+            s[idx] = T.float32(99)
+
+    lowered = _device_func(run_passes(func))
+    assert _storage_syncs(lowered), "Bind sharing hid a cross-thread WAW hazard"
+
+
+@tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
     region that splits a warp must be a compile-time error, not silently
@@ -1021,6 +1102,43 @@ def test_partial_sync_warp_multiple_still_lowered():
     syncs = _assert_syncs_inside(lowered, guard.then_case, arg_count=3)
     _assert_partial_sync_params(syncs, 32)
     assert not _storage_syncs(guard)
+
+
+def test_partial_sync_ids_unique_across_storage_scopes():
+    """The pipeline runs ThreadSync once for "shared" and once for "shared.dyn".
+    Two disjoint thread ranges must not end up on the same named barrier: each
+    `bar.sync id, count` would then complete the other group's phases (seen as a
+    hang in the warp-specialised sparse-MLA forward kernel)."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        D = T.alloc_buffer((64,), dtype="float32", scope="shared.dyn")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 64:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] += S[63 - tx]
+        if tx >= 64:
+            for i in range(2):
+                D[tx - 64] = T.float32(1)
+                acc[0] += D[127 - tx]
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    lowered = mod["main"]
+    static_syncs = _storage_syncs(lowered, "shared", arg_count=3)
+    dynamic_syncs = _storage_syncs(lowered, "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(static_syncs, 64)
+    _assert_partial_sync_params(dynamic_syncs, 64)
+    static_ids = {int(call.args[1]) for call in static_syncs}
+    dynamic_ids = {int(call.args[1]) for call in dynamic_syncs}
+    assert not static_ids & dynamic_ids, f"disjoint thread ranges share named barriers {static_ids & dynamic_ids}"
 
 
 # =============================================================================
@@ -1865,6 +1983,82 @@ def test_partial_sync_multidimensional_rectangle():
     barriers = _thread_sync_calls(func)
     assert len(barriers) == 1
     assert barriers[0][1] == 64
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("axis", ["y", "z"])
+@pytest.mark.parametrize("shift", [0, 1])
+def test_waw_uses_all_thread_axes(axis, shift):
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 4)
+        ty = T.launch_thread("threadIdx.y", 4)
+        tz = T.launch_thread("threadIdx.z", 4)
+        s[tx + 4 * ty + 16 * tz] = T.float32(1)
+        if axis == "y":
+            s[tx + 4 * ((ty + shift) % 4) + 16 * tz] = T.float32(2)
+        else:
+            s[tx + 4 * ty + 16 * ((tz + shift) % 4)] = T.float32(2)
+
+    lowered = _device_func(run_passes(func))
+    assert len(_storage_syncs(lowered)) == shift
+
+
+def _masked_extern_write_kernel(use_access_ptr):
+    """Thread 0 zeroes a shared buffer through an opaque extern, then everyone reads it.
+
+    Written with the tilelang frontend, so it uses its own ``TL`` alias: this
+    module's ``T`` is the raw TVMScript parser.
+    """
+    from tilelang import language as TL
+
+    N = 8192
+
+    @TL.prim_func
+    def kern(Y: TL.Tensor((N,), "float32")):
+        with TL.Kernel(1, threads=256):
+            B = TL.alloc_shared((N,), "float32")
+            tx = TL.get_thread_binding()
+            for i in TL.Parallel(N):
+                B[i] = 1.0
+            # Discharge this phase's conflicts so the barrier under test is only the
+            # one that has to separate the extern from the read below.
+            TL.sync_threads()
+            if tx == 0:
+                if use_access_ptr:
+                    TL.call_extern("handle", "memset", TL.access_ptr(B, "w"), 0, N * 4)
+                else:
+                    TL.call_extern("handle", "memset", TL.address_of(B[0]), 0, N * 4)
+            TL.copy(B, Y)
+
+    return kern
+
+
+def _barrier_follows_extern(use_access_ptr):
+    import tilelang
+
+    with tvm.target.Target("cuda"):
+        source = tilelang.lower(_masked_extern_write_kernel(use_access_ptr), target="cuda").kernel_source
+    assert "memset" in source, source
+    return "__syncthreads" in source.split("memset", 1)[1]
+
+
+@tilelang.testing.requires_cuda
+def test_address_of_extern_write_is_fenced_before_block_reads():
+    """`address_of` says nothing about how its consumer uses the pointer, so the
+    access has to be treated as a write. Classified as a read, the extern write
+    never conflicted with the block-wide reads that follow and no barrier was
+    planned between them."""
+    assert _barrier_follows_extern(use_access_ptr=False), "no barrier after the extern write"
+
+
+@tilelang.testing.requires_cuda
+def test_access_ptr_write_is_fenced_before_block_reads():
+    """Control: the same kernel using `access_ptr(..., "w")`, which names the
+    access type, already got its barrier."""
+    assert _barrier_follows_extern(use_access_ptr=True), "no barrier after the extern write"
 
 
 if __name__ == "__main__":

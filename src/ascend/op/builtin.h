@@ -56,6 +56,7 @@ TVM_DLL const Op &simd_pst();
 TVM_DLL const Op &simd_vld();
 TVM_DLL const Op &simd_vld2(); // dual-dest load (e.g. DINTLV_B16) → vec_pair
 TVM_DLL const Op &simd_vsts();
+TVM_DLL const Op &simd_vst2();
 TVM_DLL const Op &simd_vsstb();
 
 // -- Binary arithmetic
@@ -303,7 +304,7 @@ TVM_DLL const Op &ascend_copy_ubuf_to_cbuf();
  * \brief Ascend ND→NZ scatter (SimdVF) from UB ND tile to UB NZ tile.
  *
  * ascend_nd2nz_scatter(src_ub, tmp_nz_ub, rows, cols,
- *                      dst_dtype_str, src_dtype_str)
+ *                      dst_pitch, src_dtype_str, dst_dtype_str)
  *
  */
 TVM_DLL const Op &ascend_nd2nz_scatter();
@@ -311,7 +312,8 @@ TVM_DLL const Op &ascend_nd2nz_scatter();
 /*!
  * \brief Ascend post-scatter UB→L1 raw DMA with NZ-fractal stride correction.
  *
- * ascend_nd2nz_post_copy(dst_l1, src_ub, rows, cols, full_rows, dst_dtype_str)
+ * ascend_nd2nz_post_copy(dst_l1, src_ub, rows, cols, src_pitch, dst_pitch,
+ * dtype_str)
  *
  */
 TVM_DLL const Op &ascend_nd2nz_post_copy();

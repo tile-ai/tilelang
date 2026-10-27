@@ -95,6 +95,20 @@ of output elements.
 
 ## Running
 
+CI splits unit tests between the AscendC and PTO jobs using the `pto` marker:
+
+```bash
+python -m pytest testing/ascend -m "not pto"  # AscendC and common tests
+python -m pytest testing/ascend -m pto        # PTO tests
+```
+
+Mark PTO-only tests with `@pytest.mark.pto`, or set `pytestmark = pytest.mark.pto`
+when every test in a module is PTO-specific. For tests parameterized over both
+backends, mark only the PTO case with
+`pytest.param("pto", marks=pytest.mark.pto)`. The two selections are disjoint
+and together cover the full suite. Common tests, including contracts that check
+the same frontend IR with both code generators, run once in the AscendC job.
+
 Use an Ascend-enabled build from the checkout being tested. Verify the imported
 `tilelang` package and native libraries belong to that checkout, particularly
 when using an independent worktree alongside an editable installation.

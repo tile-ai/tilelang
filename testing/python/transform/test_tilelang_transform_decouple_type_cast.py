@@ -1,3 +1,6 @@
+import numpy as np
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -63,6 +66,162 @@ def test_memory_to_local():
                 b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
+
+
+def test_local_to_memory_nonzero_min():
+    """Staging stores and copy loads use offsets within the loop extent."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(2, 6):
+            b[i] = b_frag[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((4,), T.float16, scope="local")
+            for i in T.vectorized(2, 6):
+                b_local_cast[i - 2] = T.cast(b_frag[i], T.float16)
+            for i_copy in T.vectorized(2, 6):
+                b[i_copy] = b_local_cast[i_copy - 2]
+
+    _check(before, after)
+
+
+def test_memory_to_local_nonzero_min():
+    """Staging copy stores and compute loads use offsets within the extent."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(2, 6):
+            b_frag[i] = b[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((4,), T.float16, scope="local")
+            for i_copy in T.vectorized(2, 6):
+                b_local_cast[i_copy - 2] = b[i_copy]
+            for i in T.vectorized(2, 6):
+                b_frag[i] = T.cast(b_local_cast[i - 2], T.float32)
+
+    _check(before, after)
+
+
+@pytest.mark.parametrize("loop_min", [2, "symbolic"])
+def test_decouple_preserves_logical_loop_domain(loop_min):
+    """RMW staging uses ordinals while all three loops retain their domain."""
+    tir = tvm.tirx
+    extent = 4
+    if loop_min == "symbolic":
+        loop_min = tir.Var("start", "int32")
+        scalar_params = [loop_min]
+    else:
+        scalar_params = []
+    a = tir.decl_buffer((16,), "float16", name="a")
+    i = tir.Var("i", "int32")
+    value = tir.Cast("float16", tir.Cast("float32", a[i]) + tir.const(1, "float32"))
+    before = tir.PrimFunc(
+        [a.data, *scalar_params],
+        tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [i])),
+        buffer_map={a.data: a},
+    ).with_attr("global_symbol", "main")
+
+    # Keep logical memory indices and use ordinals only for the scratch buffer.
+    # The RMW load and store must share the same four-element staging buffer.
+    cast_buf = tir.decl_buffer((4,), "float16", name="a_local_cast", scope="local")
+    copy_from_var = tir.Var("copy_from", "int32")
+    copy_to_var = tir.Var("copy_to", "int32")
+    copy_from = tir.For(
+        copy_from_var,
+        loop_min,
+        extent,
+        tir.ForKind.VECTORIZED,
+        tir.BufferStore(cast_buf, a[copy_from_var], [copy_from_var - loop_min]),
+    )
+    ordinal = i - loop_min
+    compute_value = tir.Cast("float16", tir.Cast("float32", cast_buf[ordinal]) + tir.const(1, "float32"))
+    compute = tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(cast_buf, compute_value, [ordinal]))
+    copy_to = tir.For(
+        copy_to_var,
+        loop_min,
+        extent,
+        tir.ForKind.VECTORIZED,
+        tir.BufferStore(a, cast_buf[copy_to_var - loop_min], [copy_to_var]),
+    )
+    block = tir.SBlock(
+        [],
+        [],
+        [],
+        "decoupled_cast",
+        tir.SeqStmt([tir.AllocBuffer(cast_buf), copy_from, compute, copy_to]),
+        annotations={"lexical_alloc_scope": 1},
+    )
+    expected = before.with_body(tir.SBlockRealize([], True, block))
+
+    actual_mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    tvm.ir.assert_structural_equal(actual_mod["main"], expected, True)
+
+
+@pytest.mark.parametrize("decouple", [False, True])
+@pytest.mark.parametrize("index_dtype", ["int32", "int64"])
+@pytest.mark.parametrize(
+    "start, extent, values",
+    [(2, 4, [2, 3, 4, 5]), (-3, 4, [-3, -2, -1, 0]), (2, 0, []), (2, 1, [2])],
+)
+def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values):
+    """Legalization preserves the number of iterations and their logical values."""
+    tir = tvm.tirx
+    a = tir.decl_buffer((8,), "float32", name="a")
+    i = tir.Var("i", index_dtype)
+    index = i - start
+    value = tir.Cast("float32", tir.Cast("float64", a[index]) + tir.Cast("float64", i))
+    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [index]))
+    func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a}).with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    with tvm.target.Target("c"):
+        if decouple:
+            mod = DecoupleTypeCast()(mod)
+        mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
+        mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    # Execute the legalized domains with scalar C codegen.
+    with tvm.transform.PassContext(config={"tirx.disable_vectorize": True}):
+        executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+    output = tvm.runtime.tensor(np.full(8, -1, dtype="float32"))
+    executable["main"](output)
+    expected = np.full(8, -1, dtype="float32")
+    expected[: len(values)] += values
+    np.testing.assert_array_equal(output.numpy(), expected)
+
+
+@pytest.mark.parametrize("step", [2, None], ids=["nonunit", "dynamic"])
+def test_nonunit_step_remains_scalar(step):
+    """The unit-step transformations leave other loop steps unchanged."""
+    tir = tvm.tirx
+    a = tir.decl_buffer((8,), "float32", name="a")
+    i = tir.Var("i", "int32")
+    params = [a.data]
+    if step is None:
+        step = tir.Var("step", "int32")
+        params.append(step)
+    value = tir.Cast("float32", tir.Cast("float64", a[i]) + tir.const(1, "float64"))
+    body = tir.BufferStore(a, value, [i])
+    before = tir.PrimFunc(params, tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body, step=step), buffer_map={a.data: a})
+    expected = before.with_body(tir.For(i, 2, 4, tir.ForKind.SERIAL, body, step=step))
+    with tvm.target.Target("c"):
+        mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+        mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
+    tvm.ir.assert_structural_equal(mod["main"], expected, True)
 
 
 def test_no_transform_same_dtype():
@@ -242,6 +401,81 @@ def test_local_to_memory_with_branch_local_bind():
                     b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
+
+
+def test_local_to_memory_with_nested_guards():
+    """Nested guards must be conjoined on the generated copy-to loop."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 12:  # noqa: SIM102
+                if i < 8:
+                    b[i] = a_frag[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i in T.vectorized(16):
+                if i < 12:  # noqa: SIM102
+                    if i < 8:
+                        b_local_cast[i] = T.cast(a_frag[i], T.float8_e4m3fn)
+            for i_copy in T.vectorized(16):
+                if T.if_then_else(i_copy < 12, i_copy < 8, False):
+                    b[i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
+def test_memory_to_local_with_nested_guards():
+    """Nested guards must be conjoined on the generated copy-from loop."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 12:  # noqa: SIM102
+                if i < 8:
+                    a_frag[i] = b[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            for i_copy in T.vectorized(16):
+                if T.if_then_else(i_copy < 12, i_copy < 8, False):
+                    b_local_cast[i_copy] = b[i_copy]
+            for i in T.vectorized(16):
+                if i < 12:  # noqa: SIM102
+                    if i < 8:
+                        a_frag[i] = T.cast(b_local_cast[i], T.float32)
+
+    _check(before, after)
+
+
+def test_if_else_control_flow_skips_decoupling():
+    """Copy loops cannot represent branch-specific guards, so keep the source."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
+        a_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 8:
+                b[i] = a_frag[i]
+            else:
+                a_frag[i] = 0.0
+
+    _check(before, before)
 
 
 def test_cast_buffers_wrapped_in_lexical_alloc_scope():
@@ -658,6 +892,53 @@ def test_codegen_pipelined_int64_index_cp_async_operands():
     assert gs_lines, "Expected cp_async_gs (global->shared) calls for disable_tma copy"
     for line in gs_lines:
         assert "_local_cast" not in line, f"cp_async operand points at local memory: {line.strip()}"
+
+
+def test_memory_dependent_guard_skips_decoupling():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i < 8:  # noqa: SIM102
+                if b[i] > T.float16(0):
+                    b[i] = local[i]
+
+    _check(before, before)
+
+
+def test_effectful_guard_skips_decoupling():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if T.call_extern("bool", "guard", i):
+                b[i] = local[i]
+
+    _check(before, before)
+
+
+def test_nested_guard_preserves_conditional_evaluation():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        local = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            if i != 0:  # noqa: SIM102
+                if 16 // i > 2:
+                    b[i] = local[i]
+
+    mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    copy_conditions = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.IfThenElse) and isinstance(node.then_case, tvm.tirx.BufferStore) and node.then_case.buffer.name == "b":
+            copy_conditions.append(node.condition)
+
+    tvm.tirx.stmt_functor.post_order_visit(mod["before"].body, collect)
+    assert len(copy_conditions) == 1
+    condition = copy_conditions[0]
+    assert isinstance(condition, tvm.tirx.Call)
+    assert condition.op.same_as(tvm.ir.Op.get("tirx.if_then_else"))
+    assert int(condition.args[2]) == 0
 
 
 if __name__ == "__main__":

@@ -108,6 +108,7 @@ static constexpr const char *kLayoutVisualizationEnable =
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
+static constexpr const char *kCUDACompiler = "tl.cuda_compiler";
 /*! \brief Emit #line directives in generated C-family source from TIR spans,
  * mapping generated statements back to their Python source lines. Default:
  * false. */
@@ -145,13 +146,6 @@ static constexpr const char *kPassProfileThresholdMs =
  * routing their shapes or handles back through Python.
  */
 TVM_DLL const Op &tvm_ffi_call_with_result();
-
-/*! \brief Elementwise clamp with NaN propagation and single-evaluation
- * operands. */
-TVM_DLL const Op &clamp();
-
-/*! \brief Shared clamp expansion for backends without a device helper. */
-TVM_DLL PrimExpr LowerClamp(PrimExpr expr);
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
