@@ -31,31 +31,13 @@ def _with_device_compile_flags(
     pass_configs: dict[str, Any],
     compile_flags: list[str] | str | None,
 ) -> dict[str, Any]:
-    """Fold ``compile_flags`` into the pass configs that reach the device codegen.
-
-    The grouped path compiles the merged device module itself and then builds the
-    per-config ``JITKernel`` objects with ``from_database=True``, so it never runs
-    ``JITKernel``'s own merge of ``self.compile_flags``. The device backends read
-    the flags only from the pass configs (``cuda/backend.py`` and
-    ``ascend/backend.py`` both look up ``TL_DEVICE_COMPILE_FLAGS`` there), so
-    without this the flags the cache identity was computed from would never reach
-    the compiler.
-
-    Existing entries keep their order and precede the explicit flags, matching
-    what ``JITKernel`` does when it merges the same two sources.
-    """
+    """Append explicit flags after existing flags for grouped device compilation."""
     if compile_flags is None:
         return pass_configs
 
-    existing = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
-    if existing is None:
-        existing = []
-    elif isinstance(existing, str):
-        existing = [existing]
-    else:
-        existing = list(existing)
-
-    flags = [compile_flags] if isinstance(compile_flags, str) else list(compile_flags)
+    existing = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS) or []
+    existing = [existing] if isinstance(existing, str) else existing
+    flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
     pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = [*existing, *flags]
     return pass_configs
 

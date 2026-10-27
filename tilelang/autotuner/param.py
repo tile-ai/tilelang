@@ -44,20 +44,6 @@ PARAMS_PATH = "params.json"
 TargetLike = str | dict[str, object] | Target
 
 
-def _normalize_compile_flags(compile_flags: list[str] | str | None) -> tuple[str, ...] | None:
-    """Return a hashable form of the device-compiler flags, preserving their order.
-
-    The order is kept rather than sorted: the compiler may care about flag
-    precedence, and a spurious cache miss costs less than reusing a binary that
-    was built with different flags.
-    """
-    if compile_flags is None:
-        return None
-    if isinstance(compile_flags, str):
-        return (compile_flags,)
-    return tuple(compile_flags)
-
-
 @dataclass(frozen=True)
 class CompileArgs:
     """Compile arguments for the auto-tuner. Detailed description can be found in `tilelang.jit.compile`.
@@ -108,7 +94,7 @@ class CompileArgs:
             "target_host": str(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
             "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
-            "compile_flags": _normalize_compile_flags(self.compile_flags),
+            "compile_flags": [self.compile_flags] if isinstance(self.compile_flags, str) else self.compile_flags,
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
