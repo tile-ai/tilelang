@@ -89,7 +89,9 @@ expressions such as `2 * N` or `T.ceildiv(N, 4)` in their dimensions. Each symbo
 must be bound directly from an input shape, stride, or explicit integer scalar parameter,
 and each dimension must resolve to a nonnegative integer before allocation.
 Output-only symbols and dimensions that depend on tensor contents cannot be
-inferred by the Python runtime adapters.
+inferred by the Python runtime adapters. Distinct symbolic variables remain
+independent even when they share a name hint. Reuse the same variable object
+when dimensions are intended to share a binding.
 
 ## 2. Launching Work with `T.Kernel`
 

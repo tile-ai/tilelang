@@ -1,5 +1,6 @@
 import pytest
 import torch
+import tilelang.testing
 
 from tilelang import tvm
 from tilelang.jit.adapter.shape import OutputShapeResolver
@@ -53,6 +54,41 @@ def test_output_shape_rejects_noninteger_scalar(value):
     func = tir.PrimFunc([n, output.data], tir.Evaluate(0), buffer_map={output.data: output})
     with pytest.raises(ValueError, match="output C dimension 0"):
         OutputShapeResolver(func, [1])(1, [value, None])
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("cooperative", [False, True])
+def test_cuda_host_symbol_identity(cooperative):
+    from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
+
+    tir = tvm.tirx
+    left, right = tir.Var("n", "int32"), tir.Var("n", "int32")
+    wrapper = TLCUDASourceWrapper.__new__(TLCUDASourceWrapper)
+    wrapper.mod = tvm.IRModule({"main": tir.PrimFunc([left, right], tir.Evaluate(0))})
+    functions, launches = {}, {}
+    for name, operands in [("first", [right, left]), ("second", [left, right])]:
+        x, y = tir.Var("n", "int32"), tir.Var("n", "int32")
+        functions[name] = tir.PrimFunc([x, y], tir.Evaluate(0))
+        launches[name] = {"function_params": operands, "grid_info": [y, 1, 1], "block_info": [1, 1, 1], "dynamic_smem_buf": 0}
+    wrapper.device_mod = tvm.IRModule(functions)
+    wrapper.use_cooperative_groups = dict.fromkeys(functions, cooperative)
+    wrapper.cluster_dims = dict.fromkeys(functions)
+    wrapper.l2_persistent_map = {}
+    wrapper.tma_descriptor_args = None
+    code = "__global__ void first(int n, int n_1); __global__ void second(int n, int n_1); void bodies() {}"
+    source = wrapper.create_dispatch_func(code, launches)
+    assert "int n, int _tl_arg_1" in source
+    if cooperative:
+        assert "first_args[] = {(void*)&_tl_arg_1, (void*)&n}" in source
+        assert "second_args[] = {(void*)&n, (void*)&_tl_arg_1}" in source
+        assert "(void*)first, dim3((n), 1, 1)" in source
+        assert "(void*)second, dim3((_tl_arg_1), 1, 1)" in source
+    else:
+        first_source, second_source = source.split('TILELANG_CHECK_LAST_ERROR("first");')
+        assert "config.gridDim = dim3((n), 1, 1)" in first_source
+        assert "config.gridDim = dim3((_tl_arg_1), 1, 1)" in second_source
+        assert "cudaLaunchKernelEx(&config, first, _tl_arg_1, n)" in source
+        assert "cudaLaunchKernelEx(&config, second, n, _tl_arg_1)" in source
 
 
 if __name__ == "__main__":
