@@ -1021,6 +1021,26 @@ template <typename Impl> struct ReduceLowerer {
             all_threads = thread_range->extent;
           }
 
+          // The batched all-reduce phases are emitted below as plain
+          // statements, outside the PartitionLoop that guards the local
+          // reduction. Its workspace is indexed with threadIdx.x -
+          // thread_offset, so a thread below the resolved range would address
+          // memory before the workspace (named barrier participation count does
+          // not filter the executing threads). Guard every run_batch call with
+          // the same resolved range.
+          auto guarded_allreduce = [&](const Array<PrimExpr> &args) -> Stmt {
+            Stmt call = Evaluate(
+                Call(DataType::Handle(), builtin::call_extern(), args));
+            PrimExpr tid = lower_args.thread_index;
+            PrimExpr in_range =
+                (tid >= thread_offset) && (tid < thread_offset + all_threads);
+            in_range = analyzer->Simplify(in_range);
+            if (analyzer->CanProve(in_range)) {
+              return call;
+            }
+            return IfThenElse(in_range, call);
+          };
+
           int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
@@ -1103,8 +1123,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
-                  Call(DataType::Handle(), builtin::call_extern(), args)));
+              phases.push_back(guarded_allreduce(args));
 
               Var unpack_j("unpack_j");
               PrimExpr ubase = Integer(flat_offset);
@@ -1148,8 +1167,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
-                  Call(DataType::Handle(), builtin::call_extern(), args)));
+              phases.push_back(guarded_allreduce(args));
             }
           }
         }
