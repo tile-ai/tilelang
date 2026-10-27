@@ -2792,7 +2792,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     need_copy_h_ = true;
-    int n = Downcast<IntImm>(op->args[0])->value;
+    // The wait depth lowers to a `cp.async.wait_group N`, whose operand must be
+    // a compile-time immediate. A software pipeline over a dynamic trip count
+    // can emit a non-constant depth (e.g. `1 - ko`) in its drain phase. Since
+    // there is no runtime form of the wait, fall back to a full wait (N=0: wait
+    // for all outstanding async copies), which is always a safe
+    // over-synchronization.
+    int n = 0;
+    if (const auto *imm = op->args[0].as<IntImmNode>()) {
+      n = static_cast<int>(imm->value);
+    }
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
