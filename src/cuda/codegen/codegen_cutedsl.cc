@@ -2406,6 +2406,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       // vector into per-lane shifts and store the narrowed result.
       PrintVecBinaryOp_("<<", result_dtype, op->args[0], op->args[1], os);
     }
+  } else if (op->op.same_as(builtin::tvm_fill_fragment()) ||
+             op->op.same_as(builtin::tvm_load_matrix_sync()) ||
+             op->op.same_as(builtin::tvm_store_matrix_sync()) ||
+             op->op.same_as(builtin::tvm_mma_sync()) ||
+             op->op.same_as(builtin::tvm_bmma_sync())) {
+    // These lower to the nvcuda::wmma API, which has no CuTeDSL equivalent.
+    LOG(FATAL) << "The CuTeDSL backend does not implement the nvcuda::wmma "
+                  "fragment API ("
+               << op->op
+               << "). Use a wgmma (sm_90) or tcgen05 (sm_100) gemm instead, "
+                  "or compile this kernel for the cuda backend.";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
