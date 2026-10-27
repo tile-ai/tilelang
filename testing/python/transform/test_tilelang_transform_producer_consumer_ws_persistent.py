@@ -884,6 +884,39 @@ def producer_prelude_only_before_outer_serial():
     return main
 
 
+def producer_prelude_bind_before_outer_serial():
+    """A ``T.bind`` that must stay in the shared prelude reads a block local.
+
+    The pipeline loop sits under another loop, so the bind cannot be moved into
+    a branch and stays where it is, reading the original ``k_off``. The producer
+    partition uses that same local in its copy index, which is exactly the case
+    where cloning it for the producer would leave the clone uninitialized.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 160), T.float16),
+        B: T.Tensor((64, 160), T.float16),
+        C: T.Tensor((128, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            k_off = T.alloc_local((1,), T.int32)
+            k_off[0] = 1
+            shift = T.bind(k_off[0])
+            for p in T.serial(2):
+                T.clear(C_l)
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, (k + k_off[0]) * 32], A_s)
+                    T.copy(B[0, (k + shift) * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+                T.copy(C_l, C[p * 64, 0])
+
+    return main
+
+
 def _compile_ws(func):
     assert "tl_tiled_ws_applied" in _apply_ws_pass(func)["main"].script()
     return tilelang.compile(
@@ -911,6 +944,29 @@ def test_ws_prelude_only_before_outer_loop_uses_the_cloned_local():
     assert "k_off_producer_ws[0] = 1" in script, "guarded prelude does not initialize the clone"
     assert "k_off_producer_ws[0]) * 32" in script, "pipelined copy reads the original local"
     assert "k_off[0]) * 32" not in script
+
+
+@tilelang.testing.requires_cuda
+def test_ws_shared_prelude_bind_keeps_the_original_local():
+    """The bind stays in the shared prelude, so its local must not be cloned."""
+    script = _apply_ws_pass(producer_prelude_bind_before_outer_serial())["main"].script()
+    assert "tl_tiled_ws_applied" in script
+    assert "shift: T.int32 = k_off[0]" in script
+    assert "k_off_producer_ws" not in script, "producer clone would never be initialized"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_shared_prelude_bind_runs():
+    import torch
+
+    kernel = _compile_ws(producer_prelude_bind_before_outer_serial())
+    torch.manual_seed(0)
+    A = torch.randn(64, 160, dtype=torch.float16, device="cuda")
+    B = torch.randn(64, 160, dtype=torch.float16, device="cuda")
+    # ``k_off`` is 1, so the copies read K tiles 1..4 instead of 0..3.
+    ref = sum(A[:, (k + 1) * 32 : (k + 2) * 32].float() @ B[:, (k + 1) * 32 : (k + 2) * 32].float().T for k in range(4))
+    torch.testing.assert_close(kernel(A, B), ref.repeat(2, 1), rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
