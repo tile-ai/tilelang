@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/optional.h>
 #include <tvm/ir/op.h>
@@ -35,10 +36,12 @@ struct AtomicSIMTIndexMap {
  * consumes none and may share the sole loop variable, including the dummy
  * extent-1 loop used when the destination is a single element. An absent source
  * region denotes a scalar expression whose indices do not need mapping.
+ * Each consumed extent must match its corresponding destination loop domain.
  */
 inline AtomicSIMTIndexMap
 MakeAtomicSIMTIndexMap(const Op &operation, const tirx::BufferRegion &dst,
-                       const ffi::Optional<tirx::BufferRegion> &src) {
+                       const ffi::Optional<tirx::BufferRegion> &src,
+                       arith::Analyzer *analyzer) {
   AtomicSIMTIndexMap result;
   for (const Range &range : dst->region) {
     if (tirx::is_one(range->extent)) {
@@ -80,9 +83,24 @@ MakeAtomicSIMTIndexMap(const Op &operation, const tirx::BufferRegion &dst,
     ffi::Array<PrimExpr> indices;
     size_t idx = 0;
     for (const Range &range : ranges) {
-      indices.push_back(tirx::is_one(range->extent)
-                            ? range->min
-                            : range->min + result.loop_vars[idx++]->var);
+      if (tirx::is_one(range->extent)) {
+        indices.push_back(range->min);
+        continue;
+      }
+      const tirx::IterVar &loop = result.loop_vars[idx++];
+      CHECK(analyzer->CanProveEqual(range->extent, loop->dom->extent),
+            ValueError)
+          << "Cannot map atomic region to SIMT loop variables for "
+          << operation->name << ": buffer " << region->buffer->name
+          << " has extent " << range->extent
+          << " that does not match loop extent " << loop->dom->extent
+          << "; src="
+          << (src.defined() ? src.value()->buffer->name
+                            : ffi::String("<scalar expression>"))
+          << ", dst=" << dst->buffer->name << ", src_range="
+          << (src.defined() ? src.value()->region : ffi::Array<Range>{})
+          << ", dst_range=" << dst->region;
+      indices.push_back(range->min + loop->var);
     }
     return indices;
   };

@@ -407,6 +407,32 @@ def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, des
 @pytest.mark.parametrize(
     "source_shape,destination_shape",
     [
+        ((4, 16), (8, 8)),
+        ((8, 8), (4, 16)),
+        ((8, 4), (8, 8)),
+        ((8, 16), (8, 8)),
+        ((1, 4, 1, 16), (8, 1, 8)),
+        ((8, 1, 16), (1, 8, 8, 1)),
+        ((8,), (1,)),
+    ],
+)
+def test_region_atomic_extent_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target, pytest.raises(ValueError, match="Cannot map atomic region") as exc_info:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    message = str(exc_info.value)
+    for context in (f"tl.atomic_{operation}_elem_op", "extent", "src=A_shared", "dst=B_shared", "src_range=", "dst_range="):
+        assert context in message
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
         ((8, 16), (8, 16)),
         ((1, 8, 16), (8, 16)),
         ((8, 1, 16), (1, 8, 16, 1)),
@@ -421,6 +447,44 @@ def test_region_atomic_matching_rank_is_accepted(operation, source_shape, destin
             enable_host_codegen=False,
             enable_device_compile=False,
         )
+
+
+def region_atomic_offset_program(operation):
+    atomic_op = getattr(T, f"atomic_{operation}")
+
+    @T.prim_func
+    def main(A: T.Tensor((10, 12), "float32"), B: T.Tensor((12, 16), "float32")):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((10, 12), "float32")
+            T.copy(A, A_shared)
+            atomic_op(B[3:11, 4:12], A_shared[1:9, 2:10])
+
+    return main
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+def test_region_atomic_matching_extents_with_offsets_codegen(operation, region_atomic_target):
+    with region_atomic_target:
+        artifact = tilelang.lower(
+            region_atomic_offset_program(operation),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    assert f"Atomic{operation.title()}(" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+def test_region_atomic_matching_extents_with_offsets(operation):
+    kernel = tilelang.compile(region_atomic_offset_program(operation))
+    source = torch.arange(120, dtype=torch.float32, device="cuda").reshape(10, 12)
+    destination = torch.full((12, 16), 200.0 if operation == "min" else 1.0, device="cuda")
+    expected = destination.clone()
+    expected[3:11, 4:12] = source[1:9, 2:10] + (1.0 if operation == "add" else 0.0)
+
+    kernel(source, destination)
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
 
 
 def region_atomic_scalar_source_program(operation, source_form, source_index=1):

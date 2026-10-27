@@ -162,7 +162,7 @@ For MakeSIMTLoop(const AtomicAddNode &op, arith::Analyzer *analyzer) {
     src_region = BufferRegion(op.src, op.src_range);
   }
   backend::AtomicSIMTIndexMap index_map = backend::MakeAtomicSIMTIndexMap(
-      op.GetElemOp(), BufferRegion(op.dst, op.dst_range), src_region);
+      op.GetElemOp(), BufferRegion(op.dst, op.dst_range), src_region, analyzer);
   const Array<IterVar> &loop_vars = index_map.loop_vars;
   for (const auto &iv : loop_vars) {
     analyzer->Bind(iv->var, iv->dom);
