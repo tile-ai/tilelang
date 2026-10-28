@@ -34,7 +34,9 @@ def _set_cache_dirs(monkeypatch, tmp_path):
 def _fake_pto_compile(compile_calls):
     def fake_compile_ptodsl_to_aibin(code, pto_arch, pto_flags, verbose=False):
         compile_calls.append((code, pto_arch, tuple(pto_flags)))
-        return bytearray(b"fake-aibin")
+        # The artifact identifies the flags it was built with, so a hit can
+        # be told apart from a fresh compile by its bytes.
+        return bytearray(" ".join(["fake-aibin", *pto_flags]).encode())
 
     return fake_compile_ptodsl_to_aibin
 
@@ -66,53 +68,50 @@ def test_pto_binary_cache_hit_skips_toolchain(monkeypatch, tmp_path):
     monkeypatch.setenv("PTO_FLAGS", "--pto-opt=experimental")
     third = compile_pto(source, target)
     fourth = compile_pto(source, target)
+    # Removing the flags restores the original identity and its cache entry.
+    monkeypatch.delenv("PTO_FLAGS")
+    fifth = compile_pto(source, target)
 
-    assert bytes(first) == bytes(second) == bytes(third) == bytes(fourth) == b"fake-aibin"
-    # first compiles, second hits; third compiles (new flags), fourth hits
+    assert bytes(first) == bytes(second) == bytes(fifth)
+    assert bytes(third) == bytes(fourth)
+    assert bytes(first) != bytes(third)
+    assert b"--pto-opt=experimental" in bytes(third)
+    # first compiles, second hits; third compiles (new flags), fourth hits;
+    # fifth hits the entry the first compile created.
     assert len(compile_calls) == 2
     cache_files = list((tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}"))
     assert len(cache_files) == 2
     for cache_file in cache_files:
-        assert cache_file.read_bytes() == b"fake-aibin"
+        assert cache_file.read_bytes() in (bytes(first), bytes(third))
         assert (cache_file.parent / "metadata.json").is_file()
 
 
-def test_pto_binary_cache_toolchain_upgrade_misses(monkeypatch, tmp_path):
-    """Same source and flags, different ptoas: the cache must miss."""
+@pytest.mark.parametrize(
+    ("old_toolchain", "new_toolchain"),
+    [
+        ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.68", "cann": "/cann-a (9.1.0)"}),
+        ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.67", "cann": "/cann-b (9.2.0)"}),
+    ],
+    ids=["ptoas-upgrade", "cann-change"],
+)
+def test_pto_binary_cache_separates_toolchain_identities(monkeypatch, tmp_path, old_toolchain, new_toolchain):
+    """Each stamp field participates in the key: a one-field change misses, restoring the old stamp reuses the first entry."""
     _set_cache_dirs(monkeypatch, tmp_path)
     target = Target({"kind": "ascend"})
     source = "from ptodsl import pto\n"
 
     compile_calls = []
-    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"})
-    assert bytes(compile_old(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 1
+    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
+    first = compile_old(source, target)
 
-    compile_calls.clear()
-    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.68", "cann": "/cann-a (9.1.0)"})
-    assert bytes(compile_new(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 1
+    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain=new_toolchain)
+    compile_new(source, target)
 
-    cache_files = list((tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}"))
-    assert len(cache_files) == 2
+    compile_old_again = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
+    restored = compile_old_again(source, target)
 
-
-def test_pto_binary_cache_cann_change_misses(monkeypatch, tmp_path):
-    """Same source, flags, and tool versions, different CANN install: the cache must miss."""
-    _set_cache_dirs(monkeypatch, tmp_path)
-    target = Target({"kind": "ascend"})
-    source = "from ptodsl import pto\n"
-
-    compile_calls = []
-    compile_old = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"})
-    assert bytes(compile_old(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 1
-
-    compile_calls.clear()
-    compile_new = _patch_callback(monkeypatch, compile_calls, toolchain={"ptoas": "ptoas 0.67", "cann": "/cann-b (9.2.0)"})
-    assert bytes(compile_new(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 1
-
+    assert bytes(restored) == bytes(first)
+    assert len(compile_calls) == 2
     cache_files = list((tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}"))
     assert len(cache_files) == 2
 
@@ -201,7 +200,7 @@ def test_pto_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     target = Target({"kind": "ascend"})
     source = "from ptodsl import pto\n"
 
-    compile_pto(source, target)
+    first = compile_pto(source, target)
     assert len(compile_calls) == 1
 
     [cache_file] = (tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}")
@@ -210,5 +209,5 @@ def test_pto_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     cache_file.write_bytes(b"\x00" * cache_file.stat().st_size)
 
     recovered = compile_pto(source, target)
-    assert bytes(recovered) == b"fake-aibin"
+    assert bytes(recovered) == bytes(first)
     assert len(compile_calls) == 2
