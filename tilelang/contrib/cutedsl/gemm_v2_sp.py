@@ -39,8 +39,8 @@ def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tn
 
     Operand numbering: the num_c_regs write-only D outputs come first (their
     slack inputs follow as tied operands), then the A registers (RS only) or the
-    A descriptor (SS only), the B descriptor, and the metadata register. The
-    sparse selector, scale-out predicate value and the scale/transpose flags are
+    A descriptor (SS only), the B descriptor, the metadata register, and the
+    scale-out predicate. The sparse selector and the scale/transpose flags are
     immediates baked into the string.
     """
     d_regs = ", ".join(f"${i}" for i in range(num_c_regs))
@@ -58,13 +58,15 @@ def _wgmma_sp_asm(shape, ptx_a, ptx_b, ptx_c, num_c_regs, num_a_regs, tnsp_a, tn
     desc_b_operand = f"${idx}"
     idx += 1
     e_operand = f"${idx}"
+    idx += 1
+    scale_operand = idx
 
     tail = _sparse_tail(ptx_a, num_a_regs, scale_a, scale_b, tnsp_a, tnsp_b)
 
     return (
         "{\n"
         ".reg .pred p;\n"
-        f"setp.ne.b32 p, {1 if scale_out != 0 else 0}, 0;\n"
+        f"setp.ne.b32 p, ${scale_operand}, 0;\n"
         f"wgmma.mma_async.sp.sync.aligned.{shape}.{ptx_c}.{ptx_a}.{ptx_b} "
         f"{{{d_regs}}}, "
         f"{a_operand}"
@@ -91,7 +93,7 @@ def wgmma_sp_ss(
     desc_a: GmmaDescriptor,
     desc_b: GmmaDescriptor,
     C_ptr: cute.Pointer,
-    scale_out: Constexpr[int],
+    scale_out: int,
     E_ptr: cute.Pointer,
     e_offset,
 ):
@@ -121,8 +123,10 @@ def wgmma_sp_ss(
     operands.append(desc_a.desc_i64[0].ir_value())
     operands.append(desc_b.desc_i64[0].ir_value())
     operands.append(E_vec[0].ir_value())
+    # scale_out (i32): the runtime accumulate predicate
+    operands.append(scale_out.ir_value() if hasattr(scale_out, "ir_value") else cute.Int32(scale_out).ir_value())
 
-    constraints = ",".join([f"={c_constraint}"] * num_c_regs) + "," + ",".join([str(i) for i in range(num_c_regs)]) + ",l,l,r"
+    constraints = ",".join([f"={c_constraint}"] * num_c_regs) + "," + ",".join([str(i) for i in range(num_c_regs)]) + ",l,l,r,r"
 
     result = llvm.inline_asm(
         llvm.StructType.get_literal([c_ir_type] * num_c_regs),
@@ -154,7 +158,7 @@ def wgmma_sp_rs(
     A_ptr: cute.Pointer,
     desc_b: GmmaDescriptor,
     C_ptr: cute.Pointer,
-    scale_out: Constexpr[int],
+    scale_out: int,
     E_ptr: cute.Pointer,
     e_offset,
 ):
@@ -188,6 +192,8 @@ def wgmma_sp_rs(
         operands.append(A_vecs[i].ir_value())
     operands.append(desc_b.desc_i64[0].ir_value())
     operands.append(E_vec[0].ir_value())
+    # scale_out (i32): the runtime accumulate predicate
+    operands.append(scale_out.ir_value() if hasattr(scale_out, "ir_value") else cute.Int32(scale_out).ir_value())
 
     constraints = (
         ",".join([f"={c_constraint}"] * num_c_regs)
@@ -195,7 +201,7 @@ def wgmma_sp_rs(
         + ",".join([str(i) for i in range(num_c_regs)])
         + ","
         + ",".join(["r"] * num_a_regs)
-        + ",l,r"
+        + ",l,r,r"
     )
 
     result = llvm.inline_asm(
