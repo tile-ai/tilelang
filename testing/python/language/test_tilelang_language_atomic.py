@@ -194,7 +194,7 @@ def run_atomic_addx4(M, N, block_M, block_N):
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda()
-    B = torch.zeros(M, N, dtype=torch.float32).cuda()
+    B = torch.randn(M, N, dtype=torch.float32).cuda()
     ref_B = B.clone()
 
     for i in range(M):
