@@ -1510,11 +1510,8 @@ def _make_bitwise_reduce_kernel(op, src_dtype, dst_dtype, M=4, N=4):
 
 
 def _compile_bitwise_reduce(program):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(program, out_idx=-1, target="cuda")
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda
