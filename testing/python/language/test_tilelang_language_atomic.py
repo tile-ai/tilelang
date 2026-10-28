@@ -691,8 +691,8 @@ def test_tma_atomic_add_rejects_unencodable_explicit_layout():
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
-    tilelang.disable_cache()
-    kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+    with tilelang.testing.without_kernel_cache():
+        kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
     assert "AtomicAddx4" in kernel.get_kernel_source()
 
 
@@ -728,8 +728,7 @@ def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_orde
     # the scalar lowering of the same call does. Cache disabled because the key
     # does not cover the native library by default, so a stale pre-fix kernel
     # source would otherwise be served here.
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
 
         wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
@@ -744,8 +743,6 @@ def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_orde
         Out = torch.zeros(N, dtype=torch_dtype).cuda()
         kernel(X, Out)
         torch.testing.assert_close(Out, X, atol=1e-2, rtol=1e-2)
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.jit

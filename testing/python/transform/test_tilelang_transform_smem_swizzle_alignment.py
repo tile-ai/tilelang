@@ -54,11 +54,8 @@ def _make_swizzled_tma_copy_kernel(pad_elems: int, dtype: str, columns: int):
 
 
 def _compile_kernel(pad_elems: int, dtype: str, columns: int):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return _make_swizzled_tma_copy_kernel(pad_elems, dtype, columns)
-    finally:
-        tilelang.enable_cache()
 
 
 def _dynamic_smem_offset(source: str, buffer_name: str) -> int:

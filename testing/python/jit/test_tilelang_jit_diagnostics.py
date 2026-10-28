@@ -318,16 +318,12 @@ def test_explicit_cuda_arch_source_generation_probe():
     from tilelang.engine.lower import lower as tilelang_lower
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_120"})
-    tilelang.disable_cache()
-    try:
-        with target:
-            artifact = tilelang_lower(
-                _make_cuda_compile_probe(),
-                target=target,
-                enable_device_compile=False,
-            )
-    finally:
-        tilelang.enable_cache()
+    with tilelang.testing.without_kernel_cache(), target:
+        artifact = tilelang_lower(
+            _make_cuda_compile_probe(),
+            target=target,
+            enable_device_compile=False,
+        )
 
     assert "__global__" in artifact.kernel_source
     assert "add_one" in artifact.kernel_source
