@@ -212,9 +212,12 @@ def flashattn_bwd(
     window_size=None,  # None for full attention
     sm_scale=None,
     dtype: T.dtype = T.float16,
+    *,
+    block_M,
+    block_N,
+    num_stages,
+    threads,
 ):
-    block_M, block_N, num_stages, threads = get_bwd_configs()
-
     if sm_scale is None:
         sm_scale = (1.0 / dim) ** 0.5
     scale = sm_scale * 1.44269504  # log2(e)
@@ -367,7 +370,10 @@ class _attention(torch.autograd.Function):
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         delta = kernel_prep(o, do)
-        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.window_size, dtype=dtype)
+        block_M, block_N, num_stages, threads = get_bwd_configs()
+        kernel = flashattn_bwd(
+            BATCH, H, N_CTX, D_HEAD, ctx.window_size, dtype=dtype, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads
+        )
         shape = [BATCH, H, N_CTX, D_HEAD]
         dq = torch.zeros(shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
         dk = torch.empty(shape, dtype=q.dtype, device=q.device)
@@ -516,7 +522,10 @@ def run_regression_perf(
         do, q, k, v, sinks_c, o = [maybe_contiguous(x) for x in (dO, Q, K, V, sinks, O)]
         k_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         Delta = k_prep(o, do)
-        k_bwd = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype)
+        block_M, block_N, num_stages, threads = get_bwd_configs()
+        k_bwd = flashattn_bwd(
+            BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype, block_M=block_M, block_N=block_N, num_stages=num_stages, threads=threads
+        )
         k_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
         shape = (BATCH, H, N_CTX, D_HEAD)
         dq = torch.zeros(shape, dtype=torch.float32, device=Q.device)

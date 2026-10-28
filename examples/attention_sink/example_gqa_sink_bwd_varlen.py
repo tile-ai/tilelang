@@ -314,6 +314,11 @@ def flashattn_bwd(
     window_size=None,
     sm_scale=None,
     dtype=T.float16,
+    *,
+    block_M,
+    block_N,
+    num_stages,
+    threads,
 ):
     if sm_scale is None:
         sm_scale = (1.0 / dim) ** 0.5
@@ -323,8 +328,6 @@ def flashattn_bwd(
     q_shape = [UQ, heads, dim]
     kv_shape = [UKV, head_kv, dim]
     accum_dtype = T.float32
-
-    block_M, block_N, num_stages, threads = get_bwd_configs()
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -559,6 +562,7 @@ class _attention(torch.autograd.Function):
         kernel_post = flashattn_bwd_postprocess(UQ, H, D_HEAD, dtype=dtype)
         delta = kernel_prep(o_unpad, do, cu_seqlens_q)
 
+        block_M, block_N, num_stages, threads = get_bwd_configs()
         kernel = flashattn_bwd(
             batch_size,
             groups,
@@ -571,6 +575,10 @@ class _attention(torch.autograd.Function):
             ctx.is_causal,
             window_size=ctx.window_size,
             dtype=dtype,
+            block_M=block_M,
+            block_N=block_N,
+            num_stages=num_stages,
+            threads=threads,
         )
 
         head_kv = H // groups
