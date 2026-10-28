@@ -66,6 +66,10 @@ class PTOLibraryGenerator(LibraryGenerator):
             module_name = "_tilelang_ptodsl_compile"
 
             try:
+                # Initialize Torch before loading native extensions from the
+                # kernel module, matching tilelang's initialization order.
+                import torch
+
                 spec = importlib.util.spec_from_file_location(module_name, src_path)
                 module = importlib.util.module_from_spec(spec)
                 assert spec.loader is not None

@@ -24,6 +24,42 @@ def get_output_scalar_dim_map(func: tvm.tirx.PrimFunc, result_idx: list[int]) ->
     return result
 
 
+def dynamic_symbolic_vars(func) -> list[tvm.tirx.Var]:
+    """List implicit shape and stride arguments in signature order by identity."""
+    seen = set(func.params)
+    result = []
+    for field in ("shape", "strides"):
+        for param in func.params:
+            if param in func.buffer_map:
+                for var in getattr(func.buffer_map[param], field):
+                    if isinstance(var, tvm.tirx.Var) and var not in seen:
+                        seen.add(var)
+                        result.append(var)
+    return result
+
+
+def name_host_arguments(arguments):
+    """Disambiguate exported names while retaining each argument's Var binding."""
+    reserved = {arg["name"] for arg in arguments}
+    used = {"stream"}
+    names = {}
+    for i, arg in enumerate(arguments):
+        name = arg["name"]
+        suffix = i
+        while name in used:
+            name = f"_tl_arg_{suffix}"
+            suffix += 1
+            while name in reserved:
+                name = f"_tl_arg_{suffix}"
+                suffix += 1
+        arg["name"] = name
+        used.add(name)
+        names[arg["var"]] = name
+        if "data" in arg:
+            names[arg["data"]] = name
+    return names
+
+
 def match_global_kernel(source: str, annotation: str = "__global__") -> int:
     pattern = r"__global__\s+void\s+[__launch_bounds__\(\d+\)\s+]\w+"
     for line in source.split("\n"):
@@ -346,11 +382,12 @@ def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[s
 
 def parse_function_call_args(
     declaration: str,
-    function_args: list[dict[str, str]],
+    function_args: list[dict[str, Any]],
     function_params: list[Any],
     desc_name_map: dict[str, str] | None = None,
     desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     transform_arg: Callable[[str, str], Any] | None = None,
+    var_name_map: dict[tvm.tirx.Var, str] | None = None,
 ) -> list[Any]:
     """
     Parse function call arguments from a kernel declaration.
@@ -362,6 +399,7 @@ def parse_function_call_args(
         desc_name_map: Optional mapping for descriptor names.
         desc_name_var_map: Optional mapping from descriptor names to TVM variables.
         transform_arg: Optional function to transform each argument (name, type) -> result.
+        var_name_map: Optional identity bindings for positional IR operands.
 
     Returns:
         List of parsed call arguments.
@@ -369,6 +407,34 @@ def parse_function_call_args(
     pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
     matches = re.findall(pattern, declaration)
     call_args = []
+
+    if var_name_map is not None:
+        descriptor_names = iter(match for i, match in enumerate(matches) if i and matches[i - 1] == "CUtensorMap")
+        for operand in function_params:
+            if operand in var_name_map:
+                name = var_name_map[operand]
+            elif operand.dtype != "handle":
+                if isinstance(operand, tvm.tirx.Var):
+                    raise ValueError(f"Unbound kernel argument: {operand}")
+                name = pythonic_expr(operand, var_name_map=var_name_map, expression_style="cxx")
+            else:
+                name = next(descriptor_names, None)
+                if name is None or desc_name_map is None or desc_name_var_map is None:
+                    raise ValueError(f"Unbound pointer argument: {operand}")
+                index = matches.index(name)
+                for arg in function_args:
+                    original = arg.get("data", arg.get("var"))
+                    if original is not None and maybe_desc_name(original.name, matches, index, desc_name_map):
+                        desc_name_map[name] = arg["name"]
+                        break
+                if name not in desc_name_map:
+                    raise ValueError(f"Cannot bind TMA descriptor: {name}")
+                desc_name_var_map[name] = operand
+            if transform_arg is not None:
+                arg_type = next((arg["type"] for arg in function_args if arg["name"] == name), "None")
+                name = transform_arg(name, arg_type)
+            call_args.append(name)
+        return call_args
 
     for i, match in enumerate(matches):
         for arg in function_args:
