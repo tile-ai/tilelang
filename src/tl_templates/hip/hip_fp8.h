@@ -186,7 +186,7 @@ struct fp8_e8_t {
   }
   // A double converts directly, as with __nv_fp8_e8m0(double): narrowing it to
   // float first can round it down onto a power of two (1 + 2^-25 to 1.0).
-  // Other argument types keep the float constructor.
+  // Integers have their own constructor below; other types use the float one.
   template <typename T, typename = typename std::enable_if<
                             std::is_same<T, double>::value>::type>
   __device__ fp8_e8_t(T val) {
@@ -201,6 +201,26 @@ struct fp8_e8_t {
     int e8 = exponent == 0 ? 0 : exponent - 1023 + 127 + inexact;
     data = static_cast<unsigned char>(
         exponent == 0x7FF || e8 > 254 ? 0xFE : (e8 < 0 ? 0 : e8));
+  }
+  // Integers round exactly: narrowing to float can land on a power of two
+  // (2^24 + 1 to 2^24), and so can narrowing a 64-bit value to double.
+  template <typename T,
+            typename std::enable_if<std::is_integral<T>::value &&
+                                        !std::is_same<T, bool>::value,
+                                    int>::type = 0>
+  __device__ fp8_e8_t(T val) {
+    using U = typename std::make_unsigned<T>::type;
+    // |val| in unsigned arithmetic, which also holds the most negative value.
+    U mag = (std::is_signed<T>::value && val < 0)
+                ? static_cast<U>(U(0) - static_cast<U>(val))
+                : static_cast<U>(val);
+    if (mag == 0) {
+      data = 0; // zero clips to 2^-127
+      return;
+    }
+    int log2_floor = 63 - __builtin_clzll(static_cast<unsigned long long>(mag));
+    data =
+        static_cast<unsigned char>(127 + log2_floor + ((mag & (mag - 1)) != 0));
   }
   __device__ operator float() const {
     if (data == 0xFF) {

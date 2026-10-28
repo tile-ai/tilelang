@@ -122,5 +122,22 @@ def test_double_to_e8m0_rounds_the_double_itself():
     torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0, equal_nan=True)
 
 
+@tilelang.testing.requires_cdna
+def test_int_to_e8m0_rounds_the_integer_itself():
+    # Rounding through float (or, for 64-bit values, double) would turn
+    # 2^24 + 1, 2^53 + 1 and 2^62 + 1 into powers of two and keep them.
+    cases = (
+        (T.int32, torch.int32, [0, 1, -1, 3, -5, 2**24 - 1, 2**24, 2**24 + 1, -(2**24 + 1), 2**31 - 1, -(2**31)]),
+        (T.int64, torch.int64, [2**53 + 1, 2**62 + 1, -(2**62 + 1), 2**63 - 1, -(2**63)]),
+    )
+    for source, dtype, vals in cases:
+        x = torch.tensor(vals, dtype=dtype)
+        # |v| rounded up to a power of two; zero clips to 2^-127.
+        expected = torch.tensor([2.0 ** (abs(v) - 1).bit_length() if v else 2.0**-127 for v in vals])
+        y = torch.empty(x.numel(), dtype=torch.float32, device="cuda")
+        _roundtrip(x.numel(), T.float8_e8m0fnu, source)(x.cuda(), y)
+        torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
