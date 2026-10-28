@@ -111,21 +111,30 @@ def generate_qkv(q, k, v, query_padding_mask=None, key_padding_mask=None, kvpack
 
 
 @functools.lru_cache(maxsize=None)
-def flash_attn_varlen_supported(device_index: int = 0) -> bool:
-    """Whether the installed flash-attn has kernels for this device.
+def flash_attn_varlen_supported(device: int | torch.device | None = None) -> bool:
+    """Whether the installed flash-attn can run varlen attention on this device.
 
     flash-attn refuses architectures it was not built for at the first call
     (`RuntimeError: FlashAttention only supports Ampere GPUs or newer.`), so
     probe once with a minimal varlen call instead of guessing from versions.
     """
-    import flash_attn
+    try:
+        import flash_attn
+    except ImportError:
+        return False
 
-    device = torch.device("cuda", device_index)
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    elif isinstance(device, int):
+        device = torch.device("cuda", device)
+    elif device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+
     q = torch.zeros(8, 1, 16, device=device, dtype=torch.float16)
     cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32, device=device)
     try:
         flash_attn.flash_attn_varlen_func(q, q, q, cu_seqlens, cu_seqlens, 4, 4)
-    except Exception:
+    except RuntimeError:
         return False
     return True
 
