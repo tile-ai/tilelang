@@ -6,6 +6,7 @@ from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
 from typing import Optional
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_bwd_configs():
@@ -13,11 +14,11 @@ def get_bwd_configs():
     sm_version = sm_major * 10 + sm_minor
     # The 128x32 two-stage backward needs ~105 KiB of dynamic shared memory;
     # sm_86/89/120 allow about 99 KiB per block.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
+    optin_smem = get_max_dynamic_shared_memory()
     if sm_version == 80:
         return 64, 32, 1, 128
     elif sm_version >= 90:
-        if optin_smem is not None and optin_smem < 128 * 1024:
+        if optin_smem < 128 * 1024:
             return 64, 32, 1, 128
         return 128, 32, 2, 256
     else:
