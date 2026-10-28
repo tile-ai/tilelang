@@ -25,6 +25,7 @@
 #include <tvm/tirx/stmt.h>
 
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -91,6 +92,97 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
+  if (node->type->IsLogical()) {
+    for (const auto &[name, buffer] :
+         {std::pair{"input", node->src}, {"output", node->dst}}) {
+      CHECK(IsSharedBuffer(buffer) || IsFragmentBuffer(buffer), ValueError)
+          << "reduce_" << reduce_type << " requires a shared or fragment "
+          << name << " buffer, got " << buffer.scope();
+    }
+    DataType src_dtype = node->src->dtype;
+    CHECK(src_dtype.is_scalar() &&
+              (src_dtype.is_bool() || src_dtype.is_int() ||
+               src_dtype.is_uint() || src_dtype.is_float16() ||
+               src_dtype == DataType::Float(32) ||
+               src_dtype == DataType::Float(64) || src_dtype.is_bfloat16()),
+          TypeError)
+        << "reduce_" << reduce_type
+        << " requires a boolean, integer, or floating-point input, got "
+        << src_dtype;
+    CHECK(node->dst->dtype == DataType::Bool(), TypeError)
+        << "reduce_" << reduce_type << " requires a bool output, got "
+        << node->dst->dtype;
+  } else if (node->type->IsBitAnd() || node->type->IsBitOr() ||
+             node->type->IsBitXor()) {
+    for (const auto &[name, buffer] :
+         {std::pair{"input", node->src}, {"output", node->dst}}) {
+      DataType dtype = buffer->dtype;
+      CHECK(dtype.is_bool() || dtype.is_int() || dtype.is_uint(), ValueError)
+          << "reduce_" << reduce_type << " requires an integer/bool " << name
+          << " buffer, got dtype " << dtype;
+    }
+  }
+
+  arith::Analyzer analyzer;
+  const auto &src_region = node->srcRegion_->region;
+  const auto &dst_region = node->dstRegion_->region;
+  bool whole_region = node->type->IsLogical() && node->dim == -1;
+  CHECK(whole_region ||
+            (node->dim >= 0 && node->dim < static_cast<int>(src_region.size())),
+        ValueError)
+      << "reduce_" << reduce_type << " axis " << node->dim
+      << " is out of range for input rank " << src_region.size();
+
+  // Shared operands are staged through fragments by the language API. These
+  // restrictions belong to that path, not to the reduction kind or local path.
+  for (const auto &[name, region] :
+       {std::pair{"input", node->srcRegion_}, {"output", node->dstRegion_}}) {
+    if (!IsSharedBuffer(region->buffer) && !IsFragmentBuffer(region->buffer)) {
+      continue;
+    }
+    for (size_t i = 0; i < region->region.size(); ++i) {
+      const Range &range = region->region[i];
+      if (IsFragmentBuffer(region->buffer)) {
+        CHECK(
+            analyzer.CanProveEqual(range->min, 0) &&
+                analyzer.CanProveEqual(range->extent, region->buffer->shape[i]),
+            ValueError)
+            << "reduce_" << reduce_type
+            << " currently requires a full fragment " << name
+            << "; copy the full fragment to shared memory before "
+               "selecting a subregion";
+      }
+      PrimExpr simplified_extent = analyzer.Simplify(range->extent);
+      const auto *extent = simplified_extent.as<IntImmNode>();
+      CHECK(extent && extent->value >= 0, ValueError)
+          << "reduce_" << reduce_type
+          << " requires non-negative static region extents for fragment "
+             "lowering; use a fixed-size tile with neutral padding";
+    }
+  }
+
+  Array<PrimExpr> expected_shape;
+  if (whole_region || (src_region.size() == 1 && (IsFragmentBuffer(node->dst) ||
+                                                  IsSharedBuffer(node->dst)))) {
+    expected_shape = {Integer(1)};
+  } else {
+    for (size_t i = 0; i < src_region.size(); ++i) {
+      PrimExpr extent = src_region[i]->extent;
+      if (i != node->dim) {
+        expected_shape.push_back(extent);
+      } else if (src_region.size() == dst_region.size()) {
+        expected_shape.push_back(make_const(extent.dtype(), 1));
+      }
+    }
+  }
+  bool valid_shape = expected_shape.size() == dst_region.size();
+  for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
+    valid_shape =
+        analyzer.CanProveEqual(expected_shape[i], dst_region[i]->extent);
+  }
+  CHECK(valid_shape, ValueError)
+      << "Invalid reduce output shape for reduce_" << reduce_type << ": "
+      << node->dstRegion_ << ", expected " << expected_shape;
   // Optional "batch" annotation: number of output elements per batched
   // AllReduce call (default 1 = scalar).
   if (auto opt = annotations.Get("batch")) {
@@ -134,6 +226,19 @@ AccessRegions ReduceOpNode::GetAccessRegions() const {
 TileOperator ReduceOpNode::Clone() const {
   auto op = make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
+}
+
+Fragment ReduceOpNode::NormalizeSourceLayoutForReduction(
+    const Fragment &layout, arith::Analyzer *analyzer) const {
+  if (dim != -1) {
+    return layout;
+  }
+  ICHECK(type->IsLogical());
+  PrimExpr extent = Integer(1);
+  for (const PrimExpr &size : layout->InputShape()) {
+    extent = analyzer->Simplify(extent * size);
+  }
+  return Downcast<Fragment>(layout->Reshape({extent}, analyzer));
 }
 
 static Array<PrimExpr> InputPlaceholders(size_t n) {
@@ -192,26 +297,12 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
 
   if (IsFragmentBuffer(src) && IsFragmentBuffer(dst) &&
       layout_args.layout_map.count(src)) {
-    auto src_layout = layout_args.layout_map[src].as<Fragment>().value();
-    auto reducer_layout = ComputeReducerLayout(src_layout, this->dim);
+    auto src_layout = NormalizeSourceLayoutForReduction(
+        layout_args.layout_map[src].as<Fragment>().value(),
+        layout_args.analyzer);
+    int reduce_dim = ReductionDim();
+    auto reducer_layout = ComputeReducerLayout(src_layout, reduce_dim);
 
-    // Match the frontend's reduction shape contract before Reshape, which
-    // only checks the total element count.
-    Array<PrimExpr> expected_shape = reducer_layout->InputShape();
-    if (dst->shape.size() == src_layout->InputShape().size()) {
-      // Keeping the reduced axis requires its extent to be one.
-      expected_shape = src_layout->InputShape();
-      expected_shape.Set(dim, make_const(expected_shape[dim].dtype(), 1));
-    }
-    bool valid_shape = dst->shape.size() == expected_shape.size();
-    for (size_t i = 0; valid_shape && i < expected_shape.size(); ++i) {
-      valid_shape =
-          layout_args.analyzer->CanProveEqual(dst->shape[i], expected_shape[i]);
-    }
-    ICHECK(valid_shape) << "ReduceOp: invalid destination shape " << dst->shape
-                        << " for " << dst << ", expected " << expected_shape
-                        << " when reducing axis " << dim << " of "
-                        << src->shape;
     reducer_layout = Downcast<Fragment>(
         reducer_layout->Reshape(dst->shape, layout_args.analyzer));
 
@@ -254,6 +345,11 @@ TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReduceOpNode::RegisterReflection();
   ReduceTypeNode::RegisterReflection();
+  reflection::GlobalDef().def(
+      "tl.ReduceOp",
+      [](Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+        return ReduceOp(std::move(args), std::move(annotations));
+      });
 }
 
 } // namespace tl

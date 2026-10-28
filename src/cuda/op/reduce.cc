@@ -19,6 +19,15 @@ using namespace tirx;
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
+  static std::optional<std::string>
+  MakeCodegenReducer(const ReduceOpNode &op, Target target, int vsize = 1) {
+    // CuTeDSL shares this lowerer but uses its own runtime reducers.
+    if (!TargetIsCuTeDSL(target) && op.type->IsLogical() && vsize == 1) {
+      return op.type->IsAll() ? "tl::AllOp" : "tl::AnyOp";
+    }
+    return backend::reduce::MakeCodegenReducer(op, vsize);
+  }
+
   static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
     return reducing_threads > 32;
   }

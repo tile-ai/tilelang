@@ -720,7 +720,7 @@ def test_reduce_rejects_invalid_destination_shape(out_shape):
             src = T.alloc_fragment((64, 64), T.float32)
             dst = T.alloc_fragment(out_shape, T.float32)
             T.copy(A, src)
-            # Bypass the frontend's shape check to exercise the native contract
+            # Bypass the public API to exercise the native contract
             # before layout reshape could accept an unrelated equal-size shape.
             T.evaluate(
                 T.call_intrin(
@@ -730,8 +730,32 @@ def test_reduce_rejects_invalid_destination_shape(out_shape):
             T.copy(dst, B)
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target, pytest.raises(tvm.error.InternalError, match="ReduceOp: invalid destination shape"):
+    with target, pytest.raises(ValueError, match="Invalid reduce output shape"):
         tilelang.lower(kernel, target=target)
+
+
+@pytest.mark.parametrize("op", [T.reduce_sum, T.reduce_max, T.reduce_bitand, T.reduce_any, T.reduce_all])
+def test_reduce_rejects_invalid_axis_shape_and_fragment_regions(op):
+    src = tvm.tirx.decl_buffer((4, 8), "bool", scope="local.fragment")
+    dst = tvm.tirx.decl_buffer((4,), "bool", scope="local.fragment")
+    for dim in (2, -3):
+        with pytest.raises(ValueError, match="out of range"):
+            op(src, dst, dim=dim)
+    with pytest.raises(ValueError, match="Invalid reduce output shape"):
+        op(src, dst, dim=0)
+    with pytest.raises(ValueError, match="full fragment input"):
+        op(src[:, 0:4], dst)
+    with pytest.raises(ValueError, match="full fragment output"):
+        op(src, src[:, 0:0], dim=1)
+
+
+@pytest.mark.parametrize("op", [T.reduce_sum, T.reduce_max, T.reduce_any, T.reduce_all])
+def test_reduce_rejects_dynamic_shared_region(op):
+    n = T.Var("n", "int32")
+    src = tvm.tirx.decl_buffer((4, 8), "float32", scope="shared")
+    dst = tvm.tirx.decl_buffer((4,), "bool" if op in (T.reduce_any, T.reduce_all) else "float32", scope="local.fragment")
+    with pytest.raises(ValueError, match="static region extents for fragment lowering"):
+        op(src[:, 0:n], dst)
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ enum class ReduceTypeEnum : uint8_t {
   kBitAnd, ///< Bitwise and reduction
   kBitOr,  ///< Bitwise or reduction
   kBitXor, ///< Bitwise xor reduction
+  kAny,    ///< Logical any reduction
+  kAll,    ///< Logical all reduction
 };
 
 /// Node class representing a reduction type
@@ -52,6 +54,9 @@ public:
   bool IsBitAnd() const { return type == int(ReduceTypeEnum::kBitAnd); }
   bool IsBitOr() const { return type == int(ReduceTypeEnum::kBitOr); }
   bool IsBitXor() const { return type == int(ReduceTypeEnum::kBitXor); }
+  bool IsAny() const { return type == int(ReduceTypeEnum::kAny); }
+  bool IsAll() const { return type == int(ReduceTypeEnum::kAll); }
+  bool IsLogical() const { return IsAny() || IsAll(); }
 };
 
 /// Wrapper class for reduction type with string-based construction
@@ -77,6 +82,10 @@ public:
       node->type = int(ReduceTypeEnum::kBitOr);
     } else if (type == "bitxor") {
       node->type = int(ReduceTypeEnum::kBitXor);
+    } else if (type == "any") {
+      node->type = int(ReduceTypeEnum::kAny);
+    } else if (type == "all") {
+      node->type = int(ReduceTypeEnum::kAll);
     } else {
       LOG(FATAL) << "Invalid reduce type: " << type;
     }
@@ -90,7 +99,7 @@ public:
   tirx::Buffer src, dst; ///< Source and destination buffers
   // Optional: keep the original regions used to construct this op
   BufferRegion srcRegion_, dstRegion_;
-  int dim;         ///< Dimension to reduce along
+  int dim; ///< Reduction axis; -1 reduces all axes for logical reductions.
   ReduceType type; ///< Type of reduction operation
   bool clear;      ///< Whether to clear destination before reduction
   int batch{1};    ///< Number of output elements per batched AllReduce
@@ -132,6 +141,10 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
+  /// Flatten the logical source domain for whole-region reductions.
+  Fragment NormalizeSourceLayoutForReduction(const Fragment &layout,
+                                             arith::Analyzer *analyzer) const;
+  int ReductionDim() const { return dim == -1 ? 0 : dim; }
   static const Op &Get();
   TileOperator Clone() const;
 };
