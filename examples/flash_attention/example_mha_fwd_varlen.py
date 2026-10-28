@@ -8,7 +8,7 @@ from tilelang.profiler import do_bench
 from tilelang.autotuner import set_autotune_inputs, autotune
 
 import torch
-from varlen_utils import generate_random_padding_mask, generate_qkv
+from varlen_utils import flash_attn_varlen_supported, generate_random_padding_mask, generate_qkv, varlen_attention_ref
 import itertools
 
 
@@ -198,21 +198,25 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, c
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
-    import flash_attn
+    if flash_attn_varlen_supported():
+        import flash_attn
 
-    fla_out_unpad = flash_attn.flash_attn_varlen_func(
-        q_unpad,
-        k_unpad,
-        v_unpad,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        0.0,
-        causal=causal,
-    )
-    fla_out = output_pad_fn(fla_out_unpad)
-    torch.testing.assert_close(out, fla_out, rtol=1e-2, atol=1e-2)
+        ref_out_unpad = flash_attn.flash_attn_varlen_func(
+            q_unpad,
+            k_unpad,
+            v_unpad,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            0.0,
+            causal=causal,
+        )
+    else:
+        print("flash-attn has no kernels for this device; comparing against the PyTorch reference.")
+        ref_out_unpad = varlen_attention_ref(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, causal=causal)
+    ref_out = output_pad_fn(ref_out_unpad)
+    torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
 
     print("All checks passed.✅")
 
@@ -220,13 +224,14 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, c
     t = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q))
     print(f"Tilelang time: {t} ms")
     print(f"Tilelang: {total_flops / t * 1e-9} TFlops")
-    t = do_bench(
-        lambda: flash_attn.flash_attn_varlen_func(
-            q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, 0.0, causal=causal
+    if flash_attn_varlen_supported():
+        t = do_bench(
+            lambda: flash_attn.flash_attn_varlen_func(
+                q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, 0.0, causal=causal
+            )
         )
-    )
-    print(f"FA2 time: {t} ms")
-    print(f"FA2: {total_flops / t * 1e-9} TFlops")
+        print(f"FA2 time: {t} ms")
+        print(f"FA2: {total_flops / t * 1e-9} TFlops")
 
 
 def run_regression_perf(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, causal: bool = False):

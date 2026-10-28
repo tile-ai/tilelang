@@ -5,7 +5,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang.profiler import do_bench
-from varlen_utils import generate_random_padding_mask, generate_qkv
+from varlen_utils import flash_attn_varlen_supported, generate_random_padding_mask, generate_qkv, varlen_attention_ref
 
 
 @tilelang.jit(
@@ -176,21 +176,25 @@ def main(
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
-    import flash_attn
+    if flash_attn_varlen_supported():
+        import flash_attn
 
-    fa_out_unpad = flash_attn.flash_attn_varlen_func(
-        q_unpad,
-        k_unpad,
-        v_unpad,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        0.0,
-        causal=is_causal,
-    )
-    fa_out = output_pad_fn(fa_out_unpad)
-    torch.testing.assert_close(out, fa_out, rtol=1e-2, atol=1e-2)
+        ref_out_unpad = flash_attn.flash_attn_varlen_func(
+            q_unpad,
+            k_unpad,
+            v_unpad,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            0.0,
+            causal=is_causal,
+        )
+    else:
+        print("flash-attn has no kernels for this device; comparing against the PyTorch reference.")
+        ref_out_unpad = varlen_attention_ref(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, causal=is_causal)
+    ref_out = output_pad_fn(ref_out_unpad)
+    torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
 
     print("All checks passed.✅")
     latency = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q), _n_warmup=5, _n_repeat=5)
