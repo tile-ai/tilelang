@@ -95,10 +95,12 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
   std::vector<size_t> src_singleton_axes, dst_singleton_axes;
 
   if (dma_path == DMAPath::kGMToL1) {
+    bool batched = IsBatchedGMToL1Copy(op.src, op.src_range, op.dst,
+                                       op.dst_range, analyzer);
     StridedLayout src_layout = NormalizeMTE2DLayout(
-        op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling");
+        op.src, op.src_range, analyzer, "Ascend GM->L1 OOB handling", batched);
     StridedLayout dst_layout = NormalizeTrailingMTE2DLayout(
-        op.dst, op.dst_range, analyzer, "Ascend GM->L1 OOB handling");
+        op.dst, op.dst_range, analyzer, "Ascend GM->L1 OOB handling", batched);
     size_t src_inner_axis = static_cast<size_t>(src_layout.modes[0].axis);
     size_t src_row_axis = static_cast<size_t>(src_layout.modes[1].axis);
     size_t dst_inner_axis = static_cast<size_t>(dst_layout.modes[0].axis);
@@ -108,19 +110,25 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                    ? std::vector<size_t>{dst_inner_axis, dst_row_axis}
                    : std::vector<size_t>{dst_row_axis, dst_inner_axis};
 
-    auto collect_other_axes = [](size_t ndim, size_t axis0, size_t axis1) {
-      std::vector<size_t> axes;
-      for (size_t i = 0; i < ndim; ++i) {
-        if (i != axis0 && i != axis1) {
-          axes.push_back(i);
+    if (batched) {
+      // Batch participates in tail clamping, not singleton-axis guards.
+      src_axes.push_back(0);
+      dst_axes.push_back(0);
+    } else {
+      auto collect_other_axes = [](size_t ndim, size_t axis0, size_t axis1) {
+        std::vector<size_t> axes;
+        for (size_t i = 0; i < ndim; ++i) {
+          if (i != axis0 && i != axis1) {
+            axes.push_back(i);
+          }
         }
-      }
-      return axes;
-    };
-    src_singleton_axes =
-        collect_other_axes(op.src_range.size(), src_row_axis, src_inner_axis);
-    dst_singleton_axes =
-        collect_other_axes(op.dst_range.size(), dst_row_axis, dst_inner_axis);
+        return axes;
+      };
+      src_singleton_axes =
+          collect_other_axes(op.src_range.size(), src_row_axis, src_inner_axis);
+      dst_singleton_axes =
+          collect_other_axes(op.dst_range.size(), dst_row_axis, dst_inner_axis);
+    }
   } else {
     auto collect_non_singleton_axes = [](const Array<Range> &ranges) {
       std::vector<size_t> axes, singleton_axes;
@@ -250,6 +258,15 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
 Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
                 const PrimExpr &value) {
   ICHECK_EQ(region.size(), dst->shape.size());
+  if (region.size() == 3 && !is_one(region[0]->extent)) {
+    Var batch_idx("batch_idx", region[0]->extent.dtype());
+    Array<Range> matrix_region = region;
+    matrix_region.Set(0,
+                      Range::FromMinExtent(region[0]->min + batch_idx,
+                                           make_const(batch_idx.dtype(), 1)));
+    return For(batch_idx, 0, region[0]->extent, ForKind::kSerial,
+               MakeL1Fill(dst, matrix_region, value));
+  }
   Array<PrimExpr> mins;
   Array<PrimExpr> region_args;
   for (const Range &range : region)
