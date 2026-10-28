@@ -28,9 +28,18 @@ def PerCoreTask():
     same logical read/write role. For loop-free dispatch, on every dynamic
     invocation and every participating block index, the candidate guards must
     be mutually exclusive and collectively exhaustive: exactly one candidate
-    must execute on each core. Conditions may dispatch by block/core ID, but must
-    not make the operation data-dependent, optional, or executable more than
-    once on one core. This exact-once property is a user control-flow contract.
+    must execute on each core. Conditions selecting candidates may dispatch by
+    block/core ID, but must not make candidate selection data-dependent,
+    optional, or executable more than once on one core. This exact-once
+    property applies to candidate selection, not to each statement inside a
+    candidate, and is a user control-flow contract.
+
+    Conditions inside a ``T.Task()`` candidate are allowed. All branches still
+    contribute to its access and resource analysis and must satisfy the same
+    single-pipe and core-affinity constraints. External synchronization encloses
+    the candidate rather than its internal branches, including when a branch
+    performs no buffer access. Internal loops retain the region-boundary
+    synchronization described above even when nested under a condition.
 
     Keep the complete block-index dispatch inside one ``T.PerCoreTask()``. Do
     not put separate ``T.PerCoreTask()`` regions in sibling conditional branches:
@@ -85,7 +94,9 @@ def Task(latency: int | None = None, ii: int | None = None):
 
     Inside ``T.PerCoreTask()``, the same marker also denotes one concrete
     per-core candidate. Put the control flow that selects a core outside this
-    scope so automatic synchronization remains under the same guard. Explicit
+    scope so automatic synchronization remains under the same guard. Conditions
+    within a candidate are allowed and remain inside its synchronization
+    boundary; every branch must satisfy the task's resource constraints. Explicit
     markers may be mixed with unmarked candidates; the compiler infers markers
     for the remaining supported candidate boundaries. Do not nest
     ``T.PerCoreTask()`` inside this scope; put this ``T.Task()`` inside

@@ -15,6 +15,36 @@ from tvm import tirx
 _CROSS_AIV_ERROR = "does not support synchronization between AIV0 and AIV1"
 
 
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint-branches", "overlapping-else"])
+def test_internal_candidate_condition_includes_both_access_branches(target, overlap):
+    @T.prim_func
+    def main(src: T.Tensor((128,), "float32"), dst: T.Tensor((1024,), "float32"), enabled: T.bool):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((64,), "float32")
+            T.copy(src[sid * 64 : sid * 64 + 64], ub)
+            with T.PerCoreTask():
+                for route in T.unroll(2):
+                    if sid == route:
+                        with T.Task():
+                            for stage in T.serial(4):
+                                if enabled:
+                                    begin = stage * 128 + sid * 64
+                                    T.copy(ub, dst[begin : begin + 64])
+                                else:
+                                    begin = stage * 128 + sid * (32 if overlap else 64) + 512
+                                    T.copy(ub, dst[begin : begin + 64])
+
+    with determine_target(target, return_object=True):
+        if overlap:
+            # One conflicting branch must retain the cross-AIV dependency.
+            with pytest.raises(tvm.error.InternalError, match=_CROSS_AIV_ERROR):
+                tilelang.lower(main, target=target, enable_device_compile=False)
+        else:
+            artifact = tilelang.lower(main, target=target, enable_device_compile=False)
+            assert artifact.kernel_source
+
+
 def _writers(*, stride=None, extra=None, hint=None, copies=1, sync=False):
     params = []
     if stride == "dynamic":
