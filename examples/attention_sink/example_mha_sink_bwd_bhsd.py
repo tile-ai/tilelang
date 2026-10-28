@@ -12,17 +12,15 @@ from tilelang.utils.device import get_max_dynamic_shared_memory
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
-    # The 128x32 two-stage backward needs ~105 KiB of dynamic shared memory;
-    # sm_86/89/120 allow about 99 KiB per block.
-    optin_smem = get_max_dynamic_shared_memory()
-    if sm_version == 80:
-        return 64, 32, 1, 128
-    elif sm_version >= 90:
-        if optin_smem < 128 * 1024:
-            return 64, 32, 1, 128
-        return 128, 32, 2, 256
-    else:
+    if sm_version < 80:
         raise ValueError(f"Unsupported SM version: {sm_version}")
+    # The 128x32 two-stage backward needs ~105 KiB of dynamic shared memory;
+    # sm_86/89/120 allow about 99 KiB per block, and Ampere runs the smaller
+    # tile better even where the larger one would fit.
+    optin_smem = get_max_dynamic_shared_memory()
+    if sm_version == 80 or optin_smem < 128 * 1024:
+        return 64, 32, 1, 128
+    return 128, 32, 2, 256
 
 
 @tilelang.jit(
