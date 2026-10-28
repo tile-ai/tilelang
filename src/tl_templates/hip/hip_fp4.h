@@ -42,15 +42,21 @@ struct fp4_e2_t {
   uint8_t __x; // only low 4 bits are used
 
   TL_DEVICE fp4_e2_t() = default;
-  TL_DEVICE explicit fp4_e2_t(uint8_t raw) : __x(raw & 0x0Fu) {}
-  // Numeric conversion from float / half / bfloat16, as for CUDA's
-  // __nv_fp4_e2m1: generated code casts values with `(fp4_e2_t)x`, which would
-  // otherwise truncate x to an integer and keep it as raw bits. Integers keep
-  // the raw-bits constructor above.
-  template <typename T, typename = typename std::enable_if<
-                            !std::is_integral<T>::value>::type>
+  // Numeric conversion from any scalar (float, half, bfloat16 or an integer),
+  // as for CUDA's __nv_fp4_e2m1: generated code casts values with
+  // `(fp4_e2_t)x`. Integers may pass through float: those it cannot hold
+  // exactly all saturate to 6.
+  template <typename T,
+            typename = typename std::enable_if<!std::is_same<
+                typename std::decay<T>::type, fp4_e2_t>::value>::type>
   TL_DEVICE explicit fp4_e2_t(T x)
       : __x(__tl_float_to_fp4_bits(static_cast<float>(x))) {}
+  // Raw E2M1 bits in the low nibble, e.g. when unpacking packed storage.
+  TL_DEVICE static fp4_e2_t from_bits(uint8_t bits) {
+    fp4_e2_t value;
+    value.__x = bits & 0x0Fu;
+    return value;
+  }
 
   // Convert FP4 E2M1 to float (pure bit manipulation, no hardware intrinsic).
   // E2M1 encoding: value = (-1)^s * 2^(e-1) * (1 + m*0.5)  for e != 0
@@ -101,8 +107,12 @@ public:
   TL_DEVICE fp4_e2_2_t() = default;
   TL_DEVICE explicit fp4_e2_2_t(uint8_t data) : __x(data) {}
 
-  TL_DEVICE fp4_e2_t x() const { return fp4_e2_t(__x & 0x0Fu); }
-  TL_DEVICE fp4_e2_t y() const { return fp4_e2_t((__x >> 4u) & 0x0Fu); }
+  TL_DEVICE fp4_e2_t x() const {
+    return fp4_e2_t::from_bits(static_cast<uint8_t>(__x & 0x0Fu));
+  }
+  TL_DEVICE fp4_e2_t y() const {
+    return fp4_e2_t::from_bits(static_cast<uint8_t>(__x >> 4u));
+  }
 
   TL_DEVICE void set_x(fp4_e2_t val) {
     __x = (__x & 0xF0u) | (val.__x & 0x0Fu);

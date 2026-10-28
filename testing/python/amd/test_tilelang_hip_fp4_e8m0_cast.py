@@ -62,6 +62,22 @@ def test_float_to_fp4_rounds_to_nearest_even():
 
 
 @tilelang.testing.requires_cdna
+def test_int_to_fp4_is_numeric():
+    if _arch() != "gfx950":
+        pytest.skip("the FP4 E2M1 types exist on gfx950 only")
+    # Integers convert by value (1 -> 1.0, not the E2M1 bits 0b0001 = 0.5).
+    cases = (
+        (T.int32, torch.int32, list(range(-8, 9)) + [100, -100, 2**31 - 1, -(2**31)]),
+        (T.uint8, torch.uint8, list(range(16)) + [255]),
+    )
+    for source, dtype, vals in cases:
+        x = torch.tensor(vals, dtype=dtype)
+        y = torch.empty(x.numel(), dtype=torch.float32, device="cuda")
+        _roundtrip(x.numel(), T.float4_e2m1fn, source)(x.cuda(), y)
+        torch.testing.assert_close(y.cpu(), _reference_fp4(x.float()), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cdna
 def test_float_to_e8m0_rounds_up_to_a_power_of_two():
     # As __nv_fp8_e8m0(float) (cudaRoundPosInf, __NV_SATFINITE): powers of two
     # are exact, other magnitudes round up, NaN stays NaN.
