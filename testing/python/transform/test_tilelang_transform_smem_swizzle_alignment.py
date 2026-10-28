@@ -54,8 +54,11 @@ def _make_swizzled_tma_copy_kernel(pad_elems: int, dtype: str, columns: int):
 
 
 def _compile_kernel(pad_elems: int, dtype: str, columns: int):
+    # Compile through the JIT wrapper explicitly: a plain call can return the
+    # kernel an earlier case built, which is exactly the stale source this
+    # asserts against.
     with tilelang.testing.without_kernel_cache():
-        return _make_swizzled_tma_copy_kernel(pad_elems, dtype, columns)
+        return _make_swizzled_tma_copy_kernel.compile(pad_elems, dtype, columns)
 
 
 def _dynamic_smem_offset(source: str, buffer_name: str) -> int:

@@ -691,8 +691,10 @@ def test_tma_atomic_add_rejects_unencodable_explicit_layout():
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
+    # Compile through the JIT wrapper explicitly: a plain call may return a
+    # kernel the wrapper already built, bypassing the compile this asserts on.
     with tilelang.testing.without_kernel_cache():
-        kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+        kernel = atomic_add_program.compile(K, M, N, block_M, block_N, dtype=dtype)
     assert "AtomicAddx4" in kernel.get_kernel_source()
 
 
@@ -725,11 +727,12 @@ def atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=T
 
 def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_order_id, dtype=T.float16):
     # A vectorized atomic add must carry the requested memory order, just like
-    # the scalar lowering of the same call does. Cache disabled because the key
-    # does not cover the native library by default, so a stale pre-fix kernel
-    # source would otherwise be served here.
+    # the scalar lowering of the same call does. Compile through the JIT wrapper
+    # inside a cache-bypass scope: the disk key does not cover the native library
+    # by default, and a plain call could also return the wrapper's cached kernel,
+    # so a stale pre-fix source would otherwise be served here.
     with tilelang.testing.without_kernel_cache():
-        kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
+        kernel = atomic_add_vectorized_memory_order_program.compile(N, threads, memory_order, dtype=dtype)
 
         wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
         assert wide_calls, f"expected a vectorized atomic add, got:\n{kernel.get_kernel_source()}"
