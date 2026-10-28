@@ -221,8 +221,15 @@ def get_decode_configs(heads, kv_heads):
     # needs fewer warps for T.gemm to partition it.
     optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
     if optin_smem is not None and optin_smem < 160 * 1024:
-        return 32, min(16, heads // kv_heads), 128
-    return 64, min(64, heads // kv_heads), 256
+        block_n, cap, threads = 32, 16, 128
+    else:
+        block_n, cap, threads = 64, 64, 256
+    # The kernel launches `heads // block_H` head blocks, so block_H must divide
+    # the number of query heads per kv head or the tail heads are never written.
+    group = heads // kv_heads
+    block_h = next((d for d in range(min(cap, group), 0, -1) if group % d == 0), 1)
+    assert block_h >= 16, f"no shared-memory-bounded tile covers {group} heads per kv head"
+    return block_n, block_h, threads
 
 
 def main(
