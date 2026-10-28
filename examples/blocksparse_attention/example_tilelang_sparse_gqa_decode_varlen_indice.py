@@ -353,14 +353,17 @@ def main(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=12
     assert_close("output", ref, out, atol=1e-3, rtol=1e-3)
 
     ## latency reference
-    for _ in range(10):
-        ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
-    torch.cuda.synchronize()
-    start = time.time()
-    for _ in range(100):
-        ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
-    torch.cuda.synchronize()
-    print("dense time: ", (time.time() - start) / 100 * 1000)
+    try:
+        for _ in range(10):
+            ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
+        torch.cuda.synchronize()
+        start = time.time()
+        for _ in range(100):
+            ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks, block_size)
+        torch.cuda.synchronize()
+        print("dense time: ", (time.time() - start) / 100 * 1000)
+    except (ImportError, RuntimeError) as exc:
+        print(f"flash-attn dense reference unavailable on this device: {exc}")
 
     for _ in range(10):
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
