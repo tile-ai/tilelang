@@ -15,6 +15,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
 
 
+def get_fwd_configs():
+    # The 128x128 two-stage tile needs 160 KiB of dynamic shared memory, which
+    # fits the data-center parts but not the ~99 KiB cap on sm_86/89/120.
+    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
+    if optin_smem is not None and optin_smem < 160 * 1024:
+        return 64, 64, 2, 128
+    return 128, 128, 2, 256
+
+
 @tilelang.jit(
     out_idx=[7],
     pass_configs={
@@ -352,8 +361,20 @@ def main(
     UQ = q_unpad.shape[0]
     UKV = k_unpad.shape[0]
 
+    block_M, block_N, num_stages, threads = get_fwd_configs()
     kernel = flashattn_sink(
-        batch, groups, UQ, UKV, heads, dim, is_causal, window_size=window_size, block_M=128, block_N=128, num_stages=2, threads=256
+        batch,
+        groups,
+        UQ,
+        UKV,
+        heads,
+        dim,
+        is_causal,
+        window_size=window_size,
+        block_M=block_M,
+        block_N=block_N,
+        num_stages=num_stages,
+        threads=threads,
     )
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, sinks)
