@@ -130,9 +130,9 @@ def test_profiler_uses_shared_device_helpers():
         pytest.param(None, (9, 0), 227 * 1024, id="sm90-fallback"),
         pytest.param(None, (8, 6), 99 * 1024, id="sm86-fallback"),
         pytest.param(None, (8, 0), 163 * 1024, id="sm80-fallback"),
-        pytest.param(None, (7, 5), 96 * 1024, id="sm75-fallback"),
+        pytest.param(None, (7, 5), 64 * 1024, id="sm75-fallback"),
         pytest.param(None, (10, 3), 227 * 1024, id="sm103-fallback"),
-        pytest.param(None, (5, 2), 99 * 1024, id="unknown-arch-default"),
+        pytest.param(None, (5, 2), 48 * 1024, id="unknown-arch-default"),
     ],
 )
 def test_get_max_dynamic_shared_memory(monkeypatch, optin_smem, capability, expected):
@@ -145,6 +145,17 @@ def test_get_max_dynamic_shared_memory(monkeypatch, optin_smem, capability, expe
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: capability)
 
     assert device_utils.get_max_dynamic_shared_memory() == expected
+
+
+def test_get_max_dynamic_shared_memory_honors_an_explicit_device(monkeypatch):
+    limits = {0: 227 * 1024, 1: 99 * 1024}
+    monkeypatch.setattr(device_utils, "IS_CUDA", True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: SimpleNamespace(shared_memory_per_block_optin=limits[index]))
+
+    assert device_utils.get_max_dynamic_shared_memory(torch.device("cuda:1")) == 99 * 1024
+    assert device_utils.get_max_dynamic_shared_memory(1) == 99 * 1024
+    assert device_utils.get_max_dynamic_shared_memory() == 227 * 1024
 
 
 def test_get_max_dynamic_shared_memory_without_cuda(monkeypatch):
