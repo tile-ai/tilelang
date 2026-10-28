@@ -114,6 +114,19 @@ def test_generated_names_preserve_globals(tmp_path):
     assert mutate(function).gen(_TestBuilder())() == function()
 
 
+def test_generated_names_preserve_unbound_global_declaration(tmp_path):
+    """An unused global declaration must not capture the generated builder."""
+    function = _load_function(tmp_path, "__tb = 0\ndef kernel(value):\n    global __tb_1\n    return value\n")
+    assert mutate(function).gen(_TestBuilder())(123) == function(123)
+
+
+def test_generated_names_do_not_write_declared_globals(tmp_path):
+    """Generated loop targets must not create a global declared by user code."""
+    function = _load_function(tmp_path, "def kernel(_):\n    global __1\n    if True:\n        pass\n    return 7\n")
+    assert mutate(function).gen(_TestBuilder())(123) == function(123)
+    assert "__1" not in function.__globals__
+
+
 @pytest.mark.parametrize("name", ["__tb", "__tb_fl", "__tb_fn", "__kwargs"])
 def test_generated_names_preserve_function_names(tmp_path, name):
     """Returning the generated closure must not resolve to an internal local."""

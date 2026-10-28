@@ -378,6 +378,8 @@ class DSLMutator(ast.NodeTransformer):
                     self.used_names.add(item.id)
                 elif isinstance(item, ast.arg):
                     self.used_names.add(item.arg)
+                elif isinstance(item, ast.Global):
+                    self.used_names.update(item.names)
                 elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     self.used_names.add(item.name)
                 elif isinstance(item, ast.alias):
