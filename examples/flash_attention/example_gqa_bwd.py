@@ -3,21 +3,22 @@ import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
 import argparse
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_fwd_configs():
     # The 128x64 tile needs ~120 KiB of dynamic shared memory, more than the
     # ~99 KiB cap on sm_86/89/120; the 64-row tile fits with four warps.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
-    if optin_smem is not None and optin_smem < 160 * 1024:
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
         return 64, 64, 128
     return 128, 64, 256
 
 
 def get_bwd_configs():
     # 128x32 with two stages needs ~129 KiB of dynamic shared memory.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
-    if optin_smem is not None and optin_smem < 160 * 1024:
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
         return 64, 32, 128
     return 128, 32, 256
 

@@ -45,6 +45,42 @@ def get_current_device():
     return device
 
 
+# Opt-in dynamic shared memory per block, in KiB, as documented for
+# cudaDevAttrMaxSharedMemoryPerBlockOptin. Used only when PyTorch does not
+# expose the limit itself (torch < 2.7).
+_OPTIN_SMEM_KIB = {
+    70: 96,
+    75: 96,
+    80: 163,
+    86: 99,
+    87: 163,
+    89: 99,
+    90: 227,
+    100: 227,
+    103: 227,
+    110: 227,
+    120: 99,
+    121: 99,
+}
+
+
+def get_max_dynamic_shared_memory(device: int | torch.device | None = None) -> int:
+    """Largest dynamic shared-memory allocation a thread block may request, in bytes.
+
+    Kernels that request more than this fail at launch with
+    ``Failed to set the allowed dynamic shared memory size to N``.
+    """
+    if not IS_CUDA:
+        return 48 * 1024
+    index = device if isinstance(device, int) else torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(index)
+    limit = getattr(props, "shared_memory_per_block_optin", None)
+    if limit is not None:
+        return int(limit)
+    major, minor = torch.cuda.get_device_capability(index)
+    return 1024 * _OPTIN_SMEM_KIB.get(major * 10 + minor, 99)
+
+
 def device_synchronize(device: int | torch.device | None = None) -> None:
     """Synchronize CUDA/HIP, MPS, or NPU, preferring CUDA when no device is given."""
     if device is None:

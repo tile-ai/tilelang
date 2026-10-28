@@ -9,6 +9,7 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_bwd_configs():
@@ -16,8 +17,8 @@ def get_bwd_configs():
     sm_version = sm_major * 10 + sm_minor
     # The 128x32 two-stage backward needs ~160 KiB of dynamic shared memory;
     # sm_86/89/120 allow about 99 KiB per block.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
-    if sm_version == 80 or (optin_smem is not None and optin_smem < 160 * 1024):
+    optin_smem = get_max_dynamic_shared_memory()
+    if sm_version == 80 or optin_smem < 160 * 1024:
         return 64, 32, 1, 128
     return 128, 32, 2, 256
 

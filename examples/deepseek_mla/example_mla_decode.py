@@ -5,6 +5,7 @@ from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 @tilelang.jit(
@@ -219,16 +220,17 @@ def get_decode_configs(heads, kv_heads):
     # The 64x64 tile needs ~226 KiB of dynamic shared memory; sm_86/89/120 cap
     # per-block dynamic shared memory at about 99 KiB. The smaller tile also
     # needs fewer warps for T.gemm to partition it.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
-    if optin_smem is not None and optin_smem < 160 * 1024:
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
         block_n, cap, threads = 32, 16, 128
     else:
         block_n, cap, threads = 64, 64, 256
-    # The kernel launches `heads // block_H` head blocks, so block_H must divide
-    # the number of query heads per kv head or the tail heads are never written.
+    # `T.gemm` maps whole 16-row tiles to warps, and the kernel launches
+    # `heads // block_H` head blocks, so block_H must be a multiple of 16 that
+    # divides the query heads per kv head; otherwise some heads are never written.
     group = heads // kv_heads
-    block_h = next((d for d in range(min(cap, group), 0, -1) if group % d == 0), 1)
-    assert block_h >= 16, f"no shared-memory-bounded tile covers {group} heads per kv head"
+    block_h = next((d for d in range(min(cap, group) // 16 * 16, 0, -16) if group % d == 0), 0)
+    assert block_h, f"{group} heads per kv head admit no multiple-of-16 tile"
     return block_n, block_h, threads
 
 

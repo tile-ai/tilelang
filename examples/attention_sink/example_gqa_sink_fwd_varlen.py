@@ -13,13 +13,14 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_fwd_configs():
     # The 128x128 two-stage tile needs 160 KiB of dynamic shared memory, which
     # fits the data-center parts but not the ~99 KiB cap on sm_86/89/120.
-    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
-    if optin_smem is not None and optin_smem < 160 * 1024:
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
         return 64, 64, 2, 128
     return 128, 128, 2, 256
 
