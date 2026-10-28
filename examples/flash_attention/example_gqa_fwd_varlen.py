@@ -176,7 +176,7 @@ def main(
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
-    if flash_attn_varlen_supported():
+    if flash_attn_varlen_supported(q_unpad.device):
         import flash_attn
 
         ref_out_unpad = flash_attn.flash_attn_varlen_func(

@@ -198,7 +198,7 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, c
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
-    if flash_attn_varlen_supported():
+    if flash_attn_varlen_supported(q_unpad.device):
         import flash_attn
 
         ref_out_unpad = flash_attn.flash_attn_varlen_func(
@@ -224,7 +224,7 @@ def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128, c
     t = do_bench(lambda: kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q))
     print(f"Tilelang time: {t} ms")
     print(f"Tilelang: {total_flops / t * 1e-9} TFlops")
-    if flash_attn_varlen_supported():
+    if flash_attn_varlen_supported(q_unpad.device):
         t = do_bench(
             lambda: flash_attn.flash_attn_varlen_func(
                 q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, 0.0, causal=causal
