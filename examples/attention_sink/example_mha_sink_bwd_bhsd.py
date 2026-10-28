@@ -11,9 +11,14 @@ from typing import Optional
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
+    # The 128x32 two-stage backward needs ~105 KiB of dynamic shared memory;
+    # sm_86/89/120 allow about 99 KiB per block.
+    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
     if sm_version == 80:
         return 64, 32, 1, 128
     elif sm_version >= 90:
+        if optin_smem is not None and optin_smem < 128 * 1024:
+            return 64, 32, 1, 128
         return 128, 32, 2, 256
     else:
         raise ValueError(f"Unsupported SM version: {sm_version}")

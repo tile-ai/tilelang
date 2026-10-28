@@ -5,13 +5,30 @@ import tilelang.language as T
 import argparse
 
 
+def get_fwd_configs():
+    # The 128x64 tile needs ~120 KiB of dynamic shared memory, more than the
+    # ~99 KiB cap on sm_86/89/120; the 64-row tile fits with four warps.
+    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
+    if optin_smem is not None and optin_smem < 160 * 1024:
+        return 64, 64, 128
+    return 128, 64, 256
+
+
+def get_bwd_configs():
+    # 128x32 with two stages needs ~129 KiB of dynamic shared memory.
+    optin_smem = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "shared_memory_per_block_optin", None)
+    if optin_smem is not None and optin_smem < 160 * 1024:
+        return 64, 32, 128
+    return 128, 32, 256
+
+
 @tilelang.jit(
     out_idx=[3, 4],
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
 )
-def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1):
+def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1, threads=256):
     scale = (1.0 / dim_qk) ** 0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim_qk]
@@ -28,7 +45,7 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
         Output: T.Tensor([batch, seq_len, heads, dim_v], dtype),  # type: ignore
         lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
-        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim_qk], dtype)
             K_shared = T.alloc_shared([block_N, dim_qk], dtype)
             V_shared = T.alloc_shared([block_N, dim_v], dtype)
@@ -341,9 +358,8 @@ class _attention(torch.autograd.Function):
     def forward(ctx, q, k, v, causal, groups=1, use_atomic=True):
         BATCH, N_CTX, H, D_HEAD_QK = q.shape
         D_HEAD_V = v.shape[-1]
-        block_M = 128
-        block_N = 64
-        mod = flashattn_fwd(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
+        block_M, block_N, threads = get_fwd_configs()
+        mod = flashattn_fwd(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups, threads=threads)
         o, lse = mod(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
@@ -366,15 +382,14 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
-        block_M = 128
-        block_N = 32
+        block_M, block_N, threads = get_bwd_configs()
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
         mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD_QK)
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
             kernel = flashattn_bwd_atomic_add(
-                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
+                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=threads, num_stages=2, groups=groups
             )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
@@ -388,7 +403,7 @@ class _attention(torch.autograd.Function):
             dv = dv.to(torch.float16)
         else:
             kernel = flashattn_bwd_split(
-                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=256, num_stages=2, groups=groups
+                BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N, threads=threads, num_stages=2, groups=groups
             )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
