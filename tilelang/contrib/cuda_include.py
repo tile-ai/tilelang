@@ -1,4 +1,4 @@
-"""CUDA include-path discovery for NVRTC compilation."""
+"""CUDA include-path discovery shared by compiler integrations."""
 
 from __future__ import annotations
 
