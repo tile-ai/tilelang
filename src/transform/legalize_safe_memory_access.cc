@@ -662,17 +662,15 @@ private:
 
     PrimExpr flat_extent = IntImm(address_dtype, 1);
     for (size_t i = 0; i < bound_buffer->shape.size(); ++i) {
-      flat_extent =
-          flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
+      flat_extent = flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
     }
-    PrimExpr elem_offset =
-        bound_buffer->elem_offset.defined()
-            ? Cast(address_dtype, bound_buffer->elem_offset)
-            : make_zero(address_dtype);
+    PrimExpr elem_offset = bound_buffer->elem_offset.defined()
+                               ? Cast(address_dtype, bound_buffer->elem_offset)
+                               : make_zero(address_dtype);
     // Physical end in bits: allocation covers
     // [elem_offset, elem_offset + flat_extent) in buffer dtype units.
-    PrimExpr buffer_bits = (elem_offset + flat_extent) *
-                           IntImm(address_dtype, buffer_elem_bits);
+    PrimExpr buffer_bits =
+        (elem_offset + flat_extent) * IntImm(address_dtype, buffer_elem_bits);
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     (void)is_load;

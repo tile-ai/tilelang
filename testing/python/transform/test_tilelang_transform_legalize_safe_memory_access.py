@@ -1022,7 +1022,6 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
-
 def test_tvm_access_ptr_elem_offset_included_in_bound():
     """Regression (KellyFrog #3518): include buffer.elem_offset in the physical end.
 
@@ -1067,9 +1066,7 @@ def test_tvm_access_ptr_elem_offset_included_in_bound():
     mod = tvm.IRModule.from_expr(func)
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(
-        body, op="tl.ptx_cp_async"
-    )
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) == 1
     call = cp_async_calls[0]
     assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
@@ -1078,24 +1075,11 @@ def test_tvm_access_ptr_elem_offset_included_in_bound():
     analyzer = tvm.arith.Analyzer()
     b_var = main.params[-1]
     for block_idx in (0, 1):
-        substituted = analyzer.simplify(
-            tvm.tirx.stmt_functor.substitute(
-                predicate, {b_var: tvm.tirx.const(block_idx, "int32")}
-            )
-        )
-        assert analyzer.can_prove(substituted), (
-            f"in-bounds block {block_idx} was predicated off with elem_offset; "
-            f"predicate={predicate}"
-        )
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} was predicated off with elem_offset; predicate={predicate}"
     for block_idx in (2, 3):
-        substituted = analyzer.simplify(
-            tvm.tirx.stmt_functor.substitute(
-                predicate, {b_var: tvm.tirx.const(block_idx, "int32")}
-            )
-        )
-        assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
-            f"OOB block {block_idx} should be false; predicate={predicate}"
-        )
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), f"OOB block {block_idx} should be false; predicate={predicate}"
 
 
 def test_tvm_access_ptr_large_shape_extent_uses_int64():
@@ -1121,9 +1105,7 @@ def test_tvm_access_ptr_large_shape_extent_uses_int64():
     mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(
-        body, op="tl.ptx_cp_async"
-    )
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) == 1
     call = cp_async_calls[0]
     # Constant in-bounds transfer: analyzer should prove the guard and drop it
@@ -1133,10 +1115,7 @@ def test_tvm_access_ptr_large_shape_extent_uses_int64():
     assert len(call.args) == 4
     predicate = call.args[3]
     analyzer = tvm.arith.Analyzer()
-    assert analyzer.can_prove(analyzer.simplify(predicate)), (
-        f"in-bounds access on large buffer was predicated off; predicate={predicate}"
-    )
-
+    assert analyzer.can_prove(analyzer.simplify(predicate)), f"in-bounds access on large buffer was predicated off; predicate={predicate}"
 
 
 if __name__ == "__main__":
