@@ -479,6 +479,15 @@ int64_t ConstArgDim(const CallNode *call, size_t index, const char *name) {
   return ConstShapeDim(call->args[index], name);
 }
 
+int64_t GemmBufferOffset(const CallNode *call, size_t index) {
+  int64_t offset = ConstArgDim(call, index, "PTO GEMM buf_offset");
+  ICHECK_GE(offset, 0) << "PTO GEMM buf_offset must be non-negative";
+  ICHECK_LE(offset, 30)
+      << "PTO GEMM buf_offset must allow two consecutive mutex buffer IDs "
+         "in [0, 31]";
+  return offset;
+}
+
 // SIMD register temps (T.simd.alloc_var): lanes >= 32.
 bool IsVectorLocalVarDtype(DataType dtype) { return dtype.lanes() >= 32; }
 
@@ -2106,7 +2115,10 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_has_gemm_ =
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
-  current_function_is_mixed_ = IsAscendMixedKernel(func);
+  const auto sections = GetAscendKernelSections(func);
+  current_function_is_mixed_ =
+      sections.has_vector &&
+      (sections.has_cube || sections.has_vector_subcores);
   if (current_function_is_mixed_) {
     MixedSectionVariableInfo mixed_info =
         MixedSectionLocalVarAnalyzer::Analyze(func->body);
@@ -2122,6 +2134,16 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   if (!current_function_is_mixed_) {
     PrintIndent();
     stream << "pto.init_core()\n";
+  } else if (!sections.has_cube) {
+    // Explicit vector subcores require the physical 1C2V launch group even
+    // without user Cube work. PTOAS emits a mixed binary only when both
+    // physical sections exist; core initialization keeps the idle AIC entry.
+    PrintIndent();
+    stream << "with tl.mixed_kernel_section(\"cube\"):\n";
+    int cube_scope = BeginScope();
+    PrintIndent();
+    stream << "pto.init_core()\n";
+    EndScope(cube_scope);
   }
   if (func_has_gemm_l1 || func_has_blockscaled_gemm_l1) {
     std::vector<Call> gemm_calls;
@@ -2147,10 +2169,6 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   PrintStmt_(func->body);
   EndScope(func_scope);
   stream << "\n";
-  if (current_function_is_mixed_) {
-    stream << current_function_name_ << " = tl.finalize_mixed_kernel("
-           << current_function_name_ << ")\n\n";
-  }
 }
 
 std::string CodeGenTileLangPTO::Finish() {
@@ -2355,16 +2373,26 @@ bool CodeGenTileLangPTO::HasAscendMad(const PrimFunc &func) const {
   return found;
 }
 
-bool CodeGenTileLangPTO::IsAscendMixedKernel(const PrimFunc &func) const {
-  bool has_cube = false;
-  bool has_vector = false;
+CodeGenTileLangPTO::AscendKernelSections
+CodeGenTileLangPTO::GetAscendKernelSections(const PrimFunc &func) const {
+  AscendKernelSections sections;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
     if (const auto *block = node.as<SBlockNode>()) {
-      has_cube = has_cube || block->name_hint == "CUBE";
-      has_vector = has_vector || block->name_hint == "VECTOR";
+      sections.has_cube = sections.has_cube || block->name_hint == "CUBE";
+      if (block->name_hint == "VECTOR") {
+        sections.has_vector = true;
+        if (auto opt = block->annotations.Get("vector_count")) {
+          const auto *count = opt.value().as<IntImmNode>();
+          ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
+              << "Mixed-kernel vector_count must be the constant integer 1 or "
+                 "2, got "
+              << opt.value();
+          sections.has_vector_subcores = true;
+        }
+      }
     }
   });
-  return has_cube && has_vector;
+  return sections;
 }
 
 bool CodeGenTileLangPTO::IsInlineableInvariantSimdBind(
@@ -3678,8 +3706,6 @@ CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallNode *op) {
          "sf_nz_stride="
       << sf_nz_stride << ", tile_k_sub=" << base_k;
 
-  CheckConstZero(op->args[14], "blockscaled GEMM buf_offset");
-
   Call call = GetRef<Call>(op);
   auto call_it = gemm_emit_context_by_call_.find(call);
   if (call_it != gemm_emit_context_by_call_.end()) {
@@ -4220,12 +4246,13 @@ void CodeGenTileLangPTO::EmitGemmRun(const PTOGemmEmitContext &ctx,
                                      const std::string &acc,
                                      const std::string &clear_accum,
                                      const std::string &unit_flag_ctrl,
-                                     int64_t hf32_mode) {
+                                     int64_t buf_offset, int64_t hf32_mode) {
   PrintIndent();
   stream << ctx.helper_name << ".run_l1_tile(" << a_mat << ", " << b_mat << ", "
          << ctx.a_l0_name << ", " << ctx.b_l0_name << ", " << acc
          << ", clear_accum=" << clear_accum
-         << ", unit_flag_ctrl=" << unit_flag_ctrl;
+         << ", unit_flag_ctrl=" << unit_flag_ctrl
+         << ", buf_offset=" << buf_offset;
   if (IsFloat32(ctx.input_dtype) && hf32_mode != 0) {
     // PTO names the hardware bit-47 mode ROUND_AWAY; CANN names the same
     // setting HF32TransMode::NEAREST_ZERO.
@@ -4241,13 +4268,14 @@ void CodeGenTileLangPTO::EmitBlockscaledGemmRun(
     const std::string &b_mat, const std::string &sfa_mat,
     const std::string &sfb_mat, const std::string &acc,
     const std::string &clear_accum, const std::string &sf_k_offset,
-    const std::string &unit_flag_ctrl) {
+    const std::string &unit_flag_ctrl, int64_t buf_offset) {
   PrintIndent();
   stream << ctx.helper_name << ".run_l1_tile(" << a_mat << ", " << b_mat << ", "
          << sfa_mat << ", " << sfb_mat << ", " << ctx.a_l0_name << ", "
          << ctx.b_l0_name << ", " << acc << ", sf_k_offset=" << sf_k_offset
          << ", clear_accum=" << clear_accum
-         << ", unit_flag_ctrl=" << unit_flag_ctrl << ")\n";
+         << ", unit_flag_ctrl=" << unit_flag_ctrl
+         << ", buf_offset=" << buf_offset << ")\n";
 }
 
 void CodeGenTileLangPTO::EmitAscendGemmL1(const CallNode *op) {
@@ -4268,7 +4296,8 @@ void CodeGenTileLangPTO::EmitAscendGemmL1(const CallNode *op) {
   }
   EmitGemmRun(ctx, a_mat, b_mat, acc,
               RemoveOutermostParentheses(PrintExpr_(op->args[8])),
-              RemoveOutermostParentheses(PrintExpr_(op->args[11])), hf32_mode);
+              RemoveOutermostParentheses(PrintExpr_(op->args[11])),
+              GemmBufferOffset(op, 10), hf32_mode);
 }
 
 void CodeGenTileLangPTO::EmitAscendBlockscaledGemmL1(const CallNode *op) {
@@ -4285,7 +4314,8 @@ void CodeGenTileLangPTO::EmitAscendBlockscaledGemmL1(const CallNode *op) {
   EmitBlockscaledGemmRun(ctx, a_mat, b_mat, sfa_mat, sfb_mat, acc,
                          RemoveOutermostParentheses(PrintExpr_(op->args[10])),
                          RemoveOutermostParentheses(PrintExpr_(op->args[15])),
-                         RemoveOutermostParentheses(PrintExpr_(op->args[17])));
+                         RemoveOutermostParentheses(PrintExpr_(op->args[17])),
+                         GemmBufferOffset(op, 14));
 }
 
 void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
@@ -5345,8 +5375,9 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
              "precision=\"ftz_true\" or \"exact\"";
       if (prec == SfuPrecision::kExact) {
         ValidateVecMode_(op, 3);
-        os << "tl.vdiv_precise_f32(" << PrintExpr_(op->args[0]) << ", "
-           << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
+        os << "pto.vdiv(" << PrintExpr_(op->args[0]) << ", "
+           << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
+           << ", precision=\"high_precision\")";
         return;
       }
     }
@@ -6179,21 +6210,22 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
                          "PTO floating-point cast");
     return;
   }
-  if (scalar_value && from_integer && to_integer && !from.is_bool() &&
-      !to.is_bool() &&
-      (from.bits() != to.bits() || from.is_uint() != to.is_uint())) {
-    // Python int(runtime_value) tries to consume a device-side SSA value while
-    // PTODSL is tracing. Use pto.cast for both width changes and same-width
-    // signedness changes so later scalar ops see the authored int/uint type.
-    os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO integer cast");
-    return;
-  }
-  if (from_integer && to_integer && from.bits() <= to.bits()) {
-    // Address-index widening should not become Python int(...), because that
-    // coerces PTODSL runtime values and breaks tracing. Same-width int/uint
-    // casts are handled above to preserve signedness for downstream scalar
-    // lowering.
-    PrintExpr_(op->value, os);
+  if (from_integer && to_integer) {
+    std::string value = PrintExpr_(op->value);
+    if (from.is_bool() || to.is_bool()) {
+      // A numeric-to-bool cast tests nonzero; truncating to i1 would turn an
+      // even nonzero value into false. Scalarize the comparisons because the
+      // SIMT backend does not support builtin-vector setcc. Bool vectors use
+      // the same byte carrier as bool storage, with each lane normalized.
+      DataType element = to.is_bool() ? DataType::Int(8) : to.element_of();
+      os << "tl.cast_bool_vector(" << value << ", " << DataTypeName(element)
+         << ")";
+      return;
+    }
+    // pto.cast preserves builtin-vector shape while changing the element
+    // dtype. Keep both width and signedness conversions: dropping an inline
+    // int32x2 -> uint32x2 cast changes the semantics of subsequent min/max.
+    os << ScalarCastExpr(value, to.element_of(), "PTO integer cast");
     return;
   }
 
@@ -6206,13 +6238,6 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
     ICHECK(imm) << "PTO bool cast expected a floating-point immediate";
     os << (imm->value != 0.0 ? "True" : "False");
     return;
-  }
-
-  if (from_integer && to_integer) {
-    // All scalar integer casts were handled above. Only unsupported vector
-    // narrowing remains; preserve its diagnostic instead of emitting a cast.
-    LOG(FATAL) << "PTO integer cast currently supports scalar values only, got "
-               << from << " -> " << to;
   }
 
   if (from_integer && to_float) {
@@ -7717,6 +7742,13 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
     const std::string contiguous_suffix =
         store_lanes > 1 ? ", contiguous=" + std::to_string(store_lanes) : "";
     if (scope == "local.fragment" || scope == "local") {
+      // LLVM local stores require the same signless integer carrier as the
+      // allocation. Keep unsigned semantics in expressions and restore them
+      // on load; this same-width cast preserves all stored bits.
+      if (IsInteger32(buffer_dtype)) {
+        value = ScalarCastExpr(value, DataType::Int(buffer_dtype.bits()),
+                               "PTO SIMT local vector store");
+      }
       stream << "pto.store(" << value << ", "
              << GetVarID(op->buffer->data.get()) << ", " << index_str
              << contiguous_suffix << ")\n";

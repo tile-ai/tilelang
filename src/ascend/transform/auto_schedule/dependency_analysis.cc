@@ -23,12 +23,14 @@
  */
 
 #include "./dependency_analysis.h"
+#include "./task_analysis.h"
 #include "./task_annotations.h"
 #include "ascend/op/utils.h"
 
 #include <algorithm>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -116,23 +118,16 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
   return {controls.begin() + first, controls.end()};
 }
 
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        const ConstrSet &b_ctx, const BufferRegion &b_region,
-                        ControlNode *loop, int offset,
-                        size_t num_storage_owners,
-                        const ConflictHintList &root_conflicts,
-                        Optional<PrimExpr> a_pitch,
-                        Optional<PrimExpr> b_pitch) {
-  const bool cross = offset != 0;
-  if (cross && loop == nullptr)
-    return false;
-
+static std::optional<bool>
+DeclaredRegionConflict(const BufferRegion &a_region,
+                       const BufferRegion &b_region, ControlNode *loop,
+                       int offset, const ConflictHintList &root_conflicts) {
   bool declared_no_conflict = false;
   for (const Any &entry : ActiveConflictHints(loop, root_conflicts)) {
     Array<Any> hint = Downcast<Array<Any>>(entry);
     bool is_conflict = IsConflictHint(hint);
     int64_t cross_code = Downcast<IntImm>(hint[2])->value;
-    if (cross_code != -1 && (cross_code == 1) != cross)
+    if (cross_code != -1 && (cross_code == 1) != (offset != 0))
       continue;
     bool matches = (HintOperandMatches(hint[0], a_region) &&
                     HintOperandMatches(hint[1], b_region)) ||
@@ -146,6 +141,17 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   }
   // A forced conflict wins if contradictory declarations match.
   if (declared_no_conflict)
+    return false;
+  return std::nullopt;
+}
+
+static bool
+RegionsMayOverlap(const ConstrSet &a_ctx, const BufferRegion &a_region,
+                  const ConstrSet &b_ctx, const BufferRegion &b_region,
+                  ControlNode *loop, int offset, size_t num_storage_owners,
+                  Optional<PrimExpr> a_pitch, Optional<PrimExpr> b_pitch) {
+  const bool cross = offset != 0;
+  if (cross && loop == nullptr)
     return false;
 
   if (!a_region->buffer->data.same_as(b_region->buffer->data))
@@ -257,6 +263,267 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
            ana.z3_prover.CanProve(any_dim_disjoint));
 }
 
+bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
+                        const ConstrSet &b_ctx, const BufferRegion &b_region,
+                        ControlNode *loop, int offset,
+                        size_t num_storage_owners,
+                        const ConflictHintList &root_conflicts,
+                        Optional<PrimExpr> a_pitch,
+                        Optional<PrimExpr> b_pitch) {
+  if (offset != 0 && loop == nullptr)
+    return false;
+  if (auto declared = DeclaredRegionConflict(a_region, b_region, loop, offset,
+                                             root_conflicts))
+    return *declared;
+  return RegionsMayOverlap(a_ctx, a_region, b_ctx, b_region, loop, offset,
+                           num_storage_owners, a_pitch, b_pitch);
+}
+
+struct CompoundTaskAccesses {
+  bool has_loop{false};
+  bool complete{true};
+  std::vector<Var> local_vars;
+  std::vector<BufferRegion> reads;
+  std::vector<BufferRegion> writes;
+};
+
+// Keep loop-dependent addresses symbolic instead of taking the rectangular
+// hull of an entire atomic task. Ignoring internal bounds, guards and Bind
+// relations overestimates execution, so an inconclusive query stays a conflict.
+// Only complete, ordinary GM/UB copy footprints with stable dense layouts can
+// refine dependencies; other accesses are retained solely for hint matching.
+class CompoundTaskAccessCollector : public StmtVisitor {
+public:
+  static CompoundTaskAccesses Collect(const TaskNode *task) {
+    CompoundTaskAccessCollector collector;
+    collector.outer_ctx_ = task->outer_ctx;
+    PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
+      if (const auto *loop = node.as<ForNode>()) {
+        collector.result_.has_loop = true;
+        collector.result_.local_vars.push_back(loop->loop_var);
+      } else if (const auto *bind = node.as<BindNode>()) {
+        collector.result_.local_vars.push_back(bind->var);
+      }
+    });
+    uint16_t pipe = task->GetPipeMask();
+    if (pipe == 0 || (pipe & (pipe - 1)) != 0)
+      collector.result_.complete = false;
+    // A task's footprint also depends on enclosing control. Do not refine
+    // accesses whose indices, layout or execution read mutable state.
+    for (const IRStructure *node = task; node; node = node->GetParent()) {
+      for (const auto &guard : node->GetGuards()) {
+        if (guard->IsCondition()) {
+          collector.CheckPure(
+              static_cast<const ConditionGuard *>(guard.get())->condition);
+        } else {
+          const auto *attribute =
+              static_cast<const AttributeGuard *>(guard.get());
+          if (auto expr = attribute->node.as<PrimExpr>())
+            collector.CheckPure(expr.value());
+          if (attribute->value.defined())
+            collector.CheckAttributeValue(attribute->value);
+        }
+      }
+      if (node->IsControl()) {
+        const auto &control = static_cast<const ControlNode *>(node)->control;
+        collector.CheckPure(control->min);
+        collector.CheckPure(control->extent);
+        if (control->step.has_value())
+          collector.CheckPure(control->step.value());
+      }
+    }
+    for (const Constr &constraint : task->outer_ctx.constrs_) {
+      if (constraint.kind == Constr::kBindRange) {
+        collector.CheckPure(constraint.range->min);
+        collector.CheckPure(constraint.range->extent);
+      } else {
+        collector.CheckPure(constraint.value);
+      }
+    }
+    collector(task->stmt);
+    // Scheduled task regions also include reads from their detached guards.
+    for (const auto &guard : task->GetGuards()) {
+      if (guard->IsCondition()) {
+        collector.RecordControl(
+            static_cast<const ConditionGuard *>(guard.get())->condition);
+      } else {
+        const auto *attribute =
+            static_cast<const AttributeGuard *>(guard.get());
+        if (const auto *expr = attribute->node.as<PrimExprNode>())
+          collector.RecordControl(GetRef<PrimExpr>(expr));
+      }
+    }
+    return std::move(collector.result_);
+  }
+
+private:
+  void CheckAttributeValue(const PrimExpr &expr) {
+    // Assumption guards carry a constant diagnostic string in their value;
+    // their predicate is the node and still requires the strict pure check.
+    if (!expr.as<StringImmNode>())
+      CheckPure(expr);
+  }
+
+  void CheckPure(const PrimExpr &expr) {
+    result_.complete &= expr.dtype().is_scalar() &&
+                        (expr.dtype().is_int() || expr.dtype().is_uint() ||
+                         expr.dtype().is_bool()) &&
+                        SideEffect(expr) <= CallEffectKind::kPure;
+  }
+
+  void CheckLayout(const PrimExpr &expr) {
+    CheckPure(expr);
+    // Function parameters describe one shared layout. Internal or enclosing
+    // loop/Bind values can differ between the compared access instances.
+    for (const Var &var : result_.local_vars) {
+      if (UsesVar(expr, [&](const VarNode *v) { return v == var.get(); }))
+        result_.complete = false;
+    }
+    for (const Constr &constraint : outer_ctx_.constrs_) {
+      if (constraint.kind != Constr::kConstr &&
+          UsesVar(expr,
+                  [&](const VarNode *v) { return v == constraint.var.get(); }))
+        result_.complete = false;
+    }
+  }
+
+  void CheckBuffer(const Buffer &buffer, const Region &ranges) {
+    if (ranges.size() != buffer->shape.size() ||
+        !buffer->axis_separators.empty() ||
+        (!buffer->strides.empty() &&
+         buffer->strides.size() != buffer->shape.size())) {
+      result_.complete = false;
+      return;
+    }
+    CheckLayout(buffer->elem_offset);
+    arith::Analyzer analyzer;
+    Int64Promoter promoter;
+    PrimExpr dense_stride = IntImm(DataType::Int(64), 1);
+    for (size_t i = buffer->shape.size(); i > 0; --i) {
+      CheckLayout(buffer->shape[i - 1]);
+      if (!buffer->strides.empty()) {
+        CheckLayout(buffer->strides[i - 1]);
+        if (!analyzer.CanProveEqual(
+                cast(DataType::Int(64), promoter(buffer->strides[i - 1])),
+                dense_stride))
+          result_.complete = false;
+      }
+      dense_stride = dense_stride *
+                     cast(DataType::Int(64), promoter(buffer->shape[i - 1]));
+    }
+    for (const Range &range : ranges) {
+      CheckPure(range->min);
+      CheckPure(range->extent);
+    }
+  }
+
+  void CheckCopy(const CallNode *call) {
+    AscendCopy copy(call->args, call->annotations);
+    bool ordinary = (IsGlobalBuffer(copy->src) && IsSharedBuffer(copy->dst)) ||
+                    (IsSharedBuffer(copy->src) && IsGlobalBuffer(copy->dst));
+    if (!ordinary || copy->nd2nz || copy->transpose || copy->dual_dst_ctl ||
+        copy->data_select || copy->pad_value.defined() ||
+        copy->mx_sf_data.defined() || copy->l0_pitch.defined() ||
+        !is_zero(copy->unit_flag_ctl) || !is_zero(copy->sub_blockid) ||
+        ++copies_ > 16) {
+      result_.complete = false;
+      return;
+    }
+    for (const auto &[key, value] : call->annotations) {
+      if (auto expr = value.as<PrimExpr>())
+        CheckPure(expr.value());
+      else
+        result_.complete = false;
+    }
+    CheckBuffer(copy->src, copy->src_range);
+    CheckBuffer(copy->dst, copy->dst_range);
+  }
+
+  void Record(const Stmt &stmt) {
+    // Keep even unsupported accesses for explicit hint matching. They cannot
+    // justify eliminating a dependency: a region list need not describe an
+    // opaque pointer use or a special transfer's full physical footprint.
+    TaskAccessInfo accesses = AnalyzeTaskAccesses(stmt);
+    result_.reads.insert(result_.reads.end(), accesses.read_regions.begin(),
+                         accesses.read_regions.end());
+    result_.writes.insert(result_.writes.end(), accesses.write_regions.begin(),
+                          accesses.write_regions.end());
+  }
+
+  void RecordControl(const PrimExpr &expr) {
+    CheckPure(expr);
+    Record(Evaluate(expr));
+  }
+
+  void VisitStmt(const Stmt &stmt) final {
+    if (stmt.as<SeqStmtNode>() || stmt.as<ForNode>() ||
+        stmt.as<IfThenElseNode>() || stmt.as<AttrStmtNode>()) {
+      StmtVisitor::VisitStmt(stmt);
+    } else {
+      Record(stmt);
+      if (const auto *bind = stmt.as<BindNode>()) {
+        CheckPure(bind->value);
+        return;
+      }
+      if (const auto *eval = stmt.as<EvaluateNode>()) {
+        if (is_zero(eval->value))
+          return;
+        const auto *call = eval->value.as<CallNode>();
+        if (call && IsAscendCopyCall(call) && call->args.size() == 2) {
+          CheckCopy(call);
+          return;
+        }
+        if (call && task_analysis_detail::IsCrossCoreSyncCall(call) &&
+            call->args.size() == 3 && call->args[0].as<IntImmNode>() &&
+            call->args[1].as<StringImmNode>()) {
+          // These intrinsics order their pipe without accessing tensor storage.
+          // Keep the calls and their resource effects intact; only their scalar
+          // flag operand contributes accesses to this footprint analysis. A
+          // mutable flag expression still prevents refinement.
+          CheckPure(call->args[2]);
+          return;
+        }
+      }
+      result_.complete = false;
+    }
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    if ((op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) ||
+        (op->step.has_value() && !is_one(op->step.value())))
+      result_.complete = false;
+    RecordControl(op->min);
+    RecordControl(op->extent);
+    if (op->step.has_value())
+      RecordControl(op->step.value());
+    VisitStmt(op->body);
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    RecordControl(op->condition);
+    VisitStmt(op->then_case);
+    if (op->else_case.defined())
+      VisitStmt(op->else_case.value());
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != tl::attr::kAscendTask &&
+        op->attr_key != tl::attr::kAscendPerCoreTask &&
+        op->attr_key != tirx::attr::tilelang_assume &&
+        op->attr_key != tl::attr::kAssumeRequiresRuntimeCheck)
+      result_.complete = false;
+    if (const auto *expr = op->node.as<PrimExprNode>())
+      RecordControl(GetRef<PrimExpr>(expr));
+    CheckAttributeValue(op->value);
+    Record(Evaluate(op->value));
+    VisitStmt(op->body);
+  }
+
+  CompoundTaskAccesses result_;
+  ConstrSet outer_ctx_;
+  size_t copies_{0};
+};
+
 std::vector<DepInfo>
 AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                     const BufferVersionMap &manual_buffer_versions,
@@ -281,6 +548,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
   struct RegionAccess {
     TaskNode *task;
     BufferRegion region;
+    bool is_write;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -292,11 +560,110 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     CollectAllTaskNodes(nodes[i], tasks);
     for (TaskNode *task : tasks) {
       for (const BufferRegion &region : task->GetReadRegions())
-        accesses[i].reads.push_back({task, region});
+        accesses[i].reads.push_back({task, region, false});
       for (const BufferRegion &region : task->GetWriteRegions())
-        accesses[i].writes.push_back({task, region});
+        accesses[i].writes.push_back({task, region, true});
     }
   }
+
+  std::unordered_map<TaskNode *, CompoundTaskAccesses> compound_accesses;
+  size_t refinement_budget = 64;
+  ConflictHintList positive_hints;
+  for (const Any &entry : ActiveConflictHints(loop, root_conflicts)) {
+    if (IsConflictHint(Downcast<Array<Any>>(entry)))
+      positive_hints.push_back(entry);
+  }
+  auto get_compound_accesses =
+      [&](TaskNode *task) -> const CompoundTaskAccesses & {
+    auto it = compound_accesses.find(task);
+    if (it == compound_accesses.end())
+      it = compound_accesses
+               .emplace(task, CompoundTaskAccessCollector::Collect(task))
+               .first;
+    return it->second;
+  };
+  auto may_conflict = [&](const RegionAccess &lhs, const RegionAccess &rhs,
+                          int distance, size_t owners) {
+    if (distance != 0 && loop == nullptr)
+      return false;
+    auto declared = DeclaredRegionConflict(lhs.region, rhs.region, loop,
+                                           distance, root_conflicts);
+    if (declared == std::optional<bool>(true))
+      return true;
+    // Match original leaf regions before freshening, and before a storage-wide
+    // no-conflict or a disjoint hull can hide an explicit positive declaration.
+    // Match each operand separately to avoid a quadratic leaf-pair hint scan.
+    for (const Any &entry : positive_hints) {
+      Array<Any> hint = Downcast<Array<Any>>(entry);
+      int64_t cross_code = Downcast<IntImm>(hint[2])->value;
+      if (cross_code != -1 && (cross_code == 1) != (distance != 0))
+        continue;
+      auto matches = [&](const Any &operand, const RegionAccess &access) {
+        if (HintOperandMatches(operand, access.region))
+          return true;
+        const auto &compound = get_compound_accesses(access.task);
+        for (const BufferRegion &region :
+             access.is_write ? compound.writes : compound.reads) {
+          if (region->buffer.same_as(access.region->buffer) &&
+              HintOperandMatches(operand, region))
+            return true;
+        }
+        return false;
+      };
+      if ((matches(hint[0], lhs) && matches(hint[1], rhs)) ||
+          (matches(hint[1], lhs) && matches(hint[0], rhs)))
+        return true;
+    }
+    if (declared.has_value())
+      return *declared;
+    const Var &lhs_storage = lhs.region->buffer->data;
+    const Var &rhs_storage = rhs.region->buffer->data;
+    Optional<PrimExpr> lhs_pitch = lhs.task->GetL0Pitch(lhs_storage);
+    Optional<PrimExpr> rhs_pitch = rhs.task->GetL0Pitch(rhs_storage);
+    if (!RegionsMayOverlap(lhs.task->outer_ctx, lhs.region, rhs.task->outer_ctx,
+                           rhs.region, loop, distance, owners, lhs_pitch,
+                           rhs_pitch))
+      return false;
+    if (!lhs.region->buffer.same_as(rhs.region->buffer) ||
+        !IsGlobalBuffer(lhs.region->buffer) || refinement_budget == 0)
+      return true;
+
+    const auto &a = get_compound_accesses(lhs.task);
+    const auto &b = get_compound_accesses(rhs.task);
+    if (!a.complete || !b.complete || (!a.has_loop && !b.has_loop))
+      return true;
+    // Two invocations of the same atomic task can use different internal
+    // iterations, even at logical distance zero or when comparing it to itself.
+    Map<Var, PrimExpr> a_sub, b_sub;
+    for (const Var &var : a.local_vars)
+      a_sub.Set(var, var.copy_with_suffix("_a"));
+    for (const Var &var : b.local_vars)
+      b_sub.Set(var, var.copy_with_suffix("_b"));
+    bool found_a = false, found_b = false;
+    for (const BufferRegion &a_region : lhs.is_write ? a.writes : a.reads) {
+      if (!a_region->buffer.same_as(lhs.region->buffer))
+        continue;
+      found_a = true;
+      for (const BufferRegion &b_region : rhs.is_write ? b.writes : b.reads) {
+        if (!b_region->buffer.same_as(rhs.region->buffer))
+          continue;
+        found_b = true;
+        if (refinement_budget == 0)
+          return true;
+        --refinement_budget;
+        if (RegionsMayOverlap(lhs.task->outer_ctx.Substitute(a_sub),
+                              BufferRegion(a_region->buffer,
+                                           Substitute(a_region->region, a_sub)),
+                              rhs.task->outer_ctx.Substitute(b_sub),
+                              BufferRegion(b_region->buffer,
+                                           Substitute(b_region->region, b_sub)),
+                              loop, distance, owners, lhs_pitch, rhs_pitch))
+          return true;
+      }
+    }
+    // Missing access metadata is never evidence of disjointness.
+    return !found_a || !found_b;
+  };
 
   std::function<void(IRStructure *, CoveredDependencyMap &)>
       collect_subtree_deps = [&](IRStructure *node, CoveredDependencyMap &out) {
@@ -426,11 +793,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             int manual_versions = get_manual_versions(storage);
             if (manual_versions && !owner_exclusion) {
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
-                if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                       rhs.task->outer_ctx, rhs.region, loop, d,
-                                       /*num_storage_owners=*/0, root_conflicts,
-                                       lhs.task->GetL0Pitch(lhs_storage),
-                                       rhs.task->GetL0Pitch(rhs_storage))) {
+                if (may_conflict(lhs, rhs, d, /*owners=*/0)) {
                   add_pair(storage, d, lhs.task, rhs.task);
                   break;
                 }
@@ -442,12 +805,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                 continue;
               if (distance < 0 && loop == nullptr)
                 continue;
-              if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
-                                     rhs.task->outer_ctx, rhs.region, loop,
-                                     distance, get_num_storage_owners(storage),
-                                     root_conflicts,
-                                     lhs.task->GetL0Pitch(lhs_storage),
-                                     rhs.task->GetL0Pitch(rhs_storage))) {
+              if (may_conflict(lhs, rhs, distance,
+                               get_num_storage_owners(storage))) {
                 add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
                          rhs.task,
                          owner_exclusion ? DependencyKind::kOwnerExclusion

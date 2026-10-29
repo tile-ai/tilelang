@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import ptodsl._scalar as _scalar
 from ptodsl import pto
 from ptodsl._scalar import _emit_llvm_byte_pointer
 from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
-from ptodsl._types import _DType, _restore_integer_signedness, _signless_integer_type
+from ptodsl._types import _DType
 from ptoas.mlir.dialects import llvm
 from ptoas.mlir.ir import IntegerType
 
@@ -43,6 +42,13 @@ def vector_from_list(dtype: _DType, values: list | tuple) -> VecValue:
 def vector_to_list(value: VecValue) -> list:
     """Extract all lanes of a PTODSL builtin vector into a Python list."""
     return [_vector_lane(value, lane) for lane in range(value.size)]
+
+
+def cast_bool_vector(value: VecValue, dtype: _DType) -> VecValue:
+    """Normalize bool lanes without unsupported builtin-vector comparisons."""
+    one = pto.const(1, dtype=dtype)
+    zero = pto.const(0, dtype=dtype)
+    return vector_from_list(dtype, [pto.select(lane != 0, one, zero) for lane in vector_to_list(value)])
 
 
 def store_vector_to_list(dst: list, offset: int, value: VecValue) -> None:
@@ -143,20 +149,3 @@ def scalar_div(lhs, rhs):
 
 def scalar_rsqrt(value):
     return 1.0 / pto.sqrt(value)
-
-
-_scalar_select = _scalar.select
-
-
-def _scalar_select_compat(cond, true_val, false_val):
-    # PTOAS's select drops the authored signedness of integer operands, which
-    # breaks e.g. uint32 allreduce branch merges; restore it.
-    authored_type = unwrap_surface_value(true_val).type
-    result = _scalar_select(cond, true_val, false_val)
-    raw_result = unwrap_surface_value(result)
-    if IntegerType.isinstance(authored_type) and _signless_integer_type(authored_type) == raw_result.type:
-        result = wrap_surface_value(_restore_integer_signedness(raw_result, authored_type))
-    return result
-
-
-_scalar.select = _scalar_select_compat

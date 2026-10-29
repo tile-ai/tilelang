@@ -180,14 +180,15 @@ private:
   void EmitGemmRun(const PTOGemmEmitContext &ctx, const std::string &a_mat,
                    const std::string &b_mat, const std::string &acc,
                    const std::string &clear_accum,
-                   const std::string &unit_flag_ctrl, int64_t hf32_mode);
+                   const std::string &unit_flag_ctrl, int64_t buf_offset,
+                   int64_t hf32_mode);
   void
   EmitBlockscaledGemmRun(const PTOGemmEmitContext &ctx,
                          const std::string &a_mat, const std::string &b_mat,
                          const std::string &sfa_mat, const std::string &sfb_mat,
                          const std::string &acc, const std::string &clear_accum,
                          const std::string &sf_k_offset,
-                         const std::string &unit_flag_ctrl);
+                         const std::string &unit_flag_ctrl, int64_t buf_offset);
   std::string LocalVarID(const VarNode *var);
   bool IsLocalVarBuffer(const VarNode *var) const;
   void EmitMixedEntrySnapshot(const VarNode *var);
@@ -196,7 +197,12 @@ private:
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
   bool IsAscendCubeKernel(const PrimFunc &func) const;
-  bool IsAscendMixedKernel(const PrimFunc &func) const;
+  struct AscendKernelSections {
+    bool has_cube{false};
+    bool has_vector{false};
+    bool has_vector_subcores{false};
+  };
+  AscendKernelSections GetAscendKernelSections(const PrimFunc &func) const;
 
   bool current_function_has_gemm_{false};
   bool current_function_is_cube_{false};
