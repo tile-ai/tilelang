@@ -239,71 +239,37 @@ def sparse_attention(
     @T.macro
     def gather_kv(k, job, sid, extra, KV, ExtraKV, group_smaller, group_larger, smaller, larger, kv, raw8, raw4):
         for i in T.unroll(16):
-            with T.Stage(0):
-                if direct_query_masks:
-                    lo = group_smaller[(job % 2) * query_mask_stride + k * 32 + sid * 16 + i]
-                    hi = group_larger[(job % 2) * query_mask_stride + k * 32 + sid * 16 + i]
-                else:
-                    lo = smaller[sid * 16 + i]
-                    hi = larger[sid * 16 + i]
-                second = T.if_then_else(hi < valid_limit, hi, lo)
-                n_burst = T.alloc_var("int32")
-                n_burst = T.if_then_else(lo < valid_limit, 2, 0)
-                safe_lo = T.if_then_else(n_burst == 0, T.uint32(0), lo)
-                stride = T.alloc_var("int64")
-                stride = T.Cast("int64", second - lo)
-                if decode and extra_topk > 0 and extra_fp4:
-                    # Both formats retain separate bytes, sharing one
-                    # MTE2 task and one V consumer ownership boundary.
-                    with T.Task():
-                        if extra:
-                            extra_pairs = T.StridedTensor(
-                                (extra_storage_bytes // 288, 2, 288),
-                                (288, stride * 288, 1),
-                                "uint8",
-                                data=ExtraKV.data,
-                            )
-                            for _ in T.Serial(1):
-                                T.assume(n_burst > 0)
-                                T.assume(n_burst == 0 or safe_lo < extra_pairs.shape[0])
-                                T.copy(
-                                    extra_pairs[safe_lo, :n_burst, :],
-                                    raw4[i * 2 : i * 2 + n_burst, :],
-                                    l2_cache_ctrl=gather_cache_policy,
-                                )
-                        else:
-                            main_pairs = T.StridedTensor(
-                                (kv_storage_bytes // 528, 2, 528),
-                                (528, stride * 528, 1),
-                                "uint8",
-                                data=KV.data,
-                            )
-                            for _ in T.Serial(1):
-                                T.assume(n_burst > 0)
-                                T.assume(n_burst == 0 or safe_lo < main_pairs.shape[0])
-                                T.copy(
-                                    main_pairs[safe_lo, :n_burst, :],
-                                    raw8[i * 2 : i * 2 + n_burst, :528],
-                                    l2_cache_ctrl=gather_cache_policy,
-                                )
-                elif decode:
-                    if extra_topk > 0 and extra:
+            if direct_query_masks:
+                lo = group_smaller[(job % 2) * query_mask_stride + k * 32 + sid * 16 + i]
+                hi = group_larger[(job % 2) * query_mask_stride + k * 32 + sid * 16 + i]
+            else:
+                lo = smaller[sid * 16 + i]
+                hi = larger[sid * 16 + i]
+            second = T.if_then_else(hi < valid_limit, hi, lo)
+            n_burst = T.alloc_var("int32")
+            n_burst = T.if_then_else(lo < valid_limit, 2, 0)
+            safe_lo = T.if_then_else(n_burst == 0, T.uint32(0), lo)
+            stride = T.alloc_var("int64")
+            stride = T.Cast("int64", second - lo)
+            if decode and extra_topk > 0 and extra_fp4:
+                # Both formats retain separate bytes, sharing one
+                # MTE2 task and one V consumer ownership boundary.
+                with T.Task():
+                    if extra:
                         extra_pairs = T.StridedTensor(
-                            (extra_storage_bytes // 528, 2, 528),
-                            (528, stride * 528, 1),
+                            (extra_storage_bytes // 288, 2, 288),
+                            (288, stride * 288, 1),
                             "uint8",
                             data=ExtraKV.data,
                         )
-                        # Limit DMA assumptions to this copy.
                         for _ in T.Serial(1):
-                            with T.Stage(0):
-                                T.assume(n_burst > 0)
-                                T.assume(n_burst == 0 or safe_lo < extra_pairs.shape[0])
-                                T.copy(
-                                    extra_pairs[safe_lo, :n_burst, :],
-                                    raw8[i * 2 : i * 2 + n_burst, :528],
-                                    l2_cache_ctrl=gather_cache_policy,
-                                )
+                            T.assume(n_burst > 0)
+                            T.assume(n_burst == 0 or safe_lo < extra_pairs.shape[0])
+                            T.copy(
+                                extra_pairs[safe_lo, :n_burst, :],
+                                raw4[i * 2 : i * 2 + n_burst, :],
+                                l2_cache_ctrl=gather_cache_policy,
+                            )
                     else:
                         main_pairs = T.StridedTensor(
                             (kv_storage_bytes // 528, 2, 528),
@@ -311,33 +277,63 @@ def sparse_attention(
                             "uint8",
                             data=KV.data,
                         )
-                        # Limit DMA assumptions to this copy.
                         for _ in T.Serial(1):
-                            with T.Stage(0):
-                                T.assume(n_burst > 0)
-                                T.assume(n_burst == 0 or safe_lo < main_pairs.shape[0])
-                                T.copy(
-                                    main_pairs[safe_lo, :n_burst, :],
-                                    raw8[i * 2 : i * 2 + n_burst, :528],
-                                    l2_cache_ctrl=gather_cache_policy,
-                                )
-                else:
-                    main_pairs = T.StridedTensor(
-                        (nk, 2, 512),
-                        (512, stride * 512, 1),
-                        "bfloat16",
-                        data=KV.data,
-                    )
-                    # Limit DMA assumptions to this copy.
-                    for _ in T.Serial(1):
-                        with T.Stage(0):
                             T.assume(n_burst > 0)
                             T.assume(n_burst == 0 or safe_lo < main_pairs.shape[0])
                             T.copy(
                                 main_pairs[safe_lo, :n_burst, :],
-                                kv[i * 2 : i * 2 + n_burst, :],
+                                raw8[i * 2 : i * 2 + n_burst, :528],
                                 l2_cache_ctrl=gather_cache_policy,
                             )
+            elif decode:
+                if extra_topk > 0 and extra:
+                    extra_pairs = T.StridedTensor(
+                        (extra_storage_bytes // 528, 2, 528),
+                        (528, stride * 528, 1),
+                        "uint8",
+                        data=ExtraKV.data,
+                    )
+                    # Limit DMA assumptions to this copy.
+                    for _ in T.Serial(1):
+                        T.assume(n_burst > 0)
+                        T.assume(n_burst == 0 or safe_lo < extra_pairs.shape[0])
+                        T.copy(
+                            extra_pairs[safe_lo, :n_burst, :],
+                            raw8[i * 2 : i * 2 + n_burst, :528],
+                            l2_cache_ctrl=gather_cache_policy,
+                        )
+                else:
+                    main_pairs = T.StridedTensor(
+                        (kv_storage_bytes // 528, 2, 528),
+                        (528, stride * 528, 1),
+                        "uint8",
+                        data=KV.data,
+                    )
+                    # Limit DMA assumptions to this copy.
+                    for _ in T.Serial(1):
+                        T.assume(n_burst > 0)
+                        T.assume(n_burst == 0 or safe_lo < main_pairs.shape[0])
+                        T.copy(
+                            main_pairs[safe_lo, :n_burst, :],
+                            raw8[i * 2 : i * 2 + n_burst, :528],
+                            l2_cache_ctrl=gather_cache_policy,
+                        )
+            else:
+                main_pairs = T.StridedTensor(
+                    (nk, 2, 512),
+                    (512, stride * 512, 1),
+                    "bfloat16",
+                    data=KV.data,
+                )
+                # Limit DMA assumptions to this copy.
+                for _ in T.Serial(1):
+                    T.assume(n_burst > 0)
+                    T.assume(n_burst == 0 or safe_lo < main_pairs.shape[0])
+                    T.copy(
+                        main_pairs[safe_lo, :n_burst, :],
+                        kv[i * 2 : i * 2 + n_burst, :],
+                        l2_cache_ctrl=gather_cache_policy,
+                    )
 
     @T.macro
     def attention_body(Q, KV, Indices, Sink, Lengths, ExtraKV, ExtraIndices, ExtraLengths, O, Max, LSE):
@@ -466,50 +462,46 @@ def sparse_attention(
                 else:
                     T.fill(kv, 0)
             emitted = T.alloc_var("int32", init=0)
-            # Each nested scheduler loop is manual independently. VF loops
-            # belong to their enclosing VF task and cannot contain T.Stage.
+            # Keep the outer pipeline phases explicit; nested loops are automatic.
             for step in T.Pipelined(T.ceildiv(nq - bx, 32) * nb, num_stages=6 + q_lead_shift, annotations={"enable_offset": True}):
                 job = step // nb
                 k = step % nb
                 qidx = bx + job * 32
-                with T.Stage(0):
-                    if q_prefetch and k == 0:
-                        T.copy(Q[qidx, :, :], q_l1[job % q_slots, :, :])
+                if q_prefetch and k == 0:
+                    T.copy(Q[qidx, :, :], q_l1[job % q_slots, :, :])
                 # Flat execution needs the producer tiles before their consumers.
                 if not pipeline_stages:
-                    with T.Stage(q_lead_shift - (1 if extra_metadata_lead else 0)):
-                        extra = k >= nb0
-                        load_metadata(
-                            k,
-                            job,
-                            qidx,
-                            extra,
-                            Indices,
-                            ExtraIndices,
-                            Lengths,
-                            ExtraLengths,
-                            indices,
-                            group_smaller,
-                            group_larger,
-                            None if direct_query_masks else smaller,
-                            None if direct_query_masks else larger,
-                        )
-                    with T.Stage(q_lead_shift + (0 if extra_metadata_lead else 1) if pipeline_stages else 0):
-                        gather_kv(
-                            k,
-                            job,
-                            sid,
-                            extra,
-                            KV,
-                            ExtraKV,
-                            group_smaller,
-                            group_larger,
-                            None if direct_query_masks else smaller,
-                            None if direct_query_masks else larger,
-                            kv,
-                            raw8,
-                            raw4,
-                        )
+                    extra = k >= nb0
+                    load_metadata(
+                        k,
+                        job,
+                        qidx,
+                        extra,
+                        Indices,
+                        ExtraIndices,
+                        Lengths,
+                        ExtraLengths,
+                        indices,
+                        group_smaller,
+                        group_larger,
+                        None if direct_query_masks else smaller,
+                        None if direct_query_masks else larger,
+                    )
+                    gather_kv(
+                        k,
+                        job,
+                        sid,
+                        extra,
+                        KV,
+                        ExtraKV,
+                        group_smaller,
+                        group_larger,
+                        None if direct_query_masks else smaller,
+                        None if direct_query_masks else larger,
+                        kv,
+                        raw8,
+                        raw4,
+                    )
                 # In the pipeline, source order follows issue order; Stage still
                 # identifies the logical tile used by dependency analysis.
                 with T.Stage(2 + q_lead_shift if pipeline_stages else 0):
@@ -545,14 +537,12 @@ def sparse_attention(
                         T.copy(Q[qidx, :, :], q_l1[0, :, :])
                     T.set_mmad_direction("m")
                     for d in T.Pipelined(4, num_stages=4):
-                        with T.Stage(0):
-                            T.copy(q_l1[job % q_slots, :, d * 128 : (d + 1) * 128], aq)
-                            with T.Task():
-                                T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bq[:32, :], l0_pitch=4)
-                                T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bq[32:, :], l0_pitch=4)
-                            T.gemm(aq, bq, cq, transpose_B=True, clear_accum=d == 0, unit_flag_ctrl=T.if_then_else(d == 3, 3, 2))
+                        T.copy(q_l1[job % q_slots, :, d * 128 : (d + 1) * 128], aq)
+                        with T.Task():
+                            T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bq[:32, :], l0_pitch=4)
+                            T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bq[32:, :], l0_pitch=4)
+                        T.gemm(aq, bq, cq, transpose_B=True, clear_accum=d == 0, unit_flag_ctrl=T.if_then_else(d == 3, 3, 2))
                     T.dual_copy(cq, p, unit_flag_ctrl=3)
-                with T.Stage(4 + q_lead_shift if pipeline_stages else 0):
                     if k == 0:
                         with T.SimdVF():
                             T.fill(maxima, -3.4028234663852886e38)
@@ -596,7 +586,6 @@ def sparse_attention(
                     T.copy(s[:32, :], s_l1[sid * 32 : sid * 32 + 32, :])
                     if not pipeline_stages:
                         ss[sid] = T.Cast("uint32", delta[0] > 6.0 / scale)
-                with T.Stage(4 + q_lead_shift if pipeline_stages else 0):
                     if k == nb - 1:
                         with T.SimdVF():
                             rmax, unused = T.simd.vdintlv(T.simd.vld(maxima[0]), T.simd.vld(maxima[0]))
@@ -646,48 +635,41 @@ def sparse_attention(
                         # analysis when both KV tiles are boundaries.
                         pv_flag = T.alloc_var("int32", init=T.if_then_else(k == nb - 1, 3, 2))
                     for _pv_region in T.Pipelined(1, num_stages=4):
-                        with T.Stage(0):
-                            T.copy(s_l1, aq[:, :64])
-                            clear = T.alloc_var("int32", init=T.Cast("int32", ss_pairs[0] != T.uint64(0)))
-                            ss_result[0] = T.Cast("uint32", clear)
+                        T.copy(s_l1, aq[:, :64])
+                        clear = T.alloc_var("int32", init=T.Cast("int32", ss_pairs[0] != T.uint64(0)))
+                        ss_result[0] = T.Cast("uint32", clear)
                         for _pv_branches in T.serial(1):
                             if ss_result[0] != T.uint32(0):
                                 for d in T.Pipelined(4, num_stages=2):
-                                    with T.Stage(0):
-                                        T.dual_copy(cpv[d, :, :], out)
-                                        if emitted > 0:
-                                            scale_output_vf(True, d, factors, out, accum)
-                                        else:
-                                            scale_output_vf(False, d, factors, out, accum)
+                                    T.dual_copy(cpv[d, :, :], out)
+                                    if emitted > 0:
+                                        scale_output_vf(True, d, factors, out, accum)
+                                    else:
+                                        scale_output_vf(False, d, factors, out, accum)
                                 emitted = emitted + 1
                                 for d in T.Pipelined(4, num_stages=2):
-                                    with T.Stage(0):
-                                        with T.Task():
-                                            T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bv[:32, :], l0_pitch=8)
-                                            T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bv[32:, :], l0_pitch=8)
-                                        pv_gemm(k, pv_flag if nb == 2 else 0, True, d, aq, bv, cpv)
+                                    with T.Task():
+                                        T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bv[:32, :], l0_pitch=8)
+                                        T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bv[32:, :], l0_pitch=8)
+                                    pv_gemm(k, pv_flag if nb == 2 else 0, True, d, aq, bv, cpv)
                             else:
                                 for d in T.Pipelined(4, num_stages=2):
-                                    with T.Stage(0):
-                                        with T.Task():
-                                            T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bv[:32, :], l0_pitch=8)
-                                            T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bv[32:, :], l0_pitch=8)
-                                        pv_gemm(k, pv_flag if nb == 2 else 0, k == 0, d, aq, bv, cpv)
-                with T.Stage(5 + q_lead_shift if pipeline_stages else 0):
+                                    with T.Task():
+                                        T.copy(kv_l1_0[:, d * 128 : (d + 1) * 128], bv[:32, :], l0_pitch=8)
+                                        T.copy(kv_l1_1[:, d * 128 : (d + 1) * 128], bv[32:, :], l0_pitch=8)
+                                    pv_gemm(k, pv_flag if nb == 2 else 0, k == 0, d, aq, bv, cpv)
                     if last_output:
                         for d in T.Pipelined(4, num_stages=2):
-                            with T.Stage(0):
-                                T.dual_copy(cpv[d, :, :], out, unit_flag_ctrl=3)
-                                if emitted > 0:
-                                    final_output_vf(True, d, denorm, out, accum, final)
-                                else:
-                                    final_output_vf(False, d, denorm, out, accum, final)
+                            T.dual_copy(cpv[d, :, :], out, unit_flag_ctrl=3)
+                            if emitted > 0:
+                                final_output_vf(True, d, denorm, out, accum, final)
+                            else:
+                                final_output_vf(False, d, denorm, out, accum, final)
                             if not decode:
-                                with T.Stage(0):
-                                    T.copy(
-                                        final[:, d * 128 : (d + 1) * 128],
-                                        O[qidx, sid * 32 : sid * 32 + 32, d * 128 : (d + 1) * 128],
-                                    )
+                                T.copy(
+                                    final[:, d * 128 : (d + 1) * 128],
+                                    O[qidx, sid * 32 : sid * 32 + 32, d * 128 : (d + 1) * 128],
+                                )
                         if decode:
                             T.copy(final[:, :512], O[qidx, sid * 32 : sid * 32 + 32, :])
                 if pipeline_stages:
