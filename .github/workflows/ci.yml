@@ -297,6 +297,9 @@ jobs:
             export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
             echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
             echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          else
+            # PyTorch 2.15 rejects the Apple Paravirtual GPU on hosted macOS 26 runners.
+            echo "METAL_TORCH_REQUIREMENT=torch==2.14.1" | tee -a "${GITHUB_ENV}"
           fi
 
           echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
@@ -326,8 +329,11 @@ jobs:
           set -o pipefail
 
           uv pip install --upgrade pip setuptools wheel
+          if [[ -n "${METAL_TORCH_REQUIREMENT:-}" ]]; then
+            uv pip install -v "${METAL_TORCH_REQUIREMENT}"
+          fi
           if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
-            # Do not let the global unsafe-best-match policy escape the nightly ROCm index.
+            # Do not let the global unsafe-best-match policy escape the configured nightly index.
             UV_INDEX_STRATEGY=first-index uv pip install --prerelease=allow -v torch
           fi
           uv pip install -v -r requirements-test.txt
