@@ -2,7 +2,7 @@
 
 import torch
 import tilelang
-from examples.ascend.flashmla.kernel import PASS_CONFIG, sparse_attention
+from examples.ascend.flashmla.kernel import sparse_attention
 
 
 def prepare_decode(param, inputs):
@@ -69,7 +69,6 @@ def prepare_decode(param, inputs):
         func,
         target="ascend",
         out_idx=[8, 9],
-        pass_configs=PASS_CONFIG,
         compile_flags=["-Ofast", "-mllvm", "-enable-hiipu-vf-loop-unroll"],
     )
     kv_bytes = kv.view(torch.uint8).view(-1)

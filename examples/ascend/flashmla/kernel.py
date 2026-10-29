@@ -12,11 +12,6 @@ from tilelang import tvm
 from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_l0c_layout, make_ascend_major_k_layout, make_ascend_major_mn_layout
 from examples.ascend.flashmla.quantization import dequantize
 
-PASS_CONFIG = {
-    tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True,
-    tilelang.PassConfigKey.TL_DISABLE_SAFE_MEMORY_ACCESS: True,
-}
-
 
 def rolled(n):
     return T.unroll(n, annotations={"pragma_unroll_factor": 1})
@@ -763,6 +758,5 @@ def compile_prefill(nq, nk, topk, **kwargs):
             prefill(nq, nk, topk, **kwargs),
             target="ascend",
             out_idx=[5, 6, 7],
-            pass_configs=PASS_CONFIG,
             compile_flags=["-Ofast", "-mllvm", "-enable-hiipu-vf-loop-unroll"],
         )
