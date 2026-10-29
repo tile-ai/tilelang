@@ -171,6 +171,7 @@ def test_full_logical_tile_padding_npu(use_alias):
             if use_alias:
                 c_storage = T.alloc_l0c((31, 16), "float32")
                 accum = T.view(c_storage, (31, 16))
+                T.annotate_layout({accum: make_ascend_l0c_layout(accum)})
             else:
                 accum = T.alloc_l0c((31, 16), "float32")
             T.copy(A[:, 112:176], a_l1)

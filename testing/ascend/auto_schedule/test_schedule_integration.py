@@ -169,7 +169,7 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer"):
+            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer", "tl.AscendLowerTileOp"):
                 snapshots[info.name] = mod
 
     with tvm.transform.PassContext(instruments=[Capture()]):
@@ -183,12 +183,67 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     assert all(loop.annotations["tl.multi_buffer_counter_map"][b.data].same_as(counters[0]) for loop in owners)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     assert int(allocated_buffer(materialized, "l0a").shape[0]) == 2
+    lowered = tilelang.transform.LowerAccessPtr()(snapshots["tl.AscendLowerTileOp"])
+    physical_a = allocated_buffer(lowered, "l0a")
+    offsets = [call.args[2] for call in calls(lowered, "tirx.tvm_access_ptr") if call.args[1].same_as(physical_a.data)]
+    # Stale logical layout entries must not erase the automatic version axis
+    # while decoding flat DMA/MMAD pointers into physical fractal coordinates.
+    assert offsets and any(not tvm.arith.Analyzer().can_prove_equal(offset, 0) for offset in offsets)
     assert artifact.kernel_source and artifact.device_mod
 
 
 def test_counter_slot_is_compatible_with_l1_layout_lowering():
     artifact = tilelang.lower(_make_counter_l1_layout_program(), target="ascend")
     assert artifact.kernel_source and artifact.device_mod
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "prefix,versions,storage_dtype,view_dtype,mode",
+    [
+        (64, 1, "float32", "float32", "iteration"),
+        (0, 2, "float32", "float32", "iteration"),
+        (64, 2, "float32", "float32", "iteration"),
+        (64, 3, "float32", "bfloat16", "counter"),
+        (64, 2, "bfloat16", "float32", "iteration"),
+        (1, 2, "float32", "float32", "iteration"),
+    ],
+    ids=["single-version", "dense", "padded", "narrow-counter", "widen", "unaligned-slot"],
+)
+def test_padded_storage_versions_preserve_ordinary_view_addresses(prefix, versions, storage_dtype, view_dtype, mode):
+    """Layout padding, version expansion and UB alignment must agree in bytes."""
+    import torch
+
+    storage_bits, view_bits = tvm.DataType(storage_dtype).bits, tvm.DataType(view_dtype).bits
+    view_extent = 512 * storage_bits // view_bits
+    view_prefix = prefix * storage_bits // view_bits
+    output_extent = view_extent - view_prefix
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 512), storage_dtype), O: T.Tensor((4, output_extent), view_dtype)):
+        with T.Kernel(1):
+            owner = T.alloc_shared((512,), storage_dtype)
+            view = T.view(owner, shape=(view_extent,), dtype=view_dtype)
+            T.annotate_layout({owner: tilelang.layout.Layout((512,), lambda i: i + prefix)})
+            T.annotate_buffer_versions({owner: (versions, mode)})
+            for step in T.Pipelined(4, num_stages=max(versions, 2)):
+                if prefix == 1:
+                    # Scalar accesses allow a slot whose physical size is not
+                    # 32B-aligned; the later UB alignment pass must preserve it.
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(512):
+                            owner[i] = A[step, i]
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(output_extent):
+                            O[step, i] = view[i + view_prefix]
+                else:
+                    T.copy(A[step, :], owner)
+                    T.copy(view[view_prefix:view_extent], O[step, :])
+
+    a = torch.arange(1, 4 * 512 + 1, dtype=torch.float32).reshape(4, 512).to(getattr(torch, storage_dtype))
+    result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
+    expected = a.view(getattr(torch, view_dtype))[:, :output_extent]
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
 
 
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
@@ -586,6 +641,8 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     T.copy(ub, C[i, :, :])
                     progress += 1
 
+    # L0C copies attach frontend layout hints; scheduling consumes the
+    # normalized Buffer-keyed map produced by layout inference.
     resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
     assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
