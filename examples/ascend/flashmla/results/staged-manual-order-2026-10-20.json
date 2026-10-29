@@ -1,0 +1,309 @@
+{
+  "date": "2026-10-20",
+  "record_type": "Summary of existing local validation; documentation refresh did not rebuild or rerun tests.",
+  "implementation_commit": "9c46d1cdab152218a9335fadfcde8816409f402b",
+  "validation_parent_commit": "e9244819b52faa5775dc777570ff9110d0234ba1",
+  "validation_revision_note": "The original summary records the parent HEAD before committing the validated changes as implementation_commit. Current committed kernel source and local native-library hashes match that summary.",
+  "source_file": "examples/ascend/flashmla/staged.py",
+  "source_sha256": "986817d6f361116825ea0cb9a51db576e7a3fc9730c02936c1a0826fc4d826a2",
+  "native_library": "build/lib/libtilelang.so",
+  "native_library_sha256": "f63a9bebad45fe496bb7e89c621d29efaf819fca41a61e612648175c65885713",
+  "kernel_issue_phase_calls": 0,
+  "protocol": "Independent QK/PV B4 layouts retain the shared ring. Manual per-core/pipe source order gains strict phase separation when ascending stages would reverse it during reconstruction. Gather precedes the delta wait and SS publication.",
+  "validation": {
+    "focused_tests": 68,
+    "autoschedule_tests": 776,
+    "flashmla_device_tests": 11,
+    "flashmla_device_result": "11 passed, 106 warnings in 921.15s (0:15:21)",
+    "device_cases": [
+      "Cross-query and repeated-launch last-tile rescale: pipeline and flat (2)",
+      "Index-group tail and query state (1)",
+      "Alternating rescale and accumulate (1)",
+      "Query prefetch boundaries: 5, 15, 16 tiles (3)",
+      "Independent main/extra lengths with FP8/FP4 extra cache (4)"
+    ],
+    "schedule_comparisons": 8,
+    "baseline_regression": "ascending and nonadjacent source order failed before the fix",
+    "format": "all hooks passed"
+  },
+  "schedule_cases": [
+    {
+      "case": "bf16-2",
+      "old_II": 6057,
+      "new_II": 6059,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 416,
+      "new_strict_edges": 217,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "bf16-4",
+      "old_II": 6668,
+      "new_II": 6670,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 367,
+      "new_strict_edges": 192,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "bf16-10",
+      "old_II": 6687,
+      "new_II": 6689,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 351,
+      "new_strict_edges": 194,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "bf16-11",
+      "old_II": 6668,
+      "new_II": 6670,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 367,
+      "new_strict_edges": 198,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "bf16-16",
+      "old_II": 7514,
+      "new_II": 7516,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 391,
+      "new_strict_edges": 201,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "fp8",
+      "old_II": 7964,
+      "new_II": 7966,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 438,
+      "new_strict_edges": 226,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "fp4",
+      "old_II": 6185,
+      "new_II": 6187,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 438,
+      "new_strict_edges": 226,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    },
+    {
+      "case": "flat",
+      "old_II": 8678,
+      "new_II": 8678,
+      "same_dependencies_and_storage": {
+        "data_deps": true,
+        "register_phase_deps": true,
+        "resource_deps": true,
+        "owner_exclusion_deps": true,
+        "pipe_order_deps": true,
+        "stage_order_deps": true,
+        "manual_stages": true,
+        "latencies": true,
+        "iis": true,
+        "resource_flags": true,
+        "buffer_sizes": true,
+        "memory_groups": true
+      },
+      "manual_pipe_edges": 391,
+      "new_strict_edges": 0,
+      "manual_order_violations": [],
+      "old_explicit_order_violations": []
+    }
+  ],
+  "gather_ss_schedule": [
+    {
+      "id": 48,
+      "stage": 6,
+      "r": 4498,
+      "position": 46
+    },
+    {
+      "id": 49,
+      "stage": 10,
+      "r": 4499,
+      "position": 47
+    },
+    {
+      "id": 50,
+      "stage": 10,
+      "r": 4499,
+      "position": 48
+    }
+  ],
+  "emitted_order": [
+    {
+      "gather": 1219,
+      "delta_wait": 1226,
+      "ss_store": 1227
+    },
+    {
+      "gather": 1434,
+      "delta_wait": 1441,
+      "ss_store": 1442
+    }
+  ],
+  "emitted_order_note": "Line numbers identify the generated AIV source retained with the local validation artifacts.",
+  "performance": {
+    "nq": 4096,
+    "nk": 4096,
+    "topk": 640,
+    "kv_format": "bf16",
+    "device": "Ascend950DT_9581",
+    "physical_device": 6,
+    "method": "kernelkit msprof, flush_l2=True, 3 alternating rounds of 10 launches",
+    "statistic": "Median of three round means; ten launches per round.",
+    "rounds": 3,
+    "launches_per_round": 10,
+    "round_mean_us": {
+      "before": [
+        866.1031723022461,
+        866.2700653076172,
+        865.6740188598633
+      ],
+      "candidate": [
+        867.4383163452148,
+        866.7469024658203,
+        867.7959442138672
+      ]
+    },
+    "median_us": {
+      "before": 866.1031723022461,
+      "candidate": 867.4383163452148
+    },
+    "ratio_candidate_over_before": 1.0015415531147631,
+    "candidate_change_percent": 0.15415531147631167,
+    "bitwise_equal_to_baseline": true,
+    "source_sha256": {
+      "before": "b837367b6c3a0e9d8d9faabaac3946726361012ba6bf1b87050163a5b827425e",
+      "candidate": "986817d6f361116825ea0cb9a51db576e7a3fc9730c02936c1a0826fc4d826a2"
+    },
+    "before_asc_sha256": "b6dcc15179098b2f42434d84a4b43b9faf019d8bcc7fb57c3d4b5b399a557a20",
+    "candidate_asc_sha256": "87e2df31c277e75d649622886ae55f88417733e982a34032231ae7ca23f2a284",
+    "baseline_library_sha256": "70a7dbb4d1e9eba8111985119c8d2960f0fc080c0604fbb2dcf8cbfc14858b80",
+    "baseline_description": "Intermediate reordered kernel retaining one IssuePhase; not the original e924481 or 9e691b0 source.",
+    "baseline_method": "Recompiled frozen old-compiler perf-final.asc via the Ascend postproc hook; main_kernel ABI and returned source identity checked.",
+    "isolation": "Timing began only after all 11 device regression tests exited successfully.",
+    "sample_limit": "The existing performance record saves round means, not individual launch samples."
+  },
+  "coverage_limits": [
+    "The latest record does not include a rerun of the full 14-case BF16 or nine-case decode correctness runners.",
+    "Timing covers one BF16 configuration; no updated three-case BF16 or ten-case decode performance sweep is recorded.",
+    "Earlier B4 and decode correctness/performance records retain their own source and compiler identities.",
+    "Modeled loop II is not measured device latency."
+  ],
+  "evidence_directory": ".tlcli/manual-pipe-order-20261020",
+  "evidence_files": [
+    "summary.json",
+    "focused-tests.log",
+    "autoschedule-tests.log",
+    "device-tests.log",
+    "performance.json",
+    "performance.log",
+    "before.py",
+    "candidate.py",
+    "perf-before.asc",
+    "perf-candidate.asc"
+  ]
+}

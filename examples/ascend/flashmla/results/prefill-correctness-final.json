@@ -1,0 +1,330 @@
+{
+  "torch": "2.13.0+cpu",
+  "torch_npu": "2.13.0rc1",
+  "device": "Ascend950DT_9581",
+  "visible_devices": "5",
+  "cases": [
+    {
+      "nq": 1,
+      "nk": 128,
+      "topk": 128,
+      "sink": false,
+      "lengths": false,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 1,
+      "nk": 128,
+      "topk": 128,
+      "sink": true,
+      "lengths": true,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 1,
+      "nk": 128,
+      "topk": 128,
+      "sink": true,
+      "lengths": true,
+      "amplified": true,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 62,
+      "nk": 95,
+      "topk": 128,
+      "sink": false,
+      "lengths": false,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 62,
+      "nk": 95,
+      "topk": 128,
+      "sink": true,
+      "lengths": true,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 62,
+      "nk": 95,
+      "topk": 128,
+      "sink": true,
+      "lengths": true,
+      "amplified": true,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        512,
+        256,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 213,
+      "nk": 1521,
+      "topk": 512,
+      "sink": false,
+      "lengths": false,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1280,
+        640,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 213,
+      "nk": 1521,
+      "topk": 512,
+      "sink": true,
+      "lengths": true,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1280,
+        640,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 213,
+      "nk": 1521,
+      "topk": 512,
+      "sink": true,
+      "lengths": true,
+      "amplified": true,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1280,
+        640,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 65,
+      "nk": 4096,
+      "topk": 640,
+      "sink": false,
+      "lengths": false,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1536,
+        768,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 65,
+      "nk": 4096,
+      "topk": 640,
+      "sink": true,
+      "lengths": true,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1536,
+        768,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 65,
+      "nk": 4096,
+      "topk": 640,
+      "sink": true,
+      "lengths": true,
+      "amplified": true,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        1536,
+        768,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 65,
+      "nk": 128,
+      "topk": 64,
+      "sink": false,
+      "lengths": false,
+      "amplified": false,
+      "all_invalid_rows": true,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        384,
+        192,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    },
+    {
+      "nq": 33,
+      "nk": 95,
+      "topk": 192,
+      "sink": true,
+      "lengths": true,
+      "amplified": false,
+      "all_invalid_rows": false,
+      "q_strides": [
+        41600,
+        640,
+        1
+      ],
+      "index_strides": [
+        640,
+        320,
+        1
+      ],
+      "correctness": {
+        "reference": true,
+        "manual": true
+      }
+    }
+  ]
+}
