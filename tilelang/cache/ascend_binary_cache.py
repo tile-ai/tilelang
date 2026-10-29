@@ -29,6 +29,7 @@ class AscendBinaryCache(BinaryCache):
         compile_format: str,
         options: list[str] | None = None,
         linker_options: list[str] | None = None,
+        compiler: str = "bisheng",
     ) -> str:
         key_data: dict[str, Any] = {
             "tilelang_version": __version__,
@@ -38,5 +39,6 @@ class AscendBinaryCache(BinaryCache):
             "compile_format": compile_format,
             "options": tuple(options or []),
             "linker_options": tuple(linker_options or []),
+            "compiler": compiler,
         }
         return cls._finalize_key(key_data)

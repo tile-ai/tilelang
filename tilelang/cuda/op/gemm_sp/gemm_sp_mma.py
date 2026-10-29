@@ -96,6 +96,8 @@ class GemmSPMMA(GemmSPBase):
         C_local = self.C
         clear_accum = self.clear_accum
         assert micro_size_k <= self.K, f"K dimension {self.K} should be >= micro size k {micro_size_k}"
+        if self.K % micro_size_k != 0:
+            raise ValueError(f"gemm_sp K tile size {self.K} must be divisible by the sparse MMA K atom {micro_size_k}")
         if self.is_gemm_ss():
 
             @T.prim_func

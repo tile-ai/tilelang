@@ -28,6 +28,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <set>
@@ -61,6 +62,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
+#include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/buffer_addresses.h"
@@ -388,6 +390,205 @@ bool HasResourceDependency(const IRStructure *a, const IRStructure *b,
   if ((NodeResourceMask(a) & NodeResourceMask(b) & core_pipes) != 0)
     return true;
   return (a->GetHbmMask() & b->GetHbmMask()) != 0;
+}
+
+// Configuration values are state; loop-control and pipe registers are fences.
+constexpr uint16_t kConfigurationRegisters =
+    static_cast<uint16_t>(SpecialRegister::kHf32Mode) |
+    static_cast<uint16_t>(SpecialRegister::kMmadDirection) |
+    static_cast<uint16_t>(SpecialRegister::kPadValue) |
+    static_cast<uint16_t>(SpecialRegister::kAtomicMode);
+
+using PhaseDependency = std::tuple<int64_t, int64_t, int64_t, int64_t>;
+
+uint16_t MustWriteConfigurationRegisters(const Stmt &stmt) {
+  if (const auto *attr = stmt.as<AttrStmtNode>())
+    return MustWriteConfigurationRegisters(attr->body);
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    uint16_t mask = 0;
+    for (const Stmt &child : seq->seq)
+      mask |= MustWriteConfigurationRegisters(child);
+    return mask;
+  }
+  if (const auto *branch = stmt.as<IfThenElseNode>())
+    return branch->else_case.defined()
+               ? MustWriteConfigurationRegisters(branch->then_case) &
+                     MustWriteConfigurationRegisters(branch->else_case.value())
+               : 0;
+  const auto *evaluate = stmt.as<EvaluateNode>();
+  const auto *call = evaluate ? evaluate->value.as<CallNode>() : nullptr;
+  if (!call)
+    return 0;
+  uint16_t mask = AnalyzeSpecialRegisterWrites(stmt) & kConfigurationRegisters;
+  if (mask == 0)
+    return 0;
+  // Only an executed setter kills the old value. A setter nested in an
+  // argument (for example if_then_else) need not execute.
+  for (const PrimExpr &arg : call->args)
+    mask &= ~AnalyzeSpecialRegisterWrites(Evaluate(arg));
+  return mask;
+}
+
+// Effects on hardware configuration only. Ordinary scalar storage and variables
+// use the existing buffer-region and definition-use dependencies.
+struct ConfigurationEffects {
+  uint16_t read_mask{0}; // Incoming values that may be read.
+  uint16_t write_mask{0};
+  uint16_t must_write_mask{0};
+};
+
+ConfigurationEffects SummarizeConfigurationEffects(const IRStructure *node,
+                                                   CoreMask core) {
+  ConfigurationEffects result;
+  if (!(NodeCoreMask(node) & core))
+    return result;
+  if (node->IsTask()) {
+    const auto *task = static_cast<const TaskNode *>(node);
+    result.read_mask = node->GetSpecialReadMask() & kConfigurationRegisters;
+    result.write_mask = node->GetSpecialWriteMask() & kConfigurationRegisters;
+    result.must_write_mask = MustWriteConfigurationRegisters(task->stmt);
+  } else {
+    const auto *control = static_cast<const ControlNode *>(node);
+    result = SummarizeConfigurationEffects(control->task.get(), core);
+    std::vector<IRStructure *> children;
+    for (const auto &child : control->children)
+      children.push_back(child.get());
+    // Match buffer dependency analysis: stages establish logical iteration
+    // order; the sibling list establishes physical per-pipe issue order.
+    std::stable_sort(children.begin(), children.end(),
+                     [](const IRStructure *a, const IRStructure *b) {
+                       return a->GetStage() < b->GetStage();
+                     });
+    for (const IRStructure *child : children) {
+      ConfigurationEffects effects = SummarizeConfigurationEffects(child, core);
+      result.read_mask |= effects.read_mask & ~result.must_write_mask;
+      result.write_mask |= effects.write_mask;
+      result.must_write_mask |= effects.must_write_mask;
+    }
+    const auto *extent = control->control->extent.as<IntImmNode>();
+    if (!extent || extent->value <= 0)
+      result.must_write_mask = 0;
+  }
+  if (node->HasConditions())
+    result.must_write_mask = 0;
+  return result;
+}
+
+bool HasUnknownConfigurationEffects(const IRStructure *node) {
+  auto opaque = [](const ObjectRef &ir) {
+    bool found = false;
+    PostOrderVisit(ir, [&](const ObjectRef &object) {
+      if (const auto *call = object.as<CallNode>()) {
+        found |= !call->op.as<OpNode>() ||
+                 call->op.same_as(builtin::call_extern()) ||
+                 call->op.same_as(builtin::tvm_call_packed()) ||
+                 call->op.same_as(builtin::tvm_call_packed_lowered()) ||
+                 call->op.same_as(builtin::tvm_call_cpacked()) ||
+                 call->op.same_as(builtin::tvm_call_cpacked_lowered()) ||
+                 call->op.same_as(builtin::call_llvm_intrin());
+      }
+    });
+    return found;
+  };
+  if (node->ContainsLoopBreak())
+    return true;
+  for (const auto &guard : node->GetGuards()) {
+    if (guard->IsCondition()) {
+      if (opaque(static_cast<const ConditionGuard *>(guard.get())->condition))
+        return true;
+    } else {
+      const auto *attr = static_cast<const AttributeGuard *>(guard.get());
+      if (opaque(attr->value))
+        return true;
+      if (const auto *expr = attr->node.as<PrimExprNode>()) {
+        if (opaque(GetRef<PrimExpr>(expr)))
+          return true;
+      }
+    }
+  }
+  if (node->IsTask()) {
+    const auto *task = static_cast<const TaskNode *>(node);
+    // PerCoreTask does not expose all internal configuration effects.
+    return task->IsPerCoreTask() || opaque(task->stmt);
+  }
+  const auto *control = static_cast<const ControlNode *>(node);
+  return opaque(control->task->stmt) ||
+         std::any_of(control->children.begin(), control->children.end(),
+                     [](const auto &child) {
+                       return HasUnknownConfigurationEffects(child.get());
+                     });
+}
+
+// Bind each read to its reaching definition in logical stage order, then
+// protect that generation until the next setter. A configuration register
+// has no ring of versions: each value must be consumed within one physical II.
+// Unlike all-pairs logical WAW edges, these edges allow independent generations
+// to interleave across any number of stages without changing their readers.
+bool AddConfigurationPhaseDependencies(
+    const std::vector<ConfigurationEffects> &effects, uint16_t reg,
+    const std::vector<size_t> &logical_order,
+    const std::vector<int64_t> &stages, const std::vector<int64_t> &latencies,
+    std::vector<PhaseDependency> *deps) {
+  std::vector<size_t> writers;
+  size_t last_writer = 0;
+  for (size_t i = 0; i < effects.size(); ++i) {
+    if (effects[i].write_mask & reg) {
+      // A conditional kill may leave an older generation live. Retain the
+      // conservative logical dependencies until that reaching definition is
+      // known, rather than assuming that the skipped writer reset the state.
+      if (!(effects[i].must_write_mask & reg))
+        return false;
+      // Stable stage order ends at the last source writer of the highest stage.
+      if (writers.empty() || stages[i] >= stages[last_writer])
+        last_writer = i;
+      writers.push_back(i);
+    }
+  }
+  if (writers.empty())
+    return true;
+  auto add = [&](size_t u, size_t v, int64_t wrap, int64_t gap) {
+    ICHECK(wrap == 0 || wrap == 1)
+        << "Manual schedule constraints are infeasible: a register read "
+           "would cross a physical overwrite; check T.Stage values";
+    // Reconstruction sorts equal phases by descending stage, then source
+    // position. Preserve a required edge when that tie order would reverse it.
+    if (wrap == 0 &&
+        (stages[u] < stages[v] || (stages[u] == stages[v] && u > v)))
+      gap = std::max<int64_t>(gap, 1);
+    deps->emplace_back(u, v, wrap, gap);
+  };
+  std::vector<size_t> next_writer(effects.size());
+  for (size_t k = 0; k < writers.size(); ++k) {
+    size_t u = writers[k], v = writers[(k + 1) % writers.size()];
+    next_writer[u] = v;
+    add(u, v, v <= u ? 1 : 0, latencies[u]);
+  }
+  // The first read may consume the previous logical iteration's last write.
+  size_t writer = last_writer;
+  int64_t distance = 1;
+  for (size_t reader : logical_order) {
+    if (effects[reader].read_mask & reg) {
+      int64_t wrap = distance + stages[reader] - stages[writer];
+      size_t overwrite = next_writer[writer];
+      int64_t overwrite_wrap = overwrite <= writer ? 1 : 0;
+      add(writer, reader, wrap, latencies[writer]);
+      add(reader, overwrite, overwrite_wrap - wrap, 0);
+      if (distance == 1) {
+        // On entry there is no previous iteration's writer. Protect the
+        // incoming value from every setter active in the reader's first
+        // physical round; higher-stage setters have not started yet.
+        for (size_t initial_overwrite : writers) {
+          if (stages[initial_overwrite] == stages[reader])
+            add(reader, initial_overwrite, 0, 0);
+        }
+      }
+    }
+    if (effects[reader].write_mask & reg) {
+      writer = reader;
+      distance = 0;
+    }
+  }
+  return true;
 }
 
 ScheduleBuilder::LetDependencyClosure
@@ -799,6 +1000,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   std::vector<int64_t> resource_flags;
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
       data_deps; // (i, j, distance, latency)
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+      register_phase_deps; // (i, j, physical wrap, latency)
   std::vector<std::pair<int64_t, int64_t>> resource_deps;
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
       owner_exclusion_deps;
@@ -965,35 +1168,73 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     }
   }
 
-  // Special-register ordering: a node writing register R must be ordered
-  // against every node reading R (RAW forward, WAR backward) and every other
-  // writer of R (WAW), preserving program order. loop_break writes
-  // kLoopControl, which every node reads, so it fences against all siblings;
-  // hf32/pad match only their consumers. The distance bit encodes intra-iter
-  // (0) vs next-iter (1) direction.
+  uint16_t phase_mask = 0;
+  if (manual_schedule && enable_offset &&
+      !std::any_of(nodes.begin(), nodes.end(),
+                   HasUnknownConfigurationEffects)) {
+    std::vector<std::vector<ConfigurationEffects>> core_effects;
+    uint16_t written_registers = 0;
+    for (CoreMask core : kConcreteCores) {
+      auto &effects = core_effects.emplace_back();
+      for (const IRStructure *node : nodes) {
+        effects.push_back(SummarizeConfigurationEffects(node, core));
+        written_registers |= effects.back().write_mask;
+      }
+    }
+    // Logical order depends only on stages, not on the core or configuration.
+    std::vector<size_t> logical_order(written_registers ? n : 0);
+    std::iota(logical_order.begin(), logical_order.end(), size_t{0});
+    std::stable_sort(logical_order.begin(), logical_order.end(),
+                     [&](size_t a, size_t b) {
+                       return manual_stages[a] < manual_stages[b];
+                     });
+    for (uint16_t reg = 1; reg != 0; reg <<= 1) {
+      if (!(written_registers & reg))
+        continue;
+      std::vector<PhaseDependency> register_deps;
+      if (!std::all_of(core_effects.begin(), core_effects.end(),
+                       [&](const auto &effects) {
+                         return AddConfigurationPhaseDependencies(
+                             effects, reg, logical_order, manual_stages,
+                             latencies, &register_deps);
+                       }))
+        continue;
+      phase_mask |= reg;
+      register_phase_deps.insert(register_phase_deps.end(),
+                                 register_deps.begin(), register_deps.end());
+    }
+  }
+  auto add_register_dep = [&](size_t u, size_t v, int wrap, int64_t latency,
+                              uint16_t registers) {
+    // Fences and state with unresolved reaching definitions remain logical.
+    if (registers & ~phase_mask)
+      data_deps.emplace_back(u, v, wrap, latency);
+  };
   for (size_t i = 0; i < n; ++i) {
     uint16_t wmask = nodes[i]->GetSpecialWriteMask();
     if (wmask == 0)
       continue;
     for (size_t j = 0; j < n; ++j) {
-      if (j == i || (wmask & nodes[j]->GetSpecialReadMask()) == 0 ||
-          (!(wmask & static_cast<uint16_t>(SpecialRegister::kLoopControl)) &&
+      uint16_t overlap = wmask & nodes[j]->GetSpecialReadMask();
+      if (j == i || overlap == 0 ||
+          (!(overlap & static_cast<uint16_t>(SpecialRegister::kLoopControl)) &&
            (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) == 0))
         continue;
       if (i < j) {
-        data_deps.emplace_back(i, j, 0, latencies[i]);
-        data_deps.emplace_back(j, i, 1, 0);
+        add_register_dep(i, j, 0, latencies[i], overlap);
+        add_register_dep(j, i, 1, 0, overlap);
       } else {
-        data_deps.emplace_back(i, j, 1, latencies[i]);
-        data_deps.emplace_back(j, i, 0, 0);
+        add_register_dep(i, j, 1, latencies[i], overlap);
+        add_register_dep(j, i, 0, 0, overlap);
       }
     }
     for (size_t j = i + 1; j < n; ++j) {
-      if ((wmask & nodes[j]->GetSpecialWriteMask()) == 0 ||
+      uint16_t overlap = wmask & nodes[j]->GetSpecialWriteMask();
+      if (overlap == 0 ||
           (NodeCoreMask(nodes[i]) & NodeCoreMask(nodes[j])) == 0)
         continue;
-      data_deps.emplace_back(i, j, 0, latencies[i]);
-      data_deps.emplace_back(j, i, 1, latencies[j]);
+      add_register_dep(i, j, 0, latencies[i], overlap);
+      add_register_dep(j, i, 1, latencies[j], overlap);
     }
   }
 
@@ -1123,6 +1364,9 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   ffi::Array<ffi::Array<int64_t>> tvm_pipe_order_deps;
   ffi::Array<int64_t> tvm_storage_sizes;
   ffi::Array<int64_t> tvm_manual_stages;
+  ffi::Array<ffi::Array<int64_t>> tvm_register_phase_deps;
+  for (const auto &[u, v, wrap, latency] : register_phase_deps)
+    tvm_register_phase_deps.push_back({u, v, wrap, latency});
 
   for (auto val : latencies) {
     tvm_latencies.push_back(val);
@@ -1196,7 +1440,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
                    tvm_data_deps, tvm_resource_deps, tvm_owner_exclusion_deps,
                    tvm_pipe_order_deps, tvm_storage_sizes, tvm_memory_groups,
                    tvm_stage_order_deps, enable_offset, tvm_manual_stages,
-                   manual_schedule)
+                   manual_schedule, tvm_register_phase_deps)
           .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<int>, int64_t>>();
 
   ffi::Array<int64_t> start_times = return_val.get<0>();

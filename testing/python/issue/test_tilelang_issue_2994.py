@@ -9,11 +9,8 @@ from tvm import tirx
 
 @pytest.fixture(autouse=True)
 def _disable_tilelang_cache():
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         yield
-    finally:
-        tilelang.enable_cache()
 
 
 def _generated_call_lines(source, function):

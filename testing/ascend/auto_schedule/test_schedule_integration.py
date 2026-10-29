@@ -10,10 +10,48 @@ import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import nodes, calls, allocated_buffer, schedule
+from testing.ascend._ir import nodes, calls, allocated_buffer, schedule, statements
 
 TILE = 16
 STEPS = 4
+
+
+def _make_padding_live_in_program(first_setter_stage, last_setter_stage, steps=4):
+    @T.prim_func
+    def main(A: T.Tensor((steps, 30), "float32"), O: T.Tensor((steps, 32), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((32,), "float32")
+            T.ascend_set_copy_pad_value(-1.0, dtype="float32")
+            for i in T.Pipelined(steps, num_stages=2, annotations={"enable_offset": True}):
+                with T.Stage(0):
+                    T.copy(A[i, :], ub[:30], data_select=True)
+                    T.copy(ub, O[i, :])
+                with T.Stage(first_setter_stage):
+                    T.ascend_set_copy_pad_value(1.0, dtype="float32")
+                with T.Stage(last_setter_stage):
+                    T.ascend_set_copy_pad_value(2.0, dtype="float32")
+
+    return main
+
+
+def test_padding_live_in_rejects_overwrite_during_pipeline_startup():
+    with pytest.raises(RuntimeError, match="Manual schedule constraints are infeasible"):
+        tilelang.lower(_make_padding_live_in_program(0, 1), target="ascend")
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("setter_stage", [0, 1], ids=["same-stage", "delayed-setters"])
+@pytest.mark.parametrize("steps", [1, 4], ids=["single-iteration", "steady-state"])
+def test_padding_live_in_survives_pipeline_startup(setter_stage, steps):
+    import torch
+
+    program = _make_padding_live_in_program(setter_stage, setter_stage, steps)
+    a = torch.arange(steps * 30, dtype=torch.float32).reshape(steps, 30)
+    result = tilelang.compile(program, target="ascend", out_idx=-1)(a.npu())
+    expected = torch.full((steps, 32), 2.0)
+    expected[0, 30:] = -1.0
+    expected[:, :30] = a
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
 
 
 def _make_shared_l0_ring_program(k_tiles):
@@ -131,7 +169,7 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer"):
+            if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer", "tl.AscendLowerTileOp"):
                 snapshots[info.name] = mod
 
     with tvm.transform.PassContext(instruments=[Capture()]):
@@ -145,12 +183,204 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     assert all(loop.annotations["tl.multi_buffer_counter_map"][b.data].same_as(counters[0]) for loop in owners)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     assert int(allocated_buffer(materialized, "l0a").shape[0]) == 2
+    lowered = tilelang.transform.LowerAccessPtr()(snapshots["tl.AscendLowerTileOp"])
+    physical_a = allocated_buffer(lowered, "l0a")
+    offsets = [call.args[2] for call in calls(lowered, "tirx.tvm_access_ptr") if call.args[1].same_as(physical_a.data)]
+    # Stale logical layout entries must not erase the automatic version axis
+    # while decoding flat DMA/MMAD pointers into physical fractal coordinates.
+    assert offsets and any(not tvm.arith.Analyzer().can_prove_equal(offset, 0) for offset in offsets)
     assert artifact.kernel_source and artifact.device_mod
 
 
 def test_counter_slot_is_compatible_with_l1_layout_lowering():
     artifact = tilelang.lower(_make_counter_l1_layout_program(), target="ascend")
     assert artifact.kernel_source and artifact.device_mod
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "prefix,versions,storage_dtype,view_dtype,mode",
+    [
+        (64, 1, "float32", "float32", "iteration"),
+        (0, 2, "float32", "float32", "iteration"),
+        (64, 2, "float32", "float32", "iteration"),
+        (64, 3, "float32", "bfloat16", "counter"),
+        (64, 2, "bfloat16", "float32", "iteration"),
+        (1, 2, "float32", "float32", "iteration"),
+    ],
+    ids=["single-version", "dense", "padded", "narrow-counter", "widen", "unaligned-slot"],
+)
+def test_padded_storage_versions_preserve_ordinary_view_addresses(prefix, versions, storage_dtype, view_dtype, mode):
+    """Layout padding, version expansion and UB alignment must agree in bytes."""
+    import torch
+
+    storage_bits, view_bits = tvm.DataType(storage_dtype).bits, tvm.DataType(view_dtype).bits
+    view_extent = 512 * storage_bits // view_bits
+    view_prefix = prefix * storage_bits // view_bits
+    output_extent = view_extent - view_prefix
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 512), storage_dtype), O: T.Tensor((4, output_extent), view_dtype)):
+        with T.Kernel(1):
+            owner = T.alloc_shared((512,), storage_dtype)
+            view = T.view(owner, shape=(view_extent,), dtype=view_dtype)
+            T.annotate_layout({owner: tilelang.layout.Layout((512,), lambda i: i + prefix)})
+            T.annotate_buffer_versions({owner: (versions, mode)})
+            for step in T.Pipelined(4, num_stages=max(versions, 2)):
+                if prefix == 1:
+                    # Scalar accesses allow a slot whose physical size is not
+                    # 32B-aligned; the later UB alignment pass must preserve it.
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(512):
+                            owner[i] = A[step, i]
+                    with T.SimtVF(threads=128):
+                        for i in T.Parallel(output_extent):
+                            O[step, i] = view[i + view_prefix]
+                else:
+                    T.copy(A[step, :], owner)
+                    T.copy(view[view_prefix:view_extent], O[step, :])
+
+    a = torch.arange(1, 4 * 512 + 1, dtype=torch.float32).reshape(4, 512).to(getattr(torch, storage_dtype))
+    result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
+    expected = a.view(getattr(torch, view_dtype))[:, :output_extent]
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
+def test_oob_copy_padding_does_not_serialize_mte2():
+    @T.prim_func
+    def main(A: T.Tensor((31, 32), "bfloat16"), B: T.Tensor((16, 32), "bfloat16"), C: T.Tensor((31, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_l1((16, 32), "bfloat16")
+            b = T.alloc_l1((16, 32), "bfloat16")
+            a0 = T.alloc_l0a((16, 32), "bfloat16")
+            b0 = T.alloc_l0b((16, 32), "bfloat16")
+            acc = T.alloc_l0c((16, 16), "float32")
+            # Opaque offsets make copy/padding footprints conservatively overlap.
+            row_idx = T.alloc_var("int32", init=0)
+            T.copy(B, b)
+            for i in T.Pipelined(2, num_stages=2):
+                T.copy(A[row_idx : row_idx + 16, :], a)
+                T.copy(a, a0)
+                T.copy(b, b0)
+                T.gemm(a0, b0, acc, transpose_B=True, clear_accum=True)
+                T.copy(acc, C[i * 16 : (i + 1) * 16, :])
+                row_idx += 16
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        tilelang.lower(main, target="ascend", enable_device_compile=False)
+    after = snapshots["tl.InsertSync"]
+    assert calls(after, "tl.tileop.fill"), "The last tile must still be zero padded"
+    assert not [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # Grouping the MTE2 writes must preserve the handoff to the L1 consumer.
+    for operation in ("set", "wait"):
+        assert [call for call in calls(after, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE2_MTE1"]
+
+
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float4_e2m1fn"], ids=["fp8", "fp4"])
+@pytest.mark.parametrize("transpose", [False, True], ids=["k-contiguous", "mn-contiguous"])
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_per_core_mx_copy_padding_survives_lowering(dtype, transpose, explicit_task):
+    mn, k_alloc = 64, 128
+    shape = (k_alloc, mn) if transpose else (mn, k_alloc)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((mn, k_alloc), dtype),
+        B: T.Tensor((mn, k_alloc), dtype),
+        SA: T.Tensor((2, mn), "uint16"),
+        SB: T.Tensor((2, mn), "uint16"),
+        C: T.Tensor((mn, mn), "float32"),
+        actual_k: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_l1(shape, dtype)
+            b = T.alloc_l1(shape, dtype)
+            sa = T.alloc_l1((mn, 2), "uint16")
+            sb = T.alloc_l1((mn, 2), "uint16")
+            a0 = T.alloc_l0a(shape, dtype)
+            b0 = T.alloc_l0b(shape, dtype)
+            sa0 = T.alloc_l0a_sf(a0, sf_shape=(mn, 2))
+            sb0 = T.alloc_l0b_sf(b0, sf_shape=(mn, 2))
+            acc = T.alloc_l0c((mn, mn), "float32")
+            k = T.min(T.max(actual_k, 65), k_alloc)
+            # OOB insertion, rather than the DSL, creates the conditional fill.
+            with T.PerCoreTask():
+                if explicit_task:
+                    with T.Task():
+                        if transpose:
+                            T.copy(A[:, :k], a[:k, :], transpose=True)
+                        else:
+                            T.copy(A[:, :k], a[:, :k])
+                else:
+                    if transpose:
+                        T.copy(A[:, :k], a[:k, :], transpose=True)
+                    else:
+                        T.copy(A[:, :k], a[:, :k])
+            if transpose:
+                T.copy(B[:, :k], b[:k, :], transpose=True)
+            else:
+                T.copy(B[:, :k], b[:, :k])
+            T.copy(SA, sa, transpose=True)
+            T.copy(SB, sb, transpose=True)
+            T.copy(a, a0)
+            T.copy(b, b0)
+            T.copy(sa, sa0)
+            T.copy(sb, sb0)
+            T.gemm_blockscaled(a0, b0, acc, sa0, sb0, transpose_A=transpose, transpose_B=not transpose, clear_accum=True)
+            T.copy(acc, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits", "tl.InsertSync"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend", enable_device_compile=False)
+    assert artifact.kernel_source and artifact.device_mod
+    needs_fill = transpose or dtype == "float8_e4m3fn"
+    for name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits"):
+        (group,) = [node for node in nodes(snapshots[name], tirx.AttrStmt) if node.attr_key == "tl.ascend_per_core_task"]
+        assert len(calls(group, "tl.tileop.ascend_copy")) == 1
+        assert len(calls(group, "tl.tileop.fill")) == int(needs_fill)
+        if needs_fill:
+            (task,) = [node for node in nodes(group, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+            assert calls(task.body.seq[0], "tl.tileop.ascend_copy")
+            (guard,) = nodes(task, tirx.IfThenElse)
+            assert len(calls(guard, "tl.tileop.fill")) == 1
+
+    scheduled = snapshots["tl.InsertSync"]
+    assert not [call for call in calls(scheduled, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # InsertSync may coalesce the A/B handoff. Completion must follow the
+    # PerCoreTask copy and padding, rather than sit inside a padding guard.
+    operations = [(stmt.value, parents) for stmt, parents in statements(scheduled) if isinstance(stmt, tirx.Evaluate)]
+    notify_idx = next(
+        idx
+        for idx, (call, _) in enumerate(operations)
+        if isinstance(call, tirx.Call) and call.op.name == "tl.ascend_set_flag" and call.args[0].value == "MTE2_MTE1"
+    )
+    notify, parents = operations[notify_idx]
+    assert not any(isinstance(parent, tirx.IfThenElse) for parent in parents)
+    before_notify = [call for call, _ in operations[:notify_idx] if isinstance(call, tirx.Call)]
+    assert sum(call.op.name == "tl.tileop.ascend_copy" for call in before_notify) >= 1
+    assert sum(call.op.name == "tl.tileop.fill" for call in before_notify) >= int(needs_fill)
+    assert any(
+        isinstance(call, tirx.Call)
+        and call.op.name == "tl.ascend_wait_flag"
+        and call.args[0].value == "MTE2_MTE1"
+        and tvm.ir.structural_equal(call.args[1], notify.args[1])
+        for call, _ in operations[notify_idx + 1 :]
+    )
 
 
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
@@ -548,6 +778,8 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     T.copy(ub, C[i, :, :])
                     progress += 1
 
+    # L0C copies attach frontend layout hints; scheduling consumes the
+    # normalized Buffer-keyed map produced by layout inference.
     resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
     progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
     assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)

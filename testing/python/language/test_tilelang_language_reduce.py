@@ -144,7 +144,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128, group_stride: int = 
     return make_kernel()
 
 
-def _make_offset_thread_reduce_kernel(keepdim=False, clear=True):
+def _make_offset_thread_reduce_kernel(keepdim=False, clear=True, batch=1):
     """Reduction whose participating threads occupy a non-zero thread range,
     i.e. tx in [32, 96) of a 128-thread block."""
 
@@ -192,7 +192,7 @@ def _make_offset_thread_reduce_kernel(keepdim=False, clear=True):
                     x_frag[i, j] = x[i, j]
                 if not clear:
                     T.fill(sum_frag, 1)
-                T.reduce_sum(x_frag, sum_frag, dim=1, clear=clear)
+                T.reduce_sum(x_frag, sum_frag, dim=1, clear=clear, batch=batch)
                 for i, j in T.Parallel(rows, width):
                     if keepdim:
                         out[i, j] = x_frag[i, j] / sum_frag[i, 0]
@@ -1261,6 +1261,173 @@ def test_reduce_packed_fp8_to_float16_absmax_runtime():
     torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
+def _make_fp8_e4m3_reduce_kernel(reduce_fn, M, N):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float8_e4m3), B: T.Tensor((M,), T.float8_e4m3)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((M, N), T.float8_e4m3)
+            dst = T.alloc_fragment((M,), T.float8_e4m3)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.parametrize(("reduce_fn", "torch_op"), [(T.reduce_max, "max"), (T.reduce_min, "min")], ids=["max", "min"])
+def test_reduce_fp8_e4m3_dst_runtime(reduce_fn, torch_op):
+    """reduce_max/reduce_min into a float8_e4m3 dst used to crash nvcc with
+    an undefined `inff` identifier (GH-2998)."""
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is not available")
+
+    M, N = 32, 64
+    k = _compile(_make_fp8_e4m3_reduce_kernel(reduce_fn, M, N))
+
+    a = torch.rand(M, N, device="cuda").to(torch.float8_e4m3fn)
+    out = k(a)
+    # torch has no min/max reduction kernel for float8_e4m3fn; reduce in fp32.
+    ref = getattr(a.float(), torch_op)(dim=1).values
+    assert torch.allclose(out.float(), ref, atol=1e-1)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(("dtype", "op"), [(T.float4_e2m1fn, "sum"), (T.float4_e2m1fn, "max"), (T.int4, "min"), ("uint4", "bitand")])
+@pytest.mark.parametrize("scope", ["local", "local.fragment"])
+def test_reduce_rejects_subbyte_accumulator(dtype, op, scope):
+    @T.prim_func
+    def kernel(A: T.Tensor((1, 128), T.int32), B: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_buffer((1, 128), T.int32, scope=scope)
+            dst = T.alloc_buffer((1,), dtype, scope=scope)
+            T.copy(A, src)
+            # Exercise the native contract, including TIR that bypasses Python.
+            T.evaluate(
+                T.call_intrin("handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), op, 1, True)
+            )
+            T.copy(dst, B)
+
+    with pytest.raises(ValueError, match=f"sub-byte accumulator dtype {dtype}"):
+        tilelang.lower(kernel, target="cuda")
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float4_e2m1fn, T.int4])
+@pytest.mark.parametrize("legacy", [False, True], ids=["v2", "legacy"])
+def test_finalize_reducer_rejects_subbyte_accumulator(dtype, legacy):
+    @T.prim_func
+    def kernel(A: T.Tensor((128,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=128):
+            acc = T.alloc_reducer((1,), dtype, op="sum", replication="all" if legacy else None)
+            if legacy:
+                T.clear(acc)
+                for i in T.Parallel(128):
+                    acc[0] += T.cast(A[i], dtype)
+                T.finalize_reducer(acc)
+                T.copy(acc, B)
+            else:
+                T.reducer_init(acc)
+                for i in T.Parallel(128):
+                    T.reducer_update(acc[0], A[i])
+                dst = T.alloc_fragment((1,), dtype)
+                T.finalize_reducer(acc, dst)
+                T.copy(dst, B)
+
+    with pytest.raises(ValueError, match=f"sub-byte accumulator dtype {dtype}"):
+        tilelang.lower(kernel, target="cuda")
+
+
+def _make_fp4_reduce_kernel(reduce_fn, M, N, dtype):
+    # FP16 input holding exact FP4 values avoids packed FP4 tensors on the host.
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float16), B: T.Tensor((M,), dtype)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((M, N), T.float4_e2m1fn)
+            dst = T.alloc_fragment((M,), dtype)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize(
+    ("reduce_fn", "torch_op"), [(T.reduce_sum, "sum"), (T.reduce_max, "amax"), (T.reduce_min, "amin")], ids=["sum", "max", "min"]
+)
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+def test_reduce_fp4_input_wider_accumulator_runtime(reduce_fn, torch_op, dtype):
+    M, N = 1, 1024
+    k = _compile(_make_fp4_reduce_kernel(reduce_fn, M, N, dtype))
+
+    vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4], dtype=torch.float16)
+    vals = torch.cat([vals, -vals])
+    a = vals[torch.randint(0, len(vals), (M, N))].cuda()
+    # A unique extremum in the last column must reach the other warps.
+    a[:, -1] = -6 if torch_op == "amin" else 6
+    out = k(a)
+    ref = getattr(a.to(getattr(torch, dtype)), torch_op)(dim=1)
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+def _make_non_finite_const_kernel(dtype):
+    pos_inf = tvm.tirx.const(float("inf"), dtype)
+    neg_inf = tvm.tirx.const(float("-inf"), dtype)
+    nan = tvm.tirx.const(float("nan"), dtype)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((3,), T.float32), B: T.Tensor((6,), T.float32)):
+        with T.Kernel(1, threads=1):
+            values = T.alloc_local((6,), dtype)
+            values[0] = pos_inf
+            values[1] = neg_inf
+            values[2] = nan
+            for i in T.serial(3):
+                values[i + 3] = T.cast(A[i], dtype)
+            for i in T.serial(6):
+                B[i] = T.cast(values[i], T.float32)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dtype", "cuda_type"),
+    [(T.float8_e4m3, "fp8_e4_t"), (T.float8_e4m3fn, "fp8_e4_t"), (T.float8_e8m0fnu, "fp8_e8_t"), (T.float4_e2m1fn, "fp4_e2_t")],
+)
+def test_fp8_fp4_non_finite_const_codegen(dtype, cuda_type):
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.target.Target(target):
+        src = tilelang.lower(_make_non_finite_const_kernel(dtype), target=target).kernel_source
+    assert "#include <math_constants.h>" in src
+    for value in ("CUDART_INF_F", "-CUDART_INF_F", "CUDART_NAN_F"):
+        assert f"{cuda_type}({value})" in src
+
+
+def _check_non_finite_const_matches_runtime_conversion(dtype):
+    kernel = _compile(_make_non_finite_const_kernel(dtype))
+    values = torch.tensor([float("inf"), float("-inf"), float("nan")], device="cuda")
+    output = kernel(values)
+    torch.testing.assert_close(output[:3], output[3:], atol=0, rtol=0, equal_nan=True)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.parametrize("dtype", [T.float8_e4m3, T.float8_e4m3fn])
+def test_fp8_non_finite_const_matches_runtime_conversion(dtype):
+    _check_non_finite_const_matches_runtime_conversion(dtype)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize("dtype", [T.float8_e8m0fnu, T.float4_e2m1fn])
+def test_blackwell_non_finite_const_matches_runtime_conversion(dtype):
+    _check_non_finite_const_matches_runtime_conversion(dtype)
+
+
 @tilelang.testing.requires_cuda
 def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
     k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))
@@ -1343,11 +1510,8 @@ def _make_bitwise_reduce_kernel(op, src_dtype, dst_dtype, M=4, N=4):
 
 
 def _compile_bitwise_reduce(program):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(program, out_idx=-1, target="cuda")
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda
@@ -1384,5 +1548,136 @@ def test_bitwise_reduce_accepts_integer_faces():
     _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "int32"))
 
 
+# ---------------------------------------------------------------------------
+# Batched all-reduce over an offset partial thread range
+# ---------------------------------------------------------------------------
+
+_OFFSET_RANGE_THREADS = 64
+
+
+def _allreduce_call(kernel):
+    match = re.search(r"tl::AllReduce<[^;(]*::run(?:_batch)?\(", kernel.get_kernel_source())
+    return match.group(0) if match else ""
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_batch_matches_scalar_on_offset_thread_range():
+    """`batch > 1` is documented as the same reduction using fewer barriers.
+
+    `_make_offset_thread_reduce_kernel` covers an offset participating range, but
+    it calls `reduce_sum` without a batch, so it only ever exercised the scalar
+    arm -- the one that resolves the range. The batched arm took the offset and
+    the barrier width from the block's bounds instead, so on the same kernel it
+    indexed from thread 0 and waited on 128 threads, folding non-participants'
+    untouched registers into the sum. Every output element came out wrong.
+    """
+    torch.manual_seed(3)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    reference = x / x.sum(dim=1, keepdim=True)
+
+    scalar = _make_offset_thread_reduce_kernel(batch=1)
+    batched = _make_offset_thread_reduce_kernel(batch=2)
+
+    scalar_out = scalar(x)
+    batched_out = batched(x)
+    torch.cuda.synchronize()
+
+    # The batched path has to resolve the participants, not the whole block.
+    assert f"NamedBarrier<{_OFFSET_RANGE_THREADS}>" in _allreduce_call(batched), _allreduce_call(batched)
+
+    torch.testing.assert_close(scalar_out, reference, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(batched_out, reference, rtol=1e-5, atol=1e-6)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+def _make_offset_thread_reduce_canary_kernel(batch: int = 2):
+    """Offset partial thread range with a shared canary next to the workspace.
+
+    The batched all-reduce phases are emitted as plain statements after the
+    partition loop that guards the local reduction. Every block thread therefore
+    runs ``run_batch``, whose workspace indexing is
+    ``threadIdx.x - thread_offset``; threads below the offset address memory
+    before the workspace. The canary below is allocated before the reduction
+    workspace so that those writes land in reachable memory instead of past the
+    end of the block's shared allocation.
+    """
+
+    @tilelang.jit(
+        out_idx=[1, 2],
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    def make_kernel():
+        thread_offset = 32
+        fragment_threads = 64
+        rows = 2
+        width = 512
+        vector_size = 8
+        canary_len = 512
+
+        @T.prim_func
+        def offset_thread_reduce_canary(
+            x: T.Tensor((rows, width), "float32"),
+            out: T.Tensor((rows, width), "float32"),
+            canary_out: T.Tensor((canary_len,), "float32"),
+        ) -> None:
+            with T.Kernel(1, threads=128):
+                canary = T.alloc_shared((canary_len,), "float32")
+                x_frag = T.alloc_fragment((rows, width), "float32")
+                sum_frag = T.alloc_fragment((rows,), "float32")
+                T.annotate_layout(
+                    {
+                        x_frag: T.Fragment(
+                            x_frag.shape,
+                            forward_fn=lambda i, j: (
+                                thread_offset + j // vector_size,
+                                i * vector_size + j % vector_size,
+                            ),
+                        ),
+                        sum_frag: T.Fragment(
+                            (rows,),
+                            forward_fn=lambda i, rep: (thread_offset + rep, i),
+                            replicate=fragment_threads,
+                        ),
+                    }
+                )
+                for i in T.Parallel(canary_len):
+                    canary[i] = 123.0
+                T.sync_threads()
+                for i, j in T.Parallel(rows, width):
+                    x_frag[i, j] = x[i, j]
+                T.reduce_sum(x_frag, sum_frag, dim=1, clear=True, batch=batch)
+                T.sync_threads()
+                for i, j in T.Parallel(rows, width):
+                    out[i, j] = x_frag[i, j] / sum_frag[i]
+                for i in T.Parallel(canary_len):
+                    canary_out[i] = canary[i]
+
+        return offset_thread_reduce_canary
+
+    return make_kernel()
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_batch_keeps_shared_memory_before_its_workspace():
+    """A batched all-reduce may only touch the workspace of its own threads.
+
+    With the offset range [32, 96) and batch=2, the threads outside that range
+    used to run ``run_batch`` as well. Their ``threadIdx.x - 32`` workspace
+    indices point before the workspace, into the canary, so the reduction
+    silently rewrote shared memory it does not own.
+    """
+    kernel = _make_offset_thread_reduce_canary_kernel(batch=2)
+    x = torch.ones(2, 512, device="cuda", dtype=torch.float32)
+    out, canary = kernel(x)
+
+    torch.testing.assert_close(out, x / x.sum(dim=1, keepdim=True))
+    expected_canary = torch.full((512,), 123.0, device="cuda")
+    torch.testing.assert_close(canary, expected_canary)
+    assert torch.all(canary[256:] == 123.0), "the batched all-reduce wrote before its own workspace, into the canary"

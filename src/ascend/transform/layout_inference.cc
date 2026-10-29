@@ -76,17 +76,6 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
   return true;
 }
 
-Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
-                                        const Layout &layout,
-                                        arith::Analyzer *analyzer) {
-  for (const auto &buffer : buffers) {
-    if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
-      return buffer;
-    }
-  }
-  return Optional<Buffer>();
-}
-
 // A fragment layout published into the global layout map must be a closed
 // function of the layout placeholders (input indices + replication). Loop
 // completion can legitimately produce layouts referencing an enclosing serial
@@ -316,6 +305,10 @@ public:
       // Helper: propagate inferred layout to alias buffers (same data Var)
       auto propagate_alias = [&](const Buffer &src_buffer,
                                  const Layout &src_layout) {
+        // Fragment aliases participate in the thread-ownership solver.
+        // Memory layouts belong to individual views and never propagate.
+        if (!src_layout.as<FragmentNode>())
+          return;
         if (!buffer_data_to_buffers_.count(src_buffer->data))
           return;
         const auto &siblings = buffer_data_to_buffers_[src_buffer->data];
@@ -557,6 +550,40 @@ public:
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
     }
 
+    // Unlike memory layouts, Fragment layouts define thread ownership for the
+    // shared storage. Seed every alias before inference can choose a different
+    // ownership for an unannotated view. Collection is complete here, including
+    // aliases visited after the annotation's block.
+    const LayoutMap annotations = annotated_layout_map_;
+    for (const auto &[buffer, layout] : annotations) {
+      if (!layout.as<FragmentNode>())
+        continue;
+      for (const auto &alias : buffer_data_to_buffers_[buffer->data]) {
+        if (alias.same_as(buffer))
+          continue;
+        Fragment inherited = Downcast<Fragment>(
+            ShapesEqual(layout->InputShape(), alias->shape, &analyzer_)
+                ? layout
+                : layout->Reshape(
+                      alias->shape, &analyzer_,
+                      Integer(GetElementStorageBits(buffer->dtype)),
+                      Integer(GetElementStorageBits(alias->dtype))));
+        if (auto existing = annotated_layout_map_.Get(alias)) {
+          const auto *existing_fragment = existing.value().as<FragmentNode>();
+          // The Layout overload alone does not compare Fragment threads;
+          // retain its kind check as well for reducer partials.
+          ICHECK(existing_fragment && inherited->IsEqual(existing_fragment) &&
+                 inherited->IsEqual(existing.value().get()))
+              << "Conflicting fragment layouts for aliases " << buffer->name
+              << " and " << alias->name << ":\n"
+              << inherited->DebugOutput() << "\n"
+              << existing.value()->DebugOutput();
+        } else {
+          annotated_layout_map_.Set(alias, inherited);
+        }
+      }
+    }
+
     steering_.Reserve(infer_list_, thread_bounds_vec_, analyzer_vec_,
                       annotated_layout_map_);
 
@@ -623,48 +650,6 @@ public:
                      in_queue);
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
-    // step 4: finalize alias layouts by Var
-    // For each storage var, if any buffer in the group has a layout,
-    // propagate (reshape if needed) to the rest to ensure completeness.
-    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
-      // Find a representative with existing layout
-      Optional<Buffer> rep;
-      Optional<Layout> rep_layout;
-      for (const auto &buf : buffers) {
-        if (layout_map.count(buf)) {
-          rep = buf;
-          rep_layout = layout_map[buf];
-          break;
-        }
-      }
-      if (!rep_layout.defined())
-        continue;
-      for (const auto &buf : buffers) {
-        if (!layout_map.count(buf)) {
-          bool shapes_equal =
-              rep_layout.value()->InputShape().size() == buf->shape.size();
-          if (shapes_equal) {
-            for (size_t i = 0; i < rep_layout.value()->InputShape().size();
-                 ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
-                                           buf->shape[i])) {
-                shapes_equal = false;
-                break;
-              }
-            }
-          }
-          Layout reshaped =
-              shapes_equal
-                  ? rep_layout.value()
-                  : rep_layout.value()->Reshape(
-                        buf->shape, &analyzer_,
-                        Integer(GetElementStorageBits(rep.value()->dtype)),
-                        Integer(GetElementStorageBits(buf->dtype)));
-          layout_map.Set(buf, reshaped);
-        }
-      }
-    }
-
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
       if (IsFragmentBuffer(buffer)) {
@@ -987,6 +972,17 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
+    // VF-local owners may only be referenced through reshaped aliases.
+    for (auto buffer : op->alloc_buffers) {
+      if (buffer_data_to_buffers_.count(buffer->data)) {
+        auto buffers = buffer_data_to_buffers_[buffer->data];
+        buffers.push_back(buffer);
+        buffer_data_to_buffers_.Set(buffer->data, buffers);
+      } else {
+        buffer_data_to_buffers_.Set(buffer->data, {buffer});
+      }
+    }
+
     if (IsVFRegion(op->name_hint)) {
       // A VF region is opaque to the worklist itself: visit the body first
       // (under the region's lane scope for SIMT_VF) so nested TileOps
@@ -1001,18 +997,7 @@ private:
       // annotated layouts are available during InferLayout.
       // Must happen after visiting body so buffer_data_to_buffers_ is
       // populated.
-      if (pushed_region_scope && op->annotations.count(attr::kLayoutMap)) {
-        auto map = op->annotations.Get(attr::kLayoutMap)
-                       ->as<Map<Var, Layout>>()
-                       .value();
-        for (const auto &[var, layout] : map) {
-          if (buffer_data_to_buffers_.count(var)) {
-            for (const auto &buffer : buffer_data_to_buffers_[var]) {
-              annotated_layout_map_.Set(buffer, layout);
-            }
-          }
-        }
-      }
+      RecordLayoutAnnotations(GetRef<SBlock>(op));
       // Regions contribute nothing to the inference worklist themselves:
       // nested tile operators were already collected while visiting the
       // body, and the region block is consumed by codegen as-is.
@@ -1022,34 +1007,34 @@ private:
       return;
     }
 
-    for (auto buffer : op->alloc_buffers) {
-      if (buffer_data_to_buffers_.count(buffer->data)) {
-        auto buffers = buffer_data_to_buffers_[buffer->data];
-        buffers.push_back(buffer);
-        buffer_data_to_buffers_.Set(buffer->data, buffers);
-      } else {
-        buffer_data_to_buffers_.Set(buffer->data, {buffer});
-      }
-    }
-
     // First, visit the block body to collect all buffers from
     // BufferLoad/BufferStore
     IRVisitorWithAnalyzer::VisitStmt_(op);
+    RecordLayoutAnnotations(GetRef<SBlock>(op));
+  }
 
-    // After visiting, apply layouts to all collected buffers
-    if (op->annotations.count(attr::kLayoutMap)) {
-      // Check if the layout map is Map<Var, Layout>
+  void RecordLayoutAnnotations(const SBlock &block) {
+    if (block->annotations.count(attr::kLayoutMap)) {
       auto map =
-          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
-      for (const auto &[var, layout] : map) {
-        ICHECK(buffer_data_to_buffers_.count(var))
-            << "buffer " << var << " is not found in the block";
-        const auto &buffers = buffer_data_to_buffers_[var];
-        ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
-        for (const auto &buffer : buffers) {
-          if (!IsReducerV2Buffer(buffer)) {
-            continue;
+          block->annotations.Get(attr::kLayoutMap)->cast<Map<Buffer, Layout>>();
+      for (const auto &[buffer, layout] : map) {
+        ICHECK(buffer_data_to_buffers_.count(buffer->data))
+            << "buffer " << buffer << " is not found in the block";
+        ICHECK(ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_))
+            << "Layout input shape must match buffer view " << buffer->name
+            << ": " << layout->InputShape() << " versus " << buffer->shape;
+        if (layout.as<FragmentNode>()) {
+          // Even an annotation-only Fragment view constrains the threads
+          // owning the shared register storage.
+          Array<Buffer> aliases = buffer_data_to_buffers_[buffer->data];
+          if (std::none_of(
+                  aliases.begin(), aliases.end(),
+                  [&](const Buffer &alias) { return alias.same_as(buffer); })) {
+            aliases.push_back(buffer);
+            buffer_data_to_buffers_.Set(buffer->data, aliases);
           }
+        }
+        if (IsReducerV2Buffer(buffer)) {
           const auto *partial = layout.as<PartialFragmentNode>();
           if (partial == nullptr) {
             TVM_FFI_THROW(ValueError)
@@ -1058,15 +1043,6 @@ private:
                    "a PartialFragment (its replicas are addends awaiting the "
                    "finalize collective, not equal copies), got "
                 << layout->GetTypeKey() << ".";
-          }
-          // Reshape would degrade the partial kind to a plain Fragment, so
-          // the annotated shape must match the reducer exactly.
-          if (!ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_)) {
-            TVM_FFI_THROW(ValueError)
-                << "Invalid layout for reducer `" << buffer->name
-                << "`: the PartialFragment shape " << layout->InputShape()
-                << " must equal the reducer shape " << buffer->shape
-                << " exactly. Check the layout passed to T.annotate_layout.";
           }
           arith::IterMapResult injectivity = partial->DetectInjective();
           if (!injectivity->errors.empty()) {
@@ -1078,40 +1054,17 @@ private:
                 << ". Check the layout passed to T.annotate_layout.";
           }
         }
-        Optional<Buffer> anchor_buffer =
-            FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
-        int64_t anchor_bits =
-            anchor_buffer.defined()
-                ? GetElementStorageBits(anchor_buffer.value()->dtype)
-                : GetElementStorageBits(buffers[0]->dtype);
-        // Apply layout to all buffers associated with this var
-        for (const auto &buffer : buffers) {
-
-          // Reshape the layout to match the buffer's shape
-          // Check if shapes are structurally equal
-          bool shapes_equal =
-              ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
-
-          Layout resolved_layout =
-              shapes_equal
-                  ? layout
-                  : layout->Reshape(
-                        buffer->shape, &analyzer_, Integer(anchor_bits),
-                        Integer(GetElementStorageBits(buffer->dtype)));
-          if (IsSharedBuffer(buffer)) {
-            arith::IterMapResult injectivity =
-                resolved_layout->DetectInjective();
-            if (!injectivity->errors.empty()) {
-              TVM_FFI_THROW(ValueError)
-                  << "Invalid layout for shared buffer `" << buffer->name
-                  << "`: the forward map must be injective. Details: "
-                  << injectivity->errors
-                  << ". Layout: " << resolved_layout->DebugOutput()
-                  << ". Check the layout passed to T.annotate_layout.";
-            }
+        if (IsSharedBuffer(buffer)) {
+          arith::IterMapResult injectivity = layout->DetectInjective();
+          if (!injectivity->errors.empty()) {
+            TVM_FFI_THROW(ValueError)
+                << "Invalid layout for shared buffer `" << buffer->name
+                << "`: the forward map must be injective. Details: "
+                << injectivity->errors << ". Layout: " << layout->DebugOutput()
+                << ". Check the layout passed to T.annotate_layout.";
           }
-          annotated_layout_map_.Set(buffer, resolved_layout);
         }
+        annotated_layout_map_.Set(buffer, layout);
       }
     }
   }
