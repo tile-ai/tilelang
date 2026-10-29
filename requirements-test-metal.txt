@@ -5,4 +5,6 @@
 --requirement requirements-test.txt
 
 # Metal specific requirements
-# Currently: none
+# PyTorch 2.15 rejects the Apple Paravirtual GPU on GitHub's macOS 26 runners.
+# Keep CI on the last validated MPS release until that upstream regression is fixed.
+torch==2.14.1; platform_system == 'Darwin'
