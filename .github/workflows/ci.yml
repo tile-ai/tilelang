@@ -260,6 +260,9 @@ jobs:
             export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
           else
             export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+            # Keep newer PyPI CUDA wheels from outranking the matching ROCm build
+            # when UV_INDEX_STRATEGY=unsafe-best-match is used for other dependencies.
+            export UV_TORCH_BACKEND="rocm${ROCM_VERSION_MAJMIN}"
           fi
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
 
@@ -269,6 +272,9 @@ jobs:
           echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          if [[ -n "${UV_TORCH_BACKEND:-}" ]]; then
+            echo "UV_TORCH_BACKEND=${UV_TORCH_BACKEND}" | tee -a "${GITHUB_ENV}"
+          fi
 
           if [[ ! -x "$(command -v hipcc)" ]]; then
             export PATH="/opt/rocm/bin:${PATH}"
@@ -321,7 +327,8 @@ jobs:
 
           uv pip install --upgrade pip setuptools wheel
           if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
-            uv pip install --prerelease=allow -v torch
+            # Do not let the global unsafe-best-match policy escape the nightly ROCm index.
+            UV_INDEX_STRATEGY=first-index uv pip install --prerelease=allow -v torch
           fi
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
@@ -339,6 +346,22 @@ jobs:
           echo "::group::torch.utils.collect_env"
           uv run --no-project -m -- torch.utils.collect_env
           echo "::endgroup::"
+
+      - name: Validate ROCm PyTorch backend
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          python - <<'PY'
+          import torch
+
+          backend = (
+              f"torch={torch.__version__}, cuda={torch.version.cuda}, hip={torch.version.hip}"
+          )
+          if torch.version.hip is None or torch.version.cuda is not None:
+              raise RuntimeError(f"ROCm CI requires HIP-enabled PyTorch; got {backend}")
+          if not torch.cuda.is_available():
+              raise RuntimeError(f"ROCm PyTorch cannot access a GPU; {backend}")
+          print(f"Validated ROCm PyTorch: {backend}")
+          PY
 
       - name: Clear uv cache for self-hosted runners (if setup failed)
         if: >-
