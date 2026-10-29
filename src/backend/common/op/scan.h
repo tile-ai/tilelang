@@ -31,8 +31,10 @@ namespace scan {
 inline bool
 ExprDependsOnAxis(const PrimExpr &expr, const Var &axis,
                   const Map<Var, PrimExpr> &bind_var_to_expr,
+                  arith::Analyzer *analyzer,
                   std::unordered_set<const VarNode *> *visited_bind_vars) {
-  return UsesVar(expr, [&](const VarNode *var_node) {
+  PrimExpr simplified = analyzer->Simplify(expr);
+  return UsesVar(simplified, [&](const VarNode *var_node) {
     if (var_node == axis.get()) {
       return true;
     }
@@ -42,17 +44,18 @@ ExprDependsOnAxis(const PrimExpr &expr, const Var &axis,
       return false;
     }
     return ExprDependsOnAxis(bind_var_to_expr[var], axis, bind_var_to_expr,
-                             visited_bind_vars);
+                             analyzer, visited_bind_vars);
   });
 }
 
 inline bool RegionDependsOnAxis(const BufferRegion &region, const Var &axis,
-                                const Map<Var, PrimExpr> &bind_var_to_expr) {
+                                const Map<Var, PrimExpr> &bind_var_to_expr,
+                                arith::Analyzer *analyzer) {
   for (const auto &range : region->region) {
     std::unordered_set<const VarNode *> visited_bind_vars;
-    if (ExprDependsOnAxis(range->min, axis, bind_var_to_expr,
+    if (ExprDependsOnAxis(range->min, axis, bind_var_to_expr, analyzer,
                           &visited_bind_vars) ||
-        ExprDependsOnAxis(range->extent, axis, bind_var_to_expr,
+        ExprDependsOnAxis(range->extent, axis, bind_var_to_expr, analyzer,
                           &visited_bind_vars)) {
       return true;
     }
@@ -62,8 +65,9 @@ inline bool RegionDependsOnAxis(const BufferRegion &region, const Var &axis,
 
 template <typename ScanOpNode>
 Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
-                     const char *op_name, const char *pretty_name,
-                     const char *symbol_prefix, const char *scan_noun) {
+                     arith::Analyzer *analyzer, const char *op_name,
+                     const char *pretty_name, const char *symbol_prefix,
+                     const char *scan_noun) {
   if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
     LOG(FATAL) << pretty_name
                << " for fragment not implemented, please raise an issue if "
@@ -107,9 +111,9 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
           continue;
         }
         CHECK(!RegionDependsOnAxis(op.srcRegion_, thread_axis->var,
-                                   lower_args.bind_var_to_expr) &&
+                                   lower_args.bind_var_to_expr, analyzer) &&
                   !RegionDependsOnAxis(op.dstRegion_, thread_axis->var,
-                                       lower_args.bind_var_to_expr),
+                                       lower_args.bind_var_to_expr, analyzer),
               ValueError)
             << "T." << op_name
             << " on CUDA shared memory does not support scan regions that "
@@ -157,14 +161,14 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
 }
 
 inline Stmt LowerCumSum(const CumSumOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
-  return LowerSharedScan(op, lower_args, "cumsum", "CumSum", "CumSum",
+                        arith::Analyzer *analyzer) {
+  return LowerSharedScan(op, lower_args, analyzer, "cumsum", "CumSum", "CumSum",
                          "Cumulative sum");
 }
 
 inline Stmt LowerCumMax(const CumMaxOpNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *) {
-  return LowerSharedScan(op, lower_args, "cummax", "CumMax", "CumMax",
+                        arith::Analyzer *analyzer) {
+  return LowerSharedScan(op, lower_args, analyzer, "cummax", "CumMax", "CumMax",
                          "Cumulative maximum");
 }
 

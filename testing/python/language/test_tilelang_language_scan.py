@@ -189,6 +189,50 @@ def test_cuda_shared_scan_preserves_thread_offset():
     assert "tl::CumSum1D<32, false, 32>" in artifact.device_mod.script()
 
 
+@tilelang.testing.requires_cuda
+def test_cuda_shared_scan_rejects_pure_bind_alias_to_extra_thread_axis():
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 128), T.float32), B: T.Tensor((2, 128), T.float32)):
+        T.func_attr({"global_symbol": "main", "target": target})
+        with T.Kernel(1, threads=(96, 2)):
+            thread_axis = T.get_thread_binding(1)
+            row = T.bind(thread_axis)
+            shared = T.alloc_shared((2, 128), T.float32)
+            T.copy(A, shared)
+            T.cumsum(shared[row, :], dim=0)
+            T.copy(shared, B)
+
+    with (
+        target,
+        pytest.raises(ValueError, match=r"T\.cumsum.*extra threadIdx\.y/z axes"),
+    ):
+        mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(main))
+        tl.transform.LowerTileOp()(mod)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("axis_tag", ["threadIdx.y", "threadIdx.z"])
+def test_cuda_shared_scan_ignores_finished_extra_thread_scope(axis_tag):
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((128,), T.float32)
+            T.copy(A, shared)
+            with T.launch_thread(axis_tag, 2):
+                T.evaluate(0)
+            T.cumsum(shared, dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    script = artifact.device_mod.script()
+    scan_pos = script.index("tl::CumSum1D")
+    assert "if " not in script[max(0, scan_pos - 120) : scan_pos]
+
+
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem", threads=256):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype, threads)
@@ -309,9 +353,17 @@ def test_cumsum_fragment():
     run_cumsum(128, 128, 64, 64, dtype=T.float32, scope="fragment")
 
 
+@pytest.mark.skipif(torch.version.hip is not None, reason="CUDA C++ path only; HIP retains its existing limits.")
 def test_cumsum_smem_96_threads():
     run_cumsum(128, 128, 64, 64, threads=96)
     run_cumsum_1d(96, 96)
+
+
+@tilelang.testing.requires_rocm
+def test_hip_cumsum_smem_96_threads_keeps_static_assert():
+    program = cumsum_smem_test(128, 128, 64, 64, threads=96)
+    with pytest.raises(RuntimeError, match="static assertion failed"):
+        tl.compile(program, out_idx=-1)
 
 
 def test_cumsum_smem_1d():

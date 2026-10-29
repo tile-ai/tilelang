@@ -1184,6 +1184,8 @@ private:
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
+      IterVar previous_thread_binding_y = thread_binding_y_;
+      IterVar previous_thread_binding_z = thread_binding_z_;
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
@@ -1195,6 +1197,10 @@ private:
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_binding_z_ = iv;
       }
+      Stmt result = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+      thread_binding_y_ = previous_thread_binding_y;
+      thread_binding_z_ = previous_thread_binding_z;
+      return result;
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
   }
