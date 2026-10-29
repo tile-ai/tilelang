@@ -1022,5 +1022,122 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
+
+def test_tvm_access_ptr_elem_offset_included_in_bound():
+    """Regression (KellyFrog #3518): include buffer.elem_offset in the physical end.
+
+    A float32 view of shape (8,) starting at elem_offset=8 covers physical
+    float32 indices [8, 16) = bytes [32, 64). A uint8 access at byte offset
+    32 + b*16 with extent 16 is in-bounds for b in [0, 2); ignoring
+    elem_offset falsely treats the buffer as only 32 bytes and rejects them.
+    """
+
+    @T.prim_func
+    def main(src: T.Tensor((8,), "float32"), b: T.int32):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 32 + b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    src_param = main.params[0]
+    src_buf = main.buffer_map[src_param]
+    src_with_offset = tvm.tirx.decl_buffer(
+        src_buf.shape,
+        src_buf.dtype,
+        data=src_buf.data,
+        strides=src_buf.strides,
+        elem_offset=tvm.tirx.IntImm("int32", 8),
+        scope=src_buf.scope(),
+        name=src_buf.name,
+    )
+    buffer_map = dict(main.buffer_map)
+    buffer_map[src_param] = src_with_offset
+    func = tvm.tirx.PrimFunc(
+        main.params,
+        main.body,
+        ret_type=main.ret_type,
+        buffer_map=buffer_map,
+        attrs=main.attrs,
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(func)
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(
+        body, op="tl.ptx_cp_async"
+    )
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in (0, 1):
+        substituted = analyzer.simplify(
+            tvm.tirx.stmt_functor.substitute(
+                predicate, {b_var: tvm.tirx.const(block_idx, "int32")}
+            )
+        )
+        assert analyzer.can_prove(substituted), (
+            f"in-bounds block {block_idx} was predicated off with elem_offset; "
+            f"predicate={predicate}"
+        )
+    for block_idx in (2, 3):
+        substituted = analyzer.simplify(
+            tvm.tirx.stmt_functor.substitute(
+                predicate, {b_var: tvm.tirx.const(block_idx, "int32")}
+            )
+        )
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
+            f"OOB block {block_idx} should be false; predicate={predicate}"
+        )
+
+
+def test_tvm_access_ptr_large_shape_extent_uses_int64():
+    """Regression (KellyFrog #3518): flatten extent must not overflow int32.
+
+    float32[65536, 65536] has 2^32 elements; an int32 product wraps to 0 and
+    would reject every access. Multiplying shape dims in int64 keeps a 16-byte
+    transfer at offset 0 in-bounds.
+    """
+    n = 65536
+
+    @T.prim_func
+    def main(src: T.Tensor((n, n), "float32")):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 0, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(
+        body, op="tl.ptx_cp_async"
+    )
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    # Constant in-bounds transfer: analyzer should prove the guard and drop it
+    # (3-arg form), or leave a predicate that is unconditionally true.
+    if len(call.args) == 3:
+        return
+    assert len(call.args) == 4
+    predicate = call.args[3]
+    analyzer = tvm.arith.Analyzer()
+    assert analyzer.can_prove(analyzer.simplify(predicate)), (
+        f"in-bounds access on large buffer was predicated off; predicate={predicate}"
+    )
+
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -574,10 +574,12 @@ private:
       PrimExpr annotated_offset = ptr_call->args[2];
       PrimExpr annotated_extent = ptr_call->args[3];
       PrimExpr load_index = annotated_offset;
-      if (pointer_element_dtype != flat->dtype) {
-        int pointer_elem_bits =
-            pointer_element_dtype.bits() * pointer_element_dtype.lanes();
-        int buffer_elem_bits = flat->dtype.bits() * flat->dtype.lanes();
+      int pointer_elem_bits =
+          pointer_element_dtype.bits() * pointer_element_dtype.lanes();
+      int buffer_elem_bits = flat->dtype.bits() * flat->dtype.lanes();
+      // Compare element widths, not DataType identity, so equal-width pairs
+      // like int32/float32 keep the annotated offset without FloorDiv.
+      if (pointer_elem_bits != buffer_elem_bits) {
         ICHECK_GT(pointer_elem_bits, 0)
             << "tvm_access_ptr element width must be positive: " << expr;
         ICHECK_GT(buffer_elem_bits, 0)
@@ -633,9 +635,19 @@ private:
       return conditions;
     }
 
+    // Prefer the registered (possibly unflattened) buffer so we can:
+    // (a) include buffer->elem_offset in the physical bound, and
+    // (b) multiply shape dims in int64 before any 32-bit flatten product
+    //     overflows (e.g. float32[64K, 64K]).
+    Buffer bound_buffer = buffer;
+    if (buffer_data_to_buffer_.count(buffer->data)) {
+      bound_buffer = buffer_data_to_buffer_[buffer->data];
+    }
+
     int pointer_elem_bits =
         info.element_dtype.bits() * info.element_dtype.lanes();
-    int buffer_elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
+    int buffer_elem_bits =
+        bound_buffer->dtype.bits() * bound_buffer->dtype.lanes();
     ICHECK_GT(pointer_elem_bits, 0)
         << "tvm_access_ptr element width must be positive";
     ICHECK_GT(buffer_elem_bits, 0)
@@ -648,13 +660,19 @@ private:
         bit_begin + Cast(address_dtype, info.annotated_extent.value()) *
                         IntImm(address_dtype, pointer_elem_bits);
 
-    Buffer flat = buffer.GetFlattenedBuffer();
-    PrimExpr flat_extent = Cast(address_dtype, flat->shape[0]);
-    for (size_t i = 1; i < flat->shape.size(); ++i) {
-      flat_extent = flat_extent * Cast(address_dtype, flat->shape[i]);
+    PrimExpr flat_extent = IntImm(address_dtype, 1);
+    for (size_t i = 0; i < bound_buffer->shape.size(); ++i) {
+      flat_extent =
+          flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
     }
-    PrimExpr buffer_bits =
-        flat_extent * IntImm(address_dtype, buffer_elem_bits);
+    PrimExpr elem_offset =
+        bound_buffer->elem_offset.defined()
+            ? Cast(address_dtype, bound_buffer->elem_offset)
+            : make_zero(address_dtype);
+    // Physical end in bits: allocation covers
+    // [elem_offset, elem_offset + flat_extent) in buffer dtype units.
+    PrimExpr buffer_bits = (elem_offset + flat_extent) *
+                           IntImm(address_dtype, buffer_elem_bits);
 
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     (void)is_load;
