@@ -6,8 +6,8 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
-from tilelang.testing.ir import assert_call_count, collect_calls
-from tvm.tirx.stmt_functor import ir_transform, post_order_visit
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
+from tvm.tirx.stmt_functor import ir_transform
 
 
 def _strip_block_reads_writes(stmt, strip_annotations: bool = False):
@@ -51,18 +51,6 @@ def _is_int_zero(expr):
 def _assert_tl_access_ptr_bases_are_buffer_loads(stmt):
     for call in collect_calls(stmt, op="tl.access_ptr"):
         assert isinstance(call.args[0], tvm.tirx.BufferLoad)
-
-
-def _count_if_then_else(stmt):
-    count = 0
-
-    def _visit(node):
-        nonlocal count
-        if isinstance(node, tvm.tirx.IfThenElse):
-            count += 1
-
-    post_order_visit(stmt, _visit)
-    return count
 
 
 def _assert_legalize_matches_expected(before, expected, strip_annotations: bool = False):
@@ -494,7 +482,7 @@ def assert_cp_async_access_ptr_nonzero_safe_value_legalize():
     cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) > 0
     assert all(len(call.args) == 3 for call in cp_async_calls)
-    assert _count_if_then_else(body) > 0
+    assert collect_nodes(body, tvm.tirx.IfThenElse)
     _assert_legalize_matches_expected(func, expected, strip_annotations=True)
 
 
@@ -536,7 +524,7 @@ def assert_call_extern_access_ptr_mask_legalize(access_type: str):
     body = transformed["main"].body
 
     _assert_tl_access_ptr_bases_are_buffer_loads(body)
-    assert _count_if_then_else(body) > 0
+    assert collect_nodes(body, tvm.tirx.IfThenElse)
     _assert_legalize_matches_expected(func, expected)
 
 
@@ -743,12 +731,11 @@ def test_cp_async_signed_zero_safe_value_oob(safe_value):
     assert len(calls) == 1
     if math.copysign(1.0, safe_value) > 0:
         assert len(calls[0].args) == 4
-        assert _count_if_then_else(body) == 0
+        assert not collect_nodes(body, tvm.tirx.IfThenElse)
     else:
         assert len(calls[0].args) == 3
-        assert _count_if_then_else(body) == 1
-        stores = []
-        post_order_visit(body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None)
+        assert len(collect_nodes(body, tvm.tirx.IfThenElse)) == 1
+        stores = collect_nodes(body, tvm.tirx.BufferStore)
         assert len(stores) == 1
         fill = stores[0].value
         assert isinstance(fill, tvm.tirx.FloatImm)
@@ -812,13 +799,7 @@ def test_dynamic_index_load_store_conditions_are_combined():
     assert isinstance(load_guards[0].args[2], tvm.tirx.FloatImm)
     assert float(load_guards[0].args[2].value) == 0.0
 
-    store_guards = []
-
-    def _collect_store_guard(node):
-        if isinstance(node, tvm.tirx.IfThenElse):
-            store_guards.append(node)
-
-    post_order_visit(body, _collect_store_guard)
+    store_guards = collect_nodes(body, tvm.tirx.IfThenElse)
     assert len(store_guards) == 1
     assert isinstance(store_guards[0].condition, tvm.tirx.And)
     assert isinstance(store_guards[0].then_case, tvm.tirx.BufferStore)
@@ -870,9 +851,7 @@ def test_nested_buffer_load_index_is_safely_rewritten():
         assert len(safe_indices) == 1
         _assert_safe_b_index(safe_indices[0])
 
-    guarded_b_indices = [
-        call for call in collect_calls(body, op="tirx.if_then_else") if len(call.args) == 3 and _is_load_from(call.args[1], b_data)
-    ]
+    guarded_b_indices = [call for call in all_guards if len(call.args) == 3 and _is_load_from(call.args[1], b_data)]
     assert len(guarded_b_indices) == 1
 
 
@@ -905,8 +884,7 @@ def test_ramp_load_conditions_are_combined():
     assert isinstance(guard.args[2], tvm.tirx.Broadcast)
     assert guard.args[2].dtype.lanes == lanes
 
-    predicate_nodes = []
-    post_order_visit(guard.args[0], predicate_nodes.append)
+    predicate_nodes = collect_nodes(guard.args[0], tvm.runtime.Object)
     comparisons = [node for node in predicate_nodes if isinstance(node, (tvm.tirx.LT, tvm.tirx.LE, tvm.tirx.GT, tvm.tirx.GE))]
     # Prefix constraints eliminate the three lower-bound checks implied by
     # `0 <= base`, while retaining the four progressively tighter upper bounds.
@@ -914,17 +892,6 @@ def test_ramp_load_conditions_are_combined():
     assert all(not isinstance(node, tvm.tirx.BufferLoad) for node in predicate_nodes)
     assert all(node.dtype.lanes == 1 for node in predicate_nodes if hasattr(node, "dtype"))
     assert_call_count(guard.args[0], op="tirx.if_then_else", count=0)
-
-
-def _collect_nodes(stmt, node_type):
-    nodes = []
-
-    def _visit(node):
-        if isinstance(node, node_type):
-            nodes.append(node)
-
-    post_order_visit(stmt, _visit)
-    return nodes
 
 
 def _comparison_uses_var(comparison, var):
@@ -959,7 +926,7 @@ def _assert_expr_guard_scope(body, index_var):
 
 
 def _assert_stmt_guard_scope(body, index_var):
-    guards = [guard for guard in _collect_nodes(body, tvm.tirx.IfThenElse)]
+    guards = collect_nodes(body, tvm.tirx.IfThenElse)
     assert len(guards) == 4
     assert all(not isinstance(guard.condition, tvm.tirx.And) for guard in guards)
 
@@ -1050,9 +1017,9 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert isinstance(guarded, tvm.tirx.BufferLoad)
     assert all(not isinstance(condition, tvm.tirx.And) for condition in conditions)
     assert all(_comparison_uses_var(condition, later_index) for condition in conditions[:2])
-    assert all(not _collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
-    assert all(_collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
-    assert _collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
+    assert all(not collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
+    assert all(collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
+    assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
 if __name__ == "__main__":

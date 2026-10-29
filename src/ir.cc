@@ -29,15 +29,17 @@ using namespace ffi;
 
 ForFrame MakeThreadBindingFrame(const std::string &name,
                                 const String &thread_tag,
-                                const PrimExpr &extent) {
+                                const PrimExpr &extent,
+                                const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   Var var = Var(name, extent->dtype);
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.push_back(var);
   n->doms.push_back(Range(make_const(extent->dtype, 0), extent));
-  n->f_make_for_loop =
-      [thread_tag](const Array<Var> &vars, const Array<Range> &doms,
-                   const Array<Optional<PrimExpr>> &steps, Stmt body) -> Stmt {
+  n->f_make_for_loop = [thread_tag, annotations](
+                           const Array<Var> &vars, const Array<Range> &doms,
+                           const Array<Optional<PrimExpr>> &steps,
+                           Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
     IterVar iter_var(Range{nullptr}, Var(thread_tag, vars[0]->dtype),
@@ -47,7 +49,7 @@ ForFrame MakeThreadBindingFrame(const std::string &name,
     return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kThreadBinding,
                body,
                /*thread_binding=*/iter_var,
-               /*annotations=*/Map<String, Any>{},
+               /*annotations=*/annotations,
                /*step=*/step);
   };
   return ForFrame(n);
@@ -243,6 +245,8 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   static const char *kBlockVarNames[3] = {"bx", "by", "bz"};
   static const char *kBlockTags[3] = {"blockIdx.x", "blockIdx.y", "blockIdx.z"};
 
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
   for (size_t i = 0; i < grid_size.size(); i++) {
     ForFrame frame =
         MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]);
@@ -257,8 +261,6 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   n->thread_vars = thread_frame->vars;
   n->frames.push_back(thread_frame);
 
-  Map<String, Any> block_annotations =
-      attrs.defined() ? attrs : Map<String, Any>{};
   if (block_size_opt.defined()) {
     Array<PrimExpr> block_size = block_size_opt.value();
     ICHECK(block_size.size() <= 3);
@@ -338,25 +340,35 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
   }
   std::sort(warp_groups.begin(), warp_groups.end());
 
-  // Merge consecutive groups
-  std::vector<std::pair<int, int>> merged;
-  for (int group : warp_groups) {
-    if (merged.empty() || group != merged.back().second) {
-      merged.emplace_back(group, group + 1);
-    } else {
-      merged.back().second = group + 1;
+  if (std::find(warp_groups.begin(), warp_groups.end(), -1) !=
+      warp_groups.end()) {
+    // `-1` skips the threadIdx.x binding, so the region runs on every thread
+    // and no range constraint is emitted. Treated as a group index instead, it
+    // would build the empty range [-warp_group_size, 0) and the region would
+    // run on no thread at all, dropping every store inside it.
+    condition = IntImm(DataType::Bool(), 1);
+  } else {
+    // Merge consecutive groups
+    std::vector<std::pair<int, int>> merged;
+    for (int group : warp_groups) {
+      if (merged.empty() || group != merged.back().second) {
+        merged.emplace_back(group, group + 1);
+      } else {
+        merged.back().second = group + 1;
+      }
     }
-  }
 
-  for (const auto &[start, end] : merged) {
-    PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
-    PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
-    PrimExpr range_cond = (thread_idx >= min_bound) && (thread_idx < max_bound);
+    for (const auto &[start, end] : merged) {
+      PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
+      PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
+      PrimExpr range_cond =
+          (thread_idx >= min_bound) && (thread_idx < max_bound);
 
-    if (condition.defined()) {
-      condition = tirx::Or(condition, range_cond);
-    } else {
-      condition = range_cond;
+      if (condition.defined()) {
+        condition = tirx::Or(condition, range_cond);
+      } else {
+        condition = range_cond;
+      }
     }
   }
   IfFrame if_frame = If(condition);

@@ -1,5 +1,6 @@
 """SIMD interleave/deinterleave lane ordering."""
 
+import pytest
 import torch
 import tilelang
 import tilelang.testing
@@ -34,3 +35,26 @@ def test_interleave_and_deinterleave():
     expected = torch.cat((interleaved, torch.stack((joined[::2], joined[1::2]))))
     result = tilelang.compile(kernel, target="ascend", out_idx=-1)(a.npu(), b.npu())
     torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("dtype", ["uint8", "int16", "float32", "bfloat16"])
+def test_dual_source_store_lane_order(dtype):
+    torch_dtype = getattr(torch, dtype)
+    lanes = 256 // torch.tensor([], dtype=torch_dtype).element_size()
+
+    @T.prim_func
+    def kernel(A: T.Tensor((2, lanes), dtype), O: T.Tensor((2 * lanes,), dtype)):
+        with T.Kernel(1):
+            src = T.alloc_shared((2, lanes), dtype)
+            dst = T.alloc_shared((2 * lanes,), dtype)
+            T.copy(A, src)
+            with T.SimdVF():
+                first = T.simd.vld(src[0, 0])
+                second = T.simd.vld(src[1, 0])
+                T.simd.vst2(dst[0], first, second)
+            T.copy(dst, O)
+
+    values = (torch.arange(lanes * 2).reshape(2, lanes) % 251).to(torch_dtype)
+    result = tilelang.compile(kernel, out_idx=-1)(values.npu())
+    assert torch.equal(result.cpu(), values.T.contiguous().flatten())

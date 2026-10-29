@@ -158,7 +158,8 @@ def test_store_cluster_non_16b_contiguous_fallback(capfd):
     """A contiguous 508B copy must use the barrier-aware SIMT fallback."""
     N = 127  # 127 * sizeof(float32) = 508 bytes
     prim_func = make_store_cluster_kernel(N)
-    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+    with tilelang.testing.without_kernel_cache():
+        mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
 
     src = mod.get_kernel_source()
     assert "tl::tma_store_cluster" not in src, f"Non-16B copy must not emit tma_store_cluster.\nKernel source:\n{src}"
@@ -246,7 +247,8 @@ def test_store_cluster_non_16b_row_fallback(capfd):
     """A non-contiguous copy with 124B rows must reject row-wise TMA."""
     M, N_full, N_tile = 4, 64, 31  # Each row is 31 * 4 = 124 bytes
     prim_func = make_store_cluster_simt_barrier_kernel(M, N_full, N_tile)
-    mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
+    with tilelang.testing.without_kernel_cache():
+        mod = tilelang.compile(prim_func, out_idx=[1], execution_backend="cython")
 
     src = mod.get_kernel_source()
     assert "tl::tma_store_cluster" not in src, f"Non-16B rows must not emit tma_store_cluster.\nKernel source:\n{src}"

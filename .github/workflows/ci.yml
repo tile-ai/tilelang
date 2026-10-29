@@ -38,12 +38,32 @@ jobs:
     name: Quick Lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      run_tests: ${{ steps.changes.outputs.run_tests }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Detect documentation-only changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Keep tests enabled for manual runs and if the diff cannot be resolved.
+          run_tests=true
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]] &&
+            git diff --quiet --no-renames "${BASE_SHA}...${HEAD_SHA}" -- \
+              . \
+              ':(exclude,glob)**/*.md' \
+              ':(exclude,glob)**/*.rst' \
+              ':(exclude,glob)docs/_static/**'; then
+            run_tests=false
+          fi
+          echo "run_tests=${run_tests}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Python 3.10
         id: setup-pylowest
@@ -78,6 +98,7 @@ jobs:
     name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
     if: |
       github.repository_owner == 'tile-ai' &&
+      needs.lint.outputs.run_tests == 'true' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
@@ -440,19 +461,31 @@ jobs:
           fi
 
   ascend:
-    name: Ascend tests
+    name: Test for ${{ matrix.backend.name }}
     if: |
       github.repository_owner == 'tile-ai' &&
+      needs.lint.outputs.run_tests == 'true' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: AscendC
+            target: ascend
+            unit_markers: not pto
+          - name: PTO
+            target: pto
+            unit_markers: pto
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
     timeout-minutes: 120
     env:
       PIP_USER: "0"
       USE_CUDA: "OFF"
       USE_ASCEND: "ON"
+      CMAKE_BUILD_PARALLEL_LEVEL: "64"
 
     steps:
       - name: Checkout repository
@@ -467,7 +500,8 @@ jobs:
           # rejects it as "dubious ownership"; CMake's submodule check needs it.
           git config --global --add safe.directory '*'
 
-      - name: Build and test Ascend
+      - name: Set up environment and build Ascend
+        id: ascend-build
         shell: bash
         run: |
           # Keep the runner's preinstalled Torch/Torch-NPU stack.
@@ -483,6 +517,14 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
@@ -505,9 +547,45 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-          cd testing
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
+      - name: Run ${{ matrix.backend.name }} examples
+        id: backend-examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ${{ matrix.backend.target }}
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run ${{ matrix.backend.name }} unit tests
+        id: backend-unit-tests
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_MARKERS: ${{ matrix.backend.unit_markers }}
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
+
+      - name: Summarize ${{ matrix.backend.name }} results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BACKEND_NAME: ${{ matrix.backend.name }}
+          BUILD_RESULT: ${{ steps.ascend-build.outcome }}
+          EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
+          UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Test for ${BACKEND_NAME}"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Build | ${BUILD_RESULT} |"
+            echo "| ${BACKEND_NAME} examples | ${EXAMPLES_RESULT} |"
+            echo "| Unit tests | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
     name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)

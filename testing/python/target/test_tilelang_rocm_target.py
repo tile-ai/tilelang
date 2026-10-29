@@ -80,6 +80,28 @@ def test_auto_target_uses_registered_detector_order_for_rocm():
         target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
+def test_rocm_arch_detection_reads_current_device(monkeypatch):
+    import torch
+
+    import tilelang.rocm.target as rocm_target
+
+    probed = []
+
+    class _Props:
+        gcnArchName = "gfx942:sramecc+:xnack-"
+
+    def fake_get_device_properties(index):
+        probed.append(index)
+        return _Props()
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", fake_get_device_properties)
+
+    assert rocm_target._detect_rocm_arch() == "gfx942"
+    assert probed == [1]
+
+
 def test_rdna_gfx1151_target_classification():
     target = _hip_target("gfx1151")
     assert target_is_rdna(target)

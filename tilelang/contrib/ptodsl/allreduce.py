@@ -92,17 +92,20 @@ def _redux_integer_compat(op, value, *, with_signedness):
     return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), raw_value.type))
 
 
-def _redux_add(value):
+def redux_add(value):
+    """Sum reduce across warp lanes."""
     # redux_add takes no signedness argument.
     return _redux_integer_compat(pto.redux_add, value, with_signedness=False)
 
 
-def _redux_max(value):
+def redux_max(value):
+    """Max reduce across warp lanes."""
     # redux_max/min require an explicit integer signedness.
     return _redux_integer_compat(pto.redux_max, value, with_signedness=True)
 
 
-def _redux_min(value):
+def redux_min(value):
+    """Min reduce across warp lanes."""
     return _redux_integer_compat(pto.redux_min, value, with_signedness=True)
 
 
@@ -140,9 +143,9 @@ _REDUCER_COMBINE = {
 }
 
 _REDUCER_REDUX = {
-    "sum": _redux_add,
-    "max": _redux_max,
-    "min": _redux_min,
+    "sum": redux_add,
+    "max": redux_max,
+    "min": redux_min,
 }
 
 # Run the si32 strategy on the signless carrier with identity constants typed
@@ -251,8 +254,8 @@ def _write_warp_partials(warp_val, scratch, *, wid, lid, scale: int) -> None:
         scalar.store(warp_val, scratch, slot)
 
 
-def _combine_warp_partials(lid, scratch, *, num_warps: int, scale: int, reducer: str, identity):
-    """Combine every warp's partials on warp 0 (leader lanes only).
+def _combine_warp_partials(lid, scratch, *, partial_base, num_warps: int, scale: int, reducer: str, identity):
+    """Combine a group's warp partials on its leader warp (leader lanes only).
 
     The caller wraps the emitted ops in the runtime leader-warp region; the
     ``num_warps``/``scale``/``reducer`` dispatch is resolved at trace time.
@@ -260,7 +263,7 @@ def _combine_warp_partials(lid, scratch, *, num_warps: int, scale: int, reducer:
     if scale == 1:
         loaded = scalar.select(
             lid < num_warps,
-            scalar.load(scratch, lid),
+            scalar.load(scratch, partial_base + lid),
             identity,
         )
         return _REDUCER_REDUX[reducer](loaded)
@@ -269,7 +272,7 @@ def _combine_warp_partials(lid, scratch, *, num_warps: int, scale: int, reducer:
     if total <= 32:
         loaded = scalar.select(
             lid < total,
-            scalar.load(scratch, lid),
+            scalar.load(scratch, partial_base + lid),
             identity,
         )
         return _emit_butterfly(
@@ -284,21 +287,23 @@ def _combine_warp_partials(lid, scratch, *, num_warps: int, scale: int, reducer:
     reduced = identity
     my_slot = lid % scale
     for w in range(num_warps):
-        idx_val = w * scale + my_slot
+        idx_val = partial_base + w * scale + my_slot
         loaded_v = scalar.load(scratch, idx_val)
         reduced = combine(reduced, loaded_v)
     return scalar.select(is_reducer, reduced, identity)
 
 
-def _leader_warp_reduce(tx, lid, scratch, *, num_warps: int, scale: int, reducer: str, identity):
-    """Let warp 0 combine every warp's partial into the cross-warp result."""
-    is_leader_warp = tx < 32
+def _leader_warp_reduce(tx, lid, scratch, *, threads, num_warps: int, scale: int, reducer: str, identity):
+    """Let each group's leader warp combine its own warps' partials."""
+    group = tx // threads
+    is_leader_warp = (tx % threads) < 32
     with if_(is_leader_warp) as br:
         with br.then_:
             br.assign(
                 stage4_result=_combine_warp_partials(
                     lid,
                     scratch,
+                    partial_base=group * num_warps * scale,
                     num_warps=num_warps,
                     scale=scale,
                     reducer=reducer,
@@ -311,20 +316,27 @@ def _leader_warp_reduce(tx, lid, scratch, *, num_warps: int, scale: int, reducer
     return br.stage4_result
 
 
-def _broadcast_warp_result(partial_reduced, scratch, *, tx, scale: int):
-    """Store the final partial and load the value broadcast to all lanes."""
-    is_global_leader = tx < scale
-    with if_(is_global_leader) as br5, br5.then_:
-        scalar.store(partial_reduced, scratch, tx)
+def _broadcast_warp_result(partial_reduced, scratch, *, tx, threads, scale: int):
+    """Store the final partial and load the value broadcast within the group."""
+    group = tx // threads
+    local = tx % threads
+    # Broadcast only overwrites this group's partial region.
+    bcast_base = group * (threads // 32) * scale
+    is_group_leader = local < scale
+    with if_(is_group_leader) as br5, br5.then_:
+        scalar.store(partial_reduced, scratch, bcast_base + local)
 
     syncthreads()
-    result = scalar.load(scratch, tx % scale)
+    result = scalar.load(scratch, bcast_base + (local % scale))
     syncthreads()
     return result
 
 
 def _emit_cross_warp_reduce(x, scratch, *, dtype, threads, scale, thread_offset, reducer):
-    """Cross-warp all-reduce (threads > 32)."""
+    """Cross-warp all-reduce (threads > 32).
+
+    One call can cover several consecutive groups of ``threads`` threads.
+    """
     num_warps = threads // 32
     c_identity = _const(
         _REDUCER_IDENTITY[reducer][dtype],
@@ -340,6 +352,7 @@ def _emit_cross_warp_reduce(x, scratch, *, dtype, threads, scale, thread_offset,
         tx,
         lid,
         scratch,
+        threads=threads,
         num_warps=num_warps,
         scale=scale,
         reducer=reducer,
@@ -350,6 +363,7 @@ def _emit_cross_warp_reduce(x, scratch, *, dtype, threads, scale, thread_offset,
         partial_reduced,
         scratch,
         tx=tx,
+        threads=threads,
         scale=scale,
     )
 
@@ -486,6 +500,9 @@ def simt_allreduce_min(value, *, threads, scale=1, thread_offset=0, scratch=None
 
 
 __all__ = [
+    "redux_add",
+    "redux_max",
+    "redux_min",
     "simt_allreduce_sum",
     "simt_allreduce_max",
     "simt_allreduce_min",

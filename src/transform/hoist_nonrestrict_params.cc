@@ -36,25 +36,18 @@ public:
   }
 
 private:
-  static std::string NormalizeName(const std::string &s) {
-    if (s.size() >= 8 && s.rfind("_handle") == s.size() - 7) {
-      return s.substr(0, s.size() - 7);
-    }
-    return s;
-  }
-
   void MaybeInsert(const Var &v) {
     if (!v.defined())
       return;
     const VarNode *p = v.get();
     if (seen_ptr_.count(p))
       return;
-    // Also dedup by normalized name to be robust w.r.t recreated Vars
-    std::string norm = NormalizeName(v->name_hint);
-    if (seen_name_.count(norm))
+    // Exact-name dedup handles recreated Vars without conflating a user
+    // buffer named "A_handle" with a distinct buffer named "A".
+    if (seen_name_.count(v->name_hint))
       return;
     seen_ptr_.insert(p);
-    seen_name_.insert(std::move(norm));
+    seen_name_.insert(v->name_hint);
     collected_.push_back(v);
   }
 

@@ -23,6 +23,7 @@ def global_func_device_codegen(global_func_name: str) -> DeviceCodegenFunc:
             mod,
             target,
             lambda: tvm.ffi.get_global_func(global_func_name)(mod, target),
+            role="device",
         )
 
     return build

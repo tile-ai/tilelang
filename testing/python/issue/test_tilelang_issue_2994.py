@@ -9,11 +9,8 @@ from tvm import tirx
 
 @pytest.fixture(autouse=True)
 def _disable_tilelang_cache():
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         yield
-    finally:
-        tilelang.enable_cache()
 
 
 def _generated_call_lines(source, function):
@@ -49,7 +46,7 @@ def _packed_x2_select_source(dtype):
     func = func.with_attr("global_symbol", "packed_x2_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({"packed_x2_select": func})
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -79,7 +76,7 @@ def _packed_x2_constructor_source(dtype, constructor):
     func = func.with_attr("global_symbol", name)
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -122,7 +119,7 @@ def _packed_vector_load_source(
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -166,7 +163,7 @@ def _packed_vector_store_source(
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 

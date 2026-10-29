@@ -479,6 +479,24 @@ def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     return tirx.call_intrin("void", _Op("tl.simd.vsts"), addr, src, mask, dist)
 
 
+def vst2(addr, src0, src1):
+    """Interleave two full vectors into UB with one dual-source store.
+
+    Writes ``src0[0], src1[0], src0[1], src1[1], ...`` (512 bytes).
+    Sources and destination must have the same 8-, 16-, or 32-bit element
+    dtype. The destination must be 32-byte aligned. There is no mask;
+    a pre-wrapped access_ptr must cover both vectors.
+    """
+    dtype = tvm.DataType(src0.dtype)
+    if str(src0.dtype) != str(src1.dtype) or dtype.bits not in (8, 16, 32) or dtype.lanes != 2048 // dtype.bits:
+        raise TypeError("vst2 requires two matching full vectors with 8/16/32-bit elements")
+    if isinstance(addr, BufferLoad):
+        if str(addr.buffer.dtype) != str(src0.dtype).split("x")[0]:
+            raise TypeError("vst2 destination element dtype must match the source vectors")
+        addr = access_ptr(addr, "w", extent=dtype.lanes * 2)
+    return tirx.call_intrin("void", _Op("tl.simd.vst2"), addr, src0, src1)
+
+
 def vsstb(src, base, stride, mask=None, update=False):
     """Scatter-store 32B blocks with an optional POST_UPDATE pointer.
 
