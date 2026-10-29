@@ -7,7 +7,7 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from .events import pass_phase
 
@@ -28,11 +28,12 @@ _tool_factories: dict[str, Callable[[], PassInstrumentationTool]] = {}
 
 @dataclass(frozen=True)
 class CodegenEvent:
-    """One explicit backend code-generation call within a compile session."""
+    """One backend code-generation call; ``role=None`` means unspecified."""
 
     name: str
     mod: Any
     target: Any
+    role: Literal["device", "host"] | None = None
 
 
 class PassInstrumentationTool:
@@ -253,12 +254,14 @@ def run_codegen_with_instrumentation(
     mod: Any,
     target: Any,
     call: Callable[[], _CodegenResult],
+    *,
+    role: Literal["device", "host"] | None = None,
 ) -> _CodegenResult:
-    """Run an explicit backend codegen call through the active session."""
+    """Run codegen through the active session, leaving omitted roles unspecified."""
     session = current_compile_pass_instrumentation()
     if session is None:
         return call()
-    return session.run_codegen(CodegenEvent(name=name, mod=mod, target=target), call)
+    return session.run_codegen(CodegenEvent(name=name, mod=mod, target=target, role=role), call)
 
 
 @contextmanager

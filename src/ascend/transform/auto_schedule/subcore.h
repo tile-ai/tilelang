@@ -25,6 +25,7 @@
 
 #include <tvm/tirx/analysis.h>
 
+#include "ascend/transform/buffer_addresses.h"
 #include "layout/layout.h"
 #include "scheduled_tir.h"
 #include "support/check.h"
@@ -82,7 +83,20 @@ public:
     writer->alloc_buffers = std::move(allocations);
     Map<String, Any> annotations;
     for (const auto &[key, value] : root->annotations) {
-      if (auto versions = value.try_cast<BufferVersionMap>()) {
+      if (key == kBufferAddresses) {
+        BufferAddresses mapped;
+        for (const auto &[storage, address] : ParseBufferAddresses(value)) {
+          if (projector.varying_.count(storage)) {
+            for (int p = 0; p < projector.count_; ++p)
+              if (active(storage, p))
+                mapped.Set(projector.VarFor(storage, p), address);
+          } else {
+            mapped.Set(storage, address);
+          }
+        }
+        if (!mapped.empty())
+          annotations.Set(key, mapped);
+      } else if (auto versions = value.try_cast<BufferVersionMap>()) {
         BufferVersionMap mapped;
         for (const auto &[storage, versions_count] : versions.value()) {
           if (projector.varying_.count(storage)) {
@@ -187,7 +201,8 @@ private:
       const std::vector<std::shared_ptr<IRStructure>> &nodes) const {
     // Uniform vector work can keep one shared body, including sid-dependent
     // addresses in software dual copies. Split when participation differs or
-    // Cube needs a subcore-local value or UB destination.
+    // Cube needs a subcore-local value or UB destination. SS accesses also
+    // need concrete subcore indices to distinguish independent shared words.
     for (const auto &node : nodes) {
       const TaskNode *task =
           node->IsTask()
@@ -215,8 +230,9 @@ private:
         for (const auto &regions :
              {task->GetReadRegions(), task->GetWriteRegions()})
           for (const BufferRegion &region : regions)
-            if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
-                IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer))
+            if (IsSSBuffer(region->buffer) || IsL1Buffer(region->buffer) ||
+                IsL0ABuffer(region->buffer) || IsL0BBuffer(region->buffer) ||
+                IsL0CBuffer(region->buffer))
               return true;
       }
       if (node->IsControl() &&

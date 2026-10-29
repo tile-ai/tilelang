@@ -6,11 +6,19 @@ reducing_threads as the stride, but the device template indexed with
 threadIdx.x (the full block index), causing cross-batch overwrites.
 """
 
+import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
 from tilelang.testing import requires_cuda
+
+
+@pytest.fixture(autouse=True)
+def _fresh_compile():
+    """Each case asserts on a freshly compiled kernel, not a cached one."""
+    with tilelang.testing.without_kernel_cache():
+        yield
 
 
 def _make_reduce_kernel(batch: int, op: str):
@@ -56,7 +64,6 @@ def _torch_ref(A: torch.Tensor, op: str):
 @requires_cuda
 def test_issue_2524_reduce_sum_batch_gt_1():
     """reduce_sum with batch=2 — reducing_threads(64) < blockDim(128)."""
-    tilelang.disable_cache()
     torch.manual_seed(0)
     A = torch.randint(0, 8, (16, 8, 16)).float().cuda()
     ref = _torch_ref(A, "sum").cpu()
@@ -77,7 +84,6 @@ def test_issue_2524_reduce_sum_batch_gt_1():
 @requires_cuda
 def test_issue_2524_reduce_sum_batch_eq_1():
     """reduce_sum with batch=1 — sanity check (should always pass)."""
-    tilelang.disable_cache()
     torch.manual_seed(0)
     A = torch.randint(0, 8, (16, 8, 16)).float().cuda()
     ref = _torch_ref(A, "sum").cpu()
@@ -98,7 +104,6 @@ def test_issue_2524_reduce_sum_batch_eq_1():
 @requires_cuda
 def test_issue_2524_reduce_max_batch_gt_1():
     """reduce_max with batch=2 — reducing_threads(64) < blockDim(128)."""
-    tilelang.disable_cache()
     torch.manual_seed(0)
     A = torch.randint(0, 8, (16, 8, 16)).float().cuda()
     ref = _torch_ref(A, "max").cpu()
@@ -119,7 +124,6 @@ def test_issue_2524_reduce_max_batch_gt_1():
 @requires_cuda
 def test_issue_2524_reduce_min_batch_gt_1():
     """reduce_min with batch=2 — reducing_threads(64) < blockDim(128)."""
-    tilelang.disable_cache()
     torch.manual_seed(0)
     A = torch.randint(0, 8, (16, 8, 16)).float().cuda()
     ref = _torch_ref(A, "min").cpu()

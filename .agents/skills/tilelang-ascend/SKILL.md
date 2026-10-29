@@ -278,6 +278,27 @@ buf_c = T.alloc_l0c((TILE_M, TILE_N), "float32")
 frag = T.alloc_fragment((TILE,), "float32")
 ```
 
+On dav-3510, `T.alloc_ss(shape, "uint32")` or `"uint64"` allocates
+scalar storage shared by one AIC and its two AIVs. For example,
+`words = T.alloc_ss((2,), "uint32")` can be read as one packed word through
+`T.view(words, shape=(1,), dtype="uint64")`. The group has a 3072-byte pool;
+allocation bases are aligned to 32 bytes and different allocations do not reuse
+storage. Shapes must be static and allocation does not initialize the contents.
+SS follows ordinary buffer optimization semantics; unused accesses may be
+removed. Publication and slot-reuse order come from synchronization.
+
+The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use ordinary
+mode-4 synchronization, with each AIV tracked independently. Direct AIV peer
+dependencies require explicit synchronization, as with other shared storage.
+SS supports automatic multibuffering with the same owner and version annotations
+as L1. The uint32/uint64 views share a version clock and byte pitch, and all
+versions count toward the group's 3072-byte pool. Each epoch must write the
+data consumed in that epoch; disjoint AIV writes must still publish the same
+logical generation. SS accesses are scalar-only; VF, DMA and atomics are
+unsupported.
+With AutoSchedule disabled, supply the publication and reuse handshakes
+explicitly; see `testing/ascend/language/test_tilelang_ascend_ss.py`.
+
 For a deferred reduction inside `T.SimtVF`, use the reducer epoch API. Given
 float32 UB buffers `x_ub[TILE]` and `sum_ub[1]`:
 
@@ -325,6 +346,28 @@ allocation when their asynchronous lifetimes permit reuse. Follow the
 when changing manual kernels. For capacity or launch failures, record the
 generated allocation sizes, buffer versions, VF mode, and compiler options.
 Check SDK reservations as well as user buffers before changing tile sizes.
+
+For Cube storage (L1, L0A, L0B, L0C), `T.view` and `T.reshape` aliases can have
+different canonical layouts inferred from their operations or supplied with
+`T.annotate_layout`. For example, a `(64, 128)` L0B allocation can have a
+`(128, 64)` view filled with `T.copy(..., transpose=True)` and consumed with
+`T.gemm(..., transpose_B=True)`. A same-shape view can instead use a different
+`MajorK`/`MajorMN` layout. Each view keeps its own address mapping while the
+shared `.data` keeps one allocation and version clock; `T.assume_conflict` is
+unnecessary for these aliases.
+
+Memory layout annotations apply only to the named Buffer view. They do not
+propagate through `T.view`, `T.reshape`, or a shared `.data` Var. Annotate each
+view that needs a non-default interpretation; otherwise its own operations
+infer the layout or ordinary dense/strided addressing applies. Accessed Cube
+views require their own canonical layout from an annotation or a TileOp.
+Fragment aliases still share thread ownership.
+
+These views require dense logical strides, zero base offset, the same accessed
+dtype, and equal padded physical sizes. They reinterpret storage without moving
+existing values: the producer must write the representation its consumer uses.
+Use `T.access_ptr(view[...], ...)` when passing a view to an intrinsic, so layout
+lowering can select its address mapping.
 
 `T.annotate_unlimit_memory("shared", "shared.l1")` inside a kernel removes the
 scheduler's capacity constraint for those pools. Other supported scopes are

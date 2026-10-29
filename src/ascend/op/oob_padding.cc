@@ -69,15 +69,7 @@ DMAPath GetDMAPath(const Buffer &src, const Buffer &dst) {
 
 Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
                                      const Buffer &buffer) {
-  if (layout_map.count(buffer)) {
-    return layout_map[buffer];
-  }
-  for (const auto &kv : layout_map) {
-    if (kv.first->data.same_as(buffer->data)) {
-      return kv.second;
-    }
-  }
-  return std::nullopt;
+  return layout_map.Get(buffer);
 }
 
 BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,

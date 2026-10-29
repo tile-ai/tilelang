@@ -258,6 +258,24 @@ def test_cpu_atomic_addx4_fp32_slice():
     torch.testing.assert_close(out, Init + Val, rtol=1e-4, atol=1e-4)
 
 
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_cpu_atomic_addx4_integer_destination(dtype):
+    """The CUDA dtype restriction must not remove CPU's typed x4 lowering."""
+
+    @T.prim_func
+    def main(Val: T.Tensor((4,), dtype), Init: T.Tensor((4,), dtype), Dst: T.Tensor((4,), dtype)):
+        with T.Kernel(1):
+            for i in T.serial(4):
+                Dst[i] = Init[i]
+            T.atomic_addx4(Dst[0:4], Val[0:4])
+
+    kernel = _compile_c(main, out_idx=[2])
+    Val = _make_input((4,), dtype)
+    Init = _make_input((4,), dtype, seed=11)
+    out = kernel(Val, Init)
+    torch.testing.assert_close(out, Init + Val)
+
+
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
 def test_cpu_atomic_add_region_global(dtype):
     """Tile-region atomic_add with a global dst buffer."""

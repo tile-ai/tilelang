@@ -21,6 +21,32 @@ using namespace tirx;
 using namespace ffi;
 using namespace arith;
 
+Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
+  ICHECK_GE(dim, 0) << "ReduceOp: reduction axis must be non-negative";
+  ICHECK_LT(dim, src_layout->InputDim())
+      << "ReduceOp: reduction axis exceeds the source layout rank";
+  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
+  PrimExpr reduce_extent = src_layout->InputShape()[dim];
+  Array<PrimExpr> fwd;
+  for (size_t i = 0; i + 1 < src_layout->InputDim(); ++i) {
+    fwd.push_back(InputPlaceholder(i));
+  }
+  fwd.insert(fwd.begin() + dim,
+             FloorMod(ReplicationPlaceholder(), reduce_extent));
+  PrimExpr thread = src_layout->ForwardThread(
+      fwd, FloorDiv(ReplicationPlaceholder(), reduce_extent));
+
+  Array<PrimExpr> shape = src_layout->InputShape();
+  shape.erase(shape.begin() + dim);
+  if (shape.empty()) {
+    shape.push_back(1);
+  }
+  return Fragment(shape, {}, thread, reduce_extent * src_rep_extent,
+                  std::nullopt)
+      ->CondenseReplicateVar()
+      ->BindThreadRange(src_layout->ThreadRange());
+}
+
 std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
   if (const int64_t *constant = as_const_int(expr)) {
     return *constant;
