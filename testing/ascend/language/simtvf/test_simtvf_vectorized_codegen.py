@@ -167,6 +167,7 @@ def _ramp_value_kernel(explicit):
     return main
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("explicit", [False, True], ids=["parallel-index", "strided-ramp"])
 def test_pto_ramp_value_is_one_vector_argument(explicit):
     source = _source(_ramp_value_kernel(explicit), target={"kind": "ascend", "keys": ["pto", "ascend"]})
@@ -174,6 +175,7 @@ def test_pto_ramp_value_is_one_vector_argument(explicit):
     assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
 
 
+@pytest.mark.pto
 def test_pto_ramp_operands_are_evaluated_once():
     @T.prim_func
     def main():
@@ -196,7 +198,7 @@ def test_pto_ramp_operands_are_evaluated_once():
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 @pytest.mark.parametrize("explicit", [False, True], ids=["parallel-index", "strided-ramp"])
 def test_ramp_value_preserves_all_lanes(explicit, target):
     import torch
@@ -243,6 +245,7 @@ def _vector_local_kernel(lanes, unrolled):
     return main
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("lanes,unrolled", _VECTOR_LOCAL_CASES)
 def test_pto_vector_local_uses_scalar_addressed_storage(lanes, unrolled):
     source = tilelang.lower(_vector_local_kernel(lanes, unrolled), target="pto", enable_device_compile=False).kernel_source
@@ -256,7 +259,7 @@ def test_pto_vector_local_uses_scalar_addressed_storage(lanes, unrolled):
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 @pytest.mark.parametrize("lanes,unrolled", _VECTOR_LOCAL_CASES)
 def test_vector_local_slots_observe_mutation(lanes, unrolled, target):
     import torch
@@ -290,6 +293,7 @@ def _vector_local_cross_slot_kernel(load_stride=1, store_stride=1):
     return main
 
 
+@pytest.mark.pto
 def test_pto_vector_local_cross_slot_offsets():
     source = tilelang.lower(_vector_local_cross_slot_kernel(), target="pto", enable_device_compile=False).kernel_source
     for offset in (2, 4):
@@ -298,6 +302,7 @@ def test_pto_vector_local_cross_slot_offsets():
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.pto
 def test_pto_vector_local_cross_slot_mutation_preserves_neighbors():
     import torch
 
@@ -309,6 +314,7 @@ def test_pto_vector_local_cross_slot_mutation_preserves_neighbors():
     torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("access_kind", ["load", "store"])
 def test_pto_vector_local_cross_slot_rejects_noncontiguous_ramp(access_kind):
     func = _vector_local_cross_slot_kernel(**{f"{access_kind}_stride": 2})
@@ -343,6 +349,7 @@ def _unsigned_local_min_max_kernel(vector_elements):
     return main
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("vector_elements", [False, True], ids=["scalar-elements", "vector-elements"])
 def test_pto_local_vector_load_restores_unsigned_type(vector_elements):
     source = tilelang.lower(_unsigned_local_min_max_kernel(vector_elements), target="pto", enable_device_compile=False).kernel_source
@@ -352,7 +359,7 @@ def test_pto_local_vector_load_restores_unsigned_type(vector_elements):
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 @pytest.mark.parametrize("vector_elements", [False, True], ids=["scalar-elements", "vector-elements"])
 def test_unsigned_local_vector_min_max(vector_elements, target):
     import torch

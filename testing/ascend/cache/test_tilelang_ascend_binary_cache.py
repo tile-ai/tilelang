@@ -48,6 +48,7 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
 
     compile_calls = []
     monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", _fake_bisheng_compile(compile_calls))
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: "test clang version 15.0.5")
 
     target = Target({"kind": "ascend", "arch": "dav-3510"})
     source = "extern void kernel() {}"
@@ -77,6 +78,37 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
+def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    from tilelang.ascend import backend as ascend_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+
+    # Only the build time changes; the Clang version and revisions are equal.
+    version_suffix = "clang version 15.0.5 (clang-5c68a1cb1231 flang-5c68a1cb1231)"
+    first_version = f"2026-07-01T09:55:44+08:00 {version_suffix}"
+    second_version = f"2026-08-27T22:23:38+08:00 {version_suffix}"
+    current_version = first_version
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: current_version)
+    compiled_versions = []
+
+    def fake_compile(*args, **kwargs):
+        compiled_versions.append(current_version)
+        return bytearray(current_version.encode())
+
+    monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", fake_compile)
+    target = Target({"kind": "ascend", "arch": "dav-3510"})
+    source = "extern void kernel() {}"
+
+    for current_version in (first_version, first_version, second_version, second_version, first_version):
+        binary = ascend_backend.tilelang_callback_ascend_compile(source, target)
+        assert bytes(binary) == current_version.encode()
+
+    assert compiled_versions == [first_version, second_version]
+    cache_files = list((tmp_path / "cache").glob(f"*/ascend-binaries/*/kernel.{AIBIN}"))
+    assert len(cache_files) == 2
+
+
 def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.ascend import backend as ascend_backend
@@ -85,6 +117,7 @@ def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
 
     compile_calls = []
     monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", _fake_bisheng_compile(compile_calls))
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: "test clang version 15.0.5")
 
     target = Target({"kind": "ascend", "arch": "dav-3510"})
     source = "extern void kernel() {}"

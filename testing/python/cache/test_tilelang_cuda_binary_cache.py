@@ -48,6 +48,7 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     from tilelang.cuda import backend as cuda_backend
 
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+    monkeypatch.setattr(cuda_backend.nvcc, "get_nvcc_version", lambda: (13, 0, 88))
 
     compile_calls = []
 
@@ -91,6 +92,7 @@ def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     from tilelang.cuda import backend as cuda_backend
 
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+    monkeypatch.setattr(cuda_backend.nvcc, "get_nvcc_version", lambda: (13, 0, 88))
 
     compile_calls = []
 
