@@ -54,29 +54,6 @@ inline Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
-  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
-  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
-  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
-
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto thd = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
-  auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
-  }
-
-  return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
-      ->CondenseReplicateVar()
-      ->BindThreadRange(src_layout->ThreadRange());
-}
-
 /*!
  * \brief Resolve the participating thread range of a scalar AllReduce.
  *
@@ -778,7 +755,11 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
+      auto red_layout = ComputeReducerLayout(src_layout, op.dim);
+      // Lower in the canonical reduced shape while preserving the destination's
+      // physical register indices, replication, and participating thread range.
+      dst_layout = Downcast<Fragment>(
+          dst_layout->Reshape(red_layout->InputShape(), analyzer));
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
 
@@ -1025,6 +1006,40 @@ template <typename Impl> struct ReduceLowerer {
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
+          // The batched all-reduce has to carry the same resolved thread range
+          // as the scalar arm below. When the reducing threads are a partial
+          // range that does not start at thread 0, using the block's bounds
+          // here both mis-indexes the offset and sizes the named barrier for
+          // threads that do not participate, so their untouched registers get
+          // folded into the reduction.
+          PrimExpr all_threads = lower_args.thread_bounds->extent;
+          if (reducing_threads > 32 &&
+              TargetSupportsNamedBarrier(lower_args.target)) {
+            Range thread_range = reduce::ResolveAllReduceThreadRange(
+                red_layout, lower_args.thread_bounds, lower_args.target);
+            thread_offset = thread_range->min;
+            all_threads = thread_range->extent;
+          }
+
+          // The batched all-reduce phases are emitted below as plain
+          // statements, outside the PartitionLoop that guards the local
+          // reduction. Its workspace is indexed with threadIdx.x -
+          // thread_offset, so a thread below the resolved range would address
+          // memory before the workspace (named barrier participation count does
+          // not filter the executing threads). Guard every run_batch call with
+          // the same resolved range.
+          auto guarded_allreduce = [&](const Array<PrimExpr> &args) -> Stmt {
+            Stmt call = Evaluate(
+                Call(DataType::Handle(), builtin::call_extern(), args));
+            PrimExpr tid = lower_args.thread_index;
+            PrimExpr in_range =
+                (tid >= thread_offset) && (tid < thread_offset + all_threads);
+            in_range = analyzer->Simplify(in_range);
+            if (analyzer->CanProve(in_range)) {
+              return call;
+            }
+            return IfThenElse(in_range, call);
+          };
 
           int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
           bool can_batch_pack =
@@ -1036,8 +1051,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
-              lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target);
+              all_threads, eff_batch, block_threads, lower_args.target);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
@@ -1109,8 +1123,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
-                  Call(DataType::Handle(), builtin::call_extern(), args)));
+              phases.push_back(guarded_allreduce(args));
 
               Var unpack_j("unpack_j");
               PrimExpr ubase = Integer(flat_offset);
@@ -1154,8 +1167,7 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
-              phases.push_back(Evaluate(
-                  Call(DataType::Handle(), builtin::call_extern(), args)));
+              phases.push_back(guarded_allreduce(args));
             }
           }
         }

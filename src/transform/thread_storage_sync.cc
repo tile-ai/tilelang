@@ -266,6 +266,19 @@ public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    // ThreadSync runs once per storage scope ("shared", then "shared.dyn").
+    // The earlier run has already assigned named-barrier ids; a fresh
+    // numbering would hand the same id to a disjoint thread range, and two
+    // groups syncing on one `bar.sync id, count` complete each other's phases.
+    PostOrderVisit(stmt, [&rewriter](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call && call->op.same_as(builtin::tvm_storage_sync()) &&
+          call->args.size() == 3) {
+        if (const auto *id = call->args[1].as<IntImmNode>()) {
+          rewriter.used_barrier_ids_.insert(static_cast<size_t>(id->value));
+        }
+      }
+    });
     return rewriter(std::move(stmt));
   }
 
@@ -348,10 +361,13 @@ private:
     }
 
     size_t barrier_id =
-        barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
+    while (used_barrier_ids_.count(barrier_id)) {
+      ++barrier_id;
+    }
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
+    used_barrier_ids_.insert(barrier_id);
     barrier_id_map_[key] = barrier_id;
     thread_count_map_[key] = thread_count;
 
@@ -430,6 +446,9 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  // Named-barrier ids already taken in this function, including those assigned
+  // by an earlier ThreadSync run for another storage scope.
+  std::unordered_set<size_t> used_barrier_ids_;
   int warp_size_;
 };
 
@@ -1234,8 +1253,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
           e.scope = scope;
+          // address_of does not specify how its consumer uses the pointer, so
+          // conservatively record both reads and writes. Keeping the read is
+          // necessary to preserve loop-carried barriers: a write-only summary
+          // can hoist the sync needed by the next iteration's opaque read.
+          e.type = kRead;
+          curr_stmt_.access.emplace_back(e);
+          e.type = kWrite;
           curr_stmt_.access.emplace_back(e);
         }
         ConstrVisitor::VisitExpr_(load);
@@ -1896,15 +1921,16 @@ private:
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
-      // For WAW (Write-after-Write) and RAR (Read-after-Read), we should use
-      // the same thread variables because:
-      // - WAW: doesn't create true data dependency, only need to check if the
-      //   same thread overwrites its own data across iterations
-      // - RAR: no dependency at all
-      // For RAW (Read-after-Write) and WAR (Write-after-Read), we need to use
-      // different thread variables to check cross-thread dependencies.
-      bool same_access_type = (prev.type == kWrite && curr.type == kWrite) ||
-                              (prev.type == kRead && curr.type == kRead);
+      // A same-iteration WAW must model two distinct threads: program order
+      // already orders writes from one thread, while writes from different
+      // threads may target the same address and require a barrier. Keep the
+      // existing loop-carried WAW model unchanged; correctly extending that
+      // case also requires shifting its constraints and placing the barrier
+      // inside the loop.
+      bool is_same_iteration_waw =
+          loop == nullptr && prev.type == kWrite && curr.type == kWrite;
+      bool use_distinct_threads =
+          prev.type != curr.type || is_same_iteration_waw;
 
       PrimExpr thread_condition = Bool(false);
       Map<Var, PrimExpr> prev_sub, curr_sub;
@@ -1914,14 +1940,13 @@ private:
         Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
         Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
 
-        if (same_access_type) {
-          // For WAW/RAR: use a single shared Var object for both prev and curr
-          // This allows the analyzer to see they reference the same thread
+        if (!use_distinct_threads) {
+          // For RAR/loop-carried WAW, share the thread instance.
           Var shared_var(thread_names[idx], old_prev_var.dtype());
           prev_sub.Set(old_prev_var, shared_var);
           curr_sub.Set(old_curr_var, shared_var);
         } else {
-          // For RAW/WAR: use different Var objects to model cross-thread access
+          // For RAW/WAR/same-iteration WAW: model cross-thread access.
           Var prev_var(std::string(thread_names[idx]) + "1",
                        old_prev_var.dtype());
           Var curr_var(std::string(thread_names[idx]) + "2",
@@ -1932,15 +1957,14 @@ private:
           curr_sub.Set(old_curr_var, curr_var);
         }
       }
-      if (!same_access_type) {
+      if (use_distinct_threads) {
         analyzer.EnterConstraint(thread_condition);
       }
       // Two instances in one analyzer, so per-instance binds need their own
-      // copy; see ConstrSet::RenameFrom. They differ when they are two threads
-      // (RAW/WAR) or two iterations of one thread (loop carry); a same-type
-      // pair within one iteration is one execution, where renaming would only
-      // lose the bind.
-      if (!same_access_type || loop != nullptr) {
+      // copy; see ConstrSet::RenameFrom. They differ for cross-thread proofs
+      // (RAW/WAR/same-iteration WAW) or for two loop iterations. Otherwise the
+      // pair represents one execution, where renaming would only lose the bind.
+      if (use_distinct_threads || loop != nullptr) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);
         curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,

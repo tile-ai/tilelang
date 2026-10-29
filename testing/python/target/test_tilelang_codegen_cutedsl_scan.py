@@ -49,14 +49,14 @@ def _lower_cutedsl_scan(op_name, threads):
 @pytest.mark.parametrize("threads", [32, 96])
 def test_cutedsl_codegen_supports_cumsum(threads):
     artifact = _lower_cutedsl_scan("cumsum", threads)
-    assert f"tl.CumSum1D({threads}, False).run" in artifact.kernel_source
+    assert f"tl.CumSum1D({threads}, False, 0).run" in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("threads", [32, 96])
 def test_cutedsl_codegen_supports_cummax(threads):
     artifact = _lower_cutedsl_scan("cummax", threads)
-    assert f"tl.CumMax1D({threads}, False).run" in artifact.kernel_source
+    assert f"tl.CumMax1D({threads}, False, 0).run" in artifact.kernel_source
 
 
 if __name__ == "__main__":

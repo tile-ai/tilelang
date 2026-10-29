@@ -145,6 +145,17 @@ def Stage(stage: int):
     ``T.Pipelined(..., num_stages=...)`` controls the automatic buffer-version
     search bound; it does not limit the values accepted by ``T.Stage``.
 
+    Hardware configuration registers (HF32, MMAD direction, padding, and atomic
+    mode) each share one physical value across stages. Their setters overwrite
+    that value; readers retain the reaching setter in logical stage order and
+    must precede the next physical overwrite, at most one pipeline round away.
+    Loop-entry readers must also consume the incoming value before a setter
+    overwrites it during pipeline startup.
+    Independent set/use groups can therefore use nonadjacent stages.
+    Conditional setters and opaque effects retain conservative dependencies.
+    Scalar buffers, copied scalar snapshots, and control/pipe fences keep their
+    existing logical dependency rules.
+
     Example
     -------
     >>> for i in T.Pipelined(8, annotations={"enable_offset": True}):

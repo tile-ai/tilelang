@@ -12,14 +12,14 @@ def _torch_cummax(chunk, dim, reverse):
     return chunk.cummax(dim=dim).values
 
 
-def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
+def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, threads=256):
     @T.prim_func
     def cumsum(
         A: T.Tensor((M, N), dtype),
         B: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), dtype)
 
             T.copy(A[by * block_M, bx * block_N], A_shared)
@@ -70,8 +70,37 @@ def test_fragment_scan_annotations_preserved():
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op", ["cumsum", "cummax"])
-@pytest.mark.parametrize("shape, threads", [((128,), 96), ((8, 32), 160)])
-def test_cuda_shared_scan_unsupported_threads(op, shape, threads):
+@pytest.mark.parametrize(
+    "shape, threads",
+    [((128,), 33), ((128,), 96), ((8, 32), 96), ((8, 32), 160)],
+)
+def test_cuda_shared_scan_supported_threads(op, shape, threads):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            scan(shared, dim=-1)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        tl.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize(
+    "shape, threads, requirement",
+    [
+        ((128,), 31, "at least 32 block threads"),
+        ((8, 32), 31, "at least 32 block threads and a multiple of 32"),
+        ((8, 32), 48, "at least 32 block threads and a multiple of 32"),
+    ],
+)
+def test_cuda_shared_scan_unsupported_threads(op, shape, threads, requirement):
     scan = T.cumsum if op == "cumsum" else T.cummax
 
     @T.prim_func
@@ -87,15 +116,15 @@ def test_cuda_shared_scan_unsupported_threads(op, shape, threads):
         target,
         pytest.raises(
             ValueError,
-            match=rf"T\.{op}.*32, 64, 128, 256, 512, 1024.*got {threads}",
+            match=rf"T\.{op}.*{requirement}.*got {threads}",
         ),
     ):
         tl.lower(main, target=target)
 
 
-def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
+def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem", threads=256):
     if scope == "smem":
-        program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
+        program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype, threads)
     elif scope == "fragment":
         program = cumsum_fragment_test(M, N, block_M, block_N, dim, reverse, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
@@ -213,6 +242,11 @@ def test_cumsum_fragment():
     run_cumsum(128, 128, 64, 64, dtype=T.float32, scope="fragment")
 
 
+def test_cumsum_smem_96_threads():
+    run_cumsum(128, 128, 64, 64, threads=96)
+    run_cumsum_1d(96, 96)
+
+
 def test_cumsum_smem_1d():
     run_cumsum_1d(512, 64)
     run_cumsum_1d(512, 64, reverse=True)
@@ -223,6 +257,40 @@ def test_cumsum_smem_1d():
 def test_cumsum_fragment_1d():
     run_cumsum_1d(512, 64, scope="fragment")
     run_cumsum_1d(512, 64, reverse=True, scope="fragment")
+
+
+def cumsum_pipelined_smem_test(M, N, block_N, dim=0, dtype=T.float32):
+    # On sm_90 the pipelined loop is warp specialized, so the scan runs on the
+    # consumer threads, which do not start at thread 0.
+    @T.prim_func
+    def cumsum(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(M, threads=128) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+            S_shared = T.alloc_shared((block_N,) if dim == 0 else (1, block_N), dtype)
+            for k in T.Pipelined(N // block_N, num_stages=2):
+                T.copy(A[bx, k * block_N], A_shared)
+                for i in T.Parallel(block_N):
+                    if dim == 0:
+                        S_shared[i] = A_shared[i]
+                    else:
+                        S_shared[0, i] = A_shared[i]
+                T.cumsum(src=S_shared, dim=dim)
+                for i in T.Parallel(block_N):
+                    B[bx, k * block_N + i] = S_shared[i] if dim == 0 else S_shared[0, i]
+
+    return cumsum
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+def test_cumsum_smem_pipelined(dim):
+    M, N, block_N = 4, 256, 64
+    jit_kernel = tl.compile(cumsum_pipelined_smem_test(M, N, block_N, dim), out_idx=-1)
+    A = torch.randn(M, N).cuda()
+    ref = A.view(M, N // block_N, block_N).cumsum(dim=-1).view(M, N)
+    torch.testing.assert_close(jit_kernel(A), ref, atol=1e-3, rtol=1e-3)
 
 
 def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype=T.float32):

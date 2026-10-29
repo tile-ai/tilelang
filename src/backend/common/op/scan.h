@@ -38,19 +38,7 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
     auto threads = lower_args.thread_bounds->extent;
-    if (TargetIsCuda(lower_args.target) &&
-        !TargetIsCuTeDSL(lower_args.target)) {
-      const int64_t *num_threads = as_const_int(threads);
-      CHECK(num_threads != nullptr &&
-                (*num_threads == 32 || *num_threads == 64 ||
-                 *num_threads == 128 || *num_threads == 256 ||
-                 *num_threads == 512 || *num_threads == 1024),
-            ValueError)
-          << "T." << op_name
-          << " on CUDA shared memory requires block threads in "
-             "{32, 64, 128, 256, 512, 1024}; got "
-          << threads << ".";
-    }
+    auto thread_offset = lower_args.thread_bounds->min;
     Array<PrimExpr> args;
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
@@ -62,15 +50,30 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     }
     int ndim = static_cast<int>(src_extents.size());
 
+    if (TargetIsCuda(lower_args.target) &&
+        !TargetIsCuTeDSL(lower_args.target)) {
+      const int64_t *num_threads = as_const_int(threads);
+      CHECK(num_threads != nullptr && *num_threads >= 32 &&
+                (ndim == 1 || *num_threads % 32 == 0),
+            ValueError)
+          << "T." << op_name << " on CUDA shared memory requires "
+          << (ndim == 1 ? "at least 32 block threads"
+                        : "at least 32 block threads and a multiple of 32 "
+                          "for 2D scans")
+          << "; got " << threads << ".";
+    }
+
     if (ndim == 1) {
       ICHECK_EQ(op.dim, 0) << scan_noun
                            << " over a 1D buffer only supports dim = 0.";
       ss << "tl::" << symbol_prefix << "1D<" << threads << ", "
-         << (op.reverse ? "true" : "false") << ">::run";
+         << (op.reverse ? "true" : "false") << ", " << thread_offset
+         << ">::run";
       args = {StringImm(ss.str()), src_ptr, dst_ptr, src_extents[0]};
     } else if (ndim == 2) {
       ss << "tl::" << symbol_prefix << "2D<" << threads << ", " << op.dim
-         << ", " << (op.reverse ? "true" : "false") << ">::run";
+         << ", " << (op.reverse ? "true" : "false") << ", " << thread_offset
+         << ">::run";
       PrimExpr src_stride = op.src->shape[op.src->shape.size() - 1];
       PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
       args = {StringImm(ss.str()), src_ptr,    dst_ptr,   src_extents[0],

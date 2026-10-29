@@ -6,6 +6,7 @@ import tilelang
 import tilelang.language as T_default
 import tilelang.language.common as T_comm
 import tilelang.language.tir.op as common_tir_op
+from tilelang.language.math_intrinsics import FAST_MATH_INTRINSICS
 from tilelang.language.tir.exports import (
     BACKEND_ONLY_TIR_EXPORTS,
     CLASSIFIED_VENDOR_TIR_EXPORTS,
@@ -106,6 +107,7 @@ def test_rocm_language_composes_common_and_rocm_symbols():
     assert T.mfma_store is T.tvm_mfma_store
     assert set(T.__all__) >= ROCM_ONLY_NAMES
     assert set(T.__all__) >= ROCM_ONLY_TIR_EXPORTS
+    assert set(T.__all__) >= set(FAST_MATH_INTRINSICS)
     assert hasattr(T, "MatrixCoreIntrinEmitter")
     assert hasattr(T, "make_mfma_swizzle_layout")
     assert set(T.__all__) >= SHARED_LEGACY_TIR_EXPORTS

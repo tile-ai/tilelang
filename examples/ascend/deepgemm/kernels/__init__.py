@@ -1,13 +1,27 @@
-"""Select the MNK or KMN kernel builders. MNK is the default."""
+"""GEMM kernel builders."""
 
+from .bf16_gemm import (
+    build_bf16_gemm,
+    build_bf16_batched_gemm,
+    build_bf16_m_grouped_gemm,
+    build_bf16_k_grouped_gemm,
+)
+from .fp8_gemm import (
+    build_fp8_gemm,
+    build_fp8_batched_gemm,
+    build_fp8_m_grouped_gemm,
+    build_fp8_k_grouped_gemm,
+)
+from .transform_sf import build_transform_sf
 
-def load_kernels(loop_order="mnk"):
-    if loop_order == "mnk":
-        from . import mnk
-
-        return mnk
-    if loop_order == "kmn":
-        from . import kmn
-
-        return kmn
-    raise ValueError(f"TILELANG_DEEPGEMM_LOOP_ORDER must be 'mnk' or 'kmn', got {loop_order!r}")
+__all__ = [
+    "build_transform_sf",
+    "build_bf16_gemm",
+    "build_bf16_batched_gemm",
+    "build_bf16_m_grouped_gemm",
+    "build_bf16_k_grouped_gemm",
+    "build_fp8_gemm",
+    "build_fp8_batched_gemm",
+    "build_fp8_m_grouped_gemm",
+    "build_fp8_k_grouped_gemm",
+]

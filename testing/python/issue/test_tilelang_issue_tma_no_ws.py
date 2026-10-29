@@ -9,8 +9,7 @@ from examples.gemm_sp.sparse_utils import get_e_factor
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(
             func,
             target="cuda",
@@ -18,8 +17,6 @@ def _compile_tvm_ffi(func, pass_configs, **kwargs):
             pass_configs=pass_configs,
             **kwargs,
         )
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -495,8 +492,8 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     consumer_src = src[consumer_idx:]
     flat_src = " ".join(src.split())
 
-    assert src.count(".init(1);") == 3
-    assert src.count(".init(128);") == 2
+    assert src.count(".init(1);") == 1
+    assert src.count(".init(128);") == 4
     assert "tl::tma_load(K_desc, mbarrier[0]" in src
     assert "tl::tma_load(V_desc, mbarrier[1]" in src
     assert re.search(r"mbarrier\[2\]\.wait\([^;]+\);", flat_src)

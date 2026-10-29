@@ -197,12 +197,9 @@ def test_auto_ws_reg_hints_lower_into_matching_role_scopes():
         tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False,
         tl.PassConfigKey.TL_ENABLE_FAST_MATH: False,
     }
-    tl.disable_cache()
-    try:
+    with tl.testing.without_kernel_cache():
         kernel_mod = tl.compile(kernel, target="cuda", pass_configs=pass_configs, out_idx=[-1])
         src = kernel_mod.get_kernel_source()
-    finally:
-        tl.enable_cache()
 
     producer_branch = src.index("if (((int)threadIdx.x) < 128) {")
     consumer_branch = src.index("} else {", producer_branch)
