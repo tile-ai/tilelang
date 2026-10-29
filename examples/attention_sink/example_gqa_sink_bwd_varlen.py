@@ -19,8 +19,8 @@ def get_bwd_configs():
     # sm_86/89/120 allow about 99 KiB per block.
     optin_smem = get_max_dynamic_shared_memory()
     if sm_version == 80 or optin_smem < 160 * 1024:
-        return 64, 32, 1, 128
-    return 128, 32, 2, 256
+        return dict(block_M=64, block_N=32, num_stages=1, threads=128)
+    return dict(block_M=128, block_N=32, num_stages=2, threads=256)
 
 
 @tilelang.jit(
@@ -562,7 +562,6 @@ class _attention(torch.autograd.Function):
         kernel_post = flashattn_bwd_postprocess(UQ, H, D_HEAD, dtype=dtype)
         delta = kernel_prep(o_unpad, do, cu_seqlens_q)
 
-        block_M, block_N, num_stages, threads = get_bwd_configs()
         kernel = flashattn_bwd(
             batch_size,
             groups,
@@ -575,10 +574,7 @@ class _attention(torch.autograd.Function):
             ctx.is_causal,
             window_size=ctx.window_size,
             dtype=dtype,
-            block_M=block_M,
-            block_N=block_N,
-            num_stages=num_stages,
-            threads=threads,
+            **get_bwd_configs(),
         )
 
         head_kv = H // groups

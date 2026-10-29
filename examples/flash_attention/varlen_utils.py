@@ -168,14 +168,13 @@ def varlen_attention_ref(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, 
             cols = torch.arange(k_end - k_start, device=q_unpad.device).unsqueeze(0)
             # flash-attn aligns a causal mask to the bottom-right corner.
             diagonal = cols - rows - (k_end - k_start - (q_end - q_start))
-            allowed = diagonal <= 0 if causal else torch.ones_like(diagonal, dtype=torch.bool)
+            mask = diagonal <= 0 if causal else torch.ones_like(diagonal, dtype=torch.bool)
             if window_size is not None:
                 left, right = window_size
                 if left is not None and left >= 0:
-                    allowed = allowed & (diagonal >= -left)
+                    mask = mask & (diagonal >= -left)
                 if right is not None and right >= 0:
-                    allowed = allowed & (diagonal <= right)
-            mask = torch.zeros_like(diagonal, dtype=qb.dtype).masked_fill(~allowed, float("-inf"))
+                    mask = mask & (diagonal <= right)
 
         out = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=mask)
         outs.append(out.squeeze(0).transpose(0, 1).to(q_unpad.dtype))
