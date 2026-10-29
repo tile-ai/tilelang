@@ -16,6 +16,8 @@ def test_subcore_selection_preserves_bindings_and_order(active):
     sid = tirx.Var("sid", "int32")
     route = tirx.Var("route", "int32")
     i = tirx.Var("i", "int32")
+    # The shared binding keeps both AIV streams, including a stream with no
+    # external calls when only one subcore is active.
     tasks = [unit(tirx.Bind(route, sid + 10), core=5)]
     for subcore in active:
         for label in ("before", "after"):

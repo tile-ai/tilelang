@@ -19,9 +19,6 @@ with each cache smaller than 4 GiB.
 ## Run
 
 Build TileLang with Ascend support; see the [backend guide](../../../tilelang/ascend/README.md).
-The kernels require [#3623](https://github.com/tile-ai/tilelang/pull/3623)
-for buffer view layouts and [#3624](https://github.com/tile-ai/tilelang/pull/3624)
-for configuration-register dependencies.
 
 The runners use the pinned FlashMLA checkout's input generators, numerical
 references, quantization, and `kernelkit.bench` profiler. Build its Ascend
@@ -36,6 +33,7 @@ From the TileLang repository root, select an idle NPU with
 `ASCEND_RT_VISIBLE_DEVICES`, then run:
 
 ```bash
+export ASCEND_RT_VISIBLE_DEVICES=0  # Replace 0 with an idle physical NPU.
 export PYTHONPATH=.
 export FLASHMLA_REFERENCE=/path/to/FlashMLA
 python examples/ascend/flashmla/run.py --reference "$FLASHMLA_REFERENCE" \

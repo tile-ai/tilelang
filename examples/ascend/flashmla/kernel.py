@@ -368,7 +368,8 @@ def sparse_attention(
             accum = T.alloc_shared((32, 512), "float32")
             out = T.alloc_shared((32, 128), "float32")
             # Pack consumed FP32 chunks into the row's first 512 BF16 elements.
-            # Drain the complete row only after every d chunk is normalized.
+            # Prefill drains each disjoint packed chunk while the next is normalized;
+            # decode keeps the complete-row copy.
             final = T.view(accum, shape=(32, 1024), dtype="bfloat16")
             maxima = T.alloc_shared((64,), "float32")
             scaling_max = T.alloc_shared((64,), "float32")
@@ -410,6 +411,10 @@ def sparse_attention(
             )
             if q_prefetch:
                 T.annotate_manual_multi_buffer({q_l1: 2 * nb})
+            if not decode:
+                # Four explicit output slices need independent V->MTE3 events.
+                # This declares existing subranges; it adds no physical UB copies.
+                T.annotate_manual_multi_buffer({accum: 4})
             T.annotate_buffer_versions(
                 {
                     # Query slots are explicit in the shape; keep one physical allocation.
@@ -682,7 +687,14 @@ def sparse_attention(
                                     final_output_vf(True, d, denorm, out, accum, final)
                                 else:
                                     final_output_vf(False, d, denorm, out, accum, final)
-                        T.copy(final[:, :512], O[qidx, sid * 32 : sid * 32 + 32, :])
+                            if not decode:
+                                with T.Stage(0):
+                                    T.copy(
+                                        final[:, d * 128 : (d + 1) * 128],
+                                        O[qidx, sid * 32 : sid * 32 + 32, d * 128 : (d + 1) * 128],
+                                    )
+                        if decode:
+                            T.copy(final[:, :512], O[qidx, sid * 32 : sid * 32 + 32, :])
                 if pipeline_stages:
                     with T.Stage(q_lead_shift + (0 if extra_metadata_lead else 1) if pipeline_stages else 0):
                         gather_kv(
