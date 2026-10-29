@@ -10,7 +10,7 @@ import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import nodes, calls, allocated_buffer
+from testing.ascend._ir import nodes, calls, allocated_buffer, statements
 
 TILE = 16
 STEPS = 4
@@ -244,6 +244,143 @@ def test_padded_storage_versions_preserve_ordinary_view_addresses(prefix, versio
     result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
     expected = a.view(getattr(torch, view_dtype))[:, :output_extent]
     torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
+def test_oob_copy_padding_does_not_serialize_mte2():
+    @T.prim_func
+    def main(A: T.Tensor((31, 32), "bfloat16"), B: T.Tensor((16, 32), "bfloat16"), C: T.Tensor((31, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_l1((16, 32), "bfloat16")
+            b = T.alloc_l1((16, 32), "bfloat16")
+            a0 = T.alloc_l0a((16, 32), "bfloat16")
+            b0 = T.alloc_l0b((16, 32), "bfloat16")
+            acc = T.alloc_l0c((16, 16), "float32")
+            # Opaque offsets make copy/padding footprints conservatively overlap.
+            row_idx = T.alloc_var("int32", init=0)
+            T.copy(B, b)
+            for i in T.Pipelined(2, num_stages=2):
+                T.copy(A[row_idx : row_idx + 16, :], a)
+                T.copy(a, a0)
+                T.copy(b, b0)
+                T.gemm(a0, b0, acc, transpose_B=True, clear_accum=True)
+                T.copy(acc, C[i * 16 : (i + 1) * 16, :])
+                row_idx += 16
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        tilelang.lower(main, target="ascend", enable_device_compile=False)
+    after = snapshots["tl.InsertSync"]
+    assert calls(after, "tl.tileop.fill"), "The last tile must still be zero padded"
+    assert not [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # Grouping the MTE2 writes must preserve the handoff to the L1 consumer.
+    for operation in ("set", "wait"):
+        assert [call for call in calls(after, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE2_MTE1"]
+
+
+@pytest.mark.parametrize("dtype", ["float8_e4m3fn", "float4_e2m1fn"], ids=["fp8", "fp4"])
+@pytest.mark.parametrize("transpose", [False, True], ids=["k-contiguous", "mn-contiguous"])
+@pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
+def test_per_core_mx_copy_padding_survives_lowering(dtype, transpose, explicit_task):
+    mn, k_alloc = 64, 128
+    shape = (k_alloc, mn) if transpose else (mn, k_alloc)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((mn, k_alloc), dtype),
+        B: T.Tensor((mn, k_alloc), dtype),
+        SA: T.Tensor((2, mn), "uint16"),
+        SB: T.Tensor((2, mn), "uint16"),
+        C: T.Tensor((mn, mn), "float32"),
+        actual_k: T.int32,
+    ):
+        with T.Kernel(1):
+            a = T.alloc_l1(shape, dtype)
+            b = T.alloc_l1(shape, dtype)
+            sa = T.alloc_l1((mn, 2), "uint16")
+            sb = T.alloc_l1((mn, 2), "uint16")
+            a0 = T.alloc_l0a(shape, dtype)
+            b0 = T.alloc_l0b(shape, dtype)
+            sa0 = T.alloc_l0a_sf(a0, sf_shape=(mn, 2))
+            sb0 = T.alloc_l0b_sf(b0, sf_shape=(mn, 2))
+            acc = T.alloc_l0c((mn, mn), "float32")
+            k = T.min(T.max(actual_k, 65), k_alloc)
+            # OOB insertion, rather than the DSL, creates the conditional fill.
+            with T.PerCoreTask():
+                if explicit_task:
+                    with T.Task():
+                        if transpose:
+                            T.copy(A[:, :k], a[:k, :], transpose=True)
+                        else:
+                            T.copy(A[:, :k], a[:, :k])
+                else:
+                    if transpose:
+                        T.copy(A[:, :k], a[:k, :], transpose=True)
+                    else:
+                        T.copy(A[:, :k], a[:, :k])
+            if transpose:
+                T.copy(B[:, :k], b[:k, :], transpose=True)
+            else:
+                T.copy(B[:, :k], b[:, :k])
+            T.copy(SA, sa, transpose=True)
+            T.copy(SB, sb, transpose=True)
+            T.copy(a, a0)
+            T.copy(b, b0)
+            T.copy(sa, sa0)
+            T.copy(sb, sb0)
+            T.gemm_blockscaled(a0, b0, acc, sa0, sb0, transpose_A=transpose, transpose_B=not transpose, clear_accum=True)
+            T.copy(acc, C)
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits", "tl.InsertSync"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend", enable_device_compile=False)
+    assert artifact.kernel_source and artifact.device_mod
+    needs_fill = transpose or dtype == "float8_e4m3fn"
+    for name in ("tl.AscendInsertOOBPadding", "tl.MaterializeScheduleUnits"):
+        (group,) = [node for node in nodes(snapshots[name], tirx.AttrStmt) if node.attr_key == "tl.ascend_per_core_task"]
+        assert len(calls(group, "tl.tileop.ascend_copy")) == 1
+        assert len(calls(group, "tl.tileop.fill")) == int(needs_fill)
+        if needs_fill:
+            (task,) = [node for node in nodes(group, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+            assert calls(task.body.seq[0], "tl.tileop.ascend_copy")
+            (guard,) = nodes(task, tirx.IfThenElse)
+            assert len(calls(guard, "tl.tileop.fill")) == 1
+
+    scheduled = snapshots["tl.InsertSync"]
+    assert not [call for call in calls(scheduled, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE2"]
+    # InsertSync may coalesce the A/B handoff. Completion must follow the
+    # PerCoreTask copy and padding, rather than sit inside a padding guard.
+    operations = [(stmt.value, parents) for stmt, parents in statements(scheduled) if isinstance(stmt, tirx.Evaluate)]
+    notify_idx = next(
+        idx
+        for idx, (call, _) in enumerate(operations)
+        if isinstance(call, tirx.Call) and call.op.name == "tl.ascend_set_flag" and call.args[0].value == "MTE2_MTE1"
+    )
+    notify, parents = operations[notify_idx]
+    assert not any(isinstance(parent, tirx.IfThenElse) for parent in parents)
+    before_notify = [call for call, _ in operations[:notify_idx] if isinstance(call, tirx.Call)]
+    assert sum(call.op.name == "tl.tileop.ascend_copy" for call in before_notify) >= 1
+    assert sum(call.op.name == "tl.tileop.fill" for call in before_notify) >= int(needs_fill)
+    assert any(
+        isinstance(call, tirx.Call)
+        and call.op.name == "tl.ascend_wait_flag"
+        and call.args[0].value == "MTE2_MTE1"
+        and call.args[1].same_as(notify.args[1])
+        for call, _ in operations[notify_idx + 1 :]
+    )
 
 
 def _make_subcore_gemm(pattern, steps, unit_flag=0):
