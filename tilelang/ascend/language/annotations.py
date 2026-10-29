@@ -3,9 +3,12 @@
 from tvm.tirx import IntImm
 from tvm.tirx.script.builder.ir import sblock_attr
 
+from tilelang.language.annotations import _normalize_layout_map
+
 _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
 
 __all__ = [
+    "annotate_layout",
     "annotate_buffer_versions",
     "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
@@ -25,6 +28,23 @@ _BUFFER_PLACEMENT_SCOPES = {
     "shared.l0c": (1024, 256 * 1024),
     "shared.ss": (32, 3 * 1024),
 }
+
+
+def annotate_layout(layout_map: dict):
+    """Annotate each Buffer view, preserving aliases with distinct Cube layouts.
+
+    Views share storage, not a layout conversion. A producer must write the
+    representation consumed through each view; annotating a view never moves
+    or transposes existing values. Canonical Cube views sharing storage must
+    have the same dtype and padded physical size.
+
+    Each memory view keeps its explicit or operation-required layout. Layouts
+    never propagate to other memory views sharing the same storage; annotate
+    every view that needs a non-default interpretation. Unannotated views use
+    normal inference or their ordinary dense/strided addressing. Fragment
+    aliases must always agree on thread ownership.
+    """
+    return sblock_attr({"layout_map": _normalize_layout_map(layout_map)})
 
 
 def annotate_buffer_addresses(buffer_addresses: dict):
