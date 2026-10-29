@@ -1253,8 +1253,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
           e.scope = scope;
+          // address_of does not specify how its consumer uses the pointer, so
+          // conservatively record both reads and writes. Keeping the read is
+          // necessary to preserve loop-carried barriers: a write-only summary
+          // can hoist the sync needed by the next iteration's opaque read.
+          e.type = kRead;
+          curr_stmt_.access.emplace_back(e);
+          e.type = kWrite;
           curr_stmt_.access.emplace_back(e);
         }
         ConstrVisitor::VisitExpr_(load);

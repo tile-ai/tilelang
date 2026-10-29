@@ -16,6 +16,44 @@ TILE = 16
 STEPS = 4
 
 
+def _make_padding_live_in_program(first_setter_stage, last_setter_stage, steps=4):
+    @T.prim_func
+    def main(A: T.Tensor((steps, 30), "float32"), O: T.Tensor((steps, 32), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((32,), "float32")
+            T.ascend_set_copy_pad_value(-1.0, dtype="float32")
+            for i in T.Pipelined(steps, num_stages=2, annotations={"enable_offset": True}):
+                with T.Stage(0):
+                    T.copy(A[i, :], ub[:30], data_select=True)
+                    T.copy(ub, O[i, :])
+                with T.Stage(first_setter_stage):
+                    T.ascend_set_copy_pad_value(1.0, dtype="float32")
+                with T.Stage(last_setter_stage):
+                    T.ascend_set_copy_pad_value(2.0, dtype="float32")
+
+    return main
+
+
+def test_padding_live_in_rejects_overwrite_during_pipeline_startup():
+    with pytest.raises(RuntimeError, match="Manual schedule constraints are infeasible"):
+        tilelang.lower(_make_padding_live_in_program(0, 1), target="ascend")
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("setter_stage", [0, 1], ids=["same-stage", "delayed-setters"])
+@pytest.mark.parametrize("steps", [1, 4], ids=["single-iteration", "steady-state"])
+def test_padding_live_in_survives_pipeline_startup(setter_stage, steps):
+    import torch
+
+    program = _make_padding_live_in_program(setter_stage, setter_stage, steps)
+    a = torch.arange(steps * 30, dtype=torch.float32).reshape(steps, 30)
+    result = tilelang.compile(program, target="ascend", out_idx=-1)(a.npu())
+    expected = torch.full((steps, 32), 2.0)
+    expected[0, 30:] = -1.0
+    expected[:, :30] = a
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)
+
+
 def _make_shared_l0_ring_program(k_tiles):
     k_extent = k_tiles * TILE
 

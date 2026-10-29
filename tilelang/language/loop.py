@@ -70,8 +70,9 @@ def Parallel(
         The ForFrame.
     """
     merged_annotations: dict[str, Any] = dict(annotations) if annotations is not None else {}
+    coalesced_width = coalesced_width if coalesced_width is not None else merged_annotations.get("coalesced_width")
     if coalesced_width is not None:
-        merged_annotations["coalesced_width"] = coalesced_width
+        merged_annotations["coalesced_width"] = tirx.convert(coalesced_width)
     if loop_layout is not None:
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.

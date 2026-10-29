@@ -13,8 +13,7 @@ CUDA_SM90_TARGET = {"kind": "cuda", "arch": "sm_90"}
 
 
 def _compile_tvm_ffi(func, *, target=CUDA_SM90_TARGET, target_host="c", pass_configs=None):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(
             func,
             target=target,
@@ -22,8 +21,6 @@ def _compile_tvm_ffi(func, *, target=CUDA_SM90_TARGET, target_host="c", pass_con
             execution_backend="tvm_ffi",
             pass_configs=pass_configs or {},
         )
-    finally:
-        tilelang.enable_cache()
 
 
 def _get_tma_create_tiled():

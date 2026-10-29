@@ -228,10 +228,8 @@ private:
 
 class TaskMarkerControlValidator : public StmtExprVisitor {
 public:
-  TaskMarkerControlValidator(bool reject_candidate_selection,
-                             bool allow_cross_core_sync)
-      : reject_candidate_selection_(reject_candidate_selection),
-        allow_cross_core_sync_(allow_cross_core_sync) {}
+  explicit TaskMarkerControlValidator(bool allow_cross_core_sync)
+      : allow_cross_core_sync_(allow_cross_core_sync) {}
 
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
@@ -244,13 +242,6 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
-    ICHECK(!reject_candidate_selection_)
-        << "Control flow selecting a T.Task candidate must be outside the "
-           "T.Task scope";
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
   void VisitExpr_(const CallNode *op) final {
     ICHECK(allow_cross_core_sync_ ||
            (!op->op.same_as(tl::ascend_cross_core_set_flag()) &&
@@ -260,7 +251,6 @@ private:
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  bool reject_candidate_selection_;
   bool allow_cross_core_sync_;
 };
 
@@ -278,15 +268,16 @@ struct ValidatedTask {
   bool has_buffer_access{false};
 };
 
-ValidatedTask ValidateTask(const AttrStmtNode *op, bool inside_per_core_task) {
-  ICHECK_EQ(op->attr_key, tl::attr::kAscendTask);
+ValidatedTask ValidateTask(const AttrStmt &task) {
+  ICHECK_EQ(task->attr_key, tl::attr::kAscendTask);
 
-  Stmt task_body = op->body;
+  // Internal conditions stay within the candidate's synchronization boundary.
+  // All branches still contribute to the task's resource constraints below.
+  Stmt task_body = task->body;
   TaskMarkerControlValidator control_validator(
-      inside_per_core_task, IsStandaloneCrossCoreSync(task_body));
+      IsStandaloneCrossCoreSync(task_body));
   control_validator(task_body);
 
-  Stmt task = GetRef<Stmt>(op);
   TaskResourceUsage resource_usage = AnalyzeTaskResourceUsage(task);
   uint16_t issue_pipe_mask = resource_usage.pipe_mask;
   if (AnalyzeSpecialRegisterWrites(task) != 0)
@@ -336,7 +327,7 @@ private:
 
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tl::attr::kAscendTask) {
-      ValidatedTask task = ValidateTask(op, /*inside_per_core_task=*/true);
+      ValidatedTask task = ValidateTask(GetRef<AttrStmt>(op));
       if (!task.has_buffer_access) {
         ICHECK(IsPerCoreTaskScalarControl(op))
             << "T.PerCoreTask only permits scalar Bind/condition/loop control "
@@ -498,7 +489,7 @@ private:
         << "MaterializeScheduleUnits cannot run on an already-materialized "
            "schedule";
     if (op->attr_key == tl::attr::kAscendTask) {
-      ValidateTask(op, /*inside_per_core_task=*/false);
+      ValidateTask(GetRef<AttrStmt>(op));
       return {MakeInitialScheduleUnit(GetRef<Stmt>(op))};
     }
     if (op->attr_key == tl::attr::kAscendPerCoreTask) {

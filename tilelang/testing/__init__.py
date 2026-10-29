@@ -1,5 +1,6 @@
 import sys
 import inspect
+import contextlib
 import pytest
 import random
 import torch
@@ -7,6 +8,7 @@ import numpy as np
 from tilelang.contrib import nvcc
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import target_is_cuda
+from tilelang.env import CacheState
 from tilelang.rocm.target import target_is_cdna, target_is_gfx950
 from tvm.testing.utils import Feature, requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
@@ -26,9 +28,35 @@ __all__ = [
     "ascend_backend_compiled",
     "requires_ascend",
     "requires_cuda_compute_version",
+    "without_kernel_cache",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
+
+
+@contextlib.contextmanager
+def without_kernel_cache():
+    """Disable the `CacheState` kernel cache for the enclosed block.
+
+    Use it when a test calls `tilelang.compile()` (or `JITImpl.compile()`) and
+    asserts on work that only the compile path performs: the lowered artifact
+    (`Kernel.artifact`) or compile-time diagnostics. A kernel served from the
+    cache carries neither, so such a test passes only on a cold cache unless it
+    opts out.
+
+    The `@tilelang.jit` wrapper keeps its own kernel cache and consults it
+    before `JITImpl.compile()` runs, so repeated jit calls are not covered
+    here. A cache state the caller had already disabled is restored on exit.
+    """
+    enabled = CacheState.is_enabled()
+    CacheState.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            CacheState.enable()
+        else:
+            CacheState.disable()
 
 
 def _check_is_gfx950() -> bool:
