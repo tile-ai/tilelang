@@ -226,6 +226,23 @@ def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
 
+def check_not_void(target: Any, value: Any) -> None:
+    """Reject using a value-less (void) expression as a value.
+
+    Side-effecting intrinsics such as ``T.rng_init(...)`` or ``T.sync_warp()``
+    return a void expression only so that the call reaches the IR as a
+    statement. Binding or storing it would emit C code such as ``void x = ...;``,
+    which the device compiler rejects.
+    """
+    # A void dtype stringifies to the empty string.
+    if isinstance(value, PrimExpr) and not str(value.dtype):
+        raise ValueError(
+            f"Cannot assign the value-less expression `{value}` to `{target}`: it has void "
+            "type. Side-effecting intrinsics such as `T.rng_init(...)` and `T.sync_warp()` "
+            "are statements; call them without using their result."
+        )
+
+
 # phase1: eager jit obtain function signature
 # phase2: eager jit elaborate function
 # none: not inside eager jit, i.e. it is lazyjit
@@ -750,13 +767,7 @@ class Builder(BaseBuilder):
             IRBuilder.name(name, value)
             return value
         elif isinstance(value, (PrimExpr, BufferRegion)):
-            # A value-less (void) expression stringifies to the empty dtype.
-            if isinstance(value, PrimExpr) and not str(value.dtype):
-                raise ValueError(
-                    f"Cannot bind `{name}` to a value-less expression: `{value}` has void "
-                    "type. A side-effecting intrinsic such as `T.rng_init(...)` is a "
-                    "statement; call it without assigning its result."
-                )
+            check_not_void(name, value)
             var = tirx.bind(value)
             register_let_value(var, value)
             IRBuilder.name(name, var)
