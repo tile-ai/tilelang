@@ -16,7 +16,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 from tilelang.utils.device import device_synchronize
-from tvm import tirx
+from tvm import arith, tirx
 
 
 def _synchronize_tensor_devices(*values: Any) -> None:
@@ -107,16 +107,19 @@ class Profiler:
             A new KernelParam with substituted shape
         """
         new_shape = []
+        analyzer = arith.Analyzer()
         for dim in param.shape:
-            if isinstance(dim, tirx.Var):
-                var_name = dim.name
-                if var_name in constraints:
-                    new_shape.append(constraints[var_name])
-                else:
-                    raise ValueError(
-                        f"Dynamic symbolic variable '{var_name}' not found in constraints. "
-                        f"Available constraints: {list(constraints.keys())}"
-                    )
+            if isinstance(dim, tirx.PrimExpr):
+                substitutions = {}
+                for var in tirx.analysis.undefined_vars(dim):
+                    if var.name not in constraints:
+                        raise ValueError(
+                            f"Dynamic symbolic variable '{var.name}' not found in constraints. "
+                            f"Available constraints: {list(constraints.keys())}"
+                        )
+                    substitutions[var] = tirx.IntImm(var.dtype, constraints[var.name])
+                resolved = tirx.stmt_functor.substitute(dim, substitutions)
+                new_shape.append(int(analyzer.simplify(resolved)))
             else:
                 new_shape.append(dim)
         return KernelParam(dtype=param.dtype, shape=new_shape)
