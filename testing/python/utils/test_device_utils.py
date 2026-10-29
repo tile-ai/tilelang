@@ -125,7 +125,7 @@ def test_profiler_uses_shared_device_helpers():
 @pytest.mark.parametrize(
     "optin_smem, capability, expected",
     [
-        pytest.param(101376, (12, 0), 101376, id="torch-exposes-the-limit"),
+        pytest.param(101376, (5, 2), 101376, id="torch-exposes-the-limit"),
         pytest.param(None, (12, 0), 99 * 1024, id="sm120-fallback"),
         pytest.param(None, (9, 0), 227 * 1024, id="sm90-fallback"),
         pytest.param(None, (8, 6), 99 * 1024, id="sm86-fallback"),
@@ -136,22 +136,19 @@ def test_profiler_uses_shared_device_helpers():
     ],
 )
 def test_get_max_dynamic_shared_memory(monkeypatch, optin_smem, capability, expected):
-    props = SimpleNamespace(name="test-device")
+    props = SimpleNamespace(name="test-device", major=capability[0], minor=capability[1])
     if optin_smem is not None:
         props.shared_memory_per_block_optin = optin_smem
     monkeypatch.setattr(device_utils, "IS_CUDA", True)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: props)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=0: capability)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: props)
 
     assert device_utils.get_max_dynamic_shared_memory() == expected
 
 
 def test_get_max_dynamic_shared_memory_honors_an_explicit_device(monkeypatch):
-    limits = {0: 227 * 1024, 1: 99 * 1024}
+    limits = {None: 227 * 1024, 1: 99 * 1024}
     monkeypatch.setattr(device_utils, "IS_CUDA", True)
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: SimpleNamespace(shared_memory_per_block_optin=limits[index]))
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(shared_memory_per_block_optin=limits[device]))
 
     assert device_utils.get_max_dynamic_shared_memory(torch.device("cuda:1")) == 99 * 1024
     assert device_utils.get_max_dynamic_shared_memory(1) == 99 * 1024

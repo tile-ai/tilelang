@@ -75,17 +75,12 @@ def get_max_dynamic_shared_memory(device: int | torch.device | None = None) -> i
     if not IS_CUDA:
         return _DEFAULT_OPTIN_SMEM_KIB * 1024
     if isinstance(device, torch.device):
-        index = device.index if device.index is not None else torch.cuda.current_device()
-    elif isinstance(device, int):
-        index = device
-    else:
-        index = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(index)
+        device = device.index
+    props = torch.cuda.get_device_properties(device)
     limit = getattr(props, "shared_memory_per_block_optin", None)
     if limit is not None:
         return int(limit)
-    major, minor = torch.cuda.get_device_capability(index)
-    return 1024 * _OPTIN_SMEM_KIB.get(major * 10 + minor, _DEFAULT_OPTIN_SMEM_KIB)
+    return 1024 * _OPTIN_SMEM_KIB.get(props.major * 10 + props.minor, _DEFAULT_OPTIN_SMEM_KIB)
 
 
 def device_synchronize(device: int | torch.device | None = None) -> None:
