@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from examples.ascend.flashmla.kernel import compile_prefill
+from examples.ascend.flashmla.prefill import compile_prefill
 
 
 @pytest.mark.parametrize("pipeline_stages", [True, False], ids=["pipeline", "flat"])
@@ -175,7 +175,7 @@ def flashmla_reference(monkeypatch):
 def test_decode_independent_lengths_and_group_tails(flashmla_reference, extra_format, main_lengths):
     from dataclasses import replace
 
-    from examples.ascend.flashmla.decode import prepare_decode
+    from examples.ascend.flashmla.testing import prepare_decode
 
     lib, ref, quant, kk = flashmla_reference
     device = torch.device("npu", torch.npu.current_device())

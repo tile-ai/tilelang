@@ -30,7 +30,7 @@ def main():
     import quant
     import flash_mla
     import kernelkit as kk
-    from examples.ascend.flashmla.decode import prepare_decode
+    from examples.ascend.flashmla.testing import prepare_decode
 
     device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)

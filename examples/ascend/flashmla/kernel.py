@@ -6,9 +6,7 @@ Q uses two explicit query slots when its periodic ownership fits the event
 budget; all per-tile buffer versions are compiler-managed.
 """
 
-import tilelang
 import tilelang.ascend.language as T
-from tilelang import tvm
 from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_l0c_layout, make_ascend_major_k_layout, make_ascend_major_mn_layout
 from examples.ascend.flashmla.quantization import dequantize
 
@@ -727,18 +725,3 @@ def sparse_attention(
             attention_body(Q, KV, Indices, Sink, Lengths, None, None, None, O, Max, LSE)
 
     return main
-
-
-def prefill(nq, nk, topk, **kwargs):
-    return sparse_attention(nq, nk, topk, **kwargs)
-
-
-def compile_prefill(nq, nk, topk, **kwargs):
-    # UB ND-to-NZ copy layout inference currently needs an active target context.
-    with tvm.target.Target("ascend"):
-        return tilelang.compile(
-            prefill(nq, nk, topk, **kwargs),
-            target="ascend",
-            out_idx=[5, 6, 7],
-            compile_flags=["-Ofast", "-mllvm", "-enable-hiipu-vf-loop-unroll"],
-        )

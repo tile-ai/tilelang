@@ -7,8 +7,10 @@ at `a123d0b0191e0da7aa1e044f8644e0989cc63220`.
 | Files | Purpose |
 | --- | --- |
 | `kernel.py` | Persistent prefill and decode with `T.Stage` and compiler-managed buffer versions |
-| `decode.py`, `quantization.py` | Packed FP8 main KV and optional FP8/FP4 extra KV |
-| `run.py`, `run_decode.py` | Correctness checks and benchmarks against FlashMLA |
+| `prefill.py`, `decode.py` | Compilation entry points for BF16 prefill and packed FP8/FP4 decode |
+| `quantization.py` | Packed KV dequantization and NZ conversion |
+| `testing.py` | Adapt FlashMLA reference inputs to the TileLang kernels |
+| `run_prefill.py`, `run_decode.py` | Correctness checks and benchmarks against FlashMLA |
 | `test_flashmla.py` | Kernel regression tests |
 
 The kernels use H=64, Dqk=Dv=512, BF16 Q/output, and topk extents divisible
@@ -43,7 +45,7 @@ From the TileLang repository root, select an idle NPU with
 export ASCEND_RT_VISIBLE_DEVICES=0  # Replace 0 with an idle physical NPU.
 export PYTHONPATH=.
 export FLASHMLA_REFERENCE=/path/to/FlashMLA
-python examples/ascend/flashmla/run.py --reference "$FLASHMLA_REFERENCE" \
+python examples/ascend/flashmla/run_prefill.py --reference "$FLASHMLA_REFERENCE" \
   --mode correctness --output /tmp/flashmla-prefill.json
 python examples/ascend/flashmla/run_decode.py --reference "$FLASHMLA_REFERENCE" \
   --mode correctness --output /tmp/flashmla-decode.json

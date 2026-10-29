@@ -31,7 +31,7 @@ def main():
     import lib
     import ref
     import kernelkit as kk
-    from examples.ascend.flashmla.kernel import compile_prefill
+    from examples.ascend.flashmla.testing import prepare_prefill
 
     device = torch.device("npu", torch.npu.current_device())
     torch.npu.set_op_timeout_ms(30000)
@@ -86,23 +86,11 @@ def main():
         if args.implementation in ("reference", "both"):
             funcs["reference"] = partial(lib.run_flash_mla_sparse_fwd, param, inputs)
         if args.implementation in ("tilelang", "both"):
-            kernel = compile_prefill(
-                param.s_q,
-                param.s_kv,
-                param.topk,
-                sink=param.have_attn_sink,
-                variable_lengths=param.have_topk_length,
-                scale=inputs.sm_scale,
-                q_strides=tuple(inputs.q.stride()),
-                index_stride=inputs.indices.stride(0),
-            )
+            kernel, funcs["tilelang"] = prepare_prefill(param, inputs)
             source_path = args.output.parent / args.output.stem / f"tilelang_{case_id}_{param.s_q}_{param.s_kv}_{param.topk}.asc"
             source_path.parent.mkdir(parents=True, exist_ok=True)
             source_path.write_text(kernel.get_kernel_source())
             print("Compiled cache:", getattr(kernel, "_tilelang_cache_path", None), flush=True)
-            sink_arg = inputs.attn_sink if inputs.attn_sink is not None else torch.zeros(64, dtype=torch.float32)
-            lengths_arg = inputs.topk_length if inputs.topk_length is not None else torch.full((param.s_q,), param.topk, dtype=torch.int32)
-            funcs["tilelang"] = partial(kernel, inputs.q, inputs.kv.view(param.s_kv, 512), inputs.indices.squeeze(1), sink_arg, lengths_arg)
         outputs = {}
         for name, fn in funcs.items():
             print(f"Launching {name}", flush=True)
