@@ -16,6 +16,13 @@ by 64. Prefill and decode support attention sinks, invalid indices, and per-quer
 Prefill accepts contiguous BF16 KV; decode requires contiguous packed KV pages,
 with each cache smaller than 4 GiB.
 
+On typical DeepSeek V4.1 workloads, these kernels reach about **405 TFLOPS in
+BF16 prefill** and **362 TFLOPS in FP8/FP4 decode** on Ascend 950DT with CANN 9.3.0.
+The measured prefill case uses 4,096 query tokens, 4,096 KV tokens, and topk=640;
+decode uses batch=512, four query tokens per sequence, topk=128 from the FP8 main
+cache, and topk=512 from the FP4 extra cache. These are kernel-only timings with
+L2 flushed before each launch, counting the QK and PV matrix multiplications.
+
 ## Run
 
 Build TileLang with Ascend support; see the [backend guide](../../../tilelang/ascend/README.md).
