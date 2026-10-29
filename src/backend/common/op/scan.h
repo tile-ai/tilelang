@@ -13,9 +13,11 @@
 #include "op/utils.h"
 
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 
 #include <sstream>
+#include <unordered_set>
 
 namespace tvm {
 namespace tl {
@@ -25,6 +27,38 @@ using namespace tirx;
 using namespace ffi;
 
 namespace scan {
+
+inline bool
+ExprDependsOnAxis(const PrimExpr &expr, const Var &axis,
+                  const Map<Var, PrimExpr> &bind_var_to_expr,
+                  std::unordered_set<const VarNode *> *visited_bind_vars) {
+  return UsesVar(expr, [&](const VarNode *var_node) {
+    if (var_node == axis.get()) {
+      return true;
+    }
+    Var var = GetRef<Var>(var_node);
+    if (!bind_var_to_expr.count(var) ||
+        !visited_bind_vars->insert(var_node).second) {
+      return false;
+    }
+    return ExprDependsOnAxis(bind_var_to_expr[var], axis, bind_var_to_expr,
+                             visited_bind_vars);
+  });
+}
+
+inline bool RegionDependsOnAxis(const BufferRegion &region, const Var &axis,
+                                const Map<Var, PrimExpr> &bind_var_to_expr) {
+  for (const auto &range : region->region) {
+    std::unordered_set<const VarNode *> visited_bind_vars;
+    if (ExprDependsOnAxis(range->min, axis, bind_var_to_expr,
+                          &visited_bind_vars) ||
+        ExprDependsOnAxis(range->extent, axis, bind_var_to_expr,
+                          &visited_bind_vars)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 template <typename ScanOpNode>
 Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
@@ -50,6 +84,7 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     }
     int ndim = static_cast<int>(src_extents.size());
 
+    Array<Var> guarded_thread_axes;
     if (TargetIsCuda(lower_args.target) &&
         !TargetIsCuTeDSL(lower_args.target)) {
       const int64_t *num_threads = as_const_int(threads);
@@ -61,6 +96,27 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
                         : "at least 32 block threads and a multiple of 32 "
                           "for 2D scans")
           << "; got " << threads << ".";
+
+      for (const IterVar &thread_axis : lower_args.thread_bindings) {
+        if (thread_axis->thread_tag != "threadIdx.y" &&
+            thread_axis->thread_tag != "threadIdx.z") {
+          continue;
+        }
+        const int64_t *extent = as_const_int(thread_axis->dom->extent);
+        if (extent == nullptr || *extent <= 1) {
+          continue;
+        }
+        CHECK(!RegionDependsOnAxis(op.srcRegion_, thread_axis->var,
+                                   lower_args.bind_var_to_expr) &&
+                  !RegionDependsOnAxis(op.dstRegion_, thread_axis->var,
+                                       lower_args.bind_var_to_expr),
+              ValueError)
+            << "T." << op_name
+            << " on CUDA shared memory does not support scan regions that "
+               "depend on extra threadIdx.y/z axes; got dependency on "
+            << thread_axis->thread_tag << ".";
+        guarded_thread_axes.push_back(thread_axis->var);
+      }
     }
 
     if (ndim == 1) {
@@ -83,7 +139,15 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
                  << " currently supports only 1D or 2D buffers, got " << ndim
                  << "D.";
     }
-    return Evaluate(Call(op.dst->dtype, builtin::call_extern(), args));
+    Stmt lowered = Evaluate(Call(op.dst->dtype, builtin::call_extern(), args));
+    if (!guarded_thread_axes.empty()) {
+      PrimExpr guard = EQ(guarded_thread_axes[0], 0);
+      for (size_t i = 1; i < guarded_thread_axes.size(); ++i) {
+        guard = And(guard, EQ(guarded_thread_axes[i], 0));
+      }
+      lowered = IfThenElse(guard, lowered);
+    }
+    return lowered;
   } else {
     ICHECK(false) << "Cannot lower " << op_name << " for " << op.src.scope()
                   << " and " << op.dst.scope();

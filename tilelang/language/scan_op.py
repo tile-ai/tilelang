@@ -101,6 +101,7 @@ def cumsum(
 
     With the CUDA C++ backend, 1D shared-memory scans require at least 32 block
     threads. 2D scans require at least 32 block threads and a multiple of 32.
+    Multi-axis launches require scan regions independent of threadIdx.y/z.
     Fragment scans stage through shared memory and inherit these requirements.
 
     Examples:
@@ -193,6 +194,7 @@ def cummax(
 
     With the CUDA C++ backend, 1D shared-memory scans require at least 32 block
     threads. 2D scans require at least 32 block threads and a multiple of 32.
+    Multi-axis launches require scan regions independent of threadIdx.y/z.
     Fragment scans stage through shared memory and inherit these requirements.
     """
 

@@ -1149,6 +1149,15 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
+    if (thread_binding_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_);
+    }
+    if (thread_binding_y_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_y_);
+    }
+    if (thread_binding_z_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_z_);
+    }
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
@@ -1179,6 +1188,12 @@ private:
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+      } else if (iv->thread_tag == "threadIdx.y") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_binding_y_ = iv;
+      } else if (iv->thread_tag == "threadIdx.z") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_binding_z_ = iv;
       }
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -1436,6 +1451,8 @@ private:
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
+  IterVar thread_binding_y_;
+  IterVar thread_binding_z_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;

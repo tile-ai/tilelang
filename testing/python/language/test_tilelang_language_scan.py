@@ -122,6 +122,73 @@ def test_cuda_shared_scan_unsupported_threads(op, shape, threads, requirement):
         tl.lower(main, target=target)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("threads, axis_name", [((96, 2), "ty"), ((96, 1, 2), "tz")])
+@pytest.mark.parametrize(
+    "shape, dim, symbol",
+    [((128,), 0, "tl::CumSum1D"), ((8, 32), 1, "tl::CumSum2D")],
+)
+def test_cuda_shared_scan_guards_invariant_extra_thread_axes(threads, axis_name, shape, dim, symbol):
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            T.cumsum(shared, dim=dim)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    scan_pos = artifact.device_mod.script().index(symbol)
+    assert f"if {axis_name} == 0:" in artifact.device_mod.script()[:scan_pos]
+
+    kernel = tl.compile(main, out_idx=-1)
+    data = torch.randn(shape, device="cuda")
+    torch.testing.assert_close(kernel(data), torch.cumsum(data, dim=dim), atol=1e-3, rtol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize("threads, axis", [((96, 2), 1), ((96, 1, 2), 2)])
+def test_cuda_shared_scan_rejects_axis_dependent_regions(op, threads, axis):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 128), T.float32), B: T.Tensor((2, 128), T.float32)):
+        with T.Kernel(1, threads=threads):
+            thread_axis = T.get_thread_binding(axis)
+            shared = T.alloc_shared((2, 128), T.float32)
+            T.copy(A, shared)
+            scan(shared[thread_axis, :], dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with (
+        target,
+        pytest.raises(ValueError, match=rf"T\.{op}.*extra threadIdx\.y/z axes"),
+    ):
+        tl.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+def test_cuda_shared_scan_preserves_thread_offset():
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=64):
+            tx = T.get_thread_binding(0)
+            shared = T.alloc_shared((128,), T.float32)
+            T.copy(A, shared)
+            if tx >= 32:
+                T.cumsum(shared, dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    assert "tl::CumSum1D<32, false, 32>" in artifact.device_mod.script()
+
+
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem", threads=256):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype, threads)
