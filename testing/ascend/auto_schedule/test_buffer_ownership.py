@@ -1,6 +1,7 @@
 """AnnotateMultiBufferEligible selects complete, write-first storage owners."""
 
 import pytest
+import tilelang.ascend.language as T
 from tilelang.ascend import transform
 from tvm import tirx
 from testing.ascend._ir import copy, kernel, nodes, seq
@@ -51,6 +52,29 @@ def test_write_first_ownership(case, expected):
     after = transform.AnnotateMultiBufferEligible()(before)
     (owner,) = nodes(after, tirx.For)
     assert (ub.data in owner.annotations.get("multi_buffer_eligible", [])) == expected
+
+
+@pytest.mark.parametrize("clear_step, expected", [(0, True), (1, False)], ids=["first-step-clears", "later-step-clears"])
+def test_gemm_accumulator_cleared_on_the_first_step_belongs_to_the_enclosing_loop(clear_step, expected):
+    """A step loop whose first iteration clears the accumulator writes before any
+    read, so the enclosing loop may version that accumulator; the step loop keeps
+    carrying it across its own iterations and never claims it."""
+    l0a = tirx.decl_buffer((16, 16), "float32", name="l0a", scope="shared.l0a")
+    l0b = tirx.decl_buffer((16, 16), "float32", name="l0b", scope="shared.l0b")
+    acc = tirx.decl_buffer((16, 16), "float32", name="acc", scope="shared.l0c")
+    out = tirx.decl_buffer((4, 16, 16), "float32", name="out")
+    owner, step = tirx.Var("owner", "int32"), tirx.Var("step", "int32")
+    gemm = unit(tirx.Evaluate(T.gemm(l0a, l0b, acc, transpose_B=True, clear_accum=step == clear_step)), core=2)
+    steps = unit(tirx.For(step, 0, 2, tirx.ForKind.SERIAL, gemm), core=None)
+    drain = unit(copy(acc, out, src_shape=[16, 16], dst_shape=[1, 16, 16], dst_indices=[owner, 0, 0]), core=2)
+    before = kernel(
+        unit(tirx.For(owner, 0, 4, tirx.ForKind.SERIAL, seq(steps, drain)), core=None),
+        buffers=[l0a, l0b, acc],
+        params=[out],
+    )
+    after = transform.AnnotateMultiBufferEligible()(before)
+    owners = [loop.loop_var for loop in nodes(after, tirx.For) if acc.data in loop.annotations.get("multi_buffer_eligible", [])]
+    assert [var.same_as(owner) for var in owners] == ([True] if expected else [])
 
 
 def test_nested_alias_accesses_have_one_complete_owner():
