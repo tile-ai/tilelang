@@ -72,10 +72,10 @@ def device_synchronize(device: int | torch.device | None = None) -> None:
 def get_available_cpu_count() -> int:
     """CPU cores available to this process (cpuset affinity), at least 1.
 
-    Falls back to ``os.cpu_count`` where affinity is unavailable (macOS/Windows).
+    Falls back to ``os.cpu_count`` if affinity is unsupported or cannot be queried.
     """
     try:
         cpu_count = len(os.sched_getaffinity(0))
-    except AttributeError:
+    except (AttributeError, OSError):
         cpu_count = os.cpu_count()
     return max(1, cpu_count or 1)
