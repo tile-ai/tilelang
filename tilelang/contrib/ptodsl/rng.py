@@ -11,7 +11,7 @@ class PhiloxRNG:
     logical draw index and threads it through each method explicitly, so
     PTODSL can carry the ordinary Python SSA name through runtime control
     flow. ``rand()`` returns a uint32; ``rand_uniform()`` returns float32 in
-    [0, 1); ``rand_normal()`` uses the same cached Box-Muller construction as
+    (0, 1]; ``rand_normal()`` uses the same cached Box-Muller construction as
     the AscendC backend.
     """
 
@@ -93,6 +93,7 @@ class PhiloxRNG:
         return result, draw_index + pto.const(1, dtype=pto.ui64)
 
     def rand_uniform(self, draw_index):
+        """Return a uniform float32 in (0, 1], matching cuRAND."""
         _u, draw_index = self.rand(draw_index)
         # Philox words are carried as i32 bit patterns. Re-author the value as
         # unsigned before converting so high-bit words map to positive floats.
@@ -103,6 +104,7 @@ class PhiloxRNG:
             rounding="to_nearest_even",
             saturation="nosat",
         )
+        # The half-unit offset excludes zero; float32 rounding can produce one.
         result = _f * pto.const(self._RAND_2POW32_INV, dtype=pto.f32) + pto.const(self._RAND_2POW32_INV_HALF, dtype=pto.f32)
         return result, draw_index
 

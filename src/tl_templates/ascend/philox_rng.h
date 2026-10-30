@@ -49,6 +49,7 @@ __simt_callee__ __aicore__ inline uint32_t philox_rand(AscendPhiloxState *st) {
   return st->buf[st->idx++];
 }
 
+// Uniform in (0, 1]: the offset excludes zero, and rounding can produce one.
 __simt_callee__ __aicore__ inline float
 philox_rand_uniform(AscendPhiloxState *st) {
   return philox_rand(st) * RandomKernelBase::RAND_2POW32_INV +
