@@ -52,6 +52,7 @@
 #include "ascend/transform/attr.h"
 #include "op/builtin.h"
 #include "support/check.h"
+#include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -691,7 +692,9 @@ Stmt LowerScheduledKernel(const Stmt &scheduled_body,
   Optional<Stmt> vector_body =
       LowerCore(scheduled_body, vector_mask, false, sid);
   Optional<Stmt> cube_body = LowerCore(scheduled_body, kCoreCube);
+  bool allow_shared_scalar_stream = false;
   if (!vector_body.has_value() && !cube_body.has_value()) {
+    allow_shared_scalar_stream = true;
     vector_body = LowerCore(scheduled_body, vector_mask,
                             /*allow_shared_scalar_stream=*/true, sid);
   }
@@ -699,6 +702,29 @@ Stmt LowerScheduledKernel(const Stmt &scheduled_body,
                    UsesVar(vector_body.value(), [&](const VarNode *var) {
                      return var == sid.get();
                    });
+  if (needs_sid && vector_count == 2) {
+    // Select the subcore once, before entering its pipeline. Interleaving
+    // guarded AIV tasks would otherwise test sid throughout the issue stream.
+    // Extract each stream independently to retain its own scalar bindings and
+    // loop variables, then specialize the remaining shared sid expressions.
+    auto project = [&](CoreMask core) -> Optional<Stmt> {
+      Optional<Stmt> body =
+          LowerCore(scheduled_body, core, allow_shared_scalar_stream, sid);
+      if (body.has_value())
+        return Substitute(body.value(),
+                          {{sid, IntImm(sid.dtype(), VectorSid(core))}});
+      return std::nullopt;
+    };
+    Optional<Stmt> aiv0 = project(kCoreVector0);
+    Optional<Stmt> aiv1 = project(kCoreVector1);
+    ICHECK(aiv0.has_value() || aiv1.has_value());
+    if (aiv0.has_value())
+      vector_body = IfThenElse(sid == 0, aiv0.value(), aiv1);
+    else
+      vector_body = IfThenElse(sid == 1, aiv1.value());
+    // Shared tasks can contain nested Bind/For/AllocBuffer definitions too.
+    vector_body = ConvertSSA(vector_body.value());
+  }
   if (vector_body.has_value() && !external_sid.has_value() &&
       (cube_body.has_value() || needs_sid)) {
     IterVar sid_thread(Range(0, vector_count), sid, IterVarType::kThreadIndex,

@@ -10,6 +10,80 @@ from tvm import tirx
 from testing.ascend._ir import allocated_buffer, calls, nodes, statements
 
 
+def _nz_fixpipe_kernel(split, dtype="float32", n=64, alias=False):
+    rows = 16 if split == "m" else 32
+    cols = n // 2 if split == "n" else n
+
+    @T.prim_func
+    def main(A: T.Tensor((32, 16), "bfloat16"), B: T.Tensor((n, 16), "bfloat16"), C: T.Tensor((32, n), dtype)):
+        with T.MixedKernel(1, sids=1 if split == "single" else 2) as (_, sid):
+            a = T.alloc_l1((32, 16), "bfloat16")
+            b = T.alloc_l1((n, 16), "bfloat16")
+            acc = T.alloc_l0c((32, n), "float32")
+            if alias:
+                storage = T.alloc_shared((2 * 48 * 80,), dtype)
+                ub = T.view(storage, (2, 48, 80))
+            else:
+                ub = T.alloc_shared((2, 48, 80), dtype)
+            T.annotate_layout({ub: make_ascend_l0c_layout(ub)})
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+            if split == "single":
+                T.copy(acc, ub[1, 16 : 16 + rows, 16 : 16 + cols])
+            else:
+                T.dual_copy(acc, ub[1, 16 : 16 + rows, 16 : 16 + cols])
+            with T.SimtVF(threads=128):
+                for i, j in T.Parallel(rows, cols):
+                    C[i + (sid * rows if split == "m" else 0), j + (sid * cols if split == "n" else 0)] = ub[1, 16 + i, 16 + j]
+
+    return main
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_nz_fixpipe_layout_survives_full_lowering(alias):
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendLowerTileOp":
+                snapshots[info.name] = mod
+
+    with tvm.target.Target("ascend"), tvm.transform.PassContext(instruments=[Capture()]):
+        tilelang.lower(_nz_fixpipe_kernel("m", alias=alias), target="ascend")
+    (copy,) = calls(snapshots["tl.AscendLowerTileOp"], "tl.ascend_copy_matrix_cc_to_ub")
+    assert int(copy.args[5]) == 48 * 16
+    assert int(copy.args[7]) == 1
+    assert int(copy.args[14]) == 0
+
+
+def test_nz_fixpipe_does_not_apply_nd_tail_padding():
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="aligned to 16 elements"):
+        tilelang.lower(_nz_fixpipe_kernel("single", n=9), target="ascend")
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "split,dtype,alias",
+    [("single", "float32", False), ("m", "float32", False), ("n", "float32", False), ("single", "bfloat16", False), ("m", "float32", True)],
+)
+def test_nz_fixpipe_logical_reads_npu(split, dtype, alias):
+    import torch
+
+    # Exact small inputs make addressing errors distinguishable from rounding.
+    generator = torch.Generator().manual_seed(42)
+    a = torch.randint(-4, 5, (32, 16), generator=generator).to(torch.bfloat16)
+    b = torch.randint(-4, 5, (64, 16), generator=generator).to(torch.bfloat16)
+    with tvm.target.Target("ascend"):
+        kernel = tilelang.compile(_nz_fixpipe_kernel(split, dtype, alias=alias), out_idx=-1, target="ascend")
+    expected = (a.float() @ b.float().T).to(getattr(torch, dtype))
+    for _ in range(2):
+        actual = kernel(a.npu(), b.npu())
+        torch.npu.synchronize()
+        torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+
+
 def test_padded_alias_storage_sets_the_physical_version_pitch():
     @T.prim_func
     def main(A: T.Tensor((60, 15), "bfloat16")):
