@@ -44,9 +44,11 @@ def without_kernel_cache():
     cache carries neither, so such a test passes only on a cold cache unless it
     opts out.
 
-    The `@tilelang.jit` wrapper keeps its own kernel cache and consults it
-    before `JITImpl.compile()` runs, so repeated jit calls are not covered
-    here. A cache state the caller had already disabled is restored on exit.
+    The `@tilelang.jit` wrapper keeps its own in-process caches and consults
+    them before `JITImpl.compile()` runs; while this block is active those
+    caches are bypassed too, so a jit call compiles instead of returning a
+    kernel built earlier in the process. A cache state the caller had already
+    disabled is restored on exit.
     """
     enabled = CacheState.is_enabled()
     CacheState.disable()
