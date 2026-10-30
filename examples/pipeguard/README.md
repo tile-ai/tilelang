@@ -1,7 +1,7 @@
 # PipeGuard quick start
 
-These four TileLang kernels illustrate shared-memory ordering and TMA barrier
-accounting. They are lowered and checked statically; no GPU kernel is launched.
+These six TileLang kernels illustrate shared-memory ordering, TMA barrier
+accounting, and mbarrier phase reuse. They are lowered and checked statically; no GPU kernel is launched.
 
 From the TileLang checkout, with TileLang installed and Python 3.10+:
 
@@ -17,6 +17,8 @@ python examples/pipeguard/check_kernels.py
 | `shared_race` | The same cross-warp handoff without the CTA barrier | `DATA_HAZARD` |
 | `tma_safe` | Load a 32×32 tile using TMA; all 128 threads arrive and wait before consumption | `SAFE` |
 | `tma_missing_arrival` | Issue the same TMA and wait, but omit the required thread arrivals | `SYNC_HAZARD` |
+| `mbarrier_reuse_safe` | Observe phase 0, then use a CTA barrier before phase-1 arrivals | `SAFE` |
+| `mbarrier_reuse_race` | One warp starts phase 1 without ordering its arrival after another warp's phase-0 observation | `SYNC_HAZARD` |
 
 Run one case and inspect the complete JSON report:
 
@@ -41,3 +43,32 @@ specified protocol. Do not launch the intentionally faulty kernels on a GPU.
 
 See the [integration guide](../../docs/tutorials/pipeguard.md) for checking your
 own kernels, required launch evidence, and the scope of a SAFE result.
+
+## A scheduling-dependent mbarrier error
+
+```bash
+python examples/pipeguard/check_kernels.py --case mbarrier_reuse_race --json
+python examples/pipeguard/check_kernels.py --case mbarrier_reuse_safe
+```
+
+The barrier expects two arrivals per phase. Threads 0 and 64 first arrive in
+phase 0; a CTA barrier ensures both have arrived. Phase 0 is complete, but nobody
+has yet observed that completion with an mbarrier wait.
+
+In the racy version, thread 0 next arrives in phase 1 while thread 64 can observe
+phase 0. No synchronization orders those two operations:
+
+- If thread 64 successfully observes phase 0 first, the phase-1 arrival is valid.
+- If thread 0 arrives first, it reuses an unobserved phase and violates the protocol.
+
+The subsequent CTA barrier keeps phase 1 incomplete until both phase-0 waits
+return; it cannot retroactively order the earlier arrival. The safe version puts
+the phase-0 observations and CTA handoff before the next arrival.
+
+PTX requires at least one successful observation of each phase before an arrival
+in the next phase; it does not require every thread to observe it. See
+[mbarrier phases](https://docs.nvidia.com/cuda/archive/12.9.1/parallel-thread-execution/index.html#mbarrier).
+
+The checker reports the possible phase-reuse violation even though some
+execution orders satisfy the protocol. Adding the explicit observation handoff
+makes the safe variant pass.

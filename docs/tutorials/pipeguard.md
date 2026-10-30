@@ -31,11 +31,14 @@ shared_safe: SAFE (expected SAFE)
 shared_race: DATA_HAZARD (expected DATA_HAZARD)
 tma_safe: SAFE (expected SAFE)
 tma_missing_arrival: SYNC_HAZARD (expected SYNC_HAZARD)
+mbarrier_reuse_safe: SAFE (expected SAFE)
+mbarrier_reuse_race: SYNC_HAZARD (expected SYNC_HAZARD)
 ```
 
 The shared-memory pair demonstrates cross-warp publication with and without a
 CTA barrier. The TMA pair demonstrates correct completion observation and missing
-thread arrivals. The examples use a fixed SM90a target and one 128-thread CTA;
+thread arrivals. The mbarrier pair demonstrates phase reuse with and without an
+ordered completion observation. The examples use a fixed SM90a target and one 128-thread CTA;
 they lower and check the kernels without launching them. Automatic thread-storage
 synchronization is disabled to preserve the intentionally missing barrier.
 

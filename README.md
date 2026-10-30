@@ -205,7 +205,7 @@ print("GEMM + ReLU passed.")
 
 ### Optional static checks with PipeGuard
 
-With TileLang installed, run the shared-memory and TMA examples without launching
+With TileLang installed, run the shared-memory, TMA, and mbarrier examples without launching
 a GPU kernel:
 
 ```bash
@@ -214,7 +214,7 @@ python -m pip install ./3rdparty/pipeguard
 python examples/pipeguard/check_kernels.py
 ```
 
-See the [four example cases and expected results](examples/pipeguard/README.md)
+See the [six example cases and expected results](examples/pipeguard/README.md)
 and the [integration guide](docs/tutorials/pipeguard.md) to check your own kernels.
 
 ## Examples

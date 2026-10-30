@@ -43,11 +43,51 @@ def tma_handoff(arrive):
     return kernel
 
 
+def mbarrier_handoff(ordered, producer=0):
+    """Phase reuse must follow a successful observation by at least one thread."""
+    observer = 64 if producer == 0 else 0
+
+    @T.prim_func
+    def kernel(Out: T.Tensor((1,), "int32")):
+        with T.Kernel(1, threads=128):
+            tx = T.get_thread_binding()
+            barrier = T.alloc_barrier([2])
+            if tx == 0 or tx == 64:
+                T.mbarrier_arrive(barrier)
+            # Phase 0 is complete, but nobody has observed it yet.
+            T.sync_threads()
+            if ordered:
+                if tx == 0 or tx == 64:
+                    T.mbarrier_wait_parity(barrier, 0)
+                T.sync_threads()
+                if tx == producer:
+                    T.mbarrier_arrive(barrier)
+            else:
+                if tx == producer:
+                    # Valid only if the other warp has already observed phase 0.
+                    T.mbarrier_arrive(barrier)
+                if tx == 0 or tx == 64:
+                    T.mbarrier_wait_parity(barrier, 0)
+                # Keep phase 1 incomplete until both phase-0 waits have returned.
+                # This later join cannot order the producer's earlier arrival.
+                T.sync_threads()
+            if tx == observer:
+                T.mbarrier_arrive(barrier)
+            if tx == 0 or tx == 64:
+                T.mbarrier_wait_parity(barrier, 1)
+            if tx == producer:
+                Out[0] = 1
+
+    return kernel
+
+
 CASES = {
     "shared_safe": (shared_handoff, True, "SAFE"),
     "shared_race": (shared_handoff, False, "DATA_HAZARD"),
     "tma_safe": (tma_handoff, True, "SAFE"),
     "tma_missing_arrival": (tma_handoff, False, "SYNC_HAZARD"),
+    "mbarrier_reuse_safe": (mbarrier_handoff, True, "SAFE"),
+    "mbarrier_reuse_race": (mbarrier_handoff, False, "SYNC_HAZARD"),
 }
 
 
