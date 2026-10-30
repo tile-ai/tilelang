@@ -52,6 +52,7 @@ from .loop import unroll  # noqa: F401
 from .kernel import (  # noqa: F401
     Kernel,
     MixedKernel,
+    PersistentKernel,
     get_thread_binding,
     get_thread_bindings,
     get_thread_extent,
@@ -98,6 +99,7 @@ _ASCEND_API_ALL = (
     "CubeFrame",
     "MixedKernel",
     "PerCoreTask",
+    "PersistentKernel",
     "Stage",
     "Task",
     "SimdVF",
