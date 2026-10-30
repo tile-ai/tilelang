@@ -282,54 +282,156 @@ struct AllReduce {
 private:
   static constexpr bool full_warp =
       threads == 32 && scale == 1 && thread_offset % 32 == 0;
+  static constexpr bool is_idempotent =
+      std::is_same_v<Reducer, MaxOp> || std::is_same_v<Reducer, MinOp> ||
+      std::is_same_v<Reducer, BitAndOp> || std::is_same_v<Reducer, BitOrOp>;
+  static constexpr bool has_zero_identity =
+      std::is_same_v<Reducer, SumOp> || std::is_same_v<Reducer, BitXorOp>;
+  static constexpr int in_warp_scale = scale < 32 ? scale : 32;
+  static constexpr int cross_scale = scale < 32 ? 32 : scale;
+  static constexpr int cross_radix =
+      threads > cross_scale ? (threads / cross_scale) : 1;
+  static constexpr int in_warp_lanes = 32 / in_warp_scale;
+  static constexpr int merge_lanes =
+      cross_radix < in_warp_lanes ? cross_radix : in_warp_lanes;
+  static constexpr int items_per_lane =
+      cross_radix > merge_lanes ? (cross_radix / merge_lanes) : 1;
 
+  using InWarp = AllReduce<Reducer, 32, in_warp_scale, thread_offset, Barrier,
+                           batch_size, workspace_stride>;
+  using CrossWarpInLane =
+      AllReduce<Reducer, merge_lanes * in_warp_scale, in_warp_scale,
+                thread_offset, Barrier, batch_size, workspace_stride>;
   using Next = AllReduce<Reducer, threads / 2, scale, thread_offset, Barrier,
                          batch_size, workspace_stride>;
 
   template <typename T>
   static TL_DEVICE T butterfly_reduce_scalar(T x, T *red_buf) {
-    constexpr int offset = threads / 2;
-    if constexpr (offset >= 32) {
+    if constexpr (threads > 32) {
+      const int rel_tid = threadIdx.x - thread_offset;
       Barrier::template sync<1>();
-      red_buf[threadIdx.x - thread_offset] = x;
-      Barrier::template sync<2>();
-      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
+      if constexpr (scale < 32) {
+        x = InWarp::run(x);
+        red_buf[rel_tid] = x;
+        Barrier::template sync<2>();
+        const int lane_in_group = (rel_tid & 31) / in_warp_scale;
+        const int warp_base =
+            (lane_in_group & (merge_lanes - 1)) * items_per_lane;
+        const int group_base = rel_tid & ~(threads - cross_scale);
+        const int smem_base = group_base + warp_base * cross_scale;
+        T acc = red_buf[smem_base];
+#pragma unroll 4
+        for (int k = 1; k < items_per_lane; ++k) {
+          acc = Reducer()(acc, red_buf[smem_base + k * cross_scale]);
+        }
+        if constexpr (scale == 1 && thread_offset % 32 == 0 &&
+                      sizeof(T) <= sizeof(float) &&
+                      (is_idempotent ||
+                       (has_zero_identity && std::is_integral_v<T>))) {
+          if constexpr (!is_idempotent && merge_lanes < 32) {
+            if (lane_in_group >= merge_lanes) {
+              acc = static_cast<T>(0);
+            }
+          }
+          return InWarp::run(acc);
+        } else {
+          return CrossWarpInLane::run(acc);
+        }
+      } else {
+        red_buf[rel_tid] = x;
+        Barrier::template sync<2>();
+        const int base = rel_tid & ~(threads - cross_scale);
+        T acc = red_buf[base];
+#pragma unroll 4
+        for (int k = 1; k < cross_radix; ++k) {
+          acc = Reducer()(acc, red_buf[base + k * cross_scale]);
+        }
+        return acc;
+      }
     } else {
+      constexpr int offset = threads / 2;
       x = Reducer()(x, tl::shfl_xor_sync(uint32_t(-1), x, offset));
-    }
-    if constexpr (offset == scale) {
-      return x;
-    } else {
-      return Next::run(x, red_buf);
+      if constexpr (offset == scale) {
+        return x;
+      } else {
+        return Next::run(x, red_buf);
+      }
     }
   }
 
   template <typename T>
   static TL_DEVICE void butterfly_reduce_batch(T *x, T *red_buf) {
-    constexpr int offset = threads / 2;
-    if constexpr (offset >= 32) {
+    if constexpr (threads > 32) {
+      const int rel_tid = threadIdx.x - thread_offset;
       Barrier::template sync<1>();
+      if constexpr (scale < 32) {
+        InWarp::run_batch(x);
 #pragma unroll
-      for (int i = 0; i < batch_size; i++) {
-        red_buf[(threadIdx.x - thread_offset) + i * workspace_stride] = x[i];
-      }
-      Barrier::template sync<2>();
+        for (int i = 0; i < batch_size; i++) {
+          red_buf[rel_tid + i * workspace_stride] = x[i];
+        }
+        Barrier::template sync<2>();
+        const int lane_in_group = (rel_tid & 31) / in_warp_scale;
+        const int warp_base =
+            (lane_in_group & (merge_lanes - 1)) * items_per_lane;
+        const int group_base = rel_tid & ~(threads - cross_scale);
+        const int smem_base = group_base + warp_base * cross_scale;
 #pragma unroll
-      for (int i = 0; i < batch_size; i++) {
-        x[i] =
-            Reducer()(x[i], red_buf[((threadIdx.x - thread_offset) ^ offset) +
-                                    i * workspace_stride]);
+        for (int i = 0; i < batch_size; i++) {
+          T acc = red_buf[smem_base + i * workspace_stride];
+#pragma unroll 4
+          for (int k = 1; k < items_per_lane; ++k) {
+            acc = Reducer()(
+                acc,
+                red_buf[smem_base + k * cross_scale + i * workspace_stride]);
+          }
+          if constexpr (scale == 1 && thread_offset % 32 == 0 &&
+                        sizeof(T) <= sizeof(float) && !is_idempotent &&
+                        has_zero_identity && std::is_integral_v<T> &&
+                        merge_lanes < 32) {
+            if (lane_in_group >= merge_lanes) {
+              acc = static_cast<T>(0);
+            }
+          }
+          x[i] = acc;
+        }
+        if constexpr (scale == 1 && thread_offset % 32 == 0 &&
+                      sizeof(T) <= sizeof(float) &&
+                      (is_idempotent ||
+                       (has_zero_identity && std::is_integral_v<T>))) {
+          InWarp::run_batch(x);
+        } else {
+          CrossWarpInLane::run_batch(x);
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < batch_size; i++) {
+          red_buf[rel_tid + i * workspace_stride] = x[i];
+        }
+        Barrier::template sync<2>();
+        const int base = rel_tid & ~(threads - cross_scale);
+#pragma unroll
+        for (int i = 0; i < batch_size; i++) {
+          T acc = red_buf[base + i * workspace_stride];
+#pragma unroll 4
+          for (int k = 1; k < cross_radix; ++k) {
+            acc = Reducer()(
+                acc, red_buf[base + k * cross_scale + i * workspace_stride]);
+          }
+          x[i] = acc;
+        }
       }
     } else {
+      constexpr int offset = threads / 2;
 #pragma unroll
       for (int i = 0; i < batch_size; i++) {
         x[i] = Reducer()(x[i], tl::shfl_xor_sync(uint32_t(-1), x[i], offset));
       }
-    }
-    if constexpr (offset == scale) {
-      return;
-    } else {
-      Next::run_batch(x, red_buf);
+      if constexpr (offset == scale) {
+        return;
+      } else {
+        Next::run_batch(x, red_buf);
+      }
     }
   }
 };
