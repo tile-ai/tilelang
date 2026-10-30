@@ -20,29 +20,6 @@ def _to_int32(value):
     return tirx.IntImm("int32", value) if isinstance(value, int) else value
 
 
-def _compute_flat_offset(buf, region):
-    offset = tirx.const(0, "int32")
-    ndim = len(region.region)
-    for i, rng in enumerate(region.region):
-        stride = tirx.const(1, "int32")
-        for j in range(i + 1, ndim):
-            stride = stride * buf.shape[j]
-        offset = offset + tirx.Cast("int32", rng.min) * stride
-    return offset
-
-
-def _compute_flat_offset_excluding_last(buf, region):
-    offset = tirx.const(0, "int32")
-    ndim = len(region.region)
-    for i in range(ndim - 1):
-        rng = region.region[i]
-        stride = tirx.const(1, "int32")
-        for j in range(i + 1, len(buf.shape)):
-            stride = stride * buf.shape[j]
-        offset = offset + tirx.Cast("int32", rng.min) * stride
-    return offset
-
-
 def _compute_extent(region):
     extent = tirx.const(1, "int32")
     for rng in region.region:
@@ -50,30 +27,21 @@ def _compute_extent(region):
     return extent
 
 
-def _make_access_ptr(buf, region, rw_mask):
-    return tirx.op.tvm_access_ptr(
-        tirx.op.type_annotation(buf.dtype),
-        buf.data,
-        _compute_flat_offset(buf, region),
+def _make_access_ptr(buf, region, rw_mask, exclude_last=False):
+    indices = [tirx.Cast("int32", rng.min) for rng in region.region]
+    if exclude_last:
+        indices[-1] = tirx.const(0, "int32")
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.access_ptr"),
+        tirx.BufferLoad(buf, indices),
         _compute_extent(region),
         tirx.IntImm("int32", rw_mask),
     )
 
 
 def _find_layout(layout_map, buf):
-    if layout_map is None:
-        return None
-    for key in (buf.data if hasattr(buf, "data") else None, buf):
-        if key is not None:
-            layout = layout_map.get(key)
-            if layout is not None:
-                return layout
-    for key, layout in layout_map.items():
-        if hasattr(key, "data") and hasattr(buf, "data") and key.data.same_as(buf.data):
-            return layout
-        if hasattr(key, "name") and getattr(key, "name", None) == getattr(buf, "name", None):
-            return layout
-    return None
+    return None if layout_map is None else layout_map.get(buf)
 
 
 _ASCEND_DTYPE_MAP = {
@@ -251,22 +219,8 @@ class GemmMAD(GemmBase):
         tile_k_sub = self._compute_tile_k_sub()
         c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
 
-        a_buf = self.ARegion.buffer
-        b_buf = self.BRegion.buffer
-        a_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(a_buf.dtype),
-            a_buf.data,
-            _compute_flat_offset_excluding_last(a_buf, self.ARegion),
-            _compute_extent(self.ARegion),
-            tirx.IntImm("int32", 1),
-        )
-        b_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(b_buf.dtype),
-            b_buf.data,
-            _compute_flat_offset_excluding_last(b_buf, self.BRegion),
-            _compute_extent(self.BRegion),
-            tirx.IntImm("int32", 1),
-        )
+        a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1, exclude_last=True)
+        b_ptr = _make_access_ptr(self.BRegion.buffer, self.BRegion, 1, exclude_last=True)
 
         input_dtype = self._input_dtype()
         dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)

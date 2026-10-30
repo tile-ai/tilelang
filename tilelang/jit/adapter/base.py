@@ -40,7 +40,7 @@ def output_allocation_stream(stream: int, device: torch.device) -> torch.cuda.St
 class BaseKernelAdapter(ABC):
     func: Callable | None = None
 
-    def __init__(self, mod, params: list[KernelParam], result_idx: list[int]) -> None:
+    def __init__(self, mod, params: list[KernelParam], result_idx: int | list[int] | None) -> None:
         self.mod = mod
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
@@ -60,6 +60,8 @@ class BaseKernelAdapter(ABC):
         elif isinstance(result_idx, list):
             result_idx = result_idx.copy()
             for i, idx in enumerate(result_idx):
+                if not isinstance(idx, int):
+                    raise ValueError("result_idx should be a list of integers")
                 if idx >= len(params) or idx < -len(params):
                     raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
                 if idx < 0:

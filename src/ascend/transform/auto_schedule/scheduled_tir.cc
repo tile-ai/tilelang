@@ -358,9 +358,10 @@ void ValidateBufferVersions(const BufferVersionMap &buffer_versions,
 
 void ValidateBufferVersionModes(const BufferVersionModeMap &buffer_modes) {
   for (const auto &[data, mode] : buffer_modes) {
-    ICHECK(mode == "auto" || mode == "iteration" || mode == "counter")
+    ICHECK(mode == "auto" || mode == "iteration" || mode == "counter" ||
+           mode == "write_counter")
         << "Buffer version mode for " << data
-        << " must be auto, iteration, or counter, got " << mode;
+        << " must be auto, iteration, counter, or write_counter, got " << mode;
   }
 }
 

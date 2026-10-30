@@ -70,8 +70,71 @@ def UnrollLoopSkipVF():
     This pre-AutoSchedule pass only materializes ``T.unroll(..., explicit=True)``
     loops. Non-explicit unroll hints, serial loops, and all VF block interiors
     are preserved for their later lowering stages.
+
+    Each cloned VMI allocation gets a fresh data Var, and the corresponding
+    ``tl.vmi.alloc_kind`` AttrStmt carrier emitted by
+    ``NormalizePTOAllocMarkers`` is remapped to that Var through the same
+    mapping used for buffer loads and stores.  A carrier whose allocation was
+    not rebuilt by the clone keeps its original Var.
     """
     return _ffi_api.UnrollLoopSkipVF()  # type: ignore
+
+
+def NormalizePTOAllocMarkers():
+    """Move VMI allocation kinds onto scoped carriers in the owning VF.
+
+    Consumes each SBlock's ``tl.vmi.alloc_kind`` map and emits one
+    ``AttrStmt(data_var, "tl.vmi.alloc_kind", StringImm(kind))`` per marked
+    allocation in the block that actually owns it, in ``alloc_buffers`` order.
+    Carriers for a ``SIMD_VF`` block go inside its existing outer
+    ``tl.simdvf_scope`` statement; carriers for a nested block go in that
+    block's body.  Allocations, data Vars, statement order, and unrelated
+    annotations stay untouched, and marked allocations owned outside a
+    ``SIMD_VF`` are rejected.
+
+    The pass is idempotent: existing carriers and final allocation annotations
+    are not duplicated.  Run it after binding the Ascend PTO target and before
+    ``UnrollLoopSkipVF``.  Functions without a PTO target pass through
+    unchanged.
+    """
+    return _ffi_api.NormalizePTOAllocMarkers()  # type: ignore
+
+
+def ImportPTOAllocMarkers():
+    """Attach normalized VMI allocation kinds to final ``AllocBuffer`` nodes.
+
+    Must run immediately after ``LowerOpaqueBlock`` on the PTO target.  It
+    collects the temporary ``tl.vmi.alloc_kind`` AttrStmt carriers and the
+    actual ``AllocBuffer`` statements before rewriting, matches them by data
+    Var identity, writes the kind to the matched allocation's annotations, and
+    removes the consumed carriers while preserving their bodies and order.
+    An orphan carrier or conflicting kinds are rejected.  The final allocation
+    need not be lexically inside ``tl.simdvf_scope``, because lowering
+    materializes it before the scope statement.  Functions without a PTO
+    target pass through unchanged.
+    """
+    return _ffi_api.ImportPTOAllocMarkers()  # type: ignore
+
+
+def LegalizePTOVMIMemoryAccess():
+    """Build and verify the explicit VMI memory descriptor before scheduling.
+
+    Every ordinary ``T.vmi.vload`` / ``T.vmi.vstore`` address (a scalar-origin
+    ``BufferLoad``) is replaced with ``tl.access_ptr(BufferLoad, extent,
+    rw_mask)`` plus a rewritten instruction scalar offset.  The pass proves,
+    in one shared acceptance exit, that the descriptor preserves the source
+    address, contains the complete physical access envelope and covers the
+    declared extent under the existing logical pointer-region analysis.  An
+    ordinary caller-written explicit descriptor is preserved and only verified;
+    there is no whole-allocation fallback for an ordinary access.  Indexed
+    ``vgather`` / ``vscatter`` addresses, including one reached
+    through a direct handle binding, are instead rebuilt as an owner-origin
+    descriptor with capacity ``prod(owner.shape)`` after the owner identity,
+    layout, capacity, stable-coverage and bound-address snapshot proofs.
+    Functions without a PTO target pass through unchanged; the pass is a no-op
+    on IR without VMI accesses.
+    """
+    return _ffi_api.LegalizePTOVMIMemoryAccess()  # type: ignore
 
 
 def AutoSchedule():
@@ -132,6 +195,50 @@ def NormalizeAscendFractalStorage():
 def AscendSimdVFLowerParallel():
     """Lower T.Parallel inside SIMD_VF blocks to MicroAPI register-level vector ops."""
     return _ffi_api.AscendSimdVFLowerParallel()  # type: ignore
+
+
+def VerifyParallelToPTO():
+    """Read-only verification of the PTO Parallel input contract.
+
+    Runs on the PTO target only: SIMD_VF blocks whose T.Parallel units fall
+    outside the supported mapping contract are rejected, while functions
+    without a PTO target pass through unchanged.
+    """
+    return _ffi_api.VerifyParallelToPTO()  # type: ignore
+
+
+def LegalizeParallelToPTO():
+    """Placeholder for the PTO Parallel legalization stage.
+
+    Only the registration exists for now, so that the formal PTO pipeline
+    order is fixed; the safe scalar If/Select/Min/Max rewrites are left to
+    a later change. The placeholder preserves the input IR and rejects
+    nothing.
+    """
+    return _ffi_api.LegalizeParallelToPTO()  # type: ignore
+
+
+def VerifyPTOCodegenLegality():
+    """Verify PTO requirements before code generation without modifying IR.
+
+    Consumes the final device TIR after LowerDeviceKernelLaunch and the final
+    layout and UB rewrites. Currently checks destination alignment for
+    default/continuous explicit-mask VMI stores of b8/b16/b32 data: 32 bytes
+    for ordinary stores, or natural element alignment for recognized 1PT
+    writeback. Bool data is excluded. Shapes, layouts, masks and addresses are
+    unchanged. Functions without a PTO target pass through unchanged.
+    """
+    return _ffi_api.VerifyPTOCodegenLegality()  # type: ignore
+
+
+def VectorizeParallelToPTO():
+    """Rewrite verified T.Parallel loops inside PTO SIMD_VF blocks into
+    logical VMI code.
+
+    Runs on the PTO target only; functions without a PTO target pass
+    through unchanged.
+    """
+    return _ffi_api.VectorizeParallelToPTO()  # type: ignore
 
 
 def AscendThreadSync(storage_scope: str):
@@ -245,6 +352,8 @@ __all__ = [
     "NormalizeBufferVersion",
     "NormalizeControlFlowForSchedule",
     "NormalizeConflictHints",
+    "LegalizeParallelToPTO",
+    "LegalizePTOVMIMemoryAccess",
     "PrepareMultiBuffer",
     "ResolveCore",
     "RewriteAscendBufferVersionLayout",
@@ -252,5 +361,10 @@ __all__ = [
     "RestoreWhileLoops",
     "RewriteFp4ToFp4x2",
     "RewriteFlagToBuf",
+    "ImportPTOAllocMarkers",
+    "NormalizePTOAllocMarkers",
     "UnrollLoopSkipVF",
+    "VectorizeParallelToPTO",
+    "VerifyParallelToPTO",
+    "VerifyPTOCodegenLegality",
 ]

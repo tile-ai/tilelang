@@ -34,6 +34,7 @@
 #include <utility>
 
 #include "ascend/transform/attr.h"
+#include "ascend/transform/vmi_alloc.h"
 #include "auto_schedule/task_annotations.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -44,6 +45,9 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
+
+/*! \brief Context label used in every diagnostic of this pass. */
+constexpr const char *kContext = "UnrollLoopSkipVF";
 
 // Renames Var and Buffer definitions in each unrolled body copy so every
 // iteration gets a fresh SSA identity.
@@ -80,6 +84,26 @@ public:
     writer->elem_offset = visit_expr(buffer->elem_offset);
     buffer_remap_.Set(buffer, new_buffer);
     return new_buffer;
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key != tl::attr::kVmiAllocKind) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    // The default AttrStmt mutator visits only value and body, so the carrier
+    // node must be remapped explicitly from the same map used for Buffer
+    // data Vars.  A carrier whose allocation was not rebuilt by this clone
+    // keeps its original Var intact.
+    ffi::String kind;
+    Var data = vmi::DecodeAllocKindCarrier(op, &kind, kContext);
+    Stmt stmt = StmtExprMutator::VisitStmt_(op);
+    const auto *attr = stmt.as<AttrStmtNode>();
+    ICHECK(attr != nullptr);
+    auto it = var_remap_.find(data);
+    ffi::Any node =
+        it == var_remap_.end() ? ffi::Any(data) : ffi::Any((*it).second);
+    return AttrStmt(std::move(node), attr->attr_key, attr->value, attr->body,
+                    attr->span);
   }
 
 private:
