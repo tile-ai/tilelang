@@ -5,7 +5,7 @@ and performance optimization through configuration search.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import tilelang
 from tilelang import tvm as tvm
@@ -188,6 +188,7 @@ class AutoTuner:
         target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | str | None = None,
     ):
         """Set compilation arguments for the auto-tuner.
 
@@ -202,6 +203,8 @@ class AutoTuner:
             verbose: Whether to enable verbose output. If None, reads from
                 TILELANG_VERBOSE environment variable (defaults to False).
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
+            compile_flags: Extra flags forwarded to the device compiler. They change the
+                built binary, so they take part in the cache identity.
 
         Environment Variables:
             TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a JSON
@@ -231,6 +234,7 @@ class AutoTuner:
             target_host=backend_context.target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
 
         return self
@@ -409,6 +413,7 @@ class AutoTuner:
             target_host=self.compile_args.target_host,
             verbose=self.compile_args.verbose,
             pass_configs=merged,
+            compile_flags=self.compile_args.compile_flags,
         )
 
     def _default_compile(
@@ -1231,32 +1236,29 @@ class AutoTuneImpl(Generic[_P, _T]):
 
     def __post_init__(self):
         self._tuner_cache = {}
-        self._pass_configs_lock = threading.Lock()
 
     def _make_jit_compile_func(self, mode: str, args: tuple, kwargs: dict) -> Callable[..., JITKernel]:
-        """Create a jit_compile closure for the given mode ('lazy' or 'eager').
-
-        All compilation paths are serialized under _pass_configs_lock because
-        per-config pass_configs temporarily mutates self.jit_impl.pass_configs.
-        """
+        """Compile configurations with their own JIT pass configurations."""
+        key_locks = {}
+        key_locks_guard = threading.Lock()
 
         def jit_compile(**config_arg):
             per_config_pass_configs = config_arg.pop(_PASS_CONFIGS_KEY, None)
-            with self._pass_configs_lock:
-                original_pass_configs = self.jit_impl.pass_configs
+            jit_impl = self.jit_impl
+            merged = dict(kwargs)
+            merged.update(config_arg)
+            key, _, _ = jit_impl.func._parse_phase1_key(*args, **merged)
+            with key_locks_guard:
+                key_lock = key_locks.setdefault(key, threading.Lock())
+            # Keep equivalent configurations on the same cold compilation.
+            with key_lock:
+                if per_config_pass_configs is None and mode == "lazy":
+                    return jit_impl(*args, **kwargs, __tune_params=config_arg)
                 if per_config_pass_configs is not None:
-                    merged_pc = dict(original_pass_configs or {})
+                    merged_pc = dict(jit_impl.pass_configs or {})
                     merged_pc.update(per_config_pass_configs)
-                    self.jit_impl.pass_configs = merged_pc
-
-                try:
-                    if per_config_pass_configs is None and mode == "lazy":
-                        return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
-                    merged = dict(kwargs)
-                    merged.update(config_arg)
-                    return self.jit_impl.compile(*args, **merged)
-                finally:
-                    self.jit_impl.pass_configs = original_pass_configs
+                    jit_impl = replace(jit_impl, pass_configs=merged_pc)
+                return jit_impl.compile(*args, **merged)
 
         return jit_compile
 
@@ -1264,6 +1266,9 @@ class AutoTuneImpl(Generic[_P, _T]):
         autotuner = (
             AutoTuner(self.jit_impl.func, configs=self.configs)
             .set_profile_args(
+                warmup=self.warmup,
+                rep=self.rep,
+                timeout=self.timeout,
                 supply_type=self.supply_type,
                 ref_prog=self.ref_prog,
                 supply_prog=self.supply_prog,
@@ -1281,6 +1286,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 target_host=self.jit_impl.target_host,
                 verbose=self.jit_impl.verbose,
                 pass_configs=self.jit_impl.pass_configs,
+                compile_flags=self.jit_impl.compile_flags,
             )
         )
         autotuner.run = partial(

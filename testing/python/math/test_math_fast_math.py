@@ -113,6 +113,7 @@ def run_single_arg_mathop_test(
     block_N=32,
     dtype=T.float32,
     cuda_mathop_name=None,
+    target="cuda",
 ):
     """
     Test single-argument mathops.
@@ -132,7 +133,7 @@ def run_single_arg_mathop_test(
     kernel_no_fastmath = tilelang.compile(
         main,
         out_idx=[1],
-        target="cuda",
+        target=target,
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         },
@@ -252,9 +253,9 @@ def run_abs_test():
     print("✓ abs numerical test passed")
 
 
-def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32):
+def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, block_N=32, dtype=T.float32, target="cuda"):
     """
-    Test fastmath mathops to ensure they generate fastmath CUDA code (with __ prefix).
+    Test fastmath mathops to ensure they generate fastmath code (with __ prefix).
     """
 
     @T.prim_func
@@ -270,7 +271,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
     kernel_fastmath = tilelang.compile(
         main,
         out_idx=[1],
-        target="cuda",
+        target=target,
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         },
@@ -280,7 +281,7 @@ def run_fastmath_mathop_test(mathop_name, mathop_func, M=32, N=32, block_M=32, b
 
     print(f"\n=== Testing {mathop_name} (fastmath version) ===")
     print("FAST_MATH=True:")
-    # Strip the __ prefix for checking in the CUDA source
+    # Strip the __ prefix for checking in the generated source
     cuda_mathop_name = mathop_name.lstrip("_")
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=True)
 
@@ -435,6 +436,18 @@ def test_fastmath_versions(name, func):
     """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
     run_fastmath_mathop_test(name, func, dtype=T.float32)
     print(f"✓ {name} test passed")
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("name", ["exp", "exp10", "log", "log2", "log10", "sin", "cos"])
+def test_mathops_generate_no_fastmath_hip(name):
+    run_single_arg_mathop_test(name, getattr(T, name), dtype=T.float32, target="hip")
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(("name", "func"), FASTMATH_MATHOPS, ids=[name for name, _ in FASTMATH_MATHOPS])
+def test_fastmath_versions_hip(name, func):
+    run_fastmath_mathop_test(name, func, dtype=T.float32, target="hip")
 
 
 TAN_MATHOPS = [

@@ -50,6 +50,24 @@ python -m pip install -r requirements-dev.txt
 USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 ```
 
+### Device binary cache
+
+The AscendC `tvm_ffi` compilation callback caches linked `.aibin` files under
+`TILELANG_CACHE_DIR` (default: `~/.tilelang/cache`). The key includes the generated
+source, NPU architecture, compilation and linker options, TileLang version, and
+a `compiler` string formed as `bisheng version=<version line>`.
+
+The version line is read from the selected `bisheng --version` once per process.
+It preserves the compiler build time, Clang version, and revisions; the build
+time distinguishes releases that share the same Clang version and revisions.
+Subsequent lines such as `InstalledDir` and the package's `version.info`
+`timestamp` are not included. Include paths still participate through the
+compilation options. Restart the process after changing toolchains.
+
+This follows CUDA's device binary cache policy. The outer full JIT cache has a
+separate key and does not currently include the compiler version; an outer
+cache hit skips the device compilation callback.
+
 ## Quick Start
 
 ### Selecting AscendC or PTO code generation
@@ -213,6 +231,18 @@ attention implementations.
 See the [example guide](../../examples/ascend/README.md) for running and benchmarking.
 Each top-level example has one matching correctness test. Small language and
 compiler regressions belong in [testing/ascend](../../testing/ascend/README.md).
+
+## Profiling
+
+Set `TILELANG_ASCEND_PROFILE=1` before importing TileLang and creating kernels
+to enable profiling for Ascend TVM-FFI calls. The Ascend host wrapper adds
+`tilelang::<global_symbol>` ranges to Torch profiling for both newly compiled
+kernels and kernels restored from disk cache. The switch is resolved when the
+callable is created; changing it does not update existing in-memory kernels.
+
+The same switch enables optional native CANN launch reporting when available.
+It does not start a profiling session: use the Torch NPU profiler or CANN
+profiling tools to collect events.
 
 ## Benchmark
 

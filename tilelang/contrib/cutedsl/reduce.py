@@ -269,11 +269,13 @@ class CumSum1D:
     Template params:
         threads: Number of threads
         reverse: Whether to cumsum in reverse order
+        thread_offset: First participating thread in the block
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool], thread_offset: cutlass.Constexpr[int] = 0):
         self.threads = threads
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
@@ -288,6 +290,7 @@ class CumSum1D:
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
 
         src_tensor = cute.make_tensor(src, (N,))
@@ -306,12 +309,20 @@ class CumSum2D:
         threads: Number of threads (must be power of 2, 32-1024)
         dim: Axis along which to cumsum (0 or 1)
         reverse: Whether to cumsum in reverse order
+        thread_offset: First participating thread in the block
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(
+        self,
+        threads: cutlass.Constexpr[int],
+        dim: cutlass.Constexpr[int],
+        reverse: cutlass.Constexpr[bool],
+        thread_offset: cutlass.Constexpr[int] = 0,
+    ):
         self.threads = threads
         self.dim = dim
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
         self.TILE_H = threads // self.WARP_SIZE
 
@@ -328,6 +339,7 @@ class CumSum2D:
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
@@ -355,15 +367,17 @@ class CumMax1D:
     Based on tl::CumMax1D from scan.h
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(self, threads: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool], thread_offset: cutlass.Constexpr[int] = 0):
         self.threads = threads
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
     def run(self, src: cute.Pointer, dst: cute.Pointer, N):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
 
         src_tensor = cute.make_tensor(src, (N,))
@@ -379,16 +393,24 @@ class CumMax2D:
     Based on tl::CumMax2D from scan.h
     """
 
-    def __init__(self, threads: cutlass.Constexpr[int], dim: cutlass.Constexpr[int], reverse: cutlass.Constexpr[bool]):
+    def __init__(
+        self,
+        threads: cutlass.Constexpr[int],
+        dim: cutlass.Constexpr[int],
+        reverse: cutlass.Constexpr[bool],
+        thread_offset: cutlass.Constexpr[int] = 0,
+    ):
         self.threads = threads
         self.dim = dim
         self.reverse = reverse
+        self.thread_offset = thread_offset
         self.WARP_SIZE = 32
 
     @cute.jit
     def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
+        tidx = tidx - self.thread_offset
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE

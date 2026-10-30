@@ -77,7 +77,8 @@ bool GuardsEquivalentWithAnalyzer(arith::Analyzer *analyzer, const PrimExpr &a,
   ICHECK(a.defined() && b.defined());
   if (GuardsStructurallyEqual(a, b))
     return true;
-  return analyzer->CanProveEqual(a, b);
+  // CanProveEqual subtracts its operands, which is not valid for booleans.
+  return analyzer->CanProve(a == b);
 }
 
 bool GuardImpliesWithAnalyzer(arith::Analyzer *analyzer,
@@ -299,6 +300,7 @@ std::shared_ptr<IRStructure> TaskNode::Clone() const {
   // Copy memory access regions
   new_task->SetReadRegions(GetReadRegions());
   new_task->SetWriteRegions(GetWriteRegions());
+  new_task->SetL0Pitches(GetL0Pitches());
   new_task->SetReadVars(GetReadVars());
   new_task->SetWriteVars(GetWriteVars());
   new_task->outer_ctx = outer_ctx;
@@ -329,6 +331,36 @@ std::shared_ptr<IRStructure> ControlNode::Clone() const {
   new_ctrl->loop_body_ctx_ = loop_body_ctx_;
   new_ctrl->CopyBaseMetadataFrom(*this);
   return new_ctrl;
+}
+
+std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+CollectIterationVariantVars(ControlNode *scope) {
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> result;
+  if (scope == nullptr)
+    return result;
+
+  ControlNode *root = scope;
+  while (root->GetParentControl() != nullptr)
+    root = root->GetParentControl();
+  std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
+    if (node == nullptr)
+      return;
+    if (node->IsTask()) {
+      for (const Var &var : node->GetWriteVars())
+        result.insert(var);
+      return;
+    }
+    auto *control = static_cast<ControlNode *>(node);
+    result.insert(control->control->loop_var);
+    if (control->task) {
+      for (const Var &var : control->task->GetWriteVars())
+        result.insert(var);
+    }
+    for (const std::shared_ptr<IRStructure> &child : control->children)
+      collect(child.get());
+  };
+  collect(root);
+  return result;
 }
 
 void CollectAllTaskNodes(IRStructure *node,

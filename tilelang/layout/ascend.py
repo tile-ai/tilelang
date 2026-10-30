@@ -43,15 +43,15 @@ def make_ascend_compact_nz_layout(buffer: BufferLikeType):
     extent of every leading stage up to 16.  A logical
     ``[..., rows, cols]`` buffer is stored as consecutive
     ``[C0-group, rows, C0]`` blocks, with all leading dimensions flattened
-    into the C0-group axis.  Consequently, a padded ``rows = tile_rows + 1``
-    stage has exactly the source pitch expected by
-    ``ascend_nd2nz_post_copy``.
+    into the C0-group axis.  The allocated row extent determines the pitch in 32-byte blocks,
+    including any trailing gap rows. Partial copies retain that pitch.
 
     This layout is intended for UB data that is produced directly in NZ order
     (for example with ``vsstb`` or a layout-driven ``T.copy``) and then copied
     to L1. It is not an L1 Cube operand layout. For an ND-to-NZ ``T.copy``, the
-    allocation's row extent must include one trailing padding row while the
-    copied destination region excludes it.
+    allocation's row extent includes any desired padding, for example
+    ``(tile_rows + 1, cols)``. Copy only the valid region with
+    ``T.copy(src, dst[:tile_rows, :])``; gap rows are not initialized.
     """
 
     buf, _, _ = _get_buffer_info(buffer)
@@ -111,7 +111,8 @@ def make_strided_slice(phys_buf, layout, logical_region):
 
     The result is a plain strided Buffer sharing ``phys_buf``'s data pointer,
     with explicit shape (extents) and strides pointing at the sub-region's
-    base element. No layout knowledge is needed by the consumer.
+    base element, including ``phys_buf.elem_offset``. No layout knowledge is
+    needed by the consumer.
 
     Args:
         phys_buf: The physical (remapped) buffer, e.g. with NZ shape

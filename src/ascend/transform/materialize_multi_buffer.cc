@@ -160,10 +160,33 @@ private:
       explicit Collector(VersionedBufferRegistry *registry)
           : registry_(registry) {}
 
+      Map<Var, PrimExpr> layout_pitch_bits;
+
     private:
       void VisitStmt_(const SBlockNode *op) final {
         for (const Buffer &buffer : op->alloc_buffers)
           registry_->RegisterAllocation(buffer);
+        if (auto value = op->annotations.Get(attr::kLayoutMap)) {
+          for (const auto &[buffer, layout] :
+               value.value().cast<Map<Buffer, Layout>>()) {
+            if (!registry_->storage_versions_.count(buffer->data) ||
+                layout.as<FragmentNode>())
+              continue;
+            PrimExpr bits =
+                make_const(buffer->DefaultIndexType(),
+                           buffer->dtype.bits() * buffer->dtype.lanes());
+            for (const PrimExpr &extent : layout->OutputShape())
+              bits = bits * extent;
+            arith::Analyzer analyzer;
+            bits = analyzer.Simplify(bits);
+            if (auto previous = layout_pitch_bits.Get(buffer->data))
+              ICHECK(analyzer.CanProveEqual(previous.value(), bits))
+                  << "Automatic multi-buffer storage "
+                  << buffer->data->name_hint
+                  << " has inconsistent layout storage pitches";
+            layout_pitch_bits.Set(buffer->data, bits);
+          }
+        }
         StmtVisitor::VisitStmt_(op);
       }
 
@@ -175,6 +198,14 @@ private:
       VersionedBufferRegistry *registry_;
     } collector(this);
     collector(kernel_root);
+    // Layout lowering sizes the allocation from its physical output shape.
+    // Ordinary views must use the same version pitch without inheriting the
+    // annotated view's within-version index mapping.
+    for (const auto &[storage, bits] : collector.layout_pitch_bits) {
+      auto allocation = storage_pitch_bits_.find(storage);
+      if (allocation != storage_pitch_bits_.end())
+        allocation->second = bits;
+    }
   }
 
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> storage_versions_;
@@ -334,6 +365,7 @@ void RewriteScheduledTree(std::vector<std::shared_ptr<IRStructure>> *nodes,
     auto *for_node = loop.CopyOnWrite();
     for_node->annotations.erase(kMultiBufferCounterMap);
     for_node->annotations.erase(kStorageEpochGuardMap);
+    for_node->annotations.erase(kWriteCounterUpdateGuardMap);
     control->control = std::move(loop);
   }
 }
@@ -352,30 +384,6 @@ Layout ExpandLayoutToBuffer(const Buffer &layout_buffer,
   for (size_t i = 0; i < leading_ndim; ++i)
     leading_shape.push_back(target_buffer->shape[i]);
   return layout->Expand(leading_shape);
-}
-
-Layout FindLayoutForBuffer(const Map<Buffer, Layout> &layout_map,
-                           const Buffer &buffer) {
-  if (layout_map.count(buffer))
-    return layout_map[buffer];
-  for (const auto &[layout_buffer, layout] : layout_map) {
-    if (layout_buffer->data.same_as(buffer->data)) {
-      Layout expanded = ExpandLayoutToBuffer(layout_buffer, buffer, layout);
-      if (expanded.defined())
-        return expanded;
-    }
-  }
-  return Layout();
-}
-
-bool AddLayoutForBuffer(Map<Buffer, Layout> *layout_map, const Buffer &buffer) {
-  if (layout_map->count(buffer))
-    return false;
-  Layout layout = FindLayoutForBuffer(*layout_map, buffer);
-  if (!layout.defined())
-    return false;
-  layout_map->Set(buffer, layout);
-  return true;
 }
 
 class AllocationRewriter : public StmtMutator {
@@ -406,8 +414,16 @@ private:
     if (auto value = op->annotations.Get(attr::kLayoutMap)) {
       if (auto layout_map = value.value().as<Map<Buffer, Layout>>()) {
         Map<Buffer, Layout> rewritten_layouts = layout_map.value();
-        for (const Buffer &buffer : alloc_buffers)
-          layout_changed |= AddLayoutForBuffer(&rewritten_layouts, buffer);
+        // Expand each view from its own layout. Data-Var lookup is ambiguous
+        // when several canonical matrix views share a versioned allocation.
+        for (const auto &[buffer, layout] : layout_map.value()) {
+          Buffer expanded = buffers_->Resolve(buffer);
+          if (!expanded.same_as(buffer)) {
+            rewritten_layouts.Set(
+                expanded, ExpandLayoutToBuffer(buffer, expanded, layout));
+            layout_changed = true;
+          }
+        }
         if (layout_changed)
           annotations.Set(attr::kLayoutMap, rewritten_layouts);
       }
@@ -489,7 +505,8 @@ void ElideUnitVersionCounterGroups(ScheduledTIR *scheduled_tir,
                                    const MultiBufferPlan &plan) {
   std::unordered_set<int> versioned_counter_groups;
   for (const MultiBufferInfo &info : plan.Infos()) {
-    if (info.UsesCounter() && info.NeedsVersionDimension())
+    if (info.UsesCounter() &&
+        (info.NeedsVersionDimension() || info.write_counter))
       versioned_counter_groups.insert(info.counter_group_id);
   }
 

@@ -146,8 +146,9 @@ std::shared_ptr<ControlNode> MakePlainControlNode() {
 class ScheduledTIRDecoder : public TaskAwareConstrVisitor {
 public:
   ScheduledTIRDecoder(const ConstrSet &outer_ctx,
-                      ScheduledExtraInfoFactory make_extra_info)
-      : make_extra_info_(make_extra_info) {
+                      ScheduledExtraInfoFactory make_extra_info,
+                      LayoutMap layouts)
+      : make_extra_info_(make_extra_info), layouts_(std::move(layouts)) {
     constr_stack_ = outer_ctx.constrs_;
   }
 
@@ -292,7 +293,7 @@ private:
     task->SetGuards(std::move(guards));
     task->outer_ctx = GetConstrSet();
     ApplyTaskResourceUsage(AnalyzeTaskResourceUsage(body), task.get());
-    ApplyTaskAccesses(AnalyzeTaskAccesses(body), task.get());
+    ApplyTaskAccesses(AnalyzeTaskAccesses(body, layouts_), task.get());
     uint16_t pipe_mask = task->GetPipeMask();
     if (semantic_task->attr_key == attr::kAscendPerCoreTask) {
       ICHECK_NE(pipe_mask, 0)
@@ -344,6 +345,7 @@ private:
 
   std::vector<std::shared_ptr<IRStructure>> result_;
   ScheduledExtraInfoFactory make_extra_info_;
+  LayoutMap layouts_;
 };
 
 void ValidateBufferVersions(const BufferVersionMap &buffer_versions,
@@ -356,9 +358,10 @@ void ValidateBufferVersions(const BufferVersionMap &buffer_versions,
 
 void ValidateBufferVersionModes(const BufferVersionModeMap &buffer_modes) {
   for (const auto &[data, mode] : buffer_modes) {
-    ICHECK(mode == "auto" || mode == "iteration" || mode == "counter")
+    ICHECK(mode == "auto" || mode == "iteration" || mode == "counter" ||
+           mode == "write_counter")
         << "Buffer version mode for " << data
-        << " must be auto, iteration, or counter, got " << mode;
+        << " must be auto, iteration, counter, or write_counter, got " << mode;
   }
 }
 
@@ -445,8 +448,12 @@ SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
 ScheduledTIR DecodeScheduledTIR(const SBlock &root, const ConstrSet &outer_ctx,
                                 ScheduledExtraInfoFactory make_extra_info) {
   ScheduledTIR scheduled_tir;
+  LayoutMap layouts;
+  if (auto value = root->annotations.Get("layout_map"))
+    layouts = value.value().cast<LayoutMap>();
   scheduled_tir.tree =
-      ScheduledTIRDecoder(outer_ctx, make_extra_info).Decode(root->body);
+      ScheduledTIRDecoder(outer_ctx, make_extra_info, std::move(layouts))
+          .Decode(root->body);
   scheduled_tir.metadata.kernel_root = root;
   if (auto value = root->annotations.Get(kBufferVersionsMap)) {
     scheduled_tir.metadata.buffer_versions =

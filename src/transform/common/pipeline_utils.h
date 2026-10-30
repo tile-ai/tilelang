@@ -15,7 +15,9 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
@@ -68,6 +70,103 @@ inline ffi::Array<Stmt> NormalizePipelineBody(const Stmt &body) {
 inline Stmt MakePipelineBody(const ffi::Array<Stmt> &stmts) {
   ICHECK(!stmts.empty());
   return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+}
+
+/*! \brief Collect the domains of materialized thread indices.
+ *
+ * Union repeated bindings of the same Var so a narrower sibling scope cannot
+ * hide accesses from a wider scope. Unmaterialized launch placeholders have no
+ * domain here and remain conservative in the region conflict check.
+ */
+inline ffi::Map<Var, arith::IntSet>
+CollectPipelineThreadDomains(const Stmt &body) {
+  ffi::Map<Var, arith::IntSet> domains;
+  auto record_domain = [&](const Var &var, const Range &range) {
+    arith::IntSet domain = arith::IntSet::FromRange(range);
+    if (auto previous = domains.Get(var)) {
+      domain = arith::Union({previous.value(), domain});
+    }
+    domains.Set(var, domain);
+  };
+  PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
+    if (const auto *loop = node.as<ForNode>()) {
+      if (loop->thread_binding.defined()) {
+        record_domain(loop->loop_var,
+                      Range::FromMinExtent(loop->min, loop->extent));
+      }
+    } else if (const auto *attr = node.as<AttrStmtNode>()) {
+      if (attr->attr_key == tirx::attr::thread_extent ||
+          attr->attr_key == s_tir::attr::virtual_thread) {
+        IterVar thread = Downcast<IterVar>(attr->node);
+        record_domain(
+            thread->var,
+            Range::FromMinExtent(make_zero(attr->value.dtype()), attr->value));
+      }
+    }
+  });
+  return domains;
+}
+
+/*! \brief Conservatively compare pipeline accesses across threads.
+ *
+ * Expand each access independently over the thread domains before comparing
+ * it with the other access. A shared thread Var must not cancel between two
+ * regions, since the accesses can execute in different threads. Bounds that
+ * remain symbolic and distinct views of one allocation stay conservative.
+ */
+inline bool
+PipelineRegionsMayConflict(const BufferRegion &lhs, const BufferRegion &rhs,
+                           const ffi::Map<Var, arith::IntSet> &thread_domains) {
+  if (!lhs->buffer->data.same_as(rhs->buffer->data)) {
+    return false;
+  }
+  if (!lhs->buffer.same_as(rhs->buffer) ||
+      lhs->region.size() != rhs->region.size()) {
+    return true;
+  }
+  arith::Analyzer analyzer;
+  auto provably_disjoint = [&](const arith::IntSet &a, const arith::IntSet &b) {
+    if (a.IsNothing() || b.IsNothing()) {
+      return true;
+    }
+    return a.HasLowerBound() && a.HasUpperBound() && b.HasLowerBound() &&
+           b.HasUpperBound() && as_const_int(analyzer.Simplify(a.min())) &&
+           as_const_int(analyzer.Simplify(a.max())) &&
+           as_const_int(analyzer.Simplify(b.min())) &&
+           as_const_int(analyzer.Simplify(b.max())) &&
+           arith::Intersect({a, b}).IsNothing();
+  };
+  if (!lhs->buffer->strides.empty()) {
+    // Logical coordinates need not be injective for an explicitly strided
+    // buffer. Compare physical offsets after expanding the thread domains.
+    if (!lhs->buffer->axis_separators.empty()) {
+      return true;
+    }
+    auto physical_region = [&](const BufferRegion &region) {
+      ffi::Map<Var, arith::IntSet> domains = thread_domains;
+      ffi::Array<PrimExpr> indices;
+      ffi::Array<arith::IntSet> bounds =
+          arith::EvalSet(region->region, thread_domains);
+      for (size_t i = 0; i < region->region.size(); ++i) {
+        const Range &range = region->region[i];
+        Var index("region_index", range->min.dtype());
+        domains.Set(index, bounds[i]);
+        indices.push_back(index);
+      }
+      return arith::EvalSet(region->buffer->ElemOffset(indices)[0], domains);
+    };
+    return !provably_disjoint(physical_region(lhs), physical_region(rhs));
+  }
+  ffi::Array<arith::IntSet> lhs_bounds =
+      arith::EvalSet(lhs->region, thread_domains);
+  ffi::Array<arith::IntSet> rhs_bounds =
+      arith::EvalSet(rhs->region, thread_domains);
+  for (size_t i = 0; i < lhs->region.size(); ++i) {
+    if (provably_disjoint(lhs_bounds[i], rhs_bounds[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

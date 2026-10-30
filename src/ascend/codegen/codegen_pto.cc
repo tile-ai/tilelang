@@ -4,10 +4,13 @@
  */
 #include "ascend/codegen/codegen_pto.h"
 #include "ascend/codegen/sfu_precision.h"
+#include "ascend/op/nd2nz.h"
 
 #include "ascend/op/builtin.h"
+#include "ascend/transform/vmi_alloc.h"
 #include "backend/common/codegen/codegen_utils.h"
 #include "backend/common/target_utils.h"
+#include "span_utils.h"
 #include "support/check.h"
 #include "tvm/ir/repr.h"
 
@@ -26,6 +29,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -137,6 +141,12 @@ std::string DataTypeName(DataType t) {
   if (tl::IsAscendVectorizableFP8(t))
     return FP8TypeName(t);
 
+  // PTO stores E2M1 as one byte containing a pair of logical FP4 values.
+  // TileLang expresses FP4 logically; PTO stores each pair as one f4e2m1x2
+  // element.
+  if (t.is_float4_e2m1fn()) {
+    return "pto.f4e2m1x2";
+  }
   ICHECK(t.is_scalar()) << "PTO scalar type expected, got " << t;
   if (t.is_bool()) {
     return "pto.i1";
@@ -151,16 +161,29 @@ std::string DataTypeName(DataType t) {
     return "pto.f4e2m1x2";
   } else if (t.is_bfloat16()) {
     return "pto.bf16";
-  } else if (t.is_int() || t.is_uint()) {
-    const char *prefix = t.is_uint() ? "pto.ui" : "pto.i";
+  } else if (t.is_uint()) {
     if (t.bits() == 64)
-      return std::string(prefix) + "64";
+      return "pto.ui64";
     if (t.bits() == 32)
-      return std::string(prefix) + "32";
+      return "pto.ui32";
     if (t.bits() == 16)
-      return std::string(prefix) + "16";
+      return "pto.ui16";
     if (t.bits() == 8)
-      return std::string(prefix) + "8";
+      return "pto.ui8";
+    if (t.bits() == 1)
+      return "pto.i1";
+  } else if (t.is_int()) {
+    // TileLang/TIR distinguishes signed and unsigned integer dtypes;
+    // preserve that distinction in the generated PTO type so VMI integer
+    // sources (loads, vci bridges, casts) share one element-type space.
+    if (t.bits() == 64)
+      return "pto.si64";
+    if (t.bits() == 32)
+      return "pto.si32";
+    if (t.bits() == 16)
+      return "pto.si16";
+    if (t.bits() == 8)
+      return "pto.si8";
     if (t.bits() == 1)
       return "pto.i1";
   }
@@ -228,6 +251,45 @@ bool IsImmediateScalar(const PrimExpr &value) {
   PrimExpr peeled = PeelScalarCasts(value);
   return peeled.as<IntImmNode>() != nullptr ||
          peeled.as<FloatImmNode>() != nullptr;
+}
+
+std::string PtoSignedIntegerTypeName(DataType t) {
+  ICHECK(t.is_scalar() && t.is_int())
+      << "PTO signed integer scalar type expected, got " << t;
+  switch (t.bits()) {
+  case 8:
+    return "pto.si8";
+  case 16:
+    return "pto.si16";
+  case 32:
+    return "pto.si32";
+  case 64:
+    return "pto.si64";
+  default:
+    LOG(FATAL) << "Unsupported PTO signed integer type: " << t;
+  }
+  return "";
+}
+
+// PTODSL infers the result element type of vci/vbrc from the scalar
+// argument. A dynamic TIR integer prints as MLIR `index` (or a signless
+// constant), which disagrees with the signed/unsigned vector element type the
+// surrounding VMI ops use, so the value argument is adapted to a same-width
+// signless scalar and the result is reinterpreted bit-wise (no numeric
+// conversion; bit width, signedness target and lanes are preserved).
+std::string PtoSignlessIntegerTypeName(DataType t) {
+  ICHECK(t.is_scalar() && (t.is_int() || t.is_uint()))
+      << "PTO signless integer scalar type expected, got " << t;
+  return "pto.i" + std::to_string(t.bits());
+}
+
+std::string PtoIntegerVectorInterpretTarget(DataType element) {
+  if (element.is_int()) {
+    return PtoSignedIntegerTypeName(element);
+  }
+  ICHECK(element.is_uint())
+      << "PTO integer element type expected, got " << element;
+  return "pto.ui" + std::to_string(element.bits());
 }
 
 std::string StripPipePrefix(const std::string &name) {
@@ -411,11 +473,44 @@ bool IsSupportedSIMTLocalStorageType(DataType t) {
   return IsSimtLocalBufferDtype(t) || (t.is_scalar() && t == DataType::Int(32));
 }
 
+bool IsSimtLocalIntegerStorageDtype(DataType t) {
+  return t.is_scalar() && (t.is_int() || t.is_uint()) &&
+         (t.bits() == 8 || t.bits() == 32) &&
+         IsSupportedSIMTLocalStorageType(t);
+}
+
+std::string SimtLocalIntegerStorageTypeName(DataType t) {
+  ICHECK(IsSimtLocalIntegerStorageDtype(t));
+  return "pto.i" + std::to_string(t.bits());
+}
+
+// SIMT local integer storage is signless because LLVM stack accesses require
+// signless integer element types.  TileLang's logical signedness is restored
+// at the load boundary and folded back to the backing type at the store
+// boundary.  These adapters are only consumed by the SIMT local branches of
+// ScalarLoad/EmitScalarStore/EmitScalarizedLoad/EmitScalarizedStore.
+std::string SimtLocalLoadAdapter(const std::string &value, DataType t) {
+  if (!IsSimtLocalIntegerStorageDtype(t)) {
+    return value;
+  }
+  return "pto.cast(" + value + ", " + DataTypeName(t) + ")";
+}
+
+std::string SimtLocalStoreAdapter(const std::string &value, DataType t) {
+  if (!IsSimtLocalIntegerStorageDtype(t)) {
+    return value;
+  }
+  return "pto.cast(" + value + ", " + SimtLocalIntegerStorageTypeName(t) + ")";
+}
+
 std::string SIMTLocalStorageTypeName(DataType t) {
   ICHECK(IsSupportedSIMTLocalStorageType(t));
   // LLVM stack allocations require signless integer element types. Preserve
   // TileLang's signedness at load/store boundaries instead.
-  return IsInteger32(t) ? "pto.i32" : DataTypeName(t);
+  if (IsSimtLocalIntegerStorageDtype(t)) {
+    return SimtLocalIntegerStorageTypeName(t);
+  }
+  return DataTypeName(t);
 }
 
 bool IsSupportedSIMTFP8ContiguousLaneCount(int lanes) {
@@ -435,6 +530,21 @@ void CheckContiguousRampStride(const PrimExpr &index, const char *access_kind) {
         << " emits a contiguous vector access, so Ramp stride must be 1, got "
         << ramp->stride;
   }
+}
+
+PrimExpr SIMTVectorLocalScalarOffset(const PrimExpr &index, int element_lanes,
+                                     const char *access_kind) {
+  // BufferLoad/Store indices count vector slots, including Ramp indices.
+  PrimExpr slot = index;
+  if (const auto *ramp = index.as<RampNode>()) {
+    CheckContiguousRampStride(index, access_kind);
+    slot = ramp->base;
+  }
+  ICHECK(slot.dtype().is_scalar())
+      << "PTO SIMT vector local " << access_kind
+      << " requires a scalar index or a unit-stride Ramp, got " << index;
+  return arith::Analyzer().Simplify(slot *
+                                    make_const(slot.dtype(), element_lanes));
 }
 
 void CheckConstZero(const PrimExpr &expr, const char *name) {
@@ -554,8 +664,9 @@ void CheckLocalVarBuffer(const BufferNode *buffer) {
     // They are initialized to None and receive a pointer on their first store.
     return;
   }
-  if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
-    (void)DataTypeName(dtype.element_of());
+  if (dtype.lanes() > 1) {
+    // VMI registers are logical vectors; integer, floating-point and
+    // low-precision element types are all valid here.
     return;
   }
   ICHECK_EQ(dtype.lanes(), 1)
@@ -1016,6 +1127,15 @@ public:
       std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
 
   static DirectionMap Analyze(const PrimFunc &func) {
+    bool has_mad = false;
+    tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_mad |= IsMad(call);
+      }
+    });
+    if (!has_mad) {
+      return {};
+    }
     PTOMmadDirectionAnalyzer analyzer;
     analyzer.VisitStmt(func->body, FromMask(kM));
     DirectionMap result;
@@ -1045,8 +1165,25 @@ private:
            (analyzer_.CanProve(!state.n) ? 0 : kN);
   }
 
+  static bool IsMad(const CallNode *call) {
+    return call->op.same_as(tl::ascend_mad()) ||
+           call->op.same_as(tl::ascend_mad_mx()) ||
+           call->op.same_as(tl::ascend_gemm_l1()) ||
+           call->op.same_as(tl::ascend_blockscaled_gemm_l1());
+  }
+
+  PrimExpr MergePredicate(const PrimExpr &a, const PrimExpr &b) {
+    // Direction predicates contain only pure SSA conditions (see Restrict).
+    // Stateful guards leave both paths unchanged, so repeated merges would
+    // otherwise double the predicate tree before arithmetic simplification.
+    if (a.same_as(b) || ffi::StructuralEqual()(a, b)) {
+      return a;
+    }
+    return analyzer_.Simplify(a || b);
+  }
+
   State Merge(const State &a, const State &b) {
-    return {analyzer_.Simplify(a.m || b.m), analyzer_.Simplify(a.n || b.n)};
+    return {MergePredicate(a.m, b.m), MergePredicate(a.n, b.n)};
   }
 
   State Restrict(const State &state, const PrimExpr &condition) {
@@ -1182,10 +1319,7 @@ private:
                                       : State{reachable, const_false()},
               {}};
     }
-    if (call->op.same_as(tl::ascend_mad()) ||
-        call->op.same_as(tl::ascend_mad_mx()) ||
-        call->op.same_as(tl::ascend_gemm_l1()) ||
-        call->op.same_as(tl::ascend_blockscaled_gemm_l1()))
+    if (IsMad(call))
       mad_directions_[GetRef<Call>(call)] |= Mask(state);
     return {state, {}};
   }
@@ -2010,6 +2144,8 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
   mixed_entry_snapshot_ids_.clear();
   loop_condition_snapshot_ids_.clear();
   simd_pair_vars_.clear();
+  value_defs_.clear();
+  vmi_allocations_.clear();
   gemm_emit_contexts_.clear();
   gemm_emit_context_by_call_.clear();
   gemm_zero_addr_emitted_ = false;
@@ -2032,6 +2168,7 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
   ResetFunctionState_();
+  CollectVmiAllocations_(func->body);
   name_supply_->ReserveName("pto");
   name_supply_->ReserveName("scalar");
   name_supply_->ReserveName("tl");
@@ -2116,8 +2253,13 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
 
 std::string CodeGenTileLangPTO::Finish() {
   std::ostringstream code;
-  code << "from ptodsl import pto\n";
+  // Import the tilelang compatibility layer first: it loads this build's
+  // native tilelang/tvm libraries before the PTODSL MLIR modules come up.
+  // Loading them in the opposite order trips a static-initializer crash in
+  // the MLIR PassBuilder when both library families are dlopened into the
+  // same process (observed on the Ascend validation runners).
   code << "import tilelang.contrib.ptodsl as tl\n";
+  code << "from ptodsl import pto\n";
   code << "\n";
   code << decl_stream.str();
   code << stream.str();
@@ -2450,6 +2592,21 @@ void CodeGenTileLangPTO::EmitInlineSimtVF(const SBlockNode *op,
 std::string CodeGenTileLangPTO::GetPointerExpr(const VarNode *buffer_var,
                                                DataType elem_dtype,
                                                const PrimExpr &index) {
+  // A marked VMI allocation is a register value, not addressable storage.
+  // address_of / tl.access_ptr / tvm_access_ptr must not expose either kind
+  // as a pointer or reinterpret it through another dtype view.
+  auto vmi_allocation = vmi_allocations_.find(GetRef<Var>(buffer_var));
+  if (vmi_allocation != vmi_allocations_.end() &&
+      vmi_allocation->second.kind == tl::attr::kVmiAllocKindDataArray) {
+    LOG(FATAL) << "PTO VMI register array `" << buffer_var->name_hint
+               << "` cannot be used as a memory address; VMI register arrays "
+                  "only support BufferLoad/BufferStore at constant register "
+                  "indices";
+  }
+  ICHECK(vmi_allocation == vmi_allocations_.end())
+      << "PTO VMI data slot `" << buffer_var->name_hint
+      << "` cannot be used as a memory address; VMI register slots only "
+         "support BufferLoad/BufferStore at index 0";
   std::string scope = "global";
   if (alloc_storage_scope_.count(buffer_var)) {
     scope = alloc_storage_scope_.at(buffer_var);
@@ -2569,6 +2726,7 @@ std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition) {
          (dtype.is_bool() || dtype.is_int() || dtype.is_uint()))
       << "PTO control-flow condition must be a scalar integer predicate, got "
       << dtype;
+  CheckPtoScalarOperand_(condition, "PTO control-flow condition");
   std::string value = RemoveOutermostParentheses(PrintExpr_(condition));
   // TIR follows C truthiness for all integer conditions.  Always compare at
   // the use site because a bool-typed expression may be materialized in an
@@ -2596,10 +2754,7 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
       return "tl.fp8_byte_load(" + GetVarID(buffer->data.get()) + ", " +
              index_str + ", " + FP8TypeName(buffer->dtype) + ")";
     }
-    if (IsInteger32(buffer->dtype)) {
-      return "pto.cast(" + value + ", " + DataTypeName(buffer->dtype) + ")";
-    }
-    return value;
+    return SimtLocalLoadAdapter(value, buffer->dtype);
   }
 
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
@@ -2623,20 +2778,24 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
 
 std::string CodeGenTileLangPTO::LocalVarStoreValue(const PrimExpr &value,
                                                    DataType dtype) {
-  std::string value_expr = RemoveOutermostParentheses(PrintExpr_(value));
   if (dtype.is_handle()) {
-    return value_expr;
+    return RemoveOutermostParentheses(PrintExpr_(value));
   }
   bool is_literal =
       value.as<IntImmNode>() != nullptr || value.as<FloatImmNode>() != nullptr;
   if (dtype.is_scalar() && is_literal) {
-    return "pto.const(" + value_expr + ", dtype=" + DataTypeName(dtype) + ")";
+    return "pto.const(" + RemoveOutermostParentheses(PrintExpr_(value)) +
+           ", dtype=" + DataTypeName(dtype) + ")";
   }
   if (dtype.is_bool() || dtype.bits() == 1 || dtype.is_int() ||
       dtype.is_uint()) {
-    return ScalarCastExpr(value_expr, dtype, "PTO local.var store");
+    // Check provenance before printing/adapting the scalar (covers bool and
+    // integer local.var stores; other local.var branches keep their route).
+    CheckPtoScalarOperand_(value, "PTO local.var integer store");
+    return ScalarCastExpr(RemoveOutermostParentheses(PrintExpr_(value)), dtype,
+                          "PTO local.var store");
   }
-  return value_expr;
+  return RemoveOutermostParentheses(PrintExpr_(value));
 }
 
 void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
@@ -2653,20 +2812,20 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
 
   if (scope == "local.fragment" || scope == "local") {
     if (inside_simtvf_body_) {
-      ICHECK(IsSupportedSIMTLocalScalarAccessType(buffer->dtype))
+      // The index addresses scalar storage, including lanes of vector locals.
+      DataType dtype = buffer->dtype.element_of();
+      ICHECK(IsSupportedSIMTLocalScalarAccessType(dtype))
           << "PTO SIMT local scalar store supports float16, bfloat16, "
              "float32, int8, uint8, int32, uint32, and FP8 only, got "
-          << buffer->dtype;
+          << dtype;
       std::string store_value = value;
-      if (tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      if (tl::IsAscendVectorizableFP8(dtype)) {
         stream << "tl.fp8_byte_store(" << store_value << ", "
                << GetVarID(buffer->data.get()) << ", " << index_str << ", "
-               << FP8TypeName(buffer->dtype) << ")\n";
+               << FP8TypeName(dtype) << ")\n";
         return;
       }
-      if (IsInteger32(buffer->dtype)) {
-        store_value = "pto.cast(" + store_value + ", pto.i32)";
-      }
+      store_value = SimtLocalStoreAdapter(store_value, dtype);
       stream << "pto.store(" << store_value << ", "
              << GetVarID(buffer->data.get()) << ", " << index_str << ")\n";
       return;
@@ -2706,6 +2865,25 @@ void CodeGenTileLangPTO::EmitLocalVarInitialization_(const Buffer &buffer,
     // can be carried out of nested branches.
     vid = name_supply_->FreshName("tl" + vid, false);
     var_idmap_[buffer->data.get()] = vid;
+  }
+  if (FindVmiAllocSlot_(buffer.get(), "PTO VMI data slot initialization") !=
+      nullptr) {
+    // Explicit mutable VMI slots, including one lane, start from the vreg
+    // descriptor placeholder used by the existing vector-slot path.
+    stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
+           << DataTypeName(dtype.element_of()) << ")\n";
+    RegisterHandleType_(buffer->data.get(), dtype);
+    EmitMixedEntrySnapshot(buffer->data.get());
+    return;
+  }
+  if (dtype.lanes() > 1) {
+    // Mutable vector registers start as a vreg descriptor placeholder; the
+    // first actual store overwrites it with a real vector value.
+    stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
+           << DataTypeName(dtype.element_of()) << ")\n";
+    RegisterHandleType_(buffer->data.get(), dtype);
+    EmitMixedEntrySnapshot(buffer->data.get());
+    return;
   }
   if (current_function_has_gemm_) {
     // Keep authored PTO surface values (not Python ints) so AST-rewritten
@@ -2766,18 +2944,20 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
     DataType elem =
         buffer->dtype.is_vector() ? buffer->dtype.element_of() : buffer->dtype;
     if (inside_simtvf_body_) {
+      ICHECK(FindVmiAllocArray_(buffer.get(),
+                                "PTO VMI register array allocation") == nullptr)
+          << "PTO VMI register array `" << buffer->name
+          << "` cannot use SIMT local backing; VMI register arrays are emitted "
+             "as independent Python register names";
       ICHECK(IsSupportedSIMTLocalStorageType(buffer->dtype))
           << "PTO SIMT local allocation supports float16, bfloat16, "
              "float32, int8, uint8, int32, uint32, and "
              "float8_e4m3fn/float8_e5m2, got "
           << buffer->dtype;
-      stream << vid << " = pto.alloc_buffer((" << opt_size.value() << ",), "
-             << (buffer->dtype.is_vector()
-                     ? (tl::IsAscendVectorizableFP8(buffer->dtype)
-                            ? DataTypeName(buffer->dtype)
-                            : ScalarType(elem))
-                     : SIMTLocalStorageTypeName(buffer->dtype))
-             << ")\n";
+      // SIMT locals use scalar-addressed storage, including vector slots.
+      stream << vid << " = pto.alloc_buffer(("
+             << opt_size.value() * buffer->dtype.lanes() << ",), "
+             << SIMTLocalStorageTypeName(elem) << ")\n";
     } else if (persistent) {
       ICHECK(IsFloat32(buffer->dtype))
           << "PTO persistent local allocation currently supports float32 "
@@ -2799,13 +2979,11 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
       stream << vid << " = [None] * " << opt_size.value() << "\n";
     }
   } else if (scope == "local.var") {
-    PrintIndent();
-    // A surrounding SIMD loop may discover this local.var as loop-carried
-    // state before the allocation statement is emitted.  LocalVarID then
-    // reserves its Python name in var_idmap_.  Reuse that reservation here;
-    // AllocVarID would incorrectly diagnose it as a second TIR definition.
-    // local_var_buffers_ records allocations that were actually emitted, so
-    // a genuinely repeated allocation does not reset an accumulator.
+    CheckLocalVarBuffer(buffer.get());
+    // Reuse the Python name if this local.var already has one registered in
+    // var_idmap_; AllocVarID would diagnose it as a second TIR definition.
+    // local_var_buffers_ separately tracks emitted initializations, so a
+    // repeated allocation does not reset the local.var value.
     if (local_var_buffers_.count(buffer->data.get())) {
       return;
     }
@@ -2813,6 +2991,7 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
     std::string vid = var_idmap_.count(buffer->data.get())
                           ? GetVarID(buffer->data.get())
                           : AllocVarID(buffer->data.get());
+    PrintIndent();
     EmitLocalVarInitialization_(buffer, std::move(vid));
     return;
   }
@@ -3358,6 +3537,7 @@ std::string CodeGenTileLangPTO::GetLocalByteAddrExpr(
            ", dtype=pto.int64)";
   }
 
+  CheckPtoScalarOperand_(elem_index, context.c_str());
   std::string index_expr = RemoveOutermostParentheses(PrintExpr_(elem_index));
   std::string coerced = ScalarCastExpr(index_expr, DataType::Int(64), context);
   if (elem_bytes == 1) {
@@ -3491,6 +3671,112 @@ void CodeGenTileLangPTO::RestoreMixedSectionVariables(
     PrintIndent();
     stream << value_id << " = " << snapshot_id << "\n";
   }
+}
+
+bool CodeGenTileLangPTO::IsVmiLocalRegisterBuffer(
+    const BufferNode *buffer) const {
+  // Storage category comes only from the explicit allocation marker.  Shape,
+  // dtype and scope are contract checks on the marked allocation, never a
+  // substitute for the marker: an ordinary SIMD register array with the same
+  // buffer facts must stay on the ordinary vector paths.
+  return FindVmiAllocArray_(buffer, "PTO VMI register array access") != nullptr;
+}
+
+void CodeGenTileLangPTO::CheckVmiLocalRegisterIndex(
+    const BufferNode *buffer, const PrimExpr &index) const {
+  bool is_constant = true;
+  tirx::PostOrderVisit(index, [&](const ObjectRef &node) {
+    if (node.as<VarNode>()) {
+      is_constant = false;
+    }
+  });
+  ICHECK(is_constant)
+      << "PTO VMI local register buffer `" << buffer->name
+      << "` requires a compile-time constant index. Register arrays cannot "
+         "be accessed inside T.unroll(..., explicit=False) or other runtime "
+         "loops; use T.unroll(..., explicit=True), got "
+      << index;
+}
+
+void CodeGenTileLangPTO::RegisterVmiAllocation_(const Buffer &buffer,
+                                                const ffi::String &kind,
+                                                const char *context) {
+  tl::vmi::ValidateAllocation(buffer.get(), kind, context);
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end()) {
+    vmi_allocations_.emplace(buffer->data,
+                             PtoVmiAllocInfo{kind, buffer->dtype});
+    return;
+  }
+  ICHECK(it->second.kind == kind)
+      << context << " found conflicting `" << tl::attr::kVmiAllocKind
+      << "` entries for one VMI allocation: " << it->second.kind << " vs "
+      << kind;
+  ICHECK(it->second.dtype == buffer->dtype)
+      << context << " found conflicting dtypes for one VMI allocation: "
+      << it->second.dtype << " vs " << buffer->dtype;
+}
+
+void CodeGenTileLangPTO::CollectVmiAllocations_(const Stmt &body) {
+  // Shared collection validates only marked data Vars and every allocation
+  // view that shares a marked Var.  A block map alone never creates an
+  // allocation and is ignored without an active owner.
+  tl::vmi::AllocMarkers markers;
+  tl::vmi::CollectAllocMarkers(body, &markers, "PTO codegen");
+  for (const auto &[data, kind] : markers.kinds) {
+    auto allocation = markers.allocations.find(data);
+    ICHECK(allocation != markers.allocations.end())
+        << "PTO codegen lost the allocation views of a marked VMI data Var";
+    for (const Buffer &buffer : allocation->second) {
+      RegisterVmiAllocation_(buffer, kind, "PTO codegen");
+    }
+  }
+}
+
+const CodeGenTileLangPTO::PtoVmiAllocInfo *
+CodeGenTileLangPTO::FindVmiAllocSlot_(const BufferNode *buffer,
+                                      const char *context) const {
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end() ||
+      it->second.kind != tl::attr::kVmiAllocKindData) {
+    return nullptr;
+  }
+  tl::vmi::ValidateDataSlot(buffer, context);
+  ICHECK(buffer->dtype == it->second.dtype)
+      << context << " accesses VMI data slot `" << buffer->name
+      << "` through dtype " << buffer->dtype
+      << ", but the allocation has dtype " << it->second.dtype
+      << "; a shared data Var must keep the allocation dtype";
+  return &it->second;
+}
+
+const CodeGenTileLangPTO::PtoVmiAllocInfo *
+CodeGenTileLangPTO::FindVmiAllocArray_(const BufferNode *buffer,
+                                       const char *context) const {
+  auto it = vmi_allocations_.find(buffer->data);
+  if (it == vmi_allocations_.end() ||
+      it->second.kind != tl::attr::kVmiAllocKindDataArray) {
+    return nullptr;
+  }
+  // Flattening may change the access view's rank and shape, so only the
+  // storage category and the exact element dtype are rechecked here.  The
+  // positive static allocation shape was validated when the table was built.
+  ICHECK(buffer->dtype == it->second.dtype)
+      << context << " accesses VMI register array `" << buffer->name
+      << "` through dtype " << buffer->dtype
+      << ", but the allocation has dtype " << it->second.dtype
+      << "; a shared data Var must keep the allocation dtype";
+  ffi::String scope = ScopeOfBuffer(buffer);
+  ICHECK(scope == "local")
+      << context << " VMI register array view must use scope `local`, got `"
+      << scope << "` for buffer `" << buffer->name << "`";
+  ICHECK(buffer->dtype.lanes() > 1 &&
+         tl::vmi::IsDataArrayElementType(buffer->dtype))
+      << context
+      << " VMI register array view requires a numeric non-bool "
+         "multi-lane element dtype, got "
+      << buffer->dtype << " for buffer `" << buffer->name << "`";
+  return &it->second;
 }
 
 const CodeGenTileLangPTO::PTOGemmEmitContext &
@@ -4512,29 +4798,15 @@ void CodeGenTileLangPTO::EmitAscendCopyUbufToCbuf(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
-  // ascend_nd2nz_post_copy(dst_l1, src_nz_ub, rows, cols, full_rows,
-  //                        dst_dtype_str [, split_dim_neg2, half_extent])
-  // The dual extras (args 6-7) are consumed by warpgroup_partition before
-  // codegen; by the time we get here, the dst access_ptr already has the
-  // sid-based offset baked in.
-  ICHECK(op->args.size() == 6U || op->args.size() == 8U)
-      << "tl.ascend_nd2nz_post_copy expects 6 or 8 arguments, got "
-      << op->args.size();
-
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
   std::string dst = GetLocalPtrExpr(op->args[0], "mat", DataType::BFloat(16));
   std::string src = GetLocalPtrExpr(op->args[1], "ub", DataType::BFloat(16));
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  int64_t full_rows = ConstArgDim(op, 4, "full_rows");
-  std::string dst_dtype = Downcast<StringImm>(op->args[5])->value;
-
-  int elem_bytes = (dst_dtype == "float") ? 4 : 2;
-  int elems_perC0 = 32 / elem_bytes;
-  int64_t burst_num = cols / elems_perC0;
-  int64_t burst_len = rows;
-  int64_t src_gap = 1;
-  int64_t dst_gap = full_rows - rows;
+  int64_t burst_num = geometry.Bursts();
+  int64_t burst_len = geometry.rows;
+  int64_t src_gap = geometry.src_pitch - geometry.rows;
+  int64_t dst_gap = geometry.dst_pitch - geometry.rows;
 
   PrintIndent();
   stream << "pto.mte_ub_l1(" << src << ", " << dst << ", " << burst_len
@@ -4543,17 +4815,12 @@ void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
-  // ascend_nd2nz_scatter(src_ub, tmp_nz_ub, rows, cols,
-  //                      dst_dtype_str, src_dtype_str)
-  // Emits inline PTO SIMD calls that reorder [ROWS, COLS] data from ND
-  // (row-major) to NZ (fractal) layout within UB.
-  ICHECK_EQ(op->args.size(), 6U)
-      << "tl.ascend_nd2nz_scatter expects exactly 6 arguments";
-
-  int64_t rows = ConstArgDim(op, 2, "rows");
-  int64_t cols = ConstArgDim(op, 3, "cols");
-  std::string dst_dtype = Downcast<StringImm>(op->args[4])->value;
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
   std::string src_dtype = Downcast<StringImm>(op->args[5])->value;
+  std::string dst_dtype = Downcast<StringImm>(op->args[6])->value;
 
   ICHECK(rows % 16 == 0) << "PTO nd2nz_scatter requires ROWS % 16 == 0, got "
                          << rows;
@@ -4598,7 +4865,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
     }
 
     int src_offset = pass * vl_elems;
-    int dst_pass_offset = pass * (static_cast<int>(rows) + 1) * vl_elems;
+    int dst_pass_offset =
+        pass * static_cast<int>(geometry.dst_pitch) * vl_elems;
 
     for (int r = 0; r < rows; ++r) {
       int row_src_offset = src_offset + r * static_cast<int>(cols);
@@ -4616,8 +4884,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
              << " dist=\"NORM\")\n";
       PrintIndent();
       stream << "pto.vsstb(" << var << ", pto.addptr(" << dst_ptr << ", "
-             << row_dst_offset << "), " << (rows + 1) << ", 0, " << mask_fn
-             << ")\n";
+             << row_dst_offset << "), " << geometry.dst_pitch << ", 0, "
+             << mask_fn << ")\n";
     }
   }
 }
@@ -4687,6 +4955,774 @@ std::string CodeGenTileLangPTO::EmitAllReduceExpr_(const std::string &func_name,
   return os.str();
 }
 
+std::string
+CodeGenTileLangPTO::PrintVmiAnnotationValue(const std::string &key,
+                                            const ObjectRef &value) {
+  if (key == "to_dtype") {
+    if (const auto *dtype_name = value.as<StringImmNode>()) {
+      const std::string &name = dtype_name->value;
+      // PTODSL int-to-int widening requires a signed/unsigned source
+      // (si16/ui16), not TVM's signless i16.
+      if (name == "si8")
+        return "pto.si8";
+      if (name == "si16")
+        return "pto.si16";
+      if (name == "si32")
+        return "pto.si32";
+      if (name == "si64")
+        return "pto.si64";
+      return ScalarType(ParseDataType(name));
+    }
+  }
+
+  if (const auto *expr = value.as<PrimExprNode>()) {
+    return PrintExpr_(GetRef<PrimExpr>(expr));
+  }
+
+  std::ostringstream os;
+  os << value;
+  return os.str();
+}
+
+// Returns true if a tl.vmi.vcvt narrows logical BF16 values to FP4.  PTO only
+// exposes FP4 as f4e2m1x2, so this call packs its BF16 input in codegen.
+static bool
+IsVmiVcvtToFp4(const std::vector<std::pair<std::string, ObjectRef>> &kwargs) {
+  for (const auto &[key, value] : kwargs) {
+    if (key == "to_dtype") {
+      if (const auto *str = value.as<StringImmNode>()) {
+        return str->value == "float4_e2m1fn";
+      }
+    }
+  }
+  return false;
+}
+
+static std::optional<std::string>
+VmiVcvtTarget(const std::vector<std::pair<std::string, ObjectRef>> &kwargs) {
+  for (const auto &[key, value] : kwargs) {
+    if (key == "to_dtype") {
+      if (const auto *str = value.as<StringImmNode>()) {
+        return str->value;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+// TileLang models packed FP4 in logical scalar lanes, while PTO VMI models
+// one physical byte as f4e2m1x2. Reverse conversion therefore first produces
+// bf16x2 pair carriers and then reinterprets those carriers as logical BF16
+// lanes. FP32 is the same operation followed by the ordinary BF16 widening
+// conversion. PTO's unified VMI lowering owns the Packed4 P0-P3 expansion.
+static bool IsVmiVcvtFromFp4(const CallNode *op) {
+  return !op->args.empty() && op->args[0].dtype().is_vector() &&
+         op->args[0].dtype().element_of().is_float4_e2m1fn();
+}
+
+static std::string VmiDtypeAnnotation(DataType element) {
+  if (element.is_int()) {
+    return PtoSignedIntegerTypeName(element);
+  }
+  if (element.is_uint()) {
+    return "pto.ui" + std::to_string(element.bits());
+  }
+  return DataTypeName(element);
+}
+
+const char *CodeGenTileLangPTO::PtoValueKindName(PtoValueKind kind) {
+  switch (kind) {
+  case PtoValueKind::kScalar:
+    return "scalar";
+  case PtoValueKind::kVmiData:
+    return "VMI data";
+  case PtoValueKind::kVmiMask:
+    return "VMI mask";
+  case PtoValueKind::kVmiPair:
+    return "VMI pair";
+  case PtoValueKind::kVoid:
+    return "void";
+  case PtoValueKind::kHandle:
+    return "handle";
+  case PtoValueKind::kOtherVector:
+    return "other vector";
+  case PtoValueKind::kUnknown:
+    return "unknown";
+  }
+  return "unknown";
+}
+
+struct CodeGenTileLangPTO::PtoValueQueryContext {
+  // Query-local lexical overrides (Let bindings seen by the active query).
+  std::unordered_map<const VarNode *, PrimExpr> local_defs;
+  // Vars on the current definition chain; re-entering one is a cycle.
+  std::unordered_set<const VarNode *> active;
+  // Query-local memo for expression/definition classification.  Node identity
+  // is stable, but a result computed under an active Let override is only
+  // valid for that lexical scope, so entries carry the scope generation.
+  std::unordered_map<const Object *,
+                     std::pair<size_t, CodeGenTileLangPTO::PtoValueInfo>>
+      memo;
+  size_t scope_generation{0};
+};
+
+// Classifies each immediate semantic operand of `expr` exactly once without
+// descending into operand subtrees: ExprVisitor's per-node dispatch walks one
+// level, and each child visit is intercepted below and handed to the full
+// (memoized) classification.  This keeps ordinary scalar expressions linear
+// even for deeply nested or shared DAG-shaped terms.
+struct CodeGenTileLangPTO::PtoOperandScanner final : public tirx::ExprVisitor {
+  PtoOperandScanner(const CodeGenTileLangPTO *codegen,
+                    PtoValueQueryContext *context)
+      : codegen_(codegen), context_(context) {}
+
+  bool has_unknown_origin{false};
+
+  void VisitExpr(const PrimExpr &expr) final {
+    if (!expr.defined() || has_unknown_origin) {
+      return;
+    }
+    PtoValueInfo info = codegen_->AnalyzePtoValue_(expr, context_);
+    has_unknown_origin = info.kind == PtoValueKind::kVmiData ||
+                         info.kind == PtoValueKind::kVmiMask ||
+                         info.kind == PtoValueKind::kVmiPair ||
+                         info.kind == PtoValueKind::kVoid ||
+                         info.kind == PtoValueKind::kUnknown;
+  }
+
+  // Walks the immediate semantic operands of the root expression.  The
+  // qualified base call bypasses this class's VisitExpr override for the root
+  // only; the per-node handlers reach the children through the virtual
+  // VisitExpr above.
+  void ScanImmediateOperands(const PrimExpr &expr) {
+    tirx::ExprVisitor::VisitExpr(expr);
+  }
+
+private:
+  const CodeGenTileLangPTO *codegen_;
+  PtoValueQueryContext *context_;
+};
+
+namespace {
+
+bool IsVmiOpName(const std::string &name) {
+  return name.rfind("tl.vmi.", 0) == 0;
+}
+
+// Grouped vbrc keeps accepting numeric local.var reads through pure aliases.
+// is_uint() includes TIR uint1/bool, preserving the original admission test.
+bool IsNumericVbrcCompatDtype(DataType dtype) {
+  return dtype.is_int() || dtype.is_uint() || dtype.is_float() ||
+         dtype.is_bfloat16();
+}
+
+} // namespace
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyPtoValue_(const PrimExpr &expr) const {
+  return AnalyzePtoValue_(expr).kind;
+}
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyPtoValue_(const PrimExpr &expr,
+                                      PtoValueQueryContext *context) const {
+  return AnalyzePtoValue_(expr, context).kind;
+}
+
+CodeGenTileLangPTO::PtoValueInfo
+CodeGenTileLangPTO::AnalyzePtoValue_(const PrimExpr &expr) const {
+  PtoValueQueryContext context;
+  return AnalyzePtoValue_(expr, &context);
+}
+
+CodeGenTileLangPTO::PtoValueInfo
+CodeGenTileLangPTO::AnalyzePtoValue_(const PrimExpr &expr,
+                                     PtoValueQueryContext *context) const {
+  if (!expr.defined() || context == nullptr) {
+    return {};
+  }
+  const Object *node = expr.get();
+  auto memo_it = context->memo.find(node);
+  if (memo_it != context->memo.end() &&
+      memo_it->second.first == context->scope_generation) {
+    return memo_it->second.second;
+  }
+  PtoValueInfo info = AnalyzePtoValueUncached_(expr, context);
+  context->memo[node] = std::make_pair(context->scope_generation, info);
+  return info;
+}
+
+CodeGenTileLangPTO::PtoValueInfo CodeGenTileLangPTO::AnalyzePtoValueUncached_(
+    const PrimExpr &expr, PtoValueQueryContext *context) const {
+  if (const auto *var = expr.as<VarNode>()) {
+    const PrimExpr *definition = nullptr;
+    PrimExpr stored;
+    auto local_it = context->local_defs.find(var);
+    if (local_it != context->local_defs.end()) {
+      stored = local_it->second;
+      definition = &stored;
+    } else {
+      auto it = value_defs_.find(var);
+      if (it != value_defs_.end()) {
+        stored = it->second;
+        definition = &stored;
+      }
+    }
+    if (definition != nullptr) {
+      ICHECK(context->active.insert(var).second)
+          << "PTO SSA definition cycle detected for variable "
+          << var->name_hint;
+      PtoValueInfo info = AnalyzePtoValue_(*definition, context);
+      context->active.erase(var);
+      return info;
+    }
+    // Unbound Var: parameter/loop variable contract.
+    if (expr.dtype().is_handle()) {
+      return {PtoValueKind::kHandle, false};
+    }
+    if (expr.dtype().is_scalar()) {
+      return {PtoValueKind::kScalar, false};
+    }
+    return {PtoValueKind::kOtherVector, false};
+  }
+
+  if (expr.as<IntImmNode>() != nullptr || expr.as<FloatImmNode>() != nullptr) {
+    return {PtoValueKind::kScalar, false};
+  }
+
+  if (const auto *let = expr.as<LetNode>()) {
+    // Query-local lexical scope: bind the RHS in the local override layer and
+    // analyze the body with the binding visible.  The persistent table is not
+    // modified.  The RHS is classified lazily when the body resolves the bound
+    // Var: classifying it eagerly here would traverse the same RHS a second
+    // time under the bumped scope generation and make a linear nested-Let
+    // chain exponential.  Unused bindings do not affect the body's result
+    // classification; emission still handles and validates the RHS.
+    auto previous = context->local_defs.find(let->var.get());
+    bool had_previous = previous != context->local_defs.end();
+    PrimExpr saved;
+    if (had_previous) {
+      saved = previous->second;
+    }
+    context->local_defs[let->var.get()] = let->value;
+    ++context->scope_generation;
+    PtoValueInfo info = AnalyzePtoValue_(let->body, context);
+    ++context->scope_generation;
+    if (had_previous) {
+      context->local_defs[let->var.get()] = saved;
+    } else {
+      context->local_defs.erase(let->var.get());
+    }
+    return info;
+  }
+
+  if (const auto *cast = expr.as<CastNode>()) {
+    PtoValueInfo source = AnalyzePtoValue_(cast->value, context);
+    if (cast->value.dtype() == cast->dtype) {
+      // Same-dtype casts are transparent aliases and preserve both the kind
+      // and the local.var-read source fact.
+      return source;
+    }
+    // Non-identity casts of VMI values require VMI conversion operations.
+    // A scalar result dtype alone does not make a VMI or unknown source
+    // a scalar value.  The alias source fact is not propagated.
+    if (source.kind == PtoValueKind::kVmiData ||
+        source.kind == PtoValueKind::kVmiMask ||
+        source.kind == PtoValueKind::kVmiPair ||
+        source.kind == PtoValueKind::kVoid ||
+        source.kind == PtoValueKind::kUnknown) {
+      return {PtoValueKind::kUnknown, false};
+    }
+    if (expr.dtype().is_handle()) {
+      return {PtoValueKind::kHandle, false};
+    }
+    if (expr.dtype().is_scalar()) {
+      return {PtoValueKind::kScalar, false};
+    }
+    return {PtoValueKind::kOtherVector, false};
+  }
+
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return ClassifyBufferLoad_(load);
+  }
+
+  if (const auto *call = expr.as<CallNode>()) {
+    auto opt_call_op = call->op.as<Op>();
+    if (opt_call_op.has_value()) {
+      const std::string name = opt_call_op.value()->name;
+      if (IsVmiOpName(name)) {
+        return {ClassifyVmiCallResult_(call, context), false};
+      }
+      if (call->op.same_as(tirx::builtin::reinterpret())) {
+        ICHECK_EQ(call->args.size(), 1U)
+            << "tirx.reinterpret expects 1 argument (value)";
+        PtoValueInfo source = AnalyzePtoValue_(call->args[0], context);
+        PtoValueKind kind;
+        if (source.kind == PtoValueKind::kVmiData) {
+          DataType source_dtype = call->args[0].dtype();
+          DataType target_dtype = expr.dtype();
+          if (source_dtype.bits() == target_dtype.bits() &&
+              source_dtype.lanes() == target_dtype.lanes()) {
+            kind = PtoValueKind::kVmiData;
+          } else {
+            kind = PtoValueKind::kUnknown;
+          }
+        } else if (source.kind == PtoValueKind::kVmiMask ||
+                   source.kind == PtoValueKind::kVmiPair ||
+                   source.kind == PtoValueKind::kVoid ||
+                   source.kind == PtoValueKind::kUnknown) {
+          kind = PtoValueKind::kUnknown;
+        } else if (expr.dtype().is_handle()) {
+          kind = PtoValueKind::kHandle;
+        } else if (expr.dtype().is_scalar()) {
+          kind = PtoValueKind::kScalar;
+        } else {
+          kind = PtoValueKind::kOtherVector;
+        }
+        return {kind, false};
+      }
+    }
+    return {ClassifyOrdinaryExpr_(expr, context), false};
+  }
+
+  return {ClassifyOrdinaryExpr_(expr, context), false};
+}
+
+CodeGenTileLangPTO::PtoValueKind
+CodeGenTileLangPTO::ClassifyOrdinaryExpr_(const PrimExpr &expr,
+                                          PtoValueQueryContext *context) const {
+  // Ordinary scalar expressions keep their contract unless a semantic operand
+  // carries a VMI kind or an unknown VMI origin.  Only the immediate operands
+  // are classified (once each, memoized); the query never prints or emits.
+  PtoOperandScanner scanner(this, context);
+  scanner.ScanImmediateOperands(expr);
+  if (scanner.has_unknown_origin) {
+    return PtoValueKind::kUnknown;
+  }
+  if (expr.dtype().is_handle()) {
+    return PtoValueKind::kHandle;
+  }
+  if (expr.dtype().is_scalar()) {
+    return PtoValueKind::kScalar;
+  }
+  return PtoValueKind::kOtherVector;
+}
+
+CodeGenTileLangPTO::PtoValueInfo
+CodeGenTileLangPTO::ClassifyBufferLoad_(const BufferLoadNode *op) const {
+  // Ordinary memory reads follow the storage contract: a scalar-valued
+  // BufferLoad is a scalar regardless of which VMI store previously wrote the
+  // address.  Explicit VMI data allocations and VMI local register slots are
+  // the only buffer reads classified as VMI data; multi-lane local.var and
+  // ordinary vectors stay on their existing register/vector routes.  The
+  // local.var-read fact is true only for an actual local.var BufferLoad, not
+  // for register arrays or shared/global memory.
+  if (FindVmiAllocSlot_(op->buffer.get(), "PTO VMI data slot load") !=
+      nullptr) {
+    return {PtoValueKind::kVmiData, true};
+  }
+  if (IsVmiLocalRegisterBuffer(op->buffer.get())) {
+    return {PtoValueKind::kVmiData, false};
+  }
+  const bool is_local_var = ScopeOfBuffer(op->buffer.get()) == "local.var";
+  if (op->dtype.is_scalar()) {
+    return {PtoValueKind::kScalar, is_local_var};
+  }
+  return {PtoValueKind::kOtherVector, is_local_var};
+}
+
+CodeGenTileLangPTO::PtoValueKind CodeGenTileLangPTO::ClassifyVmiCallResult_(
+    const CallNode *op, PtoValueQueryContext *context) const {
+  auto opt_call_op = op->op.as<Op>();
+  ICHECK(opt_call_op.has_value()) << "tl.vmi call has a non-Op callee";
+  const std::string name = opt_call_op.value()->name;
+  if (name == "tl.vmi.create_mask" || name == "tl.vmi.vcmp" ||
+      name == "tl.vmi.vcmps") {
+    return PtoValueKind::kVmiMask;
+  }
+  if (name == "tl.vmi.vintlv" || name == "tl.vmi.vdintlv" ||
+      name == "tl.vmi.vunzip" || name == "tl.vmi.vmull") {
+    return PtoValueKind::kVmiPair;
+  }
+  if (name == "tl.vmi.vload") {
+    // vload always produces one VMI data result.
+    return PtoValueKind::kVmiData;
+  }
+  if (name == "tl.vmi.pair_get") {
+    ICHECK_EQ(op->args.size(), 2U) << "tl.vmi.pair_get expects (pair, index)";
+    PtoValueKind pair_kind = ClassifyPtoValue_(op->args[0], context);
+    ICHECK(pair_kind == PtoValueKind::kVmiPair)
+        << "PTO provenance tl.vmi.pair_get source must be a VMI pair; got "
+        << PtoValueKindName(pair_kind) << " (" << op->args[0].dtype()
+        << "): " << op->args[0];
+    const auto *index = op->args[1].as<IntImmNode>();
+    ICHECK(index != nullptr && (index->value == 0 || index->value == 1))
+        << "PTO provenance tl.vmi.pair_get index must be the constant 0 or 1, "
+           "got "
+        << op->args[1];
+    return PtoValueKind::kVmiData;
+  }
+  if (name == "tl.vmi.vstore" || name == "tl.vmi.vscatter") {
+    return PtoValueKind::kVoid;
+  }
+  static const std::unordered_set<std::string> kDataOps = {
+      "tl.vmi.vci",     "tl.vmi.vbrc",
+      "tl.vmi.vzip",    "tl.vmi.vadd",
+      "tl.vmi.vsub",    "tl.vmi.vmul",
+      "tl.vmi.vdiv",    "tl.vmi.vmax",
+      "tl.vmi.vmin",    "tl.vmi.vand",
+      "tl.vmi.vor",     "tl.vmi.vxor",
+      "tl.vmi.vshl",    "tl.vmi.vshr",
+      "tl.vmi.vabs",    "tl.vmi.vneg",
+      "tl.vmi.vrelu",   "tl.vmi.vexp",
+      "tl.vmi.vln",     "tl.vmi.vsqrt",
+      "tl.vmi.vnot",    "tl.vmi.vadds",
+      "tl.vmi.vmuls",   "tl.vmi.vmaxs",
+      "tl.vmi.vmins",   "tl.vmi.vshls",
+      "tl.vmi.vshrs",   "tl.vmi.vsel",
+      "tl.vmi.vselr",   "tl.vmi.vcadd",
+      "tl.vmi.vcmax",   "tl.vmi.vcmin",
+      "tl.vmi.vcvt",    "tl.vmi.vinterpret_cast",
+      "tl.vmi.vexpdif", "tl.vmi.vaxpy",
+      "tl.vmi.vlrelu",  "tl.vmi.vprelu",
+      "tl.vmi.vmula",   "tl.vmi.vdhist",
+      "tl.vmi.vchist",  "tl.vmi.vgather",
+  };
+  if (kDataOps.count(name) != 0U) {
+    return PtoValueKind::kVmiData;
+  }
+  // Registered operations without an explicit contract (for example a future
+  // addition) stay unknown so consumers diagnose instead of guessing.
+  return PtoValueKind::kUnknown;
+}
+
+void CodeGenTileLangPTO::CheckPtoScalarOperand_(const PrimExpr &expr,
+                                                const char *consumer) const {
+  PtoValueKind kind = ClassifyPtoValue_(expr);
+  if (kind == PtoValueKind::kScalar) {
+    return;
+  }
+  std::ostringstream message;
+  message << consumer << " expects a scalar; got " << PtoValueKindName(kind)
+          << " (" << expr.dtype() << ", lanes=" << expr.dtype().lanes()
+          << "): " << expr;
+  if (kind == PtoValueKind::kUnknown) {
+    const auto *call = expr.as<CallNode>();
+    if (call != nullptr) {
+      auto opt_call_op = call->op.as<Op>();
+      if (opt_call_op.has_value() && IsVmiOpName(opt_call_op.value()->name)) {
+        message << "; unclassified " << opt_call_op.value()->name
+                << " result; add an explicit VMI return contract";
+      }
+    }
+  }
+  LOG(FATAL) << message.str();
+}
+
+void CodeGenTileLangPTO::CheckPtoVmiBridgeOperand_(
+    const CallNode *op, const char *op_name,
+    const PtoValueInfo &source_info) const {
+  ICHECK(!op->args.empty()) << op_name << " expects a source operand";
+  const PrimExpr &source = op->args[0];
+  const PtoValueKind source_kind = source_info.kind;
+  const bool has_group = op->annotations.find("group") != op->annotations.end();
+  if (std::string(op_name) == "tl.vmi.vci") {
+    if (source_kind == PtoValueKind::kVmiData) {
+      LOG(FATAL) << "tl.vmi.vci base expects a scalar; got VMI data ("
+                 << source.dtype() << ", lanes=" << source.dtype().lanes()
+                 << "): " << source;
+    }
+    if (source_kind != PtoValueKind::kScalar) {
+      LOG(FATAL) << "tl.vmi.vci base expects a scalar; got "
+                 << PtoValueKindName(source_kind) << " (" << source.dtype()
+                 << ", lanes=" << source.dtype().lanes() << "): " << source;
+    }
+    return;
+  }
+  // tl.vmi.vbrc
+  if (has_group) {
+    const auto *group = op->annotations.at("group").as<IntImmNode>();
+    ICHECK(group != nullptr)
+        << "tl.vmi.vbrc group annotation must be a constant integer";
+    if (source_kind != PtoValueKind::kVmiData) {
+      // Also accept numeric local.var reads through pure aliases without
+      // changing their classification.  The same analysis supplied the kind
+      // and the read-source fact, so there is no second RHS/Let traversal.
+      // Scalar constants and parameters do not set the fact.  Require the
+      // same lane count as the group.
+      if (IsNumericVbrcCompatDtype(source.dtype()) &&
+          source_info.is_local_var_read_alias) {
+        ICHECK_EQ(source.dtype().lanes(), group->value)
+            << "tl.vmi.vbrc source lane count must equal group; got "
+            << source.dtype().lanes() << " lanes and group=" << group->value;
+        return;
+      }
+      LOG(FATAL) << "tl.vmi.vbrc with group=... requires a VMI vreg; got "
+                 << PtoValueKindName(source_kind) << " (" << source.dtype()
+                 << ", lanes=" << source.dtype().lanes() << "): " << source;
+    }
+    ICHECK_EQ(source.dtype().lanes(), group->value)
+        << "tl.vmi.vbrc source lane count must equal group; got "
+        << source.dtype().lanes() << " lanes and group=" << group->value;
+    return;
+  }
+  if (source_kind == PtoValueKind::kVmiMask ||
+      source_kind == PtoValueKind::kVmiPair ||
+      source_kind == PtoValueKind::kVoid ||
+      source_kind == PtoValueKind::kHandle ||
+      source_kind == PtoValueKind::kUnknown) {
+    LOG(FATAL) << "tl.vmi.vbrc cannot broadcast "
+               << PtoValueKindName(source_kind) << " (" << source.dtype()
+               << ", lanes=" << source.dtype().lanes() << "): " << source;
+  }
+}
+
+void CodeGenTileLangPTO::PrintPtoVmiCall_(const CallNode *op,
+                                          std::ostream &os) {
+  auto opt_call_op = op->op.as<Op>();
+  ICHECK(opt_call_op.has_value());
+  std::string op_name = opt_call_op.value()->name;
+  ICHECK(StartsWith(op_name, "tl.vmi."))
+      << "Expected a tl.vmi.* call, got " << op_name;
+
+  // vload/vstore accept no dist_mode annotation, and their access shape is
+  // described only by stride, block_stride and group.  The descriptor pass also
+  // rejects it, but code generation has its own guard so manually constructed
+  // TIR can never have the annotation silently dropped or written to PTODSL.
+  if (op_name == "tl.vmi.vload" || op_name == "tl.vmi.vstore") {
+    if (op->annotations.find("dist_mode") != op->annotations.end()) {
+      LOG(FATAL) << "PTO codegen: " << op_name
+                 << " does not accept a dist_mode annotation; remove it and "
+                    "regenerate the VMI memory access"
+                 << tvm::tl::SpanHintSuffix(op->span);
+    }
+  }
+
+  // VMI addresses, both ordinary and indexed, are lowered by
+  // LegalizePTOVMIMemoryAccess into an explicit descriptor before code
+  // generation.  A raw BufferLoad at the address operand means that pass was
+  // skipped or never ran on this function, so report the actual offending
+  // operand instead of emitting an invalid PTODSL memory access.  Nested loads
+  // (for example a descriptor's index[0]) remain ordinary reads and are not
+  // diagnosed here.
+  {
+    int address_index = -1;
+    if (op_name == "tl.vmi.vload" || op_name == "tl.vmi.vgather") {
+      address_index = 0;
+    } else if (op_name == "tl.vmi.vscatter" || op_name == "tl.vmi.vstore") {
+      address_index = 1;
+    }
+    if (address_index >= 0 &&
+        static_cast<size_t>(address_index) < op->args.size() &&
+        op->args[address_index].as<BufferLoadNode>() != nullptr) {
+      LOG(FATAL) << "LegalizePTOVMIMemoryAccess: unlowered raw BufferLoad at "
+                 << op_name << " address operand " << address_index
+                 << "; VMI memory descriptors must be legalized before code "
+                    "generation"
+                 << tvm::tl::SpanHintSuffix(op->span);
+    }
+  }
+
+  std::vector<std::pair<std::string, ObjectRef>> kwargs;
+  kwargs.reserve(op->annotations.size());
+  for (const auto &[key, value] : op->annotations) {
+    std::string key_str = key;
+    if (key_str == "loc" || key_str == "ip") {
+      continue;
+    }
+    kwargs.emplace_back(std::move(key_str), value);
+  }
+  std::sort(kwargs.begin(), kwargs.end(), [](const auto &lhs, const auto &rhs) {
+    return lhs.first < rhs.first;
+  });
+
+  if (op_name == "tl.vmi.vcvt" && IsVmiVcvtToFp4(kwargs)) {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "Packed FP4 vcvt expects exactly one BF16 source vector";
+    const DataType source_dtype = op->args[0].dtype();
+    ICHECK(source_dtype.is_vector() && source_dtype.element_of().is_bfloat16())
+        << "Packed FP4 vcvt only supports bfloat16 source vectors, got "
+        << source_dtype;
+    ICHECK_EQ(source_dtype.lanes() % 2, 0)
+        << "Packed FP4 vcvt requires an even BF16 lane count, got "
+        << source_dtype.lanes();
+  }
+
+  if (op_name == "tl.vmi.vcvt" && IsVmiVcvtFromFp4(op)) {
+    const auto target = VmiVcvtTarget(kwargs);
+    ICHECK(target.has_value() &&
+           (*target == "bfloat16" || *target == "float32"))
+        << "Packed FP4 source vcvt only supports bfloat16 or float32, got "
+        << (target.has_value() ? *target : "<missing>");
+    const DataType source_dtype = op->args[0].dtype();
+    ICHECK_EQ(source_dtype.lanes() % 2, 0)
+        << "Packed FP4 source vcvt requires an even logical lane count, got "
+        << source_dtype.lanes();
+
+    ICHECK_EQ(op->args.size(), 1U) << "Packed FP4 source vcvt expects exactly "
+                                      "one packed FP4 source vector";
+    const std::string source = PrintExpr_(op->args[0]);
+    // Pair-to-scalar BF16 re-view is a register-level vinterpret_cast.
+    // Do not materialize the converted pairs through a UB scratch buffer.
+    const std::string bf16 = "pto.vmi.vinterpret_cast(pto.vmi.vcvt(" + source +
+                             ", to_dtype=pto.vmi.bf16x2), to_dtype=pto.bf16)";
+    if (*target == "bfloat16") {
+      os << bf16;
+    } else {
+      os << "pto.vmi.vcvt(" << bf16 << ", to_dtype=pto.f32)";
+    }
+    return;
+  }
+
+  // Classify the VMI source *before* printing any argument.  A lane-1 VMI
+  // vreg is a TIR scalar by dtype but remains VMI data; only a proven scalar
+  // may enter the integer signless bridge.  vci/scalar-only consumers receive
+  // an explicit category diagnostic instead of an invalid PTODSL scalar op.
+  PtoValueInfo vmi_source_info;
+  if (!op->args.empty()) {
+    vmi_source_info = AnalyzePtoValue_(op->args[0]);
+  }
+  if (op_name == "tl.vmi.vbrc" || op_name == "tl.vmi.vci") {
+    CheckPtoVmiBridgeOperand_(op, op_name.c_str(), vmi_source_info);
+  }
+  // Adapt proven integer scalar sources of vci/vbrc at the VMI
+  // value-argument boundary. The generated scalar must be *signless*: PTOAS
+  // materialises per-physical-vector offsets with `arith.constant`, which
+  // requires signless integers, so a typed (signed) constant base fails for
+  // every input wider than one physical vector. A VCI base can be folded to
+  // a constant whenever the loop has a single chunk, so integer VCI always
+  // takes this path; VBRC constants keep the verified typed-literal path.
+  const bool scalar_integer_input =
+      vmi_source_info.kind == PtoValueKind::kScalar && !op->args.empty() &&
+      op->args[0].dtype().is_scalar() &&
+      (op->args[0].dtype().is_int() || op->args[0].dtype().is_uint());
+  const bool integer_data_result =
+      op->dtype.element_of().is_int() || op->dtype.element_of().is_uint();
+  const bool integer_source_literal =
+      !op->args.empty() && op->args[0].as<IntImmNode>() != nullptr;
+  const bool bridge_integer_source =
+      (op_name == "tl.vmi.vci" ||
+       (op_name == "tl.vmi.vbrc" && !integer_source_literal)) &&
+      scalar_integer_input && integer_data_result;
+
+  if (bridge_integer_source) {
+    os << "pto.vmi.vinterpret_cast(";
+  }
+  os << "pto." << op_name.substr(3) << "(";
+  bool needs_comma = false;
+
+  auto print_scalar_literal_value = [&](const PrimExpr &arg) {
+    if (const auto *imm = arg.as<IntImmNode>()) {
+      if (imm->dtype == DataType::Bool()) {
+        os << (imm->value ? "True" : "False");
+      } else {
+        os << imm->value;
+      }
+      return;
+    }
+    if (const auto *imm = arg.as<FloatImmNode>()) {
+      os << "float.fromhex('" << FlexibleHexFormat(imm->value) << "')";
+      return;
+    }
+    PrintExpr_(arg, os);
+  };
+
+  // PTODSL vgather/vscatter take a single pointer operand. TileLang lowers
+  // buffer addresses to (ptr, elem_offset); fold them with addptr here.
+  auto print_ptr_with_offset = [&](const PrimExpr &ptr,
+                                   const PrimExpr &offset) {
+    if (is_zero(offset)) {
+      os << PrintExpr_(ptr);
+      return;
+    }
+    os << "pto.addptr(" << PrintExpr_(ptr) << ", "
+       << RemoveOutermostParentheses(PrintExpr_(offset)) << ")";
+  };
+
+  if (op_name == "tl.vmi.vgather") {
+    ICHECK_EQ(op->args.size(), 4U)
+        << op_name << " expects (ptr, offset, offsets, mask)";
+    print_ptr_with_offset(op->args[0], op->args[1]);
+    os << ", " << PrintExpr_(op->args[2]) << ", " << PrintExpr_(op->args[3]);
+    needs_comma = true;
+  } else if (op_name == "tl.vmi.vscatter") {
+    ICHECK_EQ(op->args.size(), 5U)
+        << op_name << " expects (value, ptr, offset, offsets, mask)";
+    os << PrintExpr_(op->args[0]) << ", ";
+    print_ptr_with_offset(op->args[1], op->args[2]);
+    os << ", " << PrintExpr_(op->args[3]) << ", " << PrintExpr_(op->args[4]);
+    needs_comma = true;
+  } else {
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      const PrimExpr &arg = op->args[i];
+      if (needs_comma) {
+        os << ", ";
+      }
+      const bool is_scalar_literal =
+          arg.as<FloatImmNode>() != nullptr || arg.as<IntImmNode>() != nullptr;
+      const bool should_wrap_typed_literal =
+          (op_name == "tl.vmi.vbrc" || op_name == "tl.vmi.vci") && i == 0 &&
+          is_scalar_literal;
+      if (bridge_integer_source && i == 0) {
+        if (integer_source_literal) {
+          // Constant base: same-width signless scalar holding the original
+          // bit pattern (never a Python default type, never forced to i32).
+          os << PtoSignlessIntegerTypeName(arg.dtype()) << "(";
+          print_scalar_literal_value(arg);
+          os << ")";
+        } else {
+          os << "pto.cast(" << PrintExpr_(arg) << ", "
+             << PtoSignlessIntegerTypeName(arg.dtype()) << ")";
+        }
+      } else if (should_wrap_typed_literal) {
+        // PTODSL needs typed literal scalars for these VMI sources; preserve
+        // the literal dtype instead of assuming every source is f32.
+        os << ScalarType(arg.dtype()) << "(";
+        print_scalar_literal_value(arg);
+        os << ")";
+      } else if (op_name == "tl.vmi.vcvt" && i == 0 && IsVmiVcvtToFp4(kwargs) &&
+                 arg.dtype().is_vector() &&
+                 arg.dtype().element_of().is_bfloat16()) {
+        // PTOAS vcvt only accepts bf16x2 -> f4x2; pair the bf16 source
+        // (vinterpret_cast is a physical no-op) inline. Note: pto.vmi.bf16x2
+        // is the BF16x2Type dtype, distinct from the MLIR vector pto.bf16x2.
+        os << "pto.vmi.vinterpret_cast(" << PrintExpr_(arg)
+           << ", to_dtype=pto.vmi.bf16x2)";
+      } else {
+        os << PrintExpr_(arg);
+      }
+      needs_comma = true;
+    }
+  }
+
+  for (const auto &[key, value] : kwargs) {
+    if (needs_comma) {
+      os << ", ";
+    }
+    os << key << "=";
+    if (op_name == "tl.vmi.vcvt" && key == "to_dtype" && op->dtype.is_int()) {
+      os << PtoSignedIntegerTypeName(op->dtype.element_of());
+    } else if (op_name == "tl.vmi.vload" && key == "size" &&
+               op->dtype.element_of().is_float4_e2m1fn()) {
+      // TileLang VMI exposes FP4 lane counts logically.  PTO represents each
+      // f4e2m1x2 byte as one physical VMI element, so its vload size must be
+      // expressed in packed-pair units.  The frontend has already converted
+      // the corresponding address offset to the same physical unit.
+      os << "(" << PrintVmiAnnotationValue(key, value) << " // 2)";
+    } else {
+      os << PrintVmiAnnotationValue(key, value);
+    }
+    needs_comma = true;
+  }
+  // Close the VMI source first, then feed the reinterpret target: the
+  // wrapper must be `vinterpret_cast(vci(...), to_dtype=...)`.
+  os << ")";
+  if (bridge_integer_source) {
+    os << ", to_dtype="
+       << PtoIntegerVectorInterpretTarget(op->dtype.element_of()) << ")";
+  }
+}
+
 void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                     std::ostream &os) { // NOLINT(*)
   if (EmitSimdMergingCall_(op, os)) {
@@ -4700,6 +5736,15 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         RequiresStatementControlFlow(op->args[1]) ||
         RequiresStatementControlFlow(op->args[2]);
     auto branch_value = [&](const PrimExpr &expr) {
+      const bool scalar_adapted_branch =
+          expr.as<IntImmNode>() == nullptr &&
+          expr.as<FloatImmNode>() == nullptr &&
+          (expr.dtype().is_bool() ||
+           (op->dtype.is_scalar() &&
+            (op->dtype.is_int() || op->dtype.is_uint())));
+      if (scalar_adapted_branch) {
+        CheckPtoScalarOperand_(expr, "PTO if_then_else branch");
+      }
       std::string value = PrintExpr_(expr);
       if (expr.dtype().is_bool()) {
         // PTODSL typed constants require numeric bool literals.
@@ -4818,10 +5863,17 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
       op->op.same_as(tl::warp_reduce_min())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "PTO warp reduction expects exactly one argument";
+    DataType dtype = op->args[0].dtype();
+    ICHECK(IsSupportedSIMTAllReduceType(dtype))
+        << "PTO warp reduction currently supports float16, float32, int32, "
+           "and uint32 only, got "
+        << dtype
+        << ". Use a supported reducer dtype, such as float32, and cast the "
+           "result afterward.";
     const char *name = op->op.same_as(tl::warp_reduce_sum())   ? "redux_add"
                        : op->op.same_as(tl::warp_reduce_max()) ? "redux_max"
                                                                : "redux_min";
-    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ")";
+    os << "tl." << name << "(" << PrintExpr_(op->args[0]) << ")";
     return;
   }
 
@@ -5079,8 +6131,35 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
   if (op->op.same_as(tirx::builtin::reinterpret())) {
     ICHECK_EQ(op->args.size(), 1U)
         << "tirx.reinterpret expects 1 argument (value)";
-    std::string value = PrintExpr_(op->args[0]);
+    PtoValueKind reinterpret_source_kind = ClassifyPtoValue_(op->args[0]);
     DataType target_dtype = op->dtype;
+    if (reinterpret_source_kind == PtoValueKind::kVmiData) {
+      DataType source_dtype = op->args[0].dtype();
+      if (source_dtype.bits() == target_dtype.bits() &&
+          source_dtype.lanes() == target_dtype.lanes()) {
+        // Same element width and lane count is a register-level re-view; use
+        // the explicit VMI reinterpret API, never scalar/lexical bitcasts.
+        os << "pto.vmi.vinterpret_cast(" << PrintExpr_(op->args[0])
+           << ", to_dtype=" << VmiDtypeAnnotation(target_dtype.element_of())
+           << ")";
+        return;
+      }
+      LOG(FATAL) << "PTO reinterpret of VMI data requires the same element "
+                    "width and lane count; use T.vmi.vinterpret_cast with the "
+                    "explicit packed/shape contract (source "
+                 << source_dtype << ", target " << target_dtype
+                 << "): " << op->args[0];
+    }
+    if (reinterpret_source_kind == PtoValueKind::kVmiMask ||
+        reinterpret_source_kind == PtoValueKind::kVmiPair ||
+        reinterpret_source_kind == PtoValueKind::kVoid ||
+        reinterpret_source_kind == PtoValueKind::kUnknown) {
+      LOG(FATAL) << "PTO reinterpret cannot consume "
+                 << PtoValueKindName(reinterpret_source_kind) << " (source "
+                 << op->args[0].dtype() << ", target " << target_dtype
+                 << "): " << op->args[0];
+    }
+    std::string value = PrintExpr_(op->args[0]);
     if (target_dtype.lanes() > 1) {
       // Vector reinterpret: lower to pto.vbitcast(vec, elem_type).
       os << "pto.vbitcast(" << value << ", "
@@ -5480,6 +6559,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd vlrelu/vprelu expects 3 arguments";
     if (op->op.same_as(tl::simd_vlrelu())) {
       DataType vector_dtype = op->args[0].dtype();
+      CheckPtoScalarOperand_(op->args[1], "tl.simd.vlrelu scalar");
       std::string alpha = WrapTypedConst(
           RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
           vector_dtype, IsImmediateScalar(op->args[1]));
@@ -5529,6 +6609,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                                           : "vshrs";
     std::string src = PrintExpr_(op->args[0]);
     DataType result_dtype = op->args[0].dtype();
+    CheckPtoScalarOperand_(op->args[1], "tl.simd vector-scalar operand");
     std::string scalar = WrapTypedConst(
         RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
         result_dtype, IsImmediateScalar(op->args[1]));
@@ -5603,6 +6684,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
   if (op->op.same_as(tl::simd_vcmps())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vcmps expects 4 arguments (src, scalar, mask, op)";
+    CheckPtoScalarOperand_(op->args[1], "tl.simd.vcmps scalar");
     std::string cmp_op = Downcast<StringImm>(op->args[3])->value;
     static const std::unordered_map<std::string, const char *> kCmpModeEnum = {
         {"eq", "EQ"}, {"ne", "NE"}, {"gt", "GT"},
@@ -5634,6 +6716,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     // Match the authored vector element dtype (i16 for packed-ue8m0 lane math,
     // i32 for f32 gather paths). Always-i32 coercion breaks i16 vci users.
     DataType elem = op->dtype.element_of();
+    CheckPtoScalarOperand_(op->args[0], "tl.simd.vci index");
     std::string index;
     if (IsImmediateScalar(op->args[0])) {
       index =
@@ -5654,6 +6737,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd.vdup expects 3 arguments (src, mask, mode)";
     ValidateVecMode_(op, 2);
     DataType elem = op->dtype.element_of();
+    CheckPtoScalarOperand_(op->args[0], "tl.simd.vdup scalar");
     std::string scalar;
     if (IsImmediateScalar(op->args[0])) {
       scalar =
@@ -6050,6 +7134,27 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     if (op->args.size() == 1U && TryEmitUnaryMath_(op_name, op->args[0], os)) {
       return;
     }
+    if (StartsWith(op_name, "tl.vmi.")) {
+      if (op_name == "tl.vmi.pair_get") {
+        ICHECK_EQ(op->args.size(), 2U)
+            << "tl.vmi.pair_get expects exactly 2 arguments";
+        PtoValueKind pair_kind = ClassifyPtoValue_(op->args[0]);
+        ICHECK(pair_kind == PtoValueKind::kVmiPair)
+            << "tl.vmi.pair_get source must be a VMI pair; got "
+            << PtoValueKindName(pair_kind) << " (" << op->args[0].dtype()
+            << "): " << op->args[0];
+        const auto *pair_index = op->args[1].as<IntImmNode>();
+        ICHECK(pair_index != nullptr &&
+               (pair_index->value == 0 || pair_index->value == 1))
+            << "tl.vmi.pair_get index must be the constant 0 or 1, got "
+            << op->args[1];
+        os << "(" << PrintExpr_(op->args[0]) << ")[" << pair_index->value
+           << "]";
+        return;
+      }
+      PrintPtoVmiCall_(op, os);
+      return;
+    }
     if (StartsWith(op_name, "tl.")) {
       LOG(FATAL) << "PTO codegen does not support TileLang op `" << op_name
                  << "`. Please add a handler in CodeGenTileLangPTO or lower "
@@ -6087,6 +7192,21 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
   if (from == to) {
     PrintExpr_(op->value, os);
     return;
+  }
+
+  PtoValueKind cast_source_kind = ClassifyPtoValue_(op->value);
+  if (cast_source_kind == PtoValueKind::kVmiData) {
+    LOG(FATAL) << "PTO integer cast cannot consume VMI data; use T.vmi.vcvt "
+                  "or T.vmi.vinterpret_cast (source "
+               << op->value.dtype() << ", target " << to << "): " << op->value;
+  }
+  if (cast_source_kind == PtoValueKind::kVmiMask ||
+      cast_source_kind == PtoValueKind::kVmiPair ||
+      cast_source_kind == PtoValueKind::kVoid ||
+      cast_source_kind == PtoValueKind::kUnknown) {
+    LOG(FATAL) << "PTO cast cannot consume "
+               << PtoValueKindName(cast_source_kind) << " (source "
+               << op->value.dtype() << ", target " << to << "): " << op->value;
   }
 
   const bool from_fp8 = tl::IsAscendVectorizableFP8(from);
@@ -6225,8 +7345,14 @@ void CodeGenTileLangPTO::VisitExpr_(const LetNode *op,
       << "PTO Let variable is already defined: " << op->var->name_hint;
 
   std::string vid = AllocVarID(op->var.get());
+  ICHECK(!value_defs_.count(op->var.get()))
+      << "duplicate PTO Let definition: " << op->var->name_hint;
+  value_defs_.emplace(op->var.get(), op->value);
   std::string body = PrintExpr_(op->body);
 
+  bool removed_def = value_defs_.erase(op->var.get());
+  ICHECK(removed_def) << "PTO Let definition was not registered: "
+                      << op->var->name_hint;
   bool removed = var_idmap_.erase(op->var.get());
   ICHECK(removed) << "PTO Let variable was not registered: "
                   << op->var->name_hint;
@@ -6423,6 +7549,9 @@ void CodeGenTileLangPTO::VisitExpr_(const NotNode *op,
   ICHECK(op->dtype.is_scalar() && op->a.dtype().is_bool())
       << "PTO logical-not currently supports scalar bool predicates only, got "
       << op->a.dtype();
+  // A lane-1 VMI mask is a TIR scalar bool but remains a VMI value and cannot
+  // enter the logical scalar adapter.
+  CheckPtoScalarOperand_(op->a, "PTO logical-not operand");
   // tl.logical_not(value) implements logical negation as value == 0.
   os << "tl.logical_not(";
   PrintExpr_(op->a, os);
@@ -6441,10 +7570,14 @@ void CodeGenTileLangPTO::VisitExpr_(const SelectNode *op,
       return;
     }
     if (op->dtype.is_scalar() && op->dtype.is_bool()) {
+      // The logical-bool adapter is scalar-only; a lane-1 VMI mask (or VMI
+      // data used as a predicate) must be diagnosed, not normalized.
+      CheckPtoScalarOperand_(expr, "PTO select branch");
       os << "tl.as_logical_bool(" << PrintExpr_(expr) << ")";
       return;
     }
     if (coerce_integer_branches) {
+      CheckPtoScalarOperand_(expr, "PTO select branch");
       os << ScalarCastExpr(PrintExpr_(expr), op->dtype, "PTO select branch");
       return;
     }
@@ -6540,6 +7673,21 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
   os << "(" << PrintExpr_(lhs) << " " << opstr << " " << PrintExpr_(rhs) << ")";
 }
 
+void CodeGenTileLangPTO::VisitExpr_(const RampNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // Keep operands expression-local and evaluate each once, even for effectful
+  // calls. A Ramp used as a value must remain a typed vector.
+  os << "(lambda _ramp_base, _ramp_stride: tl.vector_from_list("
+     << DataTypeName(op->dtype.element_of()) << ", (";
+  for (int lane = 0; lane < op->dtype.lanes(); ++lane) {
+    if (lane != 0) {
+      os << ", ";
+    }
+    os << "(_ramp_base)+(_ramp_stride*" << lane << ")";
+  }
+  os << ")))(" << PrintExpr_(op->base) << ", " << PrintExpr_(op->stride) << ")";
+}
+
 void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,
                                     std::ostream &os) { // NOLINT(*)
   DataType elem_dtype = op->value.dtype();
@@ -6555,6 +7703,13 @@ void CodeGenTileLangPTO::VisitExpr_(const BroadcastNode *op,
 void CodeGenTileLangPTO::VisitStmt_(const DeclBufferNode *op) { (void)op; }
 
 void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
+  // Record every SSA definition before any printing branch (including the
+  // early-return SIMD pair/pointer paths below).  Queries only consume the
+  // stored IR; they never depend on the printed form.
+  ICHECK(!value_defs_.count(op->var.get()))
+      << "duplicate PTO SSA definition: " << op->var->name_hint;
+  value_defs_.emplace(op->var.get(), op->value);
+
   if (const auto *call = op->value.as<CallNode>()) {
     if (IsOpName(call->op, "tl.simd.alloc")) {
       AllocVarID(op->var.get());
@@ -6754,6 +7909,14 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
 }
 
 void CodeGenTileLangPTO::VisitStmt_(const AllocBufferNode *op) {
+  // All local.var buffers (scalar, handle and vector) share the unified
+  // allocation path with block alloc_buffers: scope registration,
+  // duplicate-allocation dedup, name reuse and mixed-section snapshots all
+  // live in EmitBufferAllocation / EmitLocalVarInitialization_.
+  if (GetPtrStorageScope(op->buffer->data) == "local.var") {
+    EmitBufferAllocation(op->buffer);
+    return;
+  }
   if (!current_function_is_cube_ || in_mixed_vector_section_) {
     EmitBufferAllocation(op->buffer);
     return;
@@ -6779,14 +7942,6 @@ void CodeGenTileLangPTO::VisitStmt_(const AllocBufferNode *op) {
     auto opt_size = alloc_ref.ConstantAllocationSize();
     ICHECK(opt_size.has_value())
         << "PTO local.fragment allocation expects a constant size";
-  } else if (scope == "local.var") {
-    // Scalar alloc_var is used by GEMM tile mapping; vector alloc_var is a
-    // mutable SIMD register and is emitted as a PTODSL Vec value.
-    CheckLocalVarBuffer(op->buffer.get());
-    PrintIndent();
-    local_var_buffers_.insert(buffer_var.get());
-    EmitLocalVarInitialization_(op->buffer, AllocVarID(buffer_var.get()));
-    return;
   }
 
   RegisterHandleType_(buffer_var.get(), op->buffer->dtype);
@@ -7343,6 +8498,19 @@ void CodeGenTileLangPTO::VisitStmt_(const EvaluateNode *op) {
 
 void CodeGenTileLangPTO::VisitExpr_(const BufferLoadNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  if (FindVmiAllocSlot_(op->buffer.get(), "PTO VMI data slot load") !=
+      nullptr) {
+    ICHECK_EQ(op->indices.size(), 1U)
+        << "PTO VMI data slot load expects a single index";
+    ICHECK(!op->predicate.defined())
+        << "PTO VMI data slots do not support predicated loads";
+    int64_t index = 0;
+    ICHECK(TryGetConstInt(op->indices[0], &index) && index == 0)
+        << "PTO VMI data slot load expects index 0";
+    os << LocalVarID(op->buffer->data.get());
+    return;
+  }
+
   // S.alloc_var inside T.SimdVF() creates a `local.var`-scope buffer with a
   // vector dtype (e.g. float32x64). In PTODSL it is a plain Python variable
   // holding a vector register value, so load at index 0 is just the variable
@@ -7386,6 +8554,20 @@ void CodeGenTileLangPTO::VisitExpr_(const BufferLoadNode *op,
     return;
   }
 
+  if (IsVmiLocalRegisterBuffer(op->buffer.get())) {
+    ICHECK_EQ(op->indices.size(), 1U)
+        << "PTO VMI local register buffers must be flattened before codegen";
+    ICHECK(!op->predicate.defined())
+        << "PTO VMI local register buffers do not support predicated loads";
+    CheckVmiLocalRegisterIndex(op->buffer.get(), op->indices[0]);
+    // Reuse the tree's vector-local accessor so register arrays follow the
+    // slot-name model (Name stores stay loop-carriable for PTODSL's AST
+    // liveness analysis, matching scalarized local.fragment buffers).
+    os << GetVectorLocalRef(op->buffer->data.get(), op->indices[0],
+                            "PTO VMI local register buffer load");
+    return;
+  }
+
   ICHECK_EQ(op->indices.size(), 1)
       << "CodeGenTileLangPTO only supports flat buffer loads";
   ICHECK(!op->predicate.defined())
@@ -7416,6 +8598,14 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
   DataType value_dtype = op->dtype;
   DataType element_dtype = op->buffer->dtype;
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && element_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Convert vector slots to scalar offsets for the existing contiguous load.
+    index = SIMTVectorLocalScalarOffset(index, element_dtype.lanes(), "load");
+    element_dtype = element_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): reading one slot yields a whole vector register. Emit a plain
@@ -7452,15 +8642,16 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
            "and 8 only, got "
         << value_dtype;
     const int lanes = value_dtype.lanes();
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "load");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "load");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     if (scope == "local.fragment" || scope == "local") {
-      os << "pto.load(" << GetVarID(op->buffer->data.get()) << ", " << index_str
-         << ", contiguous=" << lanes << ")";
+      std::string value = "pto.load(" + GetVarID(op->buffer->data.get()) +
+                          ", " + index_str +
+                          ", contiguous=" + std::to_string(lanes) + ")";
+      os << SimtLocalLoadAdapter(value, element_dtype);
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
@@ -7529,6 +8720,31 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangPTO::VisitStmt_(const BufferStoreNode *op) {
+  if (FindVmiAllocSlot_(op->buffer.get(), "PTO VMI data slot store") !=
+      nullptr) {
+    ICHECK_EQ(op->indices.size(), 1U)
+        << "PTO VMI data slot store expects a single index";
+    ICHECK(!op->predicate.defined())
+        << "PTO VMI data slots do not support predicated stores";
+    int64_t index = 0;
+    ICHECK(TryGetConstInt(op->indices[0], &index) && index == 0)
+        << "PTO VMI data slot store expects index 0";
+    PtoValueKind kind = ClassifyPtoValue_(op->value);
+    ICHECK(kind == PtoValueKind::kVmiData)
+        << "PTO VMI data slot store requires a VMI data RHS; got "
+        << PtoValueKindName(kind) << " (" << op->value.dtype()
+        << ", lanes=" << op->value.dtype().lanes() << "): " << op->value;
+    ICHECK(op->value.dtype() == op->buffer->dtype)
+        << "PTO VMI data slot store dtype/lanes must match the allocation: "
+           "slot "
+        << op->buffer->dtype << " vs value " << op->value.dtype();
+    std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
+    PrintIndent();
+    stream << LocalVarID(op->buffer->data.get()) << " = " << value << "\n";
+    EmitMixedEntrySnapshot(op->buffer->data.get());
+    return;
+  }
+
   // S.alloc_var inside T.SimdVF() creates a `local.var`-scope buffer with a
   // vector dtype (e.g. float32x64). In PTODSL it is a plain Python variable
   // holding a vector register value, so store at index 0 is just
@@ -7582,6 +8798,46 @@ void CodeGenTileLangPTO::VisitStmt_(const BufferStoreNode *op) {
     return;
   }
 
+  if (IsVmiLocalRegisterBuffer(op->buffer.get())) {
+    ICHECK_EQ(op->indices.size(), 1U)
+        << "PTO VMI local register buffers must be flattened before codegen";
+    ICHECK(!op->predicate.defined())
+        << "PTO VMI local register buffers do not support predicated stores";
+    CheckVmiLocalRegisterIndex(op->buffer.get(), op->indices[0]);
+    // A marked array reads back as VMI data, so each store must keep that
+    // storage contract instead of silently upgrading an ordinary vector.
+    PtoValueKind kind = ClassifyPtoValue_(op->value);
+    ICHECK(kind == PtoValueKind::kVmiData)
+        << "PTO VMI register array store requires a VMI data RHS; got "
+        << PtoValueKindName(kind) << " (" << op->value.dtype()
+        << ", lanes=" << op->value.dtype().lanes() << "): " << op->value;
+    ICHECK(op->value.dtype() == op->buffer->dtype)
+        << "PTO VMI register array store dtype/lanes must match the "
+           "allocation: array "
+        << op->buffer->dtype << " vs value " << op->value.dtype();
+    PrintIndent();
+    stream << GetVectorLocalRef(op->buffer->data.get(), op->indices[0],
+                                "PTO VMI local register buffer store")
+           << " = " << RemoveOutermostParentheses(PrintExpr_(op->value))
+           << "\n";
+    return;
+  }
+
+  // Ordinary local vector register arrays do not carry an explicit storage
+  // category.  Refuse to store a VMI value there: the later read would be an
+  // ordinary vector again, silently losing the VMI identity.  SIMT-backed
+  // local storage, local.var compatibility paths and local.fragment have their
+  // own emission routes and keep their existing contracts.
+  if (!inside_simtvf_body_ && ScopeOfBuffer(op->buffer.get()) == "local" &&
+      op->buffer->dtype.lanes() > 1) {
+    PtoValueKind kind = ClassifyPtoValue_(op->value);
+    ICHECK(kind == PtoValueKind::kOtherVector)
+        << "PTO ordinary vector register array store requires an ordinary "
+           "vector RHS; got "
+        << PtoValueKindName(kind)
+        << "; use T.vmi.alloc_local for VMI data arrays: " << op->value;
+  }
+
   ICHECK_EQ(op->indices.size(), 1)
       << "CodeGenTileLangPTO only supports flat buffer stores";
   ICHECK(!op->predicate.defined())
@@ -7601,11 +8857,18 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   DataType buffer_dtype = op->buffer->dtype;
   DataType value_dtype = op->value.dtype();
   std::string scope = ScopeOfBuffer(op->buffer.get());
+  PrimExpr index = op->indices[0];
+
+  if (inside_simtvf_body_ && buffer_dtype.is_vector() &&
+      (scope == "local.fragment" || scope == "local")) {
+    // Match the scalar-addressed allocation and contiguous load path.
+    index = SIMTVectorLocalScalarOffset(index, buffer_dtype.lanes(), "store");
+    buffer_dtype = buffer_dtype.element_of();
+  }
 
   // Vector-element buffer (e.g. T.simd.alloc_local produces float32x64
   // elements): the value is a whole vector register stored into one buffer
-  // slot. Emit a plain Python assignment; the buffer was allocated as a list
-  // (non-SIMT) or pto.alloc_buffer (SIMT).
+  // slot outside SIMT. Emit an assignment to its Python vector value.
   if (buffer_dtype.lanes() > 1) {
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
     PrintIndent();
@@ -7636,7 +8899,7 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
         << "PTO SIMT vector BufferStore expects the value element dtype to "
            "match the buffer element dtype, got "
         << value_dtype << " vs " << buffer_dtype;
-    if (TryEmitRngBroadcastStore(op)) {
+    if (TryEmitRngBroadcastStore(op, index)) {
       return;
     }
     ICHECK(!tl::IsAscendVectorizableFP8(buffer_dtype) ||
@@ -7645,10 +8908,9 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
            "4, and 8 only, got "
         << value_dtype;
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
-    std::string index_str =
-        RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-    if (const auto *ramp = op->indices[0].as<RampNode>()) {
-      CheckContiguousRampStride(op->indices[0], "store");
+    std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+    if (const auto *ramp = index.as<RampNode>()) {
+      CheckContiguousRampStride(index, "store");
       index_str = RemoveOutermostParentheses(PrintExpr_(ramp->base));
     }
     PrintIndent();
@@ -7656,8 +8918,8 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
     const std::string contiguous_suffix =
         store_lanes > 1 ? ", contiguous=" + std::to_string(store_lanes) : "";
     if (scope == "local.fragment" || scope == "local") {
-      stream << "pto.store(" << value << ", "
-             << GetVarID(op->buffer->data.get()) << ", " << index_str
+      stream << "pto.store(" << SimtLocalStoreAdapter(value, buffer_dtype)
+             << ", " << GetVarID(op->buffer->data.get()) << ", " << index_str
              << contiguous_suffix << ")\n";
       return;
     }
@@ -7720,7 +8982,8 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const BufferStoreNode *op) {
   LOG(FATAL) << "PTO non-SIMT vector BufferStore is not supported yet";
 }
 
-bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
+bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op,
+                                                  const PrimExpr &index) {
   const auto *broadcast = op->value.as<BroadcastNode>();
   if (broadcast == nullptr) {
     return false;
@@ -7743,9 +9006,9 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const BufferStoreNode *op) {
       << "PTO RNG broadcast store currently supports exactly 2 lanes, got "
       << broadcast->dtype;
 
-  PrimExpr base_index = op->indices[0];
+  PrimExpr base_index = index;
   if (const auto *ramp = base_index.as<RampNode>()) {
-    CheckContiguousRampStride(op->indices[0], "store");
+    CheckContiguousRampStride(index, "store");
     base_index = ramp->base;
   }
 

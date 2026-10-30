@@ -18,7 +18,9 @@ from .allocate import (  # noqa: F401
     alloc_l0c,
 )
 from .annotations import (  # noqa: F401
+    annotate_layout,
     annotate_buffer_versions,
+    annotate_buffer_addresses,
     annotate_manual_multi_buffer,
     annotate_unlimit_memory,
 )
@@ -66,6 +68,10 @@ from .tile_schedule import (  # noqa: F401
 from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Vector, VectorFrame  # noqa: F401
 
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
+from . import vmi as vmi  # noqa: F401 (exposed as T.vmi.*)
+
+# Scalar reciprocal sqrt is a frontend composition of common math ops.
+from .math import rsqrt  # noqa: F401
 
 # Ascend owns its debug surface: device_assert lowers through the toolkit's
 # assert() macro, print gates by the NPU execution model (no CUDA-style
@@ -108,6 +114,7 @@ _ASCEND_API_ALL = (
     "alloc_l1",
     "alloc_ss",
     "annotate_buffer_versions",
+    "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
     "assume_conflict",
@@ -121,7 +128,9 @@ _ASCEND_API_ALL = (
     "rng_init",
     "rng_rand",
     "rng_rand_float",
+    "rsqrt",
     "simd",
+    "vmi",
     "unroll",
 )
 

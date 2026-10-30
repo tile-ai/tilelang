@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "ascend/op/nd2nz.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,19 @@ bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   if (auto call_op = op->op.as<Op>()) {
     const std::string &name = call_op.value()->name;
     if (name.rfind(kSimdOpPrefix, 0) == 0) {
+      if (op_name != nullptr) {
+        *op_name = name;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsVmiOp(const CallNode *op, std::string *op_name = nullptr) {
+  if (auto opt_call_op = op->op.as<Op>()) {
+    const std::string &name = opt_call_op.value()->name;
+    if (name.rfind("tl.vmi.", 0) == 0) {
       if (op_name != nullptr) {
         *op_name = name;
       }
@@ -1622,44 +1636,40 @@ void CodeGenTileLangAscend::EmitUbufToL1Copy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitNd2NzScatter_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_scatter";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const std::string dst_dtype = GetStringImmArg(op, 4, kIntrinsic, "dst_dtype");
-  const std::string src_dtype = GetStringImmArg(op, 5, kIntrinsic, "src_dtype");
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
+  const std::string src_dtype =
+      GetStringImmArg(op, 5, "tl.ascend_nd2nz_scatter", "src_dtype");
+  const std::string dst_dtype =
+      GetStringImmArg(op, 6, "tl.ascend_nd2nz_scatter", "dst_dtype");
 
   std::ostringstream function_name;
   function_name << (IsInsideSimdVF() ? "ascend_nd2nz_scatter_callee"
                                      : "ascend_nd2nz_scatter")
-                << "<" << rows << ", " << cols << ", " << src_dtype << ", "
-                << dst_dtype << ">";
+                << "<" << rows << ", " << cols << ", " << geometry.dst_pitch
+                << ", " << src_dtype << ", " << dst_dtype << ">";
   EmitCApiCall_(function_name.str(),
                 {{op->args[0], "(__ubuf__ " + src_dtype + "*)(", ")"},
                  {op->args[1], "(__ubuf__ " + dst_dtype + "*)(", ")"}});
 }
 
 void CodeGenTileLangAscend::EmitNd2NzPostCopy_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_post_copy";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const int64_t full_rows = GetIntImmArg(op, 4, kIntrinsic, "full_rows");
-  const std::string dst_dtype = GetStringImmArg(op, 5, kIntrinsic, "dst_dtype");
-
-  const int64_t element_bytes = dst_dtype == "float" ? 4 : 2;
-  const int64_t elements_per_c0 = 32 / element_bytes;
-  const int64_t burst_num = cols / elements_per_c0;
-  const int64_t burst_len = rows;
-  constexpr int64_t kSourceGap = 1;
-  const int64_t destination_gap = full_rows - rows;
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
+  const int64_t burst_num = geometry.Bursts();
+  const int64_t burst_len = geometry.rows;
+  const int64_t source_gap = geometry.src_pitch - geometry.rows;
+  const int64_t destination_gap = geometry.dst_pitch - geometry.rows;
   const std::string destination = PrintExpr(op->args[0]);
   const std::string source = PrintExpr(op->args[1]);
 
   PrintIndent();
   stream << "asc_copy_ub2l1((__cbuf__ void*)(" << destination
          << "), (__ubuf__ void*)(" << source << "), " << burst_num << ", "
-         << burst_len << ", " << kSourceGap << ", " << destination_gap
+         << burst_len << ", " << source_gap << ", " << destination_gap
          << ");\n";
 }
 
@@ -2427,6 +2437,19 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << ");\n";
   }
 
+  // --- SimdVF dual-source interleaved store: (addr, src0, src1) ---
+  else if (op->op.same_as(tl::simd_vst2())) {
+    ICHECK_EQ(op->args.size(), 3);
+    DataType dtype = op->args[1].dtype().element_of();
+    std::string src0 = this->PrintExpr(op->args[1]);
+    std::string src1 = this->PrintExpr(op->args[2]);
+    std::string addr = this->PrintExpr(op->args[0]);
+    this->PrintIndent();
+    this->stream << "simd_inst::vst_x2(" << src0 << ", " << src1
+                 << ", (__ubuf__ " << CCEUBufType(dtype) << "*)" << addr
+                 << ");\n";
+  }
+
   // --- SimdVF scatter-store blocks: (src, base, stride, mask [, post]) ---
   else if (op->op.same_as(tl::simd_vsstb())) {
     ICHECK(op->args.size() == 4 || op->args.size() == 5);
@@ -2580,6 +2603,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Unsupported RNG distribution on Ascend: " << dist;
     os << "tl::philox_rand_" << dist << "(&" << ascend_rng_state_var_ << ")";
   } else {
+    std::string op_name;
+    // Evaluate statements print their value through this CallNode visitor, so
+    // statement-form VMI calls such as vstore are rejected here as well.
+    if (IsVmiOp(op, &op_name)) {
+      LOG(FATAL) << "Ascend CCE codegen does not support " << op_name
+                 << "; use target='pto' for T.vmi.*";
+    }
     CodeGenC::VisitExpr_(op, os);
   }
 }
@@ -3764,6 +3794,18 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             bool skip_first_arg,
                                             std::ostream &os) {
   DataType ret_dtype = GetRuntimeDataType(ret_type);
+  // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
+  // Select the scalar-core implementation using the existing VF context.
+  if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
+      global_symbol == "sqrtf") {
+    global_symbol = "AscendC::Std::sqrt";
+    if (!has_ascend_std_math_included_) {
+      // The Std headers use AscendC annotations from kernel_operator.h.
+      decl_stream << "#include <kernel_operator.h>\n";
+      decl_stream << "#include <utils/std/cmath.h>\n";
+      has_ascend_std_math_included_ = true;
+    }
+  }
   if (ret_dtype.is_fixed_length_vector()) {
     ValidateGenericVectorType("external call", ret_dtype);
     // Scalarize: for each lane, extract scalar args, call the scalar
