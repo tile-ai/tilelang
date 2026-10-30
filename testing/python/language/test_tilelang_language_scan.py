@@ -12,14 +12,14 @@ def _torch_cummax(chunk, dim, reverse):
     return chunk.cummax(dim=dim).values
 
 
-def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32):
+def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, threads=256):
     @T.prim_func
     def cumsum(
         A: T.Tensor((M, N), dtype),
         B: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), dtype)
 
             T.copy(A[by * block_M, bx * block_N], A_shared)
@@ -68,9 +68,174 @@ def test_fragment_scan_annotations_preserved():
     assert 'test.scan="cummax"' in cummax_line
 
 
-def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize(
+    "shape, threads",
+    [((128,), 33), ((128,), 96), ((8, 32), 96), ((8, 32), 160)],
+)
+def test_cuda_shared_scan_supported_threads(op, shape, threads):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            scan(shared, dim=-1)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        tl.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize(
+    "shape, threads, requirement",
+    [
+        ((128,), 31, "at least 32 block threads"),
+        ((8, 32), 31, "at least 32 block threads and a multiple of 32"),
+        ((8, 32), 48, "at least 32 block threads and a multiple of 32"),
+    ],
+)
+def test_cuda_shared_scan_unsupported_threads(op, shape, threads, requirement):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            scan(shared, dim=-1)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with (
+        target,
+        pytest.raises(
+            ValueError,
+            match=rf"T\.{op}.*{requirement}.*got {threads}",
+        ),
+    ):
+        tl.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("threads, axis_name", [((96, 2), "ty"), ((96, 1, 2), "tz")])
+@pytest.mark.parametrize(
+    "shape, dim, symbol",
+    [((128,), 0, "tl::CumSum1D"), ((8, 32), 1, "tl::CumSum2D")],
+)
+def test_cuda_shared_scan_guards_invariant_extra_thread_axes(threads, axis_name, shape, dim, symbol):
+    @T.prim_func
+    def main(A: T.Tensor(shape, T.float32), B: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared(shape, T.float32)
+            T.copy(A, shared)
+            T.cumsum(shared, dim=dim)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    scan_pos = artifact.device_mod.script().index(symbol)
+    assert f"if {axis_name} == 0:" in artifact.device_mod.script()[:scan_pos]
+
+    kernel = tl.compile(main, out_idx=-1)
+    data = torch.randn(shape, device="cuda")
+    torch.testing.assert_close(kernel(data), torch.cumsum(data, dim=dim), atol=1e-3, rtol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+@pytest.mark.parametrize("threads, axis", [((96, 2), 1), ((96, 1, 2), 2)])
+def test_cuda_shared_scan_rejects_axis_dependent_regions(op, threads, axis):
+    scan = T.cumsum if op == "cumsum" else T.cummax
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 128), T.float32), B: T.Tensor((2, 128), T.float32)):
+        with T.Kernel(1, threads=threads):
+            thread_axis = T.get_thread_binding(axis)
+            shared = T.alloc_shared((2, 128), T.float32)
+            T.copy(A, shared)
+            scan(shared[thread_axis, :], dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with (
+        target,
+        pytest.raises(ValueError, match=rf"T\.{op}.*extra threadIdx\.y/z axes"),
+    ):
+        tl.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+def test_cuda_shared_scan_preserves_thread_offset():
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=64):
+            tx = T.get_thread_binding(0)
+            shared = T.alloc_shared((128,), T.float32)
+            T.copy(A, shared)
+            if tx >= 32:
+                T.cumsum(shared, dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    assert "tl::CumSum1D<32, false, 32>" in artifact.device_mod.script()
+
+
+@tilelang.testing.requires_cuda
+def test_cuda_shared_scan_rejects_pure_bind_alias_to_extra_thread_axis():
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 128), T.float32), B: T.Tensor((2, 128), T.float32)):
+        T.func_attr({"global_symbol": "main", "target": target})
+        with T.Kernel(1, threads=(96, 2)):
+            thread_axis = T.get_thread_binding(1)
+            row = T.bind(thread_axis)
+            shared = T.alloc_shared((2, 128), T.float32)
+            T.copy(A, shared)
+            T.cumsum(shared[row, :], dim=0)
+            T.copy(shared, B)
+
+    with (
+        target,
+        pytest.raises(ValueError, match=r"T\.cumsum.*extra threadIdx\.y/z axes"),
+    ):
+        mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(main))
+        tl.transform.LowerTileOp()(mod)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("axis_tag", ["threadIdx.y", "threadIdx.z"])
+def test_cuda_shared_scan_ignores_finished_extra_thread_scope(axis_tag):
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((128,), T.float32)
+            T.copy(A, shared)
+            with T.launch_thread(axis_tag, 2):
+                T.evaluate(0)
+            T.cumsum(shared, dim=0)
+            T.copy(shared, B)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        artifact = tl.lower(main, target=target)
+    script = artifact.device_mod.script()
+    scan_pos = script.index("tl::CumSum1D")
+    assert "if " not in script[max(0, scan_pos - 120) : scan_pos]
+
+
+def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem", threads=256):
     if scope == "smem":
-        program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
+        program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype, threads)
     elif scope == "fragment":
         program = cumsum_fragment_test(M, N, block_M, block_N, dim, reverse, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
@@ -186,6 +351,19 @@ def test_cumsum_fragment():
 
     # Test different dtypes
     run_cumsum(128, 128, 64, 64, dtype=T.float32, scope="fragment")
+
+
+@pytest.mark.skipif(torch.version.hip is not None, reason="CUDA C++ path only; HIP retains its existing limits.")
+def test_cumsum_smem_96_threads():
+    run_cumsum(128, 128, 64, 64, threads=96)
+    run_cumsum_1d(96, 96)
+
+
+@tilelang.testing.requires_rocm
+def test_hip_cumsum_smem_96_threads_keeps_static_assert():
+    program = cumsum_smem_test(128, 128, 64, 64, threads=96)
+    with pytest.raises(RuntimeError, match="static assertion failed"):
+        tl.compile(program, out_idx=-1)
 
 
 def test_cumsum_smem_1d():

@@ -104,7 +104,11 @@ inline const char *InferLevelToString(InferLevel level) {
 
 struct LowerArgs {
   Target target;
+  // thread_bounds is the x-axis range used by existing lowering helpers.
+  // thread_bindings carries every materialized axis so CUDA lowering can detect
+  // extra y/z planes that may execute the same tile operation.
   Range thread_bounds;
+  ffi::Array<tirx::IterVar> thread_bindings;
   // Logical thread index consumed by lowering helpers. This is an expression
   // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
   // a thread_extent AttrStmt), while targets without thread bindings (e.g.
