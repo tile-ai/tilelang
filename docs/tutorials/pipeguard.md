@@ -13,7 +13,8 @@ python -m pip install ./3rdparty/pipeguard
 
 Use Python 3.10+ in the same environment as TileLang. The pinned dependency
 contains the checker, capture adapters, and unit tests, without benchmark
-corpora or evaluation results. Access to the PipeGuard repository is required.
+corpora or evaluation results. Maximal is the only checker engine. Access to the
+PipeGuard repository is required.
 
 ## Check a kernel
 
@@ -53,6 +54,10 @@ values. Launch dimensions must match the lowered kernel.
 Capture and checking run in a subprocess with one shared deadline (120 seconds
 by default). Timeout returns `INCONCLUSIVE` / `CAPTURE_CHECK_TIMEOUT`. The deadline
 starts after lowering and IR serialization. No GPU kernel is launched.
+
+Frontend mappings and protocol semantics are documented in the dependency's
+[frontend guide](../../3rdparty/pipeguard/docs/frontends.md) and
+[semantics guide](../../3rdparty/pipeguard/docs/semantics.md).
 
 ## Results and scope
 
