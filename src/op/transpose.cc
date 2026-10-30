@@ -5,6 +5,7 @@
 
 #include "transpose.h"
 #include "support/check.h"
+#include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 
 #include <dlpack/dlpack.h>
@@ -31,6 +32,35 @@ size_t SourceAxisForDestinationAxis(size_t dst_axis, size_t rank) {
   if (dst_axis == rank - 1)
     return rank - 2;
   return dst_axis;
+}
+
+/// Validate that dst is src with the final two axes swapped.
+///
+/// Extents may be symbolic, and two copies of the same expression are not
+/// necessarily the same node, so equality is decided by the arithmetic analyzer
+/// rather than by pointer comparison. Doing this after region normalization is
+/// what makes the check cover both the language wrapper and direct construction
+/// of `tl.tileop.transpose`.
+void ValidateTransposeExtents(const Array<Range> &src_range,
+                              const Array<Range> &dst_range) {
+  size_t rank = src_range.size();
+  ICHECK_EQ(rank, dst_range.size())
+      << "Transpose requires src and dst to have the same rank, but got "
+      << rank << " source axes and " << dst_range.size() << " destination axes";
+  ICHECK_GE(rank, 2) << "Transpose requires at least two dimensions";
+
+  arith::Analyzer analyzer;
+  for (size_t axis = 0; axis < rank; axis++) {
+    size_t dst_axis = SourceAxisForDestinationAxis(axis, rank);
+    const PrimExpr &src_extent = src_range[axis]->extent;
+    const PrimExpr &dst_extent = dst_range[dst_axis]->extent;
+    bool same_extent = analyzer.CanProveEqual(src_extent, dst_extent);
+    ICHECK(same_extent)
+        << "Transpose destination shape must be the source shape with the "
+           "final two axes swapped; source axis "
+        << axis << " has extent " << src_extent << " but destination axis "
+        << dst_axis << " has extent " << dst_extent;
+  }
 }
 
 std::vector<int> MakeSourceAxisToIterVarMap(Array<Range> ranges,
@@ -89,6 +119,7 @@ Transpose::Transpose(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dst = dst_access.region->buffer;
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
+  ValidateTransposeExtents(node->src_range, node->dst_range);
   node->SetAccessRegions({src_access, dst_access});
   data_ = std::move(node);
 }
