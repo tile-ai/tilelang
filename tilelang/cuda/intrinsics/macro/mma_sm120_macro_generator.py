@@ -28,8 +28,8 @@ class BlockScaleMmaConfig:
     scale_vec_size: int
     sf_vec_size: int
     scale_type: str
-    a_dtype_abbrv: str
-    b_dtype_abbrv: str
+    # PTX operand types the kind accepts for A and B.
+    operand_dtype_abbrvs: tuple[str, ...]
     # Accessing T.float32 here would create a circular import during language initialization.
     accum_dtype: str = "float32"
     active_sfa_threads: int = 16
@@ -272,10 +272,57 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         scale_vec_size=4,
         sf_vec_size=16,
         scale_type="ue4m3",
-        a_dtype_abbrv="e2m1",
-        b_dtype_abbrv="e2m1",
+        operand_dtype_abbrvs=("e2m1",),
+    ),
+    # MXFP4: packed E2M1 with one UE8M0 scale per 32 K elements. A scale word
+    # covers two K64 atoms; the byte selector (0 or 2) picks the atom's half.
+    ("mxf4nvf4", 2, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf4nvf4",
+        mma_prefix="m16n8k64",
+        atom_k=64,
+        scale_vec_size=2,
+        sf_vec_size=32,
+        scale_type="ue8m0",
+        operand_dtype_abbrvs=("e2m1",),
+    ),
+    # MX block scaling: one UE8M0 scale per 32 K elements. A packed scale word
+    # holds the scales of four consecutive K32 atoms; the byte selector picks one.
+    # Every operand occupies one byte per element in the MMA registers: FP8
+    # loads with the ordinary 8-bit ldmatrix fragments, and E2M1 comes from
+    # padded float4_e2m1_unpacked shared memory through the expanding ldmatrix.
+    ("mxf8f6f4", 1, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf8f6f4",
+        mma_prefix="m16n8k32",
+        atom_k=32,
+        scale_vec_size=1,
+        sf_vec_size=32,
+        scale_type="ue8m0",
+        operand_dtype_abbrvs=("e4m3", "e5m2", "e2m1"),
     ),
 }
+
+
+def _is_packed_fp4(dtype) -> bool:
+    return str(dtype) == "float4_e2m1fn"
+
+
+def block_scale_register_dtype(dtype) -> str:
+    """Register fragment dtype for a block-scaled MMA operand."""
+    # Unpacked FP4 is a shared-memory storage tag; registers hold byte containers.
+    return "uint8" if "float4_e2m1_unpacked" in str(dtype) else str(dtype)
+
+
+def block_scale_mma_kind_for_dtypes(a_dtype: str, b_dtype: str, sf_granularity_k: int = 16) -> tuple[str, int, str]:
+    """Return the SM120 ``(kind, scale_vec_size, scale_type)`` for operand dtypes.
+
+    Packed E2M1 on both sides selects ``kind::mxf4nvf4``: NVFP4 (UE4M3 per 16)
+    or, with a granularity of 32, MXFP4 (UE8M0 per 32). Any byte-per-element
+    operand (FP8, or E2M1 in unpacked shared storage) selects MX
+    ``kind::mxf8f6f4``.
+    """
+    if _is_packed_fp4(a_dtype) and _is_packed_fp4(b_dtype):
+        return ("mxf4nvf4", 2, "ue8m0") if int(sf_granularity_k) == 32 else ("mxf4nvf4", 4, "ue4m3")
+    return "mxf8f6f4", 1, "ue8m0"
 
 
 def _get_block_scale_mma_config(kind: str, scale_vec_size: int, scale_type: str) -> BlockScaleMmaConfig:
@@ -318,17 +365,21 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         self.is_blockscaled = is_blockscaled
         if is_blockscaled:
             self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
+            operands = self.block_scale_config.operand_dtype_abbrvs
             a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
             b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
+            # kind::mxf8f6f4 reads one byte per element, so E2M1 must use unpacked storage.
+            packed_fp4 = self.block_scale_config.kind == "mxf8f6f4" and (_is_packed_fp4(a_dtype) or _is_packed_fp4(b_dtype))
             if (
-                a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
-                or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
+                a_dtype_abbrv not in operands
+                or b_dtype_abbrv not in operands
+                or packed_fp4
                 or str(accum_dtype) != self.block_scale_config.accum_dtype
             ):
                 raise ValueError(
-                    f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
-                    f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
-                    f"accum_dtype={self.block_scale_config.accum_dtype}; "
+                    f"{self.block_scale_config.kind} expects a_dtype and b_dtype in {operands}"
+                    + (" (E2M1 as float4_e2m1_unpacked shared storage)" if self.block_scale_config.kind == "mxf8f6f4" else "")
+                    + f", accum_dtype={self.block_scale_config.accum_dtype}; "
                     f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
                 )
             self.kind = self.block_scale_config.kind
@@ -360,11 +411,21 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
         if self.is_blockscaled:
-            self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv
-            self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv
+            self.a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
+            self.b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
             self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
         else:
             super()._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
+
+    @property
+    def uses_packed_fp4(self) -> bool:
+        """Whether operands are packed E2M1 (``kind::mxf4nvf4``, NVFP4 or MXFP4)."""
+        return self.is_blockscaled and self.kind == "mxf4nvf4"
+
+    @property
+    def is_nvf4(self) -> bool:
+        """Whether this emitter issues NVFP4 (``kind::mxf4nvf4.scale_vec::4X``)."""
+        return self.uses_packed_fp4 and self.scale_vec_size == 4
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
         if self.is_blockscaled:
@@ -373,7 +434,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             super()._initialize_mma_prefix(k_dim)
 
     def make_mma_load_layout(self, local_buf, matrix="A"):
-        if not self.is_blockscaled or matrix != "A":
+        if not self.uses_packed_fp4 or matrix != "A":
             return super().make_mma_load_layout(local_buf, matrix)
 
         # SM120 A registers are ordered (K8, M8, K32), matching ldmatrix.x4.
@@ -414,7 +475,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         )
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        if not self.is_blockscaled:
+        if not self.uses_packed_fp4:
             return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
@@ -464,7 +525,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         return _warp_ld_a_e2m1(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        if not self.is_blockscaled:
+        if not self.uses_packed_fp4:
             return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
@@ -553,6 +614,19 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
+    def _scale_byte_id(self, k_start: PrimExpr, ki: PrimExpr, sf_granularity_k: int):
+        """Byte of the packed scale word that holds this K atom's scale.
+
+        ``scale_vec::4X`` consumes all four bytes, so its selector is 0. With
+        ``scale_vec::2X`` a K64 atom reads one half (selector 0 or 2), and with
+        ``scale_vec::1X`` a K32 atom reads one byte. The selector folds to a
+        constant when the K tile is a multiple of four scale blocks.
+        """
+        if self.scale_vec_size == 4:
+            return 0
+        _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
+        return (_k_start + self.micro_size_k * ki) // int(sf_granularity_k) % 4
+
     @staticmethod
     def _kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr):
         """Return the flattened uint32 offset for one packed scale word."""
@@ -609,6 +683,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
         scale_a_word_k = self._scale_word_k(k_start, k_inner, sf_a_granularity_k)
         scale_b_word_k = self._scale_word_k(k_start, k_inner, sf_b_granularity_k)
+        scale_a_byte_id = self._scale_byte_id(k_start, k_inner, sf_a_granularity_k)
+        scale_b_byte_id = self._scale_byte_id(k_start, k_inner, sf_b_granularity_k)
         thread_binding = self.get_thread_binding()
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
@@ -674,6 +750,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     i * warp_cols * local_size_out + j * local_size_out,
                     scale_a_ptr,
                     scale_b_ptr,
+                    scale_a_byte_id,
+                    0,
+                    scale_b_byte_id,
+                    0,
                 )
                 if replicate_b:
                     if sf_layout == "blockscaled_chunk_kmajor":
@@ -706,6 +786,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                         i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
                         scale_a_ptr,
                         scale_b_rep_ptr,
+                        scale_a_byte_id,
+                        0,
+                        scale_b_byte_id,
+                        0,
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
@@ -926,6 +1010,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_layout: str = "rowmajor",
     ):
         """Emit an SM120 full-tile block-scaled MMA register micro-pipeline."""
+        if not self.is_nvf4:
+            raise ValueError("sm120 full-tile MMA currently requires kind::mxf4nvf4")
         if self.n_dim != 16:
             raise ValueError("sm120 full-tile MMA requires replicated B n_dim=16")
         if not self.b_transposed:

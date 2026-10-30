@@ -737,7 +737,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  * The method recognizes and emits code for (non-exhaustive): cp.async and its
  * commit/wait variants, tma_load/store and im2col variants, ptX
  * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
- * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
+ * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp/
+ * ptx_mma_block_scale), low-level PTX
  * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
  * paths for special small-float encodings (e.g., float4 e2m1fn)
  * and related external calls, and other TL runtime calls.
@@ -836,8 +837,9 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // args[2] = num_elems, args[3] = predicate (optional)
     int total_bytes = GetTileLangCPAsyncTransferBytes(op);
 
-    std::string dst = PrintExpr_(op->args[0]);
-    std::string src = PrintExpr_(op->args[1]);
+    // Packed FP4 operands are copied through byte pointers, as for ldmatrix.
+    std::string dst = PrintBytePointerExpr_(op->args[0], /*packed_fp4=*/true);
+    std::string src = PrintBytePointerExpr_(op->args[1], /*packed_fp4=*/true);
     std::string size = std::to_string(total_bytes);
 
     if (op->args.size() == 3) {
@@ -1067,12 +1069,30 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     PrintIndent();
     stream << ss.str();
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
+    // An optional trailing string selects an element-format variant.
+    bool has_variant =
+        op->args.size() == 5U && op->args.back().as<StringImmNode>();
+    ICHECK(op->args.size() == 4U || has_variant);
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl.ptx_ldmatrix_x" + std::to_string(num);
+    if (has_variant) {
+      std::string variant = Downcast<StringImm>(op->args.back())->value;
+      ICHECK_EQ(variant, "b4x16_p64")
+          << "Unsupported ptx_ldmatrix variant: " << variant;
+      ICHECK_EQ(trans, 0) << "ldmatrix .b4x16_p64 has no transposed form";
+      func_name = "tl.ptx_ldmatrix_" + variant + "_x" + std::to_string(num);
+    }
     if (trans == 1)
       func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    // ldmatrix takes a plain shared-memory address, which CuTeDSL FP4
+    // pointers (packed or 16U4_ALIGN16B) do not lower to; pass their rows as
+    // byte pointers.
+    std::string smem_ptr =
+        PrintBytePointerExpr_(op->args[2], /*packed_fp4=*/true);
+    std::string local_ptr = PrintExpr_(op->args[3]);
+    PrintIndent();
+    stream << func_name << "(" << smem_ptr << ", " << local_ptr << ")\n";
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -1251,6 +1271,40 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
            << ", " << b_bias << ", " << c_ref << ", " << c_bias << ", "
            << meta_ref << ", " << meta_bias << ", " << sparse_selector << ", "
            << saturate << ")\n";
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
+    // SM120-family warp-level block-scaled MMA; see the CUDA codegen for the
+    // argument layout. The scale operands are pointers to packed uint32
+    // scale words; the byte and thread selectors pick the scales of the atom.
+    ICHECK_EQ(op->args.size(), 21U);
+    std::string accum_dtype = Downcast<StringImm>(op->args[0])->value;
+    std::string shape = Downcast<StringImm>(op->args[1])->value;
+    std::string A_layout = Downcast<StringImm>(op->args[2])->value;
+    std::string B_layout = Downcast<StringImm>(op->args[3])->value;
+    std::string kind = Downcast<StringImm>(op->args[4])->value;
+    int scale_vec_size = static_cast<int>(Downcast<IntImm>(op->args[5])->value);
+    std::string A_dtype = Downcast<StringImm>(op->args[6])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[7])->value;
+    std::string scale_type = Downcast<StringImm>(op->args[8])->value;
+    std::string a_ref = GetVarPtr_(op->args[9]);
+    std::string a_bias = PrintExpr_(op->args[10]);
+    std::string b_ref = GetVarPtr_(op->args[11]);
+    std::string b_bias = PrintExpr_(op->args[12]);
+    std::string c_ref = GetVarPtr_(op->args[13]);
+    std::string c_bias = PrintExpr_(op->args[14]);
+    std::string scale_a = PrintExpr_(op->args[15]);
+    std::string scale_b = PrintExpr_(op->args[16]);
+
+    PrintIndent();
+    stream << "tl.ptx_mma_block_scale(\"" << accum_dtype << "\", \"" << shape
+           << "\", \"" << A_layout << "\", \"" << B_layout << "\", \"" << kind
+           << "\", " << scale_vec_size << ", \"" << A_dtype << "\", \""
+           << B_dtype << "\", \"" << scale_type << "\", " << a_ref << ", "
+           << a_bias << ", " << b_ref << ", " << b_bias << ", " << c_ref << ", "
+           << c_bias << ", " << scale_a << ", " << scale_b;
+    for (size_t i = 17; i < 21; ++i) {
+      stream << ", " << PrintExpr_(op->args[i]);
+    }
+    stream << ")\n";
   } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
     // arg 0: shape (StringImm, e.g. "m64n128k16")
     // arg 1: a_is_k_major (Bool)
@@ -3517,13 +3571,14 @@ CodeGenTileLangCuTeDSL::GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
   return "(" + ptr_str + " + " + index_str + ")";
 }
 
-std::string
-CodeGenTileLangCuTeDSL::PrintBytePointerExpr_(const PrimExpr &expr) {
+std::string CodeGenTileLangCuTeDSL::PrintBytePointerExpr_(const PrimExpr &expr,
+                                                          bool packed_fp4) {
   const CallNode *call = expr.as<CallNode>();
   if (call && call->op.same_as(builtin::address_of())) {
     ICHECK_EQ(call->args.size(), 1U);
     const BufferLoadNode *load = call->args[0].as<BufferLoadNode>();
-    if (load && load->buffer->dtype.is_float4_e2m1_unpacked()) {
+    if (load && (load->buffer->dtype.is_float4_e2m1_unpacked() ||
+                 (packed_fp4 && load->buffer->dtype.is_float4_e2m1fn()))) {
       ICHECK_EQ(load->indices.size(), 1U)
           << "CodeGenTileLangCuTeDSL only supports flat memory";
       return GetSubByteBufferPtrAsByte_(load->buffer.get(), load->indices[0]);
