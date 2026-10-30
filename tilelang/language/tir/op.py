@@ -95,15 +95,11 @@ atan2 = _tvm_op.atan2
 sqrt = _tvm_op.sqrt
 rsqrt = _tvm_op.rsqrt
 clz = _tvm_op.clz
-floor = _tvm_op.floor
-ceil = _tvm_op.ceil
-trunc = _tvm_op.trunc
 abs = _tvm_op.abs
 bitwise_and = _tvm_op.bitwise_and
 bitwise_not = _tvm_op.bitwise_not
 bitwise_or = _tvm_op.bitwise_or
 bitwise_xor = _tvm_op.bitwise_xor
-nearbyint = _tvm_op.nearbyint
 nextafter = _tvm_op.nextafter
 hypot = _tvm_op.hypot
 copysign = _tvm_op.copysign
@@ -406,6 +402,35 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
     return _tvm_op.reinterpret(dtype, value, span)
 
 
+def _rounding_intrin(name, x, span=None):
+    x = tvm.tirx.convert(x)
+    if x.dtype.startswith(("int", "uint", "bool")):
+        return x
+    # TVM folds FloatImm.value as a double without first narrowing to its dtype.
+    # Keep rounding opaque even when simplification later exposes a constant.
+    return call_intrin(x.dtype, _tvm_op.Op.get("tl." + name), x, span=span)
+
+
+def floor(x, span=None):
+    """Round down to an integer, preserving the input dtype."""
+    return _rounding_intrin("floor", x, span)
+
+
+def ceil(x, span=None):
+    """Round up to an integer, preserving the input dtype."""
+    return _rounding_intrin("ceil", x, span)
+
+
+def trunc(x, span=None):
+    """Round toward zero, preserving the input dtype."""
+    return _rounding_intrin("trunc", x, span)
+
+
+def nearbyint(x, span=None):
+    """Round to the nearest integer with ties to even."""
+    return _rounding_intrin("nearbyint", x, span)
+
+
 def round(x, rounding_mode="ties-to-even", span=None):
     """Round elements of the array to the nearest integer.
 
@@ -436,7 +461,7 @@ def round(x, rounding_mode="ties-to-even", span=None):
         rounding_mode = "ties-to-even"
 
     if rounding_mode == "ties-to-even":
-        return _tvm_op.round(x, span)
+        return _rounding_intrin("round", x, span)
     if rounding_mode == "ties-away-from-zero":
         x = tvm.tirx.convert(x)
         return call_intrin(x.dtype, _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
