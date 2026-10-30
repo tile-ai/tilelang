@@ -91,7 +91,7 @@ class Profiler:
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
                 param = self.params[i]
-                if dynamic_symbolic_constraints:
+                if dynamic_symbolic_constraints is not None:
                     param = self._substitute_dynamic_symbols(param, dynamic_symbolic_constraints)
                 ins.append(self.supply(param))
         return ins

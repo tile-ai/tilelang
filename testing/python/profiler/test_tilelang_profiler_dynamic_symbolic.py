@@ -110,13 +110,8 @@ def test_profiler_dynamic_symbolic_missing_constraint():
     kernel = matmul(M, N, K, block_M, block_N, block_K)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
-    # Test that missing constraint raises ValueError
-    try:
+    with pytest.raises(ValueError, match="Dynamic symbolic variable 'm' not found in constraints"):
         profiler.do_bench(dynamic_symbolic_constraints={"wrong_name": 256})
-        raise ValueError("Expected ValueError for missing constraint")
-    except ValueError as e:
-        assert "m" in str(e), f"Error message should mention missing variable 'm', got: {e}"
-        print(f"Correctly raised error for missing constraint: {e}")
 
 
 def test_profiler_dynamic_symbolic_with_input_tensors():
@@ -185,6 +180,24 @@ def test_profiler_substitution_keeps_static_dimensions():
     concrete = profiler._substitute_dynamic_symbols(param, {"unused": 4})
 
     assert concrete.shape == [2, 3]
+
+
+@pytest.mark.parametrize("constraints", [{}, {"wrong_name": 3}], ids=["empty", "unrelated"])
+def test_profiler_bench_rejects_missing_symbolic_constraints_on_cpu(monkeypatch, constraints):
+    monkeypatch.setattr(tilelang.utils.device, "get_current_device", lambda: torch.device("cpu"))
+    m = T.dynamic("m")
+    param = KernelParam("float32", [m + 1])
+    profiler = Profiler([param], [], tilelang.TensorSupplyType.Zero)
+
+    with pytest.raises(ValueError, match="Dynamic symbolic variable 'm' not found in constraints"):
+        profiler.do_bench(
+            func=lambda value: value,
+            backend="wall",
+            device="cpu",
+            n_warmup=1,
+            n_repeat=1,
+            dynamic_symbolic_constraints=constraints,
+        )
 
 
 def test_profiler_benchmarks_symbolic_shape_expressions_on_cpu(monkeypatch):
