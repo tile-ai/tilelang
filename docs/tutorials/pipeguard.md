@@ -13,10 +13,39 @@ python -m pip install ./3rdparty/pipeguard
 
 Use Python 3.10+ in the same environment as TileLang. The pinned dependency
 contains the checker, capture adapters, and unit tests, without benchmark
-corpora or evaluation results. Maximal is the only checker engine. Access to the
-PipeGuard repository is required.
+corpora or evaluation results. Access to the PipeGuard repository is required.
 
-## Check a kernel
+## Quick start
+
+Run the complete kernels in [`examples/pipeguard`](../../examples/pipeguard/README.md)
+from the TileLang checkout:
+
+```bash
+python examples/pipeguard/check_kernels.py
+```
+
+Expected output (compiler logs may also appear):
+
+```text
+shared_safe: SAFE (expected SAFE)
+shared_race: DATA_HAZARD (expected DATA_HAZARD)
+tma_safe: SAFE (expected SAFE)
+tma_missing_arrival: SYNC_HAZARD (expected SYNC_HAZARD)
+```
+
+The shared-memory pair demonstrates cross-warp publication with and without a
+CTA barrier. The TMA pair demonstrates correct completion observation and missing
+thread arrivals. The examples use a fixed SM90a target and one 128-thread CTA;
+they lower and check the kernels without launching them. Automatic thread-storage
+synchronization is disabled to preserve the intentionally missing barrier.
+
+To inspect one case and its diagnostics:
+
+```bash
+python examples/pipeguard/check_kernels.py --case tma_missing_arrival --json
+```
+
+## Check your own kernel
 
 Pass a `T.prim_func` to lower and check it without executing it:
 

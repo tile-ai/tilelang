@@ -203,6 +203,20 @@ print("GEMM + ReLU passed.")
 
 `@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. `T.Pipelined` stages global-to-shared transfers, `T.gemm` maps the tile operation to the target backend, and `T.Parallel` expresses the elementwise ReLU epilogue. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then explore the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for layouts, autotuning, and architecture-specific optimizations.
 
+### Optional static checks with PipeGuard
+
+With TileLang installed, run the shared-memory and TMA examples without launching
+a GPU kernel:
+
+```bash
+git submodule update --init 3rdparty/pipeguard
+python -m pip install ./3rdparty/pipeguard
+python examples/pipeguard/check_kernels.py
+```
+
+See the [four example cases and expected results](examples/pipeguard/README.md)
+and the [integration guide](docs/tutorials/pipeguard.md) to check your own kernels.
+
 ## Examples
 
 - **Start here:** [quickstart](https://github.com/tile-ai/tilelang/blob/main/examples/quickstart.py) and [elementwise kernels](https://github.com/tile-ai/tilelang/tree/main/examples/elementwise)
