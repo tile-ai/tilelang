@@ -1,4 +1,6 @@
 # ruff: noqa
+import functools
+
 import torch
 from einops import rearrange, repeat
 from bert_padding import pad_input, unpad_input
@@ -106,3 +108,74 @@ def generate_qkv(q, k, v, query_padding_mask=None, key_padding_mask=None, kvpack
             dq_pad_fn,
             dk_pad_fn,
         )
+
+
+@functools.lru_cache(maxsize=None)
+def flash_attn_varlen_supported(device: int | torch.device | None = None) -> bool:
+    """Whether the installed flash-attn can run varlen attention on this device.
+
+    flash-attn refuses architectures it was not built for at the first call
+    (`RuntimeError: FlashAttention only supports Ampere GPUs or newer.`), so
+    probe once with a minimal varlen call instead of guessing from versions.
+    """
+    try:
+        import flash_attn
+    except ImportError:
+        return False
+
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    elif isinstance(device, int):
+        device = torch.device("cuda", device)
+    elif device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+
+    q = torch.zeros(8, 1, 16, device=device, dtype=torch.float16)
+    cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32, device=device)
+    try:
+        flash_attn.flash_attn_varlen_func(q, q, q, cu_seqlens, cu_seqlens, 4, 4)
+    except RuntimeError:
+        return False
+    return True
+
+
+def varlen_attention_ref(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, causal=False, window_size=None):
+    """Plain-PyTorch varlen attention for devices flash-attn cannot run on.
+
+    Takes the flash-attn varlen layout, `(total_tokens, heads, dim)` with
+    `cu_seqlens_*` holding each sequence's offsets, and returns the same layout.
+    """
+    import torch.nn.functional as F
+
+    heads = q_unpad.size(1)
+    groups = heads // k_unpad.size(1)
+    outs = []
+    for b in range(cu_seqlens_q.numel() - 1):
+        q_start, q_end = int(cu_seqlens_q[b]), int(cu_seqlens_q[b + 1])
+        k_start, k_end = int(cu_seqlens_k[b]), int(cu_seqlens_k[b + 1])
+        if q_end == q_start:
+            continue
+        qb = q_unpad[q_start:q_end].transpose(0, 1).unsqueeze(0).float()
+        kb = k_unpad[k_start:k_end].transpose(0, 1).unsqueeze(0).float()
+        vb = v_unpad[k_start:k_end].transpose(0, 1).unsqueeze(0).float()
+        if groups > 1:
+            kb = kb.repeat_interleave(groups, dim=1)
+            vb = vb.repeat_interleave(groups, dim=1)
+
+        mask = None
+        if causal or window_size is not None:
+            rows = torch.arange(q_end - q_start, device=q_unpad.device).unsqueeze(1)
+            cols = torch.arange(k_end - k_start, device=q_unpad.device).unsqueeze(0)
+            # flash-attn aligns a causal mask to the bottom-right corner.
+            diagonal = cols - rows - (k_end - k_start - (q_end - q_start))
+            mask = diagonal <= 0 if causal else torch.ones_like(diagonal, dtype=torch.bool)
+            if window_size is not None:
+                left, right = window_size
+                if left is not None and left >= 0:
+                    mask = mask & (diagonal >= -left)
+                if right is not None and right >= 0:
+                    mask = mask & (diagonal <= right)
+
+        out = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=mask)
+        outs.append(out.squeeze(0).transpose(0, 1).to(q_unpad.dtype))
+    return torch.cat(outs, dim=0)
