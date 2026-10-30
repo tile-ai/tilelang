@@ -192,6 +192,67 @@ private:
   bool IsLocalVarBuffer(const VarNode *var) const;
   void EmitMixedEntrySnapshot(const VarNode *var);
   void RestoreMixedSectionVariables(const SBlockNode *section);
+  std::string PrintVmiAnnotationValue(const std::string &key,
+                                      const ObjectRef &value);
+  void PrintPtoVmiCall_(const CallNode *op, std::ostream &os);
+  // SSA provenance for PTO values.  The table maps a bound VarNode to its RHS
+  // IR; only Bind/Let registration writes it.  Queries are pure: they never
+  // print, emit, allocate names or modify the persistent table.
+  enum class PtoValueKind {
+    kScalar,
+    kVmiData,
+    kVmiMask,
+    kVmiPair,
+    kVoid,
+    kHandle,
+    kOtherVector,
+    kUnknown,
+  };
+  struct PtoValueInfo {
+    PtoValueKind kind{PtoValueKind::kUnknown};
+    // True only when the expression itself is a local.var BufferLoad, or a
+    // pure Var/Let-body/same-dtype-Cast alias of one.  It is a source fact for
+    // the grouped-vbrc compatibility check, not a VMI kind and not a
+    // descendant-containment test.
+    bool is_local_var_read_alias{false};
+  };
+  struct PtoValueQueryContext; // query-local Let overrides + active Var set
+  struct PtoOperandScanner;    // one-level immediate-operand classification
+  PtoValueInfo AnalyzePtoValue_(const PrimExpr &expr) const;
+  PtoValueInfo AnalyzePtoValue_(const PrimExpr &expr,
+                                PtoValueQueryContext *context) const;
+  PtoValueInfo AnalyzePtoValueUncached_(const PrimExpr &expr,
+                                        PtoValueQueryContext *context) const;
+  PtoValueKind ClassifyPtoValue_(const PrimExpr &expr) const;
+  PtoValueKind ClassifyPtoValue_(const PrimExpr &expr,
+                                 PtoValueQueryContext *context) const;
+  PtoValueKind ClassifyVmiCallResult_(const CallNode *op,
+                                      PtoValueQueryContext *context) const;
+  PtoValueInfo ClassifyBufferLoad_(const BufferLoadNode *op) const;
+  PtoValueKind ClassifyOrdinaryExpr_(const PrimExpr &expr,
+                                     PtoValueQueryContext *context) const;
+  static const char *PtoValueKindName(PtoValueKind kind);
+  void CheckPtoScalarOperand_(const PrimExpr &expr, const char *consumer) const;
+  void CheckPtoVmiBridgeOperand_(const CallNode *op, const char *op_name,
+                                 const PtoValueInfo &source_info) const;
+  bool IsVmiLocalRegisterBuffer(const BufferNode *buffer) const;
+  void CheckVmiLocalRegisterIndex(const BufferNode *buffer,
+                                  const PrimExpr &index) const;
+  // Explicit VMI register allocations carry `tl.vmi.alloc_kind` on the actual
+  // allocation.  One table holds both the mutable slot kind and the register
+  // array kind; consumers query the entry that matches their category.  The
+  // table is registered before any allocation is emitted.
+  struct PtoVmiAllocInfo {
+    ffi::String kind;
+    DataType dtype;
+  };
+  void CollectVmiAllocations_(const Stmt &body);
+  void RegisterVmiAllocation_(const Buffer &buffer, const ffi::String &kind,
+                              const char *context);
+  const PtoVmiAllocInfo *FindVmiAllocSlot_(const BufferNode *buffer,
+                                           const char *context) const;
+  const PtoVmiAllocInfo *FindVmiAllocArray_(const BufferNode *buffer,
+                                            const char *context) const;
   bool HasAscendGemmL1(const PrimFunc &func) const;
   bool HasAscendBlockscaledGemmL1(const PrimFunc &func) const;
   bool HasAscendMad(const PrimFunc &func) const;
@@ -241,6 +302,16 @@ private:
   // VarNode to its (low, high) SSA name pair.
   std::unordered_map<const VarNode *, std::pair<std::string, std::string>>
       simd_pair_vars_;
+  // Persistent per-function SSA definitions used by PtoValueKind queries.
+  // Registered at every Bind/Let entry and cleared in ResetFunctionState_.
+  std::unordered_map<const VarNode *, PrimExpr> value_defs_;
+  // Actual VMI register allocations in the current function, keyed by
+  // buffer.data. Owning keys keep cloned Vars alive even if their first
+  // allocation node is replaced. Registered before allocation emission and
+  // cleared in ResetFunctionState_.
+  std::unordered_map<Var, PtoVmiAllocInfo, ffi::ObjectPtrHash,
+                     ffi::ObjectPtrEqual>
+      vmi_allocations_;
   std::vector<PTOGemmEmitContext> gemm_emit_contexts_;
   std::unordered_map<Call, size_t, ObjectPtrHash, ObjectPtrEqual>
       gemm_emit_context_by_call_;
