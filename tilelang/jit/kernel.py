@@ -565,6 +565,16 @@ class JITKernel(Generic[_P, _T]):
         """
         return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
 
+    def check_pipeguard(self, *, launch_grid: tuple[int, ...] | list[int], **kwargs: Any) -> dict[str, Any]:
+        """Run optional PipeGuard static checks without executing this kernel.
+
+        See :func:`tilelang.contrib.pipeguard.check` for exact launch bindings,
+        the selected-CTA scope, timeout, and installation requirements.
+        """
+        from tilelang.contrib.pipeguard import check
+
+        return check(self, launch_grid=launch_grid, **kwargs)
+
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         """
         Returns the source code of the compiled kernel function.
