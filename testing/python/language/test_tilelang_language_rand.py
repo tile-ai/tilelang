@@ -123,5 +123,17 @@ def test_rand_init_in_split_guard(generator):
     assert (A[n:] == sentinel).all(), "rows outside the guard must stay untouched"
 
 
+def test_rand_init_result_cannot_be_bound():
+    """#3029: `rng_init` is a void statement; binding its result is rejected."""
+    with pytest.raises(ValueError, match="value-less expression"):
+
+        @T.prim_func
+        def rand_kernel(Out: T.Tensor((8,), "uint32")):
+            with T.Kernel(1, threads=8):
+                tx = T.get_thread_binding()
+                _state = T.rng_init(1234)
+                Out[tx] = T.rng_rand()
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
