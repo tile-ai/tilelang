@@ -9,6 +9,12 @@ from tilelang import tvm
 from tvm import tirx
 
 
+@pytest.fixture(autouse=True)
+def _disable_kernel_cache(monkeypatch):
+    # Compile-time diagnostics are not emitted when a cached kernel is loaded.
+    monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
+
+
 def _compile_serial(func, out_idx=-1):
     kernel = tilelang.compile(func, target="c", out_idx=out_idx, pass_configs={"tl.cpu_parallel": True})
     assert "#pragma omp" not in kernel.get_kernel_source()
