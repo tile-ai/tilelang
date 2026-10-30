@@ -2204,7 +2204,10 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_has_gemm_ =
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
-  current_function_is_mixed_ = IsAscendMixedKernel(func);
+  const auto sections = GetAscendKernelSections(func);
+  current_function_is_mixed_ =
+      sections.has_vector &&
+      (sections.has_cube || sections.has_vector_subcores);
   if (current_function_is_mixed_) {
     MixedSectionVariableInfo mixed_info =
         MixedSectionLocalVarAnalyzer::Analyze(func->body);
@@ -2220,6 +2223,16 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   if (!current_function_is_mixed_) {
     PrintIndent();
     stream << "pto.init_core()\n";
+  } else if (!sections.has_cube) {
+    // Explicit vector subcores require the physical 1C2V launch group even
+    // without user Cube work. PTOAS emits a mixed binary only when both
+    // physical sections exist; core initialization keeps the idle AIC entry.
+    PrintIndent();
+    stream << "with tl.mixed_kernel_section(\"cube\"):\n";
+    int cube_scope = BeginScope();
+    PrintIndent();
+    stream << "pto.init_core()\n";
+    EndScope(cube_scope);
   }
   if (func_has_gemm_l1 || func_has_blockscaled_gemm_l1) {
     std::vector<Call> gemm_calls;
@@ -2458,16 +2471,26 @@ bool CodeGenTileLangPTO::HasAscendMad(const PrimFunc &func) const {
   return found;
 }
 
-bool CodeGenTileLangPTO::IsAscendMixedKernel(const PrimFunc &func) const {
-  bool has_cube = false;
-  bool has_vector = false;
+CodeGenTileLangPTO::AscendKernelSections
+CodeGenTileLangPTO::GetAscendKernelSections(const PrimFunc &func) const {
+  AscendKernelSections sections;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
     if (const auto *block = node.as<SBlockNode>()) {
-      has_cube = has_cube || block->name_hint == "CUBE";
-      has_vector = has_vector || block->name_hint == "VECTOR";
+      sections.has_cube = sections.has_cube || block->name_hint == "CUBE";
+      if (block->name_hint == "VECTOR") {
+        sections.has_vector = true;
+        if (auto opt = block->annotations.Get("vector_count")) {
+          const auto *count = opt.value().as<IntImmNode>();
+          ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
+              << "Mixed-kernel vector_count must be the constant integer 1 or "
+                 "2, got "
+              << opt.value();
+          sections.has_vector_subcores = true;
+        }
+      }
     }
   });
-  return has_cube && has_vector;
+  return sections;
 }
 
 bool CodeGenTileLangPTO::IsInlineableInvariantSimdBind(

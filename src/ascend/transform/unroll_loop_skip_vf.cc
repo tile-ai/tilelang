@@ -35,6 +35,7 @@
 
 #include "ascend/transform/attr.h"
 #include "ascend/transform/vmi_alloc.h"
+#include "auto_schedule/task_annotations.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -133,7 +134,25 @@ public:
         op->attr_key == "tl.simtvf_scope") {
       return GetRef<Stmt>(op);
     }
-    return StmtExprMutator::VisitStmt_(op);
+    bool boundary_sync = false;
+    if (op->attr_key == tl::attr::kAscendPerCoreTask) {
+      // Decide before unrolling: after expansion the repeated candidates no
+      // longer have a For ancestor, but they still share one logical token.
+      PostOrderVisit(op->body, [&](const ObjectRef &node) {
+        boundary_sync |=
+            node.as<ForNode>() != nullptr || node.as<WhileNode>() != nullptr;
+      });
+    }
+    Stmt result = StmtExprMutator::VisitStmt_(op);
+    if (boundary_sync) {
+      AttrStmt marker = Downcast<AttrStmt>(result);
+      auto metadata =
+          ascend::task_metadata_detail::CopyTaskMetadata(marker->node);
+      metadata.Set(tl::attr::kAscendPerCoreTaskBoundarySync, Integer(1));
+      marker.CopyOnWrite()->node = std::move(metadata);
+      return marker;
+    }
+    return result;
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
