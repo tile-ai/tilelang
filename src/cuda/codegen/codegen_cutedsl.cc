@@ -3278,6 +3278,10 @@ void CodeGenTileLangCuTeDSL::PrintCallExtern_(Type ret_type,
     global_symbol_str = canonicalized_global_symbol_str;
   }
 
+  if (global_symbol_str == "__umulhi" || global_symbol_str == "__umul64hi") {
+    global_symbol_str = "tl.mulhi";
+  }
+
   // Atomic Functions
   if (global_symbol_str.substr(0, 6) == "Atomic") {
     global_symbol_str = "tl." + global_symbol_str;
