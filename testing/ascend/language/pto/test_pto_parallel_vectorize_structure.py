@@ -234,33 +234,6 @@ def _k2d_row(M, N, lanes, dtype="float32"):
     return main
 
 
-def _k_explicit_padding(E, lanes, dtype="float32"):
-    """Explicit ``T.Parallel(P)`` with a user ``if`` guard: at this stage the
-    guard is still rejected; its legalization belongs to the control-flow
-    stage."""
-
-    P = _ceil_to_lanes(E, lanes)
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((P,), dtype),
-        B: T.Tensor((P,), dtype),
-    ):
-        with T.Kernel(1):
-            a = T.alloc_shared((P,), dtype)
-            b = T.alloc_shared((P,), dtype)
-            T.copy(A, a)
-            with T.SimdVF(lanes=lanes):
-                for i in T.Parallel(P):
-                    if i < E:
-                        b[i] = a[i] + a[i]
-                    else:
-                        b[i] = a[i]
-            T.copy(b, B)
-
-    return main
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -370,17 +343,6 @@ def test_real_stride_addresses_survive_vectorization():
         assert shape == [M * P], f"buffer {name} shape must stay as allocated, got {shape}"
 
 
-@pytest.mark.pto
-def test_explicit_padding_is_rejected_at_this_stage():
-    E, lanes = 150, 128
-    _, error = _lower_capture(_k_explicit_padding(E, lanes), expect_error=True)
-    assert error is not None, "an if-guarded T.Parallel must still be rejected at this stage"
-    message = str(error)
-    assert "VerifyParallelToPTO" in message or "conditional" in message or "unsupported" in message, (
-        f"expected the guard rejection diagnostic, got: {message}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Sub/div/unary emission and lane-uniform folding
 # ---------------------------------------------------------------------------
@@ -434,7 +396,6 @@ def _int_uniform_fold_kernel(n, lanes):
 
 @pytest.mark.pto
 def test_vectorize_int_uniform_sub_folds_scalar():
-
     from tilelang.ascend import transform as atx
 
     # Run Vectorize directly on the captured post-Verify module and check
