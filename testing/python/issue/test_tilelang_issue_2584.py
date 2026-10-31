@@ -11,6 +11,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm
 
 N, M = 1024, 512
 
@@ -55,14 +56,20 @@ def test_aligned_1d_load_keeps_tma():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_misaligned_1d_load_reports():
-    with pytest.raises(Exception, match="16-byte aligned"):
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"`A` starts at byte offset 20.*16-byte aligned",
+    ):
         tilelang.compile(_load_kernel(5, True), target="cuda")
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_misaligned_1d_store_reports():
-    with pytest.raises(Exception, match="16-byte aligned"):
+    with pytest.raises(
+        tvm.error.InternalError,
+        match=r"`Out` starts at byte offset 20.*16-byte aligned",
+    ):
         tilelang.compile(_store_kernel(5), target="cuda")
 
 

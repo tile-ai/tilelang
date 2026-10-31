@@ -586,17 +586,20 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
   }
-  const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
-  const Array<Range> &global_range =
-      IsGlobalBuffer(op.src) ? op.src_range : op.dst_range;
-  arith::Analyzer local_analyzer;
-  if (!IsBulkBoxBase16BAligned(global_buffer, global_range, &local_analyzer)) {
-    oss << "a bulk TMA copy must start at a 16-byte aligned address; `"
-        << global_buffer->name << "` starts at byte offset "
-        << local_analyzer.Simplify(
-               FloorDiv(BulkBoxBaseBits(global_buffer, global_range), 8))
-        << ", which cp.async.bulk requires to be 16-byte aligned.";
-    return oss.str();
+  if (IsGlobalBuffer(op.src) || IsGlobalBuffer(op.dst)) {
+    const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
+    const Array<Range> &global_range =
+        IsGlobalBuffer(op.src) ? op.src_range : op.dst_range;
+    arith::Analyzer local_analyzer;
+    if (!IsBulkBoxBase16BAligned(global_buffer, global_range,
+                                 &local_analyzer)) {
+      oss << "a bulk TMA copy must start at a 16-byte aligned address; `"
+          << global_buffer->name << "` starts at byte offset "
+          << local_analyzer.Simplify(
+                 FloorDiv(BulkBoxBaseBits(global_buffer, global_range), 8))
+          << ", which cp.async.bulk requires to be 16-byte aligned.";
+      return oss.str();
+    }
   }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
