@@ -27,6 +27,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <functional>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -574,6 +575,35 @@ private:
       return use;
     }
 
+    /*! The two-operand value nodes, one shared recursion shape: both
+     * operands run through the same check, and each kind additionally
+     * applies the VMI operation matrix. `vmi_op` carries the kind's VMI op
+     * (vadd/vsub/vmul/vdiv). The unary Not and the three-operand Select are
+     * handled separately by the caller. */
+    struct BinaryOperands {
+      const char *vmi_op;
+      DataType dtype;
+      PrimExpr a;
+      PrimExpr b;
+    };
+
+    static std::optional<BinaryOperands> GetBinaryOperands(
+        const PrimExpr &e) {
+      if (const auto *n = e.as<AddNode>()) {
+        return BinaryOperands{"vadd", n->dtype, n->a, n->b};
+      }
+      if (const auto *n = e.as<SubNode>()) {
+        return BinaryOperands{"vsub", n->dtype, n->a, n->b};
+      }
+      if (const auto *n = e.as<MulNode>()) {
+        return BinaryOperands{"vmul", n->dtype, n->a, n->b};
+      }
+      if (const auto *n = e.as<DivNode>()) {
+        return BinaryOperands{"vdiv", n->dtype, n->a, n->b};
+      }
+      return std::nullopt;
+    }
+
     // Per-operation type rules driven by the operands'
     // lane classification. Uniform+Uniform stays scalar (only the base
     // dtype and PTO scalar-support are required); any Varying operand
@@ -583,28 +613,10 @@ private:
     // stays rejected.
     void CheckBinaryOpTypes(const PrimExpr &expr) {
       std::function<void(const PrimExpr &)> check = [&](const PrimExpr &e) {
-        if (const auto *add = e.as<AddNode>()) {
-          check(add->a);
-          check(add->b);
-          CheckOneOp("vadd", add->dtype, add->a, add->b);
-          return;
-        }
-        if (const auto *sub = e.as<SubNode>()) {
-          check(sub->a);
-          check(sub->b);
-          CheckOneOp("vsub", sub->dtype, sub->a, sub->b);
-          return;
-        }
-        if (const auto *mul = e.as<MulNode>()) {
-          check(mul->a);
-          check(mul->b);
-          CheckOneOp("vmul", mul->dtype, mul->a, mul->b);
-          return;
-        }
-        if (const auto *div = e.as<DivNode>()) {
-          check(div->a);
-          check(div->b);
-          CheckOneOp("vdiv", div->dtype, div->a, div->b);
+        if (auto bin = GetBinaryOperands(e)) {
+          check(bin->a);
+          check(bin->b);
+          CheckOneOp(bin->vmi_op, bin->dtype, bin->a, bin->b);
           return;
         }
         if (const auto *cast = e.as<CastNode>()) {
