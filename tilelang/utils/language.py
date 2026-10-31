@@ -454,11 +454,17 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     per-lane width, not the full element width.  Multiply by ``lanes`` so
     that the total bit count is correct.
     """
-    result = tirx.IntImm("int32", 1) if len(shape) == 0 else shape[0]
-    for i in range(1, len(shape)):
-        result = result * shape[i]
+    # Accumulate in int64: a buffer with more than 2**31 bits overflows an
+    # int32 extent before the product is compared or emitted.
+    result = tirx.IntImm("int64", 1)
+    for dim in shape:
+        if isinstance(dim, int):
+            factor = tirx.IntImm("int64", dim)
+        else:
+            factor = dim if str(dim.dtype) == "int64" else tirx.Cast("int64", dim)
+        result = result * factor
     dt = DataType(dtype)
-    return result * dt.bits * dt.lanes
+    return result * tirx.IntImm("int64", dt.bits * dt.lanes)
 
 
 def prim_expr_equal(lhs, rhs) -> bool:
@@ -468,12 +474,22 @@ def prim_expr_equal(lhs, rhs) -> bool:
     Tries structural_equal first, then falls back to expr_deep_equal.
     Python ints are converted to IntImm for comparison.
     """
-    if isinstance(lhs, int) and isinstance(rhs, int):
-        return lhs == rhs
+
+    def _const_value(value):
+        if isinstance(value, int):
+            return value
+        if isinstance(value, tirx.IntImm):
+            return int(value.value)
+        return None
+
+    lhs_const = _const_value(lhs)
+    rhs_const = _const_value(rhs)
+    if lhs_const is not None and rhs_const is not None:
+        return lhs_const == rhs_const
     if isinstance(lhs, int):
-        lhs = tirx.IntImm("int32", lhs)
+        lhs = tirx.IntImm("int64" if not (-(1 << 31) <= lhs < (1 << 31)) else "int32", lhs)
     if isinstance(rhs, int):
-        rhs = tirx.IntImm("int32", rhs)
+        rhs = tirx.IntImm("int64" if not (-(1 << 31) <= rhs < (1 << 31)) else "int32", rhs)
     if ir.structural_equal(lhs, rhs):
         return True
     return tirx.analysis.expr_deep_equal(lhs, rhs)
