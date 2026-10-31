@@ -56,6 +56,37 @@ using arith::IRMutatorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
 
+class ThreadSyncConditionBinder : public StmtExprMutator {
+public:
+  explicit ThreadSyncConditionBinder(StorageScope sync_scope)
+      : sync_scope_(std::move(sync_scope)) {}
+
+private:
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    auto branch = Downcast<IfThenElse>(StmtExprMutator::VisitStmt_(op));
+    bool reads_sync_scope = false;
+    PostOrderVisit(branch->condition, [&](const ObjectRef &node) {
+      if (const auto *load = node.as<BufferLoadNode>()) {
+        reads_sync_scope |=
+            StorageScope::Create(GetPtrStorageScope(load->buffer->data)) ==
+            sync_scope_;
+      }
+    });
+    if (!reads_sync_scope) {
+      return branch;
+    }
+    // Plan the predicate read before the branch so a WAR sync separates them.
+    Var predicate("thread_sync_condition", branch->condition.dtype(),
+                  branch->span);
+    return SeqStmt({Bind(predicate, branch->condition, branch->span),
+                    IfThenElse(predicate, branch->then_case, branch->else_case,
+                               branch->span)},
+                   branch->span);
+  }
+
+  StorageScope sync_scope_;
+};
+
 // Similar to ThreadSyncAfterWaitQueueInserter, but for explicit cp.async
 // synchronization intrinsics (ptx_wait_group).
 //
@@ -2075,7 +2106,7 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
     return func;
   }
   auto *n = func.CopyOnWrite();
-  auto stmt = n->body;
+  auto stmt = ThreadSyncConditionBinder(sync_scope)(n->body);
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
     stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
   }
