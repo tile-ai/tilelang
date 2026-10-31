@@ -13,7 +13,7 @@ row allocation. ``ensure_zero_padding`` does not clear inputs: zero output
 padding requires zero input padding and valid scales.
 Prepacked int16 scales are used directly, including caller-provided padding.
 Quantized dense and grouped GEMMs accept FP8/FP8 or packed FP4/FP4 inputs.
-As in DeepGEMM-Ascend-Nightly, fp8_bmm/fp8_einsum accept FP8 inputs only.
+fp8_bmm/fp8_einsum accept FP8 inputs only.
 FP4 E2M1 values use int8 or float4_e2m1fn_x2 storage, with the lower nibble
 first along the contiguous axis; shapes and strides count packed bytes.
 """
@@ -69,7 +69,7 @@ def _check_quantized_pair(a, b):
     pair = (_input_dtype(a), _input_dtype(b))
     fp8, fp4 = "float8_e4m3fn", "float4_e2m1fn_x2"
     if pair == (fp8, fp4):
-        # TODO: port Nightly's FP8 x FP4 dequant kernel; the heuristic already models it.
+        # TODO: implement the FP8 x FP4 dequant kernel already modeled by the heuristic.
         raise NotImplementedError("FP8 x FP4 (FP8 dequant) kernels are not implemented")
     if pair not in ((fp8, fp8), (fp4, fp4)):
         raise TypeError(f"Supported quantized dtype pairs are FP8/FP8 and FP4/FP4, got {pair}")
@@ -516,9 +516,9 @@ def bf16_bmm(a, b, d, c=None, compiled_dims="nk", epilogue=None) -> None:
 def fp8_bmm(a, b, d, c=None, recipe=(1, 1, 32), compiled_dims="nk", epilogue=None) -> None:
     a_data, sfa = _fp8_operand(a, "a")
     b_data, sfb = _fp8_operand(b, "b")
-    # Match DeepGEMM-Ascend-Nightly's fp8_bmm dtype contract.
+    # Batched quantized GEMM accepts FP8 operands on both sides.
     if a_data.dtype != torch.float8_e4m3fn or b_data.dtype != torch.float8_e4m3fn:
-        raise TypeError("fp8_bmm supports FP8/FP8 inputs only, matching DeepGEMM-Ascend-Nightly")
+        raise TypeError("fp8_bmm supports FP8/FP8 inputs only")
     d, resolved = epilogue_ops.resolve(d, c, epilogue=epilogue, allow_fp8=True)
     desc = _get_gemm_desc(
         GemmType.Batched,
