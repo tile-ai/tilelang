@@ -277,72 +277,72 @@ private:
         << "[VectorizeParallelToPTO] internal error: parallel units lost "
            "after scan";
 
-    Stmt new_body;
-    {
-      // One inverse per unit: the same mapping feeds the lanes read, the
-      // shared-mask decision and the unit conversion below, so a region
-      // with n units inverts n times instead of 2n+1. The inversion is
-      // the expensive part (layout reshape + analyzer proofs); the
-      // mappings are small value structs.
-      std::vector<pto_analysis::PtoInverseMapping> mappings;
-      mappings.reserve(scan.units.size());
-      for (const For &unit : scan.units) {
-        mappings.push_back(pto_analysis::InvertPtoLaneLayout(unit));
+    Stmt body = ConvertRegionBody(region, scan);
+    return SBlock(op->iter_vars, op->reads, op->writes, op->name_hint,
+                  std::move(body), op->init, op->alloc_buffers,
+                  op->match_buffers, op->annotations);
+  }
+  // Convert one SIMD_VF region body: mask plan and units.
+  Stmt ConvertRegionBody(const Stmt &region,
+                         const pto_analysis::PtoRegionScan &scan) {
+    // One inverse per unit: the same mapping feeds the lanes read, the
+    // shared-mask decision and the unit conversion below, so a region
+    // with n units inverts n times instead of 2n+1. The inversion is
+    // the expensive part (layout reshape + analyzer proofs); the
+    // mappings are small value structs.
+    std::vector<pto_analysis::PtoInverseMapping> mappings;
+    mappings.reserve(scan.units.size());
+    for (const For &unit : scan.units) {
+      mappings.push_back(pto_analysis::InvertPtoLaneLayout(unit));
+    }
+    // Lanes come from the first unit's layout; all units in one VF
+    // share the same L (Verify enforces the annotation consistency).
+    int64_t lanes = mappings[0].lanes;
+    // A full mask binding per VF, shared by the divisible units. A
+    // region whose units all have non-divisible extents never uses it
+    // (every unit builds its own per-chunk dynamic mask), so the
+    // binding is only emitted when at least one divisible unit needs
+    // it.
+    bool any_divisible = false;
+    for (const pto_analysis::PtoInverseMapping &mapping : mappings) {
+      if (mapping.tail_lanes == 0) {
+        any_divisible = true;
+        break;
       }
-      // Lanes come from the first unit's layout; all units in one VF
-      // share the same L (Verify enforces the annotation consistency).
-      int64_t lanes = mappings[0].lanes;
-      // A full mask binding per VF, shared by the divisible units. A
-      // region whose units all have non-divisible extents never uses it
-      // (every unit builds its own per-chunk dynamic mask), so the
-      // binding is only emitted when at least one divisible unit needs
-      // it.
-      bool any_divisible = false;
-      for (const pto_analysis::PtoInverseMapping &mapping : mappings) {
-        if (mapping.tail_lanes == 0) {
-          any_divisible = true;
-          break;
-        }
+    }
+    Stmt new_region = region;
+    if (any_divisible) {
+      shared_mask_ = Var("mask", DataType::Bool(static_cast<int>(lanes)));
+      PrimExpr mask_value = Call(
+          DataType::Bool(static_cast<int>(lanes)), VmiOp("create_mask"),
+          {IntImm(DataType::Int(32), static_cast<int>(lanes))},
+          {{"size", IntImm(DataType::Int(32), static_cast<int>(lanes))}});
+      // Define the shared mask inside the simdvf scope attr when the
+      // region is wrapped by one: VPTO treats vecscope-region data as
+      // region-local and rejects pset values crossing the boundary.
+      const auto *scope_attr = new_region.as<AttrStmtNode>();
+      if (scope_attr != nullptr &&
+          scope_attr->attr_key == "tl.simdvf_scope") {
+        new_region = AttrStmt(scope_attr->node, scope_attr->attr_key,
+                              scope_attr->value,
+                              SeqStmt::Flatten(Bind(shared_mask_, mask_value),
+                                               scope_attr->body));
+      } else {
+        new_region =
+            SeqStmt::Flatten(Bind(shared_mask_, mask_value), new_region);
       }
-      Stmt new_region = region;
-      if (any_divisible) {
-        shared_mask_ = Var("mask", DataType::Bool(static_cast<int>(lanes)));
-        PrimExpr mask_value = Call(
-            DataType::Bool(static_cast<int>(lanes)), VmiOp("create_mask"),
-            {IntImm(DataType::Int(32), static_cast<int>(lanes))},
-            {{"size", IntImm(DataType::Int(32), static_cast<int>(lanes))}});
-        // Define the shared mask inside the simdvf scope attr when the
-        // region is wrapped by one: VPTO treats vecscope-region data as
-        // region-local and rejects pset values crossing the boundary.
-        const auto *scope_attr = new_region.as<AttrStmtNode>();
-        if (scope_attr != nullptr &&
-            scope_attr->attr_key == "tl.simdvf_scope") {
-          new_region = AttrStmt(scope_attr->node, scope_attr->attr_key,
-                                scope_attr->value,
-                                SeqStmt::Flatten(Bind(shared_mask_, mask_value),
-                                                 scope_attr->body));
-        } else {
-          new_region =
-              SeqStmt::Flatten(Bind(shared_mask_, mask_value), new_region);
-        }
-      }
-
-      // Convert each sequential unit in order; unit state (bind
-      // maps, counters) is reset per unit; the shared full mask, when
-      // emitted, is visible to every unit.
-      for (size_t i = 0; i < scan.units.size(); ++i) {
-        Stmt converted = ConvertUnit(scan.units[i], mappings[i]);
-        new_region = ReplaceStmt(new_region, scan.units[i], converted);
-      }
-      new_body = new_region;
     }
 
-    // new_body is (mask bind + region with all units converted); the
-    // scope AttrStmt wrapper, if any, is inside it already.
-    return SBlock(op->iter_vars, op->reads, op->writes, op->name_hint, new_body,
-                  op->init, op->alloc_buffers, op->match_buffers,
-                  op->annotations);
+    // Convert each sequential unit in order; unit state (bind
+    // maps, counters) is reset per unit; the shared full mask, when
+    // emitted, is visible to every unit.
+    for (size_t i = 0; i < scan.units.size(); ++i) {
+      Stmt converted = ConvertUnit(scan.units[i], mappings[i]);
+      new_region = ReplaceStmt(new_region, scan.units[i], converted);
+    }
+    return new_region;
   }
+
 
   // Replace one statement (the unit's For) with its conversion, recursing
   // through the same wrapper kinds DiscoverUnits understands.
@@ -652,12 +652,7 @@ private:
           CurrentMapping(), &analyzer_, bind_env_);
       if (access.pattern == pto_analysis::AccessPattern::kContinuous) {
         if (value.dtype().lanes() == 1) {
-          value = EmitBind(
-              "vbrc_val",
-              Call(VectorDType(value.dtype(), lanes_), VmiOp("vbrc"), {value},
-                   {{"size",
-                     IntImm(DataType::Int(32), static_cast<int>(lanes_))}}),
-              &pre);
+          value = BroadcastToLanes("vbrc_val", value, &pre);
         }
         Array<PrimExpr> start_idx;
         for (const auto &idx : access.start_indices) {
@@ -824,20 +819,16 @@ private:
       return ConvertBinary(div->a, div->b, "vdiv", pre);
     }
     if (const auto *call = expr.as<CallNode>()) {
-      // Hardware-backed unary math (fabs/exp/log/sqrt); the dtype matrix
-      // mirrors the ISA documentation (see IsSupportedVectorUnaryOp).
-      static const std::unordered_map<std::string, std::string> kUnaryMap = {
-          {"tirx.fabs", "vabs"},
-          {"tirx.exp", "vexp"},
-          {"tirx.log", "vln"},
-          {"tirx.sqrt", "vsqrt"}};
+      // Hardware-backed unary math (fabs/exp/log/sqrt); the mapping lives in
+      // the shared utils table (see IsSupportedVectorUnaryOp for the matrix).
       auto call_op = call->op.as<Op>();
       ICHECK(call_op.has_value())
           << "[VectorizeParallelToPTO] internal error: non-Op call passed "
              "Verify: "
           << expr;
-      auto it = kUnaryMap.find(call_op.value()->name);
-      ICHECK(it != kUnaryMap.end())
+      const char *unary = pto_analysis::VectorUnaryVmiOpName(
+          call_op.value()->name);
+      ICHECK(unary != nullptr)
           << "[VectorizeParallelToPTO] internal error: call passed Verify "
              "without a VMI mapping: "
           << call_op.value()->name;
@@ -845,9 +836,9 @@ private:
       if (a.dtype().lanes() == 1) {
         return Call(expr.dtype(), call->op, {a});
       }
-      return EmitBind(it->second,
+      return EmitBind(unary,
                       Call(VectorDType(expr.dtype().element_of(), lanes_),
-                           VmiOp(it->second), {a, mask_var_}),
+                           VmiOp(unary), {a, mask_var_}),
                       pre);
     }
     if (const auto *cast = expr.as<CastNode>()) {
@@ -951,17 +942,9 @@ private:
                     << vmi_name;
     }
     if (a_vec && !b_vec) {
-      b = EmitBind(
-          "brc",
-          Call(VectorDType(b.dtype(), lanes_), VmiOp("vbrc"), {b},
-               {{"size", IntImm(DataType::Int(32), static_cast<int>(lanes_))}}),
-          pre);
+      b = BroadcastToLanes("brc", b, pre);
     } else if (!a_vec && b_vec) {
-      a = EmitBind(
-          "brc",
-          Call(VectorDType(a.dtype(), lanes_), VmiOp("vbrc"), {a},
-               {{"size", IntImm(DataType::Int(32), static_cast<int>(lanes_))}}),
-          pre);
+      a = BroadcastToLanes("brc", a, pre);
     }
     return EmitBind(vmi_name,
                     Call(VectorDType(a.dtype().element_of(), lanes_),
@@ -996,6 +979,16 @@ private:
       os << dtype;
     }
     return os.str();
+  }
+
+  // Broadcast a lane-uniform scalar to the current lane count (vbrc).
+  PrimExpr BroadcastToLanes(const char *tag, const PrimExpr &scalar,
+                            Array<Stmt> *pre) {
+    return EmitBind(
+        tag,
+        Call(VectorDType(scalar.dtype(), lanes_), VmiOp("vbrc"), {scalar},
+             {{"size", IntImm(DataType::Int(32), static_cast<int>(lanes_))}}),
+        pre);
   }
 
   Var EmitBind(const std::string &name, const PrimExpr &value,

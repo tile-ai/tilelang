@@ -39,6 +39,23 @@ std::string AccessPatternToString(AccessPattern pattern) {
 // pto_index_analysis.cc; PTO lane-layout planning and the consumers here share
 // that single implementation.
 
+const char *VectorUnaryVmiOpName(const std::string &tirx_op_name) {
+  // Hardware-backed unary math: fabs/exp/log/sqrt map to the VMI
+  // vabs/vexp/vln/vsqrt instructions.
+  static const std::pair<const char *, const char *> kUnaryMathTable[] = {
+      {"tirx.fabs", "vabs"},
+      {"tirx.exp", "vexp"},
+      {"tirx.log", "vln"},
+      {"tirx.sqrt", "vsqrt"},
+  };
+  for (const auto &entry : kUnaryMathTable) {
+    if (tirx_op_name == entry.first) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
+
 PtoInverseMapping InvertPtoLaneLayout(const For &loop) {
   auto anno = loop->annotations.Get(attr::kPtoParallelLoopLayout);
   if (!anno.has_value()) {
@@ -632,8 +649,7 @@ public:
       // Hardware-backed unary math. fabs/exp/log/sqrt map to the VMI
       // vabs/vexp/vln/vsqrt instructions; the dtype matrix mirrors the
       // ISA documentation (see IsSupportedVectorUnaryOp).
-      if (name == "tirx.fabs" || name == "tirx.exp" || name == "tirx.log" ||
-          name == "tirx.sqrt") {
+      if (VectorUnaryVmiOpName(name) != nullptr) {
         if (op->args.size() != 1U) {
           if (!unsupported.has_value()) {
             unsupported = name + " expects exactly one operand";
@@ -968,8 +984,7 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
   if (const auto *call = expr.as<CallNode>()) {
     if (auto call_op = call->op.as<Op>()) {
       const std::string &name = call_op.value()->name;
-      if (name == "tirx.fabs" || name == "tirx.exp" || name == "tirx.log" ||
-          name == "tirx.sqrt") {
+      if (VectorUnaryVmiOpName(name) != nullptr) {
         return AnalyzeLaneUseImpl(call->args[0], ctx, reason, metadata_mode);
       }
     }
@@ -1098,19 +1113,19 @@ LaneUse AnalyzeLaneUseMeta(const PrimExpr &expr, LaneUseContext *ctx,
 bool IsSupportedVectorUnaryOp(const std::string &tirx_op, DataType dtype) {
   // Per the VMI ISA documentation: vabs admits f16/bf16/f32 (the vabs
   // instruction also takes si8/si16/si32, but the frontend abs() lowers
-  // integers to Select — PR-2 territory — and returns unsigned inputs
-  // unchanged, so integer dtypes never reach this gate); vexp/vln/vsqrt
-  // admit f16/f32 only.
+  // integers to Select and returns unsigned inputs unchanged, so integer
+  // dtypes never reach this gate); vexp/vln/vsqrt admit f16/f32 only.
+  // The op-name admission is the shared VectorUnaryVmiOpName table.
+  if (VectorUnaryVmiOpName(tirx_op) == nullptr) {
+    return false;
+  }
   const int bits = dtype.bits();
   if (tirx_op == "tirx.fabs") {
     return (dtype.is_float() || dtype.is_bfloat16()) &&
            (bits == 16 || bits == 32);
   }
-  if (tirx_op == "tirx.exp" || tirx_op == "tirx.log" ||
-      tirx_op == "tirx.sqrt") {
-    return dtype.is_float() && (bits == 16 || bits == 32);
-  }
-  return false;
+  // The remaining mapped names (exp/log/sqrt).
+  return dtype.is_float() && (bits == 16 || bits == 32);
 }
 
 bool ExprUsesVar(const PrimExpr &expr, const VarNode *var) {
@@ -1620,6 +1635,7 @@ std::optional<std::string> FindUnsupportedExprNode(const PrimExpr &expr) {
   visitor(expr);
   return visitor.unsupported;
 }
+
 
 } // namespace pto
 } // namespace tl

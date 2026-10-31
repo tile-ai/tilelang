@@ -258,6 +258,10 @@ struct VectorCastPlan {
 
 using CastPlan = std::variant<ScalarCastPlan, VectorCastPlan>;
 
+// The tirx.* unary math ops with a VMI mapping (fabs/exp/log/sqrt):
+// returns the VMI op name, or nullptr for any other name.
+const char *VectorUnaryVmiOpName(const std::string &tirx_op_name);
+
 /*! Operation-level type support for the vector arithmetic emitted
  * here. VMI vmul only supports i16/i32/f16/bf16/f32
  * elements; vadd/vsub additionally allow i8; vdiv admits f16/f32 only.
