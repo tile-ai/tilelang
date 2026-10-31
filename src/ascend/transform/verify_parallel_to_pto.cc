@@ -383,10 +383,126 @@ private:
     // not a whitelist. Reject those kinds explicitly.
 
     void VisitStmt_(const ForNode *op) final {
-      // No loops of any kind inside T.Parallel.
-      parent_->Fail("loop structure",
-                    "loops (serial/pipelined/while) inside T.Parallel are "
-                    "not yet supported");
+      // Loop-shell admission: a T.serial loop inside T.Parallel is admitted
+      // as a preserved shell (Vectorize copies the loop through and converts
+      // only its body). The induction variable is lane-uniform by
+      // construction, so it is registered as a uniform definition while the
+      // body runs through the same unit-level checks. Neither the shell nor
+      // its body depends on the trip count being known at compile time: the
+      // bound is copied through verbatim, so a runtime extent is admitted as
+      // well. A constant extent must still be positive; a runtime extent is
+      // the program's contract (the same assumption any `for` carries).
+      // Non-serial kinds stay rejected at this stage.
+      if (op->kind != ForKind::kSerial) {
+        parent_->Fail("loop structure",
+                      "only T.serial loops inside T.Parallel are supported "
+                      "at this stage (pipelined and while loops are "
+                      "rejected)");
+      }
+      // A zero trip count is a legal empty shell, the same semantics a plain
+      // `for` has; only a negative constant is rejected.
+      const auto *extent_imm = op->extent.as<IntImmNode>();
+      if (extent_imm != nullptr && extent_imm->value < 0) {
+        parent_->Fail("loop structure",
+                      "T.serial inside T.Parallel must not have a negative "
+                      "extent");
+      }
+      if (op->step.defined()) {
+        // A non-unit step only changes which values the induction variable
+        // takes; the shell stays lane-uniform, so Vectorize copies the step
+        // through. Only a constant positive step is admitted (a runtime step
+        // would need its own analysis).
+        const auto *step_imm = op->step.value().as<IntImmNode>();
+        if (step_imm == nullptr || step_imm->value <= 0) {
+          parent_->Fail("loop structure",
+                        "T.serial inside T.Parallel must have a positive "
+                        "constant step at this stage");
+        }
+      }
+      // The shell is copied through verbatim, so a bound that references a
+      // lane-varying or unit-local variable would dangle after conversion.
+      {
+        bool uses_local_var = false;
+        const auto probe = [&uses_local_var, this](const PrimExpr &expr) {
+          PostOrderVisit(expr, [&uses_local_var, this](const ObjectRef &n) {
+            if (const auto *v = n.as<VarNode>()) {
+              // The lane variable disappears with the conversion, and a var
+              // bound inside the unit is re-bound by Vectorize; either way a
+              // copied bound would dangle.
+              if (v == loop_var_.get() || bind_env_.count(GetRef<Var>(v))) {
+                uses_local_var = true;
+              }
+            }
+            // A bound read from a buffer (such as `T.serial(n[0])`) is out of
+            // scope: the shell is copied through verbatim, so the read would be
+            // re-evaluated against a buffer the conversion may have rewritten.
+            if (n->IsInstance<BufferLoadNode>()) {
+              uses_local_var = true;
+            }
+          });
+        };
+        probe(op->min);
+        probe(op->extent);
+        if (op->step.defined()) {
+          probe(op->step.value());
+        }
+        if (uses_local_var) {
+          parent_->Fail("loop structure",
+                        "T.serial shell bounds must not reference the "
+                        "parallel lane variable or a variable bound inside "
+                        "the unit (the shell is copied through after those "
+                        "variables are gone or re-bound)");
+        }
+      }
+      // Every other expression position runs the reference check; the shell
+      // bounds must too. Without it a variable that is never defined anywhere
+      // is copied through verbatim into the output (the shell is rebuilt from
+      // these very expressions).
+      CheckDefinedVars(op->min);
+      CheckDefinedVars(op->extent);
+      if (op->step.defined()) {
+        CheckDefinedVars(op->step.value());
+      }
+      // A bound that mentions no lane variable is not automatically supported:
+      // the shell is copied into the vectorized loop header, so an opaque call
+      // would run once per chunk instead of once per source iteration and its
+      // result and side effects are unproven. Classify the bounds with the
+      // analysis the metadata positions use: supported uniform scalars (kernel
+      // parameters, outer serial variables, the 2D kept coordinate) stay
+      // admitted, anything varying or unknown is rejected here.
+      {
+        pto_analysis::LaneUseContext ctx = MakeLaneUseContext();
+        const auto admit_bound = [&](const PrimExpr &bound, const char *which) {
+          std::string why;
+          pto_analysis::LaneUse use =
+              pto_analysis::AnalyzeLaneUseMeta(bound, &ctx, &why);
+          if (use == pto_analysis::LaneUse::kUniform) {
+            return;
+          }
+          std::ostringstream oss;
+          oss << "T.serial shell " << which
+              << " must be a lane-uniform scalar expression";
+          if (!why.empty()) {
+            oss << " (" << why << ")";
+          }
+          parent_->Fail("loop structure", oss.str());
+        };
+        admit_bound(op->min, "lower bound");
+        admit_bound(op->extent, "extent");
+      }
+      defined_loop_vars_.insert(op->loop_var.get());
+      // The range is a fact, not an assumption: a predicate like `_t < extent`
+      // is provably true here, and the same fact is bound in Legalize before it
+      // normalises a predicate away.
+      analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent),
+                     /*allow_override=*/true);
+      Map<Var, PrimExpr> saved_env = bind_env_;
+      Map<Var, Integer> saved_classified = classified_;
+      classified_.Set(op->loop_var, Integer(0));
+      StmtExprVisitor::VisitStmt_(op);
+      bind_env_ = std::move(saved_env);
+      classified_ = std::move(saved_classified);
+      defined_loop_vars_.erase(op->loop_var.get());
     }
     void VisitStmt_(const IfThenElseNode *op) final {
       // The restricted lane-varying conditional forms are admitted.
@@ -505,6 +621,12 @@ private:
       ctx.analyzer = &analyzer_;
       ctx.bind_env = bind_env_;
       ctx.external_defs = external_defs_;
+      // An admitted serial induction variable is lane-uniform and lexically
+      // defined inside its shell, so the analysis must not treat it as an
+      // unknown variable.
+      for (const VarNode *v : defined_loop_vars_) {
+        ctx.external_defs.insert(v);
+      }
       ctx.classified = classified_;
       return ctx;
     }
@@ -527,8 +649,9 @@ private:
       if (const auto *store = stmt.as<BufferStoreNode>()) {
         // The access check is the whole admission here: a destination that is
         // continuous under the layout (start + lane over the full chunk) is
-        // per-lane and can be paired; anything else -- interleaved, lane-uniform
-        // or data-dependent -- is rejected by it with a precise diagnostic.
+        // per-lane and can be paired; anything else -- interleaved,
+        // lane-uniform or data-dependent -- is rejected by it with a precise
+        // diagnostic.
         VisitStmt_(store);
         return;
       }
@@ -587,6 +710,11 @@ private:
           return;
         }
         if (parent_->external_defs_.count(v) != 0) {
+          return;
+        }
+        if (parent_->defined_loop_vars_.count(v) != 0) {
+          // Induction variable of an admitted serial shell; it is
+          // lane-uniform and in lexical scope inside the shell body.
           return;
         }
         std::ostringstream oss;
@@ -653,8 +781,7 @@ private:
       PrimExpr b;
     };
 
-    static std::optional<BinaryOperands> GetBinaryOperands(
-        const PrimExpr &e) {
+    static std::optional<BinaryOperands> GetBinaryOperands(const PrimExpr &e) {
       if (const auto *n = e.as<AddNode>()) {
         return BinaryOperands{"vadd", n->dtype, n->a, n->b};
       }
@@ -689,119 +816,122 @@ private:
     // scalar Mul inside a Varying Add is legal while an int8 vector Mul
     // stays rejected.
     void CheckBinaryOpTypes(const PrimExpr &expr) {
-      std::function<void(const PrimExpr &)> check = [&](const PrimExpr &e) {
-        // Ordered comparison of bool operands has no lane-mask lowering;
-        // only EQ/NE is expressed in the mask domain.
-        {
-          PrimExpr rel_a;
-          PrimExpr rel_b;
-          const pto::RelationalKind *rel =
-              pto::MatchRelational(e, &rel_a, &rel_b);
-          if (rel != nullptr && std::string(rel->cmp) != "eq" &&
-              std::string(rel->cmp) != "ne" && rel_a.dtype().is_bool() &&
-              rel_b.dtype().is_bool()) {
-            LOG(FATAL) << "[VerifyParallelToPTO] type: ordered comparison "
-                          "of bool operands has no lane-mask lowering";
-          }
-        }
-        if (auto bin = GetBinaryOperands(e)) {
-          check(bin->a);
-          check(bin->b);
-          if (bin->vmi_op != nullptr) {
-            CheckOneOp(bin->vmi_op, bin->dtype, bin->a, bin->b);
-          }
-          return;
-        }
-        if (const auto *cast = e.as<CastNode>()) {
-          check(cast->value);
-          return;
-        }
-        // Select, like the relational / boolean nodes of
-        // GetBinaryOperands, is expressed by Legalize and Vectorize as
-        // vcmp+vsel. Operands recurse through the same check, so lane
-        // classification and dtype rules still apply to whatever feeds
-        // them.
-        if (const auto *sel = e.as<SelectNode>()) {
-          if (sel->true_value.dtype().is_bool() ||
-              sel->false_value.dtype().is_bool()) {
-            LOG(FATAL) << "[VerifyParallelToPTO] type: a bool-valued "
-                          "Select has no vreg lowering";
-          }
-          check(sel->condition);
-          check(sel->true_value);
-          check(sel->false_value);
-          return;
-        }
-        if (const auto *notn = e.as<NotNode>()) {
-          check(notn->a);
-          return;
-        }
-        // Min/Max are rewritten to Select by Legalize, but their operands must
-        // still pass the same type rules here (e.g. the integer-bitwise ban).
-        if (const auto *minn = e.as<MinNode>()) {
-          // Legalize rewrites Min/Max to Select, which would introduce a
-          // bool-ordered comparison and a bool-valued Select after Verify.
-          if (minn->dtype.is_bool()) {
-            LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
-                          "operands has no lane-mask lowering";
-          }
-          check(minn->a);
-          check(minn->b);
-          return;
-        }
-        if (const auto *maxn = e.as<MaxNode>()) {
-          // Same gate as Min: Legalize rewrites Max to Select, which would
-          // introduce a bool-ordered compare and a bool-valued Select.
-          if (maxn->dtype.is_bool()) {
-            LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
-                          "operands has no lane-mask lowering";
-          }
-          check(maxn->a);
-          check(maxn->b);
-          return;
-        }
-        if (const auto *call = e.as<CallNode>()) {
-          if (auto call_op = call->op.as<Op>()) {
-            const std::string &name = call_op.value()->name;
-            // Boolean mask-combine calls (the shared
-            // tirx.bitwise_* / tir.And|Or|Not admission table) and the
-            // tl/tir.infinity() constant.
-            // A mask combine only has a lowering for bool (lane-mask) values.
-            if (pto_analysis::MaskLogicVmiOpName(name) != nullptr) {
-              // An integer bitwise call is rejected with a proper diagnostic;
-              // CheckBinaryOpTypes is static, so report via LOG(FATAL) (the
-              // same channel Fail uses).
-              if (!call->dtype.is_bool()) {
-                LOG(FATAL)
-                    << "[VerifyParallelToPTO] type: bitwise mask combine `"
-                    << name
-                    << "` requires bool (lane-mask) operands; an integer "
-                       "bitwise call has no lane-mask lowering";
+      std::function<void(const PrimExpr &)> check =
+          [&](const PrimExpr &e) {
+            // Ordered comparison of bool operands has no lane-mask lowering;
+            // only EQ/NE is expressed in the mask domain.
+            {
+              PrimExpr rel_a;
+              PrimExpr rel_b;
+              const pto::RelationalKind *rel =
+                  pto::MatchRelational(e, &rel_a, &rel_b);
+              if (rel != nullptr && std::string(rel->cmp) != "eq" &&
+                  std::string(rel->cmp) != "ne" && rel_a.dtype().is_bool() &&
+                  rel_b.dtype().is_bool()) {
+                LOG(FATAL) << "[VerifyParallelToPTO] type: ordered comparison "
+                              "of bool operands has no lane-mask lowering";
               }
-              for (const auto &arg : call->args) {
-                check(arg);
+            }
+            if (auto bin = GetBinaryOperands(e)) {
+              check(bin->a);
+              check(bin->b);
+              if (bin->vmi_op != nullptr) {
+                CheckOneOp(bin->vmi_op, bin->dtype, bin->a, bin->b);
               }
               return;
             }
-            if (name == "tl.infinity" || name == "tir.infinity") {
+            if (const auto *cast = e.as<CastNode>()) {
+              check(cast->value);
               return;
             }
-            // The tirx.fabs/exp/log/sqrt unary math table; the original
-            // tirx op name stays the CheckOneUnaryOp key.
-            if (pto_analysis::VectorUnaryVmiOpName(name) != nullptr) {
-              check(call->args[0]);
-              CheckOneUnaryOp(name.c_str(), call->dtype, call->args[0]);
+            // Select, like the relational / boolean nodes of
+            // GetBinaryOperands, is expressed by Legalize and Vectorize as
+            // vcmp+vsel. Operands recurse through the same check, so lane
+            // classification and dtype rules still apply to whatever feeds
+            // them.
+            if (const auto *sel = e.as<SelectNode>()) {
+              if (sel->true_value.dtype().is_bool() ||
+                  sel->false_value.dtype().is_bool()) {
+                LOG(FATAL) << "[VerifyParallelToPTO] type: a bool-valued "
+                              "Select has no vreg lowering";
+              }
+              check(sel->condition);
+              check(sel->true_value);
+              check(sel->false_value);
               return;
             }
-          }
-        }
-        if (const auto *load = e.as<BufferLoadNode>()) {
-          // Index arithmetic is address analysis, not value arithmetic.
-          (void)load;
-          return;
-        }
-        // Vars/constants carry no operation to check.
-      };
+            if (const auto *notn = e.as<NotNode>()) {
+              check(notn->a);
+              return;
+            }
+            // Min/Max are rewritten to Select by Legalize, but their operands
+            // must still pass the same type rules here (e.g. the
+            // integer-bitwise ban).
+            if (const auto *minn = e.as<MinNode>()) {
+              // Legalize rewrites Min/Max to Select, which would introduce a
+              // bool-ordered comparison and a bool-valued Select after Verify.
+              if (minn->dtype.is_bool()) {
+                LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
+                              "operands has no lane-mask lowering";
+              }
+              check(minn->a);
+              check(minn->b);
+              return;
+            }
+            if (const auto *maxn = e.as<MaxNode>()) {
+              // Same gate as Min: Legalize rewrites Max to Select, which would
+              // introduce a bool-ordered compare and a bool-valued Select.
+              if (maxn->dtype.is_bool()) {
+                LOG(FATAL) << "[VerifyParallelToPTO] type: Min/Max of bool "
+                              "operands has no lane-mask lowering";
+              }
+              check(maxn->a);
+              check(maxn->b);
+              return;
+            }
+            if (const auto *call = e.as<CallNode>()) {
+              if (auto call_op = call->op.as<Op>()) {
+                const std::string &name = call_op.value()->name;
+                // Boolean mask-combine calls (the shared
+                // tirx.bitwise_* / tir.And|Or|Not admission table) and the
+                // tl/tir.infinity() constant.
+                // A mask combine only has a lowering for bool (lane-mask)
+                // values.
+                if (pto_analysis::MaskLogicVmiOpName(name) != nullptr) {
+                  // An integer bitwise call is rejected with a proper
+                  // diagnostic; CheckBinaryOpTypes is static, so report via
+                  // LOG(FATAL) (the same channel Fail uses).
+                  if (!call->dtype.is_bool()) {
+                    LOG(FATAL)
+                        << "[VerifyParallelToPTO] type: bitwise mask combine `"
+                        << name
+                        << "` requires bool (lane-mask) operands; an integer "
+                           "bitwise call has no lane-mask lowering";
+                  }
+                  for (const auto &arg : call->args) {
+                    check(arg);
+                  }
+                  return;
+                }
+                if (name == "tl.infinity" || name == "tir.infinity") {
+                  return;
+                }
+                // The tirx.fabs/exp/log/sqrt unary math table; the original
+                // tirx op name stays the CheckOneUnaryOp key.
+                if (pto_analysis::VectorUnaryVmiOpName(name) != nullptr) {
+                  check(call->args[0]);
+                  CheckOneUnaryOp(name.c_str(), call->dtype, call->args[0]);
+                  return;
+                }
+              }
+            }
+            if (const auto *load = e.as<BufferLoadNode>()) {
+              // Index arithmetic is address analysis, not value arithmetic.
+              (void)load;
+              return;
+            }
+            // Vars/constants carry no operation to check.
+          };
       check(expr);
     }
 
@@ -1012,6 +1142,10 @@ private:
     // vars, thread_extent bindings, binds, allocations) that is in scope
     // where the unit appears.
     std::set<const VarNode *> external_defs_;
+    // Induction variables of admitted serial loop shells (constant-bound
+    // T.serial inside T.Parallel). In scope only while the shell's body
+    // is being visited; classified as lane-uniform.
+    std::set<const VarNode *> defined_loop_vars_;
   };
 
   // ------------------------------------------------------------------
@@ -1357,7 +1491,7 @@ private:
   // passes track the same facts, which is what keeps their verdicts aligned.
   void AdmitPredicates(const Stmt &body) {
     class Admission : public StmtExprVisitor {
-     public:
+    public:
       Admission(VerifyParallelToPTOImpl *parent, std::set<const VarNode *> defs,
                 const Map<Var, PrimExpr> &outer_env,
                 const std::vector<std::pair<Var, Range>> &outer_ranges)
@@ -1465,7 +1599,7 @@ private:
         StmtExprVisitor::VisitExpr_(op);
       }
 
-     private:
+    private:
       void VisitScopedBlock(const Array<IterVar> &iter_vars,
                             const Array<Buffer> &alloc_buffers,
                             const Stmt &body) {
@@ -1504,14 +1638,15 @@ private:
         // The predicate is an expression position like any other, and it is
         // dropped after admission. An unadmitted node that the analyzer folds
         // away (`True | call_extern(...)`, `True | (p % 2 == 0)`) would
-        // therefore never be seen by a later pass -- an external call could even
-        // carry a side effect that the removal silently discards. Run the same
-        // whitelist the compute-value positions run, on the original tree and
-        // before the truth proof.
-        if (auto reason = pto_analysis::FindUnsupportedExprNode(predicate.value())) {
-          parent_->Fail("expression",
-                        "access predicate on buffer `" + std::string(name) +
-                            "`: " + reason.value());
+        // therefore never be seen by a later pass -- an external call could
+        // even carry a side effect that the removal silently discards. Run the
+        // same whitelist the compute-value positions run, on the original tree
+        // and before the truth proof.
+        if (auto reason =
+                pto_analysis::FindUnsupportedExprNode(predicate.value())) {
+          parent_->Fail("expression", "access predicate on buffer `" +
+                                          std::string(name) +
+                                          "`: " + reason.value());
         }
         if (!pto_analysis::IsProvablyTruePredicate(predicate.value(),
                                                    &analyzer_, env_)) {
