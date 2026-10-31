@@ -984,6 +984,49 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
 // Main rewriter
 // ---------------------------------------------------------------------------
 
+// Backing data of the buffers read and written by the visited statements.
+// Tile ops report their own operands; loads in their region bounds are reads.
+class BufferDataReadWriteCollector : public StmtExprVisitor {
+public:
+  const VarSet &GetReads() const { return reads_; }
+  const VarSet &GetWrites() const { return writes_; }
+
+private:
+  void VisitExpr_(const BufferLoadNode *op) final {
+    reads_.insert(op->buffer->data);
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    writes_.insert(op->buffer->data);
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    auto tile_op = ParseOperator(GetRef<Call>(op));
+    if (!tile_op.defined()) {
+      StmtExprVisitor::VisitExpr_(op);
+      return;
+    }
+    AccessRegions access = tile_op->GetAccessRegions();
+    VisitRegions(access.reads, &reads_);
+    VisitRegions(access.writes, &writes_);
+  }
+
+  void VisitRegions(const Array<BufferRegion> &regions, VarSet *buffers) {
+    for (const BufferRegion &region : regions) {
+      buffers->insert(region->buffer->data);
+      for (const Range &range : region->region) {
+        VisitExpr(range->min);
+        VisitExpr(range->extent);
+      }
+    }
+  }
+
+  VarSet reads_;
+  VarSet writes_;
+};
+
 class ProducerConsumerWSRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -1413,6 +1456,55 @@ private:
         }
       }
       compute_cursor = wait_pos;
+    }
+
+    // A producer-side read only observes producer-side writes that precede it
+    // in the body. Any other write to that buffer, e.g. a copy index updated
+    // for the next iteration, is not ordered before the read, so the producer
+    // would see a stale value. Leave such loops to the sequential fallback in
+    // the pass entry point.
+    std::unordered_set<const StmtNode *> producer_prefix;
+    for (const auto &prefix_stmts : producer_loop_prefix_stmts) {
+      for (const auto &stmt : prefix_stmts) {
+        producer_prefix.insert(stmt.get());
+      }
+    }
+    // Reads are recorded in body order, so the first position is kept. Leading
+    // bindings are evaluated before the body, at position -1.
+    std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> first_read;
+    auto record_reads = [&](const VarSet &reads, int pos) {
+      for (const Var &buffer_data : reads) {
+        first_read.emplace(buffer_data, pos);
+      }
+    };
+    for (const auto *bindings :
+         {&outer_leading_bindings, &inner_leading_bindings}) {
+      for (const auto &binding : *bindings) {
+        BufferDataReadWriteCollector access;
+        access(binding.second);
+        record_reads(access.GetReads(), -1);
+      }
+    }
+    std::vector<VarSet> stmt_writes(flat_stmts.size());
+    std::vector<bool> on_producer(flat_stmts.size());
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      BufferDataReadWriteCollector access;
+      access(flat_stmts[i]);
+      on_producer[i] =
+          IsProducer(kinds[i]) || producer_prefix.count(flat_stmts[i].get());
+      if (on_producer[i]) {
+        record_reads(access.GetReads(), static_cast<int>(i));
+      }
+      stmt_writes[i] = access.GetWrites();
+    }
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      for (const Var &buffer_data : stmt_writes[i]) {
+        auto it = first_read.find(buffer_data);
+        if (it != first_read.end() &&
+            !(on_producer[i] && static_cast<int>(i) < it->second)) {
+          return StmtExprMutator::VisitStmt_(orig_realize);
+        }
+      }
     }
 
     bool producer_needs_full_thread_extent = false;
