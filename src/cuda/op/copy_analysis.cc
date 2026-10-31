@@ -192,6 +192,28 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
+// `cp.async.bulk` requires the starting global address of the bounding box to
+// be 16-byte aligned. Reject a region whose start offset is provably
+// misaligned; symbolic offsets keep the TMA path, matching the total-size
+// check in CheckBulkCopy1D so dynamic producer offsets are not downgraded.
+PrimExpr BulkBoxBaseBits(const Buffer &global_tensor,
+                         const Array<Range> &global_range) {
+  Array<PrimExpr> global_mins;
+  for (const Range &range : global_range) {
+    global_mins.push_back(range->min);
+  }
+  return global_tensor->ElemOffset(global_mins)[0] *
+         global_tensor->dtype.bits();
+}
+
+bool IsBulkBoxBase16BAligned(const Buffer &global_tensor,
+                             const Array<Range> &global_range,
+                             arith::Analyzer *analyzer) {
+  return !analyzer->CanProve(
+      FloorMod(BulkBoxBaseBits(global_tensor, global_range), 128) != 0,
+      arith::ProofStrength::kSymbolicBound);
+}
+
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
                    bool check_last_dim, bool emit_diagnostics) {
   if (!TargetHasBulkCopy(target)) {
@@ -199,6 +221,13 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
   }
   if (op.src.scope() != "global" ||
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
+    return false;
+  }
+  if (!IsBulkBoxBase16BAligned(op.src, op.src_range, analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "src range base must be 16-byte aligned for tma bulk "
+                    << "load " << op.src->name;
+    }
     return false;
   }
   if (check_last_dim &&
@@ -238,6 +267,13 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   }
   if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
       op.dst.scope() != "global") {
+    return false;
+  }
+  if (!IsBulkBoxBase16BAligned(op.dst, op.dst_range, analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "dst range base must be 16-byte aligned for tma bulk "
+                    << "store " << op.dst->name;
+    }
     return false;
   }
   if (check_last_dim &&
@@ -548,6 +584,18 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << op.src->name << " (scope=" << op.src.scope()
         << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
+    return oss.str();
+  }
+  const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
+  const Array<Range> &global_range =
+      IsGlobalBuffer(op.src) ? op.src_range : op.dst_range;
+  arith::Analyzer local_analyzer;
+  if (!IsBulkBoxBase16BAligned(global_buffer, global_range, &local_analyzer)) {
+    oss << "a bulk TMA copy must start at a 16-byte aligned address; `"
+        << global_buffer->name << "` starts at byte offset "
+        << local_analyzer.Simplify(
+               FloorDiv(BulkBoxBaseBits(global_buffer, global_range), 8))
+        << ", which cp.async.bulk requires to be 16-byte aligned.";
     return oss.str();
   }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
