@@ -159,11 +159,19 @@ def _pass_context_config() -> dict:
     option; CE can then map generated C back to the example.
     """
     from tilelang.transform import PassConfigKey
+    from tilelang.transform.pass_config import normalize_pass_configs
 
     key = getattr(PassConfigKey, "TL_EMIT_LINE_DIRECTIVES", None)
     if key is None:
         return {}
-    return {key: True}
+    # Fold environment defaults first, then enable level 1 (per statement) for
+    # this tool unless the environment selected another level (for example 2
+    # for per-line anchoring). Level 1 keeps the historical bool value.
+    config = normalize_pass_configs(None)
+    level_key = getattr(key, "value", key)
+    if config.get(level_key, 1) == 1:
+        config[level_key] = True
+    return config
 
 
 def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -> str:

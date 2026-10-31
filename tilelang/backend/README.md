@@ -269,8 +269,12 @@ deduplication. They may use types and macros from backend headers. Macros that
 configure those headers must be supplied through compiler flags, such as
 `compile_flags=["-DENABLE_BF16"]`, because imports follow the headers.
 
-Backend builders pass `tl.emit_line_directives` to `SetEmitLineDirectives`.
-The default is off. A custom `AddFunction` implementation must call
+Backend builders pass the `tl.emit_line_directives` level to
+`SetEmitLineDirectives`: 0 is off, 1 emits a directive per spanned statement,
+and 2 or more wraps the source stream and re-anchors every emitted line,
+inheriting the nearest enclosing span for statements that have none, so
+debugger line mappings cannot drift even inside a statement that prints
+several lines. A custom `AddFunction` implementation must call
 `PreFunctionBody` after its compiler-generated prologue to emit the function
 entry span before printing the body.
 
