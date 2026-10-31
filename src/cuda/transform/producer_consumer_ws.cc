@@ -621,6 +621,13 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     static const Op &copy_op = Op::Get("tl.tileop.copy");
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
+    auto tile_op = ParseOperator(call);
+    if (tile_op.defined() && tile_op.as<Im2ColOpNode>() != nullptr &&
+        GetIm2ColImplKind(target_) == Im2ColImplKind::kSimt) {
+      auto annotations = call->annotations;
+      annotations.Set(attr::kParallelAsyncWithoutAsyncCommitWait, Bool(true));
+      return Call(call->dtype, call->op, call->args, annotations, call->span);
+    }
     if (!call->op.same_as(copy_op) || !CanUsePipelineManagedCPAsyncCopy(call)) {
       return call;
     }
