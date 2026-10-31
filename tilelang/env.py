@@ -412,7 +412,10 @@ class Environment:
 
     # Compilation defaults (for jit, autotune, compile)
     # These allow overriding default compilation parameters via environment variables
-    TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_DEFAULT_TARGET", "auto")
+    TILELANG_DEFAULT_TARGET = EnvVar(
+        "TILELANG_DEFAULT_TARGET",
+        lambda: os.environ.get("TILELANG_TARGET", "auto"),
+    )
     TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
     TILELANG_LAYOUT_COST_MODEL = EnvVar(
