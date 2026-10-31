@@ -16,10 +16,22 @@ bool TargetIsCPU(Target target) {
   return target->GetTargetDeviceType() == kDLCPU;
 }
 
+bool TargetHasAMX(Target target) {
+  if (!TargetIsCPU(target))
+    return false;
+  for (const auto &key : target->keys) {
+    if (key == "amx")
+      return true;
+  }
+  return false;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.TargetIsCPU",
                         [](Target target) { return TargetIsCPU(target); });
+  refl::GlobalDef().def("tl.TargetHasAMX",
+                        [](Target target) { return TargetHasAMX(target); });
 }
 
 } // namespace tl
