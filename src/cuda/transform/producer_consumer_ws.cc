@@ -1592,21 +1592,21 @@ private:
         producer_stmts.push_back(s);
       }
     }
-    // Async-only producers already contribute one completion per thread.
-    // With a prefix, also publish any synchronous writes by a regular release.
+    // SIMT producers may retain synchronous stores after async-copy lowering.
+    // Publish those writes, as well as prefix writes, with a regular release.
     if (!producer_is_single_warp) {
       for (int fwd_base = 0; fwd_base < num_fwd; fwd_base += num_stages) {
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         if (!has_async_producer) {
           // No async copy: each thread publishes its writes and arrives.
           producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
-        } else if (!has_producer_prefix) {
+        } else if (!has_producer_prefix && !has_simt_producer) {
           // Async copy only: completion consumes the thread's arrival credit.
           producer_stmts.push_back(Evaluate(
               Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                    {MakeBarrierRef(barrier_buf, fwd_id)})));
         } else {
-          // Async copy with prefix: reserve completion, then publish writes.
+          // Reserve async completion before publishing synchronous writes.
           producer_stmts.push_back(
               Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async_barrier(),
                             {MakeBarrierRef(barrier_buf, fwd_id)})));

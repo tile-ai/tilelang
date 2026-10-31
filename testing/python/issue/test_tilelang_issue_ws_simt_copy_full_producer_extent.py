@@ -125,5 +125,42 @@ def test_ws_tma_producer_participation(coordinate):
     torch.testing.assert_close(c, a.float() @ reference_b.float(), rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_ws_publishes_synchronous_fp8_conversion():
+    """A TMA producer and synchronous conversion must both finish before GEMM."""
+    M, N, K = 512, 1024, 3072
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.bfloat16),
+        W: T.Tensor((N, K), T.float8_e4m3fn),
+        C: T.Tensor((M, N), T.bfloat16),
+    ):
+        with T.Kernel(N // 16, M // 16, threads=64) as (bn, bm):
+            a = T.alloc_shared((16, 128), T.bfloat16)
+            w = T.alloc_shared((16, 128), T.bfloat16)
+            acc = T.alloc_fragment((16, 16), T.float32)
+            T.clear(acc)
+            for bk in T.Pipelined(K // 128, num_stages=2):
+                T.copy(A[bm * 16, bk * 128], a)
+                for i, j in T.Parallel(16, 128):
+                    w[i, j] = T.cast(W[bn * 16 + i, bk * 128 + j], T.bfloat16)
+                T.gemm(a, w, acc, transpose_B=True)
+            T.copy(acc, C[bm * 16, bn * 16])
+
+    kernel = _compile_tvm_ffi(main)
+    row_tags = torch.arange(M, device="cuda") // 16 % 4 + 1
+    k_tags = torch.arange(K, device="cuda") // 128 + 1
+    a = (row_tags[:, None] * k_tags[None, :]).bfloat16()
+    w = ((k_tags % 7) + 1).expand(N, K).to(torch.float8_e4m3fn)
+    c = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
+    expected = (a.float() @ w.to(torch.bfloat16).float().T).bfloat16()
+    for _ in range(200):
+        c.fill_(float("nan"))
+        kernel(a, w, c)
+        torch.testing.assert_close(c, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
