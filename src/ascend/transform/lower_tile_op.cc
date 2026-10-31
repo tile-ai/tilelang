@@ -299,6 +299,10 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
+  // Enclosing conditional predicates, innermost last. Copied into LowerArgs so
+  // bound checks can prove capacity under the guard that protects the op.
+  Array<PrimExpr> predicate_stack_;
+
   // Region-local execution scope of an opaque region block (see
   // RegionScopeProvider). While non-empty, tile operators lower against the
   // innermost region's thread var and bounds instead of the kernel's.
@@ -325,6 +329,25 @@ private:
       return region_thread_scope_stack_.back().thread_bounds;
     }
     return InferThreadBoundsFromIterVar(thread_binding_);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    Stmt then_case;
+    {
+      With<arith::ConstraintContext> then_ctx(analyzer_, op->condition);
+      predicate_stack_.push_back(op->condition);
+      then_case = VisitStmt(op->then_case);
+      predicate_stack_.pop_back();
+    }
+    ffi::Optional<Stmt> else_case;
+    if (op->else_case.defined()) {
+      PrimExpr neg_condition = analyzer_->rewrite_simplify(!op->condition);
+      With<arith::ConstraintContext> else_ctx(analyzer_, neg_condition);
+      predicate_stack_.push_back(neg_condition);
+      else_case = VisitStmt(op->else_case.value());
+      predicate_stack_.pop_back();
+    }
+    return IfThenElse(op->condition, then_case, else_case);
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
@@ -1268,6 +1291,7 @@ private:
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
 
+    lower_args.predicates = predicate_stack_;
     auto lowered = tile_op->Lower(lower_args, analyzer_);
     // Let the whole lowered subtree inherit the source location of the tile
     // op statement, keeping any finer-grained spans already present.

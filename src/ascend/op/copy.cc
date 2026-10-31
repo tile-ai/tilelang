@@ -972,6 +972,11 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
   PrimExpr sf_dst_stride =
       FloorDiv(dst_range[ndim - 1]->extent + sf_info.c0 - 1, sf_info.c0);
   {
+    PrimExpr guard = IntImm(DataType::Bool(), 1);
+    for (const auto &predicate : T.predicates) {
+      guard = guard && predicate;
+    }
+    With<arith::ConstraintContext> guard_ctx(analyzer, guard);
     With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
     size_t src_ndim = src_range.size();
     ICHECK(analyzer->CanProveEqual(
