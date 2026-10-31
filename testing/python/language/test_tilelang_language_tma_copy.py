@@ -261,6 +261,60 @@ def test_tma_copy_uses_descriptor_for_padded_multirow_region():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("rows,shared_cols,col_offset", [(2, 64, 8), (2, 32, 0), (1, 64, 8)])
+def test_tma_copy_shared_subregion_preserves_row_stride(rows, shared_cols, col_offset):
+    import torch
+
+    cols = 32
+
+    @T.prim_func
+    def load(A: T.Tensor((rows, cols), T.float32), B: T.Tensor((rows, shared_cols), T.float32)):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((rows, shared_cols), T.float32)
+            T.fill(shared, -1.0)
+            T.copy(A, shared[:, col_offset : col_offset + cols], prefer_instruction="tma")
+            T.copy(shared, B, prefer_instruction="sync")
+
+    @T.prim_func
+    def store(A: T.Tensor((rows, shared_cols), T.float32), B: T.Tensor((rows, cols), T.float32)):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((rows, shared_cols), T.float32)
+            T.copy(A, shared, prefer_instruction="sync")
+            T.copy(shared[:, col_offset : col_offset + cols], B)
+
+    source = torch.arange(rows * cols, dtype=torch.float32, device="cuda").reshape(rows, cols)
+    padded = torch.full((rows, shared_cols), -1.0, dtype=torch.float32, device="cuda")
+    padded[:, col_offset : col_offset + cols] = source
+    load_kernel = tilelang.compile(load, out_idx=[1], target="cuda")
+    store_kernel = tilelang.compile(store, out_idx=[1], target="cuda")
+    torch.testing.assert_close(load_kernel(source), padded, rtol=0, atol=0)
+    torch.testing.assert_close(store_kernel(padded), source, rtol=0, atol=0)
+
+    if rows == 1 or shared_cols == cols:
+        # A single padded row and an unpadded tile are still contiguous.
+        assert "tl::tma_load(" in load_kernel.get_kernel_source()
+        assert "tl::tma_store(" in store_kernel.get_kernel_source()
+        assert "CUtensorMap" not in load_kernel.get_kernel_source()
+        assert "CUtensorMap" not in store_kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_cuda
+def test_explicit_tma_copy_rejects_noncontiguous_shared_subregion():
+    @T.prim_func
+    def main(out: T.Tensor((2, 32), T.float32)):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((2, 64), T.float32)
+            T.fill(shared, 1.0)
+            T.tma_copy(shared[:, 8:40], out)
+            T.tma_store_wait(0)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target, pytest.raises(tvm.error.InternalError, match=r"T.tma_copy\(\) cannot fall back to normal copy"):
+        tilelang.lower(main, target=target)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_copy_box_split_respects_smem_alignment():
     """Rest instructions step the shared tile by the box size, and the TMA
     unit requires every instruction's shared address to be 128-byte aligned.
