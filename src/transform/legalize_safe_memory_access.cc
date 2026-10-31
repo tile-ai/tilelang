@@ -636,9 +636,11 @@ private:
     }
 
     // Prefer the registered (possibly unflattened) buffer so we can:
-    // (a) include buffer->elem_offset in the physical bound, and
+    // (a) include buffer->elem_offset in the physical bound,
     // (b) multiply shape dims in int64 before any 32-bit flatten product
-    //     overflows (e.g. float32[64K, 64K]).
+    //     overflows (e.g. float32[64K, 64K]), and
+    // (c) honor non-compact strides via Buffer::GetFlattenedBuffer() =
+    //     strides[0]*shape[0] (padded layouts span more than prod(shape)).
     Buffer bound_buffer = buffer;
     if (buffer_data_to_buffer_.count(buffer->data)) {
       bound_buffer = buffer_data_to_buffer_[buffer->data];
@@ -660,9 +662,17 @@ private:
         bit_begin + Cast(address_dtype, info.annotated_extent.value()) *
                         IntImm(address_dtype, pointer_elem_bits);
 
+    // Match Buffer::GetFlattenedBuffer(): with strides, extent is
+    // strides[0]*shape[0]; otherwise product of shape dims (in int64).
     PrimExpr flat_extent = IntImm(address_dtype, 1);
-    for (size_t i = 0; i < bound_buffer->shape.size(); ++i) {
-      flat_extent = flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
+    if (!bound_buffer->strides.empty()) {
+      flat_extent = Cast(address_dtype, bound_buffer->strides[0]) *
+                    Cast(address_dtype, bound_buffer->shape[0]);
+    } else {
+      for (size_t i = 0; i < bound_buffer->shape.size(); ++i) {
+        flat_extent =
+            flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
+      }
     }
     PrimExpr elem_offset = bound_buffer->elem_offset.defined()
                                ? Cast(address_dtype, bound_buffer->elem_offset)

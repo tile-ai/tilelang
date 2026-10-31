@@ -1118,5 +1118,74 @@ def test_tvm_access_ptr_large_shape_extent_uses_int64():
     assert analyzer.can_prove(analyzer.simplify(predicate)), f"in-bounds access on large buffer was predicated off; predicate={predicate}"
 
 
+def test_tvm_access_ptr_padded_strides_included_in_bound():
+    """Regression (CodeRabbit #3518): include strides when computing flat extent.
+
+    float32[4, 4] with strides=(8, 1) spans strides[0]*shape[0]=32 elements
+    (128 bytes). Product of shape alone is only 16 elements (64 bytes), so a
+    valid uint8 access into the padded tail would be falsely rejected.
+    """
+
+    @T.prim_func
+    def main(src: T.Tensor((4, 4), "float32"), b: T.int32):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            # Byte offset 64 + b*16: for b in [0, 4) stays within the 128-byte
+            # padded span, but is past the 64-byte shape-product bound.
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 64 + b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    src_param = main.params[0]
+    src_buf = main.buffer_map[src_param]
+    src_with_strides = tvm.tirx.decl_buffer(
+        src_buf.shape,
+        src_buf.dtype,
+        data=src_buf.data,
+        strides=[tvm.tirx.IntImm("int32", 8), tvm.tirx.IntImm("int32", 1)],
+        elem_offset=src_buf.elem_offset,
+        scope=src_buf.scope(),
+        name=src_buf.name,
+    )
+    buffer_map = dict(main.buffer_map)
+    buffer_map[src_param] = src_with_strides
+    func = tvm.tirx.PrimFunc(
+        main.params,
+        main.body,
+        ret_type=main.ret_type,
+        buffer_map=buffer_map,
+        attrs=main.attrs,
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(func)
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    # Padded span is 128 bytes: offsets 64/80/96/112 with extent 16 are in-bounds.
+    for block_idx in (0, 1, 2, 3):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), (
+            f"in-bounds padded block {block_idx} was predicated off; predicate={predicate}"
+        )
+    # Offset 128 + extent 16 exceeds the 128-byte padded span.
+    for block_idx in (4, 5):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
+            f"OOB padded block {block_idx} should be false; predicate={predicate}"
+        )
+
+
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
