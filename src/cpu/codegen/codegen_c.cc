@@ -4,6 +4,7 @@
 #include "codegen_c.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 
 #include <tvm/runtime/module.h>
 #include <tvm/target/codegen.h>
@@ -241,6 +242,7 @@ void CodeGenTileLangC::PrintFuncCallC(const std::string &packed_func_name,
 void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
   // clear previous generated state.
   this->InitFuncState(f);
+  openmp_bound_vars_.clear();
   // reserve keywords
   ReserveKeywordsAsUnique();
 
@@ -454,26 +456,90 @@ void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
+Var CodeGenTileLangC::HoistOpenMPBound_(const PrimExpr &expr) {
+  Var bound("loop_bound", expr.dtype());
+  std::string id = AllocVarID(bound.get());
+  PrintSSAAssign(id, PrintExpr(expr), expr.dtype());
+  openmp_bound_vars_.push_back(bound);
+  return bound;
+}
+
+CodeGenTileLangC::OpenMPLoopChain
+CodeGenTileLangC::PrepareOpenMPLoopChain_(const For &head) {
+  struct LoopBounds {
+    PrimExpr min;
+    PrimExpr extent;
+    Optional<PrimExpr> step;
+  };
+
+  std::vector<For> loops;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> loop_vars;
+  for (const ForNode *node = head.get(); node != nullptr;
+       node = node->body.as<ForNode>()) {
+    if (node->kind != ForKind::kParallel) {
+      break;
+    }
+    For loop = GetRef<For>(node);
+    loops.push_back(loop);
+    loop_vars.insert(loop->loop_var);
+  }
+
+  auto UsesLoopVar = [&loop_vars](const PrimExpr &expr) {
+    return tirx::UsesVar(expr, [&loop_vars](const VarNode *var) {
+      return loop_vars.count(GetRef<Var>(var)) > 0;
+    });
+  };
+
+  std::vector<LoopBounds> bounds(loops.size());
+  size_t collapse_depth = 0;
+  for (size_t i = 0; i < loops.size(); ++i) {
+    const For &loop = loops[i];
+    bool invariant = !UsesLoopVar(loop->min) && !UsesLoopVar(loop->extent) &&
+                     (!loop->step || !UsesLoopVar(*loop->step));
+    if (!invariant) {
+      break;
+    }
+    Optional<PrimExpr> step;
+    if (loop->step) {
+      step = HoistOpenMPBound_(*loop->step);
+    }
+    bounds[i] = {HoistOpenMPBound_(loop->min), HoistOpenMPBound_(loop->extent),
+                 step};
+    ++collapse_depth;
+  }
+
+  std::vector<For> rewritten(loops.size());
+  Stmt body = loops.back()->body;
+  for (size_t i = loops.size(); i-- > 0;) {
+    const For &loop = loops[i];
+    if (i < collapse_depth) {
+      const LoopBounds &bound = bounds[i];
+      rewritten[i] =
+          For(loop->loop_var, bound.min, bound.extent, loop->kind, body,
+              loop->thread_binding, loop->annotations, bound.step, loop->span);
+    } else {
+      rewritten[i] =
+          For(loop->loop_var, loop->min, loop->extent, loop->kind, body,
+              loop->thread_binding, loop->annotations, loop->step, loop->span);
+    }
+    body = rewritten[i];
+  }
+  return {rewritten, collapse_depth};
+}
+
 void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
   if (op->kind == ForKind::kParallel && omp_chain_members_.count(op) == 0) {
-    // Head of a parallel chain: count the perfectly-nested kParallel body
-    // loops for the collapse(n) clause, then print serially via the base
-    // class. Chain members are remembered by node identity so that a
-    // *different* kParallel loop reached through wrapper statements
-    // (IfThenElse / AttrStmt / SeqStmt) inside the chain body still gets
-    // its own pragma instead of being mistaken for a member.
+    // Materialize only the invariant prefix. Bounds that reference a chain
+    // iterator stay in their original scope and are excluded from collapse.
     auto saved_members = omp_chain_members_;
-    int depth = 1;
-    for (const ForNode *child = op->body.as<ForNode>();
-         child && child->kind == ForKind::kParallel;
-         child = child->body.as<ForNode>()) {
-      omp_chain_members_.insert(child);
-      ++depth;
+    OpenMPLoopChain chain = PrepareOpenMPLoopChain_(GetRef<For>(op));
+    for (size_t i = 1; i < chain.loops.size(); ++i) {
+      omp_chain_members_.insert(chain.loops[i].get());
     }
     this->PrintIndent();
     stream << "#pragma omp parallel for";
-    if (depth > 1) {
-      stream << " collapse(" << depth << ")";
+    if (chain.collapse_depth > 1) {
+      stream << " collapse(" << chain.collapse_depth << ")";
     }
     if (auto num_threads = op->annotations.Get(tl::attr::kCPUNumThreads)) {
       if (const auto *imm = num_threads->as<IntImmNode>()) {
@@ -481,7 +547,7 @@ void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
       }
     }
     stream << "\n";
-    CodeGenC::VisitStmt_(op);
+    CodeGenC::VisitStmt_(chain.loops.front().get());
     omp_chain_members_ = std::move(saved_members);
     return;
   }

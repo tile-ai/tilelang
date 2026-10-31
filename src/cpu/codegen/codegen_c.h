@@ -91,6 +91,16 @@ private:
    * different kParallel loop reached through wrapper statements inside the
    * chain body still gets its own pragma. */
   std::unordered_set<const ForNode *> omp_chain_members_;
+  /*! \brief Keep synthetic bound vars alive for the current function. */
+  std::vector<Var> openmp_bound_vars_;
+
+  struct OpenMPLoopChain {
+    std::vector<For> loops;
+    size_t collapse_depth;
+  };
+
+  Var HoistOpenMPBound_(const PrimExpr &expr);
+  OpenMPLoopChain PrepareOpenMPLoopChain_(const For &head);
 
   FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
   std::string GetPackedName(const CallNode *op);
