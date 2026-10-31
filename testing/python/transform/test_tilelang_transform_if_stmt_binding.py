@@ -273,5 +273,139 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
     tvm.ir.assert_structural_equal(after.body, expected.body, True)
 
 
+def test_if_stmt_binding_keeps_bind_before_atomic_via_address_of():
+    """Regression for issue #2594 residual: atomic_*_elem_op(address_of(...)).
+
+    #2651 taught the collector to honor access_ptr / tvm_access_ptr write
+    masks. The language frontend uses access_ptr("rw"), but a destination
+    formed with address_of still only recorded a read, so a scalar bind of
+    the pre-atomic value was inlined past the RMW and observed the
+    post-atomic value. Plain BufferStore controls stay correct because
+    BufferStore already adds a write.
+    """
+
+    @T.prim_func
+    def before(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A[0]),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    @T.prim_func
+    def expected(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A[0]),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
+def test_if_stmt_binding_keeps_pre_atomic_add_elem_snapshot():
+    """Regression for #2594: a scalar bind that reads buffer A must not be
+    inlined past a later non-returning ``atomic_add_elem_op`` to A.
+
+    ``T.atomic_add`` (return_prev=False) lowers to
+    ``tl.atomic_add_elem_op(tl.access_ptr(..., "rw"), ...)``. The collector
+    must treat the write-bit access_ptr as a write so ``IsReplayableScalarBind``
+    keeps the bind. Without write tracking the bind is substituted into the
+    store and the kernel reads the post-atomic value (#2651 closed the hole;
+    this pins the issue's exact non-ret shape).
+    """
+
+    @T.prim_func
+    def before(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.call_intrin(
+                        "handle",
+                        tvm.ir.Op.get("tl.access_ptr"),
+                        A[0],
+                        1,
+                        3,
+                    ),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    @T.prim_func
+    def expected(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    T.call_intrin(
+                        "handle",
+                        tvm.ir.Op.get("tl.access_ptr"),
+                        A[0],
+                        1,
+                        3,
+                    ),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
+def test_if_stmt_binding_keeps_pre_atomic_add_via_tvm_access_ptr():
+    """Same as the #2594 non-ret case, but destination via ``tvm_access_ptr``."""
+
+    @T.prim_func
+    def before(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    A.access_ptr("rw"),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    @T.prim_func
+    def expected(A: T.Buffer((1,), "int32"), Out: T.Buffer((1,), "int32")):
+        if A[0] > 0:
+            v = T.bind(A[0])
+            T.evaluate(
+                T.call_intrin(
+                    "handle",
+                    tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                    A.access_ptr("rw"),
+                    100,
+                )
+            )
+            Out[0] = v
+
+    after = _run_if_stmt_binding(before)
+    tvm.ir.assert_structural_equal(after.body, expected.body, True)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
