@@ -14,4 +14,5 @@ flash-attn==2.5.8
 torch<2.14
 cuda-python==13.0.3
 # Use the cu13 extra so CuTeDSL installs the CUDA 13 runtime package.
-nvidia-cutlass-dsl[cu13]==4.7.0
+# 4.8.0 is the first release whose FP8 conversions compile for sm_89.
+nvidia-cutlass-dsl[cu13]==4.8.1

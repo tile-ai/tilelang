@@ -1047,6 +1047,12 @@ private:
         static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
     if (num_stages < 1)
       return StmtExprMutator::VisitStmt_(op);
+    // The loop finder descends through every statement kind, but the WS block
+    // can only be rebuilt through the kinds ReplacePipelineLoopInStmt handles
+    // (no While yet). Decline so the pass falls back instead of failing.
+    if (!PipelineLoopContainmentChecker::Contains(orig_block->body,
+                                                  pipeline_loop))
+      return StmtExprMutator::VisitStmt_(op);
 
     // Flatten the loop body.
     Array<Stmt> flat_stmts;
@@ -1761,6 +1767,7 @@ private:
     shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
     consumer_prelude_live_seed_ = {};
+    shared_prelude_buffers_ = {};
     producer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
         rewritten_producer, buffer_data_to_buffer_));
     consumer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
@@ -1771,6 +1778,7 @@ private:
     // uses of the values defined by each prelude statement.
     extracted_producer_init_ = {};
     extracted_consumer_init_ = {};
+    guarded_producer_prelude_ = {};
 
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_extent),
                                   Downcast<IntImm>(consumer_extent)};
@@ -1809,10 +1817,16 @@ private:
             &producer_access,
             LocalAccessCollector::Collect(stmt, buffer_data_to_buffer_));
       }
+      for (const auto &guard : guarded_producer_prelude_) {
+        MergeLocalAccessSummary(&producer_access,
+                                LocalAccessCollector::Collect(
+                                    guard->then_case, buffer_data_to_buffer_));
+      }
       auto maybe_clone = [&](const Buffer &buffer) {
         if (!buffer.defined() ||
             !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer)) ||
             !block_alloc_buffers.count(buffer) ||
+            shared_prelude_buffers_.count(buffer) ||
             producer_buffer_remap.count(buffer)) {
           return;
         }
@@ -1838,10 +1852,24 @@ private:
       extracted_producer_init_ = remapped_producer_init;
     }
 
+    // Placeholder statements of the first-pass result and their final form.
+    StmtRewriteMap final_stmts;
+    if (!producer_buffer_remap.empty()) {
+      for (const auto &guard : guarded_producer_prelude_) {
+        final_stmts.emplace(
+            guard,
+            IfThenElse(guard->condition,
+                       RemapBuffers(guard->then_case, producer_buffer_remap)));
+      }
+    }
+
     // If branch-local prelude init/copy was extracted, rebuild with it inside
     // the corresponding WS branch so each branch initializes its own local
-    // state before entering the pipelined loop.
-    if (!extracted_producer_init_.empty() ||
+    // state before entering the pipelined loop. The same rebuild is needed
+    // when only the producer's buffers were cloned: the placeholder still
+    // holds the pre-remap loop, which would read the original buffers while
+    // the guarded prelude writes the clones.
+    if (!producer_buffer_remap.empty() || !extracted_producer_init_.empty() ||
         !extracted_consumer_init_.empty()) {
       Stmt enriched_producer = rewritten_producer;
       if (!extracted_producer_init_.empty()) {
@@ -1870,28 +1898,24 @@ private:
                                 scoped_producer, scoped_consumer);
       ws_body =
           AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, ws_body);
-      // Second pass: replace again with the enriched WS body.
-      // extracted_consumer_init_ is already empty (stmts were removed
-      // from the prelude in the first pass result).
-      // We need to replace in the ALREADY-modified body from pass 1.
-      // The pipeline loop has already been replaced by dummy_ws in that
-      // tree, so do a direct substitution of the placeholder WS body.
-      // Since dummy_ws appears exactly once in replaced.stmt, do a
-      // simple statement replacement on the full placeholder stmt.
-      class SubstWsBody : public StmtExprMutator {
+      final_stmts.emplace(dummy_ws, ws_body);
+    }
+    // Second pass: substitute the placeholders in the first-pass result.
+    // Each of them appears exactly once there.
+    if (!final_stmts.empty()) {
+      class SubstPlaceholders : public StmtExprMutator {
       public:
-        SubstWsBody(const Stmt &old_ws, const Stmt &new_ws)
-            : old_(old_ws), new_(new_ws) {}
+        explicit SubstPlaceholders(const StmtRewriteMap &final_stmts)
+            : final_stmts_(final_stmts) {}
         Stmt VisitStmt(const Stmt &stmt) final {
-          if (stmt.same_as(old_)) {
-            return new_;
+          if (auto it = final_stmts_.find(stmt); it != final_stmts_.end()) {
+            return it->second;
           }
           return StmtExprMutator::VisitStmt(stmt);
         }
-        Stmt old_, new_;
+        const StmtRewriteMap &final_stmts_;
       };
-      SubstWsBody subst(dummy_ws, ws_body);
-      replaced_stmt = subst(replaced_stmt);
+      replaced_stmt = SubstPlaceholders(final_stmts)(replaced_stmt);
     }
     Stmt new_block_body = SinkGuardedConsumerPostlude::Rewrite(
         replaced_stmt, thread_iv_->var, producer_extent);
@@ -2231,14 +2255,15 @@ private:
       Optional<Stmt> rewritten_loop = VisitStmt(op->seq[loop_idx]);
       ICHECK(rewritten_loop.defined())
           << "ProducerConsumerWS: failed to replace pipeline loop child";
+      bool across_control_flow = crossed_control_flow_;
 
       // Rewrite the child containing the pipeline loop before classifying this
       // level's prelude.  The recursive rewrite propagates liveness from
       // nested post-loop consumers, which outer prelude BindNodes need in
       // order to stay shared when they feed both pre-loop shared work and the
       // producer/consumer branches.
-      PropagatePreludeLiveness(op, loop_idx);
-      AppendClassifiedPrelude(op, loop_idx, &new_seq);
+      PropagatePreludeLiveness(op, loop_idx, across_control_flow);
+      AppendClassifiedPrelude(op, loop_idx, across_control_flow, &new_seq);
 
       new_seq.push_back(rewritten_loop.value());
 
@@ -2294,6 +2319,7 @@ private:
       if (!found) {
         return Optional<Stmt>();
       }
+      crossed_control_flow_ = true;
       Stmt new_then =
           then_result.defined() ? then_result.value() : op->then_case;
       return IfThenElse(op->condition, new_then, new_else, op->span);
@@ -2304,6 +2330,7 @@ private:
       if (!body.defined()) {
         return Optional<Stmt>();
       }
+      crossed_control_flow_ = true;
       For new_for = GetRef<For>(op);
       new_for.CopyOnWrite()->body = body.value();
       return new_for;
@@ -2323,7 +2350,8 @@ private:
                         rewritten);
     }
 
-    void PropagatePreludeLiveness(const SeqStmtNode *op, int loop_idx) {
+    void PropagatePreludeLiveness(const SeqStmtNode *op, int loop_idx,
+                                  bool across_control_flow) {
       LocalLiveSet shared_live = rewriter_->shared_prelude_live_seed_;
       LocalLiveSet producer_live = rewriter_->producer_prelude_live_seed_;
       LocalLiveSet consumer_live = rewriter_->consumer_prelude_live_seed_;
@@ -2343,7 +2371,10 @@ private:
       for (int i = loop_idx - 1; i >= 0; --i) {
         LocalAccessSummary summary = LocalAccessCollector::Collect(
             op->seq[i], rewriter_->buffer_data_to_buffer_);
-        if (!summary.HasTrackedDefs()) {
+        // Across control flow, bindings stay in place for every thread (see
+        // AppendClassifiedPrelude), so whatever they read is shared too.
+        if (!summary.HasTrackedDefs() ||
+            (across_control_flow && op->seq[i].as<BindNode>())) {
           shared_live.AddUses(summary);
           continue;
         }
@@ -2366,35 +2397,70 @@ private:
     }
 
     void AppendClassifiedPrelude(const SeqStmtNode *op, int loop_idx,
+                                 bool across_control_flow,
                                  Array<Stmt> *new_seq) {
       // Classify pre-loop statements using branch-private def/use sets.
       // Shared-prelude statements stay in place; branch-private definitions
       // move next to the branch that consumes them, or are duplicated when
       // both producer and consumer need the same definition.
+      //
+      // Moving a statement into the WS branches is only valid when no loop or
+      // condition separates it from the pipeline loop: otherwise it would run
+      // once per outer iteration (after that iteration's own prelude) or be
+      // skipped together with the loop.  Such statements stay in place and
+      // are guarded to the partition that needs them instead.
       for (int i = 0; i < loop_idx; ++i) {
-        switch (ClassifyPreludeStmt(op->seq[i],
-                                    rewriter_->buffer_data_to_buffer_,
-                                    rewriter_->shared_prelude_live_seed_,
-                                    rewriter_->producer_prelude_live_seed_,
-                                    rewriter_->consumer_prelude_live_seed_)) {
-        case PreludeStmtPlacement::kProducerOnly:
-          rewriter_->extracted_producer_init_.push_back(op->seq[i]);
-          break;
-        case PreludeStmtPlacement::kConsumerOnly:
-          rewriter_->extracted_consumer_init_.push_back(op->seq[i]);
-          break;
-        case PreludeStmtPlacement::kDuplicateToBoth:
-          rewriter_->extracted_producer_init_.push_back(op->seq[i]);
-          rewriter_->extracted_consumer_init_.push_back(op->seq[i]);
-          break;
-        case PreludeStmtPlacement::kKeepSharedPrelude:
-          if (auto it = rewriter_->common_prelude_rewrites_.find(op->seq[i]);
+        const Stmt &stmt = op->seq[i];
+        PreludeStmtPlacement placement =
+            ClassifyPreludeStmt(stmt, rewriter_->buffer_data_to_buffer_,
+                                rewriter_->shared_prelude_live_seed_,
+                                rewriter_->producer_prelude_live_seed_,
+                                rewriter_->consumer_prelude_live_seed_);
+        if (across_control_flow && stmt.as<BindNode>()) {
+          placement = PreludeStmtPlacement::kKeepSharedPrelude;
+        }
+        bool to_producer = placement == PreludeStmtPlacement::kProducerOnly ||
+                           placement == PreludeStmtPlacement::kDuplicateToBoth;
+        bool to_consumer = placement == PreludeStmtPlacement::kConsumerOnly ||
+                           placement == PreludeStmtPlacement::kDuplicateToBoth;
+        if (placement == PreludeStmtPlacement::kKeepSharedPrelude) {
+          Stmt kept = stmt;
+          if (auto it = rewriter_->common_prelude_rewrites_.find(stmt);
               it != rewriter_->common_prelude_rewrites_.end()) {
-            new_seq->push_back(it->second);
-          } else {
-            new_seq->push_back(op->seq[i]);
+            kept = it->second;
           }
-          break;
+          // The statement runs for every thread before the split, so the
+          // buffers it touches keep their block-wide layout and must not be
+          // cloned for the producer.
+          LocalAccessSummary kept_access = LocalAccessCollector::Collect(
+              kept, rewriter_->buffer_data_to_buffer_);
+          rewriter_->shared_prelude_buffers_.insert(
+              kept_access.read_buffers.begin(), kept_access.read_buffers.end());
+          rewriter_->shared_prelude_buffers_.insert(
+              kept_access.write_buffers.begin(),
+              kept_access.write_buffers.end());
+          new_seq->push_back(kept);
+          continue;
+        }
+        if (!across_control_flow) {
+          if (to_producer) {
+            rewriter_->extracted_producer_init_.push_back(stmt);
+          }
+          if (to_consumer) {
+            rewriter_->extracted_consumer_init_.push_back(stmt);
+          }
+          continue;
+        }
+        if (to_producer) {
+          // Producer-private buffers are cloned only after replacement, so
+          // BuildWSBlock remaps the body of this guard afterwards.
+          IfThenElse guard(LT(rewriter_->thread_iv_->var, producer_extent_),
+                           stmt);
+          rewriter_->guarded_producer_prelude_.push_back(guard);
+          new_seq->push_back(guard);
+        }
+        if (to_consumer) {
+          new_seq->push_back(GuardConsumerOnly(stmt));
         }
       }
     }
@@ -2404,6 +2470,9 @@ private:
     Stmt ws_body_;
     PrimExpr producer_extent_;
     PrimExpr consumer_extent_;
+    // Set once the pipeline loop was found under a For or IfThenElse below
+    // the statement being visited.
+    bool crossed_control_flow_{false};
   };
 
   Optional<Stmt> ReplacePipelineLoopInStmt(const Stmt &stmt,
@@ -2457,6 +2526,11 @@ private:
   LocalLiveSet consumer_prelude_live_seed_;
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
+  Array<IfThenElse> guarded_producer_prelude_;
+  // Buffers touched by statements that stay in the shared prelude. They cannot
+  // be cloned for the producer: the shared statement runs before the partition
+  // split, so both branches must keep pointing at the same buffer.
+  BufferSet shared_prelude_buffers_;
 };
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
-from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available, fp8_conversion_compile_hint
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
@@ -350,7 +350,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             stream: CUDA stream handle
             device_id: CUDA device ID for multi-GPU support
         """
-        result = self.pymodule.call(*args, stream=stream, device_id=device_id)
+        try:
+            result = self.pymodule.call(*args, stream=stream, device_id=device_id)
+        except Exception as err:
+            hint = fp8_conversion_compile_hint(self.target.attrs.get("arch"), self.get_kernel_source()) if "NVVM" in str(err) else None
+            if hint is not None:
+                raise RuntimeError(hint) from err
+            raise
 
         # After first call, save cubin to cache if needed
         self._save_cubin_to_cache_if_needed()
@@ -440,7 +446,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((v for v in param_values if isinstance(v, torch.Tensor)), None)
-        if first_tensor is None:
+        # A kernel whose only tensors are out_idx outputs has no argument to
+        # infer the device from; allocate on the current device, as the CUDA
+        # adapters do.
+        if first_tensor is not None:
+            device = first_tensor.device
+        elif torch.cuda.is_available():
+            device = torch.device("cuda", torch.cuda.current_device())
+        else:
             raise ValueError("Expected at least one torch.Tensor argument to infer CUDA device")
 
         args: list[Any] = []
@@ -448,7 +461,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         # Outputs written on a caller-supplied stream are allocated on that stream.
         alloc_stream = None
         if stream is not None and self.result_idx:
-            alloc_stream = output_allocation_stream(stream, first_tensor.device)
+            alloc_stream = output_allocation_stream(stream, device)
 
         # tensor pointers
         with torch.cuda.stream(alloc_stream):
@@ -462,7 +475,22 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                             shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
-                    tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
+                    # Sub-byte dtypes are stored packed in torch (float4_e2m1fn_x2 holds two
+                    # FP4 elements per byte), so the logical element shape has to be divided
+                    # by the packing factor, exactly as the CUDA adapters do.  A final extent
+                    # that does not fill whole bytes is rejected, like the CUDA host check,
+                    # rather than rounded: neither floor nor ceil yields a valid packed view.
+                    element_bits = self.params[i].dtype.bits * self.params[i].dtype.lanes
+                    pack = 8 // element_bits if element_bits < 8 else 1
+                    if pack > 1 and shape and isinstance(shape[-1], int):
+                        if shape[-1] % pack != 0:
+                            name = self.prim_func.params[i].name
+                            raise ValueError(
+                                f"packed output {name} has a final dimension that is not storage-aligned: "
+                                f"{shape[-1]} elements of {self.params[i].dtype} is not a multiple of {pack}"
+                            )
+                        shape = [*shape[:-1], shape[-1] // pack]
+                    tensor = torch.empty(*shape, dtype=dtype, device=device)
                     param_values[i] = tensor
                 else:
                     tensor = param_values[i]
@@ -479,10 +507,11 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        # Get device_id from first tensor for multi-GPU support
-        if not first_tensor.is_cuda:
-            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {first_tensor.device}")
-        device_id = first_tensor.device.index or 0
+        # Get device_id from the first tensor, or the current device when the
+        # kernel takes no tensor input, for multi-GPU support
+        if first_tensor is not None and not first_tensor.is_cuda:
+            raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {device}")
+        device_id = device.index or 0
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 

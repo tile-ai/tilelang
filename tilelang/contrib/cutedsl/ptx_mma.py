@@ -18,8 +18,11 @@ Supported dense configurations (from mma.h):
 - TF32: m16n8k4, m16n8k8 -> f32 accumulator
 - FP64: m8n8k4 -> f64 accumulator
 
-Sparse (mma.sp) variants mirror the dense ones with halved A registers,
-an extra metadata register, and a sparse_selector literal.
+Sparse variants mirror the dense ones with halved A registers, an extra
+metadata register, and a sparse_selector literal. Like
+``tl_templates/cuda/instruction/mma_sp.h`` they cover f16/bf16/tf32, s8/u8 and
+FP8 (e4m3/e5m2, sm_89+), and emit ``mma.sp::ordered_metadata``, which PTX
+recommends over plain ``mma.sp`` for performance.
 """
 
 __all__ = [
@@ -38,9 +41,10 @@ __all__ = [
     "ptx_mma_m16n8k32_e5m2_e5m2_f32",
     "ptx_mma",
     "ptx_mma_sp",
+    "ptx_mma_block_scale",
 ]
 
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.cutlass_dsl import CuTeDSL, T, dsl_user_op
 from cutlass._mlir.dialects import llvm
 from cutlass.cute.typing import Pointer
 import cutlass.cute as cute
@@ -150,7 +154,7 @@ def _make_ptx_mma(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
 
 
 def _make_ptx_mma_sp(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
-    """Factory to create a @dsl_user_op for ``mma.sp.sync.aligned``.
+    """Factory to create a @dsl_user_op for ``mma.sp::ordered_metadata.sync.aligned``.
 
     Args:
         ptx_shape: PTX shape, e.g. "m16n8k32"
@@ -172,7 +176,7 @@ def _make_ptx_mma_sp(ptx_shape, ptx_dtypes, n_a, n_b, n_c, flavor):
     c_regs = ", ".join(f"${n_c + n_a + n_b + i}" for i in range(n_c))
     meta_reg = f"${n_c + n_a + n_b + n_c}"
     ptx_template = (
-        f"mma.sp.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes}"
+        f"mma.sp::ordered_metadata.sync.aligned.{ptx_shape}.{{a_layout}}.{{b_layout}}.{ptx_dtypes}"
         f" {{{{{d_regs}}}}}, {{{{{a_regs}}}}}, {{{{{b_regs}}}}}, {{{{{c_regs}}}}}, {meta_reg}, 0x{{sparse_selector}};"
     )
 
@@ -290,6 +294,13 @@ ptx_mma_sp_m16n8k16_bf16_bf16_f32 = _make_ptx_mma_sp("m16n8k16", "f32.bf16.bf16.
 # INT8
 ptx_mma_sp_m16n8k64_s8_s8_s32 = _make_ptx_mma_sp("m16n8k64", "s32.s8.s8.s32", 4, 4, 4, "i32")
 ptx_mma_sp_m16n8k32_s8_s8_s32 = _make_ptx_mma_sp("m16n8k32", "s32.s8.s8.s32", 2, 2, 4, "i32")
+# UINT8
+ptx_mma_sp_m16n8k64_u8_u8_s32 = _make_ptx_mma_sp("m16n8k64", "s32.u8.u8.s32", 4, 4, 4, "i32")
+ptx_mma_sp_m16n8k32_u8_u8_s32 = _make_ptx_mma_sp("m16n8k32", "s32.u8.u8.s32", 2, 2, 4, "i32")
+# FP8 (SM89+), f32 accumulator only; the sparse selector must be 0
+_PTX_MMA_SP_FP8 = {
+    (a, b): _make_ptx_mma_sp("m16n8k64", f"f32.{a}.{b}.f32", 4, 4, 4, "f32") for a in ("e4m3", "e5m2") for b in ("e4m3", "e5m2")
+}
 # TF32
 ptx_mma_sp_m16n8k16_tf32_tf32_f32 = _make_ptx_mma_sp("m16n8k16", "f32.tf32.tf32.f32", 2, 2, 4, "f32")
 ptx_mma_sp_m16n8k8_tf32_tf32_f32 = _make_ptx_mma_sp("m16n8k8", "f32.tf32.tf32.f32", 1, 1, 4, "f32")
@@ -378,6 +389,15 @@ def ptx_mma(
 # =============================================================================
 
 
+_FP8_SP_NAMES = {
+    "e4m3": "e4m3",
+    "float8_e4m3": "e4m3",
+    "float8_e4m3fn": "e4m3",
+    "e5m2": "e5m2",
+    "float8_e5m2": "e5m2",
+}
+
+
 def ptx_mma_sp(
     shape: str,
     a_layout: str,
@@ -422,6 +442,8 @@ def ptx_mma_sp(
             return ptx_mma_sp_m16n8k32_bf16_bf16_f32(*_args)
         elif a_dtype in ["int8", "s8"]:
             return ptx_mma_sp_m16n8k32_s8_s8_s32(*_args)
+        elif a_dtype in ["uint8", "u8"]:
+            return ptx_mma_sp_m16n8k32_u8_u8_s32(*_args)
 
     elif shape == "m16n8k16":
         if a_dtype in ["fp16", "f16", "float16"]:
@@ -437,8 +459,97 @@ def ptx_mma_sp(
     elif shape == "m16n8k64":
         if a_dtype in ["int8", "s8"]:
             return ptx_mma_sp_m16n8k64_s8_s8_s32(*_args)
+        if a_dtype in ["uint8", "u8"]:
+            return ptx_mma_sp_m16n8k64_u8_u8_s32(*_args)
+        fp8_pair = (_FP8_SP_NAMES.get(a_dtype), _FP8_SP_NAMES.get(b_dtype))
+        if fp8_pair in _PTX_MMA_SP_FP8 and c_dtype in ["fp32", "f32", "float32"]:
+            return _PTX_MMA_SP_FP8[fp8_pair](*_args)
 
     elif shape == "m16n8k8" and a_dtype in ["tf32", "tensorfloat32", "fp32", "f32", "float32"]:
         return ptx_mma_sp_m16n8k8_tf32_tf32_f32(*_args)
 
     raise ValueError(f"Unsupported sparse MMA configuration: shape={shape}, a_dtype={a_dtype}, b_dtype={b_dtype}, c_dtype={c_dtype}")
+
+
+# =============================================================================
+# SM120 block-scaled MMA
+# =============================================================================
+
+# tl::detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs (mma_block_scale.h).
+_MMA_BLOCK_SCALE_MXF4NVF4 = (
+    "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3 "
+    "{$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, $9}, {$10, $11, $12, $13}, {$14}, {$15, $16}, {$17}, {$18, $19};"
+)
+_MMA_BLOCK_SCALE_CONSTRAINTS = ",".join(["=f"] * 4 + ["r"] * 6 + ["f"] * 4 + ["r", "h", "h", "r", "h", "h"])
+
+
+def _check_block_scale_arch():
+    arch = CuTeDSL._get_dsl().envar.arch
+    if arch[3:].rstrip("af") not in ("120", "121") or arch[-1] not in "af":
+        raise NotImplementedError(f"ptx_mma_block_scale requires sm_120a/f or sm_121a/f, got {arch}")
+
+
+@dsl_user_op
+def ptx_mma_block_scale(
+    accum_dtype: str,
+    shape: str,
+    a_layout: str,
+    b_layout: str,
+    kind: str,
+    scale_vec_size: int,
+    a_dtype: str,
+    b_dtype: str,
+    scale_type: str,
+    a_ptr: Pointer,
+    a_offset,
+    b_ptr: Pointer,
+    b_offset,
+    c_ptr: Pointer,
+    c_offset,
+    scale_a: Pointer,
+    scale_b: Pointer,
+    scale_a_byte_id=0,
+    scale_a_thread_id=0,
+    scale_b_byte_id=0,
+    scale_b_thread_id=0,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """``tl::sm120_mma_sync_blockscaled``: SM120 NVF4 block-scaled warp MMA.
+
+    Only the configuration supported by the CUDA template is accepted:
+    f32 m16n8k64 row.col kind::mxf4nvf4 scale_vec::4X e2m1.e2m1 with ue4m3
+    scales. Offsets are in elements of the operand buffers; each scale pointer
+    is read as one 32-bit word.
+    """
+    config = (accum_dtype, shape, a_layout, b_layout, kind, scale_vec_size, a_dtype, b_dtype, scale_type)
+    if config != ("float32", "m16n8k64", "row", "col", "mxf4nvf4", 4, "e2m1", "e2m1", "ue4m3"):
+        raise ValueError(f"Unsupported ptx_mma_block_scale configuration: {config}")
+    _check_block_scale_arch()
+
+    def words(ptr, offset, count, dtype):
+        tensor = cute.make_tensor(cute.recast_ptr(ptr + offset, dtype=dtype), (count,))
+        return tensor, [dtype(tensor[i]).ir_value(loc=loc, ip=ip) for i in range(count)]
+
+    _, a_vals = words(a_ptr, a_offset, 4, cute.Int32)
+    _, b_vals = words(b_ptr, b_offset, 2, cute.Int32)
+    c_tensor, c_vals = words(c_ptr, c_offset, 4, cute.Float32)
+    _, (sa,) = words(scale_a, 0, 1, cute.Int32)
+    _, (sb,) = words(scale_b, 0, 1, cute.Int32)
+    selectors = [cute.Int16(v).ir_value(loc=loc, ip=ip) for v in (scale_a_byte_id, scale_a_thread_id, scale_b_byte_id, scale_b_thread_id)]
+
+    f32 = T.f32()
+    result = llvm.inline_asm(
+        llvm.StructType.get_literal([f32] * 4),
+        a_vals + b_vals + c_vals + [sa, selectors[0], selectors[1], sb, selectors[2], selectors[3]],
+        _MMA_BLOCK_SCALE_MXF4NVF4,
+        _MMA_BLOCK_SCALE_CONSTRAINTS,
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    for i in range(4):
+        c_tensor[i] = cute.Float32(llvm.extractvalue(f32, result, [i], loc=loc, ip=ip))

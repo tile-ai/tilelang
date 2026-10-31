@@ -34,6 +34,8 @@ from cutlass._mlir.extras import types as mlir_types
 from cutlass._mlir import ir as mlir_ir
 from cutlass.cutlass_dsl import dsl_user_op
 
+from .warp import _as_cuda_predicate
+
 __all__ = [
     "BYTES_PER_TENSORMAP",
     "BYTES_PER_POINTER",
@@ -49,12 +51,29 @@ __all__ = [
     "handle_add_byte_offset",
     "shuffle_elect",
     "sync_thread_partial",
+    "named_barrier_arrive",
+    "__syncthreads_count",
+    "__syncthreads_and",
+    "__syncthreads_or",
     "warpgroup_reg_alloc",
     "warpgroup_reg_dealloc",
     "pack_half2",
+    "pack_b8x4",
+    "as_pointer",
 ]
 
 BYTES_PER_TENSORMAP = 128
+
+
+def as_pointer(value):
+    """Return the pointer behind *value*.
+
+    Generated CuTeDSL code passes buffer views (``cute.Tensor``) where the
+    pointer itself is meant, so unwrap ``.iterator`` when the value has one.
+    """
+    return value.iterator if hasattr(value, "iterator") else value
+
+
 BYTES_PER_POINTER = 8
 
 
@@ -110,6 +129,20 @@ def _recast_fp4_unpack_smem_ptr(ptr, swizzle_=None, *, loc=None, ip=None):
     return _cute_ir.recast_iter(res_ty, ptr.value, loc=loc, ip=ip)
 
 
+def as_byte_ptr(ptr):
+    """A ``Uint8`` view of a sub-byte element pointer, for byte-addressed instructions.
+
+    Instructions such as TMA, cp.async and ldmatrix take a raw address, which a
+    pointer to packed FP4/FP6/INT4 elements cannot be lowered to directly. The
+    addresses they take are at least byte aligned, so the view is exact. The view
+    is rebuilt from the integer address because ``cute.recast_ptr`` needs a static
+    alignment, which a dynamically offset sub-byte pointer no longer carries.
+    """
+    if isinstance(ptr, cute.Pointer) and ptr.dtype.width < 8:
+        return cute.make_ptr(cutlass.Uint8, ptr.toint(), ptr.memspace, assumed_align=1)
+    return ptr
+
+
 def recast_ptr(ptr, swizzle_=None, dtype=None):
     if dtype is Float4E2M1FN_unpack and getattr(ptr, "memspace", None) == AddressSpace.smem:
         return _recast_fp4_unpack_smem_ptr(ptr, swizzle_)
@@ -160,6 +193,21 @@ def bitcast(value, target_dtype):
 
     @dsl_user_op
     def bitcast_impl(src_val, *, loc=None, ip=None):
+        if isinstance(src_val, TensorSSA):
+            src_ir = src_val.ir_value(loc=loc, ip=ip)
+            if src_val.dtype is tgt_wrapper:
+                return src_val
+            if src_val.dtype.width != tgt_wrapper.width:
+                raise NotImplementedError(f"vector bitcast from {src_val.dtype} to {tgt_wrapper} changes the element width")
+            src_elem_type = src_val.dtype.mlir_type
+            if src_elem_type == tgt_mlir_type:
+                # Same MLIR element type (int8 and uint8 are both signless i8),
+                # so only the Python wrapper changes.
+                return TensorSSA(src_ir, src_val.shape, tgt_wrapper)
+            # Distinct element types -- int <-> float, or float16 vs bfloat16,
+            # which MLIR keeps apart -- must be a real vector bitcast.
+            res = llvm.bitcast(_recast_type(src_ir.type, tgt_mlir_type), src_ir, loc=loc, ip=ip)
+            return TensorSSA(res, src_val.shape, tgt_wrapper)
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
         result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
         return tgt_wrapper(result)
@@ -202,8 +250,7 @@ def _f4e2m1_to_float32_tensor(value, *, loc=None, ip=None):
     f32_subnormal_abs = i32(0x3F000000)
 
     for idx in range(length):
-        pos = i32(idx)
-        nibble_i4 = vector.extractelement(vec_i4, position=pos, loc=loc, ip=ip)
+        nibble_i4 = vector.extract(vec_i4, [], [idx], loc=loc, ip=ip)
         nibble = arith.extui(Int32.mlir_type, nibble_i4, loc=loc, ip=ip)
 
         payload = arith.andi(nibble, payload_mask, loc=loc, ip=ip)
@@ -220,7 +267,7 @@ def _f4e2m1_to_float32_tensor(value, *, loc=None, ip=None):
         abs_bits = arith.select(is_zero, zero, nonzero_abs, loc=loc, ip=ip)
         bits = arith.ori(sign, abs_bits, loc=loc, ip=ip)
         f32 = llvm.bitcast(Float32.mlir_type, bits, loc=loc, ip=ip)
-        vec_dst = vector.insertelement(f32, vec_dst, position=pos, loc=loc, ip=ip)
+        vec_dst = vector.insert(f32, vec_dst, [], [idx], loc=loc, ip=ip)
 
     return TensorSSA(vec_dst, value.shape, Float32)
 
@@ -252,8 +299,7 @@ def _float32_to_f4e2m1_tensor(value, *, loc=None, ip=None):
     shift_sign = i32(28)
 
     for idx in range(length):
-        pos = i32(idx)
-        bits = vector.extractelement(vec_i32, position=pos, loc=loc, ip=ip)
+        bits = vector.extract(vec_i32, [], [idx], loc=loc, ip=ip)
         sign = arith.shrui(arith.andi(bits, sign_mask, loc=loc, ip=ip), shift_sign, loc=loc, ip=ip)
         abs_bits = arith.andi(bits, abs_mask, loc=loc, ip=ip)
         abs_val = llvm.bitcast(Float32.mlir_type, abs_bits, loc=loc, ip=ip)
@@ -270,7 +316,7 @@ def _float32_to_f4e2m1_tensor(value, *, loc=None, ip=None):
         payload = arith.select(is_nan, i32(7), payload, loc=loc, ip=ip)
 
         nibble = arith.trunci(Int4.mlir_type, arith.ori(sign, payload, loc=loc, ip=ip), loc=loc, ip=ip)
-        vec_i4 = vector.insertelement(nibble, vec_i4, position=pos, loc=loc, ip=ip)
+        vec_i4 = vector.insert(nibble, vec_i4, [], [idx], loc=loc, ip=ip)
 
     vec_f4_type = mlir_ir.VectorType.get([length], Float4E2M1FN.mlir_type, loc=loc)
     vec_f4 = builtin.unrealized_conversion_cast([vec_f4_type], [vec_i4], loc=loc, ip=ip)
@@ -369,11 +415,59 @@ def shuffle_elect(thread_extent):
 
 
 def sync_thread_partial(barrier_id=None, thread_count=None):
+    """
+    Synchronize at a CTA barrier, as tl::__sync_thread_partial (bar.sync id, count).
+
+    The CUDA template defaults the count to 0, which ``bar.sync`` treats as all
+    CTA threads; a missing or static zero count emits the count-less form.
+    """
     from .reduce import bar_sync_ptx
 
     barrier_id = 0 if barrier_id is None else barrier_id
-    thread_count = 0 if thread_count is None else thread_count
+    if thread_count is None or (isinstance(thread_count, int) and thread_count == 0):
+        prims.barrier_cta_sync(barrier_id)
+        return
     bar_sync_ptx(barrier_id, thread_count)
+
+
+@dsl_user_op
+def named_barrier_arrive(barrier_id, thread_count, *, loc=None, ip=None):
+    """
+    Arrive at a named barrier without waiting.
+
+    Matches tl::__named_barrier_arrive: bar.arrive (barrier.cta.arrive.aligned).
+    """
+    prims.barrier_cta_arrive_aligned(barrier_id, thread_count, loc=loc, ip=ip)
+
+
+@dsl_user_op
+def __syncthreads_count(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning the number of threads whose predicate is non-zero.
+
+    Matches CUDA __syncthreads_count: bar.red.popc.u32 on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "popc", loc=loc, ip=ip))
+
+
+@dsl_user_op
+def __syncthreads_and(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning 1 if the predicate is non-zero for all threads, else 0.
+
+    Matches CUDA __syncthreads_and: bar.red.and.pred on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "and", loc=loc, ip=ip))
+
+
+@dsl_user_op
+def __syncthreads_or(pred, *, loc=None, ip=None) -> Int32:
+    """
+    Block barrier returning 1 if the predicate is non-zero for any thread, else 0.
+
+    Matches CUDA __syncthreads_or: bar.red.or.pred on barrier 0.
+    """
+    return Int32(prims.barrier_cta_red_aligned(_as_cuda_predicate(pred), 0, "or", loc=loc, ip=ip))
 
 
 def warpgroup_reg_alloc(reg_count):
@@ -413,3 +507,31 @@ def pack_half2(x, y):
         return Int32(packed_xy)
 
     return pack_half2_impl(x, y)
+
+
+@dsl_user_op
+def pack_b8x4(x0, x1, x2, x3, *, loc=None, ip=None) -> Int32:
+    """
+    Pack the raw bytes of four 8-bit values into one 32-bit word.
+
+    Matches tl::pack_b8x4: ``(x3 << 24) | (x2 << 16) | (x1 << 8) | x0`` over the
+    bit patterns, so int8/uint8 and FP8 values pack the same way.
+    """
+    i8_type = mlir_ir.IntegerType.get_signless(8)
+    packed = None
+    for i, value in enumerate((x0, x1, x2, x3)):
+        if isinstance(value, int):
+            value = Uint8(value & 0xFF)
+        if isinstance(value, Numeric):
+            if value.width != 8:
+                raise TypeError(f"pack_b8x4 expects 8-bit values, got {type(value).__name__}")
+            if not isinstance(value, (Int8, Uint8)):
+                value = value.bitcast(Uint8, loc=loc, ip=ip)
+        value_ir = value.ir_value(loc=loc, ip=ip) if hasattr(value, "ir_value") else value
+        if value_ir.type != i8_type:
+            value_ir = llvm.bitcast(i8_type, value_ir, loc=loc, ip=ip)
+        word = arith.extui(Int32.mlir_type, value_ir, loc=loc, ip=ip)
+        if i:
+            word = arith.shli(word, arith.constant(Int32.mlir_type, 8 * i, loc=loc, ip=ip), loc=loc, ip=ip)
+        packed = word if packed is None else arith.ori(packed, word, loc=loc, ip=ip)
+    return Int32(packed)

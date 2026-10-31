@@ -288,7 +288,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     return latency_ms, _tflops(args.m, args.n, args.k, latency_ms)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--m", type=int, default=2048)
     parser.add_argument("--n", type=int, default=2048)
@@ -307,11 +307,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--dump-source")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv=None) -> None:
+    args = parse_args(argv)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     capability = torch.cuda.get_device_capability()
