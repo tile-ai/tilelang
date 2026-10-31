@@ -498,9 +498,33 @@ private:
 };
 
 struct Im2Col {
+  static Stmt LowerSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                        arith::Analyzer *analyzer);
   static Stmt Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer);
 };
+
+Stmt Im2Col::LowerSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                       arith::Analyzer *analyzer) {
+  Stmt lowered = LowerIm2ColSIMT(op, lower_args, analyzer);
+  auto async_annotation =
+      op.annotations_.Get(attr::kParallelAsyncWithoutAsyncCommitWait);
+  bool async_without_async_commit_wait = false;
+  if (async_annotation.defined()) {
+    if (auto value = async_annotation.value().try_cast<Bool>()) {
+      async_without_async_commit_wait = value.value()->value;
+    }
+  }
+  if (!async_without_async_commit_wait ||
+      !TargetCudaHasAsyncCopy(lower_args.target)) {
+    return lowered;
+  }
+  auto result =
+      InjectPTXAsyncCopy(lowered, /*async_without_async_commit_wait=*/true);
+  ICHECK(result.injected_ptx_async_copy)
+      << "Pipeline-managed im2col requires cp.async lowering";
+  return result.stmt;
+}
 
 void Copy::CollectFragmentLayouts(const PrimExpr &expr,
                                   const Map<Var, PrimExpr> &bind_var_to_expr,
@@ -2828,11 +2852,19 @@ const bool cuda_copy_registered = RegisterCudaCopy();
 
 bool RegisterCudaIm2Col() {
   RegisterIm2ColImpl(Im2ColImpl{
+      "cuda.Im2ColSIMT",
+      MatchCudaCopyTarget,
+      50,
+      Im2ColImplKind::kSimt,
+      cuda::Im2Col::LowerSIMT,
+  });
+  RegisterIm2ColImpl(Im2ColImpl{
       "cuda.Im2Col",
       [](Target target) {
         return MatchCudaCopyTarget(target) && TargetIsHopper(target);
       },
       100,
+      Im2ColImplKind::kTma,
       cuda::Im2Col::Lower,
   });
   return true;

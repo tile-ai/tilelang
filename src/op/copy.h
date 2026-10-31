@@ -225,16 +225,22 @@ public:
   TileOperator Clone() const;
 };
 
+enum class Im2ColImplKind { kSimt, kTma };
+
 struct Im2ColImpl {
   const char *name;
   CopyTargetPredicate match_target;
   int priority;
+  Im2ColImplKind kind;
 
   Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 
 void RegisterIm2ColImpl(Im2ColImpl impl);
+Im2ColImplKind GetIm2ColImplKind(Target target);
+Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                     arith::Analyzer *analyzer);
 
 class Im2ColOp : public TileOperator {
 public:
