@@ -251,10 +251,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         return adapter
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
-        """Extract information about dynamic shapes from the TIR function.
+        """Extract dynamic symbols in the source wrapper's ABI order.
 
         Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
-        for runtime shape resolution.
+        for runtime shape resolution. Shapes and strides are each visited in PrimFunc parameter
+        order, independently of which tensors are outputs.
         id represents shape or stride, 0 represents shape, 1 represents stride.
         stride_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch strides
         are in storage units but the kernel expects logical element strides.
@@ -263,21 +264,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
-        # Inputs are visited first. An output's shape is resolved from these entries
-        # while that output is being allocated, so a dimension mentioned by both an
-        # input and an output must be owned by the input; owning it on the output
-        # would make the allocation loop read a slot it has not filled yet.
-        ordered = [i for i in range(len(params)) if i not in self.result_idx]
-        ordered += [i for i in range(len(params)) if i in self.result_idx]
-        for i in ordered:
-            param = params[i]
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j, 1)
-        for i in ordered:
-            param = params[i]
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes

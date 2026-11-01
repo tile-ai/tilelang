@@ -10,7 +10,6 @@ from .utils import (
     is_metal_target,
     is_cutedsl_target,
     match_declare_kernel,
-    match_declare_kernel_cpu,
     is_cuda_target,
     is_hip_target,
     is_cpu_target,
@@ -18,7 +17,6 @@ from .utils import (
     parse_function_call_args,
     parse_tma_descriptor_args,
 )
-import re
 import logging
 import textwrap
 from tvm.tirx.stmt_functor import post_order_visit
@@ -815,38 +813,33 @@ class TLCPUSourceWrapper:
                     }
                 )
             elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype), "var": param})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
+        explicit_params = set(self.prim_func.params)
+        used_names = {arg["name"] for arg in function_args}
         for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+            if dyn_sym in explicit_params:
+                continue
+            name = dyn_sym.name
+            suffix = 1
+            while name in used_names:
+                name = f"{dyn_sym.name}_{suffix}"
+                suffix += 1
+            function_args.append({"name": name, "type": self._lookup_type(dyn_sym_dtype), "var": dyn_sym})
+            used_names.add(name)
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
-
-        def func_call_args(s, function_args):
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
+        arg_name_by_var = {arg["var"]: arg["name"] for arg in function_args if "var" in arg}
 
         _call_str = """"""
 
-        for function_name, _ in function_informations.items():
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel_cpu(code, function_name + "(")
-
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
-
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            call_args = ", ".join(func_call_args(declaration, function_args))
+        for function_name, function_info in function_informations.items():
+            call_args = ", ".join(
+                pythonic_expr(arg, self._TYPE_MAP, floor_div_op="/", var_name_map=arg_name_by_var)
+                for arg in function_info["function_params"]
+            )
             _call_str += f"{function_name}({call_args})"
 
         # Wrap the kernel dispatch logic in an external C function
@@ -867,13 +860,28 @@ class TLCPUSourceWrapper:
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set: dict[str, str] = {}
+        dynamic_symbolic_set: dict[tvm.tirx.Var, str] = {}
+
+        def unique_push_back(var: tvm.tirx.Var):
+            if var not in dynamic_symbolic_set:
+                dynamic_symbolic_set[var] = str(var.dtype)
+            else:
+                assert str(var.dtype) == dynamic_symbolic_set[var]
+
         for param in prim_func.params:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set[dim.name] = str(dim.dtype)
+                    if isinstance(dim, tvm.tirx.Var):
+                        unique_push_back(dim)
+
+        for param in prim_func.params:
+            if param in prim_func.buffer_map:
+                buffer = prim_func.buffer_map[param]
+                for stride in buffer.strides:
+                    if isinstance(stride, tvm.tirx.Var):
+                        unique_push_back(stride)
+
         return list(dynamic_symbolic_set.items())
 
     def get_cpu_init_func(self):
@@ -890,9 +898,25 @@ class TLCPUSourceWrapper:
 
         # Organize function information for code generation
         function_informations = {}
+        host_func = next(iter(self.host_mod.functions.values()))
         for function_name in function_names:
+            device_func = self.device_mod[function_name]
+            kernel_params_cnt = len(device_func.params)
+            function_params = None
+
+            def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
+                nonlocal function_params
+                if not isinstance(node, tvm.tirx.Call) or node.op != tvm.ir.Op.get("tirx.call_extern"):
+                    return
+                if len(node.args) < 1 + param_cnt or node.args[0].value != fn:
+                    return
+                function_params = node.args[1 : 1 + param_cnt]
+
+            post_order_visit(host_func.body, visitor)
+            assert function_params is not None, f"Could not find host call to device function {function_name}"
             function_informations[function_name] = {
                 "function_name": function_name,
+                "function_params": function_params,
             }
 
         # Create the call function wrapper for the CPU kernel
