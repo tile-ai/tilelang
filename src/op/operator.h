@@ -105,6 +105,9 @@ inline const char *InferLevelToString(InferLevel level) {
 struct LowerArgs {
   Target target;
   Range thread_bounds;
+  // Full launch extent, before enclosing thread predicates narrow
+  // thread_bounds.
+  PrimExpr block_thread_extent;
   // Logical thread index consumed by lowering helpers. This is an expression
   // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
   // a thread_extent AttrStmt), while targets without thread bindings (e.g.
