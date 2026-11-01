@@ -416,7 +416,10 @@ private:
         if (summary.has_tma_store && !summary.has_generic) {
           return {i, summary};
         }
-        return {};
+        if (summary.has_generic || summary.has_async) {
+          return {};
+        }
+        continue;
       }
 
       ProxyEventSummary summary = SummarizeProxyEvents(stmts[i]);

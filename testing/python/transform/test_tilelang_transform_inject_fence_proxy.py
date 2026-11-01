@@ -134,6 +134,47 @@ def test_tma_store_fence_is_hoisted_before_shared_barrier_with_neutral_ops():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_store_fence_scans_past_neutral_leader_branch():
+    def tma_store_call(global_buffer, shared_buffer):
+        return T.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.tma_store"),
+            global_buffer.data,
+            shared_buffer.data,
+            256,
+            0,
+            0,
+        )
+
+    @T.prim_func
+    def before():
+        with T.Kernel(128):
+            shared = T.decl_buffer((128,), T.float16, scope="shared")
+            output = T.decl_buffer((128,), T.float16, scope="global")
+            shared[0] = T.float16(0)
+            T.tvm_storage_sync("shared")
+            if T.shuffle_elect(128):
+                T.evaluate(T.int32(0))
+            if T.shuffle_elect(128):
+                T.evaluate(tma_store_call(output, shared))
+
+    @T.prim_func
+    def after():
+        with T.Kernel(128):
+            shared = T.decl_buffer((128,), T.float16, scope="shared")
+            output = T.decl_buffer((128,), T.float16, scope="global")
+            shared[0] = T.float16(0)
+            T.fence_proxy_async()
+            T.tvm_storage_sync("shared")
+            if T.shuffle_elect(128):
+                T.evaluate(T.int32(0))
+            if T.shuffle_elect(128):
+                T.evaluate(tma_store_call(output, shared))
+
+    _check(before, after)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_async_to_generic_no_double_fence():
     @T.prim_func
     def before():
