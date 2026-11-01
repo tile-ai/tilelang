@@ -237,6 +237,20 @@ bool CallMayWriteSharedMemory(const CallNode *call) {
   return writes_shared;
 }
 
+bool ExprMayWriteSharedMemory(const PrimExpr &expr) {
+  bool writes_shared = false;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (writes_shared) {
+      return;
+    }
+    const auto *call = node.as<CallNode>();
+    if (call != nullptr && CallMayWriteSharedMemory(call)) {
+      writes_shared = true;
+    }
+  });
+  return writes_shared;
+}
+
 ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsFenceProxyAsyncCall(call)) {
     return ProxyEvent::kNeutral;
@@ -268,7 +282,8 @@ ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
     if (const auto *store = node.as<BufferStoreNode>()) {
       auto scope =
           StorageScope::Create(GetPtrStorageScope(store->buffer->data));
-      if (scope.rank == StorageRank::kShared) {
+      if (scope.rank == StorageRank::kShared ||
+          ExprMayWriteSharedMemory(store->value)) {
         summary.has_generic = true;
       }
       return;
@@ -478,7 +493,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-    if (scope.rank == StorageRank::kShared) {
+    if (scope.rank == StorageRank::kShared ||
+        ExprMayWriteSharedMemory(op->value)) {
       current_state_ = ProxyStateSet::Generic();
     }
     return stmt;
