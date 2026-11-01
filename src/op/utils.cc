@@ -6,12 +6,16 @@
 #include "utils.h"
 
 #include <cmath>
+#include <utility>
 
 #include "builtin.h"
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
+#include <tvm/tirx/expr_functor.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/tirx/builtin.h>
 
@@ -67,6 +71,76 @@ DecodedRegionCall DecodeRegionCall(const ffi::Array<PrimExpr> &args) {
   return {load->buffer, std::move(ranges), static_cast<int>(*mask)};
 }
 
+// Match only copy forms, without traversing arbitrary statements or operands.
+class BufferCopyAnalyzer
+    : public StmtFunctor<std::optional<BufferCopy>(const Stmt &)>,
+      public ExprFunctor<std::optional<BufferCopy>(const PrimExpr &,
+                                                   BufferCopy)> {
+  using Result = std::optional<BufferCopy>;
+
+  Result VisitStmt_(const BufferStoreNode *op) final {
+    if (op->predicate.defined()) {
+      return std::nullopt;
+    }
+    BufferCopy copy;
+    copy.store = ffi::GetRef<BufferStore>(op);
+    return VisitExpr(op->value, std::move(copy));
+  }
+
+  Result VisitStmt_(const IfThenElseNode *op) final {
+    const auto *then_store = op->then_case.as<BufferStoreNode>();
+    const auto *else_store = op->else_case.defined()
+                                 ? op->else_case.value().as<BufferStoreNode>()
+                                 : nullptr;
+    if (!then_store || !else_store || then_store->predicate.defined() ||
+        else_store->predicate.defined() ||
+        !then_store->buffer.same_as(else_store->buffer) ||
+        !ffi::StructuralEqual()(then_store->indices, else_store->indices)) {
+      return std::nullopt;
+    }
+    BufferCopy copy;
+    copy.store = ffi::GetRef<BufferStore>(then_store);
+    copy.predicate = op->condition;
+    copy.fallback = else_store->value;
+    return VisitExpr(then_store->value, std::move(copy));
+  }
+
+  Result VisitExpr_(const CallNode *op, BufferCopy copy) final {
+    if (!op->op.same_as(builtin::if_then_else())) {
+      return std::nullopt;
+    }
+    if (copy.fallback.defined() &&
+        (!ffi::StructuralEqual()(copy.fallback.value(), op->args[2]) ||
+         IsZeroBitPattern(copy.fallback.value()) !=
+             IsZeroBitPattern(op->args[2]))) {
+      return std::nullopt;
+    }
+    // Preserve short-circuit evaluation of nested guards. In particular, an
+    // inner guard may itself load memory protected by the outer guard.
+    copy.predicate = copy.predicate.defined()
+                         ? if_then_else(copy.predicate.value(), op->args[0],
+                                        make_zero(op->args[0].dtype()))
+                         : op->args[0];
+    copy.fallback = op->args[2];
+    return VisitExpr(op->args[1], std::move(copy));
+  }
+
+  Result VisitExpr_(const BufferLoadNode *op, BufferCopy copy) final {
+    if (op->predicate.defined()) {
+      return std::nullopt;
+    }
+    // A gather's index loads belong to its address, not the copied value.
+    copy.load = ffi::GetRef<BufferLoad>(op);
+    return copy;
+  }
+
+  Result VisitStmtDefault_(const ffi::Object *) final { return std::nullopt; }
+
+  Result VisitExprDefault_(const ffi::Object *, BufferCopy) final {
+    return std::nullopt;
+  }
+};
+
 } // namespace
 
 bool IsZeroBitPattern(const PrimExpr &expr) {
@@ -80,6 +154,10 @@ bool IsZeroBitPattern(const PrimExpr &expr) {
     return imm->value == 0.0 && !std::signbit(imm->value);
   }
   return false;
+}
+
+std::optional<BufferCopy> AnalyzeBufferCopy(const Stmt &stmt) {
+  return BufferCopyAnalyzer().VisitStmt(stmt);
 }
 
 bool IsBufferLikeExpr(const PrimExpr &expr) {
