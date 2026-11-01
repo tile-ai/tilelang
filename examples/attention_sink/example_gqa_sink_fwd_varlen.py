@@ -352,8 +352,22 @@ def main(
     UQ = q_unpad.shape[0]
     UKV = k_unpad.shape[0]
 
+    block_M, block_N, num_stages, threads = 128, 128, 2, 256
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin < 160 * 1024:
+        block_M, block_N, num_stages, threads = 64, 64, 1, 128
     kernel = flashattn_sink(
-        batch, groups, UQ, UKV, heads, dim, is_causal, window_size=window_size, block_M=128, block_N=128, num_stages=2, threads=256
+        batch,
+        groups,
+        UQ,
+        UKV,
+        heads,
+        dim,
+        is_causal,
+        window_size=window_size,
+        block_M=block_M,
+        block_N=block_N,
+        num_stages=num_stages,
+        threads=threads,
     )
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, sinks)

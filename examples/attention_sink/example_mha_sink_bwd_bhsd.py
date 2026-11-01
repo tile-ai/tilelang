@@ -11,7 +11,7 @@ from typing import Optional
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
-    if sm_version == 80:
+    if sm_version == 80 or torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block_optin < 160 * 1024:
         return 64, 32, 1, 128
     elif sm_version >= 90:
         return 128, 32, 2, 256
