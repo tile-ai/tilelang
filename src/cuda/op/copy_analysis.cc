@@ -192,8 +192,53 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
+// Mirrors ComputeBulkCopyTile: a bulk copy needs constant extents, and the
+// shared and global tiles must agree on every non-unit mode.  A padded shared
+// buffer (for example BK=112 for K=100) therefore cannot be copied with one
+// descriptor; selecting the bulk path for it used to reach an ICHECK in
+// lowering instead of falling back.
+bool AreBulkCopyExtentsCompatible(const Array<Range> &shared_range,
+                                  const Array<Range> &global_range) {
+  size_t shared_cur = 0;
+  size_t global_cur = 0;
+  while (shared_cur < shared_range.size() && global_cur < global_range.size()) {
+    const int64_t *s_extent = as_const_int(shared_range[shared_cur]->extent);
+    const int64_t *g_extent = as_const_int(global_range[global_cur]->extent);
+    if (s_extent == nullptr || g_extent == nullptr) {
+      return false;
+    }
+    if (*s_extent <= 1) {
+      shared_cur++;
+      continue;
+    }
+    if (*g_extent <= 1) {
+      global_cur++;
+      continue;
+    }
+    if (*s_extent != *g_extent) {
+      return false;
+    }
+    shared_cur++;
+    global_cur++;
+  }
+  for (; shared_cur < shared_range.size(); shared_cur++) {
+    const int64_t *extent = as_const_int(shared_range[shared_cur]->extent);
+    if (extent == nullptr || *extent != 1) {
+      return false;
+    }
+  }
+  for (; global_cur < global_range.size(); global_cur++) {
+    const int64_t *extent = as_const_int(global_range[global_cur]->extent);
+    if (extent == nullptr || *extent != 1) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
-                   bool check_last_dim, bool emit_diagnostics) {
+                   bool check_last_dim, bool emit_diagnostics,
+                   bool check_tile_extents = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -227,12 +272,21 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
     }
     return false;
   }
+  if (!AreBulkCopyExtentsCompatible(op.dst_range, op.src_range)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "shared and global extents are not compatible for a "
+                       "single tma bulk load between "
+                    << op.src->name << " and " << op.dst->name
+                    << "; will be fallback to normal copy";
+    }
+    return false;
+  }
   return CheckGlobalStrides(op.src, analyzer, emit_diagnostics);
 }
 
 bool CheckBulkStore(const CopyNode &op, Target target,
                     arith::Analyzer *analyzer, bool check_last_dim,
-                    bool emit_diagnostics) {
+                    bool emit_diagnostics, bool check_tile_extents = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -262,6 +316,15 @@ bool CheckBulkStore(const CopyNode &op, Target target,
                     << op.src->name << " vs. " << op.dst->name << " dtype "
                     << op.src->dtype << " vs. " << op.dst->dtype
                     << " will be fallback to normal copy";
+    }
+    return false;
+  }
+  if (!AreBulkCopyExtentsCompatible(op.src_range, op.dst_range)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "shared and global extents are not compatible for a "
+                       "single tma bulk store between "
+                    << op.src->name << " and " << op.dst->name
+                    << "; will be fallback to normal copy";
     }
     return false;
   }
@@ -387,7 +450,8 @@ bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
                      bool emit_diagnostics) {
-  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {
+  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics,
+                     /*check_tile_extents=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.src, op.dst, op.src_range, op.dst_range, layout_map,
@@ -397,7 +461,8 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
 bool CheckBulkStore1D(const CopyNode &op, Target target,
                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
                       bool emit_diagnostics) {
-  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics)) {
+  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics,
+                      /*check_tile_extents=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.dst, op.src, op.dst_range, op.src_range, layout_map,
