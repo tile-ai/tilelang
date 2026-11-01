@@ -28,6 +28,7 @@ from contextlib import nullcontext
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
+from tilelang.env import is_cache_enabled
 from tilelang.utils.device import get_available_cpu_count
 from os import path, makedirs
 from logging import getLogger
@@ -554,19 +555,25 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             self.mode = self._infer_jit_mode(*args, **kwargs)
             self.func.set_mode(self.mode)
 
+        # A disabled cache must bypass the wrapper's in-process caches as well,
+        # otherwise a caller inside `without_kernel_cache()` can still receive a
+        # kernel that was compiled before the block started.
+        cache_enabled = is_cache_enabled()
+
         call_form_key = None
-        if self.is_lazy_mode() and self._can_use_call_form_cache(has_tune_params):
+        if cache_enabled and self.is_lazy_mode() and self._can_use_call_form_cache(has_tune_params):
             kernel, call_form_key = self._call_form_cache.lookup(args, kwargs)
             if kernel is not _CALL_FORM_CACHE_MISS:
                 return kernel
 
         key, kernel_args = self.func.parse_args(*args, **kwargs)
-        kernel = self._kernel_cache.get(key, None)
+        kernel = self._kernel_cache.get(key, None) if cache_enabled else None
         if kernel is None:
             kernel = self.compile(*args, **kwargs)
-            self._kernel_cache[key] = kernel
+            if cache_enabled:
+                self._kernel_cache[key] = kernel
 
-        if call_form_key is not None and self.is_lazy_mode() and not kernel_args:
+        if cache_enabled and call_form_key is not None and self.is_lazy_mode() and not kernel_args:
             self._call_form_cache.store(call_form_key, kernel)
 
         # eager mode: execute kernel immediately and return result
