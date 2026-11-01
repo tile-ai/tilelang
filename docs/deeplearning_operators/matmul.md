@@ -199,7 +199,7 @@ T.gemm(A_shared, B_shared, C_local)
 ```
 
 - A single call that performs a tile-level matrix multiplication using the specified buffers.
-- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang emits HIP code built on MFMA compiler intrinsics.
+- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang emits HIP code using MFMA or WMMA compiler intrinsics, depending on the target architecture.
 
 6. **Copying Back Results**:
 
@@ -208,6 +208,36 @@ T.copy(C_local, C[by * block_M, bx * block_N])
 ```
 
 - After computation, data in the local register fragment is written back to global memory.
+
+### Linear Shared Layouts on gfx1200
+
+Use `make_linear_layout` from `tilelang.layout` to keep GEMM operands in row-major shared storage. This support is limited to AMD's `gfx1200` ISA target. Inside a `T.prim_func`:
+
+```python
+with T.Kernel(1, threads=32):
+    A_shared = T.alloc_shared((16, 32), "bfloat16")
+    B_shared = T.alloc_shared((32, 32), "bfloat16")
+    C_local = T.alloc_fragment((16, 32), "float32")
+    T.annotate_layout(
+        {
+            A_shared: make_linear_layout(A_shared),
+            B_shared: make_linear_layout(B_shared),
+        }
+    )
+    T.clear(C_local)
+    # Copy the input tiles into A_shared and B_shared, then compute:
+    T.gemm(A_shared, B_shared, C_local)
+```
+
+Requirements:
+
+- Use BF16 shared-memory operands, FP32 accumulation, no transposes, and `k_pack=1` (the default). Tile M, N and K must be constant multiples of 16; global matrix dimensions may have tails when copies handle their bounds.
+- Each operand must cover its entire contiguous 2D buffer, with zero region and element offsets, no explicit strides, and alignment of at least 16 bytes and divisible by 16. Ordinary `T.alloc_shared` allocations provide this alignment.
+- Use the exact input shape and mapping returned by `make_linear_layout`; custom mappings are not supported.
+
+Either or both input buffers may be annotated; an unannotated operand keeps its default inferred layout. Linear layouts do not guarantee better performance.
+
+Execution has been validated with `num_stages=0`. A compile-only regression also checks that requesting `num_stages=2` produces the same device code: the current gfx1200 planner disables software pipelining. This does not validate staged shared storage or pipelined execution.
 
 ## Comparison with Other DSLs
 

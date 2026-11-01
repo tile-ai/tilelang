@@ -170,6 +170,8 @@ private:
 
 using GemmTargetPredicate = bool (*)(Target target);
 
+class Gemm;
+
 struct GemmImpl {
   const char *name;
   GemmTargetPredicate match_target;
@@ -180,7 +182,11 @@ struct GemmImpl {
       const GemmWarpPolicyNode &policy, int M, int N, int block_size,
       Target target, String gemm_inst);
 
-  bool (*reuse_existing_shared_layout)(String gemm_inst);
+  // Validate the actual operand layout before suppressing an inferred layout.
+  bool (*reuse_existing_shared_layout)(String gemm_inst, const Gemm &op,
+                                       const Buffer &buffer,
+                                       const Layout &layout,
+                                       const Target &target);
 };
 
 void RegisterGemmImpl(GemmImpl impl);
