@@ -253,7 +253,7 @@ public:
                             const LayoutMap &layout_map = {})
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
-  int Plan(const For &node, bool allow_cast_decoupling) {
+  int Plan(const For &node, bool defer_cast_constraints) {
     Target target = Target::Current(false);
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
@@ -296,7 +296,7 @@ public:
     // separate from physical buffer scope.
     VectorConstraintSummary constraints = SummarizeConstraints(verbose);
     vector_size_ = SelectVectorSize(constraints, has_seq_stmt, verbose);
-    if (!allow_cast_decoupling) {
+    if (!defer_cast_constraints) {
       // DecoupleTypeCast can leave mixed-type stores intact, e.g. when their
       // guard reads memory. Final legalization must honor the remaining casts
       // rather than assuming their computation will be staged separately.
@@ -1208,19 +1208,19 @@ private:
 };
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map,
-                     bool allow_cast_decoupling) {
+                     bool defer_cast_constraints) {
   arith::Analyzer analyzer;
   return VectorizePlanner(&analyzer, layout_map)
-      .Plan(loop, allow_cast_decoupling);
+      .Plan(loop, defer_cast_constraints);
 }
 
 int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map, bool allow_cast_decoupling) {
+                     const LayoutMap &layout_map, bool defer_cast_constraints) {
   // Planning is a query: visiting the loop must not install its local
   // definitions in the caller's context, which may later analyze a rewrite.
   auto local_analyzer = analyzer->Clone();
   return VectorizePlanner(local_analyzer.get(), layout_map)
-      .Plan(loop, allow_cast_decoupling);
+      .Plan(loop, defer_cast_constraints);
 }
 
 namespace {

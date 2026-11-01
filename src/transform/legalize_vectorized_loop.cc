@@ -81,7 +81,7 @@ private:
     // Change the loop kind from vectorized to serial
     for_node.CopyOnWrite()->kind = ForKind::kSerial;
     int vectorize_size = GetVectorizeSize(for_node, analyzer_, {},
-                                          /*allow_cast_decoupling=*/false);
+                                          /*defer_cast_constraints=*/false);
     if (vectorize_size <= 1 && IsNonTrivialVectorizedLoop(for_node)) {
       LOG(WARNING) << "T.vectorized loop over `" << for_node->loop_var
                    << "` with extent " << for_node->extent
