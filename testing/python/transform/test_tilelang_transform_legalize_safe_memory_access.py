@@ -575,6 +575,132 @@ def test_oob_store():
     assert_oob_store_legalize(64, 64)
 
 
+def test_tvm_access_ptr_uint8_over_float32_in_bounds_no_false_oob():
+    """Regression for #3493: annotation-dtype units must drive tvm_access_ptr bounds.
+
+    Each transfer copies 16 bytes from a float32 buffer via a uint8 access pointer.
+    All accesses with b in [0, 8) are in bounds; treating offset=b*16 as float32
+    elements would falsely reject every access with b >= 2.
+    """
+    blocks = 8
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((blocks, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    # The buggy unit scaling produced a guard equivalent to (b * 16) < 32, which
+    # is false for every in-bounds block index b >= 2. After the fix the guard
+    # must stay true for every b in [0, blocks).
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in range(blocks):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} was predicated off; predicate={predicate}"
+
+
+def test_tvm_access_ptr_uint8_over_float32_oob_keeps_guard():
+    """Companion to #3493: truly OOB byte-range transfers must still be guarded."""
+    blocks = 8
+
+    @T.prim_func
+    def main(
+        # Only 2 rows => 32 bytes; offsets b*16 for b in [2, 8) are out of range.
+        src: T.Tensor((2, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected an OOB predicate for the oversized byte range"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    # First two rows are still in-bounds (32 bytes).
+    for block_idx in (0, 1):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} should pass; predicate={predicate}"
+    # Later rows exceed the 32-byte buffer.
+    for block_idx in range(2, blocks):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)) or not analyzer.can_prove(substituted), (
+            f"OOB block {block_idx} should not be unconditionally true; predicate={predicate}"
+        )
+
+
+def test_tvm_access_ptr_short_extent_checks_cp_async_transfer_range():
+    """A tvm_access_ptr extent smaller than the cp.async byte count must not hide OOB.
+
+    The uint8 pointer declares extent 1, but cp.async copies 16 bytes. On a
+    32-byte float32 buffer, byte offset 4*b + 16 is in bounds only for b <= 4.
+    """
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((2, 4), "float32"),
+        b: T.int32,
+    ):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, b * 4, 1, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in range(8):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        if block_idx <= 4:
+            assert analyzer.can_prove(substituted), f"in-bounds b={block_idx} was predicated off; predicate={predicate}"
+        else:
+            assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
+                f"b={block_idx} reads past the buffer but was not guarded; predicate={predicate}"
+            )
+
+
 def test_cp_async_access_ptr_oob():
     assert_cp_async_access_ptr_legalize()
 
@@ -894,6 +1020,171 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert all(not collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
     assert all(collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
     assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
+
+
+def test_tvm_access_ptr_elem_offset_included_in_bound():
+    """Regression (KellyFrog #3518): include buffer.elem_offset in the physical end.
+
+    A float32 view of shape (8,) starting at elem_offset=8 covers physical
+    float32 indices [8, 16) = bytes [32, 64). A uint8 access at byte offset
+    32 + b*16 with extent 16 is in-bounds for b in [0, 2); ignoring
+    elem_offset falsely treats the buffer as only 32 bytes and rejects them.
+    """
+
+    @T.prim_func
+    def main(src: T.Tensor((8,), "float32"), b: T.int32):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 32 + b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    src_param = main.params[0]
+    src_buf = main.buffer_map[src_param]
+    src_with_offset = tvm.tirx.decl_buffer(
+        src_buf.shape,
+        src_buf.dtype,
+        data=src_buf.data,
+        strides=src_buf.strides,
+        elem_offset=tvm.tirx.IntImm("int32", 8),
+        scope=src_buf.scope(),
+        name=src_buf.name,
+    )
+    buffer_map = dict(main.buffer_map)
+    buffer_map[src_param] = src_with_offset
+    func = tvm.tirx.PrimFunc(
+        main.params,
+        main.body,
+        ret_type=main.ret_type,
+        buffer_map=buffer_map,
+        attrs=main.attrs,
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(func)
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    for block_idx in (0, 1):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), f"in-bounds block {block_idx} was predicated off with elem_offset; predicate={predicate}"
+    for block_idx in (2, 3):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), f"OOB block {block_idx} should be false; predicate={predicate}"
+
+
+def test_tvm_access_ptr_large_shape_extent_uses_int64():
+    """Regression (KellyFrog #3518): flatten extent must not overflow int32.
+
+    float32[65536, 65536] has 2^32 elements; an int32 product wraps to 0 and
+    would reject every access. Multiplying shape dims in int64 keeps a 16-byte
+    transfer at offset 0 in-bounds.
+    """
+    n = 65536
+
+    @T.prim_func
+    def main(src: T.Tensor((n, n), "float32")):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 0, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    # Constant in-bounds transfer: analyzer should prove the guard and drop it
+    # (3-arg form), or leave a predicate that is unconditionally true.
+    if len(call.args) == 3:
+        return
+    assert len(call.args) == 4
+    predicate = call.args[3]
+    analyzer = tvm.arith.Analyzer()
+    assert analyzer.can_prove(analyzer.simplify(predicate)), f"in-bounds access on large buffer was predicated off; predicate={predicate}"
+
+
+def test_tvm_access_ptr_padded_strides_included_in_bound():
+    """Regression (CodeRabbit #3518): include strides when computing flat extent.
+
+    float32[4, 4] with strides=(8, 1) spans strides[0]*shape[0]=32 elements
+    (128 bytes). Product of shape alone is only 16 elements (64 bytes), so a
+    valid uint8 access into the padded tail would be falsely rejected.
+    """
+
+    @T.prim_func
+    def main(src: T.Tensor((4, 4), "float32"), b: T.int32):
+        stage = T.alloc_shared((4,), "float32")
+        T.ptx_cp_async(
+            T.tvm_access_ptr(T.type_annotation("uint8"), stage.data, 0, 16, 2),
+            # Byte offset 64 + b*16: for b in [0, 4) stays within the 128-byte
+            # padded span, but is past the 64-byte shape-product bound.
+            T.tvm_access_ptr(T.type_annotation("uint8"), src.data, 64 + b * 16, 16, 1),
+            16,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    src_param = main.params[0]
+    src_buf = main.buffer_map[src_param]
+    src_with_strides = tvm.tirx.decl_buffer(
+        src_buf.shape,
+        src_buf.dtype,
+        data=src_buf.data,
+        strides=[tvm.tirx.IntImm("int32", 8), tvm.tirx.IntImm("int32", 1)],
+        elem_offset=src_buf.elem_offset,
+        scope=src_buf.scope(),
+        name=src_buf.name,
+    )
+    buffer_map = dict(main.buffer_map)
+    buffer_map[src_param] = src_with_strides
+    func = tvm.tirx.PrimFunc(
+        main.params,
+        main.body,
+        ret_type=main.ret_type,
+        buffer_map=buffer_map,
+        attrs=main.attrs,
+    ).with_attr("global_symbol", "main")
+
+    mod = tvm.IRModule.from_expr(func)
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    assert len(cp_async_calls) == 1
+    call = cp_async_calls[0]
+    assert len(call.args) == 4, "expected a runtime guard while b is symbolic"
+    predicate = call.args[3]
+
+    analyzer = tvm.arith.Analyzer()
+    b_var = main.params[-1]
+    # Padded span is 128 bytes: offsets 64/80/96/112 with extent 16 are in-bounds.
+    for block_idx in (0, 1, 2, 3):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(substituted), (
+            f"in-bounds padded block {block_idx} was predicated off; predicate={predicate}"
+        )
+    # Offset 128 + extent 16 exceeds the 128-byte padded span.
+    for block_idx in (4, 5):
+        substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
+            f"OOB padded block {block_idx} should be false; predicate={predicate}"
+        )
+
+
 
 
 if __name__ == "__main__":
