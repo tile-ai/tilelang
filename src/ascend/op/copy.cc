@@ -609,6 +609,34 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       physical_inner_elems =
           Float4StorageBytes(valid_inner_elems, op.src->dtype);
       physical_dtype = "int8_t";
+      // A logical FP4 view over byte storage is moved by a byte-granular int8
+      // DMA, so the starting offset and the row stride must be even. An odd
+      // offset would address the preceding byte (selecting the neighbouring
+      // nibble), and an odd stride would be rounded up by half a byte.
+      if (!GetBufferStorageDType(op.src).is_float4_e2m1fn()) {
+        auto is_even = [&](const PrimExpr &value) {
+          PrimExpr two = make_const(value.dtype(), 2);
+          return analyzer->CanProveEqual(floormod(value, two),
+                                         make_zero(value.dtype()));
+        };
+        ICHECK(is_even(src_region.offset))
+            << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
+               "requires an even logical source offset (two FP4 values per "
+               "byte), got "
+            << src_region.offset << ".";
+        if (!analyzer->CanProveEqual(valid_n_rows, I(1))) {
+          ICHECK(is_even(src_row.stride))
+              << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
+                 "requires an even logical row stride (two FP4 values per "
+                 "byte), got "
+              << src_row.stride << ".";
+        }
+        ICHECK(is_even(valid_inner_elems))
+            << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
+               "requires an even logical inner extent (two FP4 values per "
+               "byte), got "
+            << valid_inner_elems << ".";
+      }
       src_ptr = NormalizeFloat4ByteViewPtr(op.src, src_ptr, src_region.offset,
                                            src_region_elements);
     }
