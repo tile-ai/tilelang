@@ -126,11 +126,15 @@ def LegalizePTOVMIMemoryAccess():
     address, contains the complete physical access envelope and covers the
     declared extent under the existing logical pointer-region analysis.  An
     ordinary caller-written explicit descriptor is preserved and only verified;
-    there is no whole-allocation fallback for an ordinary access.  Indexed
-    ``vgather`` / ``vscatter`` addresses, including one reached
-    through a direct handle binding, are instead rebuilt as an owner-origin
-    descriptor with capacity ``prod(owner.shape)`` after the owner identity,
-    layout, capacity, stable-coverage and bound-address snapshot proofs.
+    there is no whole-allocation fallback for an ordinary access.  Supported
+    ordinary single-element loads declare one element; other loads retain their
+    access-mode envelopes.  Indexed ``vgather`` / ``vscatter`` addresses,
+    including one reached through a direct handle binding, are instead rebuilt
+    as an owner-origin descriptor after the owner identity, layout, capacity,
+    stable-coverage and bound-address snapshot proofs.  A same-dtype descriptor
+    uses ``prod(owner.shape)`` elements.  A supported dtype-changing view uses
+    an internal typed owner Buffer and converts the same bit capacity to the
+    access dtype without creating an allocation.
     Functions without a PTO target pass through unchanged; the pass is a no-op
     on IR without VMI accesses.
     """

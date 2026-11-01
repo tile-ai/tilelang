@@ -16,7 +16,8 @@ visible to the scheduler.  This file verifies:
   candidate moves the source position into it; descriptor base + instruction
   offset always equals the original access address after the normal
   negative-index legalization.
-* Physical envelopes: ordinary loads round up to full physical vectors; group
+* Physical envelopes: supported ordinary single-element loads declare one
+  element, while other ordinary loads round up to full physical vectors; group
   envelopes cover all groups (a slot counts one element per group, a static
   negative stride relocates the lowest address and compensates with the
   instruction offset, a padded row-major view declares its logical prefix from
@@ -513,6 +514,35 @@ def test_ordinary_load_covers_full_physical_vectors(dtype, size, expected):
 
     assert _vload_descriptor(main) == (64, expected, 1, 0)
     assert _vstore_descriptor(main) == (512, size, 2, 0)
+
+
+# ---------------------------------------------------------------------------
+# Small version slots: real cross-slot declarations stay rejected
+# ---------------------------------------------------------------------------
+def _versioned_cross_slot_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((4,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            rstd = T.alloc_shared((2,), F32)
+            out = T.alloc_shared((64,), F32)
+            T.annotate_buffer_versions({rstd: 2})
+            for w in T.serial(2):
+                T.copy(A[w * 2 : w * 2 + 2], rstd)
+                with T.SimdVF():
+                    ptr = T.access_ptr(rstd[0], "r", extent=3)
+                    scalar = T.vmi.vload(ptr, size=1)
+                    value = T.vmi.vbrc(scalar, size=64, group=1)
+                    mask = T.vmi.create_mask(64, size=64)
+                    T.vmi.vstore(value, out[0], mask)
+                T.copy(out, C[w * 64 : w * 64 + 64])
+
+    return main
+
+
+@pytest.mark.pto
+def test_versioned_explicit_cross_slot_descriptor_is_still_rejected():
+    with pytest.raises(tvm.error.TVMError, match="crosses a 32-byte-aligned version slot"):
+        _lower_pto(_versioned_cross_slot_kernel())
 
 
 # ---------------------------------------------------------------------------
@@ -1237,7 +1267,7 @@ def _fp4_kernel(index=64, size=128):
             out = T.alloc_shared((256,), FP4)
             T.copy(A, work)
             with T.SimdVF():
-                mask = T.vmi.create_mask(size // 2, size=size // 2)
+                mask = T.vmi.create_mask(max(size // 2, 1), size=max(size // 2, 1))
                 v = T.vmi.vload(work[index], size=size)
                 T.vmi.vstore(v, out[index], mask)
             T.copy(out, C)
@@ -1245,25 +1275,30 @@ def _fp4_kernel(index=64, size=128):
     return main
 
 
+@pytest.mark.parametrize(
+    ("index", "size"),
+    [(64, 128), (2, 2)],
+    ids=["full-vector", "packed-pair-nonzero-start"],
+)
 @pytest.mark.pto
-def test_fp4_descriptor_stays_logical_then_packed_once():
+def test_fp4_descriptor_stays_logical_then_packed_once(index, size):
     with _capture_rewrite_input() as captured:
-        artifact = _lower_pto(_fp4_kernel())
+        artifact = _lower_pto(_fp4_kernel(index=index, size=size))
     before = captured["module"]
 
     # Logical FP4 element units before the rewrite.
-    assert _descriptor_in_module(before, "tl.vmi.vload") == (64, 128, 1, 0)
-    assert _descriptor_in_module(before, "tl.vmi.vstore") == (64, 128, 2, 0)
+    assert _descriptor_in_module(before, "tl.vmi.vload") == (index, size, 1, 0)
+    assert _descriptor_in_module(before, "tl.vmi.vstore") == (index, size, 2, 0)
 
     # Exactly one physical packing: the single rewrite pass halves both.
     rewritten = ascend_transform.RewriteFp4ToFp4x2()(before)
-    assert _descriptor_in_module(rewritten, "tl.vmi.vload") == (32, 64, 1, 0)
-    assert _descriptor_in_module(rewritten, "tl.vmi.vstore") == (32, 64, 2, 0)
+    assert _descriptor_in_module(rewritten, "tl.vmi.vload") == (index // 2, size // 2, 1, 0)
+    assert _descriptor_in_module(rewritten, "tl.vmi.vstore") == (index // 2, size // 2, 2, 0)
 
     source = artifact.kernel_source
     load_line = next(ln.strip() for ln in source.splitlines() if "vmi.vload" in ln)
-    assert "addptr" in load_line and "), 32)" in load_line, load_line
-    assert load_line.rstrip().endswith("size=(128 // 2))"), load_line
+    assert "addptr" in load_line and f"), {index // 2})" in load_line, load_line
+    assert load_line.rstrip().endswith(f"size=({size} // 2))"), load_line
 
 
 @pytest.mark.pto
@@ -1271,6 +1306,12 @@ def test_fp4_odd_start_is_still_rejected():
     """The logical descriptor keeps the odd start; the later FP4 pack rejects it."""
     with pytest.raises(tvm.error.TVMError, match="fp4 access_ptr offset must be even"):
         _lower_pto(_fp4_kernel(index=65))
+
+
+@pytest.mark.pto
+def test_fp4_single_logical_element_is_still_rejected():
+    with pytest.raises((TypeError, ValueError, tvm.error.TVMError), match="even FP4"):
+        _lower_pto(_fp4_kernel(index=0, size=1))
 
 
 # ---------------------------------------------------------------------------

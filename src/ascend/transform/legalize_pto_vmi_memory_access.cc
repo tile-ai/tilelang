@@ -31,7 +31,10 @@
  * gather/scatter accesses, whether automatic or caller-written through
  * one direct handle Bind/Let, are rebuilt at the unique active allocation
  * owner origin after the owner identity, layout, capacity and stable-coverage
- * proofs and the bound-address snapshot check.  An ordinary caller-written
+ * proofs and the bound-address snapshot check.  A dtype-changing view uses an
+ * internal typed owner Buffer with capacity converted in bit units; it shares
+ * the allocation data Var and never creates another allocation.  An ordinary
+ * caller-written
  * explicit descriptor is never rewritten: only its coverage is verified and
  * the instruction offset is kept.  There is no whole-allocation fallback for
  * an ordinary access.
@@ -796,6 +799,22 @@ std::pair<int64_t, int64_t> BlockEnvelope(const std::optional<PrimExpr> &block,
   return {0, high};
 }
 
+bool SupportsScalarBroadcastLoad(DataType dtype) {
+  if (!dtype.is_scalar()) {
+    return false;
+  }
+  if (dtype.is_int() || dtype.is_uint()) {
+    return dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32;
+  }
+  if (dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2()) {
+    return true;
+  }
+  if (dtype.is_bfloat16()) {
+    return true;
+  }
+  return dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32);
+}
+
 std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
                                            DataType elem_dtype, bool is_load,
                                            const std::string &op_name,
@@ -810,6 +829,9 @@ std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
     // Genuine FP4 descriptors stay in logical element units; the later
     // RewriteFp4ToFp4x2 performs the single physical packing.
     return {0, lanes};
+  }
+  if (is_load && lanes == 1 && SupportsScalarBroadcastLoad(elem_dtype)) {
+    return {0, 1};
   }
   if (is_load) {
     int bits = elem_dtype.bits();
@@ -1683,6 +1705,118 @@ struct IndexedOwner {
   PrimExpr extent;
 };
 
+bool IsByteAddressableIndexedType(DataType dtype) {
+  return dtype.is_scalar() && !dtype.is_bool() && !dtype.is_float4_e2m1fn() &&
+         (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32);
+}
+
+void CheckInt64ProductBound(arith::Analyzer *analyzer, const PrimExpr &value,
+                            int64_t factor, const std::string &op_name,
+                            const Span &span) {
+  int64_t bound = analyzer->const_int_bound(value)->max_value;
+  if (bound == arith::ConstIntBound::kPosInf ||
+      bound > std::numeric_limits<int64_t>::max() / factor) {
+    Fail(op_name + " cannot represent the owner bit capacity within int64 when "
+                   "changing the descriptor element type",
+         span);
+  }
+}
+
+PrimExpr ConvertOwnerCapacity(arith::Analyzer *analyzer,
+                              const PrimExpr &owner_extent,
+                              DataType owner_dtype, DataType access_dtype,
+                              const std::string &op_name, const Span &span) {
+  if (!IsByteAddressableIndexedType(owner_dtype) ||
+      !IsByteAddressableIndexedType(access_dtype)) {
+    Fail(op_name + " supports dtype-changing indexed views only for scalar "
+                   "byte-addressable storage types",
+         span);
+  }
+  int64_t owner_bits = owner_dtype.bits();
+  int64_t access_bits = access_dtype.bits();
+  CheckInt64ProductBound(analyzer, owner_extent, owner_bits, op_name, span);
+  arith::Analyzer local_analyzer;
+  PrimExpr owner_bits_expr = make_const(owner_extent.dtype(), owner_bits);
+  PrimExpr access_bits_expr = make_const(owner_extent.dtype(), access_bits);
+  PrimExpr zero = make_const(owner_extent.dtype(), 0);
+  PrimExpr bit_capacity =
+      local_analyzer.Simplify(owner_extent * owner_bits_expr);
+  if (!analyzer->CanProve(FloorMod(bit_capacity, access_bits_expr) == zero)) {
+    Fail(op_name +
+             " cannot convert the whole-owner capacity to the access element "
+             "type without truncating bits",
+         span);
+  }
+  PrimExpr extent =
+      local_analyzer.Simplify(FloorDiv(bit_capacity, access_bits_expr));
+  if (!analyzer->CanProve(extent > 0)) {
+    Fail(op_name +
+             " cannot prove a positive whole-owner capacity in the access "
+             "element type",
+         span);
+  }
+  return extent;
+}
+
+Buffer MakeTypedOwnerView(const Buffer &owner, DataType access_dtype,
+                          const PrimExpr &extent) {
+  return Buffer(owner->data, access_dtype, {extent}, {}, IntConst(0),
+                owner->name + "_as_" + std::to_string(access_dtype.bits()) +
+                    "bit",
+                owner->data_alignment, owner->offset_factor, owner->buffer_type,
+                {}, owner->span);
+}
+
+void ValidateDtypeChangingView(arith::Analyzer *analyzer,
+                               const AccessAddress &address,
+                               const Buffer &owner,
+                               const PrimExpr &typed_extent,
+                               const std::string &op_name, const Span &span) {
+  DataType owner_dtype = owner->dtype;
+  DataType access_dtype = address.buffer->dtype;
+  if (!IsByteAddressableIndexedType(owner_dtype) ||
+      !IsByteAddressableIndexedType(access_dtype)) {
+    Fail(op_name + " supports dtype-changing indexed views only for scalar "
+                   "byte-addressable storage types",
+         span);
+  }
+  int64_t access_bytes = access_dtype.bits() / 8;
+  if (owner->data_alignment % access_bytes != 0) {
+    Fail(op_name +
+             " cannot prove the allocation owner is aligned for the access "
+             "element type",
+         span);
+  }
+  if (std::optional<std::string> stability =
+          OwnerCapacityStabilityReason(address.buffer)) {
+    Fail(op_name + " dtype-changing view " + stability.value(), span);
+  }
+  if (std::optional<std::string> tight =
+          OwnerTightReason(analyzer, address.buffer)) {
+    Fail(op_name + " dtype-changing view is not usable: " + tight.value(),
+         span);
+  }
+
+  PrimExpr view_extent = OwnerExtent(analyzer, address.buffer, op_name, span);
+  Array<PrimExpr> view_origin =
+      address.buffer.OffsetOf(BufferZeros(address.buffer));
+  if (view_origin.size() != 1 ||
+      !RepresentableInInt64(analyzer, view_origin[0])) {
+    Fail(op_name + " requires a single, value-preserving scalar origin for a "
+                   "dtype-changing view",
+         span);
+  }
+  PrimExpr origin64 = WidenToInt64(view_origin[0]);
+  if (!analyzer->CanProve(origin64 >= 0) ||
+      !analyzer->CanProve(origin64 <= typed_extent) ||
+      !analyzer->CanProve(view_extent <= typed_extent - origin64)) {
+    Fail(op_name +
+             " dtype-changing view range is not provably contained in the "
+             "allocation owner",
+         span);
+  }
+}
+
 IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
                                   const AccessAddress &address,
                                   const std::vector<Buffer> &active_allocations,
@@ -1700,13 +1834,6 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
     CheckIndexedAddressSnapshot(address, op_name, span);
   }
   ValidateUbBuffer(owner, op_name + " owner", span);
-  if (address.buffer->dtype != owner->dtype) {
-    std::ostringstream oss;
-    oss << op_name << " requires the source element dtype "
-        << address.buffer->dtype << " to match the owner element dtype "
-        << owner->dtype;
-    Fail(oss.str(), span);
-  }
   if (std::optional<std::string> tight = OwnerTightReason(analyzer, owner)) {
     Fail(op_name + " owner is not usable: " + tight.value(), span);
   }
@@ -1725,15 +1852,32 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
         << ") is not provably zero";
     Fail(oss.str(), span);
   }
-  // Coverage is an independent owner property: check it before constructing
-  // the capacity expression so a shape without a stable whole-area proof is
-  // diagnosed as such, not as an arithmetic failure.
-  if (std::optional<std::string> coverage =
-          OwnerCoverageReason(analyzer, owner)) {
-    Fail(op_name + " owner is not usable: " + coverage.value(), span);
+
+  if (address.buffer->dtype == owner->dtype) {
+    // Keep the original owner Buffer and symbolic capacity expression intact
+    // on the existing same-dtype path.
+    if (std::optional<std::string> coverage =
+            OwnerCoverageReason(analyzer, owner)) {
+      Fail(op_name + " owner is not usable: " + coverage.value(), span);
+    }
+    PrimExpr extent = OwnerExtent(analyzer, owner, op_name, span);
+    return {owner, origin, extent};
   }
-  PrimExpr extent = OwnerExtent(analyzer, owner, op_name, span);
-  return {owner, origin, extent};
+
+  PrimExpr owner_extent = OwnerExtent(analyzer, owner, op_name, span);
+  PrimExpr typed_extent =
+      ConvertOwnerCapacity(analyzer, owner_extent, owner->dtype,
+                           address.buffer->dtype, op_name, span);
+  ValidateDtypeChangingView(analyzer, address, owner, typed_extent, op_name,
+                            span);
+  Buffer typed_owner =
+      MakeTypedOwnerView(owner, address.buffer->dtype, typed_extent);
+  if (std::optional<std::string> coverage =
+          OwnerCoverageReason(analyzer, typed_owner)) {
+    Fail(op_name + " typed owner is not usable: " + coverage.value(), span);
+  }
+  return {typed_owner, IntImm(address.buffer->shape[0].dtype(), 0),
+          typed_extent};
 }
 
 // ---------------------------------------------------------------------------
@@ -2024,7 +2168,7 @@ private:
     }
     if (!is_gather) {
       DataType value_elem = call->args[0].dtype().with_lanes(1);
-      if (value_elem != owner.buffer->dtype) {
+      if (value_elem != address.buffer->dtype) {
         Fail(op_name +
                  " requires the destination element dtype to match the value "
                  "element dtype; convert the value before storing",

@@ -297,6 +297,13 @@ def test_group_and_block_envelopes():
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=0, e=120, d=0, rw=1)
 
+    # A single logical lane still uses the block-stride envelope, not the
+    # ordinary single-element broadcast shortcut.
+    call = _vload(_load(work, [_int(0)]), size=1, block_stride=2)
+    body = _run(_evaluate(call))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=0, e=120, d=0, rw=1)
+
     with pytest.raises(tvm.error.InternalError, match="block"):
         _run(_evaluate(_vload(_load(work, [_int(0)]), size=64, block_stride=k)))
     with pytest.raises(tvm.error.InternalError, match="block"):
@@ -403,6 +410,59 @@ def test_explicit_descriptor_preserved_and_diagnosed():
         _run(_evaluate(_vstore(_vec("v"), _access_ptr(work, [_int(0)], 128, 1))))
     with pytest.raises(tvm.error.InternalError, match="scalar integer"):
         _run(_evaluate(_vload(_load(work, [_int(0)]), tirx.Var("bad", "handle"), size=64)))
+
+
+# ---------------------------------------------------------------------------
+# Ordinary single-element broadcast loads
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "float16",
+        "bfloat16",
+        "float32",
+        "float8_e4m3fn",
+        "float8_e5m2",
+    ],
+)
+@pytest.mark.pto
+def test_single_element_load_uses_scalar_broadcast_envelope(dtype):
+    work = _buffer((2,), dtype=dtype)
+    call = _vload(_load(work, [_int(1)]), elem=dtype, size=1)
+
+    body = _run(_evaluate(call))
+
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=1, e=1, d=0, rw=1)
+    assert out.dtype == call.dtype
+    assert _constant(out.annotations["size"]) == 1
+
+
+@pytest.mark.pto
+def test_single_element_explicit_descriptor_is_not_shrunk():
+    work = _buffer((512,))
+    pointer = _access_ptr(work, [_int(32)], 64, 1)
+    call = _vload(pointer, 0, size=1)
+
+    body = _run(_evaluate(call))
+
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(pointer)
+    assert _constant(pointer.args[1]) == 64
+    assert _constant(out.args[1]) == 0
+
+    small = _buffer((2,))
+    explicit_one = _access_ptr(small, [_int(1)], 1, 1)
+    body = _run(_evaluate(_vload(explicit_one, 0, size=1)))
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(explicit_one)
+    assert _constant(explicit_one.args[1]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +677,133 @@ def test_indexed_uses_active_owner_descriptor():
     (out,) = _vmi_calls(body, "tl.vmi.vgather")
     _assert_owner_plan(out, address_index=0, owner=work, e=256, d=64, rw=1)
     _assert_no_raw_address(body)
+
+
+def _assert_typed_owner_plan(call, *, address_index, owner, dtype, e, d, rw):
+    base, pointer = _descriptor(call, address_index)
+    assert not base.buffer.same_as(owner)
+    assert base.buffer.data.same_as(owner.data)
+    assert base.buffer.dtype == owner.dtype or str(base.buffer.dtype) == dtype
+    assert str(base.buffer.dtype) == dtype
+    assert all(_constant(index) == 0 for index in base.indices)
+    assert str(pointer.args[1].dtype) == "int64"
+    assert _constant(pointer.args[1]) == e
+    assert _constant(pointer.args[2]) == rw
+    assert _constant(call.args[address_index + 1]) == d
+    return base, pointer
+
+
+@pytest.mark.parametrize(
+    ("owner_dtype", "view_dtype"),
+    [
+        ("uint8", "uint16"),
+        ("uint16", "uint8"),
+        ("int16", "uint16"),
+    ],
+    ids=["widen-elements", "narrow-elements", "same-width-reinterpret"],
+)
+@pytest.mark.pto
+def test_indexed_dtype_view_uses_access_element_units(owner_dtype, view_dtype):
+    owner_bits = int(owner_dtype[-1]) if owner_dtype[-1] == "8" else 16
+    view_bits = int(view_dtype[-1]) if view_dtype[-1] == "8" else 16
+    owner = _buffer((2048 // owner_bits,), dtype=owner_dtype)
+    view = _view(owner, (2048 // view_bits,), dtype=view_dtype)
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    call = _vgather(_load(view, [_int(3)]), offsets=offsets, mask=mask, elem=view_dtype)
+
+    body = _run(_sblock(_evaluate(call), owner))
+
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    _assert_typed_owner_plan(out, address_index=0, owner=owner, dtype=view_dtype, e=2048 // view_bits, d=3, rw=1)
+    assert out.dtype == call.dtype
+    assert out.args[2].same_as(offsets) and out.args[3].same_as(mask)
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_elem_offset_is_counted_once():
+    owner = _buffer((256,), dtype="uint8")
+    view = _view(owner, (64,), dtype="uint16", elem_offset=8)
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+
+    for explicit in (False, True):
+        source = _access_ptr(view, [_int(3)], 64, 1) if explicit else _load(view, [_int(3)])
+        call = _vgather(source, offsets=offsets, mask=mask, elem="uint16")
+        body = _run(_sblock(_evaluate(call), owner))
+        (out,) = _vmi_calls(body, "tl.vmi.vgather")
+        base, _ = _assert_typed_owner_plan(out, address_index=0, owner=owner, dtype="uint16", e=128, d=11, rw=1)
+        assert base.buffer.elem_offset == 0
+
+
+@pytest.mark.pto
+def test_scatter_value_matches_access_view_dtype():
+    owner = _buffer((256,), dtype="uint8")
+    view = _view(owner, (128,), dtype="uint16")
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    value = _vec("value", "uint16")
+    call = _vscatter(value, _load(view, [_int(3)]), offsets=offsets, mask=mask)
+
+    body = _run(_sblock(_evaluate(call), owner))
+
+    (out,) = _vmi_calls(body, "tl.vmi.vscatter")
+    _assert_typed_owner_plan(out, address_index=1, owner=owner, dtype="uint16", e=128, d=3, rw=2)
+    assert out.args[0].same_as(value)
+
+    wrong_value = _vec("wrong_value", "uint8")
+    wrong = _vscatter(wrong_value, _load(view, [_int(3)]), offsets=offsets, mask=mask)
+    with pytest.raises(tvm.error.InternalError, match="destination element dtype"):
+        _run(_sblock(_evaluate(wrong), owner))
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_rejects_unsafe_layout_and_range():
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    owner = _buffer((256,), dtype="uint8")
+
+    too_large = _view(owner, (129,), dtype="uint16")
+    with pytest.raises(tvm.error.InternalError, match="view range"):
+        _run(_sblock(_evaluate(_vgather(_load(too_large, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), owner))
+
+    padded = _view(owner, (64,), dtype="uint16", strides=(128,))
+    with pytest.raises(tvm.error.InternalError, match="tight row-major"):
+        _run(_sblock(_evaluate(_vgather(_load(padded, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), owner))
+
+    unaligned = tirx.decl_buffer((256,), "uint8", name="unaligned_owner", scope="shared", data_alignment=1)
+    words = _view(unaligned, (128,), dtype="uint16")
+    with pytest.raises(tvm.error.InternalError, match="aligned"):
+        _run(_sblock(_evaluate(_vgather(_load(words, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), unaligned))
+
+    huge = _buffer((2**62,), dtype="uint16", name="huge_owner")
+    bytes_view = _view(huge, (1,), dtype="uint8")
+    with pytest.raises(tvm.error.InternalError, match="owner bit capacity"):
+        _run(_sblock(_evaluate(_vgather(_load(bytes_view, [_int(0)]), offsets=offsets, mask=mask)), huge))
+
+    owner32 = _buffer((64,), dtype="uint32")
+    view64 = _view(owner32, (32,), dtype="uint64")
+    with pytest.raises(tvm.error.InternalError, match="byte-addressable"):
+        _run(_sblock(_evaluate(_vgather(_load(view64, [_int(0)]), offsets=offsets, mask=mask, elem="uint64")), owner32))
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_requires_exact_dynamic_capacity_conversion():
+    n = tirx.Var("n", "int32")
+    owner = tirx.decl_buffer((n,), "uint8", name="dynamic_bytes", scope="shared")
+    view = tirx.decl_buffer((tirx.FloorDiv(n, _int(2)),), "uint16", name="dynamic_words", scope="shared", data=owner.data)
+    call = _vgather(_load(view, [_int(0)]), offsets=_vec("offsets", "uint32"), mask=_mask("mask"), elem="uint16")
+
+    bounded = tirx.IfThenElse(tirx.And(n > 0, n <= 256), _evaluate(call), _evaluate(0))
+    with pytest.raises(tvm.error.InternalError, match="without truncating bits"):
+        _run(_sblock(bounded, owner), params=[n])
+
+    divisible = tirx.IfThenElse(tirx.And(tirx.And(n > 0, n <= 256), tirx.FloorMod(n, _int(2)) == 0), _evaluate(call), _evaluate(0))
+    body = _run(_sblock(divisible, owner), params=[n])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base, pointer = _descriptor(out, 0)
+    assert base.buffer.data.same_as(owner.data)
+    assert str(base.buffer.dtype) == "uint16"
 
 
 @pytest.mark.pto
