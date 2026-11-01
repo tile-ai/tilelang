@@ -41,6 +41,20 @@ def test_default_target_env_keeps_plain_string(monkeypatch):
     assert tilelang.env.get_default_target() == "cuda"
 
 
+def test_legacy_target_env_alias_is_used_when_default_is_unset(monkeypatch):
+    monkeypatch.delenv("TILELANG_DEFAULT_TARGET", raising=False)
+    monkeypatch.setenv("TILELANG_TARGET", "cutedsl")
+
+    assert tilelang.env.get_default_target() == "cutedsl"
+
+
+def test_explicit_default_target_takes_precedence_over_legacy_alias(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", "cuda")
+    monkeypatch.setenv("TILELANG_TARGET", "cutedsl")
+
+    assert tilelang.env.get_default_target() == "cuda"
+
+
 def test_bare_cuda_target_uses_detected_exact_arch(monkeypatch):
     from tilelang.cuda import target as cuda_target
 
