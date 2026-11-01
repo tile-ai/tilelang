@@ -2255,6 +2255,8 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     int loop_extent = plan.rest_size;
     Array<PrimExpr> args = make_args(loop_var);
     Map<String, ObjectRef> ann;
+    ann.Set(attr::kSmemAlignment,
+            Integer(SwizzleMode::FromOrdinal(desc.swizzle).SmemAlignment()));
     if (is_cluster_barrier && TargetIsSm100(lower_args.target) && is_load) {
       ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
     }
@@ -2264,11 +2266,13 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       tma_copy = wrap_multicast(
           tma_copy, For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                         Evaluate(Call(DataType::Handle(), tma_load_multicast(),
-                                      build_multicast_args(args)))));
+                                      build_multicast_args(args), ann))));
     }
   } else {
     Array<PrimExpr> args = make_args(std::nullopt);
     Map<String, ObjectRef> ann;
+    ann.Set(attr::kSmemAlignment,
+            Integer(SwizzleMode::FromOrdinal(desc.swizzle).SmemAlignment()));
     if (TargetIsSm100(lower_args.target) && is_load &&
         (annotations.find("use_2cta") != annotations.end() ||
          is_cluster_barrier)) {
@@ -2278,7 +2282,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     if (use_multicast) {
       tma_copy = wrap_multicast(
           tma_copy, Evaluate(Call(DataType::Handle(), tma_load_multicast(),
-                                  build_multicast_args(args))));
+                                  build_multicast_args(args), ann)));
     }
   }
 
@@ -2495,6 +2499,11 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
   auto shared_tensor = is_load ? dst : src;
   auto global_tensor = is_load ? src : dst;
 
+  // Unlike tensor-map copies, linear bulk copies have no shared-memory swizzle.
+  if (lower_args.require_smem_alignment) {
+    lower_args.require_smem_alignment(shared_tensor->data, 16);
+  }
+
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
     shared_elements *= shared_range[i]->extent;
@@ -2578,16 +2587,20 @@ Stmt Copy::LowerBulk1D(const CopyNode &op, const LowerArgs &lower_args,
          "invalid size.\n"
       << "  Total_bytes = " << total_bytes << "\n";
 
+  Map<String, ObjectRef> ann;
+  ann.Set(attr::kSmemAlignment, Integer(16));
   if (is_load) {
     PrimExpr mbar_arg = barrier_base_id >= 0 ? mbar_handle : PrimExpr(0);
     tma_copy = Evaluate(Call(DataType::Handle(), tma_load(),
                              {shared_addr, global_addr, mbar_arg, total_bytes,
-                              GetEvictionPolicy(op)}));
+                              GetEvictionPolicy(op)},
+                             ann));
   } else {
     int need_reduce = 0;
     tma_copy = Evaluate(Call(DataType::Handle(), tma_store(),
                              {global_addr, shared_addr, total_bytes,
-                              need_reduce, GetEvictionPolicy(op)}));
+                              need_reduce, GetEvictionPolicy(op)},
+                             ann));
   }
 
   if (!is_load) {
