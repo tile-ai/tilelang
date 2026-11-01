@@ -62,6 +62,68 @@ TL_DEVICE void ptx_ldmatrix_x4_trans(void const *const smem_ptr,
       : "r"(smem_int_ptr));
 }
 
+// Expanding loads of 4-bit E2M1 data into 8-bit MMA containers. Each 16-byte
+// shared-memory row holds 16 packed values followed by 8 bytes of padding
+// (CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B, TileLang's float4_e2m1_unpacked
+// storage). The lane mapping matches an 8-bit ldmatrix. ldmatrix leaves each
+// value in bits [3:0], whereas mma kind::f8f6f4/mxf8f6f4 reads E2M1 from bits
+// [5:2], so the containers are shifted left by two.
+#if defined(CUTE_ARCH_LDSM_SM100A_ENABLED)
+#define TL_LDMATRIX_B4X16_P64_ENABLED 1
+#endif
+
+TL_DEVICE void ptx_ldmatrix_b4x16_p64_x1(void const *const smem_ptr,
+                                         void *const local_ptr) {
+#if defined(TL_LDMATRIX_B4X16_P64_ENABLED)
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  uint32_t *value = reinterpret_cast<uint32_t *>(local_ptr);
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n16.x1.shared.b8x16.b4x16_p64 {%0}, [%1];\n"
+      : "=r"(value[0])
+      : "r"(smem_int_ptr));
+  value[0] <<= 2;
+#else
+  CUTE_INVALID_CONTROL_PATH("ldmatrix .b4x16_p64 requires an SM100/SM120 "
+                            "family target (sm_100a/f .. sm_121a/f)");
+#endif
+}
+
+TL_DEVICE void ptx_ldmatrix_b4x16_p64_x2(void const *const smem_ptr,
+                                         void *const local_ptr) {
+#if defined(TL_LDMATRIX_B4X16_P64_ENABLED)
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  uint32_t *value = reinterpret_cast<uint32_t *>(local_ptr);
+  asm volatile("ldmatrix.sync.aligned.m8n16.x2.shared.b8x16.b4x16_p64 {%0, "
+               "%1}, [%2];\n"
+               : "=r"(value[0]), "=r"(value[1])
+               : "r"(smem_int_ptr));
+  value[0] <<= 2;
+  value[1] <<= 2;
+#else
+  CUTE_INVALID_CONTROL_PATH("ldmatrix .b4x16_p64 requires an SM100/SM120 "
+                            "family target (sm_100a/f .. sm_121a/f)");
+#endif
+}
+
+TL_DEVICE void ptx_ldmatrix_b4x16_p64_x4(void const *const smem_ptr,
+                                         void *const local_ptr) {
+#if defined(TL_LDMATRIX_B4X16_P64_ENABLED)
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  uint32_t *value = reinterpret_cast<uint32_t *>(local_ptr);
+  asm volatile("ldmatrix.sync.aligned.m8n16.x4.shared.b8x16.b4x16_p64 {%0, "
+               "%1, %2, %3}, [%4];\n"
+               : "=r"(value[0]), "=r"(value[1]), "=r"(value[2]), "=r"(value[3])
+               : "r"(smem_int_ptr));
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    value[i] <<= 2;
+  }
+#else
+  CUTE_INVALID_CONTROL_PATH("ldmatrix .b4x16_p64 requires an SM100/SM120 "
+                            "family target (sm_100a/f .. sm_121a/f)");
+#endif
+}
+
 TL_DEVICE void ptx_stmatrix_m8n8_x1(void const *const smem_ptr,
                                     const int32_t &value0) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
