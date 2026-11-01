@@ -212,7 +212,7 @@ void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
 
 void FatalMmaSyncUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL)
-      << "T.gemm requires native mma.sync lowering on Ampere/Ada, "
+      << "T.gemm requires native mma.sync lowering, "
          "but the operand dtype configuration is not supported. Got target="
       << target << ", A(scope=" << op.a_.scope() << ", dtype=" << op.a_->dtype
       << "), B(scope=" << op.b_.scope() << ", dtype=" << op.b_->dtype
@@ -432,7 +432,7 @@ struct Gemm {
     if (NeedsSm89Fp8Mma(op) && !TargetHasSMVersionGE(target, 89)) {
       FatalFp8MmaUnavailable(op, target);
     }
-    if (TargetIsAmpere(target) && !AllowAmpereMMA(op, target)) {
+    if (!AllowAmpereMMA(op, target)) {
       FatalMmaSyncUnavailable(op, target);
     }
     return kCudaMMA;
