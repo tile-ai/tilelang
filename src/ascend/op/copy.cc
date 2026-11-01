@@ -976,7 +976,6 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
     for (const auto &predicate : T.predicates) {
       guard = guard && predicate;
     }
-    With<arith::ConstraintContext> guard_ctx(analyzer, guard);
     With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
     size_t src_ndim = src_range.size();
     ICHECK(analyzer->CanProveEqual(
@@ -988,8 +987,10 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
            analyzer->CanProveEqual(sf_k_step, sf_dst_stride))
         << "L0 SF source and compact destination region must cover the same "
            "physical scale groups";
+    bool guard_dead = analyzer->CanProve(!guard);
     for (size_t i = ndim - 2; i < ndim; ++i) {
-      ICHECK(analyzer->CanProve(data_ranges[i]->extent <= data_buf->shape[i]))
+      ICHECK(guard_dead ||
+             analyzer->CanProve(data_ranges[i]->extent <= data_buf->shape[i]))
           << "L0 SF copy must fit its bound data allocation " << data_buf->name;
     }
   }

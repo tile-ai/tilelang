@@ -332,10 +332,11 @@ private:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
+    PrimExpr condition = VisitExpr(op->condition);
     Stmt then_case;
     {
-      With<arith::ConstraintContext> then_ctx(analyzer_, op->condition);
-      predicate_stack_.push_back(op->condition);
+      With<arith::ConstraintContext> then_ctx(analyzer_, condition);
+      predicate_stack_.push_back(condition);
       then_case = VisitStmt(op->then_case);
       predicate_stack_.pop_back();
     }
@@ -347,7 +348,7 @@ private:
       else_case = VisitStmt(op->else_case.value());
       predicate_stack_.pop_back();
     }
-    return IfThenElse(op->condition, then_case, else_case);
+    return IfThenElse(condition, then_case, else_case);
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
