@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING, Generic, TypeVar
+from typing import Any, TYPE_CHECKING
 from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
@@ -248,18 +248,12 @@ if TYPE_CHECKING:
     class SharedBuffer(BaseTensor): ...
 
     class LocalBuffer(BaseTensor): ...
-
-    _T = TypeVar("_T")
-
-    class Ref(Generic[_T], tirx.Var): ...
 else:
     Tensor = TensorProxy()  # pylint: disable=invalid-name
     StridedTensor = StridedTensorProxy()  # pylint: disable=invalid-name
     FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
     SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
-
-    class Ref: ...
 
 
 def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_var: bool = False) -> Var:

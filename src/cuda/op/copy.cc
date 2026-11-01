@@ -510,8 +510,8 @@ Stmt Im2Col::LowerSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   auto async_annotation =
       op.annotations_.Get(attr::kParallelAsyncWithoutAsyncCommitWait);
   bool async_without_async_commit_wait = false;
-  if (async_annotation.defined()) {
-    if (auto value = async_annotation.value().try_cast<Bool>()) {
+  if (async_annotation) {
+    if (auto value = async_annotation.value().as<Bool>()) {
       async_without_async_commit_wait = value.value()->value;
     }
   }
@@ -521,8 +521,7 @@ Stmt Im2Col::LowerSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   }
   auto result =
       InjectPTXAsyncCopy(lowered, /*async_without_async_commit_wait=*/true);
-  ICHECK(result.injected_ptx_async_copy)
-      << "Pipeline-managed im2col requires cp.async lowering";
+  // The WS release arrival also publishes synchronous fallback stores.
   return result.stmt;
 }
 

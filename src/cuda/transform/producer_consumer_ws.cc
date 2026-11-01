@@ -880,32 +880,32 @@ static Optional<Var> ExtractProducerWriteBufferData(const Stmt &stmt) {
   return Optional<Var>();
 }
 
-static int
-FindFirstAsyncProducerConsumerRead(const Stmt &producer_stmt,
-                                   const Array<Stmt> &consumer_compute_stmts,
-                                   const BufferDataToBufferMap &buffer_map) {
-  int earliest_read = static_cast<int>(consumer_compute_stmts.size());
-  auto update_earliest_read = [&](const Var &buffer_data) {
-    for (size_t ci = 0; ci < static_cast<size_t>(earliest_read); ++ci) {
-      BufferDataAccessInfo access = AnalyzeBufferDataAccess(
-          consumer_compute_stmts[ci], buffer_data, buffer_map);
-      if (access.read) {
-        earliest_read = static_cast<int>(ci);
-        return;
+static std::pair<int, int>
+FindProducerBufferAccess(const Stmt &producer_stmt,
+                         const Array<Stmt> &access_stmts,
+                         const BufferDataToBufferMap &buffer_map,
+                         std::vector<bool> *accesses_producer) {
+  int earliest_access = static_cast<int>(access_stmts.size());
+  int latest_access = -1;
+  auto update_access = [&](const Var &buffer_data) {
+    for (size_t ci = 0; ci < access_stmts.size(); ++ci) {
+      BufferDataAccessInfo access =
+          AnalyzeBufferDataAccess(access_stmts[ci], buffer_data, buffer_map);
+      if (access.HasAnyAccess()) {
+        earliest_access = std::min(earliest_access, static_cast<int>(ci));
+        latest_access = std::max(latest_access, static_cast<int>(ci));
+        (*accesses_producer)[ci] = true;
       }
     }
   };
   if (Optional<Var> write_buffer_data =
           ExtractProducerWriteBufferData(producer_stmt)) {
-    update_earliest_read(write_buffer_data.value());
+    update_access(write_buffer_data.value());
   }
   PostOrderVisit(producer_stmt, [&](const ObjectRef &obj) {
-    if (earliest_read == 0) {
-      return;
-    }
     if (const auto *store = obj.as<BufferStoreNode>()) {
       if (IsSharedBuffer(store->buffer)) {
-        update_earliest_read(store->buffer->data);
+        update_access(store->buffer->data);
       }
       return;
     }
@@ -915,12 +915,9 @@ FindFirstAsyncProducerConsumerRead(const Stmt &producer_stmt,
       return;
     }
     PostOrderVisit(call->args[0], [&](const ObjectRef &ptr_obj) {
-      if (earliest_read == 0) {
-        return;
-      }
       if (const auto *load = ptr_obj.as<BufferLoadNode>()) {
         if (IsSharedBuffer(load->buffer)) {
-          update_earliest_read(load->buffer->data);
+          update_access(load->buffer->data);
         }
         return;
       }
@@ -934,11 +931,11 @@ FindFirstAsyncProducerConsumerRead(const Stmt &producer_stmt,
       }
       auto it = buffer_map.find(ffi::GetRef<Var>(var));
       if (it != buffer_map.end() && IsSharedBuffer(it->second)) {
-        update_earliest_read(it->second->data);
+        update_access(it->second->data);
       }
     });
   });
-  return earliest_read;
+  return {earliest_access, latest_access};
 }
 
 static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
@@ -1218,6 +1215,20 @@ private:
 
     buffer_data_to_buffer_ =
         BufferDataToBufferCollector::Collect(orig_block->body);
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (!IsProducer(kinds[i])) {
+        continue;
+      }
+      std::vector<bool> target_accesses(flat_stmts.size(), false);
+      FindProducerBufferAccess(flat_stmts[i], flat_stmts,
+                               buffer_data_to_buffer_, &target_accesses);
+      for (size_t j = 0; j < flat_stmts.size(); ++j) {
+        // The split reorders producers ahead of consumers and each other.
+        if (j != i && target_accesses[j] && (j < i || IsProducer(kinds[j]))) {
+          return StmtExprMutator::VisitStmt_(orig_realize);
+        }
+      }
+    }
     Array<Stmt> consumer_compute_stmts;
     for (size_t i = 0; i < flat_stmts.size(); ++i) {
       if (!IsProducer(kinds[i])) {
@@ -1225,9 +1236,12 @@ private:
       }
     }
 
+    std::vector<bool> consumer_accesses_producer(consumer_compute_stmts.size(),
+                                                 false);
     Array<Stmt> prelude_stmts =
         CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop);
     std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
+    VarSet prelude_write_data;
     for (const Stmt &stmt : prelude_stmts) {
       if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
         continue;
@@ -1236,20 +1250,33 @@ private:
       if (!write_buffer_data.defined()) {
         continue;
       }
-      int first_read = -1;
+      int first_access = -1;
       for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
         BufferDataAccessInfo access = AnalyzeBufferDataAccess(
             consumer_compute_stmts[ci], write_buffer_data.value(),
             buffer_data_to_buffer_);
-        if (access.read) {
-          first_read = static_cast<int>(ci);
-          break;
+        if (access.HasAnyAccess()) {
+          if (first_access < 0) {
+            first_access = static_cast<int>(ci);
+          }
+          consumer_accesses_producer[ci] = true;
         }
       }
-      if (first_read < 0) {
+      if (first_access < 0) {
         continue;
       }
-      prelude_tma_plans.push_back({stmt, first_read});
+      if (!prelude_write_data.insert(write_buffer_data.value()).second) {
+        return StmtExprMutator::VisitStmt_(orig_realize);
+      }
+      std::vector<bool> target_accesses(flat_stmts.size(), false);
+      FindProducerBufferAccess(stmt, flat_stmts, buffer_data_to_buffer_,
+                               &target_accesses);
+      for (size_t i = 0; i < flat_stmts.size(); ++i) {
+        if (IsProducer(kinds[i]) && target_accesses[i]) {
+          return StmtExprMutator::VisitStmt_(orig_realize);
+        }
+      }
+      prelude_tma_plans.push_back({stmt, first_access});
     }
 
     int total_barriers = num_fwd + num_bp + prelude_tma_plans.size();
@@ -1268,49 +1295,53 @@ private:
       Optional<Var> write_buffer_data =
           ExtractProducerWriteBufferData(flat_stmts[i]);
       if (write_buffer_data.defined()) {
-        int first_read = -1;
+        int first_access = -1;
         int last_access = -1;
         for (size_t ci = 0; ci < consumer_compute_stmts.size(); ++ci) {
           BufferDataAccessInfo access = AnalyzeBufferDataAccess(
               consumer_compute_stmts[ci], write_buffer_data.value(),
               buffer_data_to_buffer_);
-          if (access.read && first_read < 0) {
-            first_read = static_cast<int>(ci);
-          }
           if (access.HasAnyAccess()) {
+            if (first_access < 0) {
+              first_access = static_cast<int>(ci);
+            }
             last_access = static_cast<int>(ci);
+            consumer_accesses_producer[ci] = true;
           }
         }
-        if (first_read >= 0) {
-          wait_insert_pos[access_group_idx] = first_read;
-          arrive_insert_pos[access_group_idx] = last_access + 1;
-        } else if (last_access >= 0) {
-          wait_insert_pos[access_group_idx] = 0;
+        if (first_access >= 0) {
+          wait_insert_pos[access_group_idx] = first_access;
           arrive_insert_pos[access_group_idx] = last_access + 1;
         }
       }
       ++access_group_idx;
     }
 
-    // --- Adjust wait positions for SIMT/cp.async producers ---
-    // SIMT and cp.async producers tie their completion to all forward barriers.
-    // If a consumer reads any such shared destination before the first TMA
-    // read, pull all waits earlier so the async producer is also covered.
+    // SIMT/cp.async producers share every forward barrier and may reuse a
+    // stage after the first back-pressure wait, so all groups cover their
+    // first access through their final access.
     if (has_simt_producer || has_cp_async_producer) {
-      int earliest_async_read = static_cast<int>(consumer_compute_stmts.size());
+      int earliest_async_access =
+          static_cast<int>(consumer_compute_stmts.size());
+      int latest_async_access = -1;
       for (size_t i = 0; i < flat_stmts.size(); ++i) {
         if (kinds[i] != TileStmtKind::kSimtProducer &&
             kinds[i] != TileStmtKind::kCpAsyncProducer &&
             kinds[i] != TileStmtKind::kCpAsyncRaw) {
           continue;
         }
-        int first_read = FindFirstAsyncProducerConsumerRead(
-            flat_stmts[i], consumer_compute_stmts, buffer_data_to_buffer_);
-        earliest_async_read = std::min(earliest_async_read, first_read);
+        auto [first_access, last_access] = FindProducerBufferAccess(
+            flat_stmts[i], consumer_compute_stmts, buffer_data_to_buffer_,
+            &consumer_accesses_producer);
+        earliest_async_access = std::min(earliest_async_access, first_access);
+        latest_async_access = std::max(latest_async_access, last_access);
       }
-      // Pull all wait positions earlier if needed.
+      // Cover the complete shared-stage lifetime in every group.
       for (int g = 0; g < num_producer_groups; ++g) {
-        wait_insert_pos[g] = std::min(wait_insert_pos[g], earliest_async_read);
+        wait_insert_pos[g] =
+            std::min(wait_insert_pos[g], earliest_async_access);
+        arrive_insert_pos[g] =
+            std::max(arrive_insert_pos[g], latest_async_access + 1);
       }
     }
 
@@ -1363,6 +1394,10 @@ private:
       bool all_movable = true;
       LocalLiveSet movable_probe_live = producer_body_live;
       for (int ci = compute_cursor; ci < wait_pos; ++ci) {
+        if (consumer_accesses_producer[ci]) {
+          all_movable = false;
+          break;
+        }
         const LocalAccessSummary &summary = consumer_compute_summaries[ci];
         if (consumer_compute_stmts[ci].as<BindNode>()) {
           if (!movable_probe_live.NeedsAnyDef(summary)) {
@@ -1422,6 +1457,36 @@ private:
       compute_cursor = wait_pos;
     }
 
+    LocalLiveSet producer_binding_live = producer_body_live;
+    VarSet producer_binding_vars;
+    std::vector<Stmt> producer_bindings;
+    for (int ci = static_cast<int>(consumer_compute_stmts.size()) - 1; ci >= 0;
+         --ci) {
+      const Stmt &stmt = consumer_compute_stmts[ci];
+      const auto *bind = stmt.as<BindNode>();
+      if (bind && producer_binding_live.vars.count(bind->var)) {
+        // Hoisting a stateful value could cross its original synchronization.
+        if (SideEffect(bind->value) > CallEffectKind::kPure) {
+          return StmtExprMutator::VisitStmt_(orig_realize);
+        }
+        producer_binding_vars.insert(bind->var);
+        producer_bindings.push_back(stmt);
+        producer_binding_live.AddUses(consumer_compute_summaries[ci]);
+      }
+    }
+    Array<Stmt> producer_scalar_bindings(producer_bindings.rbegin(),
+                                         producer_bindings.rend());
+    for (auto &prefix : producer_loop_prefix_stmts) {
+      Array<Stmt> remaining;
+      for (const auto &stmt : prefix) {
+        const auto *bind = stmt.as<BindNode>();
+        if (!bind || !producer_binding_vars.count(bind->var)) {
+          remaining.push_back(stmt);
+        }
+      }
+      prefix = std::move(remaining);
+    }
+
     bool producer_needs_full_thread_extent = false;
     for (size_t i = 0;
          i < flat_stmts.size() && !producer_needs_full_thread_extent; ++i) {
@@ -1452,8 +1517,9 @@ private:
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
     bool has_async_producer = has_simt_producer || has_cp_async_producer;
-    bool has_producer_prefix =
-        !outer_leading_bindings.empty() || !inner_leading_bindings.empty();
+    bool has_producer_prefix = !outer_leading_bindings.empty() ||
+                               !inner_leading_bindings.empty() ||
+                               !producer_scalar_bindings.empty();
     for (const auto &prefix : producer_loop_prefix_stmts)
       has_producer_prefix |= !prefix.empty();
     bool producer_is_single_warp = !has_async_producer &&
@@ -1510,7 +1576,7 @@ private:
       if (kinds[i] == TileStmtKind::kSimtProducer) {
         // Annotate ForNodes with kParallelAsyncWithoutAsyncCommitWait so
         // InjectPTXAsyncCopy (called from LowerTileOp) does not insert
-        // commit+wait — the WS pass will emit its own commit+barrier_noinc.
+        // commit+wait — the WS pass owns commit and completion tracking.
         simt_producer_stmts.push_back(
             SimtProducerAnnotator::Annotate(flat_stmts[i], target_));
       } else if (kinds[i] == TileStmtKind::kCpAsyncProducer ||
@@ -1520,7 +1586,7 @@ private:
     }
 
     // Second pass: build the producer body with correct ordering.
-    Array<Stmt> producer_stmts;
+    Array<Stmt> producer_stmts = producer_scalar_bindings;
     int tma_idx = 0;
     int last_tma_idx = num_producer_groups - 1;
     bool simt_stmts_emitted = false;
@@ -1599,21 +1665,21 @@ private:
         producer_stmts.push_back(s);
       }
     }
-    // Async-only producers already contribute one completion per thread.
-    // With a prefix, also publish any synchronous writes by a regular release.
+    // SIMT lowering can retain synchronous stores alongside async copies.
+    // Publish those stores with a regular release arrival.
     if (!producer_is_single_warp) {
       for (int fwd_base = 0; fwd_base < num_fwd; fwd_base += num_stages) {
         PrimExpr fwd_id = IntImm(DataType::Int(32), fwd_base) + p_stage_expr;
         if (!has_async_producer) {
           // No async copy: each thread publishes its writes and arrives.
           producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
-        } else if (!has_producer_prefix) {
+        } else if (!has_producer_prefix && !has_simt_producer) {
           // Async copy only: completion consumes the thread's arrival credit.
           producer_stmts.push_back(Evaluate(
               Call(DataType::Handle(), tl::ptx_cp_async_barrier_noinc(),
                    {MakeBarrierRef(barrier_buf, fwd_id)})));
         } else {
-          // Async copy with prefix: reserve completion, then publish writes.
+          // Reserve async completion and publish synchronous producer writes.
           producer_stmts.push_back(
               Evaluate(Call(DataType::Handle(), builtin::ptx_cp_async_barrier(),
                             {MakeBarrierRef(barrier_buf, fwd_id)})));
