@@ -204,6 +204,7 @@ def test_tma_store_preserves_generic_effect_in_leader_branch_store():
             shared = T.decl_buffer((128,), T.float16, scope="shared")
             output = T.decl_buffer((128,), T.float16, scope="global")
             shared[0] = T.float16(0)
+            T.fence_proxy_async()
             T.tvm_storage_sync("shared")
             if T.shuffle_elect(128):
                 output[0] = T.call_extern("float16", "custom_ptr_store", T.address_of(shared[0]))

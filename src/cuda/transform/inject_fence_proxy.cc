@@ -428,7 +428,7 @@ private:
       if (leader != nullptr && !leader->else_case.defined() &&
           IsTmaLeaderCondition(leader->condition)) {
         ProxyEventSummary summary = SummarizeProxyEvents(leader->then_case);
-        if (summary.has_tma_store && !summary.has_generic) {
+        if (summary.has_tma_store) {
           return {i, summary};
         }
         if (summary.has_generic || summary.has_async) {
