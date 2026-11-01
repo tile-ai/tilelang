@@ -107,8 +107,7 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
 template <class Reducer, int threads, bool reverse = false,
           int thread_offset = 0>
 struct InclusiveScan1D {
-  static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32);
+  static_assert(threads >= 32);
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
@@ -121,8 +120,7 @@ struct InclusiveScan1D {
 template <class Reducer, int threads, int Axis = 0, bool reverse = false,
           int thread_offset = 0>
 struct InclusiveScan2D {
-  static_assert(threads == 1024 or threads == 512 or threads == 256 or
-                threads == 128 or threads == 64 or threads == 32);
+  static_assert(threads >= 32 and threads % 32 == 0);
   static_assert(Axis == 0 or Axis == 1);
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,

@@ -99,6 +99,11 @@ def cumsum(
 
     Supports Buffer, BufferRegion, and BufferLoad inputs, allowing operations on buffer slices/regions.
 
+    With the CUDA C++ backend, 1D shared-memory scans require at least 32 block
+    threads. 2D scans require at least 32 block threads and a multiple of 32.
+    Multi-axis launches require scan regions independent of threadIdx.y/z.
+    Fragment scans stage through shared memory and inherit these requirements.
+
     Examples:
         A 1D inclusive scan that writes the result into a separate shared-memory buffer:
 
@@ -186,6 +191,11 @@ def cummax(
     the operation is performed in-place into `src`. When `src.scope()` is
     "local.fragment", this delegates to `cummax_fragment`; otherwise it emits
     the `tl.cummax` intrinsic.
+
+    With the CUDA C++ backend, 1D shared-memory scans require at least 32 block
+    threads. 2D scans require at least 32 block threads and a multiple of 32.
+    Multi-axis launches require scan regions independent of threadIdx.y/z.
+    Fragment scans stage through shared memory and inherit these requirements.
     """
 
     dst, dim = _prepare_scan_args(src, dst, dim, "cummax")
