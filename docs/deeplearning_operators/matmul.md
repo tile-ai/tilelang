@@ -235,7 +235,9 @@ Requirements:
 - Each operand must cover its entire contiguous 2D buffer, with zero region and element offsets, no explicit strides, and alignment of at least 16 bytes and divisible by 16. Ordinary `T.alloc_shared` allocations provide this alignment.
 - Use the exact input shape and mapping returned by `make_linear_layout`; custom mappings are not supported.
 
-Only `num_stages=0` has been validated for `T.Pipelined` loops. Omitting the annotation keeps the default inferred layout. Linear layouts do not guarantee better performance.
+Either or both input buffers may be annotated; an unannotated operand keeps its default inferred layout. Linear layouts do not guarantee better performance.
+
+Execution has been validated with `num_stages=0`. A compile-only regression also checks that requesting `num_stages=2` produces the same device code: the current gfx1200 planner disables software pipelining. This does not validate staged shared storage or pipelined execution.
 
 ## Comparison with Other DSLs
 
