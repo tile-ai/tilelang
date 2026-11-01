@@ -159,6 +159,7 @@ struct Gemm {
                                         const Target &target) {
     if (gemm_inst != kROCmWMMA || !TargetIsGfx1200(target) || op->transA_ ||
         op->transB_ || op->kPack_ != 1 ||
+        (!buffer.same_as(op->a_) && !buffer.same_as(op->b_)) ||
         op->a_->dtype != DataType::BFloat(16) ||
         op->b_->dtype != DataType::BFloat(16) ||
         op->c_->dtype != DataType::Float(32) || op->m_ % 16 != 0 ||

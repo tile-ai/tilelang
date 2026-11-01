@@ -194,6 +194,47 @@ def test_gemm_wmma_rejects_incompatible_shared_layout(layout_kind, error):
         tilelang.lower(program, target=target)
 
 
+def _check_wmma_shared_accumulator_layout():
+    @T.prim_func
+    def main(C: T.Tensor((16, 32), "float32")):
+        with T.Kernel(1, threads=32):
+            A_shared = T.alloc_shared((16, 32), "bfloat16")
+            B_shared = T.alloc_shared((32, 32), "bfloat16")
+            C_shared = T.alloc_shared((16, 32), "float32")
+            T.annotate_layout({C_shared: make_linear_layout(C_shared)})
+            T.clear(A_shared)
+            T.clear(B_shared)
+            T.clear(C_shared)
+            T.gemm(A_shared, B_shared, C_shared)
+            T.copy(C_shared, C)
+
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    with target, tvm.transform.PassContext(opt_level=3), pytest.raises(Exception, match="Get different layout for C_shared"):
+        tilelang.lower(main, target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+def test_gemm_wmma_shared_layout_rejects_accumulator():
+    import subprocess
+    import sys
+
+    # Disable the emitter's Python scope assertion so this reaches the C++
+    # per-buffer reuse check. Otherwise that assertion masks a missing A/B guard.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-O",
+            "-c",
+            "import runpy, sys; runpy.run_path(sys.argv[1])['_check_wmma_shared_accumulator_layout']()",
+            __file__,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
 @tilelang.testing.requires_rocm(support_required="compile-only")
 @pytest.mark.parametrize(
     "storage",
