@@ -1,6 +1,10 @@
+from itertools import product
+
 from tilelang import tvm as tvm
+import pytest
 import tilelang.testing
 import tilelang.language as T
+from tilelang.layout import Layout, make_linear_layout
 
 
 def matmul(
@@ -17,6 +21,7 @@ def matmul(
     accum_dtype,
     num_stages,
     threads,
+    shared_layout=None,
 ):
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
@@ -33,6 +38,8 @@ def matmul(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            if shared_layout is not None:
+                T.annotate_layout({A_shared: shared_layout(A_shared), B_shared: shared_layout(B_shared)})
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
@@ -47,6 +54,214 @@ def matmul(
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("linear", [False, True], ids=["default", "linear"])
+def test_gemm_wmma_shared_layout_loads(linear):
+    """Check physical LDS addresses and lane ownership, including load widths."""
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    program = matmul(16, 32, 32, 16, 32, 32, False, False, "bfloat16", "bfloat16", "float32", 0, 32, make_linear_layout if linear else None)
+    with target, tvm.transform.PassContext(opt_level=3):
+        artifact = tilelang.lower(program, target=target)
+
+    stores = []
+    wmma_calls = []
+    domains = {}
+    thread_vars = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.For):
+            domains[node.loop_var] = range(int(node.min), int(node.min + node.extent))
+        elif isinstance(node, tvm.tirx.AttrStmt) and node.attr_key == "thread_extent":
+            if node.node.thread_tag == "threadIdx.x":
+                thread_vars.append(node.node.var)
+                domains[node.node.var] = range(int(node.value))
+        elif isinstance(node, tvm.tirx.BufferStore):
+            stores.append(node)
+        elif isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tl.tvm_rdna_wmma"):
+            wmma_calls.append(node)
+
+    for func in artifact.device_mod.functions.values():
+        tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
+    assert len(wmma_calls) == len(thread_vars) == 1
+    assert wmma_calls[0].args[0].value == "f32_16x16x16_bf16_w32"
+    thread_var = thread_vars[0]
+    assert len(domains[thread_var]) == 32
+    # Identify operands by their WMMA pointer arguments, not generated names.
+    operand_data = {"A": wmma_calls[0].args[6], "B": wmma_calls[0].args[8]}
+    loads = {name: [store for store in stores if store.buffer.data.same_as(data)] for name, data in operand_data.items()}
+    # This minimal tile has one load site per operand. Never silently discard
+    # additional stores if lowering changes.
+    assert {name: len(sites) for name, sites in loads.items()} == {"A": 1, "B": 1}
+    for sites in loads.values():
+        assert isinstance(sites[0].value, tvm.tirx.BufferLoad)
+    shared_vars = set(tvm.tirx.analysis.undefined_vars(loads["A"][0].value.indices[0])) & set(
+        tvm.tirx.analysis.undefined_vars(loads["B"][0].value.indices[0])
+    )
+    reduction_vars = shared_vars - {thread_var}
+    assert len(reduction_vars) == 1
+    reduction_var = reduction_vars.pop()
+    assert list(domains[reduction_var]) == [0, 1]
+
+    def physical(row, col):
+        # The default 32-column BF16 tile swaps column bits 3/4 by row bits
+        # 1/2. Linear annotations must instead retain the row-major address.
+        return row * 32 + (col if linear else col ^ ((row & 6) << 2))
+
+    analyzer = tvm.arith.Analyzer()
+    for name, sites in loads.items():
+        for store in sites:
+            load = store.value
+            assert load.dtype.lanes == (8 if name == "A" else 1)
+            index, destination = load.indices[0], store.indices[0]
+            for expr in (index, destination):
+                if isinstance(expr, tvm.tirx.Ramp):
+                    assert int(expr.stride) == 1
+                    assert expr.lanes == load.dtype.lanes
+            base = index.base if isinstance(index, tvm.tirx.Ramp) else index
+            local_base = destination.base if isinstance(destination, tvm.tirx.Ramp) else destination
+            variables = tvm.tirx.analysis.undefined_vars(base + local_base)
+            visited = set()
+            for values in product(*(domains[var] for var in variables)):
+                bindings = dict(zip(variables, values))
+                lane, ki = bindings[thread_var], bindings[reduction_var]
+                actual = int(analyzer.simplify(tvm.tirx.stmt_functor.substitute(base, bindings)))
+                local = int(analyzer.simplify(tvm.tirx.stmt_functor.substitute(local_base, bindings)))
+                assert 0 <= actual <= (512 if name == "A" else 1024) - load.dtype.lanes
+                assert actual % load.dtype.lanes == 0
+                for element in range(load.dtype.lanes):
+                    slot = local + element
+                    assert 0 <= slot < (8 if name == "A" else 16)
+                    k = ki * 16 + lane // 16 * 8 + slot % 8
+                    row, col = (lane % 16, k) if name == "A" else (k, slot // 8 * 16 + lane % 16)
+                    assert actual + element == physical(row, col)
+                    # A matching access count alone can hide duplicate slots
+                    # and leave other operand registers uninitialized.
+                    position = (lane, ki, slot)
+                    assert position not in visited
+                    visited.add(position)
+            assert visited == set(product(range(32), range(2), range(8 if name == "A" else 16)))
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("linear", [False, True], ids=["default", "linear"])
+@pytest.mark.parametrize(
+    "shape,block,threads",
+    [((16, 32, 32), (16, 32, 32), 32), ((17, 35, 33), (16, 32, 32), 32), ((128, 128, 32), (128, 128, 32), 128)],
+    ids=["single-tile", "mnk-tail", "multiple-wavefronts"],
+)
+def test_gemm_wmma_shared_layout_correctness(linear, shape, block, threads):
+    import torch
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    if torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] != "gfx1200":
+        pytest.skip("Requires gfx1200 WMMA execution")
+    M, N, K = shape
+    program = matmul(M, N, K, *block, False, False, "bfloat16", "bfloat16", "float32", 0, threads, make_linear_layout if linear else None)
+    kernel = tilelang.compile(program, target={"kind": "hip", "mcpu": "gfx1200"})
+    generator = torch.Generator().manual_seed(0)
+    # Small integers make the FP32 reduction exact, so this checks operand
+    # mapping without relying on a loose GEMM numerical tolerance.
+    a = torch.randint(-2, 3, (M, K), generator=generator).to(torch.bfloat16)
+    b = torch.randint(-2, 3, (K, N), generator=generator).to(torch.bfloat16)
+    expected = (a.float() @ b.float()).to(torch.bfloat16)
+    guarded = torch.full((M * N + 32,), 123, dtype=torch.bfloat16, device=device)
+    output = guarded[16:-16].view(M, N)
+    kernel(a.to(device), b.to(device), output)
+    torch.cuda.synchronize(device)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    assert torch.all(guarded[:16] == 123)
+    assert torch.all(guarded[-16:] == 123)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize(
+    "layout_kind,error",
+    [("overlapping", "forward map must be injective"), ("column-major", "Get different layout")],
+)
+def test_gemm_wmma_rejects_incompatible_shared_layout(layout_kind, error):
+    def incompatible(buffer):
+        if layout_kind == "overlapping":
+            return Layout(buffer.shape, lambda i, j: j)
+        # A bijective column-major mapping passes the shared-layout injectivity
+        # check, but must still be rejected by the WMMA compatibility check.
+        return Layout(buffer.shape, lambda i, j: j * buffer.shape[0] + i)
+
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    program = matmul(16, 32, 32, 16, 32, 32, False, False, "bfloat16", "bfloat16", "float32", 0, 32, incompatible)
+    with target, tvm.transform.PassContext(opt_level=3), pytest.raises(Exception, match=error):
+        tilelang.lower(program, target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize(
+    "storage",
+    [
+        "aligned",
+        "weak-alignment-a",
+        "weak-alignment-b",
+        "nonmultiple-alignment",
+        "strides",
+        "element-offset",
+        "partial-region",
+        "region-offset",
+        "stage-axis",
+    ],
+)
+def test_gemm_wmma_shared_layout_storage(storage):
+    """Require full, contiguous storage with alignment suitable for WMMA loads."""
+    from tvm.script import tirx as I
+
+    a_shape = (1, 16, 32) if storage == "stage-axis" else (32, 32) if storage in ("partial-region", "region-offset") else (16, 32)
+    a_alignment = 8 if storage == "weak-alignment-a" else 24 if storage == "nonmultiple-alignment" else 16
+    b_alignment = 8 if storage == "weak-alignment-b" else 16
+    a_strides = (32, 1) if storage == "strides" else None
+    a_offset = 1 if storage == "element-offset" else 0
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=32):
+            A_shared = I.sblock_alloc_buffer(
+                a_shape, "bfloat16", scope="shared", align=a_alignment, strides=a_strides, elem_offset=a_offset
+            )
+            B_shared = I.sblock_alloc_buffer((32, 32), "bfloat16", scope="shared", align=b_alignment)
+            C_local = T.alloc_fragment((16, 32), "float32")
+            T.annotate_layout({A_shared: make_linear_layout(A_shared), B_shared: make_linear_layout(B_shared)})
+            T.clear(A_shared)
+            T.clear(B_shared)
+            T.clear(C_local)
+            if storage == "stage-axis":
+                T.gemm(A_shared[0, 0:16, 0:32], B_shared, C_local)
+            elif storage == "partial-region":
+                T.gemm(A_shared[0:16, 0:32], B_shared, C_local)
+            elif storage == "region-offset":
+                T.gemm(A_shared[16:32, 0:32], B_shared, C_local)
+            else:
+                T.gemm(A_shared, B_shared, C_local)
+
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    with target, tvm.transform.PassContext(opt_level=3):
+        if storage == "aligned":
+            assert tilelang.lower(main, target=target).device_mod is not None
+        else:
+            with pytest.raises(Exception, match="Get different layout"):
+                tilelang.lower(main, target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize(
+    "arch,trans_A,trans_B",
+    [("gfx942", False, False), ("gfx1100", False, False), ("gfx1201", False, False), ("gfx1200", True, False), ("gfx1200", False, True)],
+)
+def test_gemm_shared_layout_unsupported_modes(arch, trans_A, trans_B):
+    target = tvm.target.Target({"kind": "hip", "mcpu": arch})
+    with target, tvm.transform.PassContext(opt_level=3):
+        default = matmul(32, 32, 32, 32, 32, 32, trans_A, trans_B, "bfloat16", "bfloat16", "float32", 0, 64)
+        assert tilelang.lower(default, target=target).device_mod is not None
+        linear = matmul(32, 32, 32, 32, 32, 32, trans_A, trans_B, "bfloat16", "bfloat16", "float32", 0, 64, make_linear_layout)
+        with pytest.raises(Exception, match="Get different layout"):
+            tilelang.lower(linear, target=target)
 
 
 def run_gemm(

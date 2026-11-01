@@ -238,23 +238,22 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
     return {};
   LayoutMap results;
   if (const auto f = Function::GetGlobal("tl.gemm.infer_layout")) {
-    auto inferred_layouts = Downcast<LayoutMap>((*f)(
-        GetRef<Gemm>(this), layout_args.target, layout_args.thread_bounds));
-    // For MMA instructions, skip shared buffer layouts that are already
-    // inferred by a prior operator to avoid layout conflicts when the same
-    // shared buffer is consumed by multiple gemm ops with different transpose
-    // semantics. WGMMA/TCGEN5MMA have strict shared memory layout requirements
-    // and must always set their layouts.
+    Gemm op = GetRef<Gemm>(this);
+    auto inferred_layouts = Downcast<LayoutMap>(
+        (*f)(op, layout_args.target, layout_args.thread_bounds));
+    // The backend decides whether its operand loads can honor an existing
+    // shared layout. Some instructions require a fixed layout; others can
+    // reuse compatible annotations or layouts inferred by prior operators.
     auto block_size = *as_const_int(layout_args.thread_bounds->extent);
     String gemm_inst = GetGemmInstructionKey(block_size, layout_args.target);
-    bool reuse_existing_shared_layout =
-        ResolveGemmImpl(layout_args.target)
-            .reuse_existing_shared_layout(gemm_inst);
+    const GemmImpl &impl = ResolveGemmImpl(layout_args.target);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
-      if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          layout_args.layout_map.count(buf)) {
+      if (IsSharedBuffer(buf) && layout_args.layout_map.count(buf) &&
+          impl.reuse_existing_shared_layout(gemm_inst, op, buf,
+                                            layout_args.layout_map.at(buf),
+                                            layout_args.target)) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {
