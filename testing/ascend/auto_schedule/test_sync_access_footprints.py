@@ -6,7 +6,7 @@ import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
 from tilelang.layout import make_ascend_nz_layout
-from testing.ascend._ir import calls, copy, kernel, schedule, seq
+from testing.ascend._ir import calls, copy, kernel, schedule, seq, statements
 from testing.ascend.auto_schedule._scheduled_ir import unit
 from tvm import tirx
 
@@ -222,3 +222,49 @@ def test_physical_pointer_write_orders_control_expression_reads(control, disable
     events = _events(main, disable_reuse)
     assert ("set", "V_S") in events
     assert ("wait", "V_S") in events
+
+
+@pytest.mark.parametrize("kind", ["cross_row", "cross_row_short", "transposed_view"])
+def test_cross_row_and_transposed_view_pointer_reads_order_dma_producer(kind):
+    @T.prim_func
+    def main(x: T.Tensor((64,), "float32"), out: T.Tensor((128,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), "float32")
+            dst = T.alloc_shared((128,), "float32")
+            if kind == "transposed_view":
+                view = T.view(work, shape=(128, 2), strides=(1, 128))
+                T.copy(x, view[0:64, 1])
+                with T.SimdVF():
+                    T.simd.vsts(dst[0], T.simd.vld(view[64, 0]))
+            elif kind == "cross_row_short":
+                T.copy(x[:32], work[1, 0:32])
+                with T.SimdVF():
+                    T.evaluate(T.call_extern("int32", "consume_ub", T.access_ptr(work[0, 96], "r", extent=64)))
+                    T.simd.vsts(dst[0], T.simd.vdup(T.float32(1), "float32"))
+            else:
+                T.copy(x, work[1, 0:64])
+                with T.SimdVF():
+                    T.simd.vsts(dst[0], T.simd.vld(work[0, 64]))
+            T.copy(dst, out)
+
+    after = schedule(main, through="InsertSync", auto_schedule=True)
+    ordered = []
+    for stmt, _ in statements(after):
+        if not isinstance(stmt, (tirx.Evaluate, tirx.Bind)):
+            continue
+        for call in calls(stmt, "tl.tileop.ascend_copy"):
+            if call.args[0].args[0].buffer.name == "x":
+                ordered.append(("dma_in", None))
+        for call in calls(stmt, "tl.ascend_set_flag"):
+            ordered.append(("set", call.args[0].value))
+        for call in calls(stmt, "tl.ascend_wait_flag"):
+            ordered.append(("wait", call.args[0].value))
+        if calls(stmt, "tl.simd.vld") or calls(stmt, "consume_ub"):
+            ordered.append(("read", None))
+
+    dma_index = ordered.index(("dma_in", None))
+    read_index = ordered.index(("read", None))
+    set_index = next(i for i, item in enumerate(ordered) if item == ("set", "MTE2_V") and i > dma_index)
+    wait_index = next(i for i, item in enumerate(ordered) if item == ("wait", "MTE2_V") and i > set_index)
+    assert dma_index < set_index < wait_index < read_index
+

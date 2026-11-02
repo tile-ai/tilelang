@@ -927,11 +927,38 @@ private:
     }
   }
 
+  static bool IsCompactRowMajorBuffer(const Buffer &buffer) {
+    if (buffer->strides.empty())
+      return true;
+    size_t ndim = buffer->shape.size();
+    if (buffer->strides.size() != ndim)
+      return false;
+    int64_t expected_stride = 1;
+    for (size_t k = ndim; k-- > 0;) {
+      const int64_t *dimension = as_const_int(buffer->shape[k]);
+      const int64_t *stride = as_const_int(buffer->strides[k]);
+      if (dimension == nullptr || *dimension <= 0 || stride == nullptr)
+        return false;
+      if (*dimension > 1 && *stride != expected_stride)
+        return false;
+      if (*dimension > std::numeric_limits<int64_t>::max() / expected_stride)
+        return false;
+      expected_stride *= *dimension;
+    }
+    return true;
+  }
+
   std::vector<arith::IntSet> LogicalPointerRegion(const BufferLoad &load,
                                                   const PrimExpr &extent) {
     const Buffer &buffer = load->buffer;
     size_t ndim = buffer->shape.size();
     std::vector<arith::IntSet> region(ndim);
+    auto fill_whole_buffer = [&]() {
+      for (size_t k = 0; k < ndim; ++k) {
+        region[k] =
+            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
+      }
+    };
 
     const auto *ext_imm = extent.as<IntImmNode>();
     if (ext_imm && load->indices.size() == ndim) {
@@ -941,36 +968,55 @@ private:
       // its `shape[i]` indices as the run spans, carrying the rounded-up
       // remainder to the next (outer) dim.
       int64_t rem = ext_imm->value;
+      if (ndim > 1 && rem > 1 && !IsCompactRowMajorBuffer(buffer)) {
+        fill_whole_buffer();
+        return region;
+      }
       for (size_t k = ndim; k-- > 0;) {
         PrimExpr base = load->indices[k];
         const auto *dim_imm = buffer->shape[k].as<IntImmNode>();
         if (rem <= 1) {
           region[k] = RelaxAccessIndex(base);
-        } else if (dim_imm) {
+        } else if (k == 0) {
+          if (dim_imm && rem < dim_imm->value) {
+            region[0] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
+          } else {
+            region[0] = arith::IntSet::FromRange(
+                Range::FromMinExtent(0, buffer->shape[0]));
+          }
+        } else {
+          arith::IntSet base_set = RelaxAccessIndex(base);
+          const int64_t *base_min = as_const_int(base_set.min());
+          const int64_t *base_max = as_const_int(base_set.max());
+          if (dim_imm == nullptr || dim_imm->value <= 0 ||
+              base_min == nullptr || base_max == nullptr || *base_min < 0 ||
+              *base_max >= dim_imm->value ||
+              *base_max > std::numeric_limits<int64_t>::max() - rem) {
+            // Non-constant dim size or unbounded base index: be conservative
+            // for this and any remaining outer dims.
+            for (size_t j = 0; j <= k; ++j) {
+              region[j] = arith::IntSet::FromRange(
+                  Range::FromMinExtent(0, buffer->shape[j]));
+            }
+            break;
+          }
           int64_t d = dim_imm->value;
-          if (rem >= d) {
+          int64_t end_exclusive = *base_max + rem;
+          int64_t span = end_exclusive / d + (end_exclusive % d != 0);
+          if (span == 1) {
+            region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
+            rem = 1;
+          } else {
             // Run spills past this dim: cover it whole and carry up.
             region[k] = arith::IntSet::FromRange(
                 Range::FromMinExtent(0, buffer->shape[k]));
-            rem = (rem + d - 1) / d;
-          } else {
-            region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
-            rem = 1;
+            rem = span;
           }
-        } else {
-          // Non-constant dim size: be conservative for this and any
-          // remaining outer dims.
-          region[k] = arith::IntSet::FromRange(
-              Range::FromMinExtent(0, buffer->shape[k]));
-          rem = 1;
         }
       }
     } else {
       // Non-constant extent or arity mismatch: fall back to whole buffer.
-      for (size_t k = 0; k < ndim; ++k) {
-        region[k] =
-            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
-      }
+      fill_whole_buffer();
     }
     return region;
   }
