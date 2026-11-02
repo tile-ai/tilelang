@@ -6012,6 +6012,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // Each ulonglong4 component holds two float32 lanes. Bit-cast the float2
+  // temporary without taking its address, which NVRTC rejects.
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -6019,7 +6021,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "__builtin_bit_cast(uint64_t, make_float2(" << v << ", " << v
+         << "))";
     }
     os << ')';
     return;
