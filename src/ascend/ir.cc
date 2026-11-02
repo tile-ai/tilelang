@@ -21,6 +21,7 @@
 
 #include "ir.h"
 
+#include <algorithm>
 #include <tvm/ffi/reflection/creator.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 #include <tvm/tirx/stmt.h>
@@ -435,13 +436,16 @@ public:
     Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
 
     DataType dtype = DataType::Int(32);
-    PrimExpr extent = IntImm(dtype, vector_count);
+    // An omitted count inherits the kernel group in ResolveAivGroup. Keep a
+    // wide placeholder domain until then, without recording an explicit request.
+    PrimExpr extent = IntImm(dtype, vector_count == -1 ? 2 : vector_count);
     IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
                IterVarType::kThreadIndex, "cthread");
     body = AttrStmt(iv, tirx::attr::thread_extent, extent, body);
 
     Map<String, ObjectRef> annotations;
-    annotations.Set("vector_count", IntImm(dtype, vector_count));
+    if (vector_count != -1)
+      annotations.Set("vector_count", IntImm(dtype, vector_count));
     Stmt stmt = SBlock({}, {}, {}, "VECTOR", body, std::nullopt, stolen_bufs,
                        {}, annotations);
 
@@ -473,8 +477,8 @@ public:
 };
 
 VectorFrame Vector(int vector_count) {
-  ICHECK(vector_count >= 1 && vector_count <= 2)
-      << "Vector core count must be 1 or 2, got " << vector_count;
+  ICHECK(vector_count == -1 || vector_count == 1 || vector_count == 2)
+      << "Vector core count must be -1 (unspecified), 1 or 2, got " << vector_count;
   auto n = tvm::ffi::make_object<VectorFrameNode>();
   n->vector_count = vector_count;
   n->sid_var = tvm::tirx::Var("sid", DataType::Int(32));

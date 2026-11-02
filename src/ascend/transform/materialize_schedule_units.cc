@@ -1,3 +1,4 @@
+#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -548,6 +549,51 @@ private:
 } // namespace
 
 /*! \brief Normalize task boundaries and materialize unscheduled units. */
+// MixedKernel already declares its count and outer sid in the frontend.
+// Only validate that contract and inherit it in Vector regions. Plain Kernel
+// is left untouched until existing task/resource or CodeGen classification.
+class MixedAivValidator : public StmtMutator {
+private:
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    auto previous = sid_;
+    const auto *iv = op->node.as<IterVarNode>();
+    if (op->attr_key == tirx::attr::thread_extent && iv && iv->thread_tag == "cthread")
+      sid_ = iv->var;
+    Stmt result = StmtMutator::VisitStmt_(op);
+    sid_ = previous;
+    return result;
+  }
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint != "tilelang_root") return StmtMutator::VisitStmt_(op);
+    auto count = op->annotations.Get("vector_count");
+    if (!count.has_value()) {
+      // Validate explicit quantities even when no Cube work is present.
+      // This check does not classify the kernel or rewrite its bindings.
+      PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
+        const auto *block = node.as<SBlockNode>();
+        if (!block || block->name_hint != "VECTOR") return;
+        if (auto value = block->annotations.Get("vector_count"))
+          ResolveAivCount(Downcast<IntImm>(value.value().cast<PrimExpr>())->value);
+      });
+      return GetRef<Stmt>(op);
+    }
+    int resolved = ResolveAivCount(Downcast<IntImm>(count.value().cast<PrimExpr>())->value);
+    SBlock result = GetRef<SBlock>(op);
+    result.CopyOnWrite()->body = AivDomainNormalizer(resolved, sid_)(op->body);
+    result.CopyOnWrite()->annotations.Set("tl.resolved_aiv_count", Integer(resolved));
+    return result;
+  }
+  Optional<Var> sid_;
+};
+
+tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
+  auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
+    func.CopyOnWrite()->body = MixedAivValidator()(func->body);
+    return func;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.ResolveAivGroup", {});
+}
+
 tvm::transform::Pass MaterializeScheduleUnits() {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
     return RewriteTilelangKernels(
@@ -566,6 +612,7 @@ tvm::transform::Pass MaterializeScheduleUnits() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.ResolveAivGroup", ResolveAivGroup);
   refl::GlobalDef().def("tl.transform.MaterializeScheduleUnits",
                         MaterializeScheduleUnits);
 }

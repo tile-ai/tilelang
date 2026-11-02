@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tvm_ffi
 from tvm.target import Target
 
 from tilelang.backend.target import (
@@ -14,6 +15,33 @@ def _target_ffi_api():
     from tilelang import _ffi_api
 
     return _ffi_api
+
+
+def _query_device_aiv_per_aic() -> int | None:
+    """Query the device AIC:AIV ratio from hardware only.
+
+    Does NOT read any environment variable or user override — this is the
+    ground truth used by both normalize_pass_configs and the C++ group resolver
+    to validate user requests. Returns None when no current NPU can be queried.
+    """
+    try:
+        import torch
+
+        props = torch.npu.get_device_properties(torch.npu.current_device())
+        cube = getattr(props, "cube_core_num", 0)
+        vector = getattr(props, "vector_core_num", 0)
+        if cube > 0 and vector > 0 and vector % cube == 0 and vector // cube in (1, 2):
+            return vector // cube
+    except Exception:
+        pass
+    return None
+
+
+@tvm_ffi.register_global_func("tilelang.ascend._query_device_aiv_per_aic", override=True)
+def _query_device_aiv_per_aic_ffi() -> int:
+    """Internal hardware query for C++; 0 denotes an unknown/offline device."""
+    ratio = _query_device_aiv_per_aic()
+    return 0 if ratio is None else ratio
 
 
 def _make_ascend_target(target_dict: dict | None = None) -> Target:

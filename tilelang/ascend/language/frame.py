@@ -47,20 +47,28 @@ class VectorFrame(TIRFrame):
         return self.sid_var
 
 
-def Vector(vector: int = 2) -> VectorFrame:
+def Vector(vector: int | None = None) -> VectorFrame:
     """Construct a Vector (AIV) execution region frame.
 
     Parameters
     ----------
-    vector : int
-        Number of AIV cores (1 or 2). Default 2.
+    vector : int, optional
+        Explicit AIV count (1 or 2), checked against the selected mixed
+        group. Omission inherits that count. MixedKernel uses its original
+        sids parameter (default 2). For ordinary Kernel, existing scheduling
+        and CodeGen determine the core type; a mixed kernel uses the device
+        ratio or offline 2, and explicit Vector counts must match it.
+        Pure-kernel bindings retain the existing lowering behavior.
 
     Returns
     -------
     res : VectorFrame
         The VectorFrame used to denote an AIV execution region.
     """
-    return _ffi_api.Vector(vector)  # type: ignore[attr-defined] # pylint: disable=no-member
+    if vector is not None and (type(vector) is not int or vector not in (1, 2)):
+        raise ValueError(f"T.Vector() vector must be an integer 1 or 2. Got {vector!r}")
+    # Keep omission distinct from an explicit 2 until group resolution.
+    return _ffi_api.Vector(-1 if vector is None else vector)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def _next_vf_source_index(kind: str) -> int:

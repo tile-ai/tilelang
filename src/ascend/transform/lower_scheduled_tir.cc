@@ -1,3 +1,4 @@
+#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -712,6 +713,7 @@ Stmt LowerScheduledKernel(const Stmt &scheduled_body,
                             {}, {}, {}));
     Map<String, ffi::Any> vector_annotations;
     vector_annotations.Set("vector_count", Integer(vector_count));
+    vector_annotations.Set("tl.resolved_aiv_count", Integer(vector_count));
     blocks.push_back(SBlock({}, {}, {}, "VECTOR", vector_body.value(),
                             std::nullopt, {}, {}, vector_annotations));
     return SeqStmt(blocks);
@@ -720,6 +722,8 @@ Stmt LowerScheduledKernel(const Stmt &scheduled_body,
     Map<String, ffi::Any> annotations;
     if (external_sid.has_value() || needs_sid)
       annotations.Set("vector_count", Integer(vector_count));
+    if (external_sid.has_value() || needs_sid)
+      annotations.Set("tl.resolved_aiv_count", Integer(vector_count));
     return SBlock({}, {}, {}, "VECTOR", vector_body.value(), std::nullopt, {},
                   {}, annotations);
   }
@@ -742,8 +746,10 @@ tvm::transform::Pass LowerScheduledTIR() {
           SBlock root = context.root;
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(root, context.outer_ctx);
-          int vector_count =
-              scheduled_tir.metadata.num_aiv_subcores.value_or(2);
+          // Mixed counts were resolved before task projection; preserve pure defaults.
+          int vector_count = scheduled_tir.metadata.num_aiv_subcores.has_value()
+                                 ? scheduled_tir.metadata.num_aiv_subcores.value()
+                                 : 2;
           Optional<BufferAliasMap> aliases;
           if (auto value = root->annotations.Get(kBufferAliasMap)) {
             aliases = value.value().cast<BufferAliasMap>();

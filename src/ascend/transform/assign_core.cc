@@ -1,3 +1,4 @@
+#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -268,6 +269,17 @@ public:
     assigner.Run();
   }
 
+  // Reuse the existing task hardware classifier; ambiguous scalar tasks
+  // do not establish a requirement for an additional core type.
+  static bool HasMixedHardware(const std::vector<TaskNode *> &tasks) {
+    bool cube = false, vector = false;
+    for (const TaskNode *task : tasks) {
+      CoreMask mask = GetCandidateCoreMask(task);
+      cube |= mask == kCoreCube;
+      vector |= mask != kCoreAll && (mask & kCoreVector) != 0;
+    }
+    return cube && vector;
+  }
 private:
   CoreMaskAssigner(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
@@ -412,6 +424,18 @@ tvm::transform::Pass AssignCore() {
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
           SBlock root = context.root;
+          if (!root->annotations.count("vector_count") ||
+              root->annotations.count("tl.inferred_sid_domain")) {
+            ScheduledTIR original = DecodeScheduledTIR(root, context.outer_ctx);
+            std::vector<TaskNode *> tasks;
+            CollectAllTaskNodes(original.tree, tasks);
+            if (CoreMaskAssigner::HasMixedHardware(tasks)) {
+              int count = ResolveAivCount();
+              root.CopyOnWrite()->body = AivDomainNormalizer(count, context.outer_sid, false)(root->body);
+              root.CopyOnWrite()->annotations.Set("vector_count", Integer(count));
+              root.CopyOnWrite()->annotations.Set("tl.resolved_aiv_count", Integer(count));
+            }
+          }
           if (context.outer_sid.has_value())
             root = SubcoreProjector::Rewrite(root, context.outer_ctx,
                                              context.outer_sid.value());

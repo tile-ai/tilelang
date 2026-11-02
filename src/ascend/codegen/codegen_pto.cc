@@ -1,3 +1,4 @@
+#include "../transform/aiv_group.h"
 /*!
  * \file ascend/codegen/codegen_pto.cc
  * \brief Utility to generate PTO Python source.
@@ -2163,7 +2164,8 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
 }
 
 void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
-                                     const PrimFunc &func) {
+                                     const PrimFunc &original) {
+  PrimFunc func = original;
   RegisterFunction_(gvar, func);
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
@@ -2205,6 +2207,57 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
+  if (!current_function_is_cube_) {
+    auto requested = tl::ascend::ExplicitVectorCount(func->body);
+    if (requested.has_value()) {
+      int count = tl::ascend::ResolveAivCount(requested);
+      if (count == 2) {
+        // A native Vector launch only exposes sid 0. Keep the existing PTO
+        // mixed launch for an explicit two-AIV group, with one Vector section.
+        class VectorBody : public tirx::StmtMutator {
+          Stmt VisitStmt_(const SBlockNode *op) final {
+            auto block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
+            if (block->name_hint == "VECTOR")
+              block.CopyOnWrite()->name_hint = "vector_body";
+            return block;
+          }
+        };
+        Map<String, ObjectRef> annotations;
+        annotations.Set("vector_count", Integer(count));
+        annotations.Set("tl.resolved_aiv_count", Integer(count));
+        Stmt vector_body = SBlock({}, {}, {}, "VECTOR",
+            VectorBody()(func->body), std::nullopt, {}, {}, annotations);
+        // PTOAS classifies a single Vector section as a native Vector kernel,
+        // which exposes only sid 0. An empty Cube section retains the existing
+        // mixed launch geometry without adding any Cube computation.
+        func.CopyOnWrite()->body = SeqStmt({
+            SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
+            vector_body});
+        current_function_is_mixed_ = true;
+      }
+    }
+  }
+  int mixed_aiv_count = 2;
+  if (current_function_is_mixed_) {
+    mixed_aiv_count = tl::ascend::ResolveMixedCodegenCount(func->body);
+    func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mixed_aiv_count, std::nullopt, false)(func->body);
+    if (mixed_aiv_count == 1) {
+      tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+        if (const auto *call = node.as<CallNode>()) {
+          ICHECK(!call->op.same_as(tl::ascend_copy_matrix_cc_to_ub()))
+              << "PTO L0C->UB is unsupported with one active AIV on dav-3510; "
+                 "use aiv=2 or L0C->GM->UB";
+          if (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
+              call->op.same_as(tl::ascend_cross_core_wait_flag())) {
+            const auto *mode = call->args[0].as<IntImmNode>();
+            ICHECK(mode && mode->value != 2)
+                << "PTO aiv=1 keeps the upstream mixed launch; "
+                   "use cross-core mode 4 with AIV0, not physical-1:1 mode 2";
+          }
+        }
+      });
+    }
+  }
   if (current_function_is_mixed_) {
     MixedSectionVariableInfo mixed_info =
         MixedSectionLocalVarAnalyzer::Analyze(func->body);
