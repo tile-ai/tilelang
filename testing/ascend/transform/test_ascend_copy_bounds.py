@@ -271,8 +271,12 @@ def test_batch_symbolic_origins_use_common_axis_clamping():
 
 
 @pytest.mark.parametrize("batch_begin", [1, 3])
-def test_matrix_tail_fills_only_valid_batches(batch_begin):
-    before = _copy_module((3, 20, 10), (5, 32, 32), [batch_begin, 0, 0], [4, 32, 32], dst_min=[1, 0, 0], dst_extent=[4, 32, 32])
+@pytest.mark.parametrize("staged", [False, True])
+def test_matrix_tail_fills_only_valid_batches(batch_begin, staged):
+    dst_shape = ([2] if staged else []) + [5, 32, 32]
+    dst_min = ([1] if staged else []) + [1, 0, 0]
+    dst_extent = ([1] if staged else []) + [4, 32, 32]
+    before = _copy_module((3, 20, 10), dst_shape, [batch_begin, 0, 0], [4, 32, 32], dst_min=dst_min, dst_extent=dst_extent)
     after = transform.AscendInsertOOBPadding()(before)
     fills = calls(after, "tl.tileop.fill")
     if batch_begin == 3:
@@ -284,7 +288,10 @@ def test_matrix_tail_fills_only_valid_batches(batch_begin):
     for loop in loops:
         assert int(loop.extent) == 2
         (fill,) = calls(loop.body, "tl.tileop.fill")
-        first_batch = tirx.stmt_functor.substitute(fill.args[0].args[0].indices[0], {loop.loop_var: 0})
+        indices = fill.args[0].args[0].indices
+        if staged:
+            assert int(indices[0]) == 1
+        first_batch = tirx.stmt_functor.substitute(indices[-3], {loop.loop_var: 0})
         assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1
 
 

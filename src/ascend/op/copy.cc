@@ -546,12 +546,9 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       }
     }
   } else if (dma_path == DMAPath::kGMToL1) {
-    bool batched =
-        IsBatchedGMToL1Copy(op.src, src_range, op.dst, dst_range, analyzer);
-    StridedLayout src_layout = NormalizeMTE2DLayout(
-        op.src, src_range, analyzer, "Ascend GM->L1 copy", batched);
-    StridedLayout dst_region_layout = NormalizeTrailingMTE2DLayout(
-        op.dst, dst_range, analyzer, "Ascend GM->L1 destination", batched);
+    auto [src_layout, dst_region_layout] =
+        NormalizeGMToL1Copy(op.src, src_range, op.dst, dst_range, analyzer);
+    bool batched = src_layout.modes.size() == 3;
     const Mode &src_inner = src_layout.modes[0];
     const Mode &src_row = src_layout.modes[1];
     PrimExpr src_row_stride_bytes = AscendMTEBytesFromElements(
@@ -595,8 +592,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
             : analyzer->CanProve(src_row.size > dst_row.size) ||
                   analyzer->CanProve(src_inner.size > dst_inner.size);
     if (batched)
-      source_exceeds_destination |=
-          analyzer->CanProve(src_range[0]->extent > dst_range[0]->extent);
+      source_exceeds_destination |= analyzer->CanProve(
+          src_layout.modes[2].size > dst_region_layout.modes[2].size);
     ICHECK(!source_exceeds_destination)
         << "Ascend GM->L1 copy requires the mapped source region to fit "
            "inside the destination (with axes reversed for transpose), got "
@@ -632,7 +629,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     }
     PrimExpr src_batch_stride_bytes =
         batched
-            ? AscendMTEBytesFromElements(src_region.modes[2].stride, elem_bits)
+            ? AscendMTEBytesFromElements(src_layout.modes[2].stride, elem_bits)
             : zero;
     Array<PrimExpr> args{
         dst_ptr,       src_ptr,        sid,         src_row_stride_bytes,
@@ -645,7 +642,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           AscendMTEBytesFromElements(dst_layout.outer0 * dst_layout.outer1 *
                                          dst_layout.row_frac * dst_layout.c0,
                                      elem_bits);
-      args.push_back(src_range[0]->extent);
+      args.push_back(src_layout.modes[2].size);
       args.push_back(matrix_bytes / I(32));
     }
     call = Call(DataType::Void(), ascend_copy_gm_to_cbuf(), args);

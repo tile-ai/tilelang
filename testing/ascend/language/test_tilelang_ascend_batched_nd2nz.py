@@ -303,3 +303,47 @@ def test_batched_nd2nz_strides_and_transpose_device(dtype, rows, cols, copy_rows
     torch.npu.synchronize()
     # Check the full allocation: uncopied M/N regions and batches stay untouched.
     torch.testing.assert_close(actual.cpu(), expected, atol=0, rtol=0)
+
+
+def pipelined_batch_copy(versions=None):
+    @T.prim_func
+    def main(
+        source: T.Tensor((8, 16, 16), T.bfloat16),
+        weight: T.Tensor((16, 16), T.bfloat16),
+        output: T.Tensor((8, 16, 16), T.float32),
+    ):
+        with T.Kernel(1):
+            tile = T.alloc_l1((2, 16, 16), T.bfloat16)
+            weight_l1 = T.alloc_l1((16, 16), T.bfloat16)
+            a = T.alloc_l0a((16, 16), T.bfloat16)
+            b = T.alloc_l0b((16, 16), T.bfloat16)
+            acc = T.alloc_l0c((16, 16), T.float32)
+            if versions is not None:
+                T.annotate_buffer_versions({tile: versions})
+            T.copy(weight, weight_l1)
+            T.copy(weight_l1, b)
+            for i in T.Pipelined(4, num_stages=2):
+                T.copy(source[2 * i : 2 * i + 2, :, :], tile)
+                for batch in T.unroll(2):
+                    T.copy(tile[batch, :, :], a)
+                    T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, output[2 * i + batch, :, :])
+
+    return main
+
+
+@pytest.mark.parametrize("versions", [None, 1, 2])
+def test_batched_nd2nz_pipelined(versions):
+    source = tilelang.lower(pipelined_batch_copy(versions), target="ascend").kernel_source
+    assert "asc_set_gm2l1_nz_para(2, 1," in source
+
+
+@tilelang.testing.requires_ascend
+def test_batched_nd2nz_pipelined_device():
+    import torch
+
+    pytest.importorskip("torch_npu")
+    kernel = tilelang.compile(pipelined_batch_copy(), target="ascend", out_idx=-1)
+    source = (torch.arange(8 * 16 * 16).reshape(8, 16, 16) % 251).to(torch.bfloat16).npu()
+    identity = torch.eye(16, dtype=torch.bfloat16, device="npu")
+    torch.testing.assert_close(kernel(source, identity).cpu(), source.cpu().float(), atol=0, rtol=0)

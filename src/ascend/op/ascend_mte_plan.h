@@ -20,6 +20,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -201,11 +202,9 @@ struct StridedLayout {
 /// dimensions when needed, and prefers the trailing pair when several pairs
 /// are equivalent. Return nullopt if no pair can be proven valid; this includes
 /// both unsupported layouts and inconclusive stride/extent proofs.
-/// Batched GM->L1 copies may exclude the leading axis of a 3D region.
 inline std::optional<StridedLayout>
 TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
-                        arith::Analyzer *analyzer,
-                        bool allow_leading_batch = false) {
+                        arith::Analyzer *analyzer) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
 
   if (range.size() != buf->shape.size() || range.size() < 2)
@@ -227,8 +226,7 @@ TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
     for (int row = inner - 1; row >= 0; --row) {
       bool all_other_axes_are_unit = true;
       for (int axis = 0; axis < ndim; ++axis) {
-        if (axis == row || axis == inner ||
-            (allow_leading_batch && ndim == 3 && axis == 0)) {
+        if (axis == row || axis == inner) {
           continue;
         }
         PrimExpr extent = range[axis]->extent;
@@ -253,38 +251,18 @@ TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
   return StridedLayout{{inner, row}, raw.offset, raw.elem_bits};
 }
 
-/// Preserve legacy single-matrix normalization before selecting a batch axis.
-inline bool IsBatchedGMToL1Copy(const Buffer &src,
-                                const ffi::Array<Range> &src_range,
-                                const Buffer &dst,
-                                const ffi::Array<Range> &dst_range,
-                                arith::Analyzer *analyzer) {
-  if (src_range.size() != 3 || dst_range.size() != 3 ||
-      analyzer->CanProve(src_range[0]->extent <= 1,
-                         arith::ProofStrength::kSymbolicBound))
-    return false;
-
-  auto src_matrix = TryNormalizeMTE2DLayout(src, src_range, analyzer);
-  auto dst_matrix = TryNormalizeMTE2DLayout(dst, dst_range, analyzer);
-  // A singleton source axis need not be leading, but L1 matrix axes must trail.
-  return !(src_matrix && dst_matrix && dst_matrix->modes[0].axis == 2 &&
-           dst_matrix->modes[1].axis == 1);
-}
-
 /// Require a proven 2D layout for lowering an MTE descriptor.
 inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
                                           const ffi::Array<Range> &range,
                                           arith::Analyzer *analyzer,
-                                          const std::string &context,
-                                          bool allow_leading_batch = false) {
+                                          const std::string &context) {
   ICHECK_EQ(range.size(), buf->shape.size())
       << context << " requires one access range per buffer axis, got ranges "
       << range << " for buffer " << buf->name << " shape " << buf->shape;
   ICHECK_GE(range.size(), 2U)
       << context << " requires at least a 2D region, got buffer " << buf->name
       << " shape " << buf->shape << " ranges " << range;
-  auto layout =
-      TryNormalizeMTE2DLayout(buf, range, analyzer, allow_leading_batch);
+  auto layout = TryNormalizeMTE2DLayout(buf, range, analyzer);
   ICHECK(layout.has_value())
       << context
       << " cannot represent this region with one 2D MTE descriptor: all axes "
@@ -298,15 +276,12 @@ inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
 }
 
 /// Normalize a region whose hardware layout assigns matrix semantics to the
-/// trailing two axes (L1/L0 buffers). Leading axes select one plane unless
-/// a leading batch axis is explicitly allowed.
+/// trailing two axes (L1/L0 buffers). Leading axes may only select one plane.
 inline StridedLayout
 NormalizeTrailingMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
                              arith::Analyzer *analyzer,
-                             const std::string &context,
-                             bool allow_leading_batch = false) {
-  StridedLayout layout =
-      NormalizeMTE2DLayout(buf, range, analyzer, context, allow_leading_batch);
+                             const std::string &context) {
+  StridedLayout layout = NormalizeMTE2DLayout(buf, range, analyzer, context);
   int ndim = static_cast<int>(range.size());
   ICHECK_EQ(layout.modes[0].axis, ndim - 1)
       << context << " requires the contiguous transfer axis to be the last "
@@ -317,6 +292,47 @@ NormalizeTrailingMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
       << "buffer axis. Buffer " << buf->name << " has shape " << buf->shape
       << " and ranges " << range << ".";
   return layout;
+}
+
+/// Normalize [..., batch, row, inner] for one batched GM->L1 instruction.
+/// Leading axes select a plane (e.g. an L1 pipeline stage) and retain their
+/// contribution to the base offset.
+inline std::optional<StridedLayout>
+TryNormalizeBatchedMTELayout(const Buffer &buf, const ffi::Array<Range> &range,
+                             arith::Analyzer *analyzer) {
+  if (range.size() < 3 || range.size() != buf->shape.size())
+    return std::nullopt;
+
+  auto layout = StridedLayout::FromBufferRange(buf, range, buf->dtype.bits());
+  if (!analyzer->CanProveEqual(layout.modes[0].stride, 1))
+    return std::nullopt;
+  for (size_t i = 3; i < layout.modes.size(); ++i) {
+    if (!analyzer->CanProveEqual(layout.modes[i].size, 1))
+      return std::nullopt;
+  }
+  layout.modes.resize(3);
+  return layout;
+}
+
+inline std::pair<StridedLayout, StridedLayout>
+NormalizeGMToL1Copy(const Buffer &src, const ffi::Array<Range> &src_range,
+                    const Buffer &dst, const ffi::Array<Range> &dst_range,
+                    arith::Analyzer *analyzer) {
+  auto src_matrix = TryNormalizeMTE2DLayout(src, src_range, analyzer);
+  auto dst_matrix = TryNormalizeMTE2DLayout(dst, dst_range, analyzer);
+  int dst_ndim = static_cast<int>(dst_range.size());
+  if (src_matrix && dst_matrix && dst_matrix->modes[0].axis == dst_ndim - 1 &&
+      dst_matrix->modes[1].axis == dst_ndim - 2)
+    return {*src_matrix, *dst_matrix};
+
+  auto src_batch = TryNormalizeBatchedMTELayout(src, src_range, analyzer);
+  auto dst_batch = TryNormalizeBatchedMTELayout(dst, dst_range, analyzer);
+  ICHECK(src_batch && dst_batch)
+      << "Ascend GM->L1 copy cannot represent the source and destination as a "
+         "single matrix or a batch of matrices: "
+      << src->name << src_range << " -> " << dst->name << dst_range
+      << ". Outer-loop lowering is not yet implemented.";
+  return {*src_batch, *dst_batch};
 }
 
 // ---------------------------------------------------------------------------
