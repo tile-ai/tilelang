@@ -96,6 +96,7 @@ def _make_dense_tcgen05_partition_kernel(threads):
     return main
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("threads", [256, 384])
 def test_dense_tcgen05_mma_uses_full_tile_independent_of_block_warps(threads):
     """Regression for #3721: auxiliary block warps must not partition TCGEN05 N."""
