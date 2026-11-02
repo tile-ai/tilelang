@@ -1316,6 +1316,11 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       << "CodegenMetal does not support inter-function calls, "
       << "but expression " << ffi::GetRef<Call>(op) << " calls PrimFunc "
       << op->op;
+  if (op->op.same_as(Op::Get("tirx.mulhi"))) {
+    os << "metal::mulhi(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   if (TryPrintSimdgroupIndexExpr(op, os)) {
     return;
   }

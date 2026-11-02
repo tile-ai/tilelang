@@ -88,6 +88,7 @@ from tvm.tirx.generic import cast
 from . import _ffi_api
 from tvm.tirx.script.builder import frame
 from tilelang.language import dtypes as _dtypes
+from tilelang.language.tir import op as _tl_op
 
 # pylint: enable=unused-import
 
@@ -1770,6 +1771,7 @@ bitwise_or = _op_wrapper(_tir_op.bitwise_or)
 bitwise_xor = _op_wrapper(_tir_op.bitwise_xor)
 ceil = _op_wrapper(_tir_op.ceil)
 clz = _op_wrapper(_tir_op.clz)
+mulhi = _op_wrapper(_tl_op.mulhi)
 copysign = _op_wrapper(_tir_op.copysign)
 cos = _op_wrapper(_tir_op.cos)
 cosh = _op_wrapper(_tir_op.cosh)
@@ -2056,6 +2058,7 @@ __all__ = [
     "bitwise_xor",
     "ceil",
     "clz",
+    "mulhi",
     "copysign",
     "cos",
     "cosh",

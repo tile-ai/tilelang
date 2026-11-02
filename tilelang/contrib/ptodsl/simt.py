@@ -141,6 +141,22 @@ def scalar_div(lhs, rhs):
     return lhs / rhs
 
 
+def scalar_mulhi(lhs, rhs, bits):
+    """Unsigned high product outside SIMT; bits is fixed by code generation."""
+    a = pto.cast(lhs, pto.ui64)
+    b = pto.cast(rhs, pto.ui64)
+    shift = pto.const(32, dtype=pto.ui64)
+    if bits == 32:
+        return pto.cast((a * b) >> shift, pto.ui32)
+    mask = pto.const(0xFFFFFFFF, dtype=pto.ui64)
+    a0, a1 = a & mask, a >> shift
+    b0, b1 = b & mask, b >> shift
+    p00, p01 = a0 * b0, a0 * b1
+    p10, p11 = a1 * b0, a1 * b1
+    carry = ((p00 >> shift) + (p01 & mask) + (p10 & mask)) >> shift
+    return pto.cast(p11 + (p01 >> shift) + (p10 >> shift) + carry, pto.ui64)
+
+
 def scalar_rsqrt(value):
     return 1.0 / pto.sqrt(value)
 
