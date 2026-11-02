@@ -89,6 +89,21 @@ inline bool IsFenceProxyAsyncCall(const CallNode *call) {
   return call && call->op.same_as(fence_proxy_async());
 }
 
+bool IsSharedStorageSync(const Stmt &stmt) {
+  const auto *eval = stmt.as<EvaluateNode>();
+  if (eval == nullptr) {
+    return false;
+  }
+  const auto *call = eval->value.as<CallNode>();
+  if (call == nullptr || !call->op.same_as(builtin::tvm_storage_sync()) ||
+      call->args.empty()) {
+    return false;
+  }
+  const auto *scope = call->args[0].as<StringImmNode>();
+  return scope != nullptr &&
+         (scope->value == "shared" || scope->value == "shared.dyn");
+}
+
 // Identify async intrinsics emitted by TileLang or TVM that require a fence
 // when they follow generic proxies.
 bool IsAsyncIntrinsic(const CallNode *call) {
@@ -116,6 +131,16 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   return false;
+}
+
+bool IsTmaStoreIntrinsic(const CallNode *call) {
+  return call != nullptr && (call->op.same_as(tma_store()) ||
+                             call->op.same_as(tma_store_scatter4()));
+}
+
+bool IsTmaLeaderCondition(const PrimExpr &condition) {
+  const auto *call = condition.as<CallNode>();
+  return call != nullptr && call->op.same_as(tl_shuffle_elect());
 }
 
 inline bool IsSharedPointerVar(const VarNode *var) {
@@ -212,6 +237,20 @@ bool CallMayWriteSharedMemory(const CallNode *call) {
   return writes_shared;
 }
 
+bool ExprMayWriteSharedMemory(const PrimExpr &expr) {
+  bool writes_shared = false;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (writes_shared) {
+      return;
+    }
+    const auto *call = node.as<CallNode>();
+    if (call != nullptr && CallMayWriteSharedMemory(call)) {
+      writes_shared = true;
+    }
+  });
+  return writes_shared;
+}
+
 ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
   if (IsFenceProxyAsyncCall(call)) {
     return ProxyEvent::kNeutral;
@@ -231,6 +270,7 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
 struct ProxyEventSummary {
   bool has_async{false};
   bool has_generic{false};
+  bool has_tma_store{false};
 };
 
 ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
@@ -242,7 +282,8 @@ ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
     if (const auto *store = node.as<BufferStoreNode>()) {
       auto scope =
           StorageScope::Create(GetPtrStorageScope(store->buffer->data));
-      if (scope.rank == StorageRank::kShared) {
+      if (scope.rank == StorageRank::kShared ||
+          ExprMayWriteSharedMemory(store->value)) {
         summary.has_generic = true;
       }
       return;
@@ -252,6 +293,7 @@ ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
       ProxyEvent event = ClassifyCallProxyEvent(call);
       if (event == ProxyEvent::kAsync) {
         summary.has_async = true;
+        summary.has_tma_store |= IsTmaStoreIntrinsic(call);
       } else if (event == ProxyEvent::kGeneric) {
         summary.has_generic = true;
       }
@@ -303,6 +345,11 @@ private:
   struct RewriteResult {
     Stmt stmt;
     ProxyStateSet out_state;
+  };
+
+  struct TmaLeaderMatch {
+    int index{-1};
+    ProxyEventSummary summary;
   };
 
   RewriteResult RewriteWithState(const Stmt &stmt, ProxyStateSet in_state) {
@@ -359,15 +406,75 @@ private:
     return stmt;
   }
 
+  Stmt RewriteTmaLeaderBranch(const IfThenElseNode *op, const PrimExpr &cond,
+                              bool fence_before_barrier) {
+    ProxyStateSet entry = current_state_;
+    RewriteResult then_res =
+        RewriteWithState(op->then_case, ProxyStateSet::None());
+    Stmt leader_branch = IfThenElse(cond, then_res.stmt);
+    if (fence_before_barrier) {
+      current_state_ = then_res.out_state.Union(ProxyStateSet::Async());
+      return leader_branch;
+    }
+
+    current_state_ = then_res.out_state.Union(entry);
+    return SeqStmt(Array<Stmt>{MakeFenceProxyAsyncStmt(), leader_branch});
+  }
+
+  TmaLeaderMatch FindTmaLeaderAfterBarrier(const Array<Stmt> &stmts,
+                                           int barrier_index) const {
+    for (int i = barrier_index + 1; i < static_cast<int>(stmts.size()); ++i) {
+      const auto *leader = stmts[i].as<IfThenElseNode>();
+      if (leader != nullptr && !leader->else_case.defined() &&
+          IsTmaLeaderCondition(leader->condition)) {
+        ProxyEventSummary summary = SummarizeProxyEvents(leader->then_case);
+        if (summary.has_tma_store) {
+          return {i, summary};
+        }
+        if (summary.has_generic || summary.has_async) {
+          return {};
+        }
+        continue;
+      }
+
+      ProxyEventSummary summary = SummarizeProxyEvents(stmts[i]);
+      if (summary.has_generic || summary.has_async) {
+        return {};
+      }
+    }
+    return {};
+  }
+
   Stmt VisitStmt_(const SeqStmtNode *op) final {
     Array<Stmt> seq;
     seq.reserve(op->seq.size());
 
     for (int i = 0; i < static_cast<int>(op->seq.size()); ++i) {
       const Stmt &original = op->seq[i];
-      Stmt mutated = VisitStmt(original);
-      AppendFlattened(&seq, mutated);
+      if (current_state_.MayBeGeneric() && IsSharedStorageSync(original)) {
+        TmaLeaderMatch match =
+            FindTmaLeaderAfterBarrier(op->seq, static_cast<int>(i));
+        if (match.index >= 0) {
+          const auto *leader = op->seq[match.index].as<IfThenElseNode>();
+          Stmt barrier = VisitStmt(original);
+          seq.push_back(MakeFenceProxyAsyncStmt());
+          AppendFlattened(&seq, barrier);
+
+          for (int j = i + 1; j < match.index; ++j) {
+            AppendFlattened(&seq, VisitStmt(op->seq[j]));
+          }
+
+          PrimExpr cond = VisitExpr(leader->condition);
+          Stmt leader_branch = RewriteTmaLeaderBranch(leader, cond, true);
+          AppendFlattened(&seq, leader_branch);
+          i = match.index;
+          continue;
+        }
+      }
+
+      AppendFlattened(&seq, VisitStmt(original));
     }
+
     if (seq.size() == 1) {
       return seq[0];
     }
@@ -386,7 +493,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-    if (scope.rank == StorageRank::kShared) {
+    if (scope.rank == StorageRank::kShared ||
+        ExprMayWriteSharedMemory(op->value)) {
       current_state_ = ProxyStateSet::Generic();
     }
     return stmt;
@@ -427,6 +535,14 @@ private:
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     PrimExpr cond = VisitExpr(op->condition);
     ProxyStateSet entry = current_state_;
+
+    if (entry.MayBeGeneric() && !op->else_case.defined() &&
+        IsTmaLeaderCondition(cond)) {
+      ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
+      if (then_summary.has_tma_store && !then_summary.has_generic) {
+        return RewriteTmaLeaderBranch(op, cond, false);
+      }
+    }
 
     if (entry.MayBeGeneric() && op->else_case.defined()) {
       ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
