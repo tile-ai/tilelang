@@ -109,9 +109,10 @@ def test_dense_tcgen05_mma_uses_full_tile_independent_of_block_warps(threads):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
-def test_dense_tcgen05_384_threads_matches_matmul():
-    """Regression for #3721: the affected launch size must compute all output values."""
-    kernel = tilelang.compile(_make_dense_tcgen05_partition_kernel(384), out_idx=[2], target="cuda")
+@pytest.mark.parametrize("threads", [256, 384])
+def test_dense_tcgen05_threads_match_matmul(threads):
+    """Regression for #3721: both launch sizes must compute all output values."""
+    kernel = tilelang.compile(_make_dense_tcgen05_partition_kernel(threads), out_idx=[2], target="cuda")
 
     torch.manual_seed(0)
     A = torch.randn(128, 64, device="cuda", dtype=torch.float16)
