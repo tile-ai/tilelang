@@ -51,8 +51,8 @@ Layout makeAscendNDLayout(const tirx::Buffer &buffer);
 ///
 /// Produces a Buffer sharing phys_buf->data, with:
 ///   - shape = physical extents (from MapRegionBounds)
-///   - strides = row-major strides of phys_buf shape
-///   - elem_offset = sum(phys_region[i].min * strides[i])
+///   - strides = phys_buf strides, or row-major strides inferred from its shape
+///   - elem_offset = phys_buf.elem_offset + sum(min_i * stride_i)
 ///
 /// The result is a plain strided buffer — no layout knowledge needed by
 /// the consumer.

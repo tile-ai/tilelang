@@ -9,6 +9,8 @@ from tilelang import tvm
 from tilelang.ascend import language as T
 
 
+pytestmark = pytest.mark.pto
+
 tirx = tvm.tirx
 
 

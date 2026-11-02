@@ -297,21 +297,22 @@ private:
   }
 
   Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
+    // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
-    auto extent_tx = CalculateThreadExtent(tx_, &bound_tx);
-    auto extent_ty = CalculateThreadExtent(ty_, &bound_ty);
-    auto extent_tz = CalculateThreadExtent(tz_, &bound_tz);
-    if (extent_tx == 0 || extent_ty == 0 || extent_tz == 0) {
-      return Evaluate(0);
-    }
 
+    // Check if all threads are participating (full extent)
     if (IsFullThreadExtent(tx_, bound_tx) &&
         IsFullThreadExtent(ty_, bound_ty) &&
         IsFullThreadExtent(tz_, bound_tz)) {
       return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
+
+    // Calculate thread extents
+    auto extent_tx = CalculateThreadExtent(tx_, bound_tx);
+    auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
+    auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
 
     // Create or get barrier info
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
@@ -320,7 +321,6 @@ private:
 
     auto [barrier_id, thread_count] =
         GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
-    ICHECK_LT(barrier_id, 16U) << "[ThreadSync] Too many partial-sync barriers";
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -360,43 +360,35 @@ private:
     return {barrier_id, thread_count};
   }
 
-  // Certify a contiguous interval, including when ConstIntBound is loose.
-  size_t CalculateThreadExtent(const IterVar &iv, arith::ConstIntBound *bound) {
+  /*!
+   * \brief Calculate the number of threads that satisfy current constraints.
+   *
+   * This method uses Z3's model enumeration (AllSAT) to precisely count
+   * how many thread IDs satisfy all current constraints. This is essential
+   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
+   * gives us the range [0, 127] but the actual number of satisfying threads
+   * is 32 (i.e., 0, 4, 8, ..., 124).
+   *
+   * Falls back to range-based calculation if Z3 enumeration fails or returns
+   * an invalid result.
+   */
+  size_t CalculateThreadExtent(const IterVar &iv,
+                               const arith::ConstIntBound &bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      *bound = arith::ConstIntBound(0, 0);
       return 1;
     }
-    int64_t lower = (*bound)->min_value;
-    int64_t upper = (*bound)->max_value;
-    if (lower > upper) {
-      return 0;
+    auto extent = *as_const_int(iv->dom->extent);
+    // Always use Z3 enumeration to count satisfying values.
+    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
+    // detect. Z3 enumeration will return the exact count of satisfying values.
+    int64_t z3_count =
+        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
+    if (z3_count > 0) {
+      return static_cast<size_t>(z3_count);
     }
-    int64_t width = upper - lower + 1;
-    int64_t count = analyzer_->z3_prover.CountSatisfyingValues(iv->var, width);
-    if (count == 0 && analyzer_->z3_prover.CanProve(Bool(false))) {
-      return 0;
-    }
-    ICHECK_GT(count, 0) << "[ThreadSync] Cannot prove a thread rectangle";
-    if (count == width) {
-      return count;
-    }
-    upper -= count - 1;
-    while (lower < upper) {
-      int64_t mid = lower + (upper - lower + 1) / 2;
-      if (analyzer_->z3_prover.CanProve(iv->var >=
-                                        make_const(iv->var.dtype(), mid))) {
-        lower = mid;
-      } else {
-        upper = mid - 1;
-      }
-    }
-    upper = lower + count - 1;
-    // Count may stop early; containment certifies that these are all values.
-    ICHECK(analyzer_->z3_prover.CanProve(iv->var <=
-                                         make_const(iv->var.dtype(), upper)))
-        << "[ThreadSync] Cannot prove a thread rectangle";
-    *bound = arith::ConstIntBound(lower, upper);
-    return count;
+
+    // Fallback to range-based calculation if Z3 enumeration failed
+    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -415,12 +407,22 @@ private:
 
   bool IsFullThreadExtent(const IterVar &iv,
                           const arith::ConstIntBound &bound) {
-    auto range = iter_vars_.Get(iv->var);
-    return !range ||
-           (bound->min_value == 0 &&
-            analyzer_->CanProveEqual(range.value()->extent,
-                                     make_const(range.value()->extent.dtype(),
-                                                bound->max_value + 1)));
+    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
+      return true;
+    }
+
+    if (!iv->dom.defined()) {
+      return true;
+    }
+
+    const auto *min_node = iv->dom->min.as<IntImmNode>();
+    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
+
+    int64_t min = min_node->value;
+    int64_t extent = extent_node->value;
+    int64_t max = min + extent - 1;
+
+    return min == bound->min_value && max == bound->max_value;
   }
 
   // Member variables

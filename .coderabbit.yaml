@@ -1,6 +1,10 @@
 language: en-US
 
 reviews:
+  high_level_summary: false
+  auto_review:
+    ignore_title_keywords:
+      - "[Do not review]"
   suggested_labels: true
   auto_apply_labels: true
   labeling_instructions:
@@ -333,19 +337,32 @@ reviews:
         tilelang/testing/ir.py, and source-mapping/diagnostic portions of codegen
         and compiler passes. Match tooling intent, not filenames alone.
 
-  high_level_summary_instructions: |
-    Add a short "C++ style / lint notes" section when the PR changes C++, CI,
-    lint tooling, or C++ style documentation.
-
-    In that section:
-    - Mention whether the PR touches rules documented in docs/developer_guide/cpp_style.md.
-    - Mention the "C++ API Style Audit (warning only)" CI step when relevant.
-    - Focus on warnings introduced or touched by this PR; do not treat historical backlog as blocking.
-    - Clearly separate correctness, build, and test issues from warning-only style suggestions.
-    - Do not recommend blocking merge for advisory TLCPP003/TLCPP004 findings unless the PR
-      introduces a clear API, FFI, or maintainability risk.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
 
   path_instructions:
+    - path: "**/*"
+      instructions: |
+        Base findings on the current PR diff against its merge base, not stale
+        comments or summaries. Trace affected callers, consumers, and existing
+        guards before reporting a defect. For correctness findings, identify the
+        triggering case, violated contract, and observable consequence.
+        Distinguish code evidence from unverified assumptions.
+
+        Separate regressions introduced by the PR and incomplete fixes within its
+        stated scope from pre-existing limitations, unsupported inputs, and
+        design or performance tradeoffs. Treat existing limitations outside the
+        PR's scope as follow-up work unless this change introduces or worsens them.
+
+        Before prescribing a fix, compare sibling operations and backends and
+        existing primitives that enforce the same invariant. Prefer the smallest
+        coherent fix at the layer that owns it. Compare fixing ownership or
+        lifecycle with adding synchronization, wrappers, or special cases.
+        Account for extra synchronization, allocations, per-call host work, and
+        maintenance cost, and explain material tradeoffs. Do not infer an
+        end-to-end speedup from an instruction change alone.
+
     - path: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
       instructions: |
         Review changed C++ against docs/developer_guide/cpp_style.md.
@@ -374,6 +391,16 @@ reviews:
         changes policy.
 
         Do not suggest failing CI for existing advisory backlog.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - files: "CONTRIBUTING.md"
+        applyTo: "**/*"
+      - files: "docs/developer_guide/cpp_style.md"
+        applyTo: "src/**/*.{h,hh,hpp,cuh,cc,cpp,cxx,cu}"
+      - files: "docs/developer_guide/testing_style.md"
+        applyTo: "testing/**,examples/**"
 
 issue_enrichment:
   auto_enrich:

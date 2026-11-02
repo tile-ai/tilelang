@@ -32,6 +32,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kASTPrintEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationEnable, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutVisualizationFormats, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDeviceCompileFlags, ffi::Array<ffi::String>);
+TVM_REGISTER_PASS_CONFIG_OPTION(kCUDACompiler, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEmitLineDirectives, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDataRaceCheck, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableBufferInitCheck, Bool);
@@ -53,12 +54,6 @@ TIR_DEFINE_TL_BUILTIN(access_ptr)
     .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
-
-TIR_DEFINE_TL_BUILTIN(clamp)
-    .set_num_inputs(3)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TVectorizable>("TVectorizable", true);
 
 TIR_DEFINE_TL_BUILTIN(region).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));

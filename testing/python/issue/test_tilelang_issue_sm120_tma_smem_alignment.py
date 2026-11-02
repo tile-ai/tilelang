@@ -111,15 +111,11 @@ def _lower_for(arch: str):
     M, N, K = 128, 128, 256
     BM, BN, BK = 64, 64, 32
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
-    tilelang.disable_cache()
-    try:
-        with target:
-            artifact = tilelang_lower(
-                _make_buggy_arena_kernel(M, N, K, BM, BN, BK),
-                target=target,
-            )
-    finally:
-        tilelang.enable_cache()
+    with tilelang.testing.without_kernel_cache(), target:
+        artifact = tilelang_lower(
+            _make_buggy_arena_kernel(M, N, K, BM, BN, BK),
+            target=target,
+        )
     return artifact.device_mod
 
 
@@ -204,14 +200,11 @@ def test_tma_smem_alignment_runtime_hostarch():
     the compile-only regression coverage is the generated-TIR check above."""
     M, N, K = 128, 128, 256
     BM, BN, BK = 64, 64, 32
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         kernel = tilelang.compile(
             _make_buggy_arena_kernel(M, N, K, BM, BN, BK),
             target="cuda",
         )
-    finally:
-        tilelang.enable_cache()
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
     c = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)

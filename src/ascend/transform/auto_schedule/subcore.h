@@ -25,6 +25,7 @@
 
 #include <tvm/tirx/analysis.h>
 
+#include "ascend/transform/buffer_addresses.h"
 #include "layout/layout.h"
 #include "scheduled_tir.h"
 #include "support/check.h"
@@ -82,7 +83,20 @@ public:
     writer->alloc_buffers = std::move(allocations);
     Map<String, Any> annotations;
     for (const auto &[key, value] : root->annotations) {
-      if (auto versions = value.try_cast<BufferVersionMap>()) {
+      if (key == kBufferAddresses) {
+        BufferAddresses mapped;
+        for (const auto &[storage, address] : ParseBufferAddresses(value)) {
+          if (projector.varying_.count(storage)) {
+            for (int p = 0; p < projector.count_; ++p)
+              if (active(storage, p))
+                mapped.Set(projector.VarFor(storage, p), address);
+          } else {
+            mapped.Set(storage, address);
+          }
+        }
+        if (!mapped.empty())
+          annotations.Set(key, mapped);
+      } else if (auto versions = value.try_cast<BufferVersionMap>()) {
         BufferVersionMap mapped;
         for (const auto &[storage, versions_count] : versions.value()) {
           if (projector.varying_.count(storage)) {

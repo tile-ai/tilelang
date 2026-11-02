@@ -61,7 +61,7 @@ def make_compute(config, major_a, major_b, *, blockscaled=False, operand_bits=8)
                                     "multi_buffer_eligible": [l0a, l0b, l0_sfa, l0_sfb] if blockscaled else [l0a, l0b]
                                 },
                             ):
-                                # SF and data share MTE1; issue the SF loads first.
+                                # SF and data share MTE1; issue the data loads first.
                                 with T.Stage(0):
                                     k_mad_idx = k_mad_tile_idx * MAD_K
                                     eff_mad_k = clamp(aligned_k - k_mad_idx, 0, MAD_K)
@@ -69,17 +69,6 @@ def make_compute(config, major_a, major_b, *, blockscaled=False, operand_bits=8)
                                     is_first = k_block_idx == 0 and k_mad_idx == 0
                                     is_last = k_block_idx + 1 >= num_k_blocks and k_mad_idx + MAD_K >= aligned_k
                                     unit_flag_ctrl = T.Select(is_last, 3, 2)
-                                    if blockscaled:
-                                        if n_mad_tile_idx == 0 or not reuse_l0:
-                                            T.copy(
-                                                scale_region(l1_sfa, m_mad_idx, load_mad_m, sf_start, eff_mad_k),
-                                                scale_region(l0_sfa, 0, load_mad_m, 0, eff_mad_k),
-                                            )
-                                        if num_mad_n_tiles != 1 or m_mad_tile_idx == 0 or not reuse_l0:
-                                            T.copy(
-                                                scale_region(l1_sfb, n_mad_idx, load_mad_n, sf_start, eff_mad_k),
-                                                scale_region(l0_sfb, 0, load_mad_n, 0, eff_mad_k),
-                                            )
                                     if n_mad_tile_idx == 0 or not reuse_l0:
                                         copy_a(
                                             l1a,
@@ -98,6 +87,20 @@ def make_compute(config, major_a, major_b, *, blockscaled=False, operand_bits=8)
                                             load_mad_n,
                                             eff_mad_k,
                                         )
+                                    if blockscaled:
+                                        # SF MTE1 transfers round MN to 16, independently
+                                        # of the data transpose's 256/operand_bits rows.
+                                        # Only the useful rows contribute to stored C.
+                                        if n_mad_tile_idx == 0 or not reuse_l0:
+                                            T.copy(
+                                                scale_region(l1_sfa, m_mad_idx, eff_mad_m, sf_start, eff_mad_k),
+                                                scale_region(l0_sfa, 0, eff_mad_m, 0, eff_mad_k),
+                                            )
+                                        if num_mad_n_tiles != 1 or m_mad_tile_idx == 0 or not reuse_l0:
+                                            T.copy(
+                                                scale_region(l1_sfb, n_mad_idx, eff_mad_n, sf_start, eff_mad_k),
+                                                scale_region(l0_sfb, 0, eff_mad_n, 0, eff_mad_k),
+                                            )
                                     scale_args = (
                                         {
                                             "SFA": scale_region(l0_sfa, 0, load_mad_m, 0, eff_mad_k),

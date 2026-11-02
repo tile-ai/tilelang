@@ -3,6 +3,16 @@
 from __future__ import annotations
 
 from tilelang.language.builtin import ds_read_tr16_b64, ds_read_tr8_b64
+from tilelang.language.math_intrinsics import (
+    __cos,
+    __exp,
+    __exp10,
+    __log,
+    __log2,
+    __log10,
+    __sin,
+    __tan,
+)
 from tilelang.rocm.intrinsics import (
     MatrixCoreIntrinEmitter,
     MatrixCorePreshuffleIntrinEmitter,
@@ -24,6 +34,14 @@ __all__ = [
     "MatrixCoreIntrinEmitter",
     "MatrixCorePreshuffleIntrinEmitter",
     "WMMAIntrinEmitter",
+    "__cos",
+    "__exp",
+    "__exp10",
+    "__log",
+    "__log2",
+    "__log10",
+    "__sin",
+    "__tan",
     "ds_read_tr16_b64",
     "ds_read_tr8_b64",
     "get_mma_micro_size",

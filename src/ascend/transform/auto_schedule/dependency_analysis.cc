@@ -44,6 +44,7 @@
 #include "support/check.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
+#include "transform/common/int64_promoter.h"
 
 namespace tvm {
 namespace tl {
@@ -229,17 +230,23 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
       compared_dims = ndim > 2 ? ndim - 2 : 0;
   }
   PrimExpr any_dim_disjoint = Bool(false);
+  Int64Promoter promoter;
+  auto widen_index = [&](const PrimExpr &value) {
+    return cast(DataType::Int(64), promoter(value));
+  };
   for (size_t i = 0; i < compared_dims; ++i) {
-    PrimExpr a_min = freshen_a(Substitute(a_rng[i]->min, a_sub));
-    PrimExpr a_extent = freshen_a(Substitute(a_rng[i]->extent, a_sub));
-    PrimExpr b_min = freshen_b(Substitute(b_rng[i]->min, b_sub));
-    PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
+    // Widen the arithmetic before forming endpoints. Casting a whole int32
+    // expression hides min/max tail bounds from the arithmetic simplifier.
+    PrimExpr a_min = widen_index(freshen_a(Substitute(a_rng[i]->min, a_sub)));
+    PrimExpr a_extent =
+        widen_index(freshen_a(Substitute(a_rng[i]->extent, a_sub)));
+    PrimExpr b_min = widen_index(freshen_b(Substitute(b_rng[i]->min, b_sub)));
+    PrimExpr b_extent =
+        widen_index(freshen_b(Substitute(b_rng[i]->extent, b_sub)));
     // A half-open endpoint can exceed the int32 index range by one even
     // for an ordinary single-element access.
-    PrimExpr a_end =
-        cast(DataType::Int(64), a_min) + cast(DataType::Int(64), a_extent);
-    PrimExpr b_end =
-        cast(DataType::Int(64), b_min) + cast(DataType::Int(64), b_extent);
+    PrimExpr a_end = a_min + a_extent;
+    PrimExpr b_end = b_min + b_extent;
     any_dim_disjoint = any_dim_disjoint || (a_extent <= 0) || (b_extent <= 0) ||
                        (a_end <= b_min) || (b_end <= a_min);
   }
