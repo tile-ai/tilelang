@@ -17,9 +17,19 @@ from . import codegen, execution_backend, pipeline
 _GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
 
 
-def tilelang_callback_ppu_validate(device_mod):
+def _raise_on_pdl(node):
+    if isinstance(node, tirx.Call) and node.op.name in ("tl.pdl_trigger", "tl.pdl_sync"):
+        raise ValueError("PDL is not supported on PPU backend")
+
+
+def tilelang_callback_ppu_validate(device_mod, target):
+    support_pdl = hgcc.have_pdl(target)
     for _, base_func in device_mod.functions.items():
-        if not isinstance(base_func, tirx.PrimFunc) or not base_func.attrs:
+        if not isinstance(base_func, tirx.PrimFunc):
+            continue
+        if not support_pdl:
+            tirx.stmt_functor.post_order_visit(base_func.body, _raise_on_pdl)
+        if not base_func.attrs:
             continue
         source = base_func.attrs.get("code_block_source")
         if source is None:

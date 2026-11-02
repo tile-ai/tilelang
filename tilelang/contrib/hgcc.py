@@ -221,6 +221,8 @@ def compile_ppu(
 # Feature detection (all PPU variants support these)
 # ---------------------------------------------------------------------------
 
+_PPU_PDL_SUPPORTED_ARCHS: frozenset[int] = frozenset()
+
 
 def have_fp16(compute_version=None):
     return True
@@ -251,4 +253,9 @@ def have_tma(target=None):
 
 
 def have_pdl(target=None):
-    return True
+    target = target or Target.current()
+    if target is not None and target.kind.name != "ppu":
+        return False
+    compute_version = get_target_compute_version(target)
+    arch_int = get_target_arch_int(compute_version)
+    return arch_int in _PPU_PDL_SUPPORTED_ARCHS

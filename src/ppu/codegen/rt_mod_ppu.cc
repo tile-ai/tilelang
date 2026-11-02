@@ -482,7 +482,7 @@ Module BuildTileLangPPU(IRModule mod, Target target) {
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_ppu_validate")) {
-    (*f)(mod);
+    (*f)(mod, target);
   }
 
   for (auto kv : mod->functions) {
@@ -529,7 +529,7 @@ Module BuildTileLangPPUWithoutCompile(IRModule mod, Target target) {
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_ppu_validate")) {
-    (*f)(mod);
+    (*f)(mod, target);
   }
 
   for (auto kv : mod->functions) {

@@ -3,6 +3,7 @@ import pytest
 import tilelang
 import tilelang.ppu.language as T
 from tilelang import tvm
+from tilelang.contrib.hgcc import have_pdl
 from tvm import tirx
 
 
@@ -21,6 +22,27 @@ def _build_expr_source(expr, params):
 
 def _kernel_body(source):
     return source[source.rindex("__global__") :]
+
+
+@pytest.mark.parametrize("arch", ["ppu_10", "ppu_15"])
+def test_ppu_pdl_capability(arch):
+    target = tvm.target.Target({"kind": "ppu", "arch": arch})
+    assert not have_pdl(target)
+
+
+@pytest.mark.parametrize(
+    ("pdl_op", "expected"),
+    [
+        ("pdl_trigger", "hggcTriggerProgrammaticLaunchCompletion"),
+        ("pdl_sync", "hggcGridDependencySynchronize"),
+    ],
+)
+def test_ppu_pdl_codegen_follows_have_pdl(pdl_op, expected, monkeypatch):
+    with pytest.raises(ValueError, match="PDL is not supported on PPU backend"):
+        _build_expr_source(getattr(T, pdl_op)(), [])
+
+    monkeypatch.setattr("tilelang.ppu.backend.hgcc._PPU_PDL_SUPPORTED_ARCHS", frozenset({15}))
+    assert expected in _build_expr_source(getattr(T, pdl_op)(), [])
 
 
 def test_ppu_clamp_uses_fallback_lowering():
