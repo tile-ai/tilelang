@@ -177,6 +177,76 @@ private:
                                     : tirx::Substitute(stmt, replayable_binds);
   }
 
+  // Substituting accepted binds into a whole statement can still expand an
+  // expression many times over (`x = x + x` chains under nested guards).
+  // Abort the substitution as soon as the rewritten statement exceeds this
+  // budget and let the caller fall back to the legacy binding for the guard.
+  class ExpansionBudgetExceeded : public std::exception {
+  public:
+    const char *what() const noexcept override {
+      return "replayable bind expansion budget exceeded";
+    }
+  };
+
+  class BudgetedReplaySubstitute : public tirx::StmtExprMutator {
+  public:
+    BudgetedReplaySubstitute(const Map<Var, PrimExpr> &subs, int64_t limit)
+        : subs_(subs), limit_(limit) {}
+
+    PrimExpr VisitExpr(const PrimExpr &expr) final {
+      if (++count_ > limit_) {
+        throw ExpansionBudgetExceeded();
+      }
+      return tirx::StmtExprMutator::VisitExpr(expr);
+    }
+
+    PrimExpr VisitExpr_(const VarNode *op) final {
+      auto it = subs_.find(GetRef<Var>(op));
+      if (it != subs_.end()) {
+        return VisitExpr((*it).second);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+  private:
+    const Map<Var, PrimExpr> &subs_;
+    int64_t count_{0};
+    int64_t limit_;
+  };
+
+  // Inlining a bind duplicates its value into every use. A chain such as
+  // `x = x + x` therefore doubles the expression on each step and would grow
+  // exponentially (issue #3700). Keep replayable inlining only while the
+  // rewritten value stays small; once the budget is exceeded, the remaining
+  // binds are emitted in the guarded lexical scope instead.
+  static constexpr int64_t kMaxReplayableNodes = 128;
+  static constexpr int64_t kMaxReplayableStatementNodes = 1024;
+
+  class ReplayableNodeCounter : public tirx::ExprVisitor {
+  public:
+    explicit ReplayableNodeCounter(int64_t limit) : limit_(limit) {}
+
+    void VisitExpr(const PrimExpr &expr) final {
+      if (count_ > limit_) {
+        return;
+      }
+      ++count_;
+      tirx::ExprVisitor::VisitExpr(expr);
+    }
+
+    int64_t count() const { return count_; }
+
+  private:
+    int64_t count_{0};
+    int64_t limit_;
+  };
+
+  static bool WithinReplayableBudget(const PrimExpr &value) {
+    ReplayableNodeCounter counter(kMaxReplayableNodes);
+    counter.VisitExpr(value);
+    return counter.count() <= kMaxReplayableNodes;
+  }
+
   Stmt RewriteBindWithReplayableBinds(
       const BindNode *bind, const Map<Var, PrimExpr> &replayable_binds) const {
     PrimExpr value = RewriteWithReplayableBinds(bind->value, replayable_binds);
@@ -247,6 +317,15 @@ private:
     if (!inline_replayable_binds_) {
       return BindIfStmtLegacy(body, condition, span);
     }
+    try {
+      return ReplayableBindSeq(body, condition, span);
+    } catch (const ExpansionBudgetExceeded &) {
+      return BindIfStmtLegacy(body, condition, span);
+    }
+  }
+
+  Stmt ReplayableBindSeq(const Stmt &body, const PrimExpr &condition,
+                         Span span) const {
     auto seq_stmt = body.as<SeqStmtNode>();
     if (seq_stmt == nullptr) {
       return GuardStmt(condition, body, span);
@@ -262,8 +341,14 @@ private:
       if (!in_bind_scope) {
         if (const auto *bind = stmt.as<BindNode>()) {
           if (IsReplayableBindStmt(stmt, write_buffers)) {
-            replayable_binds.Set(bind->var, RewriteWithReplayableBinds(
-                                                bind->value, replayable_binds));
+            PrimExpr inlined =
+                RewriteWithReplayableBinds(bind->value, replayable_binds);
+            if (WithinReplayableBudget(inlined)) {
+              replayable_binds.Set(bind->var, std::move(inlined));
+              continue;
+            }
+            bind_scope.push_back(Bind(bind->var, inlined, bind->span));
+            in_bind_scope = true;
             continue;
           }
           bind_scope.push_back(
@@ -271,11 +356,12 @@ private:
           in_bind_scope = true;
           continue;
         }
-        guarded_bodies.push_back(
-            RewriteWithReplayableBinds(stmt, replayable_binds));
+        guarded_bodies.push_back(BudgetedReplaySubstitute(
+            replayable_binds, kMaxReplayableStatementNodes)(stmt));
         continue;
       }
-      bind_scope.push_back(RewriteWithReplayableBinds(stmt, replayable_binds));
+      bind_scope.push_back(BudgetedReplaySubstitute(
+          replayable_binds, kMaxReplayableStatementNodes)(stmt));
     }
 
     if (!bind_scope.empty()) {
