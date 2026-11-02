@@ -378,6 +378,25 @@ def test_l0c_copy_explicit_pitch_covers_region_and_fits_capacity(src_scope, dst_
         _equal([drain.args[6]], [64])
 
 
+@pytest.mark.parametrize("pitch,stored_m", [(None, 32), (4, 64)], ids=["compact", "explicit-prefix"])
+def test_l0c_n_split_pointer_uses_copy_pitch_and_preserves_plane_capacity(pitch, stored_m):
+    src = tirx.decl_buffer((2, 64, 128), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 32), "float16", name="dst", scope="shared.dyn")
+    after = _lower(
+        src,
+        dst,
+        _region(src, [1, 32, 64], [1, 0, 0]),
+        layouts={src: make_ascend_l0c_layout(src)},
+        annotations={"dual_dst_ctl": 2},
+        l0_pitch=pitch,
+    )
+    pipes = calls(after, "tl.ascend_copy_matrix_cc_to_ub")
+    assert len(pipes) == 2
+    # The second plane starts at the allocation capacity, not compact size.
+    _equal([pipe.args[1].args[2] for pipe in pipes], [8192, 8192 + 32 * stored_m])
+    _equal([pipe.args[6] for pipe in pipes], [stored_m, stored_m])
+
+
 def test_explicit_dynamic_l0_pitch_maps_each_iteration_independently():
     src = tirx.decl_buffer((64, 64), "bfloat16", name="src", scope="shared.l1")
     dst = tirx.decl_buffer((64, 64), "bfloat16", name="dst", scope="shared.l0a")
