@@ -6571,7 +6571,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
              "to match entry_name";
     }
+    // Raw user source: reset this function's anchors, emit one directive for
+    // the block, then pass its lines through untouched (a directive inside a
+    // macro continuation or string literal would corrupt it).
+    this->InitFuncState(f);
+    this->BeginRawSource();
     stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    this->EndRawSource();
     return;
   }
 

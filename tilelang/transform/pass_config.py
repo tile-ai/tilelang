@@ -116,7 +116,26 @@ class PassConfigKey(str, Enum):
     """Emit ``#line`` directives in generated C-family source from TIR spans,
     mapping generated statements back to their Python source lines. For example,
     with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries point at
-    the Python source. Default: False
+    the Python source. Default: 0
+
+    The value is a level:
+
+    - 0 (or False): off.
+    - 1 (or True): one directive per statement that owns a TIR span.
+    - 2 or more: every emitted source line is re-anchored. Level 1 only anchors
+      a statement's first line, so a synthesized statement without a span keeps
+      the previous mapping (already advanced past its line), and a statement
+      that prints several source lines (for example a vectorized CUDA binary
+      op) still drifts inside the statement. Level 2 precedes every emitted
+      line, including closing braces, with a fresh directive: a span-less
+      statement inherits the nearest enclosing statement's span, then the
+      function's span, then the last statement's span, and a function whose
+      PrimFunc has no span is mapped to the ``<tilelang-generated>``
+      pseudo-source instead of inheriting the previous function's file.
+
+    ``TILELANG_EMIT_LINE_DIRECTIVES`` supplies the same default outside an
+    explicit pass config (for example in compile-only tools); it accepts the
+    same level values.
     """
 
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
@@ -391,7 +410,7 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
 def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
     """Canonicalize known pass-config keys, apply environment-variable
     defaults, and emit compatibility warnings."""
-    from tilelang.env import env
+    from tilelang.env import env, parse_int_level
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
@@ -409,5 +428,16 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
     layout_cost_model = env.get_default_layout_cost_model()
     if layout_cost_model is not None:
         normalized.setdefault(PassConfigKey.TL_LAYOUT_COST_MODEL.value, layout_cost_model)
+
+    line_directive_key = PassConfigKey.TL_EMIT_LINE_DIRECTIVES.value
+    if line_directive_key in normalized:
+        # Canonicalize bools to 0/1 so the level is stable in kernel cache keys.
+        # An explicit value wins, so a malformed environment default must not be
+        # parsed (and rejected) when this key is present.
+        normalized[line_directive_key] = parse_int_level(normalized[line_directive_key], line_directive_key)
+    else:
+        emit_line_directives = env.get_default_emit_line_directives()
+        if emit_line_directives is not None:
+            normalized[line_directive_key] = emit_line_directives
 
     return normalized
