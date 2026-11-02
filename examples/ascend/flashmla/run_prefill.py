@@ -7,9 +7,6 @@ import os
 from pathlib import Path
 import statistics
 import sys
-import warnings
-
-warnings.filterwarnings("ignore", message="Permission mismatch.*")
 
 import torch
 import torch_npu
@@ -110,7 +107,7 @@ def main():
             "correctness": {},
         }
         if args.mode != "bench" or "reference" not in outputs:
-            expected_bf16, expected, expected_max, expected_lse = ref.ref_sparse_attn_fwd(param, inputs)
+            _, expected, expected_max, expected_lse = ref.ref_sparse_attn_fwd(param, inputs)
             for name, (out, maximum, lse) in outputs.items():
                 checks = [
                     kk.check_is_allclose(
@@ -131,7 +128,7 @@ def main():
                 result["cases"].append(case)
                 args.output.write_text(json.dumps(result, indent=2))
                 raise AssertionError("Correctness failure")
-        elif "reference" in outputs:
+        else:
             for name in outputs.keys() - {"reference"}:
                 for k in range(3):
                     torch.testing.assert_close(

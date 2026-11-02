@@ -3,10 +3,6 @@
 import tilelang.ascend.language as T
 
 
-def rolled(n):
-    return T.unroll(n, annotations={"pragma_unroll_factor": 1})
-
-
 @T.macro
 def dequantize(raw, scales, nz, fp4):
     with T.SimdVF():
@@ -16,7 +12,7 @@ def dequantize(raw, scales, nz, fp4):
         if fp4:
             row_indices = T.simd.vshls(T.simd.vshrs(arange, 5), 8)
             scale_indices = T.simd.vadd(arange, row_indices)
-            for row in rolled(8):
+            for row in T.unroll(8, unroll_factor=1):
                 packed_bits = T.simd.vgather2(raw[row * 4, 256], scale_indices, m16)
                 packed = T.reinterpret("float8_e4m3fnx256", packed_bits)
                 even = T.simd.vcvt(packed, "float32", m16, part=0)
@@ -27,13 +23,13 @@ def dequantize(raw, scales, nz, fp4):
         else:
             row_indices = T.simd.vmuls(T.simd.vshrs(arange, 4), 528)
             scale_indices = T.simd.vadd(arange, row_indices)
-            for row in rolled(4):
+            for row in T.unroll(4, unroll_factor=1):
                 packed = T.simd.vgather2(raw[row * 8, 512], scale_indices, m16)
                 clamped = T.simd.vmins(packed, 0xE0)
                 bits = T.simd.vshls(clamped, 7)
                 T.simd.vsts(scales[row * 128], T.reinterpret("bfloat16x128", bits), m16)
         T.simd.mem_bar("VST_VLD")
-        for row in rolled(32):
+        for row in T.unroll(32, unroll_factor=1):
             sf = T.alloc_local((4,), "bfloat16x128")
             if not fp4:
                 sf01 = T.simd.vld(scales[row * 16], "E2B_B16")

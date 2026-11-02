@@ -7,9 +7,7 @@ import os
 from pathlib import Path
 import statistics
 import sys
-import warnings
 
-warnings.filterwarnings("ignore", message="Permission mismatch.*")
 import torch
 import torch_npu
 

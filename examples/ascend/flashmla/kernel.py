@@ -11,10 +11,6 @@ from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_l0c_layou
 from examples.ascend.flashmla.quantization import dequantize
 
 
-def rolled(n):
-    return T.unroll(n, annotations={"pragma_unroll_factor": 1})
-
-
 def sparse_attention(
     nq,
     nk,
@@ -56,7 +52,7 @@ def sparse_attention(
     q_prefetch = pipeline_stages and 4 <= nb <= 15
     q_slots = 2 if q_prefetch else 1
     q_lead_shift = nb - 4 if q_prefetch else 0
-    extra_metadata_lead = pipeline_stages and q_lead_shift > 0
+    extra_metadata_lead = q_lead_shift > 0
     index_group = min(640, max(topk, extra_topk))
     gather_cache_policy = "normal_lv" if not decode or cache_hint else "notalloc_clean"
     direct_query_masks = not decode and pipeline_stages and extra_topk == 0 and 5 <= nb0 <= 10
@@ -92,9 +88,8 @@ def sparse_attention(
                 masks[col] = T.simd.vcmps(paired, valid_limit, op="lt")
             old_sum = T.simd.vld(sums[0])
             old_scale_max = T.simd.vld(scaling_max[0])
-            for r in rolled(8):
-                rm = T.alloc_var("float32x64")
-                rm = T.simd.vdup(-3.4028234663852886e38, "float32")
+            for r in T.unroll(8, unroll_factor=1):
+                rm = T.alloc_var("float32x64", init=T.simd.vdup(-3.4028234663852886e38, "float32"))
                 if not first:
                     rm = T.simd.vld(maxima[r * 8], "E2B_B32")
                 for col in T.unroll(4):
@@ -122,7 +117,7 @@ def sparse_attention(
             T.simd.vsts(factors[0], factor)
             T.simd.vsts(scaling_max[0], chosen_max)
             T.simd.mem_bar("VST_VLD")
-            for r in rolled(4):
+            for r in T.unroll(4, unroll_factor=1):
                 rmax2 = T.alloc_local((2,), "float32x64")
                 rsum2 = T.alloc_local((2,), "float32x64")
                 packed2 = T.alloc_local((2, 2), "bfloat16x128")
@@ -159,7 +154,7 @@ def sparse_attention(
     @T.macro
     def scale_output_vf(add, d, factors, out, accum):
         with T.SimdVF():
-            for r in rolled(32):
+            for r in T.unroll(32, unroll_factor=1):
                 factor5 = T.simd.vld(factors[r * 2], "BRC_B32")
                 for j in T.unroll(2):
                     cur = T.alloc_var("float32x64", init=T.simd.vld(out[r, j * 64]))
@@ -173,7 +168,7 @@ def sparse_attention(
         with T.SimdVF():
             mask16 = T.simd.pset(16)
             mask32 = T.simd.pset(32)
-            for r in rolled(16):
+            for r in T.unroll(16, unroll_factor=1):
                 packed = T.alloc_local((2, 2), "bfloat16x128")
                 for rr in T.unroll(2):
                     norm = T.simd.vld(denorm[r * 2 + rr], "BRC_B32")
@@ -197,10 +192,8 @@ def sparse_attention(
     def load_metadata(
         k, job, qidx, extra, Indices, ExtraIndices, Lengths, ExtraLengths, indices, group_smaller, group_larger, smaller, larger
     ):
-        rel = T.alloc_var("int32")
-        rel = T.if_then_else(extra, k - nb0, k)
-        group_tile = T.alloc_var("int32")
-        group_tile = rel % (index_group // 64)
+        rel = T.alloc_var("int32", init=T.if_then_else(extra, k - nb0, k))
+        group_tile = T.alloc_var("int32", init=rel % (index_group // 64))
         if k == 0 if direct_query_masks else group_tile == 0:
             if extra_topk > 0 and extra:
                 group_length = T.min(index_group, extra_topk - rel * 64)
@@ -213,7 +206,7 @@ def sparse_attention(
             valid_len = T.max(T.if_then_else(extra, extra_length, main_length) - rel * 64, 0)
             with T.SimdVF():
                 pairs32 = T.simd.pset(32, "PAT_VL32")
-                for group_k in rolled(index_group // 64):
+                for group_k in T.unroll(index_group // 64, unroll_factor=1):
                     x = T.reinterpret("uint32x64", T.simd.vld(indices[group_k * 64]))
                     pos = T.simd.vci(group_k * 64, "int32")
                     x = T.simd.vsel(x, T.simd.vdup(valid_limit, "uint32"), T.simd.vcmps(pos, valid_len, op="lt"))
@@ -244,11 +237,9 @@ def sparse_attention(
                 lo = smaller[sid * 16 + i]
                 hi = larger[sid * 16 + i]
             second = T.if_then_else(hi < valid_limit, hi, lo)
-            n_burst = T.alloc_var("int32")
-            n_burst = T.if_then_else(lo < valid_limit, 2, 0)
+            n_burst = T.alloc_var("int32", init=T.if_then_else(lo < valid_limit, 2, 0))
             safe_lo = T.if_then_else(n_burst == 0, T.uint32(0), lo)
-            stride = T.alloc_var("int64")
-            stride = T.Cast("int64", second - lo)
+            stride = T.alloc_var("int64", init=T.Cast("int64", second - lo))
             if decode and extra_topk > 0 and extra_fp4:
                 # Both formats retain separate bytes, sharing one
                 # MTE2 task and one V consumer ownership boundary.
@@ -518,7 +509,7 @@ def sparse_attention(
                             src_ptr = T.simd.make_ubuf_ptr(T.access_ptr(kv[0, 0], "r", extent=16384), "bfloat16")
                             dst0 = T.simd.make_ubuf_ptr(T.access_ptr(nz[0, 0], "w", extent=16896), "bfloat16")
                             dst1 = T.simd.make_ubuf_ptr(T.access_ptr(nz[0, 128], "w", extent=12672), "bfloat16")
-                            for _col in rolled(2):
+                            for _col in T.unroll(2, unroll_factor=1):
                                 for row in T.unroll(32):
                                     x0, src_ptr = T.simd.vld(src_ptr, post_inc=128)
                                     x1, src_ptr = T.simd.vld(src_ptr, post_inc=T.if_then_else(row == 31, -15744, 384))
@@ -671,7 +662,7 @@ def sparse_attention(
                         if decode:
                             T.copy(final[:, :512], O[qidx, sid * 32 : sid * 32 + 32, :])
                 if pipeline_stages:
-                    with T.Stage(q_lead_shift + (0 if extra_metadata_lead else 1) if pipeline_stages else 0):
+                    with T.Stage(q_lead_shift + (0 if extra_metadata_lead else 1)):
                         gather_kv(
                             k,
                             job,
