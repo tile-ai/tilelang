@@ -275,7 +275,7 @@ T.print(C[0], msg="C[0] = ")
 ### Configuring the Z3 proof budget
 
 Use `pass_configs` to change the Z3 resource budget for one kernel compilation.
-The default is `10_000`; a larger budget can prove more difficult expressions
+The default is `100_000`; a larger budget can prove more difficult expressions
 but may increase compilation time. The budget counts Z3 resource units, not
 milliseconds or an exact number of search iterations.
 

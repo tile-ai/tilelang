@@ -11,7 +11,7 @@ class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
 
     ARITH_Z3_RLIMIT = "arith.z3_rlimit"
-    """Z3 resource budget for each solver check. Default: 10,000.
+    """Z3 resource budget for each solver check. Default: 100,000.
 
     Accepts integers from 0 to 2**32 - 1; 0 means unlimited. This is a
     resource budget, not a timeout or an exact count of search iterations.
