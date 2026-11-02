@@ -71,16 +71,9 @@ def test_gemm_swzl_layout(dtype, operand, stages, row_bytes, layout_fn, mode):
         loads = [line for line in source.splitlines() if "tix_ldmatrix_swzl" in line]
         selected = [line for line in loads if f"{operand}_shared" in line]
         other = "B" if operand == "A" else "A"
-        # LayoutInference replaces a conflicting linear B with a new swizzled
-        # buffer. That actual load is eligible even though the input annotation
-        # was linear; A does not take this trans_buffer path.
-        rewritten_b = operand == "B" and layout_fn is make_linear_layout
-        expected_mode = (0 if row_bytes == 128 else 1) if rewritten_b else mode
-        assert bool(selected) == (expected_mode is not None and not disabled)
+        assert bool(selected) == (mode is not None and not disabled)
         if selected:
-            assert all(re.search(rf", {expected_mode}, (?:\(bool\)[01]|true|false)\);", line) for line in selected), selected
-        if rewritten_b and not disabled:
-            assert all("B_shared_" in line for line in selected)
+            assert all(re.search(rf", {mode}, (?:\(bool\)[01]|true|false)\);", line) for line in selected), selected
         # A fallback for one operand must not disable a compatible other one.
         assert any(f"{other}_shared" in line for line in loads) == (not disabled)
         torch.testing.assert_close(kernel(a, b), expected, atol=0.02, rtol=0.02)

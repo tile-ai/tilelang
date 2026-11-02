@@ -13,6 +13,9 @@ def _match_ppu(target) -> bool:
 
 
 register_gemm_impl("ppu.mma", GEMM_INST_MMA_PPU, _match_ppu, PPUGemmMMA)
+# Alias key for the PPU0010 chained RS transB case, where shared-layout reuse
+# is off (see ppu::Gemm::SelectInst); maps to the same PPUGemmMMA lowering.
+register_gemm_impl("ppu.mma.rs_chained", "ppu.mma.rs_chained", _match_ppu, PPUGemmMMA)
 register_gemm_impl(
     "ppu.mma.blockscaled",
     GEMM_INST_MMA_BLOCK_SCALED_PPU,

@@ -412,6 +412,12 @@ public:
                        << SpanHintSuffix(buffer->span);
           }
 
+          // User-annotated layouts stay authoritative: the gemm lowering
+          // rejects the mismatch (PPU0010) instead of converting.
+          if (IsSharedBuffer(buffer) && annotated_layout_map_.count(buffer)) {
+            continue;
+          }
+
           ObjectRef op = infer_list_stmt_[cur_infer_id];
           bool found = false;
           for (const auto &[map_buffer, map_layout] : layout_map) {

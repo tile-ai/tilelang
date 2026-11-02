@@ -187,6 +187,14 @@ class PPUGemmMMA(GemmBase):
         except ValueError:
             ppu_arch = 10
         a_from_gemm_c = self._is_chained_rs_gemm(ppu_arch)
+        if a_from_gemm_c and self.trans_B:
+            required_layout = make_ppu_swizzled_layout(self.B, k_major=True, is_gemm_rs=True)
+            b_layout = layout_map.get(self.B)
+            if b_layout is None or not b_layout.is_equal(required_layout):
+                raise ValueError(
+                    "PPU0010 chained RS GEMM with transpose_B=True does not support the retained B layout. "
+                    "Use make_ppu_swizzled_layout(B, k_major=True, is_gemm_rs=True) for this shortcut."
+                )
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_index=local_thread_index)
         # SWZL is a full-warp load; select it from the final inferred layouts.
         if arith.Analyzer().can_prove(thread_bounds.min % 32 == 0):

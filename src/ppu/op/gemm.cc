@@ -27,6 +27,15 @@ namespace ppu {
 namespace {
 
 constexpr const char *kPpuMMA = "ppu.mma";
+// Own key so ReuseExistingSharedLayout returns false: the pinned B layout of
+// the PPU0010 chained RS transB lowering must reach LayoutInference, which
+// converts a conflicting retained layout instead of silently keeping it.
+constexpr const char *kPpuMMAChainedRS = "ppu.mma.rs_chained";
+constexpr const char *kPpuMMABlockScaled = "ppu.mma.blockscaled";
+
+// Annotation set by AnnotateChainedGemm on gemms whose A comes from a prior
+// GEMM's C fragment.
+constexpr const char *kAFromGemmC = "a_from_gemm_c";
 
 void FatalUnsupportedPpuArchGemm(const GemmNode &op, Target target,
                                  const char *inst_name) {
@@ -146,6 +155,12 @@ struct Gemm {
     if (op.isTcgen05_) {
       FatalUnsupportedPpuArchGemm(op, target, "T.tcgen05_gemm()");
     }
+    if (op.transB_ && IsFragmentBuffer(op.a_) && IsSharedBuffer(op.b_) &&
+        op.a_->dtype.bits() == 16 && op.b_->dtype.bits() == 16 &&
+        op.c_->dtype.bits() == 32 && op.annotations_.count(kAFromGemmC) &&
+        GetPPUArchInt(target) == 10) {
+      return kPpuMMAChainedRS;
+    }
     return kPpuMMA;
   }
 
@@ -158,10 +173,8 @@ struct Gemm {
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, kNPerWarp);
   }
 
-  static bool ReuseExistingSharedLayout(String /* gemm_inst */) {
-    // PPU: never reuse existing shared layouts; the Python infer_layout
-    // always returns authoritative layouts for all buffers.
-    return false;
+  static bool ReuseExistingSharedLayout(String gemm_inst) {
+    return gemm_inst == kPpuMMA || gemm_inst == kPpuMMABlockScaled;
   }
 
   static String InstructionKind(String gemm_inst) {
