@@ -276,7 +276,7 @@ struct ProxyEventSummary {
 ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
   ProxyEventSummary summary;
   PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (summary.has_async && summary.has_generic) {
+    if (summary.has_async && summary.has_generic && summary.has_tma_store) {
       return;
     }
     if (const auto *store = node.as<BufferStoreNode>()) {
