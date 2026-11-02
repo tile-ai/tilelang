@@ -388,6 +388,40 @@ def test_guarded_per_core_task_keeps_wider_sync_outside_candidates():
     assert sets and calls(after, "tl.ascend_wait_flag")
 
 
+@pytest.mark.parametrize("trip_count", [0, 2], ids=["zero-trip", "multi-trip"])
+def test_per_core_internal_loop_keeps_one_handshake_per_task(trip_count):
+    a = tirx.decl_buffer((16, 16), "float32", name="A")
+    l1 = tirx.decl_buffer((16, 16), "float32", name="l1", scope="shared.l1")
+    l0 = tirx.decl_buffer((16, 16), "float32", name="l0", scope="shared.l0a")
+    stage = tirx.Var("stage", "int32")
+    loop = tirx.For(stage, 0, trip_count, tirx.ForKind.SERIAL, unit(copy(l1, l0), core=2).body)
+    group = tirx.AttrStmt({"core_mask": 2}, "tl.ascend_per_core_task", 1, loop)
+    before = kernel(
+        seq(unit(copy(a, l1), core=2), unit(group, core=None), unit(copy(a, l1), core=2)),
+        buffers=[l1, l0],
+        params=[a],
+    )
+    after = transform.InsertSync()(before)
+    for pipe in ("MTE2_MTE1", "MTE1_MTE2"):
+        events = {}
+        for operation in ("set", "wait"):
+            sites = [
+                (stmt.value, parents)
+                for stmt, parents in statements(after)
+                if isinstance(stmt, tirx.Evaluate)
+                and isinstance(stmt.value, tirx.Call)
+                and stmt.value.op.name == "tl.ascend_" + operation + "_flag"
+                and stmt.value.args[0].value == pipe
+            ]
+            assert len(sites) == 1
+            event, parents = sites[0]
+            # One atomic task consumes and publishes one token, including
+            # when its internal loop does no work or executes repeatedly.
+            assert not any(isinstance(parent, tirx.For) and parent.loop_var.same_as(stage) for parent in parents)
+            events[operation] = event.args[1]
+        assert tvm.arith.Analyzer().can_prove_equal(events["set"], events["wait"])
+
+
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static-fill", "dynamic-fill"])
 def test_fill_outside_vf_synchronizes_on_scalar_pipe(dynamic):
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
