@@ -313,6 +313,11 @@ private:
   Call NormalizeFixpipeCopy_(Call call) {
     constexpr int kFixpipeAlignmentBytes = 32;
     AscendCopy rewritten(call->args, call->annotations);
+    // NZ output has a panel pitch and whole-column-panel requirements, not
+    // ND's row pitch and 32-byte row padding. Copy lowering validates it.
+    if (auto layout = canonical_layouts_.Get(rewritten->dst);
+        layout && IsAscendFractalLayout(layout.value()))
+      return call;
     ICHECK_GE(rewritten->src_range.size(), 2U);
     ICHECK_EQ(rewritten->src_range.size(), rewritten->src->shape.size());
     // Lowering skips the DMA if any source or destination extent is
