@@ -166,7 +166,7 @@ __simt_callee__ __aicore__ inline void PhiloxRandomSimt(const uint32_t *key,
   CopyArray<ALG_COUNTER_SIZE>(results, counterTmp);
 }
 
-// float overload: Philox bits -> uniform [0, 1).
+// float overload: Philox bits -> uniform (0, 1], matching cuRAND.
 __simt_callee__ __aicore__ inline void
 PhiloxRandomSimt(const uint32_t *key, const uint32_t *counter, float *results) {
   uint32_t resultU32[ALG_COUNTER_SIZE];
