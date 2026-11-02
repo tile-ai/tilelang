@@ -1209,8 +1209,8 @@ private:
           << GetRef<Call>(op);
       ICHECK_GT(*rows, 0);
       ICHECK_GT(*cols, 0);
-      ICHECK(src_dtype->value == "float" || src_dtype->value == "half" ||
-             src_dtype->value == "bfloat16_t");
+      int source_bytes = Nd2NzElementBytes(op->args[5]);
+      Nd2NzElementBytes(op->args[6]);
 
       const AscendLatencyParams::Nd2NzLatencyParams *profile =
           &params->nd2nz_same_dtype;
@@ -1226,7 +1226,7 @@ private:
         }
       }
 
-      int64_t vector_elements = src_dtype->value == "float" ? 64 : 128;
+      int64_t vector_elements = 256 / source_bytes;
       int64_t passes = *cols / vector_elements + (*cols % vector_elements != 0);
       int64_t row_iterations =
           CheckedSerialTaskMultiply(*rows, passes, "ND->NZ row iterations");
