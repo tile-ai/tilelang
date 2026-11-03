@@ -30,6 +30,8 @@
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include <algorithm>
+#include <array>
+#include <map>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -283,6 +285,9 @@ public:
   }
 
 private:
+  // Empty scope allows dense groups to reuse an ID across storage scopes.
+  using BarrierKey = std::pair<std::array<int64_t, 6>, std::string>;
+
   explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size)
       : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
 
@@ -325,19 +330,16 @@ private:
     auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
     auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
 
-    // Create or get barrier info
-    ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
-                       bound_ty->min_value, bound_ty->max_value,
-                       bound_tz->min_value, bound_tz->max_value};
-
     // Only dense groups can share a bounds-based key across storage scopes.
-    // Sparse groups can have equal bounds and counts but different members;
-    // keep their existing per-scope allocation.
-    bool share_across_scopes = IsDenseThreadExtent_(tx_, bound_tx, extent_tx) &&
-                               IsDenseThreadExtent_(ty_, bound_ty, extent_ty) &&
-                               IsDenseThreadExtent_(tz_, bound_tz, extent_tz);
-    auto [barrier_id, thread_count] = GetOrCreateBarrier(
-        key, extent_tx, extent_ty, extent_tz, share_across_scopes, scope);
+    // Sparse groups with equal bounds can have different participants.
+    bool is_dense = IsDenseThreadExtent_(tx_, bound_tx, extent_tx) &&
+                    IsDenseThreadExtent_(ty_, bound_ty, extent_ty) &&
+                    IsDenseThreadExtent_(tz_, bound_tz, extent_tz);
+    BarrierKey key{{bound_tx->min_value, bound_tx->max_value,
+                    bound_ty->min_value, bound_ty->max_value,
+                    bound_tz->min_value, bound_tz->max_value},
+                   is_dense ? "" : scope};
+    size_t thread_count = extent_tx * extent_ty * extent_tz;
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -352,19 +354,15 @@ private:
     }
 
     // Create new sync call with barrier info
+    size_t barrier_id = GetOrCreateBarrierId_(key);
     Array<PrimExpr> new_args = {StringImm(scope),
                                 IntImm(DataType::Int(32), barrier_id),
                                 IntImm(DataType::Int(32), thread_count)};
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
 
-  std::pair<size_t, size_t>
-  GetOrCreateBarrier(const ThreadBoundKey &key, size_t extent_tx,
-                     size_t extent_ty, size_t extent_tz,
-                     bool share_across_scopes, const std::string &scope) {
-    auto &barrier_map =
-        share_across_scopes ? shared_barrier_map_ : scoped_barrier_maps_[scope];
-    if (auto it = barrier_map.find(key); it != barrier_map.end()) {
+  size_t GetOrCreateBarrierId_(const BarrierKey &key) {
+    if (auto it = barrier_ids_.find(key); it != barrier_ids_.end()) {
       return it->second;
     }
 
@@ -373,12 +371,9 @@ private:
     while (used_barrier_ids_.count(barrier_id)) {
       ++barrier_id;
     }
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
-
     used_barrier_ids_.insert(barrier_id);
-    barrier_map[key] = {barrier_id, thread_count};
-
-    return {barrier_id, thread_count};
+    barrier_ids_[key] = barrier_id;
+    return barrier_id;
   }
 
   bool IsDenseThreadExtent_(const IterVar &iv,
@@ -461,10 +456,7 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
-  using BarrierMap =
-      std::unordered_map<ThreadBoundKey, std::pair<size_t, size_t>>;
-  BarrierMap shared_barrier_map_;
-  std::unordered_map<std::string, BarrierMap> scoped_barrier_maps_;
+  std::map<BarrierKey, size_t> barrier_ids_;
   // Named-barrier ids already taken in this function, including those assigned
   // by an earlier ThreadSync run for another storage scope.
   std::unordered_set<size_t> used_barrier_ids_;
@@ -2089,19 +2081,11 @@ private:
 };
 
 PrimFunc TileLangThreadSync(PrimFunc func,
-                            const Array<String> &storage_scopes) {
-  std::vector<StorageScope> sync_scopes;
-  for (const String &storage_scope : storage_scopes) {
-    StorageScope sync_scope = StorageScope::Create(storage_scope);
-    if (sync_scope.rank != StorageRank::kGlobal) {
-      sync_scopes.push_back(std::move(sync_scope));
-    }
-  }
+                            const std::vector<StorageScope> &sync_scopes) {
   if (sync_scopes.empty()) {
     return func;
   }
-  auto *n = func.CopyOnWrite();
-  auto stmt = n->body;
+  Stmt stmt = func->body;
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
   if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
@@ -2125,7 +2109,8 @@ PrimFunc TileLangThreadSync(PrimFunc func,
   // Assign partial-sync ids only after all scopes have been planned. The same
   // thread group can then reuse an id across scopes, while disjoint groups and
   // explicitly numbered barriers remain isolated.
-  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
+  func.CopyOnWrite()->body =
+      ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
   return func;
 }
 
@@ -2141,17 +2126,23 @@ ThreadSync(const ffi::Variant<String, Array<String>> &storage_scope) {
   } else {
     storage_scopes = storage_scope.get<Array<String>>();
   }
-  auto pass_func = [storage_scopes](PrimFunc f, const IRModule &m,
-                                    const PassContext &ctx) {
-    auto *n = f.CopyOnWrite();
+
+  std::vector<StorageScope> sync_scopes;
+  for (const String &scope : storage_scopes) {
+    StorageScope sync_scope = StorageScope::Create(scope);
+    if (sync_scope.rank != StorageRank::kGlobal) {
+      sync_scopes.push_back(std::move(sync_scope));
+    }
+  }
+  auto pass_func = [sync_scopes = std::move(sync_scopes)](
+                       PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if thread storage sync is disabled
     bool disable_syncthreads =
         ctx->GetConfig(kDisableThreadStorageSync, Bool(false)).value()->value;
     if (disable_syncthreads) {
       return f;
     }
-    return tl::TileLangThreadSync(std::move(f), storage_scopes);
-    ;
+    return tl::TileLangThreadSync(std::move(f), sync_scopes);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
