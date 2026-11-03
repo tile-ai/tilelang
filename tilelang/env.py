@@ -35,6 +35,33 @@ def resolve_pass_profile_threshold_ms(pass_configs: Mapping[object, object], key
     return env_threshold_ms()
 
 
+def parse_int_level(value: object, name: str, *, minimum: int = 0) -> int:
+    """Parse an integer level from a pass-config or environment value.
+
+    Booleans map to 0/1 and the usual true/false spellings plus numeric strings
+    are accepted, so pass configs and environment variables share one parser.
+    ``name`` labels error messages; values below ``minimum`` are rejected.
+    """
+    if isinstance(value, bool):
+        level = int(value)
+    elif isinstance(value, int):
+        level = value
+    else:
+        text = str(value).strip().lower()
+        if text in ("true", "yes", "on"):
+            level = 1
+        elif text in ("false", "no", "off"):
+            level = 0
+        else:
+            try:
+                level = int(text)
+            except ValueError:
+                raise ValueError(f"{name} expects an integer level, got {value!r}") from None
+    if level < minimum:
+        raise ValueError(f"{name} expects a level >= {minimum}, got {level}")
+    return level
+
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -404,6 +431,11 @@ class Environment:
     # Source span injection into tirx IR (error locations / LSP / visualization)
     TILELANG_ENABLE_IR_SPAN = EnvVar("TILELANG_ENABLE_IR_SPAN", "1")  # "1"=on (default), "0"=off
 
+    # Codegen #line emission level (debug info / cuda-gdb source mapping):
+    # 0 = off, 1 = one directive per spanned statement, >= 2 = every line.
+    # Unset keeps the built-in default of the pass config.
+    TILELANG_EMIT_LINE_DIRECTIVES = EnvVar("TILELANG_EMIT_LINE_DIRECTIVES", None)
+
     # Auto-tuning settings
     TILELANG_AUTO_TUNING_DISABLE_CACHE = EnvVar("TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
     TILELANG_AUTO_TUNING_CPU_UTILITIES = EnvVar("TILELANG_AUTO_TUNING_CPU_UTILITIES", "0.9")  # percent of CPUs used
@@ -530,6 +562,14 @@ class Environment:
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
         return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+
+    def get_default_emit_line_directives(self) -> int | None:
+        """Default level for the tl.emit_line_directives pass config, or None
+        when the environment says nothing."""
+        value = self.TILELANG_EMIT_LINE_DIRECTIVES
+        if value is None or not str(value).strip():
+            return None
+        return parse_int_level(value, "tl.emit_line_directives")
 
     def get_default_layout_cost_model(self) -> str | None:
         """Default for the `tl.layout_cost_model` pass config, or None when

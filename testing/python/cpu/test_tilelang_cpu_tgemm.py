@@ -97,5 +97,27 @@ def test_gemm_f32_tt():
     run_gemm_compile(128, 128, 128, 64, 64, 64, trans_A=True, trans_B=True)
 
 
+def test_gemm_clear_accum_only_clears_output_region():
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, 2), T.float32),
+        B: T.Tensor((2, 2), T.float32),
+        C: T.Tensor((4, 4), T.float32),
+    ):
+        with T.Kernel(1):
+            T.gemm(A, B, C[1:3, 1:3], clear_accum=True)
+
+    kernel = tilelang.compile(main, target="c", target_host="c", execution_backend="cython")
+    a = torch.ones((2, 2), dtype=torch.float32)
+    b = torch.ones((2, 2), dtype=torch.float32)
+    c = torch.full((4, 4), 7, dtype=torch.float32)
+    expected = torch.full((4, 4), 7, dtype=torch.float32)
+    expected[1:3, 1:3] = 2
+
+    kernel(a, b, c)
+
+    torch.testing.assert_close(c, expected)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

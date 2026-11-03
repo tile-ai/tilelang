@@ -176,22 +176,33 @@ def inside_simdvf() -> bool:
     return _inside_simdvf[0] > 0
 
 
-def SimdVF(latency: int = 0) -> SimdVFFrame:
+_SIMDVF_VALID_LANES = (64, 128, 256)
+
+
+def SimdVF(latency: int = 0, lanes: int = 128) -> SimdVFFrame:
     """Construct a SimdVF region for Ascend NPU MicroAPI operations.
 
     Parameters
     ----------
     latency : int
         Measured latency in cycles. Zero uses the scheduler's latency model.
+    lanes : int
+        Logical lane count for the PTO SIMD vector path. Must be one of
+        64, 128, or 256; the default is 128. AscendC lowering ignores this
+        parameter and keeps its physical register width.
 
     Returns
     -------
     res : SimdVFFrame
         The SimdVFFrame used to denote a register-level SIMD region.
     """
+    if isinstance(lanes, bool) or not isinstance(lanes, int):
+        raise TypeError(f"T.SimdVF requires lanes to be an int, got {type(lanes)}")
+    if lanes not in _SIMDVF_VALID_LANES:
+        raise ValueError(f"T.SimdVF lanes must be one of {_SIMDVF_VALID_LANES}, got {lanes}")
     source_index = _next_vf_source_index("simdvf")
     return _ffi_api.SimdVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        int(latency), source_index
+        int(latency), source_index, int(lanes)
     )
 
 

@@ -33,6 +33,7 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
         compile_format=compile_format,
         options=compile_options,
         linker_options=linker_options,
+        compiler=f"bisheng version={bisheng.get_bisheng_version()}",
     )
     cached_binary = AscendBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:

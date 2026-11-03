@@ -2,6 +2,7 @@
 
 import pytest
 import tilelang.ascend.transform as ascend_transform
+import tilelang.ascend.transform.z3_scheduler as z3_scheduler
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
@@ -98,6 +99,64 @@ def test_auto_schedule_preserves_explicit_stage_dependencies():
     # Stage order is explicitly requested by this input. Other scheduling
     # choices are deliberately left unasserted.
     assert _direct_schedule_unit_stages(loop_unit.body.body) == [0, 1]
+
+
+@pytest.mark.parametrize("block", [4, 8, 16])
+@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint-tiles", "overlapping-tiles"])
+def test_dynamic_tail_regions_preserve_only_required_recurrences(monkeypatch, block, overlap):
+    batch, length, core, iteration = [tirx.Var(name, "int32") for name in ("batch", "length", "core", "iteration")]
+    gm = tirx.decl_buffer((batch, length, 64), "float32", name="gm")
+    ub = tirx.decl_buffer((block, 64), "float32", name="ub", scope="shared.dyn")
+    # The group_size=1 persistent traversal used by in-place tiled kernels.
+    # Both the batch and sequence dimensions remain dynamic during analysis.
+    linear = iteration * 64 + core
+    batch_index = tirx.truncmod(linear, batch)
+    tile_index = tirx.truncdiv(linear, batch)
+    start = 0 if overlap else tile_index * block
+    rows = tirx.min(block, length - start)
+    guard = tile_index < tirx.ceildiv(length, block)
+    body = seq(
+        unit(
+            copy(gm, ub, src_indices=[batch_index, start, 0], src_shape=[1, rows, 64], dst_shape=[rows, 64]),
+            core=0,
+            stage=-1,
+            guard=guard,
+            cost=(1, 1),
+        ),
+        unit(
+            copy(ub, gm, src_shape=[rows, 64], dst_indices=[batch_index, start, 0], dst_shape=[1, rows, 64]),
+            core=0,
+            stage=-1,
+            guard=guard,
+            cost=(1, 1),
+        ),
+    )
+    loop = tirx.For(
+        iteration,
+        0,
+        tirx.ceildiv(tirx.ceildiv(length, block) * batch, 64),
+        tirx.ForKind.SERIAL,
+        body,
+        annotations={"num_stages": 3, "multi_buffer_eligible": [ub.data]},
+    )
+    guarded_loop = tirx.AttrStmt(tirx.all(batch > 0, length > 0, core >= 0, core < 64), "tl.assume", "valid dimensions and core", loop)
+    before = kernel(unit(guarded_loop, core=None, stage=-1), buffers=[ub], params=[gm, core])
+    dependencies = []
+    solve = z3_scheduler.z3_schedule_loop_python
+
+    def capture(*args, **kwargs):
+        dependencies.extend(args[4])  # (producer, consumer, distance, latency)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(z3_scheduler, "z3_schedule_loop_python", capture)
+    ascend_transform.AutoSchedule()(before)
+    edges = {(src, dst, distance) for src, dst, distance, _ in dependencies}
+    # Keep the load-to-store dependency and the versioned UB reuse edge.
+    assert (0, 1, 0) in edges
+    assert any(src == 1 and dst == 0 and distance < 0 for src, dst, distance in edges)
+    # Disjoint GM tiles must not serialize a store against the next load/store.
+    assert ((1, 0, 1) in edges) == overlap
+    assert ((1, 1, 1) in edges) == overlap
 
 
 @pytest.mark.parametrize(

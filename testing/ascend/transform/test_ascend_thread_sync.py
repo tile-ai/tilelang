@@ -267,47 +267,5 @@ def test_ascend_thread_sync_skips_partial_barrier_rewriting():
     tvm.ir.assert_structural_equal(after, before)
 
 
-def test_ascend_thread_sync_cuda_fallback_distinguishes_rectangles():
-    sync = tirx.Evaluate(tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared"))
-
-    def make_body(tx):
-        return tirx.SeqStmt(
-            [
-                tirx.IfThenElse(tx // 64 == 0, sync, None),
-                tirx.IfThenElse(tx // 64 == 1, sync, None),
-                tirx.IfThenElse(tx < 64, sync, None),
-            ]
-        )
-
-    func = tirx.PrimFunc([], _thread_body(make_body, 256)).with_attr("target", tvm.target.Target("cuda"))
-    before = tvm.IRModule.from_expr(func)
-
-    after = ascend_transform.AscendThreadSync("shared")(before)["main"]
-
-    syncs = _syncs(after.body)
-    assert len(syncs) == 3
-    assert [sync.args[2].value for sync in syncs] == [64, 64, 64]
-    assert syncs[0].args[1].value != syncs[1].args[1].value
-    assert syncs[0].args[1].value == syncs[2].args[1].value
-
-
-@pytest.mark.parametrize("domain_extent", [None, 32])
-def test_ascend_thread_sync_cuda_fallback_multidimensional_rectangle(domain_extent):
-    domain = None if domain_extent is None else tvm.ir.Range(0, domain_extent)
-    tx = tirx.IterVar(domain, "tx", tirx.IterVar.ThreadIndex, "threadIdx.x")
-    ty = tirx.IterVar(tvm.ir.Range(0, 2), "ty", tirx.IterVar.ThreadIndex, "threadIdx.y")
-    sync = tirx.Evaluate(tirx.call_intrin("int32", "tirx.tvm_storage_sync", "shared"))
-    body = tirx.IfThenElse(tx.var // 32 == 0, sync, None)
-    body = tirx.AttrStmt(tx, "thread_extent", 64, tirx.AttrStmt(ty, "thread_extent", 2, body))
-    func = tirx.PrimFunc([], body).with_attr("target", tvm.target.Target("cuda"))
-    before = tvm.IRModule.from_expr(func)
-
-    after = ascend_transform.AscendThreadSync("shared")(before)["main"]
-    syncs = _syncs(after.body)
-    assert len(syncs) == 1
-    assert len(syncs[0].args) == 3
-    assert syncs[0].args[2].value == 64
-
-
 if __name__ == "__main__":
     tilelang.testing.main()

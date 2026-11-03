@@ -68,6 +68,13 @@ void RegisterReduceImpl(ReduceImpl impl) {
   ReduceImplRegistry().push_back(impl);
 }
 
+void CheckReductionDType(DataType dtype, const char *op) {
+  CHECK(dtype.bits() >= 8 || dtype.is_bool(), ValueError)
+      << op << " does not support sub-byte accumulator dtype " << dtype
+      << ". Use float16/float32 or an integer dtype of at least 8 bits for "
+         "the output/reducer buffer.";
+}
+
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
   node->annotations = annotations;
@@ -79,6 +86,7 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->SetAccessRegions({src_access, dst_access});
   node->src = node->srcRegion_->buffer;
   node->dst = node->dstRegion_->buffer;
+  CheckReductionDType(node->dst->dtype, "reduce");
   std::string reduce_type = args[2].as<StringImm>().value()->value;
   node->dim = args[3].as<IntImm>().value()->value;
   node->type = ReduceType(reduce_type);

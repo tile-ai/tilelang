@@ -9,8 +9,7 @@ from examples.gemm_sp.sparse_utils import get_e_factor
 
 
 def _compile_tvm_ffi(func, pass_configs, **kwargs):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(
             func,
             target="cuda",
@@ -18,8 +17,6 @@ def _compile_tvm_ffi(func, pass_configs, **kwargs):
             pass_configs=pass_configs,
             **kwargs,
         )
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)

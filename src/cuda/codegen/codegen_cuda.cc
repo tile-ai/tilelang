@@ -2792,7 +2792,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     need_copy_h_ = true;
-    int n = Downcast<IntImm>(op->args[0])->value;
+    // The wait depth lowers to a `cp.async.wait_group N`, whose operand must be
+    // a compile-time immediate. A software pipeline over a dynamic trip count
+    // can emit a non-constant depth (e.g. `1 - ko`) in its drain phase. Since
+    // there is no runtime form of the wait, fall back to a full wait (N=0: wait
+    // for all outstanding async copies), which is always a safe
+    // over-synchronization.
+    int n = 0;
+    if (const auto *imm = op->args[0].as<IntImmNode>()) {
+      n = static_cast<int>(imm->value);
+    }
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
@@ -5029,37 +5038,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     }
     return true;
   }
-  if (op->op.same_as(tl::clamp())) {
-    ICHECK_EQ(op->args.size(), 3);
-    need_math_h_ = true;
-    DataType dtype = op->dtype;
-    std::vector<PrimExpr> args(op->args.begin(), op->args.end());
-    for (const PrimExpr &arg : args) {
-      ICHECK_EQ(arg.dtype(), dtype)
-          << "tl.clamp operands must have matching types";
-    }
-    if (!dtype.is_scalar()) {
-      // The vector emitters cache printed expressions. Bind effectful inputs
-      // before using them so identical calls (or loads around an atomic) are
-      // still evaluated independently, once per argument.
-      for (PrimExpr &arg : args) {
-        if (SideEffect(arg) > CallEffectKind::kPure) {
-          Var value("clamp_arg", dtype);
-          arg = Let(value, arg, value);
-        }
-      }
-    }
-    if (dtype.is_scalar()) {
-      os << "tl::clamp(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
-         << ", " << PrintExpr(args[2]) << ")";
-    } else if ((dtype.is_float16() || dtype.is_bfloat16()) &&
-               CanEmitPackedX2Math(dtype)) {
-      EmitPackedX2Call("clamp2", dtype, args, os);
-    } else {
-      EmitPerLaneScalarCall("tl::clamp", dtype, args, os);
-    }
-    return true;
-  } else if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
+  if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
     // Round-to-nearest multiply / fused multiply-add with a guaranteed
     // instruction boundary (never re-contracted or split by NVCC). Scalar
     // forms reuse the IEEE intrinsic names with the fixed "rn" mode; even
@@ -6062,6 +6041,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // Each ulonglong4 component holds two float32 lanes. Bit-cast the float2
+  // temporary without taking its address, which NVRTC rejects.
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -6069,7 +6050,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "__builtin_bit_cast(uint64_t, make_float2(" << v << ", " << v
+         << "))";
     }
     os << ')';
     return;
@@ -6320,8 +6302,22 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       return;
     }
     p->PrintType(op->dtype, os);
-    os << '(' << FlexibleHexFormat(op->value) << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(';
+    // Use valid FP32 constants and let the conversion constructor handle
+    // saturation and NaNs according to the destination format.
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        os << '-';
+      }
+      os << "CUDART_INF_F";
+      p->need_math_constants_h_ = true;
+    } else if (std::isnan(op->value)) {
+      os << "CUDART_NAN_F";
+      p->need_math_constants_h_ = true;
+    } else {
+      os << FlexibleHexFormat(op->value) << 'f';
+      os << "/*" << std::scientific << op->value << "*/";
+    }
     os << ')';
     return;
   }
@@ -6607,7 +6603,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
              "to match entry_name";
     }
+    // Raw user source: reset this function's anchors, emit one directive for
+    // the block, then pass its lines through untouched (a directive inside a
+    // macro continuation or string literal would corrupt it).
+    this->InitFuncState(f);
+    this->BeginRawSource();
     stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    this->EndRawSource();
     return;
   }
 

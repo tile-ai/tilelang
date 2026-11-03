@@ -20,6 +20,7 @@
 
 #include "backend/common/op/reduce.h"
 #include "builtin_registry.h"
+#include "reduce.h"
 #include "utils.h"
 
 namespace tvm {
@@ -382,6 +383,7 @@ ReducerInitOp::ReducerInitOp(ffi::Array<PrimExpr> args,
   access.region = BufferRegion::FullRegion(access.region->buffer);
   access.access_mask = kAccessWrite;
   node->reducer = access.region->buffer;
+  CheckReductionDType(node->reducer->dtype, "reducer_init");
   if (args.size() == 2) {
     ICHECK(args[1].dtype() == node->reducer->dtype)
         << "reducer_init init value dtype " << args[1].dtype()
@@ -615,6 +617,7 @@ FinalizeReducerOp::FinalizeReducerOp(
   reducer_access.access_mask = kAccessReadWrite;
   node->reducer = reducer_access.region->buffer;
   node->SetAccessRegions({reducer_access});
+  CheckReductionDType(node->reducer->dtype, "finalize_reducer");
   node->op = (ReducerV2OpType)*as_const_int(args[1]);
   // Optional explicit collective plan (reducer v2 narrow plans): flattened
   // (reducing_threads, scale) pairs starting at args[2].

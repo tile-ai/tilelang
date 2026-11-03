@@ -628,8 +628,7 @@ def test_tiled_ws_dual_gemm_shared_accumulator_disable_wgmma():
 
 
 def _compile_tvm_ffi(func, pass_configs=None, **kwargs):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(
             func,
             target="cuda",
@@ -637,8 +636,6 @@ def _compile_tvm_ffi(func, pass_configs=None, **kwargs):
             pass_configs=pass_configs or {},
             **kwargs,
         )
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda

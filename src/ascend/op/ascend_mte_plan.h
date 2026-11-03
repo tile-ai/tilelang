@@ -119,8 +119,8 @@ struct StridedLayout {
       }
     }
 
-    // Compute base offset = sum(range[i]->min * strides[i])
-    PrimExpr offset = I(0);
+    // Offsets are relative to buf->data, including any buffer view offset.
+    PrimExpr offset = buf->elem_offset;
     for (int i = 0; i < ndim; ++i) {
       offset = offset + range[i]->min * strides[i];
     }
