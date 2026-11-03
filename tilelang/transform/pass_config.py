@@ -76,6 +76,15 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable Ascend auto scheduling. Default: True."""
 
+    TL_ASCEND_ENABLE_SUPERKERNEL = "tl.ascend_enable_superkernel"
+    """Emit SK entries and SK_BIND for Ascend C kernels. Default: False."""
+
+    TL_ASCEND_SUPERKERNEL_NUM_VARIANTS = "tl.ascend_superkernel_num_variants"
+    """Number of equivalent SK entry symbols to bind (1 to 4). Default: 4."""
+
+    TL_ASCEND_SUPERKERNEL_DISABLE_DCCI = "tl.ascend_superkernel_disable_dcci"
+    """Disable DCCI ALL around SK calls (cap bit 2). Default: False."""
+
     TL_ENABLE_AUTO_WARP_SPECIALIZATION = "tl.enable_auto_warp_specialization"
     """Name of the automatic warp-specialization scheduler to run (e.g.
     "role_based"). Default: unset (disabled)."""

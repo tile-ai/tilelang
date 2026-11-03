@@ -68,6 +68,11 @@ This follows CUDA's device binary cache policy. The outer full JIT cache has a
 separate key and does not currently include the compiler version; an outer
 cache hit skips the device compilation callback.
 
+## SuperKernel
+
+For optional SK entry generation, binding capabilities, task-context rules and
+validation, see [SuperKernel adaptation](../../docs/ascend_superkernel.md).
+
 ## Quick Start
 
 ### Selecting AscendC or PTO code generation
