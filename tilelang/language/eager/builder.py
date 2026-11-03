@@ -1106,7 +1106,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
         annotations = get_type_hints(func)
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
+        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func, cache=True), annotations=annotations)
 
     return impl(func) if func is not None else impl
 

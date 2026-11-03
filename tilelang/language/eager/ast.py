@@ -1,7 +1,9 @@
 from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from types import CodeType, FunctionType
 from typing import Generic, Any, Literal, ParamSpec, TypeVar, TypeAlias, cast
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -823,7 +825,30 @@ def has_internal_prim_func(func: Callable[_P, _T]) -> bool:
     return False
 
 
-def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
+class _ContextDependentMacro(Exception):
+    pass
+
+
+class _MacroTemplateMutator(DSLMutator):
+    def _try_eval(self, node: ast.expr) -> Any:
+        # These rewrites depend on live globals/closures, not just function code.
+        raise _ContextDependentMacro
+
+
+@lru_cache(maxsize=512)
+def _macro_template(code: CodeType, filename: str, nonlocal_names: tuple[str, ...]) -> tuple[CodeType, str] | None:
+    tree = utils.get_ast(code)
+    mut = _MacroTemplateMutator(dict.fromkeys(nonlocal_names), {}, filename)
+    try:
+        tree = mut.visit(tree)
+    except _ContextDependentMacro:
+        return None
+    make_closure = utils.get_compiled_object(tree, "make_closure", filename, {})
+    # Keep only unbound code: cached functions would retain their globals/closures.
+    return make_closure.__code__, ast.unparse(tree)
+
+
+def mutate(func: Callable[_P, _T], *, cache: bool = False) -> IRGenerator[_P, _T]:
     """
     Transform a Python function into an IR (Intermediate Representation) generator.
     This function takes a regular Python function and performs AST (Abstract Syntax Tree)
@@ -833,6 +858,7 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
             callable that will be analyzed and mutated at the AST level. The function's
             signature is preserved through generic type parameters _P (parameters) and
             _T (return type).
+        cache (bool): Reuse context-independent transformation templates for macros.
     Returns:
         IRGenerator[_P, _T]: An IRGenerator instance wrapping the transformed function.
             The generator contains:
@@ -849,10 +875,16 @@ def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
         - The returned IRGenerator maintains type information from the original function
     """
 
-    tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     nonlocals = utils.get_func_nonlocals(func)
+    if cache and not hasattr(func, "__wrapped__"):
+        template = _macro_template(func.__code__, str(Path(filename).absolute()), tuple(nonlocals))
+        if template is not None:
+            code, source = template
+            make_closure = FunctionType(code, func.__globals__)
+            return IRGenerator(gen=make_closure(**nonlocals), source=source)
 
+    tree = utils.get_ast(func)
     # DSLMutator generates a function named `make_closure`
     #   it accepts all names inside nonlocal, and returns the mutated function
     #   this is because we must separate the closure namespace form the global namespace
