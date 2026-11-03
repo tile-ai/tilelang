@@ -540,6 +540,19 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     }
   }
 
+  // CuTeDSL normalizes unsigned tensor elements to signed element types, so a
+  // plain widening cast such as `cutlass.Int32(x)` sign-extends a uint8 value
+  // >= 128.  Reinterpret the source through its unsigned type first so the
+  // widening conversion zero-extends.
+  if (from_ty.is_scalar() && target_ty.is_scalar() && from_ty.is_uint() &&
+      target_ty.bits() > from_ty.bits() &&
+      (target_ty.is_int() || target_ty.is_uint() || target_ty.is_float())) {
+    PrintType(target_ty, os);
+    os << "(cutlass.Uint" << from_ty.bits() << "(" << PrintExpr_(op->value)
+       << "))";
+    return;
+  }
+
   if (from_ty.is_scalar() && from_is_cutedsl_fp8 && target_is_fp8_widening) {
     // CuTeDSL/NVGPU widens FP8 through nvgpu.cvt_fpext, whose operand must be
     // a 32-bit aligned vector.  Pack the scalar into a four-lane FP8 vector,
