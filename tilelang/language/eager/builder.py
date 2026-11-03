@@ -12,7 +12,7 @@ from tvm.ir.base import Span
 from tvm.ir.expr import Range
 from tvm.tirx.stmt import BufferRegion
 from tvm.tirx.stmt_functor import substitute
-from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
+from .ast import BaseBuilder, IRGenerator, _mutate_macro, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
 from tilelang.language.frame import clear_let_values, register_let_value
 from tilelang.utils import side_effect
@@ -1106,7 +1106,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
         annotations = get_type_hints(func)
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func, cache=True), annotations=annotations)
+        return Macro(name=func.__name__, orig_func=func, ir_gen=_mutate_macro(func), annotations=annotations)
 
     return impl(func) if func is not None else impl
 

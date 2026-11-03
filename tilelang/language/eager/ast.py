@@ -848,7 +848,22 @@ def _macro_template(code: CodeType, filename: str, nonlocal_names: tuple[str, ..
     return make_closure.__code__, ast.unparse(tree)
 
 
-def mutate(func: Callable[_P, _T], *, cache: bool = False) -> IRGenerator[_P, _T]:
+def _mutate_macro(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
+    if hasattr(func, "__wrapped__"):
+        return mutate(func)
+
+    filename = inspect.getsourcefile(func) or inspect.getfile(func)
+    nonlocals = utils.get_func_nonlocals(func)
+    template = _macro_template(func.__code__, str(Path(filename).absolute()), tuple(nonlocals))
+    if template is None:
+        return mutate(func)
+
+    code, source = template
+    make_closure = FunctionType(code, func.__globals__)
+    return IRGenerator(gen=make_closure(**nonlocals), source=source)
+
+
+def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     """
     Transform a Python function into an IR (Intermediate Representation) generator.
     This function takes a regular Python function and performs AST (Abstract Syntax Tree)
@@ -858,7 +873,6 @@ def mutate(func: Callable[_P, _T], *, cache: bool = False) -> IRGenerator[_P, _T
             callable that will be analyzed and mutated at the AST level. The function's
             signature is preserved through generic type parameters _P (parameters) and
             _T (return type).
-        cache (bool): Reuse context-independent transformation templates for macros.
     Returns:
         IRGenerator[_P, _T]: An IRGenerator instance wrapping the transformed function.
             The generator contains:
@@ -875,16 +889,10 @@ def mutate(func: Callable[_P, _T], *, cache: bool = False) -> IRGenerator[_P, _T
         - The returned IRGenerator maintains type information from the original function
     """
 
+    tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     nonlocals = utils.get_func_nonlocals(func)
-    if cache and not hasattr(func, "__wrapped__"):
-        template = _macro_template(func.__code__, str(Path(filename).absolute()), tuple(nonlocals))
-        if template is not None:
-            code, source = template
-            make_closure = FunctionType(code, func.__globals__)
-            return IRGenerator(gen=make_closure(**nonlocals), source=source)
 
-    tree = utils.get_ast(func)
     # DSLMutator generates a function named `make_closure`
     #   it accepts all names inside nonlocal, and returns the mutated function
     #   this is because we must separate the closure namespace form the global namespace
