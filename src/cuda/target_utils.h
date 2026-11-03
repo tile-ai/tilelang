@@ -27,6 +27,9 @@ int TargetCudaGetWarpSize(Target target);
 bool TargetHasLdmatrix(Target target);
 bool TargetHasStmatrix(Target target, bool is_m16n8 = false);
 bool TargetHasTmem(Target target);
+// tcgen05.mma.kind::i8 is arch-specific: sm_100a/sm_101a/sm_110a only, not
+// sm_103a and not the family-portable sm_10xf targets.
+bool TargetHasTcgen05Int8Mma(Target target);
 bool TargetHasBulkCopy(Target target);
 bool TargetSupportsNamedBarrier(Target target);
 bool TargetSupportVectorize256(Target target);

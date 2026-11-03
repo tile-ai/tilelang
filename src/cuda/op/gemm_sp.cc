@@ -74,6 +74,9 @@ bool AllowTcgen5Mma(const GemmSPNode &op, Target target) {
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
   DataType ab_dtype = IsTmemBuffer(op.A) ? op.B->dtype : op.A->dtype;
+  if ((ab_dtype.is_int() || ab_dtype.is_uint()) && ab_dtype.bits() == 8 &&
+      !TargetHasTcgen05Int8Mma(target))
+    return false;
   return GetTCGEN5MMAMeta(op.M, op.N, op.K, ab_dtype, op.C->dtype).first;
 }
 
