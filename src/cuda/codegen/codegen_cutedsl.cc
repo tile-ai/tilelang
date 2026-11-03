@@ -649,9 +649,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
            << ",), ";
     PrintType(target_ty.element_of(), stream);
     stream << ")\n";
+    std::string narrow_src = "tl.as_tensor_ssa(" + src + ")";
+    if (from_ty.is_uint()) {
+      std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
+      PrintIndent();
+      stream << unsigned_src << " = tl.cast_tensor(" << narrow_src << ", ";
+      PrintType(DataType::UInt(from_ty.bits()), stream);
+      stream << ")\n";
+      narrow_src = unsigned_src;
+    }
     PrintIndent();
-    stream << aligned_dst << ".store(tl.cast_tensor(tl.as_tensor_ssa(" << src
-           << "), ";
+    stream << aligned_dst << ".store(tl.cast_tensor(" << narrow_src << ", ";
     PrintType(target_ty.element_of(), stream);
     stream << "))\n";
 
@@ -689,6 +697,21 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
         stream << "(0)\n";
       }
     }
+  }
+
+  // CuTeDSL normalizes unsigned tensor elements to signed; reinterpret the
+  // source as unsigned before a vector cast so widening zero-extends.
+  if (from_ty.is_uint()) {
+    std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
+    PrintIndent();
+    stream << unsigned_src << " = tl.cast_tensor(" << cast_src;
+    if (cast_src_is_tensor)
+      stream << ".load()";
+    stream << ", ";
+    PrintType(DataType::UInt(from_ty.bits()), stream);
+    stream << ")\n";
+    cast_src = unsigned_src;
+    cast_src_is_tensor = false;
   }
 
   // Cast (always aligned now)
