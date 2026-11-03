@@ -172,7 +172,7 @@ def _ramp_value_kernel(explicit):
 def test_pto_ramp_value_is_one_vector_argument(explicit):
     source = _source(_ramp_value_kernel(explicit), target={"kind": "ascend", "keys": ["pto", "ascend"]})
     lanes = 4 if explicit else 2
-    assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
+    assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.si32, .*contiguous={lanes}\)", source)
 
 
 @pytest.mark.pto

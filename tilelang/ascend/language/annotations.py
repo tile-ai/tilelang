@@ -3,9 +3,12 @@
 from tvm.tirx import IntImm
 from tvm.tirx.script.builder.ir import sblock_attr
 
+from tilelang.language.annotations import _normalize_layout_map
+
 _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
 
 __all__ = [
+    "annotate_layout",
     "annotate_buffer_versions",
     "annotate_buffer_addresses",
     "annotate_manual_multi_buffer",
@@ -13,7 +16,7 @@ __all__ = [
 ]
 
 
-_VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter")
+_VALID_BUFFER_VERSION_MODES = ("auto", "iteration", "counter", "write_counter")
 
 
 # Physical pools on dav-3510: (base alignment, capacity), in bytes.
@@ -25,6 +28,23 @@ _BUFFER_PLACEMENT_SCOPES = {
     "shared.l0c": (1024, 256 * 1024),
     "shared.ss": (32, 3 * 1024),
 }
+
+
+def annotate_layout(layout_map: dict):
+    """Annotate each Buffer view, preserving aliases with distinct Cube layouts.
+
+    Views share storage, not a layout conversion. A producer must write the
+    representation consumed through each view; annotating a view never moves
+    or transposes existing values. Canonical Cube views sharing storage must
+    have the same dtype and padded physical size.
+
+    Each memory view keeps its explicit or operation-required layout. Layouts
+    never propagate to other memory views sharing the same storage; annotate
+    every view that needs a non-default interpretation. Unannotated views use
+    normal inference or their ordinary dense/strided addressing. Fragment
+    aliases must always agree on thread ownership.
+    """
+    return sblock_attr({"layout_map": _normalize_layout_map(layout_map)})
 
 
 def annotate_buffer_addresses(buffer_addresses: dict):
@@ -90,11 +110,18 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     - ``(num_versions, mode)``: use a fixed count and explicit mode;
     - ``mode``: select a mode while leaving the version count to the scheduler.
 
-    ``mode`` is ``"auto"``, ``"iteration"``, or ``"counter"``.
+    ``mode`` is ``"auto"``, ``"iteration"``, ``"counter"``, or ``"write_counter"``.
     ``"iteration"`` uses the affine flattened-loop index. ``"counter"`` uses
     a monotonic local counter that advances after a completed active buffer
     epoch. ``"auto"`` keeps the affine fast path when safe and selects a
     counter for conditionally executed or non-affine epochs.
+
+    ``"write_counter"`` requires an explicit version count and advances on the
+    first executed writing Task in each owner-loop iteration; later writes use
+    the same version, and iterations without writes retain the preceding value.
+    Users guarantee initialized reads and that each update writes the new value
+    before reading it; use ``multi_buffer_eligible`` to override inferred owners
+    when needed.
 
     A fixed count is useful when you want to guarantee double-buffering for a
     critical buffer regardless of the Z3 solver's choice.
@@ -154,6 +181,8 @@ def annotate_buffer_versions(buffer_versions_map: dict):
         if has_mode:
             if mode not in _VALID_BUFFER_VERSION_MODES:
                 raise ValueError(f"buffer version mode must be one of {_VALID_BUFFER_VERSION_MODES}, got {mode!r} for buffer {buffer}")
+            if mode == "write_counter" and not has_num_versions:
+                raise ValueError(f'write_counter requires an explicit version count; use (2, "write_counter") for buffer {buffer}')
             if data in modes and modes[data] != mode:
                 raise ValueError(f"aliases of one buffer storage must use the same version mode, got {modes[data]!r} and {mode!r}")
             modes[data] = mode

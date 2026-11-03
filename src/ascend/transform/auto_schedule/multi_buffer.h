@@ -60,6 +60,8 @@ using namespace tirx;
 constexpr const char *kBufferVersionMode = "tl.buffer_version_mode";
 constexpr const char *kMultiBufferCounterMap = "tl.multi_buffer_counter_map";
 constexpr const char *kStorageEpochGuardMap = "tl.storage_epoch_guard_map";
+constexpr const char *kWriteCounterUpdateGuardMap =
+    "tl.write_counter_update_guard_map";
 constexpr const char *kMultiBufferBroadcastFill =
     "tl.multi_buffer_broadcast_fill";
 
@@ -67,6 +69,7 @@ enum class BufferVersionMode {
   kAuto,
   kIteration,
   kCounter,
+  kWriteCounter,
 };
 
 using BufferVersionModeMap = ffi::Map<Var, ffi::String>;
@@ -182,6 +185,13 @@ struct MultiBufferOwnerInfo {
 //              exactly one owner whose active_guard is true;
 //   counter:   counter_group_id > 0, counter defined,
 //              every owner has an active_guard (possibly true).
+//   write_counter: counter_group_id > 0, counter defined, write_counter true,
+//              active_guard records whether this owner iteration updates the
+//              value (a writer-guard union or a first-write latch). One update
+//              may contain multiple writing Tasks, but advances only once.
+// Write clocks share a group for identical writing Tasks or bound L0 planes.
+// Their dynamic READY/FREE lifecycles do not use lexical iteration distances;
+// dependencies inside an update still participate in lexical domains.
 // Compatible storages still have one info per storage; sharing a counter means
 // those infos carry the same counter_group_id and counter.
 struct MultiBufferInfo {
@@ -190,6 +200,7 @@ struct MultiBufferInfo {
   int num_versions{0};
   std::vector<MultiBufferOwnerInfo> owners;
   Buffer counter;
+  bool write_counter{false};
 
   bool UsesCounter() const { return counter.defined(); }
   bool NeedsVersionDimension() const { return num_versions > 1; }
@@ -394,6 +405,17 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
     for (ControlNode *owner_loop : owners) {
       MultiBufferOwnerInfo owner;
       owner.loop = owner_loop;
+      bool write_counter = false;
+      if (auto value = owner_loop->control->annotations.Get(
+              kWriteCounterUpdateGuardMap)) {
+        // Read-only owners retain an entry with a false update guard.
+        write_counter =
+            value.value().cast<StorageEpochGuardMap>().count(storage);
+      }
+      ICHECK(info.owners.empty() || info.write_counter == write_counter)
+          << "Disjoint multi-buffer owners must agree on the write clock for "
+          << storage->name_hint;
+      info.write_counter = write_counter;
       auto counters =
           owner_loop->control->annotations.Get(kMultiBufferCounterMap);
       if (counters.has_value()) {
@@ -407,8 +429,9 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
             info.counter = counter.value();
             uses_counter = true;
           }
-          auto guards =
-              owner_loop->control->annotations.Get(kStorageEpochGuardMap);
+          auto guards = owner_loop->control->annotations.Get(
+              write_counter ? kWriteCounterUpdateGuardMap
+                            : kStorageEpochGuardMap);
           ICHECK(guards.has_value())
               << "Prepared counter storage is missing its active guard";
           StorageEpochGuardMap guard_map =
@@ -421,6 +444,8 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
       }
       info.owners.push_back(std::move(owner));
     }
+    ICHECK(!info.write_counter || uses_counter)
+        << "Prepared write_counter storage is missing its physical counter";
     if (uses_counter) {
       // Counter storage identity reconstructs the shared physical group. One
       // group may cover several disjoint owners; each owner is independently
@@ -504,7 +529,7 @@ public:
   int DomainForStorage(const Var &storage, const ControlNode *loop) const {
     if (loop != nullptr) {
       if (const MultiBufferInfo *info = multi_buffer_plan_.Find(storage)) {
-        if (info->UsesCounter()) {
+        if (info->UsesCounter() && !info->write_counter) {
           if (const MultiBufferOwnerInfo *owner = info->FindOwner(loop)) {
             const int *domain_id =
                 FindStorageBinding(counter_bindings_, storage, owner->loop);
@@ -598,7 +623,8 @@ private:
           // Counter storages are bound once by RegisterCounterDomains. Their
           // entries remain in this shared annotation only to serialize the
           // canonical active guard alongside the physical counter binding.
-          if (counter_storages.count(storage))
+          const MultiBufferInfo *info = multi_buffer_plan_.Find(storage);
+          if (counter_storages.count(storage) && !(info && info->write_counter))
             continue;
           int domain_id = InternDomain(EpochDomainKind::kLexical, loop, guard);
           BindStorage(&lexical_bindings_, storage, loop, domain_id);
@@ -613,7 +639,7 @@ private:
 
   void RegisterCounterDomains() {
     for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
-      if (!info.UsesCounter())
+      if (!info.UsesCounter() || info.write_counter)
         continue;
       for (const MultiBufferOwnerInfo &owner : info.owners) {
         int domain_id = InternDomain(EpochDomainKind::kCounter, owner.loop,

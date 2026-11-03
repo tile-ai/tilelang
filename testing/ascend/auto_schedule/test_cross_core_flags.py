@@ -331,5 +331,42 @@ def test_ss_disjoint_aiv_read_modify_write_needs_no_sync():
     assert not calls(after, "tl.ascend_cross_core_wait_flag")
 
 
+@pytest.mark.parametrize("subcores", [1, 2])
+def test_write_clock_cross_core_flags_cover_every_consumer_bank(subcores):
+    accum = tirx.decl_buffer((1, 64), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((1, 64), "float32", name="ub", scope="shared.dyn")
+    out = tirx.decl_buffer((1, 64), "float32", name="C")
+    i = tirx.Var("i", "int32")
+    vector = 1 if subcores == 1 else 5
+    body = seq(unit(copy(accum, ub), core=2, guard=i % 3 == 0), unit(copy(ub, out), core=vector))
+    before = kernel(
+        unit(tirx.For(i, 0, 7, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]}), core=None),
+        buffers=[accum, ub],
+        params=[out],
+        annotations={
+            "vector_count": tirx.IntImm("int32", subcores),
+            "tl.buffer_versions_map": {ub.data: 2},
+            "tl.buffer_version_mode": {ub.data: "write_counter"},
+        },
+    )
+    # The accumulator producer is upstream of this scheduled protocol fixture.
+    prepared = transform.PrepareMultiBuffer()(before)
+    resolved = transform.ResolveCore()(prepared)
+    updates = [task for task in nodes(resolved, tirx.AttrStmt) if task.attr_key == "tl.ascend_task" and nodes(task.body, tirx.BufferStore)]
+    assert {int(task.node["core_mask"]) for task in updates} == {vector | 2}
+    after = transform.InsertSync()(resolved)
+    cube_drains = [
+        int(call.args[2])
+        for task in nodes(after, tirx.AttrStmt)
+        if task.attr_key == "tl.ascend_task" and int(task.node["core_mask"]) == 2
+        for call in calls(task.body, "tl.ascend_cross_core_wait_flag")
+        if isinstance(call.args[2], tirx.IntImm)
+    ]
+    assert len(cube_drains) == subcores * 2
+    assert {event_id // 16 for event_id in cube_drains} == set(range(subcores))
+    publications = calls(after, "tl.ascend_cross_core_set_flag")
+    assert publications and all(int(call.args[0]) == 4 for call in publications)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -51,19 +51,13 @@ using namespace ffi;
 
 static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                                    Map<Var, Var> &var_remap) {
-  const auto *ptr_type =
-      TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
-  Type new_type;
-  // convert fragments to normal local buffer
+  // Memory views keep their storage identity, including an unannotated owner.
+  // Only Fragment lowering changes the pointer's storage scope.
+  Var new_var = buffer->data;
   if (IsFragmentBuffer(buffer)) {
-    new_type = PointerType(ptr_type->element_type, "local");
-  } else {
-    new_type = buffer->data->type_annotation;
-  }
-  Var new_var;
-  if (IsGlobalBuffer(buffer)) {
-    new_var = buffer->data;
-  } else {
+    const auto *ptr_type =
+        TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
+    Type new_type = PointerType(ptr_type->element_type, "local");
     if (var_remap.count(buffer->data)) {
       new_var = var_remap[buffer->data];
     } else {
@@ -351,10 +345,14 @@ private:
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
+      // An enclosing layout annotation can still name the logical buffer
+      // before multi-buffer materialization. The allocation owns the physical
+      // shape, including version axes, used to decode flat pointer offsets.
+      buffer_map_.insert_or_assign(buffer->data, buffer);
     }
     for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
+      buffer_map_.insert_or_assign(match_buffer->buffer->data,
+                                   match_buffer->buffer);
       buffer_data_to_buffer_.Set(match_buffer->buffer->data,
                                  match_buffer->buffer);
     }
@@ -373,6 +371,11 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
+        // Address-backed views have layouts but no allocation or match_buffer.
+        // Register them so DMA pointers receive the same layout/pitch remap.
+        buffer_map_.insert({buffer->data, buffer});
+        if (!buffer_data_to_buffer_.count(buffer->data))
+          buffer_data_to_buffer_.Set(buffer->data, buffer);
         buffer_remap_.Set(buffer,
                           makeBufferWithLayout(buffer, layout, var_remap_));
         layout_map_.Set(buffer, layout);
@@ -589,12 +592,33 @@ private:
       // Get original and new buffer shapes.
       Array<PrimExpr> old_shape = original_buffer->shape;
       Array<PrimExpr> new_shape = new_buffer->shape;
+      Layout access_layout = layout;
+      DataType access_dtype = access_ptr_call->args[0].dtype();
+      int buffer_bits =
+          original_buffer->dtype.bits() * original_buffer->dtype.lanes();
+      int access_bits = access_dtype.bits() * access_dtype.lanes();
+      if (access_bits != buffer_bits) {
+        // A raw access pointer retains its element type but not its Buffer
+        // identity. Its offset is in that type's elements, even when the data
+        // Var resolves to a differently typed allocation. Reinterpret the
+        // logical layout before mapping the offset, preserving sub-element
+        // lanes and expressing the physical result in the pointer's units.
+        PrimExpr elements = Integer(1);
+        for (const PrimExpr &extent : old_shape) {
+          elements *= extent;
+        }
+        old_shape = {analyzer_->Simplify(
+            floordiv(elements * Integer(buffer_bits), Integer(access_bits)))};
+        access_layout = layout->Reshape(
+            old_shape, analyzer_, Integer(buffer_bits), Integer(access_bits));
+        new_shape = access_layout->OutputShape();
+      }
       Array<PrimExpr> zero_indices;
       for (size_t i = 0; i < old_shape.size(); ++i) {
         zero_indices.push_back(make_zero(elem_offset.dtype()));
       }
       Array<PrimExpr> forward_indices = RemapAccessIndices(
-          zero_indices, old_shape, new_shape, layout, elem_offset);
+          zero_indices, old_shape, new_shape, access_layout, elem_offset);
       PrimExpr new_offset = 0;
       PrimExpr stride_offset = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
@@ -645,8 +669,8 @@ private:
           << "but got indices size: " << indices.size()
           << " and shape size: " << old_shape.size();
 
-      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
-      Optional<Layout> layout = FindLayout(remap_key);
+      Buffer remap_key = load->buffer;
+      Optional<Layout> layout = layout_map_.Get(remap_key);
       if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
         return result;
       }
@@ -699,10 +723,11 @@ private:
       }
 
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
-      PrimExpr extent = access_ptr_call->args[1];
-      PrimExpr rw_mask = access_ptr_call->args[2];
+      PrimExpr extent = VisitExpr(access_ptr_call->args[1]);
+      PrimExpr rw_mask = VisitExpr(access_ptr_call->args[2]);
 
-      Array<PrimExpr> indices = load->indices;
+      Array<PrimExpr> indices = load->indices.Map(
+          [&](const PrimExpr &index) { return VisitExpr(index); });
       Array<PrimExpr> old_shape = load->buffer->shape;
 
       ICHECK_EQ(indices.size(), old_shape.size())
@@ -711,8 +736,8 @@ private:
           << "but got indices size: " << indices.size()
           << " and shape size: " << old_shape.size();
 
-      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
-      Optional<Layout> layout = FindLayout(remap_key);
+      Buffer remap_key = load->buffer;
+      Optional<Layout> layout = layout_map_.Get(remap_key);
       if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
         return result;
       }
@@ -740,6 +765,22 @@ private:
       Array<PrimExpr> new_indices = RemapAccessIndices(
           indices, old_shape, new_shape, layout.value(), offset);
 
+      if (auto pitch = access_ptr_call->annotations.Get(attr::kL0AccessPitch)) {
+        ICHECK(IsL0ABuffer(remap_key) || IsL0BBuffer(remap_key));
+        size_t n = new_shape.size();
+        ICHECK_GE(n, 4);
+        // A compact L0 copy changes this access's matrix row stride, not the
+        // allocation or the distance between storage versions.
+        Array<PrimExpr> strides(n, Integer(1));
+        PrimExpr stride = Integer(1);
+        for (size_t i = n; i > 0; --i) {
+          strides.Set(i - 1, stride);
+          stride = stride * new_shape[i - 1];
+        }
+        strides.Set(n - 4, Downcast<PrimExpr>(pitch.value()) *
+                               new_shape[n - 2] * new_shape[n - 1]);
+        new_buffer.CopyOnWrite()->strides = std::move(strides);
+      }
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
                                   rw_mask};
       if (buffer_remap_.count(remap_key)) {
@@ -768,44 +809,6 @@ private:
       }
     }
     return Optional<PrimExpr>();
-  }
-
-  Optional<Buffer> FindRemapBuffer(const Buffer &buffer) const {
-    if (buffer_remap_.count(buffer)) {
-      return buffer;
-    }
-    auto it = buffer_map_.find(buffer->data);
-    if (it != buffer_map_.end() && buffer_remap_.count(it->second)) {
-      return it->second;
-    }
-    for (const auto &kv : buffer_remap_) {
-      if (kv.first->data.same_as(buffer->data)) {
-        return kv.first;
-      }
-      if (kv.first->name == buffer->name) {
-        return kv.first;
-      }
-    }
-    return Optional<Buffer>();
-  }
-
-  Optional<Layout> FindLayout(const Buffer &buffer) const {
-    if (layout_map_.count(buffer)) {
-      return layout_map_[buffer];
-    }
-    auto it = buffer_map_.find(buffer->data);
-    if (it != buffer_map_.end() && layout_map_.count(it->second)) {
-      return layout_map_[it->second];
-    }
-    for (const auto &kv : layout_map_) {
-      if (kv.first->data.same_as(buffer->data)) {
-        return kv.second;
-      }
-      if (kv.first->name == buffer->name) {
-        return kv.second;
-      }
-    }
-    return Optional<Layout>();
   }
 
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
@@ -1012,6 +1015,15 @@ private:
       return call;
     }
 
+    // Preserve the typed base until its view-specific layout and compact L0
+    // pitch have both been applied. Visiting BufferLoad first loses that view.
+    if (op->op.same_as(tl::access_ptr())) {
+      auto rewritten = HandleAccessPtrAndOffset(GetRef<Call>(op));
+      if (rewritten.rewritten)
+        return rewritten.expr;
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+
     // Handle standalone tvm_access_ptr calls with layout transformation
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
@@ -1085,6 +1097,7 @@ private:
 
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
+    Var var = var_remap_.Get(op->var).value_or(op->var);
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
       bind_var_to_expr_[op->var] = value;
@@ -1093,10 +1106,11 @@ private:
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }
-    if (value.same_as(op->value)) {
+    if (value.same_as(op->value) && var.same_as(op->var)) {
       return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
+      n->var = var;
       n->value = value;
       return Stmt(n);
     }

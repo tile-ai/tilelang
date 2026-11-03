@@ -941,6 +941,11 @@ inline bool IsRegisterRegion(const BufferRegion &region) {
   return scope == "local" || scope == "local.var" || scope == "local.fragment";
 }
 
+// Variables recomputed within a loop and its enclosing loops, for proving
+// stability across repeated entries of a nested owner.
+std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+CollectIterationVariantVars(ControlNode *scope);
+
 void CollectAllTaskNodes(IRStructure *node, std::vector<TaskNode *> &all_tasks);
 
 inline void
