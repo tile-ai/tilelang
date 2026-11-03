@@ -2209,13 +2209,13 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_is_mixed_ = IsAscendMixedKernel(func);
   tl::ascend::AivGroupInfo aiv_group;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
-    aiv_group.Observe(node.as<SBlockNode>());
+    aiv_group.Observe(node);
   });
   int mixed_aiv_count = current_function_is_mixed_ ? aiv_group.MixedCount() : 2;
   if (!current_function_is_cube_) {
     auto requested = aiv_group.vector_count;
     if (requested.has_value()) {
-      int count = tl::ascend::ResolveAivCount(requested);
+      int count = requested.value();
       if (count == 2) {
         // A native Vector launch only exposes sid 0. Keep the existing PTO
         // mixed launch for an explicit two-AIV group, with one Vector section.
@@ -2243,7 +2243,8 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
     }
   }
   if (current_function_is_mixed_) {
-    func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mixed_aiv_count, std::nullopt, false)(func->body);
+    if (!aiv_group.resolved_count.has_value())
+      func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mixed_aiv_count, std::nullopt, false)(func->body);
     if (mixed_aiv_count == 1) {
       tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
         if (const auto *call = node.as<CallNode>()) {

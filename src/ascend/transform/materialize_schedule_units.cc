@@ -551,12 +551,16 @@ private:
 // their counts must not create a new cross-region conflict here.
 class AivRequestValidator : public ConstrVisitor {
 public:
-  static void Validate(const Stmt &body, const ConstrSet &outer_ctx) {
+  static void Validate(const Stmt &body, const ConstrSet &outer_ctx,
+                       int default_count) {
     AivRequestValidator validator;
     validator.constr_stack_ = outer_ctx.constrs_;
     validator(body);
-    if (validator.maximum_request_.has_value())
-      ResolveAivCount(validator.maximum_request_);
+    if (validator.maximum_request_.has_value()) {
+      ICHECK_LE(validator.maximum_request_.value(), default_count)
+          << "AIV group count=" << validator.maximum_request_.value()
+          << " exceeds the current device capability " << default_count;
+    }
   }
 
 private:
@@ -567,7 +571,7 @@ private:
         maximum_request_ = std::max(maximum_request_.value_or(1), count.value());
         ConstrSet context = GetConstrSet();
         if (!context.CanProve(tirx::Not(context.ToConjunction())))
-          info_.Observe(op);
+          info_.Observe(GetRef<SBlock>(op));
       }
     }
     ConstrVisitor::VisitStmt_(op);
@@ -580,8 +584,8 @@ private:
 } // namespace
 
 // MixedKernel declares an outer sid and an optional count in the frontend.
-// Resolve that contract and inherit it in Vector regions. Plain Kernel
-// is left untouched until existing task/resource or CodeGen classification.
+// Resolve that contract and inherit it in Vector regions. Plain Kernel only
+// records a device default; applying it must not override a pure Vector request.
 tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
     ffi::Map<Var, PrimExpr> inferred_counts;
@@ -589,6 +593,9 @@ tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
         std::move(func), "ResolveAivGroup",
         [&](const TilelangKernelContext &context) {
           SBlock root = context.root;
+          if (ReadAivCount(root.get(), kDefaultAivCount).has_value() ||
+              ReadAivCount(root.get(), "tl.resolved_aiv_count").has_value())
+            return root;
           auto annotation = root->annotations.Get("vector_count");
           PrimExpr request = annotation.has_value()
                                  ? annotation.value().cast<PrimExpr>()
@@ -599,8 +606,9 @@ tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
           auto count = automatic ? std::optional<int>()
                                  : ReadAivCount(root.get(), "vector_count");
           if (!count.has_value() && !automatic) {
-            // Reject inconsistent explicit regions before scheduling/CodeGen.
-            AivRequestValidator::Validate(root->body, context.outer_ctx);
+            int default_count = ResolveAivCount();
+            AivRequestValidator::Validate(root->body, context.outer_ctx, default_count);
+            root.CopyOnWrite()->annotations.Set(kDefaultAivCount, Integer(default_count));
             return root;
           }
           int resolved = ResolveAivCount(count);

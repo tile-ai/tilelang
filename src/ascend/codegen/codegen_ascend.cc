@@ -584,8 +584,8 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &original) {
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
   tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &n) {
+    aiv_group.Observe(n);
     if (const auto *block = n.as<SBlockNode>()) {
-      aiv_group.Observe(block);
       if (block->name_hint == "CUBE")
         has_cube = true;
       else if (block->name_hint == "VECTOR") {
@@ -658,8 +658,9 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &original) {
     kernel_mode_ = AscendKernelMode::kMix;
     mix_aiv_count_ = has_cube
         ? aiv_group.MixedCount()
-        : tl::ascend::ResolveAivCount(aiv_group.vector_count);
-    f.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mix_aiv_count_, std::nullopt, false)(f->body);
+        : aiv_group.vector_count.value();
+    if (has_cube && !aiv_group.resolved_count.has_value())
+      f.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mix_aiv_count_, std::nullopt, false)(f->body);
   } else if (has_cube) {
     kernel_mode_ = AscendKernelMode::kCube;
   } else if (has_vector) {

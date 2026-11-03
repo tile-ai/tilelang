@@ -12,6 +12,9 @@ namespace tvm {
 namespace tl {
 namespace ascend {
 
+// LowerOpaqueBlock carries pragma annotations through the removed kernel root.
+constexpr const char *kDefaultAivCount = "pragma_aiv_default_count";
+
 inline std::optional<int> ReadAivCount(const tirx::SBlockNode *block,
                                       const char *key) {
   auto value = block->annotations.Get(key);
@@ -54,21 +57,33 @@ inline int ResolveAivCount(std::optional<int> requested = std::nullopt) {
 struct AivGroupInfo {
   std::optional<int> vector_count;
   std::optional<int> resolved_count;
+  std::optional<int> default_count;
 
-  void Observe(const tirx::SBlockNode *block) {
-    if (!block) return;
-    if (block->name_hint == "VECTOR")
-      Merge(ReadAivCount(block, "vector_count"), &vector_count,
-            "Conflicting explicit T.Vector counts");
-    Merge(ReadAivCount(block, "tl.resolved_aiv_count"), &resolved_count,
-          "Conflicting resolved AIV group counts");
+  void Observe(const ffi::ObjectRef &node) {
+    if (const auto *block = node.as<tirx::SBlockNode>()) {
+      if (block->name_hint == "VECTOR")
+        Merge(ReadAivCount(block, "vector_count"), &vector_count,
+              "Conflicting explicit T.Vector counts");
+      Merge(ReadAivCount(block, "tl.resolved_aiv_count"), &resolved_count,
+            "Conflicting resolved AIV group counts");
+      Merge(ReadAivCount(block, kDefaultAivCount), &default_count,
+            "Conflicting default AIV group counts");
+    } else if (const auto *attr = node.as<tirx::AttrStmtNode>()) {
+      if (attr->attr_key == kDefaultAivCount) {
+        const auto *value = attr->value.as<IntImmNode>();
+        ICHECK(value && (value->value == 1 || value->value == 2))
+            << "Invalid default AIV group count";
+        Merge(static_cast<int>(value->value), &default_count,
+              "Conflicting default AIV group counts");
+      }
+    }
   }
 
   int MixedCount() const {
-    // Already resolved counts were capacity-checked before scheduling.
-    // Manual Kernel lowering has no selected count and still needs a default.
-    return resolved_count.has_value() ? resolved_count.value()
-                                      : ResolveAivCount();
+    auto count = resolved_count.has_value() ? resolved_count : default_count;
+    ICHECK(count.has_value())
+        << "AIV count must be prepared by ResolveAivGroup before CodeGen";
+    return count.value();
   }
 
 private:

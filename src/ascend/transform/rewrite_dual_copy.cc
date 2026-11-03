@@ -255,9 +255,10 @@ private:
     bool previous_single_aiv_group = single_aiv_group_;
     bool previous_plain_kernel = plain_kernel_;
     if (op->name_hint == "tilelang_root") {
-      // MixedKernel carries its original sids contract. For plain Kernel,
-      // query only when a split operation needs the capability check.
+      // Consume the early request/default. Keep the existing lazy fallback
+      // only for callers that invoke RewriteDualCopy without ResolveAivGroup.
       auto count = op->annotations.Get("vector_count");
+      if (!count.has_value()) count = op->annotations.Get(ascend::kDefaultAivCount);
       single_aiv_group_ = count.has_value() &&
                           is_one(count.value().cast<PrimExpr>());
       plain_kernel_ = !count.has_value();
