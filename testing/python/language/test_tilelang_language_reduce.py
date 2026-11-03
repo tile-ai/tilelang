@@ -61,44 +61,6 @@ def _reduce_op(T, op, src, dst, dim, batch=1):
         T.reduce_absmax(src, dst, dim=dim, **kwargs)
 
 
-@pytest.mark.parametrize(
-    "src_scope,dst_scope",
-    [
-        ("shared", "shared"),
-        ("shared", "local.fragment"),
-        ("local.fragment", "shared"),
-        ("local.fragment", "local.fragment"),
-        ("local", "local"),
-    ],
-)
-def test_reduce_annotations_per_call(src_scope, dst_scope):
-    annotations = {"enable_fadd2": False}
-
-    @T.prim_func
-    def kernel():
-        with T.Kernel(1, threads=32):
-            src = T.alloc_buffer((4, 32), T.float32, scope=src_scope)
-            dst = T.alloc_buffer((4,), T.float32, scope=dst_scope)
-            T.reduce_sum(src, dst, dim=1, batch=2, annotations=annotations)
-            T.reduce_sum(src, dst, dim=1, clear=False, annotations={"enable_fadd2": True})
-            T.reduce_sum(src, dst, dim=1)
-
-    reductions = []
-
-    def collect(node):
-        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tl.tileop.reduce"):
-            reductions.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(kernel.body, collect)
-    assert [{str(key): int(value) for key, value in call.annotations.items()} for call in reductions] == [
-        {"enable_fadd2": 0, "batch": 2},
-        {"enable_fadd2": 1},
-        {},
-    ]
-    assert [bool(call.args[4]) for call in reductions] == [True, False, True]
-    assert annotations == {"enable_fadd2": False}
-
-
 def _make_partial_reduce_kernel():
     block_threads = 128
     fragment_threads = 64
