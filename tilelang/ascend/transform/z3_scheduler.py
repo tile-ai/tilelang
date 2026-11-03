@@ -265,6 +265,25 @@ def z3_schedule_ffi(
     return start_times
 
 
+def _period_lower_bound(num_stages, iis, data_deps, resource_deps):
+    """Necessary period bounds from resource cliques and self dependencies."""
+    bound = max(iis)
+    edges = {(u, v) for u, v in resource_deps if u < v}
+    order = sorted(range(len(iis)), key=lambda i: (-iis[i], i))
+    for seed in order:
+        clique = [seed]
+        for task in order:
+            if task != seed and all(tuple(sorted((task, other))) in edges for other in clique):
+                clique.append(task)
+        bound = max(bound, sum(iis[task] for task in clique))
+    for u, v, distance, latency in data_deps:
+        if distance < 0:
+            distance = num_stages
+        if u == v and distance > 0:
+            bound = max(bound, -(-latency // distance))
+    return bound
+
+
 def z3_schedule_loop_python(
     num_stages: int,
     latencies: list[int],
@@ -411,7 +430,7 @@ def z3_schedule_loop_python(
     # Lower bound: 1 cycle
     # A sequential schedule must cover both dependency latency and the issue
     # intervals of tasks sharing a resource.
-    ii_lower = max(iis)
+    ii_lower = _period_lower_bound(num_stages, iis, data_deps, resource_deps)
     ii_upper = max(sum(latencies), sum(iis)) + 1
     best_ii = ii_upper
     best_model = None
