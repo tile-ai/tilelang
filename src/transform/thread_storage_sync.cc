@@ -804,6 +804,50 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     DataType index_dtype = DataType::Int(64);
     PrimExpr linear_thread_id = MakeLinearThreadId(env_threads_);
 
+    // A bound on a single hardware thread index that is a multiple of the
+    // warp size splits whole warps: every thread in a warp is on the same
+    // side of the bound, so the condition is warp-uniform without a general
+    // arithmetic proof.  This is the common `thread_binding < 448` guard
+    // produced by T.Parallel with 448 of 512 threads.
+    auto thread_var_extent = [this](const PrimExpr &expr) -> int64_t {
+      const auto *var = expr.as<VarNode>();
+      if (var == nullptr)
+        return -1;
+      for (const auto &iv : env_threads_) {
+        if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1 ||
+            iv->var.get() != var) {
+          continue;
+        }
+        const auto *extent = as_const_int(iv->dom->extent);
+        return extent == nullptr ? -1 : *extent;
+      }
+      return -1;
+    };
+    // The fast path is only sound when the thread dimension is a whole
+    // number of warps; otherwise one warp can straddle the bound.
+    auto warp_aligned_thread_bound = [&](const PrimExpr &expr,
+                                         int64_t bound) -> bool {
+      int64_t extent = thread_var_extent(expr);
+      if (extent < 0)
+        return false;
+      if (bound <= 0 || bound >= extent)
+        return true;
+      return extent % warp_size_ == 0 && bound % warp_size_ == 0;
+    };
+    if (const auto *lt = condition.as<LTNode>()) {
+      const auto *bound = lt->b.as<IntImmNode>();
+      if (bound != nullptr && warp_aligned_thread_bound(lt->a, bound->value)) {
+        return true;
+      }
+    }
+    if (const auto *le = condition.as<LENode>()) {
+      const auto *bound = le->b.as<IntImmNode>();
+      if (bound != nullptr &&
+          warp_aligned_thread_bound(le->a, bound->value + 1)) {
+        return true;
+      }
+    }
+
     ConstrSet cset = GetConstrSet();
     ConstrSet c1 =
         cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
