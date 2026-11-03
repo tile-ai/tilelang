@@ -208,6 +208,7 @@ private:
       }
     }
     cg->CodeGenTileLangCBase::PreFunctionBody(f);
+    cg->ClearLetBinding();
     int scope = cg->BeginScope();
     cg->PrintStmt(SkEntryRewriter(index, count, vector)(f->body));
     cg->EndScope(scope);
