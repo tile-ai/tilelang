@@ -556,12 +556,12 @@ private:
       // constant buffer that tl hack to use as local register.
       auto boundary_check = node->buffer->shape[0].as<IntImmNode>();
       if (boundary_check && boundary_check->value == 1) {
-        VisitScalarExprs_(node->indices);
+        VisitWithoutCastWidthConstraints_(node->indices);
         return GetRef<PrimExpr>(node);
       }
     }
     UpdateVectorSize(node->indices, node->buffer, false);
-    VisitScalarExprs_(node->indices);
+    VisitWithoutCastWidthConstraints_(node->indices);
     return GetRef<PrimExpr>(node);
   }
 
@@ -570,17 +570,17 @@ private:
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer, true);
     this->VisitExpr(node->value);
-    VisitScalarExprs_(node->indices);
+    VisitWithoutCastWidthConstraints_(node->indices);
     return GetRef<Stmt>(node);
   }
 
-  void VisitScalarExprs_(const Array<PrimExpr> &exprs) {
-    bool was_in_scalar_expr = in_scalar_expr_;
-    in_scalar_expr_ = true;
+  void VisitWithoutCastWidthConstraints_(const Array<PrimExpr> &exprs) {
+    bool was_skipping_cast_width_constraints = skip_cast_width_constraints_;
+    skip_cast_width_constraints_ = true;
     for (const PrimExpr &expr : exprs) {
       this->VisitExpr(expr);
     }
-    in_scalar_expr_ = was_in_scalar_expr;
+    skip_cast_width_constraints_ = was_skipping_cast_width_constraints;
   }
 
   template <typename FVisit>
@@ -595,7 +595,7 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *node) final {
     CheckConditionVectorized(node->condition);
-    VisitScalarExprs_({node->condition});
+    VisitWithoutCastWidthConstraints_({node->condition});
     PrimExpr condition = node->condition;
     if (const auto *call = condition.as<CallNode>();
         call && call->op.same_as(builtin::likely())) {
@@ -626,7 +626,7 @@ private:
     if (!node->condition.dtype().is_scalar()) {
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
-    VisitScalarExprs_({node->condition});
+    VisitWithoutCastWidthConstraints_({node->condition});
     WithBranchCondition_(node->condition,
                          [&]() { this->VisitExpr(node->true_value); });
     WithBranchCondition_(analyzer_->rewrite_simplify(Not(node->condition)),
@@ -700,7 +700,7 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
-      VisitScalarExprs_({node->args[0]});
+      VisitWithoutCastWidthConstraints_({node->args[0]});
       WithBranchCondition_(node->args[0],
                            [&]() { this->VisitExpr(node->args[1]); });
       WithBranchCondition_(Not(node->args[0]),
@@ -708,7 +708,7 @@ private:
       return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(builtin::tvm_access_ptr())) {
       HandleTvmAccessPtr(node);
-      VisitScalarExprs_(node->args);
+      VisitWithoutCastWidthConstraints_(node->args);
       return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::rng_rand_float())) {
       // Stateful RNG calls produce scalar values before any destination cast.
@@ -746,7 +746,7 @@ private:
                node->op == tl::access_ptr()) {
       // address_of and tl.access_ptr have buffer load value so we should
       // analysis the buffer load node to update vector_size_.
-      VisitScalarExprs_(node->args);
+      VisitWithoutCastWidthConstraints_(node->args);
       return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::reducer_update())) {
       // The accumulate itself never loop-vectorizes: by the time execution
@@ -1021,12 +1021,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
-    // Addresses and uniform conditions lower to scalar expressions, so their
-    // casts do not constrain data vector types. Access alignment and condition
-    // uniformity are checked separately, including the allowed lane grouping.
-    // Stochastic rounding still requires rbits to agree within each group,
-    // even when the cast's data value is scalar.
-    if (in_scalar_expr_ && !node->annotations.count("rbits")) {
+    // Address and uniform-condition casts do not constrain data vector types.
+    // Indices may still vectorize into Ramp expressions; this flag only skips
+    // dtype-based cast limits. Access alignment and condition uniformity are
+    // checked separately. Stochastic rounding still requires rbits to agree
+    // within each vector group.
+    if (skip_cast_width_constraints_ && !node->annotations.count("rbits")) {
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
     // Consider both source and target types to ensure all intermediate
@@ -1034,7 +1034,7 @@ private:
     // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
     // up to 128/32=4 lanes in CUDA vector types.
     int cast_vector_size = initial_vector_size_;
-    if (!in_scalar_expr_) {
+    if (!skip_cast_width_constraints_) {
       int target_lanes = vector_load_bits_max_ / node->dtype.bits();
       int source_bits = node->value.dtype().bits();
       int max_lanes = target_lanes;
@@ -1175,7 +1175,7 @@ private:
   int loop_extent_vector_size_ = 128;
 
   For inner_for_;
-  bool in_scalar_expr_ = false;
+  bool skip_cast_width_constraints_ = false;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
