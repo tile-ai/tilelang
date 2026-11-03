@@ -1,4 +1,3 @@
-#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -37,6 +36,7 @@
 #include <utility>
 #include <vector>
 
+#include "aiv_group.h"
 #include "ascend/op/builtin.h"
 #include "ascend/transform/attr.h"
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
@@ -546,49 +546,100 @@ private:
   }
 };
 
-} // namespace
+// Validate requests before scheduling, using the same scope facts as the
+// other frontend analyses. A later Simplify may remove unreachable regions;
+// their counts must not create a new cross-region conflict here.
+class AivRequestValidator : public ConstrVisitor {
+public:
+  static void Validate(const Stmt &body, const ConstrSet &outer_ctx) {
+    AivRequestValidator validator;
+    validator.constr_stack_ = outer_ctx.constrs_;
+    validator(body);
+    if (validator.maximum_request_.has_value())
+      ResolveAivCount(validator.maximum_request_);
+  }
 
-/*! \brief Normalize task boundaries and materialize unscheduled units. */
-// MixedKernel already declares its count and outer sid in the frontend.
-// Only validate that contract and inherit it in Vector regions. Plain Kernel
-// is left untouched until existing task/resource or CodeGen classification.
-class MixedAivValidator : public StmtMutator {
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    auto previous = sid_;
-    const auto *iv = op->node.as<IterVarNode>();
-    if (op->attr_key == tirx::attr::thread_extent && iv && iv->thread_tag == "cthread")
-      sid_ = iv->var;
-    Stmt result = StmtMutator::VisitStmt_(op);
-    sid_ = previous;
-    return result;
-  }
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint != "tilelang_root") return StmtMutator::VisitStmt_(op);
-    auto count = op->annotations.Get("vector_count");
-    if (!count.has_value()) {
-      // Validate explicit quantities even when no Cube work is present.
-      // This check does not classify the kernel or rewrite its bindings.
-      PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
-        const auto *block = node.as<SBlockNode>();
-        if (!block || block->name_hint != "VECTOR") return;
-        if (auto value = block->annotations.Get("vector_count"))
-          ResolveAivCount(Downcast<IntImm>(value.value().cast<PrimExpr>())->value);
-      });
-      return GetRef<Stmt>(op);
+  void VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint == "VECTOR") {
+      if (auto count = ReadAivCount(op, "vector_count")) {
+        // Preserve the original capacity check even for dead declarations.
+        maximum_request_ = std::max(maximum_request_.value_or(1), count.value());
+        ConstrSet context = GetConstrSet();
+        if (!context.CanProve(tirx::Not(context.ToConjunction())))
+          info_.Observe(op);
+      }
     }
-    int resolved = ResolveAivCount(Downcast<IntImm>(count.value().cast<PrimExpr>())->value);
-    SBlock result = GetRef<SBlock>(op);
-    result.CopyOnWrite()->body = AivDomainNormalizer(resolved, sid_)(op->body);
-    result.CopyOnWrite()->annotations.Set("tl.resolved_aiv_count", Integer(resolved));
-    return result;
+    ConstrVisitor::VisitStmt_(op);
   }
-  Optional<Var> sid_;
+
+  AivGroupInfo info_;
+  std::optional<int> maximum_request_;
 };
 
+} // namespace
+
+// MixedKernel declares an outer sid and an optional count in the frontend.
+// Resolve that contract and inherit it in Vector regions. Plain Kernel
+// is left untouched until existing task/resource or CodeGen classification.
 tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
-    func.CopyOnWrite()->body = MixedAivValidator()(func->body);
+    ffi::Map<Var, PrimExpr> inferred_counts;
+    func = RewriteTilelangKernels(
+        std::move(func), "ResolveAivGroup",
+        [&](const TilelangKernelContext &context) {
+          SBlock root = context.root;
+          auto annotation = root->annotations.Get("vector_count");
+          PrimExpr request = annotation.has_value()
+                                 ? annotation.value().cast<PrimExpr>()
+                                 : PrimExpr();
+          const auto *automatic = request.as<SizeVarNode>();
+          ICHECK(!automatic || context.outer_sid.has_value())
+              << "An automatic AIV count requires a MixedKernel sid binding";
+          auto count = automatic ? std::optional<int>()
+                                 : ReadAivCount(root.get(), "vector_count");
+          if (!count.has_value() && !automatic) {
+            // Reject inconsistent explicit regions before scheduling/CodeGen.
+            AivRequestValidator::Validate(root->body, context.outer_ctx);
+            return root;
+          }
+          int resolved = ResolveAivCount(count);
+          if (automatic)
+            inferred_counts.Set(GetRef<Var>(automatic), Integer(resolved));
+          auto *writer = root.CopyOnWrite();
+          writer->body = AivDomainNormalizer(resolved, context.outer_sid)(root->body);
+          writer->annotations.Set("vector_count", Integer(resolved));
+          writer->annotations.Set("tl.resolved_aiv_count", Integer(resolved));
+          return root;
+        },
+        /*require_kernel=*/false);
+    if (!inferred_counts.empty()) {
+      // Resolve expressions and launch metadata in one shared IR traversal.
+      // A plain Substitute does not visit an AttrStmt's IterVar domain.
+      auto resolve_count = [&](const ffi::ObjectRef &node) -> ffi::ObjectRef {
+        if (const auto *var = node.as<VarNode>()) {
+          if (auto value = inferred_counts.Get(GetRef<Var>(var)))
+            return value.value();
+        } else if (const auto *op = node.as<AttrStmtNode>()) {
+          const auto *iv = op->node.as<IterVarNode>();
+          if (op->attr_key == tirx::attr::thread_extent && iv &&
+              iv->thread_tag == "cthread" && iv->dom.defined()) {
+            if (const auto *var = iv->dom->extent.as<SizeVarNode>()) {
+              if (auto value = inferred_counts.Get(GetRef<Var>(var))) {
+                IterVar thread(Range(0, value.value()), iv->var,
+                               iv->iter_type, iv->thread_tag);
+                return AttrStmt(thread, op->attr_key, value.value(),
+                                op->body, op->span);
+              }
+            }
+          }
+        }
+        return node;
+      };
+      func.CopyOnWrite()->body = tirx::IRTransform(
+          func->body, nullptr, ffi::Function::FromTyped(resolve_count),
+          ffi::Array<ffi::String>{"tirx.Var", "tirx.SizeVar", "tirx.AttrStmt"});
+    }
     return func;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ResolveAivGroup", {});

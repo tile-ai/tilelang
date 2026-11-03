@@ -2207,8 +2207,13 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
+  tl::ascend::AivGroupInfo aiv_group;
+  tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+    aiv_group.Observe(node.as<SBlockNode>());
+  });
+  int mixed_aiv_count = current_function_is_mixed_ ? aiv_group.MixedCount() : 2;
   if (!current_function_is_cube_) {
-    auto requested = tl::ascend::ExplicitVectorCount(func->body);
+    auto requested = aiv_group.vector_count;
     if (requested.has_value()) {
       int count = tl::ascend::ResolveAivCount(requested);
       if (count == 2) {
@@ -2237,9 +2242,7 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       }
     }
   }
-  int mixed_aiv_count = 2;
   if (current_function_is_mixed_) {
-    mixed_aiv_count = tl::ascend::ResolveMixedCodegenCount(func->body);
     func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mixed_aiv_count, std::nullopt, false)(func->body);
     if (mixed_aiv_count == 1) {
       tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {

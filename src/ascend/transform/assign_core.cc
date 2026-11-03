@@ -1,4 +1,3 @@
-#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -44,6 +43,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/subcore.h"
 #include "./auto_schedule/task_analysis.h"
+#include "aiv_group.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -277,8 +277,9 @@ public:
       CoreMask mask = GetCandidateCoreMask(task);
       cube |= mask == kCoreCube;
       vector |= mask != kCoreAll && (mask & kCoreVector) != 0;
+      if (cube && vector) return true;
     }
-    return cube && vector;
+    return false;
   }
 private:
   CoreMaskAssigner(const std::vector<std::shared_ptr<IRStructure>> &root,
@@ -424,8 +425,7 @@ tvm::transform::Pass AssignCore() {
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
           SBlock root = context.root;
-          if (!root->annotations.count("vector_count") ||
-              root->annotations.count("tl.inferred_sid_domain")) {
+          if (!root->annotations.count("vector_count")) {
             ScheduledTIR original = DecodeScheduledTIR(root, context.outer_ctx);
             std::vector<TaskNode *> tasks;
             CollectAllTaskNodes(original.tree, tasks);

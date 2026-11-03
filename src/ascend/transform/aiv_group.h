@@ -1,14 +1,35 @@
 #pragma once
 
 #include <optional>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
-#include <tvm/ffi/function.h>
+#include <tvm/tirx/stmt_functor.h>
+
 #include "../../support/check.h"
 
-namespace tvm { namespace tl { namespace ascend {
+namespace tvm {
+namespace tl {
+namespace ascend {
+
+inline std::optional<int> ReadAivCount(const tirx::SBlockNode *block,
+                                      const char *key) {
+  auto value = block->annotations.Get(key);
+  if (!value.has_value()) return std::nullopt;
+  // Annotation values may be an FFI integer or an existing PrimExpr.
+  PrimExpr expression = value.value().cast<PrimExpr>();
+  const auto *count = expression.as<IntImmNode>();
+  ICHECK(count && (count->value == 1 || count->value == 2))
+      << key << " must be the constant integer 1 or 2 in block '"
+      << block->name_hint << "', got " << value.value();
+  return static_cast<int>(count->value);
+}
+
 inline int ResolveAivCount(std::optional<int> requested = std::nullopt) {
+  if (requested.has_value()) {
+    ICHECK(requested.value() == 1 || requested.value() == 2)
+        << "AIV group count must be 1 or 2, got " << requested.value();
+  }
   // Query hardware internally. Zero or a missing callback means unknown.
   std::optional<int> limit;
   if (auto query = ffi::Function::GetGlobal(
@@ -17,10 +38,6 @@ inline int ResolveAivCount(std::optional<int> requested = std::nullopt) {
     ICHECK(ratio == 0 || ratio == 1 || ratio == 2)
         << "Internal device AIV capability must be 0 (unknown), 1 or 2";
     if (ratio != 0) limit = static_cast<int>(ratio);
-  }
-  if (requested.has_value()) {
-    ICHECK(requested.value() == 1 || requested.value() == 2)
-        << "AIV group count must be 1 or 2, got " << requested.value();
   }
   // Explicit kernel request, then current device ratio, then offline default.
   int count = requested.value_or(limit.value_or(2));
@@ -31,6 +48,38 @@ inline int ResolveAivCount(std::optional<int> requested = std::nullopt) {
   }
   return count;
 }
+
+// One collector for frontend validation and the existing CodeGen pre-scans.
+// Requests remain distinct from counts selected by a previous compiler stage.
+struct AivGroupInfo {
+  std::optional<int> vector_count;
+  std::optional<int> resolved_count;
+
+  void Observe(const tirx::SBlockNode *block) {
+    if (!block) return;
+    if (block->name_hint == "VECTOR")
+      Merge(ReadAivCount(block, "vector_count"), &vector_count,
+            "Conflicting explicit T.Vector counts");
+    Merge(ReadAivCount(block, "tl.resolved_aiv_count"), &resolved_count,
+          "Conflicting resolved AIV group counts");
+  }
+
+  int MixedCount() const {
+    // Already resolved counts were capacity-checked before scheduling.
+    // Manual Kernel lowering has no selected count and still needs a default.
+    return resolved_count.has_value() ? resolved_count.value()
+                                      : ResolveAivCount();
+  }
+
+private:
+  static void Merge(std::optional<int> value, std::optional<int> *selected,
+                    const char *message) {
+    if (!value.has_value()) return;
+    ICHECK(!selected->has_value() || selected->value() == value.value())
+        << message << ": " << selected->value_or(-1) << " versus " << value.value();
+    *selected = value;
+  }
+};
 
 // Bind an already selected mixed-group count. This helper neither infers
 // core types nor creates a new outer sid domain.
@@ -45,6 +94,7 @@ private:
     if (op->attr_key != tirx::attr::thread_extent || !iv || iv->thread_tag != "cthread")
       return StmtMutator::VisitStmt_(op);
     if (sid_.has_value() && unify_sid_) {
+      if (iv->var.same_as(sid_.value())) return VisitStmt(op->body);
       ffi::Map<tirx::Var, PrimExpr> replacements;
       replacements.Set(iv->var, sid_.value());
       return VisitStmt(tirx::Substitute(op->body, replacements));
@@ -53,23 +103,25 @@ private:
     sid_ = iv->var;
     tirx::Stmt body = VisitStmt(op->body);
     sid_ = previous;
+    if (body.same_as(op->body) && tirx::is_const_int(op->value, count_) &&
+        iv->dom.defined() && tirx::is_zero(iv->dom->min) &&
+        tirx::is_const_int(iv->dom->extent, count_))
+      return ffi::GetRef<tirx::Stmt>(op);
     tirx::IterVar thread(Range(0, count_), iv->var, iv->iter_type, iv->thread_tag);
     return tirx::AttrStmt(thread, op->attr_key, Integer(count_), body, op->span);
   }
   tirx::Stmt VisitStmt_(const tirx::SBlockNode *op) final {
-    if (op->name_hint == "VECTOR") {
-      if (auto value = op->annotations.Get("vector_count")) {
-        const auto *imm = value.value().as<IntImmNode>();
-        ICHECK(imm && imm->value == count_)
-            << "Conflicting AIV group settings: explicit T.Vector count "
-            << "does not match resolved kernel count " << count_;
-      }
-    }
+    if (op->name_hint != "VECTOR") return StmtMutator::VisitStmt_(op);
+    auto requested = ReadAivCount(op, "vector_count");
+    ICHECK(!requested.has_value() || requested.value() == count_)
+        << "Conflicting AIV group settings: explicit T.Vector count "
+        << "does not match resolved kernel count " << count_;
     auto block = Downcast<tirx::SBlock>(StmtMutator::VisitStmt_(op));
-    if (op->name_hint == "VECTOR") {
-      block.CopyOnWrite()->annotations.Set("vector_count", Integer(count_));
-      block.CopyOnWrite()->annotations.Set("tl.resolved_aiv_count", Integer(count_));
-    }
+    if (requested == count_ && ReadAivCount(op, "tl.resolved_aiv_count") == count_)
+      return block;
+    auto *writer = block.CopyOnWrite();
+    writer->annotations.Set("vector_count", Integer(count_));
+    writer->annotations.Set("tl.resolved_aiv_count", Integer(count_));
     return block;
   }
   int count_;
@@ -77,38 +129,6 @@ private:
   bool unify_sid_;
 };
 
-// An explicit Vector-only group is a request bounded by device capacity,
-// not an assertion that its count equals the hardware default.
-inline std::optional<int> ExplicitVectorCount(const tirx::Stmt &body) {
-  std::optional<int> requested;
-  tirx::PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
-    const auto *block = node.as<tirx::SBlockNode>();
-    if (!block || block->name_hint != "VECTOR") return;
-    if (auto value = block->annotations.Get("vector_count")) {
-      int count = Downcast<IntImm>(value.value().cast<PrimExpr>())->value;
-      ICHECK(!requested.has_value() || requested.value() == count)
-          << "Conflicting explicit T.Vector counts";
-      requested = count;
-    }
-  });
-  return requested;
-}
-
-// CodeGen calls this only after its existing mixed-kernel classification.
-inline int ResolveMixedCodegenCount(const tirx::Stmt &body) {
-  std::optional<int> selected;
-  tirx::PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
-    const auto *block = node.as<tirx::SBlockNode>();
-    if (!block) return;
-    if (auto value = block->annotations.Get("tl.resolved_aiv_count")) {
-      int count = Downcast<IntImm>(value.value().cast<PrimExpr>())->value;
-      ICHECK(!selected.has_value() || selected.value() == count)
-          << "Conflicting resolved AIV group counts: previously selected "
-          << selected.value_or(-1) << ", but block '" << block->name_hint
-          << "' has tl.resolved_aiv_count=" << count;
-      selected = count;
-    }
-  });
-  return ResolveAivCount(selected);
-}
-}}} // namespace tvm::tl::ascend
+} // namespace ascend
+} // namespace tl
+} // namespace tvm

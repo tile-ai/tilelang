@@ -175,7 +175,7 @@ def Kernel(
 @kernel_launch_factory
 def MixedKernel(
     *blocks: int | tirx.PrimExpr,
-    sids: int = 2,
+    sids: int | None = None,
     prelude: str | None = None,
 ):
     """Construct an Ascend NPU Mixed-kernel launch frame with sub-kernel ID binding.
@@ -184,11 +184,14 @@ def MixedKernel(
     ----------
     blocks : int
         Number of blocks in the 1-D grid (blockIdx.x extent).
-    sids : int
-        Number of active AIV sub-cores (1 or 2). Default is 2. On dav-3510,
-        mixed kernels always launch the physical ``__mix__(1, 2)`` group;
-        ``sids=1`` restricts the vector body to sub-core 0. Binds as ``sid``
-        via ``asc_get_sub_block_id()`` in generated code.
+    sids : int or None
+        Number of active AIV sub-cores per mixed group (1 or 2). If omitted
+        or None, compilation selects the current device AIV:AIC ratio,
+        falling back to 2 when the device cannot be queried.
+        For a mixed kernel, AscendC emits the requested physical ratio;
+        PTO retains its existing mixed launch and guards the Vector body
+        with sub-core 0 when ``sids=1``. Binds as ``sid`` via the backend's
+        subblock-index operation. This is not the total device core count.
     prelude : str, optional
         Import C code injected before the generated kernel.
 
@@ -217,12 +220,12 @@ def MixedKernel(
     if len(blocks) != 1:
         raise ValueError(f"T.MixedKernel() only supports 1-D block grid. Got {len(blocks)}-D: {blocks}")
 
-    if sids not in (1, 2):
-        raise ValueError(f"T.MixedKernel() sids must be 1 or 2. Got {sids}")
+    if sids is not None and sids not in (1, 2):
+        raise ValueError(f"T.MixedKernel() sids must be 1 or 2, or None for automatic selection. Got {sids}")
 
     attrs: dict = {}
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
 
-    return _ffi_api.MixedKernelLaunch(blocks, sids, attrs)
+    return _ffi_api.MixedKernelLaunch(blocks, -1 if sids is None else sids, attrs)

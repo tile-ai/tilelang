@@ -1,4 +1,3 @@
-#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -71,8 +70,6 @@
 
 namespace tvm {
 namespace tl {
-
-
 
 using namespace tirx;
 using namespace ascend;
@@ -3043,8 +3040,9 @@ private:
     auto append_bank = [&](int offset) {
       for (const PrimExpr &iteration : iterations) {
         PrimExpr id = MakeFlagEventId(iteration, num_versions, base + offset);
-        statements.push_back(set ? MakeAscendCrossCoreSetFlag(cross_core_mode_, pipe, id)
-                                 : MakeAscendCrossCoreWaitFlag(cross_core_mode_, pipe, id));
+        statements.push_back(
+            set ? MakeAscendCrossCoreSetFlag(cross_core_mode_, pipe, id)
+                : MakeAscendCrossCoreWaitFlag(cross_core_mode_, pipe, id));
       }
     };
     if (core != kCoreCube) {
@@ -3262,9 +3260,7 @@ private:
 SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir,
                         bool pto_backend) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
-  int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.has_value()
-                             ? scheduled_tir.metadata.num_aiv_subcores.value()
-                             : 2;
+  int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
   // PTO retains the upstream mixed launch and uses mode 4 even when only
   // AIV0 executes. Active task masks still use the requested count; changing
   // the synchronization mode must not add an AIV1 participant.
