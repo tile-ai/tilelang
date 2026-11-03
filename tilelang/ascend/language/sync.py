@@ -130,8 +130,6 @@ def ascend_cross_core_set_flag(mode_id: int, pipe: str, flag_id) -> None:
     ----------
     mode_id : int
         Cross-core sync mode: 0, 1, 2, or 4.
-        Ascend 910B/910C support modes 0, 1, and 2.
-        Ascend 950 supports modes 0, 1, 2, and 4.
     pipe : str
         Pipeline type, e.g., "PIPE_MTE3", "PIPE_FIX".
     flag_id : int or PrimExpr
@@ -161,8 +159,6 @@ def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
     ----------
     mode_id : int
         Cross-core sync mode: 0, 1, 2, or 4.
-        Ascend 910B/910C support modes 0, 1, and 2.
-        Ascend 950 supports modes 0, 1, 2, and 4.
     pipe : str
         Pipeline type, e.g., "PIPE_MTE3", "PIPE_FIX".
     flag_id : int or PrimExpr
