@@ -49,7 +49,10 @@ def test_thread_sync_warp_aligned_bound_under_bitwise_and():
     }
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
     with target, tvm.transform.PassContext(config=cfg):
-        tilelang.lower(_build(), target=target, enable_device_compile=False)
+        artifact = tilelang.lower(_build(), target=target, enable_device_compile=False)
+
+    # The 448-thread partial barrier is emitted rather than rejected.
+    assert "448" in artifact.kernel_source
 
 
 if __name__ == "__main__":
