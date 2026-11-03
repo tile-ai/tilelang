@@ -544,10 +544,12 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   // plain widening cast such as `cutlass.Int32(x)` sign-extends a uint8 value
   // >= 128.  Reinterpret the source through its unsigned type first so the
   // widening conversion zero-extends.
+  const bool target_is_float = target_ty.is_float() || target_ty.is_bfloat16();
+  const bool target_is_wider_int =
+      (target_ty.is_int() || target_ty.is_uint()) &&
+      target_ty.bits() > from_ty.bits();
   if (from_ty.is_scalar() && target_ty.is_scalar() && from_ty.is_uint() &&
-      target_ty.bits() > from_ty.bits() &&
-      (target_ty.is_int() || target_ty.is_uint() || target_ty.is_float() ||
-       target_ty.is_bfloat16())) {
+      (target_is_float || target_is_wider_int)) {
     PrintType(target_ty, os);
     os << "(cutlass.Uint" << from_ty.bits() << "(" << PrintExpr_(op->value)
        << "))";
