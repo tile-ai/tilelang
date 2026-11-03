@@ -381,6 +381,7 @@ def _ir_descriptor_reused_after_full_wait():
     # One initialization feeds two batches with a full wait in between; the second batch
     # reads B0 again.
     T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
 
     @T.prim_func(private=True)
     def func():
@@ -393,8 +394,10 @@ def _ir_descriptor_reused_after_full_wait():
         desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
         init(desc, B0)
         issue(desc)
+        commit()
         wait()
         issue(desc)
+        commit()
         Tmp[tx] = T.uint8(1)
         wait()
 
@@ -430,6 +433,7 @@ def _ir_descriptor_initialized_on_two_paths():
     # The descriptor addresses B0 on one path and B1 on the other; the WGMMA issued after the
     # join reads whichever it holds.
     T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
 
     @T.prim_func(private=True)
     def func():
@@ -444,10 +448,12 @@ def _ir_descriptor_initialized_on_two_paths():
         if tx < 64:
             init(desc, B0)
             issue(desc)
+            commit()
             wait()
         else:
             init(desc, B1)
         issue(desc)
+        commit()
         Tmp[tx] = T.uint8(1)
         wait()
 
