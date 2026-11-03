@@ -42,6 +42,7 @@ def _build():
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_thread_sync_warp_aligned_bound_under_bitwise_and():
     cfg = {
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
