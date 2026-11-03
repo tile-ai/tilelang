@@ -20,6 +20,7 @@ def _kernel():
     return main
 
 
+@tilelang.testing.requires_cuda
 def test_fragment_two_indices_reports_user_error():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
     with target, pytest.raises(ValueError, match="multiple distinct indices"):
