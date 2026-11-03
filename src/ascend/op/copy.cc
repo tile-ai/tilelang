@@ -663,8 +663,15 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   } else if (dma_path == DMAPath::kL0CToUB) {
     StridedLayout src_layout = NormalizeTrailingMTE2DLayout(
         op.src, src_range, analyzer, "Ascend L0C->UB source");
-    StridedLayout dst_layout = NormalizeMTE2DLayout(
-        op.dst, dst_range, analyzer, "Ascend L0C->UB destination");
+    Optional<Layout> ub_layout = FindLayoutForBuffer(T.layout_map, op.dst);
+    bool nz_output =
+        ub_layout.defined() && IsAscendFractalLayout(ub_layout.value());
+    StridedLayout dst_layout =
+        nz_output
+            ? NormalizeTrailingMTE2DLayout(op.dst, dst_range, analyzer,
+                                           "Ascend NZ L0C->UB destination")
+            : NormalizeMTE2DLayout(op.dst, dst_range, analyzer,
+                                   "Ascend L0C->UB destination");
     const Mode &src_inner = src_layout.modes[0];
     const Mode &src_row = src_layout.modes[1];
     const Mode &dst_inner = dst_layout.modes[0];
@@ -721,6 +728,43 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       copy_inner = dst_inner.size;
       copy_rows = dst_row.size;
     }
+    if (nz_output) {
+      AscendFractalLayoutInfo dst_info;
+      ICHECK(
+          TryExtractAscendFractalLayout(ub_layout.value(), op.dst, &dst_info));
+      TVM_FFI_CHECK(dst_info.c0_axis == LogicalAxis::kCol &&
+                        dst_info.row16_axis == LogicalAxis::kRow &&
+                        analyzer->CanProveEqual(dst_info.c0, 16),
+                    ValueError)
+          << "Ascend NZ L0C->UB requires 16-column NZ panels on "
+          << op.dst->name << "; use make_ascend_l0c_layout.";
+      if (!op.dst->strides.empty()) {
+        PrimExpr stride = I(1);
+        for (int i = static_cast<int>(op.dst->shape.size()) - 1; i >= 0; --i) {
+          TVM_FFI_CHECK(analyzer->CanProveEqual(op.dst->shape[i], 1) ||
+                            analyzer->CanProveEqual(op.dst->strides[i], stride),
+                        ValueError)
+              << "Ascend NZ L0C->UB requires dense logical strides; express "
+                 "padding in the UB buffer shape instead of explicit strides.";
+          stride = stride * op.dst->shape[i];
+        }
+      }
+      With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+      TVM_FFI_CHECK(
+          analyzer->CanProveEqual(FloorMod(dst_range.back()->min, I(16)), 0) &&
+              analyzer->CanProveEqual(FloorMod(dst_inner.size, I(16)), 0) &&
+              analyzer->CanProveEqual(FloorMod(copy_inner, I(16)), 0),
+          ValueError)
+          << "Ascend NZ L0C->UB requires a destination column origin and "
+             "copy widths aligned to 16 elements; got "
+          << dst_range.back() << " and source width " << copy_inner << ".";
+      // NZ pitch advances between 16-column panels, in destination elements.
+      // Use the allocation's physical shape, not this copy's row extent.
+      Array<PrimExpr> physical_shape = ub_layout.value()->OutputShape();
+      dst_row_stride = I(1);
+      for (size_t i = physical_shape.size() - 3; i < physical_shape.size(); ++i)
+        dst_row_stride = dst_row_stride * physical_shape[i];
+    }
     PrimExpr dual_dst_ctl_val = I(dual_dst_ctl);
     PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
     PrimExpr sub_blockid_val = cast(DataType::Int(32), op.sub_blockid);
@@ -739,7 +783,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                  I(GetCCQuantPre(op.src->dtype, op.dst->dtype)), // quant_pre
                  zero,                                           // relu_pre
                  zero,                                           // split_en
-                 I(1),                                           // NZ2ND_en
+                 I(nz_output ? 0 : 1),                           // NZ2ND_en
                  zero,                                           // quant_post
                  zero,                                           // relu_post
                  zero,   // clip_relu_post

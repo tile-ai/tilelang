@@ -253,7 +253,7 @@ public:
                             const LayoutMap &layout_map = {})
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
-  int Plan(const For &node) {
+  int Plan(const For &node, bool defer_cast_constraints) {
     Target target = Target::Current(false);
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
@@ -296,6 +296,12 @@ public:
     // separate from physical buffer scope.
     VectorConstraintSummary constraints = SummarizeConstraints(verbose);
     vector_size_ = SelectVectorSize(constraints, has_seq_stmt, verbose);
+    if (!defer_cast_constraints) {
+      // DecoupleTypeCast can leave mixed-type stores intact, e.g. when their
+      // guard reads memory. Final legalization must honor the remaining casts
+      // rather than assuming their computation will be staged separately.
+      vector_size_ = arith::ZeroAwareGCD(vector_size_, constraints.call_min);
+    }
 
     // The vector width must divide the innermost loop's trip count.
     vector_size_ = arith::ZeroAwareGCD(loop_extent_vector_size_, vector_size_);
@@ -550,18 +556,31 @@ private:
       // constant buffer that tl hack to use as local register.
       auto boundary_check = node->buffer->shape[0].as<IntImmNode>();
       if (boundary_check && boundary_check->value == 1) {
-        return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+        VisitIndexExprs(node->indices);
+        return GetRef<PrimExpr>(node);
       }
     }
     UpdateVectorSize(node->indices, node->buffer, false);
-    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    VisitIndexExprs(node->indices);
+    return GetRef<PrimExpr>(node);
   }
 
   Stmt VisitStmt_(const BufferStoreNode *node) final {
     if (IsSharedBuffer(node->buffer) || IsGlobalBuffer(node->buffer))
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer, true);
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+    this->VisitExpr(node->value);
+    VisitIndexExprs(node->indices);
+    return GetRef<Stmt>(node);
+  }
+
+  void VisitIndexExprs(const Array<PrimExpr> &indices) {
+    bool was_in_index_expr = in_index_expr_;
+    in_index_expr_ = true;
+    for (const PrimExpr &index : indices) {
+      this->VisitExpr(index);
+    }
+    in_index_expr_ = was_in_index_expr;
   }
 
   Stmt VisitStmt_(const IfThenElseNode *node) final {
@@ -653,7 +672,8 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::tvm_access_ptr())) {
       HandleTvmAccessPtr(node);
-      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+      VisitIndexExprs(node->args);
+      return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::rng_rand_float())) {
       // Stateful RNG calls produce scalar values before any destination cast.
       // Keep that source width as a non-cast constraint: the simple-store
@@ -690,7 +710,8 @@ private:
                node->op == tl::access_ptr()) {
       // address_of and tl.access_ptr have buffer load value so we should
       // analysis the buffer load node to update vector_size_.
-      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+      VisitIndexExprs(node->args);
+      return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::reducer_update())) {
       // The accumulate itself never loop-vectorizes: by the time execution
       // vectorization runs (post ReducerPlanAndMaterialize) this call has
@@ -964,6 +985,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
+    // Address casts do not produce data vectors: contiguous accesses lower
+    // their indices to a scalar base and stride. Their legality is already
+    // checked by the buffer/access_ptr alignment analysis.
+    if (in_index_expr_) {
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    }
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
     // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
@@ -1107,6 +1134,7 @@ private:
   int loop_extent_vector_size_ = 128;
 
   For inner_for_;
+  bool in_index_expr_ = false;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
@@ -1179,17 +1207,20 @@ private:
   arith::Analyzer *analyzer_;
 };
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map,
+                     bool defer_cast_constraints) {
   arith::Analyzer analyzer;
-  return VectorizePlanner(&analyzer, layout_map).Plan(loop);
+  return VectorizePlanner(&analyzer, layout_map)
+      .Plan(loop, defer_cast_constraints);
 }
 
 int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map) {
+                     const LayoutMap &layout_map, bool defer_cast_constraints) {
   // Planning is a query: visiting the loop must not install its local
   // definitions in the caller's context, which may later analyze a rewrite.
   auto local_analyzer = analyzer->Clone();
-  return VectorizePlanner(local_analyzer.get(), layout_map).Plan(loop);
+  return VectorizePlanner(local_analyzer.get(), layout_map)
+      .Plan(loop, defer_cast_constraints);
 }
 
 namespace {

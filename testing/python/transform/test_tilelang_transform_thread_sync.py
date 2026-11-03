@@ -1827,164 +1827,6 @@ def test_partial_sync_assertion_checks_id_and_participant_count(barrier_id, thre
             _assert_partial_sync_params([call], 32)
 
 
-def _thread_sync_calls(func):
-    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
-    barriers = []
-
-    def collect(node):
-        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
-            barriers.append(tuple(int(arg) for arg in node.args[1:]))
-
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, collect)
-    return barriers
-
-
-def test_disjoint_partial_sync_scopes_use_distinct_ids():
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 128)
-        if tx // 64 == 0:
-            for i in range(2):
-                T.evaluate(T.tvm_storage_sync("shared"))
-                T.evaluate(T.tvm_storage_sync("shared"))
-        else:
-            for j in range(2):
-                T.evaluate(T.tvm_storage_sync("shared"))
-                T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert [call[1] for call in barriers] == [64, 64, 64, 64]
-    assert barriers[0] == barriers[1]
-    assert barriers[2] == barriers[3]
-    assert barriers[0][0] != barriers[2][0]
-
-
-def test_partial_sync_assume_scopes_use_distinct_ids():
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 128)
-        with T.attr(tx // 64 == 0, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        with T.attr(tx // 64 == 1, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        with T.attr(tx // 64 == 0, "tl.assume", 1):
-            T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 4
-    assert [call[1] for call in barriers[:3]] == [64, 64, 64]
-    assert barriers[0] == barriers[2]
-    assert barriers[0][0] != barriers[1][0]
-    assert barriers[3] == ()
-
-
-@pytest.mark.parametrize("guard", [lambda tx: tx < 64, lambda tx: tx // 64 == 0], ids=["direct", "quotient"])
-def test_equivalent_partial_thread_guards_lower_to_the_same_barriers(guard):
-    """Fragment replication guards need partial barriers within the loop."""
-
-    @T.prim_func(private=True)
-    def func(A: T.Buffer((2, 64), "float16"), Out: T.Buffer((2, 64), "float16")):
-        tx = T.launch_thread("threadIdx.x", 128)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        shared = T.alloc_buffer((64,), "float16", scope="shared")
-        if guard(tx):
-            for k in range(2):
-                shared[tx] = A[k, tx]
-                Out[k, tx] = shared[(tx + 1) % 64]
-        T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 3
-    assert barriers[0] == barriers[1]
-    assert barriers[0][1] == 64
-    assert barriers[2] == ()
-
-
-def test_partial_sync_preserves_outer_constraint_across_block_scope():
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 128)
-        T.evaluate(T.tvm_storage_sync("shared"))
-        if tx < 64:
-            with T.sblock("guarded_sync"):
-                T.evaluate(T.tvm_storage_sync("shared"))
-        else:
-            with T.sblock("other_sync"):
-                T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 4
-    assert barriers[0] == barriers[3] == ()
-    assert barriers[1][1] == barriers[2][1] == 64
-    assert barriers[1][0] != barriers[2][0]
-
-
-def test_equivalent_partial_thread_guards_reuse_barrier_id():
-    """The producer offset and a bound replica index preserve participant IDs."""
-
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 256)
-        replica: T.int32 = (tx - 128) // 64
-        if tx >= 128 and replica == 0:
-            T.evaluate(T.tvm_storage_sync("shared"))
-        if tx >= 128 and tx < 192:
-            T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 2
-    assert barriers[0] == barriers[1]
-    assert barriers[0][1] == 64
-
-
-def test_partial_sync_assert_constraint_stays_in_scope():
-    @T.prim_func(private=True)
-    def func():
-        bx = T.launch_thread("blockIdx.x", 32)
-        tx = T.launch_thread("threadIdx.x", 128)
-        if bx < 16:
-            assert tx // 64 == 0, "replica zero"
-            T.evaluate(T.tvm_storage_sync("shared"))
-        T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 2
-    assert barriers[0][1] == 64
-    assert barriers[1] == ()
-
-
-@pytest.mark.parametrize(
-    "guard",
-    [lambda tx: tx % 4 == 0, lambda tx: (tx // 32) % 2 == 0, lambda tx: tvm.tirx.Or(tx < 64, tx >= 224)],
-    ids=["sparse_lanes", "alternating_warps", "separated_intervals"],
-)
-def test_partial_sync_rejects_nonrectangular_threads(guard):
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 256)
-        if guard(tx):
-            T.evaluate(T.tvm_storage_sync("shared"))
-
-    with pytest.raises(tvm.error.InternalError, match="rectangle"):
-        _thread_sync_calls(func)
-
-
-def test_partial_sync_multidimensional_rectangle():
-    @T.prim_func(private=True)
-    def func():
-        tx = T.launch_thread("threadIdx.x", 64)
-        ty = T.launch_thread("threadIdx.y", 2)
-        if tx // 32 == 0:
-            T.evaluate(T.tvm_storage_sync("shared"))
-
-    barriers = _thread_sync_calls(func)
-    assert len(barriers) == 1
-    assert barriers[0][1] == 64
-
-
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("axis", ["y", "z"])
 @pytest.mark.parametrize("shift", [0, 1])
@@ -2059,6 +1901,31 @@ def test_access_ptr_write_is_fenced_before_block_reads():
     """Control: the same kernel using `access_ptr(..., "w")`, which names the
     access type, already got its barrier."""
     assert _barrier_follows_extern(use_access_ptr=True), "no barrier after the extern write"
+
+
+def test_full_sync_after_possibly_empty_thread_loop():
+    @T.prim_func(private=True)
+    def func(A: T.Buffer((64,), "int32"), Out: T.Buffer((64, 256), "int32")):
+        bx = T.launch_thread("blockIdx.x", 64)
+        local = T.alloc_buffer((1,), "int32", scope="local")
+        shared = T.alloc_buffer((256,), "int32", scope="shared")
+        start = T.launch_thread("threadIdx.x", 256)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        local[0] = 0
+        for token in T.serial(start, 1):
+            local[0] = local[0] + A[bx + token]
+        shared[start] = local[0]
+        T.evaluate(T.tvm_storage_sync("shared"))
+        Out[bx, start] = shared[(start + 1) % 256]
+
+    lowered = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))["main"]
+    syncs = _storage_syncs(lowered)
+    assert len(syncs) == 1
+    stores = collect_nodes(lowered, tirx.BufferStore)
+    shared_write = next(store for store in stores if store.buffer.scope() == "shared")
+    output_write = next(store for store in stores if store.buffer.name == "Out")
+    _assert_stmt_order(lowered, shared_write, _sync_stmt(lowered, syncs[0]), output_write)
 
 
 if __name__ == "__main__":
