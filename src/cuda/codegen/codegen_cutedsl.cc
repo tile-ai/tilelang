@@ -546,7 +546,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
   // widening conversion zero-extends.
   if (from_ty.is_scalar() && target_ty.is_scalar() && from_ty.is_uint() &&
       target_ty.bits() > from_ty.bits() &&
-      (target_ty.is_int() || target_ty.is_uint() || target_ty.is_float())) {
+      (target_ty.is_int() || target_ty.is_uint() || target_ty.is_float() ||
+       target_ty.is_bfloat16())) {
     PrintType(target_ty, os);
     os << "(cutlass.Uint" << from_ty.bits() << "(" << PrintExpr_(op->value)
        << "))";

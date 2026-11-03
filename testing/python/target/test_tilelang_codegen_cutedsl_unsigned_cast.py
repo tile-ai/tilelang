@@ -47,6 +47,17 @@ def test_cutedsl_unsigned_to_float_cast_zero_extends():
     assert "cutlass.Float32(cutlass.Uint8(" in artifact.kernel_source
 
 
+def test_cutedsl_unsigned_to_bfloat16_cast_zero_extends():
+    @T.prim_func
+    def prog(A: T.Tensor((1,), "uint8"), B: T.Tensor((1,), "bfloat16")):
+        with T.Kernel(1, threads=1):
+            B[0] = T.cast(A[0], "bfloat16")
+
+    artifact = _lower_cutedsl(prog)
+
+    assert "cutlass.BFloat16(cutlass.Uint8(" in artifact.kernel_source
+
+
 def test_cutedsl_signed_widening_cast_is_unchanged():
     """A signed source must keep sign-extension semantics."""
 
