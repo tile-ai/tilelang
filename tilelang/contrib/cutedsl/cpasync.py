@@ -318,7 +318,7 @@ def tma_load_gather4(
 ) -> None:
     """Load four rows of one 2-D tile with ``.tile::gather4`` (sm_100+)."""
     arch = CuTeDSL._get_dsl().envar.arch
-    check_value_in(arch, ["sm_100a", "sm_103a", "sm_110", "sm_120a", "sm_121a"], "arch")
+    check_value_in(arch, ["sm_100a", "sm_103a", "sm_107a", "sm_110", "sm_120a", "sm_121a"], "arch")
     # The gather4 form carries {col, r0, r1, r2, r3}; the primitives wrapper
     # rejects anything but two coordinates, so reach the dialect op directly.
     _nvvm.cp_async_bulk_tensor_shared_cluster_global(
@@ -391,7 +391,7 @@ def tma_store_scatter4(
 ) -> None:
     """Store four rows of one 2-D tile with ``.tile::scatter4`` (sm_100a+)."""
     arch = CuTeDSL._get_dsl().envar.arch
-    check_value_in(arch, ["sm_100a", "sm_103a", "sm_110", "sm_120a", "sm_121a"], "arch")
+    check_value_in(arch, ["sm_100a", "sm_103a", "sm_107a", "sm_110", "sm_120a", "sm_121a"], "arch")
     # Same coordinate-count restriction as tma_load_gather4.
     _nvvm.cp_async_bulk_tensor_global_shared_cta(
         _as_tensormap_ptr(tma_desc, loc=loc, ip=ip),
