@@ -68,7 +68,7 @@ error. The PTO backend rejects these options.
 | Key suffix | Default | Meaning |
 | --- | --- | --- |
 | `enable_superkernel` | `False` | Emit SK entries and bindings |
-| `superkernel_num_variants` | `4` | Bind 1 to 4 SK entry symbols |
+| `superkernel_num_variants` | `1` | Bind 1 to 4 SK entry symbols |
 | `superkernel_disable_dcci` | `False` | Cap 4: suppress DCCI ALL around calls |
 
 Only these three options are exposed. `superkernel_disable_dcci=False` emits

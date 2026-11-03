@@ -35,7 +35,7 @@ SuperKernelConfig ReadConfig() {
   ICHECK(enabled || !configured)
       << "SuperKernel options require tl.ascend_enable_superkernel=True";
   int64_t variants =
-      ctx->GetConfig<Integer>(tl::kSuperKernelNumVariants, Integer(4))
+      ctx->GetConfig<Integer>(tl::kSuperKernelNumVariants, Integer(1))
           .value()
           ->value;
   ICHECK(variants >= 1 && variants <= 4)

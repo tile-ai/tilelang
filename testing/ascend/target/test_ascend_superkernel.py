@@ -87,13 +87,20 @@ def test_task_context_by_kernel_kind(kind, qualifier):
         assert "tl_sk_sys->SkGetBlockIdx()" not in body
         assert "block_idx" in body
     assert source.count("SK_BIND(") == 1
-    assert "main_kernel_sk<3>" in source
+    assert "main_kernel_sk<0>" in source
 
 
 def test_simd_helper_captures_task_context():
     source = _source(_kernel(vf="simd"))
     assert "consume_context(tl_sk_block_idx" in source
     assert "tl_sk_num_blocks" in source
+
+
+def test_default_variant_count_is_one():
+    source = _source(_kernel())
+    binding = source.split("SK_BIND(")[1]
+    assert binding.count("_sk<") == 1
+    assert "main_kernel_sk<0>" in source
 
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4])

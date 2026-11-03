@@ -80,7 +80,7 @@ class PassConfigKey(str, Enum):
     """Emit SK entries and SK_BIND for Ascend C kernels. Default: False."""
 
     TL_ASCEND_SUPERKERNEL_NUM_VARIANTS = "tl.ascend_superkernel_num_variants"
-    """Number of equivalent SK entry symbols to bind (1 to 4). Default: 4."""
+    """Number of equivalent SK entry symbols to bind (1 to 4). Default: 1."""
 
     TL_ASCEND_SUPERKERNEL_DISABLE_DCCI = "tl.ascend_superkernel_disable_dcci"
     """Disable DCCI ALL around SK calls (cap bit 2). Default: False."""
