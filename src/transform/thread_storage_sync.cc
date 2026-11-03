@@ -33,6 +33,7 @@
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
+#include <tvm/ffi/container/variant.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -266,10 +267,9 @@ public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
-    // ThreadSync runs once per storage scope ("shared", then "shared.dyn").
-    // The earlier run has already assigned named-barrier ids; a fresh
-    // numbering would hand the same id to a disjoint thread range, and two
-    // groups syncing on one `bar.sync id, count` complete each other's phases.
+    // Reserve ids from earlier ThreadSync invocations and explicit partial
+    // syncs. Reusing one for a disjoint thread range would let the two groups
+    // complete each other's barrier phases.
     PostOrderVisit(stmt, [&rewriter](const ObjectRef &node) {
       const auto *call = node.as<CallNode>();
       if (call && call->op.same_as(builtin::tvm_storage_sync()) &&
@@ -330,8 +330,14 @@ private:
                        bound_ty->min_value, bound_ty->max_value,
                        bound_tz->min_value, bound_tz->max_value};
 
-    auto [barrier_id, thread_count] =
-        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+    // Only dense groups can share a bounds-based key across storage scopes.
+    // Sparse groups can have equal bounds and counts but different members;
+    // keep their existing per-scope allocation.
+    bool share_across_scopes = IsDenseThreadExtent_(tx_, bound_tx, extent_tx) &&
+                               IsDenseThreadExtent_(ty_, bound_ty, extent_ty) &&
+                               IsDenseThreadExtent_(tz_, bound_tz, extent_tz);
+    auto [barrier_id, thread_count] = GetOrCreateBarrier(
+        key, extent_tx, extent_ty, extent_tz, share_across_scopes, scope);
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -352,12 +358,14 @@ private:
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
 
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
-                                               size_t extent_tx,
-                                               size_t extent_ty,
-                                               size_t extent_tz) {
-    if (barrier_id_map_.count(key)) {
-      return {barrier_id_map_[key], thread_count_map_[key]};
+  std::pair<size_t, size_t>
+  GetOrCreateBarrier(const ThreadBoundKey &key, size_t extent_tx,
+                     size_t extent_ty, size_t extent_tz,
+                     bool share_across_scopes, const std::string &scope) {
+    auto &barrier_map =
+        share_across_scopes ? shared_barrier_map_ : scoped_barrier_maps_[scope];
+    if (auto it = barrier_map.find(key); it != barrier_map.end()) {
+      return it->second;
     }
 
     size_t barrier_id =
@@ -368,10 +376,17 @@ private:
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     used_barrier_ids_.insert(barrier_id);
-    barrier_id_map_[key] = barrier_id;
-    thread_count_map_[key] = thread_count;
+    barrier_map[key] = {barrier_id, thread_count};
 
     return {barrier_id, thread_count};
+  }
+
+  bool IsDenseThreadExtent_(const IterVar &iv,
+                            const arith::ConstIntBound &bound,
+                            size_t extent) const {
+    return !analyzer_->const_int_bound.IsBound(iv->var) ||
+           extent ==
+               static_cast<size_t>(bound->max_value - bound->min_value + 1);
   }
 
   /*!
@@ -446,8 +461,10 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
-  std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
-  std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  using BarrierMap =
+      std::unordered_map<ThreadBoundKey, std::pair<size_t, size_t>>;
+  BarrierMap shared_barrier_map_;
+  std::unordered_map<std::string, BarrierMap> scoped_barrier_maps_;
   // Named-barrier ids already taken in this function, including those assigned
   // by an earlier ThreadSync run for another storage scope.
   std::unordered_set<size_t> used_barrier_ids_;
@@ -2071,16 +2088,20 @@ private:
   }
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
-  StorageScope sync_scope = StorageScope::Create(storage_scope);
-  if (sync_scope.rank == StorageRank::kGlobal) {
+PrimFunc TileLangThreadSync(PrimFunc func,
+                            const Array<String> &storage_scopes) {
+  std::vector<StorageScope> sync_scopes;
+  for (const String &storage_scope : storage_scopes) {
+    StorageScope sync_scope = StorageScope::Create(storage_scope);
+    if (sync_scope.rank != StorageRank::kGlobal) {
+      sync_scopes.push_back(std::move(sync_scope));
+    }
+  }
+  if (sync_scopes.empty()) {
     return func;
   }
   auto *n = func.CopyOnWrite();
   auto stmt = n->body;
-  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
-    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
-  }
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
   if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
@@ -2089,13 +2110,21 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
                     .value()
                     .IntValue();
   }
-  TileLangThreadSyncPlanner planner(sync_scope, warp_size);
-  for (const auto &[_, buffer] : func->buffer_map) {
-    planner.SetBufferDataToBuffer(buffer->data, buffer);
+  for (const StorageScope &sync_scope : sync_scopes) {
+    if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
+      stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
+    }
+    TileLangThreadSyncPlanner planner(sync_scope, warp_size);
+    for (const auto &[_, buffer] : func->buffer_map) {
+      planner.SetBufferDataToBuffer(buffer->data, buffer);
+    }
+    planner(stmt);
+    stmt = ThreadSyncInserter(sync_scope,
+                              planner.syncs_inserted_)(std::move(stmt));
   }
-  planner(stmt);
-  stmt =
-      ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
+  // Assign partial-sync ids only after all scopes have been planned. The same
+  // thread group can then reuse an id across scopes, while disjoint groups and
+  // explicitly numbered barriers remain isolated.
   n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
   return func;
 }
@@ -2104,9 +2133,16 @@ using namespace tirx::transform;
 
 namespace transform {
 
-tvm::transform::Pass ThreadSync(const String &storage_scope) {
-  auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
-                                   const PassContext &ctx) {
+tvm::transform::Pass
+ThreadSync(const ffi::Variant<String, Array<String>> &storage_scope) {
+  Array<String> storage_scopes;
+  if (auto scope = storage_scope.as<String>()) {
+    storage_scopes.push_back(scope.value());
+  } else {
+    storage_scopes = storage_scope.get<Array<String>>();
+  }
+  auto pass_func = [storage_scopes](PrimFunc f, const IRModule &m,
+                                    const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     // Check if thread storage sync is disabled
     bool disable_syncthreads =
@@ -2114,7 +2150,7 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
     if (disable_syncthreads) {
       return f;
     }
-    return tl::TileLangThreadSync(std::move(f), storage_scope);
+    return tl::TileLangThreadSync(std::move(f), storage_scopes);
     ;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
