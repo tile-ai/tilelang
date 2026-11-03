@@ -626,6 +626,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
   int lanes = target_ty.lanes();
+  const bool unsigned_needs_zero_extend =
+      from_ty.is_uint() && ((target_ty.is_float() || target_ty.is_bfloat16()) ||
+                            ((target_ty.is_int() || target_ty.is_uint()) &&
+                             target_ty.bits() > from_ty.bits()));
 
   // CuTeDSL requires narrow precision (e.g. FP8) vector .to() casts to
   // operate on 32-bit aligned vectors.  For unaligned widths (e.g.
@@ -650,7 +654,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     PrintType(target_ty.element_of(), stream);
     stream << ")\n";
     std::string narrow_src = "tl.as_tensor_ssa(" + src + ")";
-    if (from_ty.is_uint()) {
+    if (unsigned_needs_zero_extend) {
       std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
       PrintIndent();
       stream << unsigned_src << " = tl.cast_tensor(" << narrow_src << ", ";
@@ -701,7 +705,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
 
   // CuTeDSL normalizes unsigned tensor elements to signed; reinterpret the
   // source as unsigned before a vector cast so widening zero-extends.
-  if (from_ty.is_uint()) {
+  if (unsigned_needs_zero_extend) {
     std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
     PrintIndent();
     stream << unsigned_src << " = tl.cast_tensor(" << cast_src;
