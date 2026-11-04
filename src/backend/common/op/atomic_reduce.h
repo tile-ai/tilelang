@@ -30,7 +30,8 @@ using namespace ffi;
 
 namespace atomic_reduce {
 
-inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
+inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op,
+                         arith::Analyzer *analyzer) {
   Optional<BufferRegion> src_region;
   if (!op.src_value.defined()) {
     src_region = BufferRegion(op.src, op.src_range);
@@ -69,6 +70,23 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
 
   Stmt body = tvm::tirx::Evaluate(atomic_call);
 
+  // A single-element destination consumes no real parallel dimension.  The
+  // dummy extent-1 loop would make the partitioner rewrite the source index
+  // to zero, so a per-thread scalar value such as data[i] would silently
+  // reduce lane 0 only.  Emit the atomic directly in that case.
+  bool all_unit = true;
+  for (const Range &range : op.dst_range) {
+    all_unit &= is_one(range->extent);
+  }
+  if (!op.src_value.defined()) {
+    for (const Range &range : op.src_range) {
+      all_unit &= is_one(range->extent);
+    }
+  }
+  if (all_unit) {
+    return body;
+  }
+
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
     if (i == 0) {
@@ -81,7 +99,7 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
-  return Downcast<For>(body);
+  return body;
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
@@ -114,7 +132,11 @@ struct AtomicReduce {
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
+    Stmt simt_stmt = atomic_reduce::MakeSIMTLoop(op, analyzer);
+    if (!simt_stmt.as<ForNode>()) {
+      return simt_stmt;
+    }
+    auto simt_loop = Downcast<For>(simt_stmt);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
     auto par_op = ParallelOp(fused_loop);
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
