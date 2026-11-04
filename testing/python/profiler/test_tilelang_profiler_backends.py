@@ -157,3 +157,22 @@ def test_profiler_event_metal_device(monkeypatch):
     assert instance.do_bench(backend="event", device=torch.device("mps"), input_tensors=[]) == 1.0
     assert calls[0]["backend"] == "event"
     assert calls[0]["device_idx"] == torch.device("mps")
+
+
+@pytest.mark.parametrize("container", [list, tuple])
+@pytest.mark.parametrize("missing_index", [0, 1])
+def test_assert_allclose_rejects_missing_kernel_output(container, missing_index):
+    expected = [torch.tensor([1.0]), torch.tensor([2.0])]
+    actual = expected.copy()
+    actual[missing_index] = None
+    instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: container(actual))
+
+    with pytest.raises(AssertionError, match="output.*None"):
+        instance.assert_allclose(lambda: container(expected), input_tensors=[])
+
+
+@pytest.mark.parametrize("kernel_output", [None, torch.tensor([2.0])])
+def test_assert_allclose_still_skips_optional_reference_output(kernel_output):
+    instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: [torch.tensor([1.0]), kernel_output])
+
+    instance.assert_allclose(lambda: [torch.tensor([1.0]), None], input_tensors=[])
