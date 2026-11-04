@@ -238,8 +238,10 @@ def _make_partial_warp_reduce_kernel():
                 for i, j in T.Parallel(1, 384):
                     x_frag[i, j] = x[i, j]
                 T.reduce_sum(x_frag, sum_frag, dim=1)
-                for i in T.Parallel(1):
-                    out[i] = sum_frag[i]
+                # Keep the read within the fragment's 48-thread owner set so
+                # the test reaches the non-power-of-two reduction check.
+                if T.get_thread_binding() == 0:
+                    out[0] = sum_frag[0]
 
         return partial_warp_reduce
 
