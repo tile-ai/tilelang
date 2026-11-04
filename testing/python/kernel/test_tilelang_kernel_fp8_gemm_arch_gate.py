@@ -71,19 +71,28 @@ def _compile_ptx(in_dtype, arch):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(("arch", "block_scaled"), [("sm_89", False), ("sm_120a", True)])
+@pytest.mark.parametrize(
+    ("arch", "block_scaled"),
+    [("sm_89", False), ("sm_120", False), ("sm_120a", True), ("sm_121a", True)],
+)
 @pytest.mark.parametrize(("in_dtype", "ptx_dtype"), [(T.float8_e4m3fn, "e4m3"), (T.float8_e5m2, "e5m2")])
 def test_fp8_gemm_fp32_accumulation_mma(in_dtype, ptx_dtype, arch, block_scaled):
     """SM120 runs an fp32-accumulating fp8 ``mma.sync`` at half the rate of the
     block-scaled MXF8F6F4 MMA, so there the MMA uses the block-scaled form with
-    unit scale factors. Other targets keep the plain fp8 ``mma.sync``."""
+    unit scale factors. Other targets, including the portable ``sm_120``, keep
+    the plain fp8 ``mma.sync``."""
     if arch.startswith("sm_120") and nvcc.get_cuda_version() < (12, 8):
-        pytest.skip("SM120a compilation requires CUDA 12.8+")
+        pytest.skip("SM120 compilation requires CUDA 12.8+")
+    if arch.startswith("sm_121") and nvcc.get_cuda_version() < (12, 9):
+        pytest.skip("SM121 compilation requires CUDA 12.9+")
     ptx = _compile_ptx(in_dtype, arch)
     block_scaled_mma = f"kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.{ptx_dtype}.{ptx_dtype}.f32.ue8m0"
     plain_mma = f"mma.sync.aligned.m16n8k32.row.col.f32.{ptx_dtype}.{ptx_dtype}.f32"
     assert (block_scaled_mma in ptx) == block_scaled
     assert (plain_mma in ptx) != block_scaled
+    if block_scaled:
+        # 0x7f7f7f7f: every ue8m0 scale byte encodes 2^0.
+        assert "2139062143" in ptx
 
 
 @tilelang.testing.requires_cuda
