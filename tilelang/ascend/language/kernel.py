@@ -220,8 +220,8 @@ def MixedKernel(
     if len(blocks) != 1:
         raise ValueError(f"T.MixedKernel() only supports 1-D block grid. Got {len(blocks)}-D: {blocks}")
 
-    if sids is not None and sids not in (1, 2):
-        raise ValueError(f"T.MixedKernel() sids must be 1 or 2, or None for automatic selection. Got {sids}")
+    if sids is not None and (type(sids) is not int or sids not in (1, 2)):
+        raise ValueError(f"T.MixedKernel() sids must be an integer 1 or 2, or None for automatic selection. Got {sids!r}")
 
     attrs: dict = {}
 

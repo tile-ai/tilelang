@@ -54,9 +54,10 @@ def Vector(vector: int | None = None) -> VectorFrame:
     ----------
     vector : int, optional
         Explicit AIV count (1 or 2), checked against the selected mixed
-        group. Omission inherits that count. MixedKernel uses its original
-        sids parameter (default 2). For ordinary Kernel, existing scheduling
-        and CodeGen determine the core type; a mixed kernel uses the device
+        group. Omission inherits that count. MixedKernel uses its sids parameter;
+        when omitted or None, it selects the device AIV:AIC ratio, falling back
+        to 2 when the device cannot be queried. For ordinary Kernel, existing
+        scheduling and CodeGen determine the core type; a mixed kernel uses the device
         ratio or offline 2, and explicit Vector counts must match it.
         Pure-kernel bindings retain the existing lowering behavior.
 
