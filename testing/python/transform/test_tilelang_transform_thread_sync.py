@@ -2194,8 +2194,10 @@ def test_let_bound_lane_dependent_guard_never_accepts_a_partial_barrier():
 
     try:
         mod = tilelang.transform.ThreadSync(("shared",))(tvm.IRModule({"main": func}))
-    except Exception:
-        # Rejecting the kernel outright is also acceptable.
+    except tvm.error.InternalError as err:
+        # Rejecting the kernel outright is an acceptable outcome; anything else
+        # must still fail the test.
+        assert "warp-uniform" in str(err), f"unexpected rejection: {err}"
         return
 
     guards = collect_nodes(mod["main"], tirx.IfThenElse)
