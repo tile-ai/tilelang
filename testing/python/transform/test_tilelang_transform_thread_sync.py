@@ -2101,5 +2101,107 @@ def test_full_sync_after_possibly_empty_thread_loop():
     _assert_stmt_order(lowered, shared_write, _sync_stmt(lowered, syncs[0]), output_write)
 
 
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "tx // 32 % 2 == 0",  # every other warp
+        "tx % 64 < 32",  # same set, different spelling
+        "tx // 32 % 2 == 1",  # the complementary warp set
+        "tx < 160",  # whole warps only (160 == 5 * 32)
+    ],
+    ids=["even_warps", "low_half", "odd_warps", "five_warps"],
+)
+def test_warp_index_guard_is_warp_uniform(guard):
+    """Guards that keep whole warps together must lower their partial barrier.
+
+    Each predicate below is constant inside a warp, so a barrier under it is
+    legal. Proving that must not rely on the SMT encoding of FloorDiv/FloorMod,
+    which does not relate the two thread ids on its own.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((192,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 192)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        condition = eval(guard, {"__builtins__": {}}, {"tx": tx})
+        if condition:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    mod = tilelang.transform.ThreadSync(("shared",))(tvm.IRModule({"main": func}))
+    lowered = mod["main"]
+    # There is exactly one guard here. The sync it needs must stay *inside*
+    # that branch: a full-block barrier hoisted above the guard would also
+    # satisfy "some sync exists" while no longer separating the hazard.
+    guards = collect_nodes(lowered, tirx.IfThenElse)
+    assert len(guards) == 1, f"expected one guard, got {len(guards)}"
+    syncs = _assert_syncs_inside(lowered, guards[0].then_case)
+
+
+def test_warp_straddling_guard_is_still_rejected():
+    """A guard that splits a warp must keep being rejected.
+
+    168 is not a multiple of the warp size, so warp 5 takes part with only half
+    of its threads; a partial barrier there would deadlock.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((192,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 192)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 168:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    with pytest.raises(Exception, match="warp-uniform"):
+        tilelang.transform.ThreadSync(("shared",))(tvm.IRModule({"main": func}))
+
+
+def test_let_bound_lane_dependent_guard_never_accepts_a_partial_barrier():
+    """A let-bound lane-dependent guard must not yield an in-branch barrier.
+
+    ``lane = tx % 32`` takes 32 different values inside one warp, so a partial
+    barrier under ``lane < 16`` would split a warp. The warp-index shortcut
+    rewrites the thread variable only, so a predicate reached through a bound
+    variable must not be mistaken for shared: the planner either hoists the
+    barrier or rejects the kernel. This pins that no lane-dependent let guard
+    starts lowering to a partial barrier inside the branch.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((192,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 192)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        lane = T.bind(tx % 32)
+        if lane < 16:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    try:
+        mod = tilelang.transform.ThreadSync(("shared",))(tvm.IRModule({"main": func}))
+    except Exception:
+        # Rejecting the kernel outright is also acceptable.
+        return
+
+    guards = collect_nodes(mod["main"], tirx.IfThenElse)
+    assert len(guards) == 1, f"expected one guard, got {len(guards)}"
+    assert not _storage_syncs(guards[0].then_case), "a lane-dependent let guard must not lower to a barrier inside its branch"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

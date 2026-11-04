@@ -924,6 +924,110 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     return analyzer.CanProve(agree);
   }
 
+  /*!
+   * \brief Prove that two threads of the same warp agree on \p condition by
+   *        rewriting the x thread id to ``warp_index * warp_size + lane``.
+   *
+   * A hardware warp is a contiguous run of ``threadIdx.x`` (the y/z dims have
+   * stride >= warp_size and therefore never split a warp), so two threads are
+   * in the same warp exactly when they share ``threadIdx.x / warp_size``, the
+   * *warp index*. Rewriting ``threadIdx.x`` as ``warp_index * warp_size +
+   * lane`` with a shared warp index and one free lane per instance describes
+   * exactly that relation.
+   *
+   * A predicate that reads the x id only through its warp index (e.g.
+   * ``tx // 32 % 2 == 0``, ``tx % 64 < 32``) then collapses to the same
+   * expression for both instances, which the solver below can prove; a
+   * predicate that really depends on the lane keeps differing and stays
+   * rejected.
+   *
+   * \return true only when the agreement is proved for arbitrary lanes.
+   */
+  bool CanProveAgreeWithSharedWarpIndex(const PrimExpr &condition,
+                                        const PrimExpr &warp_size,
+                                        DataType index_dtype) {
+    const auto *divisor = as_const_int(warp_size);
+    if (divisor == nullptr || *divisor <= 0 || *divisor != warp_size_) {
+      return false;
+    }
+
+    // Every dimension must be a whole number of warps, otherwise a warp can
+    // straddle a y/z coordinate and the warp index alone does not identify it.
+    IterVar x_thread;
+    bool found_x = false;
+    for (const auto &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1) {
+        continue;
+      }
+      const auto *ext = as_const_int(iv->dom->extent);
+      // A dimension of extent 1 can never split a warp; any other dimension
+      // must be a whole number of warps.
+      if (ext == nullptr || *ext <= 0 || (*ext != 1 && *ext % *divisor != 0)) {
+        return false;
+      }
+      if (iv->thread_tag == "threadIdx.x") {
+        x_thread = iv;
+        found_x = true;
+      }
+    }
+    if (!found_x) {
+      return false;
+    }
+    const Var &x_var = x_thread->var;
+    const auto *x_extent = as_const_int(x_thread->dom->extent);
+    if (x_extent == nullptr || *x_extent <= 0) {
+      return false;
+    }
+
+    Var warp_index("warp_index<T>", index_dtype);
+    Var lane1("lane1<T>", index_dtype);
+    Var lane2("lane2<T>", index_dtype);
+
+    auto rewrite_with = [&](const Var &lane) {
+      Map<Var, PrimExpr> mapping;
+      mapping.Set(x_var,
+                  Cast(x_var.dtype(),
+                       Cast(index_dtype, x_thread->dom->min) +
+                           warp_index * make_const(index_dtype, *divisor) +
+                           lane));
+      return Substitute(condition, mapping);
+    };
+
+    PrimExpr lhs = rewrite_with(lane1);
+    PrimExpr rhs = rewrite_with(lane2);
+
+    arith::Analyzer warp_analyzer;
+    for (const auto &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1) {
+        continue;
+      }
+      const auto *ext = as_const_int(iv->dom->extent);
+      if (ext != nullptr && *ext > 0) {
+        warp_analyzer.Bind(
+            iv->var, Range::FromMinExtent(make_const(iv->var.dtype(), 0),
+                                          make_const(iv->var.dtype(), *ext)));
+      }
+    }
+    for (const Var &lane : {lane1, lane2}) {
+      warp_analyzer.Bind(
+          lane, Range::FromMinExtent(make_const(index_dtype, 0),
+                                     make_const(index_dtype, *divisor)));
+    }
+    warp_analyzer.Bind(
+        warp_index,
+        Range::FromMinExtent(make_const(index_dtype, 0),
+                             make_const(index_dtype, *x_extent / *divisor)));
+
+    // ``warp_index * warp_size + lane`` with ``0 <= lane < warp_size`` folds
+    // back to ``warp_index`` under a divisor of warp_size; Simplify can now use
+    // the ranges bound above.
+    lhs = warp_analyzer.Simplify(lhs);
+    rhs = warp_analyzer.Simplify(rhs);
+    PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
+                              tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
+    return warp_analyzer.CanProve(agree);
+  }
+
   /*! \brief Return whether every hardware warp agrees on \p condition. */
   bool IsWarpUniformCondition(const PrimExpr &condition) {
     Map<Var, PrimExpr> sub1, sub2;
@@ -957,7 +1061,20 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         FloorDiv(linear1, warp_size) == FloorDiv(linear2, warp_size);
     PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
                               tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
-    return analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree));
+    if (analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree))) {
+      return true;
+    }
+
+    // The solver cannot always relate ``linear / warp_size`` across the two
+    // thread ids, so guards that select whole warps -- ``tx // 32 % 2 == 0``,
+    // ``tx % 64 < 32`` -- are rejected even though every thread of a warp
+    // agrees on them. Two threads of one warp share their warp index, and
+    // ``linear == warp_index * warp_size + lane`` holds for every thread, so
+    // rewrite both ids to that shape with a *shared* warp index and one free
+    // lane per instance. A predicate that reads the ids only through the warp
+    // index then becomes the same expression on both sides and the agreement
+    // is provable; a predicate that really depends on the lane stays rejected.
+    return CanProveAgreeWithSharedWarpIndex(condition, warp_size, index_dtype);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
