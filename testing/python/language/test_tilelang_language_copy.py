@@ -1,3 +1,4 @@
+import pytest
 import tilelang
 import tilelang.language as T
 import torch
@@ -451,6 +452,178 @@ def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
         artifact = tilelang.lower(main, target=target)
 
     assert "tl::ptx_stmatrix_m16n8_x1_trans" in artifact.kernel_source
+
+
+# ---------------------------------------------------------------------------
+# Destination regions must fit their buffer
+#
+# `T.fill`/`T.clear` reject a statically known region whose `min + extent`
+# exceeds the buffer (#3352). `T.copy` accepted the same region and lowered it
+# to an out-of-bounds store, or silently clipped it and dropped elements.
+# Only the *destination* is checked: reading past a global tensor is a
+# supported padding idiom backed by `T.annotate_safe_value`, and source and
+# destination shapes are deliberately allowed to differ.
+# ---------------------------------------------------------------------------
+
+
+def _copy_into_shared(dst_region, src_extent=8):
+    @T.prim_func
+    def main(A: T.Tensor((32,), "float32"), Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            As = T.alloc_shared((8,), "float32")
+            T.copy(A[0:src_extent], As[dst_region])
+            T.copy(As, Out)
+
+    return main
+
+
+@pytest.mark.parametrize(
+    "dst_region, src_extent",
+    [(slice(0, 32), 32), (slice(6, 18), 12)],
+    ids=["extent_exceeds_shape", "min_plus_extent_exceeds_shape"],
+)
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_out_of_bounds_destination(dst_region, src_extent):
+    """An out-of-bounds destination is a frontend error, not a silent clip."""
+    # The source extent matches so the rejection comes from the destination
+    # bound check, not from a shape mismatch further down the pipeline.
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(_copy_into_shared(dst_region, src_extent))
+
+
+@pytest.mark.parametrize(
+    "dst_region",
+    [slice(0, 8), slice(4, 8), slice(1, 8)],
+    ids=["fills_buffer_exactly", "ends_at_shape", "fills_to_the_end"],
+)
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_accepts_region_ending_at_shape(dst_region):
+    """A region ending exactly at `shape` is in bounds and must stay accepted."""
+    # Ends one past the end would be rejected, so this pins the boundary the
+    # `min <= shape - extent` comparison draws.
+    tilelang.compile(_copy_into_shared(dst_region, dst_region.stop - dst_region.start))
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_one_past_the_end():
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(_copy_into_shared(slice(1, 9), 8))
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_oversized_extent_with_symbolic_start():
+    """A constant extent wider than the buffer is rejected even when the start
+    is symbolic: the extent bound does not depend on the start."""
+
+    @T.prim_func
+    def main(A: T.Tensor((32,), "float32"), Out: T.Tensor((8,), "float32")):
+        with T.Kernel(2, threads=8) as bx:
+            As = T.alloc_shared((8,), "float32")
+            T.copy(A[0:9], As[bx : bx + 9])
+            T.copy(As, Out)
+
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(main)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_provably_out_of_bounds_symbolic_shape():
+    @T.prim_func
+    def main(N: T.int32, A: T.Tensor((32,), "float32"), Out: T.Tensor((32,), "float32")):
+        with T.Kernel(1, threads=8):
+            As = T.alloc_shared((N,), "float32")
+            T.copy(A[0:8], As[-2:6])
+            T.copy(As[0:8], Out[0:8])
+
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(main)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_symbolic_start_at_shape():
+    @T.prim_func
+    def main(N: T.int32, A: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=8):
+            As = T.alloc_shared((N,), "float32")
+            T.copy(A[0:1], As[N : N + 1])
+
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(main)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dst_region", [slice(-4, None), slice(-4, 8), slice(-4, -2), slice(-4, 6)])
+def test_tilelang_copy_accepts_negative_destination_slices(dst_region):
+    length = 2 if dst_region.stop in (-2, 6) else 4
+
+    @T.prim_func
+    def main(A: T.Tensor((4,), "float32"), Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            As = T.alloc_shared((8,), "float32")
+            T.clear(As)
+            T.copy(A[0:length], As[dst_region])
+            T.copy(As, Out)
+
+    kernel = tilelang.compile(main)
+    a = torch.arange(1, 5, dtype=torch.float32, device="cuda")
+    out = torch.empty(8, dtype=torch.float32, device="cuda")
+    kernel(a, out)
+    expected = torch.zeros_like(out)
+    expected[4 : 4 + length] = a[:length]
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, expected)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_rejects_negative_start_with_out_of_bounds_end():
+    with pytest.raises(ValueError, match="T.copy destination region"):
+        tilelang.compile(_copy_into_shared(slice(-4, 9), 5))
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_accepts_wrapped_destination_with_symbolic_shape():
+    @T.prim_func
+    def main(N: T.int32, A: T.Tensor((32,), "float32"), Out: T.Tensor((6,), "float32")):
+        with T.Kernel(1, threads=8):
+            As = T.alloc_shared((N,), "float32")
+            T.copy(A[0:6], As[-8:-2])
+            T.copy(As[0:6], Out[0:6])
+
+    kernel = tilelang.compile(main)
+    a = torch.arange(32, dtype=torch.float32, device="cuda")
+    out = torch.empty((6,), dtype=torch.float32, device="cuda")
+    kernel(8, a, out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, a[:6])
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_accepts_unknown_symbolic_destination_bounds():
+    @T.prim_func
+    def main(N: T.int32, A: T.Tensor((32,), "float32"), Out: T.Tensor((32,), "float32")):
+        with T.Kernel(2, threads=8) as bx:
+            As = T.alloc_shared((N,), "float32")
+            T.copy(A[0:8], As[bx : bx + 8])
+            T.copy(As[0:8], Out[0:8])
+
+    tilelang.compile(main)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_in_bounds_destination_still_works():
+    @tilelang.jit(out_idx=[1])
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((32,), "float32"), Out: T.Tensor((8,), "float32")):
+            with T.Kernel(1, threads=8):
+                As = T.alloc_shared((8,), "float32")
+                T.copy(A[0:8], As[0:8])
+                T.copy(As, Out)
+
+        return main
+
+    a = torch.arange(32, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kernel()(a), a[:8])
 
 
 if __name__ == "__main__":

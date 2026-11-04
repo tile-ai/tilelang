@@ -293,6 +293,83 @@ void RegisterIm2ColImpl(Im2ColImpl impl) {
   Im2ColImplRegistry().push_back(impl);
 }
 
+namespace {
+
+/*!
+ * \brief Reject a statically known region that does not fit its buffer.
+ *
+ * A region is in bounds when ``0 <= min`` and ``min + extent <= shape`` for
+ * every dimension. `T.copy` intentionally accepts a source and a destination
+ * with different shapes (the copy covers their overlap), so this only checks
+ * each region against its *own* buffer -- it never compares the two shapes.
+ *
+ * Only statically known terms are checked, and each check needs the fewest
+ * terms possible: ``extent <= shape`` needs the shape and the extent, so a
+ * constant extent wider than the buffer is rejected even when the region start
+ * is symbolic. ``min >= 0`` and ``min <= shape - extent`` additionally need a
+ * static start. For a symbolic shape, an end bound that the arithmetic
+ * analyzer can prove out of bounds is also rejected; unknowns remain for
+ * lowering.
+ *
+ * The end is compared as ``min <= shape - extent``, which avoids forming
+ * ``min + extent`` so a large constant cannot overflow int64. A region that
+ * ends exactly at ``shape`` therefore stays legal.
+ */
+void CheckRegionWithinBuffer(const Array<Range> &region, const Buffer &buffer,
+                             const char *which) {
+  ICHECK(region.size() == buffer->shape.size())
+      << "T.copy " << which << " region rank " << region.size()
+      << " does not match buffer rank " << buffer->shape.size();
+  for (size_t i = 0; i < region.size(); ++i) {
+    const auto *shape_imm = buffer->shape[i].as<IntImmNode>();
+    const auto *extent_imm = region[i]->extent.as<IntImmNode>();
+    if (shape_imm == nullptr && extent_imm != nullptr &&
+        extent_imm->value > 0) {
+      // Negative indices may already have been normalized to shape + index.
+      // Reject only when the resulting end is provably beyond the shape.
+      arith::Analyzer analyzer;
+      CHECK(!analyzer.CanProve(region[i]->min >
+                               buffer->shape[i] - region[i]->extent),
+            ValueError)
+          << "T.copy " << which << " region[" << i << "] provably exceeds "
+          << buffer->name << "[" << i << "]";
+    }
+    // The extent bound needs only the shape and the extent. Decide it before
+    // looking at the region start, so a constant extent wider than the buffer
+    // is still rejected when the start is symbolic.
+    if (shape_imm == nullptr || extent_imm == nullptr) {
+      // Symbolic shape or extent: cannot decide statically, leave it to
+      // lowering.
+      continue;
+    }
+    int64_t shape = shape_imm->value;
+    int64_t extent = extent_imm->value;
+    CHECK(extent >= 0, ValueError) << "T.copy " << which << " region[" << i
+                                   << "] has negative extent " << extent;
+    CHECK(extent <= shape, ValueError)
+        << "T.copy " << which << " region[" << i << "] = " << extent
+        << " elements exceeds " << buffer->name << "[" << i << "] which has "
+        << shape << " elements";
+    // The end bound additionally needs a static start; a symbolic start is
+    // left to lowering.
+    const auto *min_imm = region[i]->min.as<IntImmNode>();
+    if (min_imm == nullptr) {
+      continue;
+    }
+    int64_t min = min_imm->value;
+    CHECK(min >= 0, ValueError)
+        << "T.copy " << which << " region[" << i << "] starts at " << min
+        << " in " << buffer->name << ", which has " << shape << " elements";
+    // extent <= shape holds here, so shape - extent cannot underflow.
+    CHECK(min <= shape - extent, ValueError)
+        << "T.copy " << which << " region[" << i << "] = [" << min << ", "
+        << min << " + " << extent << ") exceeds " << buffer->name << "[" << i
+        << "] which has " << shape << " elements";
+  }
+}
+
+} // namespace
+
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing common SIMT hints and backend-specific metadata.
@@ -305,6 +382,17 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
+
+  // The destination is the side that must fit: an out-of-bounds store corrupts
+  // whatever the allocator placed next to the buffer. The source is
+  // deliberately *not* checked -- reading past a global tensor is a supported
+  // padding idiom, where the out-of-range elements are supplied by
+  // `T.annotate_safe_value` (see
+  // test_tilelang_copy_oob_safe_value_lexical_scope). Source and destination
+  // shapes are also not compared: `T.copy(A[:, :2], B[:, :3])` copies the
+  // overlap and is supported.
+  CheckRegionWithinBuffer(node->dst_range, node->dst, "destination");
+
   // Copy annotations from the Call node
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {
