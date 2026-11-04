@@ -79,5 +79,36 @@ def test_cutedsl_fp4_cast_values_are_fp4():
     assert not mismatches, f"first FP4 mismatches (index, got, want): {mismatches[:8]}"
 
 
+@tilelang.jit(target="cutedsl")
+def fp4_scalar_reinterpret_kernel(N=256, threads=64):
+    """Reinterpret a scalar float4_e2m1fn as the byte holding its nibble."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((N,), "float32")):
+        out = T.empty((N,), "uint8")
+        with T.Kernel(1, threads=threads):
+            for i in T.Parallel(N):
+                out[i] = T.reinterpret(T.cast(A[i], "float4_e2m1fn"), "uint8")
+        return out
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_cutedsl_fp4_scalar_reinterpret_yields_nibble():
+    """Reinterpreting a scalar FP4 value as uint8 must yield its 4-bit code.
+
+    LLVM bitcast cannot change the element width (4 -> 8 bits); the codegen has
+    to widen through the integer representation, as the CUDA backend does.
+    """
+    _require_cutedsl()
+
+    values = torch.linspace(-6.0, 6.0, 256, dtype=torch.float32, device="cuda")
+    out = fp4_scalar_reinterpret_kernel()(values)
+
+    expected = [_quantize_fp4(value) for value in values.cpu().tolist()]
+    assert out.cpu().tolist() == expected
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

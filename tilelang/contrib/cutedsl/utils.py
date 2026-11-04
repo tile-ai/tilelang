@@ -42,6 +42,7 @@ __all__ = [
     "Float4E2M1FN_unpack",
     "type_map",
     "bitcast",
+    "f4e2m1_to_uint8",
     "recast_ptr",
     "cast_tensor",
     "as_tensor_ssa",
@@ -213,6 +214,19 @@ def bitcast(value, target_dtype):
         return tgt_wrapper(result)
 
     return bitcast_impl(value)
+
+
+@dsl_user_op
+def f4e2m1_to_uint8(value, *, loc=None, ip=None):
+    """Reinterpret a scalar Float4E2M1FN value as its zero-extended 4-bit code.
+
+    LLVM bitcast cannot change the element width, so go through the integer
+    representation of the FP4 value (the same unrealized cast the tensor
+    helpers use) and zero-extend it into a byte.
+    """
+    src = value.ir_value(loc=loc, ip=ip)
+    code = builtin.unrealized_conversion_cast([Int4.mlir_type], [src], loc=loc, ip=ip)
+    return Uint8(arith.extui(Int8.mlir_type, code, loc=loc, ip=ip))
 
 
 @dsl_user_op

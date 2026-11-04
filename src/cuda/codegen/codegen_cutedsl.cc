@@ -246,6 +246,10 @@ std::string CodeGenTileLangCuTeDSL::CanonicalizeFastmathFunctionName_(
       {"sqrtf", "tl.sqrt"},
       {"tanh", "tl.tanh"},
       {"tanhf", "tl.tanh"},
+      {"ceil", "tl.ceil"},
+      {"ceilf", "tl.ceil"},
+      {"floor", "tl.floor"},
+      {"floorf", "tl.floor"},
       {"rsqrt", "tl.rsqrt"},
       {"rsqrtf", "tl.rsqrt"},
       {"fabs", "tl.fabsf"},
@@ -1852,6 +1856,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::reinterpret())) {
     DataType tgt_dtype = op->dtype;
     DataType src_dtype = op->args[0]->dtype;
+    // A Float4E2M1FN scalar is 4 bits; reinterpreting it as uint8 zero-extends
+    // the nibble, matching the packed-FP4 handling in the CUDA codegen.
+    if (src_dtype.is_scalar() && tgt_dtype.is_scalar() &&
+        src_dtype.is_float4_e2m1fn() && tgt_dtype.is_uint() &&
+        tgt_dtype.bits() == 8) {
+      os << "tl.f4e2m1_to_uint8(" << PrintExpr_(op->args[0]) << ")";
+      return;
+    }
     ICHECK_EQ(tgt_dtype.lanes() * tgt_dtype.bits(),
               src_dtype.lanes() * src_dtype.bits())
         << "reinterpret expects source and target to have the same number of "

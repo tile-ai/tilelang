@@ -29,6 +29,8 @@ __all__ = [
     "__habs",
     "__float2half_rz",
     "tanh",
+    "ceil",
+    "floor",
 ]
 
 import cutlass
@@ -360,3 +362,11 @@ def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32
 
 def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     return cute_math.tanh(x, fastmath=fastmath)
+
+
+def ceil(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
+    return _tl_math_op(cute_math.ceil, fastmath, x, **kwargs)
+
+
+def floor(x: Union[TensorSSA, Numeric], fastmath: bool = False, **kwargs) -> Union[TensorSSA, Numeric]:
+    return _tl_math_op(cute_math.floor, fastmath, x, **kwargs)
