@@ -32,6 +32,13 @@ def test_tensorcore_current_target(monkeypatch):
         assert nvcc.have_tensorcore()
 
 
+def test_tensorcore_current_target_precedes_local_device(monkeypatch):
+    monkeypatch.setattr(tvm, "cuda", lambda _: SimpleNamespace(exist=True, compute_version="6.1"))
+
+    with tvm.target.Target({"kind": "cuda", "arch": "sm_80"}):
+        assert nvcc.have_tensorcore()
+
+
 @pytest.mark.parametrize(("compute_version", "expected"), [("6.1", False), ("7.0", True)])
 def test_tensorcore_explicit_compute_version(monkeypatch, compute_version, expected):
     def unexpected_device_query(_):
