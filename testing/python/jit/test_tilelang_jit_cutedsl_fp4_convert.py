@@ -95,6 +95,7 @@ def fp4_scalar_reinterpret_kernel(N=256, threads=64):
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_cutedsl_fp4_scalar_reinterpret_yields_nibble():
     """Reinterpreting a scalar FP4 value as uint8 must yield its 4-bit code.
 
