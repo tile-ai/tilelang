@@ -5,13 +5,14 @@ from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 @tilelang.jit(
     out_idx=[4],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
 )
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, softmax_scale):
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, softmax_scale, threads=256):
     scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = T.float16
     accum_dtype = T.float32
@@ -30,7 +31,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         glse = T.alloc_global([batch, heads, num_split], dtype)
         Output_partial = T.alloc_global([batch, heads, num_split, dim], dtype)
         # flash_attn_split
-        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (bid, hid, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -125,7 +126,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
         K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
         Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
+        with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=threads) as (hid, bid):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -215,6 +216,24 @@ def ref_program(q, q_pe, kv, k_pe):
     return out
 
 
+def get_decode_configs(heads, kv_heads):
+    # The 64x64 tile needs ~226 KiB of dynamic shared memory; sm_86/89/120 cap
+    # per-block dynamic shared memory at about 99 KiB. The smaller tile also
+    # needs fewer warps for T.gemm to partition it.
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
+        block_n, cap, threads = 32, 16, 128
+    else:
+        block_n, cap, threads = 64, 64, 256
+    # `T.gemm` maps whole 16-row tiles to warps, and the kernel launches
+    # `heads // block_H` head blocks, so block_H must be a multiple of 16 that
+    # divides the query heads per kv head; otherwise some heads are never written.
+    group = heads // kv_heads
+    block_h = next((d for d in range(min(cap, group) // 16 * 16, 0, -16) if group % d == 0), 0)
+    assert block_h, f"{group} heads per kv head admit no multiple-of-16 tile"
+    return block_n, block_h, threads
+
+
 def main(
     batch=1,
     heads=128,
@@ -226,12 +245,11 @@ def main(
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
-    BLOCK_N = 64
-    BLOCK_H = min(64, heads // kv_heads)
+    BLOCK_N, BLOCK_H, threads = get_decode_configs(heads, kv_heads)
     num_split = 1
     softmax_scale = (dim + pe_dim) ** -0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale, threads=threads)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     latency = profiler.do_bench(warmup=500)
@@ -247,12 +265,11 @@ def run_regression_perf(
     dim=512,
     pe_dim=64,
 ):
-    BLOCK_N = 64
-    BLOCK_H = min(64, heads // kv_heads)
+    BLOCK_N, BLOCK_H, threads = get_decode_configs(heads, kv_heads)
     num_split = 1
     softmax_scale = (dim + pe_dim) ** -0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale)
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale, threads=threads)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     return profiler.do_bench(backend="cupti")
