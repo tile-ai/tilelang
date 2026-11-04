@@ -228,10 +228,16 @@ class Profiler:
         # Used to check no race condition inside the kernel
         ins = self._get_inputs()
         ref_outs = self.func(*ins)
+        if isinstance(ref_outs, torch.Tensor):
+            ref_outs = [ref_outs]
 
         for _ in range(repeat):
             lib_outs = self.func(*ins)
-            for lhs, rhs in zip(lib_outs, ref_outs):
+            if isinstance(lib_outs, torch.Tensor):
+                lib_outs = [lib_outs]
+            assert len(lib_outs) == len(ref_outs), "Number of kernel outputs is not consistent"
+            for output_idx, (lhs, rhs) in enumerate(zip(lib_outs, ref_outs)):
+                assert lhs.shape == rhs.shape, f"Shape of kernel output {output_idx} is not consistent"
                 assert torch.allclose(lhs, rhs), [
                     "result is not consistent",
                     lhs,
