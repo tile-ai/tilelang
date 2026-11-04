@@ -583,6 +583,20 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
   }
+  bool has_symbolic_extent = false;
+  for (const Range &range : op.src_range) {
+    has_symbolic_extent |= as_const_int(range->extent) == nullptr;
+  }
+  for (const Range &range : op.dst_range) {
+    has_symbolic_extent |= as_const_int(range->extent) == nullptr;
+  }
+  if (has_symbolic_extent) {
+    oss << "T.tma_copy() requires a constant tile extent for the descriptor "
+           "path, but the copy has a symbolic extent; the 1-D bulk path is "
+           "unavailable too. Got src="
+        << op.src->name << ", dst=" << op.dst->name;
+    return oss.str();
+  }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
       << op.src->name << ", dst=" << op.dst->name;
