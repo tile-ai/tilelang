@@ -2216,30 +2216,29 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
     auto requested = aiv_group.vector_count;
     if (requested.has_value()) {
       int count = requested.value();
-      if (count == 2) {
-        // A native Vector launch only exposes sid 0. Keep the existing PTO
-        // mixed launch for an explicit two-AIV group, with one Vector section.
-        class VectorBody : public tirx::StmtMutator {
-          Stmt VisitStmt_(const SBlockNode *op) final {
-            auto block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-            if (block->name_hint == "VECTOR")
-              block.CopyOnWrite()->name_hint = "vector_body";
-            return block;
-          }
-        };
-        Map<String, ObjectRef> annotations;
-        annotations.Set("vector_count", Integer(count));
-        annotations.Set("tl.resolved_aiv_count", Integer(count));
-        Stmt vector_body = SBlock({}, {}, {}, "VECTOR",
-            VectorBody()(func->body), std::nullopt, {}, {}, annotations);
-        // PTOAS classifies a single Vector section as a native Vector kernel,
-        // which exposes only sid 0. An empty Cube section retains the existing
-        // mixed launch geometry without adding any Cube computation.
-        func.CopyOnWrite()->body = SeqStmt({
-            SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
-            vector_body});
-        current_function_is_mixed_ = true;
-      }
+      // Explicit Vector groups use mixed launch classification, as in AscendC.
+      // A one-AIV group uses the existing mixed-section AIV0 guard.
+      class VectorBody : public tirx::StmtMutator {
+        Stmt VisitStmt_(const SBlockNode *op) final {
+          auto block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
+          if (block->name_hint == "VECTOR")
+            block.CopyOnWrite()->name_hint = "vector_body";
+          return block;
+        }
+      };
+      Map<String, ObjectRef> annotations;
+      annotations.Set("vector_count", Integer(count));
+      annotations.Set("tl.resolved_aiv_count", Integer(count));
+      Stmt vector_body = SBlock({}, {}, {}, "VECTOR",
+          VectorBody()(func->body), std::nullopt, {}, {}, annotations);
+      // PTOAS classifies a single Vector section as a native Vector kernel.
+      // An empty Cube section retains mixed launch geometry without adding
+      // any Cube computation.
+      func.CopyOnWrite()->body = SeqStmt({
+          SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
+          vector_body});
+      mixed_aiv_count = count;
+      current_function_is_mixed_ = true;
     }
   }
   if (current_function_is_mixed_) {
