@@ -1242,6 +1242,8 @@ def check_consumer_accesses(func, buffer_name, destination, overwrite=False):
     violations = ordering_violations(producer, consumer, reuse)
     if violations:
         pytest.fail(str(violations))
+    if "read" not in consumer:
+        pytest.fail("consumer read was lost from the transformed IR")
     if overwrite and "overwrite" not in consumer:
         pytest.fail("consumer overwrite was lost from the transformed IR")
 
