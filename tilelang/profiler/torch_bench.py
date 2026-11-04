@@ -21,8 +21,10 @@ class suppress_stdout_stderr:
     """
 
     def __enter__(self):
-        sys.stdout.flush()
-        sys.stderr.flush()
+        for stream in (sys.stdout, sys.stderr):
+            flush = getattr(stream, "flush", None)
+            if callable(flush):
+                flush()
         with ExitStack() as stack:
             null_stream = stack.enter_context(open(os.devnull, "w"))
             # Native libraries write to descriptors 1 and 2 even when Python's
