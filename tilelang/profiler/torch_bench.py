@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout, suppress
 
 import torch
 
@@ -24,7 +24,9 @@ class suppress_stdout_stderr:
         for stream in (sys.stdout, sys.stderr):
             flush = getattr(stream, "flush", None)
             if callable(flush):
-                flush()
+                # A broken output sink must not prevent the benchmark from running.
+                with suppress(OSError):
+                    flush()
         with ExitStack() as stack:
             null_stream = stack.enter_context(open(os.devnull, "w"))
             # Native libraries write to descriptors 1 and 2 even when Python's
