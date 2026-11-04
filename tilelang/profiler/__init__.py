@@ -230,6 +230,7 @@ class Profiler:
         ref_outs = self.func(*ins)
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
+        ref_outs = [out.clone() for out in ref_outs]
 
         for _ in range(repeat):
             lib_outs = self.func(*ins)
