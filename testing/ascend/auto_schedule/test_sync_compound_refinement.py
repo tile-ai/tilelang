@@ -225,7 +225,7 @@ def _strided_store_with_assumption(explicit):
     return main
 
 
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 @pytest.mark.parametrize("explicit", [False, True], ids=["implicit-task", "explicit-task"])
 def test_full_lowering_preserves_assumption_diagnostic_guards(target, explicit):
     snapshots = {}
@@ -268,7 +268,7 @@ def _strided_store_with_phase_barriers():
     return main
 
 
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_full_lowering_preserves_strided_stores_with_phase_barriers(target):
     snapshots = {}
 
