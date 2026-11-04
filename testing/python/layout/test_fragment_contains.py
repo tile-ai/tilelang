@@ -9,6 +9,7 @@ import sys
 
 import pytest
 import tilelang
+import tvm_ffi
 from tilelang import tvm
 from tilelang.env import TL_LIBS
 from tvm_ffi import libinfo as ffi_libinfo
@@ -63,6 +64,15 @@ def replicated(count, *, stride=1, slot=0):
     )
 
 
+def replicated_pair(count, first, second):
+    return tilelang.Fragment(
+        (1,),
+        forward_thread_fn=lambda index, replica: replica,
+        forward_index_fn=lambda index: tvm_ffi.convert([first, second]),
+        replicate=count,
+    )
+
+
 def test_fully_replicated_requires_thread_coverage(prove_contains):
     assert not prove_contains(replicated(128), replicated(96), 0, 0, 0, 0, False)
 
@@ -78,6 +88,8 @@ def test_fully_replicated_checks_physical_slots_when_requested(prove_contains):
     assert prove_contains(small, large, 0, 0, 0, 0, False)
     assert not prove_contains(small, large, 0, 0, 0, 0, True)
     assert prove_contains(small, replicated(128, slot=0), 0, 0, 0, 0, True)
+    assert not prove_contains(replicated_pair(128, 0, 1), replicated_pair(128, 0, 2), 0, 0, 0, 0, True)
+    assert prove_contains(replicated_pair(128, 0, 1), replicated_pair(128, 0, 1), 0, 0, 0, 0, True)
 
 
 @pytest.mark.parametrize("count,expected", [(48, True), (64, False)])
