@@ -16,9 +16,10 @@ namespace ascend {
 constexpr const char *kDefaultAivCount = "pragma_aiv_default_count";
 
 inline std::optional<int> ReadAivCount(const tirx::SBlockNode *block,
-                                      const char *key) {
+                                       const char *key) {
   auto value = block->annotations.Get(key);
-  if (!value.has_value()) return std::nullopt;
+  if (!value.has_value())
+    return std::nullopt;
   // Annotation values may be an FFI integer or an existing PrimExpr.
   PrimExpr expression = value.value().cast<PrimExpr>();
   const auto *count = expression.as<IntImmNode>();
@@ -40,7 +41,8 @@ inline int ResolveAivCount(std::optional<int> requested = std::nullopt) {
     int64_t ratio = (*query)().cast<int64_t>();
     ICHECK(ratio == 0 || ratio == 1 || ratio == 2)
         << "Internal device AIV capability must be 0 (unknown), 1 or 2";
-    if (ratio != 0) limit = static_cast<int>(ratio);
+    if (ratio != 0)
+      limit = static_cast<int>(ratio);
   }
   // Explicit kernel request, then current device ratio, then offline default.
   int count = requested.value_or(limit.value_or(2));
@@ -89,9 +91,11 @@ struct AivGroupInfo {
 private:
   static void Merge(std::optional<int> value, std::optional<int> *selected,
                     const char *message) {
-    if (!value.has_value()) return;
+    if (!value.has_value())
+      return;
     ICHECK(!selected->has_value() || selected->value() == value.value())
-        << message << ": " << selected->value_or(-1) << " versus " << value.value();
+        << message << ": " << selected->value_or(-1) << " versus "
+        << value.value();
     *selected = value;
   }
 };
@@ -103,13 +107,16 @@ public:
   AivDomainNormalizer(int count, ffi::Optional<tirx::Var> sid = std::nullopt,
                       bool unify_sid = true)
       : count_(count), sid_(sid), unify_sid_(unify_sid) {}
+
 private:
   tirx::Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
     const auto *iv = op->node.as<tirx::IterVarNode>();
-    if (op->attr_key != tirx::attr::thread_extent || !iv || iv->thread_tag != "cthread")
+    if (op->attr_key != tirx::attr::thread_extent || !iv ||
+        iv->thread_tag != "cthread")
       return StmtMutator::VisitStmt_(op);
     if (sid_.has_value() && unify_sid_) {
-      if (iv->var.same_as(sid_.value())) return VisitStmt(op->body);
+      if (iv->var.same_as(sid_.value()))
+        return VisitStmt(op->body);
       ffi::Map<tirx::Var, PrimExpr> replacements;
       replacements.Set(iv->var, sid_.value());
       return VisitStmt(tirx::Substitute(op->body, replacements));
@@ -122,17 +129,21 @@ private:
         iv->dom.defined() && tirx::is_zero(iv->dom->min) &&
         tirx::is_const_int(iv->dom->extent, count_))
       return ffi::GetRef<tirx::Stmt>(op);
-    tirx::IterVar thread(Range(0, count_), iv->var, iv->iter_type, iv->thread_tag);
-    return tirx::AttrStmt(thread, op->attr_key, Integer(count_), body, op->span);
+    tirx::IterVar thread(Range(0, count_), iv->var, iv->iter_type,
+                         iv->thread_tag);
+    return tirx::AttrStmt(thread, op->attr_key, Integer(count_), body,
+                          op->span);
   }
   tirx::Stmt VisitStmt_(const tirx::SBlockNode *op) final {
-    if (op->name_hint != "VECTOR") return StmtMutator::VisitStmt_(op);
+    if (op->name_hint != "VECTOR")
+      return StmtMutator::VisitStmt_(op);
     auto requested = ReadAivCount(op, "vector_count");
     ICHECK(!requested.has_value() || requested.value() == count_)
         << "Conflicting AIV group settings: explicit T.Vector count "
         << "does not match resolved kernel count " << count_;
     auto block = Downcast<tirx::SBlock>(StmtMutator::VisitStmt_(op));
-    if (requested == count_ && ReadAivCount(op, "tl.resolved_aiv_count") == count_)
+    if (requested == count_ &&
+        ReadAivCount(op, "tl.resolved_aiv_count") == count_)
       return block;
     auto *writer = block.CopyOnWrite();
     writer->annotations.Set("vector_count", Integer(count_));

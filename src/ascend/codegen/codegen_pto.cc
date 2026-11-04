@@ -2208,9 +2208,8 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
   tl::ascend::AivGroupInfo aiv_group;
-  tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
-    aiv_group.Observe(node);
-  });
+  tirx::PostOrderVisit(func->body,
+                       [&](const ObjectRef &node) { aiv_group.Observe(node); });
   int mixed_aiv_count = current_function_is_mixed_ ? aiv_group.MixedCount() : 2;
   if (!current_function_is_cube_) {
     auto requested = aiv_group.vector_count;
@@ -2229,21 +2228,22 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       Map<String, ObjectRef> annotations;
       annotations.Set("vector_count", Integer(count));
       annotations.Set("tl.resolved_aiv_count", Integer(count));
-      Stmt vector_body = SBlock({}, {}, {}, "VECTOR",
-          VectorBody()(func->body), std::nullopt, {}, {}, annotations);
+      Stmt vector_body = SBlock({}, {}, {}, "VECTOR", VectorBody()(func->body),
+                                std::nullopt, {}, {}, annotations);
       // PTOAS classifies a single Vector section as a native Vector kernel.
       // An empty Cube section retains mixed launch geometry without adding
       // any Cube computation.
-      func.CopyOnWrite()->body = SeqStmt({
-          SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
-          vector_body});
+      func.CopyOnWrite()->body = SeqStmt(
+          {SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
+           vector_body});
       mixed_aiv_count = count;
       current_function_is_mixed_ = true;
     }
   }
   if (current_function_is_mixed_) {
     if (!aiv_group.resolved_count.has_value())
-      func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mixed_aiv_count, std::nullopt, false)(func->body);
+      func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(
+          mixed_aiv_count, std::nullopt, false)(func->body);
     if (mixed_aiv_count == 1) {
       tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
         if (const auto *call = node.as<CallNode>()) {

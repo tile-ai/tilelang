@@ -258,9 +258,10 @@ private:
       // Consume the early request/default. Keep the existing lazy fallback
       // only for callers that invoke RewriteDualCopy without ResolveAivGroup.
       auto count = op->annotations.Get("vector_count");
-      if (!count.has_value()) count = op->annotations.Get(ascend::kDefaultAivCount);
-      single_aiv_group_ = count.has_value() &&
-                          is_one(count.value().cast<PrimExpr>());
+      if (!count.has_value())
+        count = op->annotations.Get(ascend::kDefaultAivCount);
+      single_aiv_group_ =
+          count.has_value() && is_one(count.value().cast<PrimExpr>());
       plain_kernel_ = !count.has_value();
     }
     bool is_vector_block = op->name_hint == "VECTOR";
@@ -320,7 +321,9 @@ private:
         << copy->src.scope() << " -> " << copy->dst.scope()
         << ". Operation: " << call;
 
-    TVM_FFI_CHECK(!(single_aiv_group_ || (plain_kernel_ && ascend::ResolveAivCount() == 1)), ValueError)
+    TVM_FFI_CHECK(!(single_aiv_group_ ||
+                    (plain_kernel_ && ascend::ResolveAivCount() == 1)),
+                  ValueError)
         << "dual_copy split requires a 1:2 AIC:AIV group; resolved kernel "
            "aiv=1. Use ordinary per-AIV copy with appropriate regions, and "
            "L0C->GM->UB for Cube-to-Vector transfer. Operation: "

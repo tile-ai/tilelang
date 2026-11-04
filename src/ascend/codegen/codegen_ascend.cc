@@ -1,5 +1,5 @@
-#include "../transform/aiv_group.h"
 #include "codegen_ascend.h"
+#include "../transform/aiv_group.h"
 #include "ascend/op/nd2nz.h"
 
 #include <algorithm>
@@ -656,11 +656,11 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &original) {
     // Preserve the existing mixed classification, including explicit
     // subcore groups whose Cube stream is empty. Only select their count.
     kernel_mode_ = AscendKernelMode::kMix;
-    mix_aiv_count_ = has_cube
-        ? aiv_group.MixedCount()
-        : aiv_group.vector_count.value();
+    mix_aiv_count_ =
+        has_cube ? aiv_group.MixedCount() : aiv_group.vector_count.value();
     if (has_cube && !aiv_group.resolved_count.has_value())
-      f.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(mix_aiv_count_, std::nullopt, false)(f->body);
+      f.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(
+          mix_aiv_count_, std::nullopt, false)(f->body);
   } else if (has_cube) {
     kernel_mode_ = AscendKernelMode::kCube;
   } else if (has_vector) {
@@ -1390,8 +1390,10 @@ void CodeGenTileLangAscend::EmitCrossCoreSync_(const CallNode *op,
       << intrinsic
       << " expects exactly 3 arguments (mode_id int, pipe string, flag_id)";
   const int64_t mode_id = GetIntImmArg(op, 0, intrinsic, "mode_id");
-  ICHECK(!(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 1 && mode_id == 4))
-      << "Cross-core synchronization mode 4 requires a 1:2 mixed group; use mode 2 for aiv=1";
+  ICHECK(!(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 1 &&
+           mode_id == 4))
+      << "Cross-core synchronization mode 4 requires a 1:2 mixed group; use "
+         "mode 2 for aiv=1";
   const char *scope = GetCrossCoreSyncScope(mode_id);
   const std::string pipe = GetStringImmArg(op, 1, intrinsic, "pipe");
   const std::string flag_id = PrintExpr(op->args[2]);

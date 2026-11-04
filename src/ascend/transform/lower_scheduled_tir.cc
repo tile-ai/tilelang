@@ -746,10 +746,12 @@ tvm::transform::Pass LowerScheduledTIR() {
           SBlock root = context.root;
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(root, context.outer_ctx);
-          // Mixed counts were resolved before task projection; preserve pure defaults.
-          int vector_count = scheduled_tir.metadata.num_aiv_subcores.has_value()
-                                 ? scheduled_tir.metadata.num_aiv_subcores.value()
-                                 : 2;
+          // Mixed counts were resolved before task projection; preserve pure
+          // defaults.
+          int vector_count =
+              scheduled_tir.metadata.num_aiv_subcores.has_value()
+                  ? scheduled_tir.metadata.num_aiv_subcores.value()
+                  : 2;
           Optional<BufferAliasMap> aliases;
           if (auto value = root->annotations.Get(kBufferAliasMap)) {
             aliases = value.value().cast<BufferAliasMap>();

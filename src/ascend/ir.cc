@@ -51,8 +51,9 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   bool specified = vector_count->value != -1;
   // Keep the unknown count symbolic so get_block_extent(1) and expressions
   // derived from it are resolved together with the launch domain.
-  PrimExpr sid_extent = specified ? cthread_extent
-                                 : PrimExpr(tirx::SizeVar("aiv_count", DataType::Int(32)));
+  PrimExpr sid_extent =
+      specified ? cthread_extent
+                : PrimExpr(tirx::SizeVar("aiv_count", DataType::Int(32)));
 
   // Frame 0: bx = blockIdx.x. Emit a target-neutral thread_binding For loop;
   // tl.MaterializeKernelLaunch turns it into a thread_extent AttrStmt.
@@ -443,7 +444,8 @@ public:
 
     DataType dtype = DataType::Int(32);
     // An omitted count inherits the kernel group in ResolveAivGroup. Keep a
-    // wide placeholder domain until then, without recording an explicit request.
+    // wide placeholder domain until then, without recording an explicit
+    // request.
     PrimExpr extent = IntImm(dtype, vector_count == -1 ? 2 : vector_count);
     IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
                IterVarType::kThreadIndex, "cthread");
@@ -484,7 +486,8 @@ public:
 
 VectorFrame Vector(int vector_count) {
   ICHECK(vector_count == -1 || vector_count == 1 || vector_count == 2)
-      << "Vector core count must be -1 (unspecified), 1 or 2, got " << vector_count;
+      << "Vector core count must be -1 (unspecified), 1 or 2, got "
+      << vector_count;
   auto n = tvm::ffi::make_object<VectorFrameNode>();
   n->vector_count = vector_count;
   n->sid_var = tvm::tirx::Var("sid", DataType::Int(32));

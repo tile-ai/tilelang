@@ -3329,7 +3329,8 @@ tvm::transform::Pass InsertSync() {
     bool pto_backend = false;
     if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
       for (const auto &key : target.value()->keys) {
-        if (key == "pto") pto_backend = true;
+        if (key == "pto")
+          pto_backend = true;
       }
     }
     return RewriteTilelangKernels(

@@ -263,10 +263,10 @@ class CoreMaskAssigner {
 public:
   static bool Assign(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const std::vector<TaskNode *> &all_tasks,
-                     const ffi::Optional<Var> &outer_sid,
-                     int num_aiv_subcores, int mixed_count) {
+                     const ffi::Optional<Var> &outer_sid, int num_aiv_subcores,
+                     int mixed_count) {
     CoreMaskAssigner assigner(root, all_tasks, outer_sid, num_aiv_subcores,
-                             mixed_count);
+                              mixed_count);
     return assigner.Run();
   }
 
@@ -413,12 +413,12 @@ private:
 };
 
 bool AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
-                     const ffi::Optional<Var> &outer_sid,
-                     int num_aiv_subcores, int mixed_count) {
+                     const ffi::Optional<Var> &outer_sid, int num_aiv_subcores,
+                     int mixed_count) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
   return CoreMaskAssigner::Assign(root, all_tasks, outer_sid, num_aiv_subcores,
-                                 mixed_count);
+                                  mixed_count);
 }
 
 } // namespace
@@ -446,7 +446,8 @@ tvm::transform::Pass AssignCore() {
           root = EncodeScheduledTIR(std::move(scheduled_tir));
           if (mixed && !requested.has_value()) {
             auto *writer = root.CopyOnWrite();
-            writer->body = AivDomainNormalizer(count, context.outer_sid, false)(root->body);
+            writer->body = AivDomainNormalizer(count, context.outer_sid,
+                                               false)(root->body);
             writer->annotations.Set("tl.resolved_aiv_count", Integer(count));
           }
           return root;

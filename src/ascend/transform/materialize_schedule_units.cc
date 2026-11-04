@@ -568,7 +568,8 @@ private:
     if (op->name_hint == "VECTOR") {
       if (auto count = ReadAivCount(op, "vector_count")) {
         // Preserve the original capacity check even for dead declarations.
-        maximum_request_ = std::max(maximum_request_.value_or(1), count.value());
+        maximum_request_ =
+            std::max(maximum_request_.value_or(1), count.value());
         ConstrSet context = GetConstrSet();
         if (!context.CanProve(tirx::Not(context.ToConjunction())))
           info_.Observe(GetRef<SBlock>(op));
@@ -585,7 +586,8 @@ private:
 
 // MixedKernel declares an outer sid and an optional count in the frontend.
 // Resolve that contract and inherit it in Vector regions. Plain Kernel only
-// records a device default; applying it must not override a pure Vector request.
+// records a device default; applying it must not override a pure Vector
+// request.
 tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
     ffi::Map<Var, PrimExpr> inferred_counts;
@@ -607,15 +609,18 @@ tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
                                  : ReadAivCount(root.get(), "vector_count");
           if (!count.has_value() && !automatic) {
             int default_count = ResolveAivCount();
-            AivRequestValidator::Validate(root->body, context.outer_ctx, default_count);
-            root.CopyOnWrite()->annotations.Set(kDefaultAivCount, Integer(default_count));
+            AivRequestValidator::Validate(root->body, context.outer_ctx,
+                                          default_count);
+            root.CopyOnWrite()->annotations.Set(kDefaultAivCount,
+                                                Integer(default_count));
             return root;
           }
           int resolved = ResolveAivCount(count);
           if (automatic)
             inferred_counts.Set(GetRef<Var>(automatic), Integer(resolved));
           auto *writer = root.CopyOnWrite();
-          writer->body = AivDomainNormalizer(resolved, context.outer_sid)(root->body);
+          writer->body =
+              AivDomainNormalizer(resolved, context.outer_sid)(root->body);
           writer->annotations.Set("vector_count", Integer(resolved));
           writer->annotations.Set("tl.resolved_aiv_count", Integer(resolved));
           return root;
@@ -634,10 +639,10 @@ tvm::transform::Pass ResolveAivGroup(Optional<PassContext> pass_ctx) {
               iv->thread_tag == "cthread" && iv->dom.defined()) {
             if (const auto *var = iv->dom->extent.as<SizeVarNode>()) {
               if (auto value = inferred_counts.Get(GetRef<Var>(var))) {
-                IterVar thread(Range(0, value.value()), iv->var,
-                               iv->iter_type, iv->thread_tag);
-                return AttrStmt(thread, op->attr_key, value.value(),
-                                op->body, op->span);
+                IterVar thread(Range(0, value.value()), iv->var, iv->iter_type,
+                               iv->thread_tag);
+                return AttrStmt(thread, op->attr_key, value.value(), op->body,
+                                op->span);
               }
             }
           }
