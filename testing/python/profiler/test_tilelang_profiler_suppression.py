@@ -20,7 +20,13 @@ class _StreamWithoutFlush:
         return self.descriptor
 
 
-@pytest.mark.parametrize("stream_kind", ["original", "stringio", "no-flush", "non-callable-flush"])
+class _StreamWithBrokenFlushLookup(_StreamWithoutFlush):
+    @property
+    def flush(self):
+        raise OSError("stream flush is unavailable")
+
+
+@pytest.mark.parametrize("stream_kind", ["original", "stringio", "no-flush", "non-callable-flush", "broken-flush-lookup"])
 @pytest.mark.parametrize("raise_inside", [False, True])
 def test_suppression_restores_python_streams_and_native_descriptors(capfd, stream_kind, raise_inside):
     python_stdout = StringIO()
@@ -33,6 +39,8 @@ def test_suppression_restores_python_streams_and_native_descriptors(capfd, strea
                 if stream_kind == "non-callable-flush":
                     for stream in streams:
                         stream.flush = None
+            elif stream_kind == "broken-flush-lookup":
+                streams = [_StreamWithBrokenFlushLookup(stream, descriptor) for descriptor, stream in enumerate(streams, start=1)]
             stack.enter_context(redirect_stdout(streams[0]))
             stack.enter_context(redirect_stderr(streams[1]))
         original_stdout, original_stderr = sys.stdout, sys.stderr
@@ -95,10 +103,14 @@ def test_suppression_runs_with_a_closed_pipe(capfd, descriptor, redirect_stream)
     assert captured.err == ("healthy output before\n" if descriptor == 1 else "")
 
 
-def test_suppression_propagates_non_io_flush_errors():
+@pytest.mark.parametrize("during_lookup", [False, True])
+def test_suppression_propagates_non_io_flush_errors(during_lookup):
     class InvalidStream(StringIO):
         def flush(self):
             raise RuntimeError("invalid stream state")
+
+    if during_lookup:
+        InvalidStream.flush = property(InvalidStream.flush)
 
     with redirect_stdout(InvalidStream()), pytest.raises(RuntimeError, match="invalid stream state"), suppress_stdout_stderr():
         pytest.fail("The benchmark must not run after a non-I/O stream failure")

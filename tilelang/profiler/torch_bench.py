@@ -22,10 +22,10 @@ class suppress_stdout_stderr:
 
     def __enter__(self):
         for stream in (sys.stdout, sys.stderr):
-            flush = getattr(stream, "flush", None)
-            if callable(flush):
-                # A broken output sink must not prevent the benchmark from running.
-                with suppress(OSError):
+            # A broken output sink must not prevent the benchmark from running.
+            with suppress(OSError):
+                flush = getattr(stream, "flush", None)
+                if callable(flush):
                     flush()
         with ExitStack() as stack:
             null_stream = stack.enter_context(open(os.devnull, "w"))
