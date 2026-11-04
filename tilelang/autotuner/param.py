@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import errno
+from filelock import FileLock
 
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
@@ -477,9 +478,6 @@ class AutotuneResult:
                 missing_names = ", ".join(path.name for path in missing_files)
                 raise RuntimeError(f"Incomplete autotune staging directory is missing required file(s): {missing_names}")
 
-            # Repair stale/incomplete entries before making the new directory visible.
-            self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
-
             # Durability barrier: keep the staged data ahead of the rename so a
             # crash cannot publish a truncated cache entry.
             for entry in os.scandir(staging_path):
@@ -487,14 +485,21 @@ class AutotuneResult:
                     with open(entry.path, "rb+") as staged_file:
                         os.fsync(staged_file.fileno())
 
-            # Atomic rename — directory becomes visible in one step.
-            try:
-                os.rename(str(staging_path), str(path))
-            except OSError as exc:
-                if not self._is_rename_collision(exc):
-                    raise
-                # Another process won the race with a complete cache entry.
-                shutil.rmtree(str(staging_path), ignore_errors=True)
+            # Keep the lock outside the replaceable directory. All writers must
+            # serialize stale-entry inspection/removal with publication so an
+            # obsolete cleanup cannot delete another process's completed entry.
+            # Cache persistence is optional; bound waiting and let the existing
+            # error path discard our staging directory if locking fails.
+            with FileLock(str(path.parent / f".{path.name}.lock"), timeout=30):
+                self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
+                # Atomic rename — directory becomes visible in one step.
+                try:
+                    os.rename(str(staging_path), str(path))
+                except OSError as exc:
+                    if not self._is_rename_collision(exc):
+                        raise
+                    # Another process won the race with a complete cache entry.
+                    shutil.rmtree(str(staging_path), ignore_errors=True)
         except Exception:
             shutil.rmtree(str(staging_path), ignore_errors=True)
             logger.exception("Error during atomic autotune result save")
