@@ -30,8 +30,9 @@ using ffi::Array;
 
 class AscendSimdVFLowerParallel : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
+  static PrimFunc Substitute(PrimFunc f, bool fill_only = false) {
     AscendSimdVFLowerParallel substituter;
+    substituter.fill_only_ = fill_only;
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     return ffi::GetRef<PrimFunc>(fptr);
@@ -39,6 +40,7 @@ public:
 
 private:
   bool inside_simdvf_{false};
+  bool fill_only_{false};
 
   const VarNode *parallel_var_{nullptr};
   int64_t parallel_extent_{0};
@@ -519,7 +521,7 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) override {
-    if (!inside_simdvf_ || op->kind != ForKind::kParallel) {
+    if (fill_only_ || !inside_simdvf_ || op->kind != ForKind::kParallel) {
       return StmtExprMutator::VisitStmt_(op);
     }
 
@@ -570,6 +572,9 @@ private:
     if (const auto *opnode = call->op.as<OpNode>()) {
       if (opnode->name == "tl.tileop.fill") {
         return LowerFill(call);
+      }
+      if (fill_only_) {
+        return StmtExprMutator::VisitStmt_(op);
       }
       if (IsAscendCopyCall(call)) {
         return LowerCopy(call);
@@ -989,8 +994,16 @@ tvm::transform::Pass AscendSimdVFLowerParallel() {
   return CreatePrimFuncPass(pass_func, 0, "tl.AscendSimdVFLowerParallel", {});
 }
 
+tvm::transform::Pass LowerSimdVFFill() {
+  auto pass_func = [](PrimFunc f, IRModule, PassContext) {
+    return AscendSimdVFLowerParallel::Substitute(std::move(f), true);
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.LowerSimdVFFill", {});
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerSimdVFFill", LowerSimdVFFill);
   refl::GlobalDef().def("tl.transform.AscendSimdVFLowerParallel",
                         AscendSimdVFLowerParallel);
 }
