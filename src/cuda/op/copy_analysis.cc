@@ -227,6 +227,15 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
     }
     return false;
   }
+  // A TensorMap descriptor is built on the host from compile-time tile
+  // extents.  A symbolic extent cannot be encoded there, and the later
+  // ComputeBulkCopyTile() cannot lower it; fall back to the elementwise path
+  // instead of selecting a bulk copy that will fail or truncate at runtime.
+  for (const Range &range : op.src_range) {
+    if (as_const_int(range->extent) == nullptr) {
+      return false;
+    }
+  }
   return CheckGlobalStrides(op.src, analyzer, emit_diagnostics);
 }
 
@@ -264,6 +273,11 @@ bool CheckBulkStore(const CopyNode &op, Target target,
                     << " will be fallback to normal copy";
     }
     return false;
+  }
+  for (const Range &range : op.dst_range) {
+    if (as_const_int(range->extent) == nullptr) {
+      return false;
+    }
   }
   return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
 }
@@ -353,11 +367,14 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
 
   PrimExpr total_bits = shared_elements * shared_tensor->dtype.bits();
 
-  // Reject only when the total transfer size is provably not 16-byte
-  // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
-  // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
-  bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+  // A 1D bulk TMA transfer moves whole 16-byte chunks.  If the extent is
+  // symbolic, "not provably misaligned" is not enough: a runtime size such as
+  // 63 floats passes the old guard and the TMA store drops the final 12-byte
+  // tail.  Require a proof of alignment here and fall back to the elementwise
+  // path otherwise.  Kernels that need TMA for dynamic sizes can make the
+  // alignment explicit in the shape/annotation.
+  bool total_16b_aligned = analyzer->CanProve(
+      FloorMod(total_bits, 128) == 0, arith::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
