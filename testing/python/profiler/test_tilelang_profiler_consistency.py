@@ -42,13 +42,14 @@ def test_inconsistent_tensor_values():
         instance.assert_consistent(repeat=1)
 
 
-@pytest.mark.parametrize("container", [None, list, tuple])
-def test_inconsistent_reused_output_storage(container):
+@pytest.mark.parametrize("container, output_index", [(None, 0), (list, 0), (tuple, 0), (list, 1), (tuple, 1)])
+def test_inconsistent_reused_output_storage(container, output_index):
     output = torch.zeros(2)
+    outputs = [output] if output_index == 0 else [torch.ones(1), output]
 
     def run():
         output.add_(1)
-        return output if container is None else container([output])
+        return output if container is None else container(outputs)
 
     instance = Profiler([], [], TensorSupplyType.Auto, run)
 
