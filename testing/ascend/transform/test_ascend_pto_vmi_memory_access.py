@@ -1138,3 +1138,231 @@ def test_passes_through_non_target_and_non_vmi():
     mod = _module(_evaluate(pointer))
     after = ascend.LegalizePTOVMIMemoryAccess()(mod)
     assert after["main"].body.same_as(mod["main"].body)
+
+
+def test_non_vmi_unsigned_cast_is_not_analyzed():
+    i = tirx.Var("i", "int32")
+    signed = tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(signed, i - 1),
+                tirx.Bind(unsigned, tirx.Cast("uint32", signed)),
+                tirx.Evaluate(unsigned),
+            ]
+        ),
+    )
+    mod = _module(body)
+    tvm.ir.assert_structural_equal(ascend.LegalizePTOVMIMemoryAccess()(mod), mod)
+
+
+@pytest.mark.parametrize("binding", ["bind", "let", "alias"])
+@pytest.mark.parametrize("memory_uses_cast", [False, True])
+def test_wrapping_cast_with_vmi(binding, memory_uses_cast):
+    work = _buffer((64,))
+    i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    alias = tirx.Var("alias", "uint32")
+    cast = tirx.Cast("uint32", signed)
+    index = tirx.Cast("int32", alias if binding == "alias" else unsigned) if memory_uses_cast else _int(0)
+    load = _vload(_load(work, [index]), size=64)
+    if binding == "let":
+        tail = _evaluate(tirx.Let(unsigned, cast, load))
+    else:
+        seq = [tirx.Bind(unsigned, cast)]
+        if binding == "alias":
+            seq.append(tirx.Bind(alias, unsigned + tirx.IntImm("uint32", 0)))
+        seq.append(_evaluate(load))
+        tail = tirx.SeqStmt(seq)
+    body = tirx.For(i, 0, 64, tirx.ForKind.SERIAL, tirx.SeqStmt([tirx.Bind(signed, i - 1), tail]))
+    if memory_uses_cast:
+        with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+            _run(_sblock(body, work))
+    else:
+        result = _run(_sblock(body, work))
+        assert len(_vmi_calls(result)) == 1
+        _assert_no_raw_address(result)
+
+
+def test_nonwrapping_cast_keeps_descriptor_proof():
+    work = _buffer((128,))
+    i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, tirx.Cast("uint32", i)),
+                _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+            ]
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
+
+
+@pytest.mark.parametrize("field", ["offset", "extent", "shape", "stride", "elem_offset"])
+def test_wrapping_cast_in_descriptor_metadata_rejected(field):
+    i = tirx.Var("i", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    value = tirx.Cast("int64", unsigned)
+    kwargs = {}
+    if field == "stride":
+        kwargs["strides"] = [value]
+    if field == "elem_offset":
+        kwargs["elem_offset"] = value
+    work = tirx.decl_buffer([value if field == "shape" else 64], "float32", scope="shared", **kwargs)
+    pointer = _access_ptr(work, [_int(0)], value if field == "extent" else 64, 1)
+    load = _vload(pointer, offset=value if field == "offset" else 0)
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, tirx.Cast("uint32", i - 1)),
+                _evaluate(load),
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+@pytest.mark.parametrize("context", ["if", "assert", "assume", "select", "call"])
+def test_wrapping_cast_condition_does_not_install_false_facts(context):
+    i = tirx.Var("i", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    cast = tirx.Cast("uint32", i - 1)
+    condition = cast < tirx.IntImm("uint32", 64)
+    work = _buffer((64,))
+    # The same condition at runtime cannot justify narrowing the cast globally.
+    bad = _evaluate(_vload(_load(work, [tirx.Cast("int64", unsigned)]), size=1))
+    if context == "if":
+        tail = tirx.IfThenElse(condition, bad, _evaluate(0))
+    elif context == "assert":
+        tail = tirx.SeqStmt([tirx.AssertStmt(condition, tirx.StringImm("range")), bad])
+    elif context == "assume":
+        tail = tirx.AttrStmt(condition, "tl.assume", _int(0), bad)
+    else:
+        guarded = (
+            tirx.Select(condition, unsigned, tirx.IntImm("uint32", 0))
+            if context == "select"
+            else tirx.if_then_else(condition, unsigned, tirx.IntImm("uint32", 0))
+        )
+        tail = _evaluate(_vload(_load(work, [tirx.Cast("int64", guarded)]), size=1))
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, cast),
+                tail,
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+def test_cast_safe_in_guarded_scope_keeps_proof():
+    work = _buffer((128,))
+    i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.IfThenElse(
+            i >= 1,
+            tirx.SeqStmt(
+                [
+                    tirx.Bind(unsigned, tirx.Cast("uint32", i - 1)),
+                    _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+                ]
+            ),
+            _evaluate(0),
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32", "uint64", "int8", "int16"])
+def test_narrowing_and_signedness_cast_cannot_prove_small_access(dtype):
+    work = _buffer((64,))
+    i, small = tirx.Var("i", "int32"), tirx.Var("small", dtype)
+    source = i - 1 if dtype.startswith("uint") else i * 2048
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(small, tirx.Cast(dtype, source)),
+                _evaluate(_vload(_load(work, [tirx.Cast("int64", small)]), size=1)),
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+def test_wrapping_let_does_not_pollute_outer_scalar_proof():
+    work = _buffer((64,))
+    i = tirx.Var("i", "int32")
+    outer, inner = tirx.Var("offset", "uint32"), tirx.Var("offset", "uint32")
+    harmless = tirx.Let(inner, tirx.Cast("uint32", i - 1), _vload(_load(work, [_int(0)]), size=64))
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(outer, tirx.IntImm("uint32", 0)),
+                _evaluate(harmless),
+                _evaluate(_vload(_load(work, [tirx.Cast("int32", outer)]), size=64)),
+            ]
+        ),
+    )
+    result = _run(_sblock(body, work))
+    assert len(_vmi_calls(result)) == 2
+    _assert_no_raw_address(result)
+
+
+def test_cast_guarded_through_scalar_alias_keeps_proof():
+    work = _buffer((128,))
+    i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(signed, i - 1),
+                tirx.IfThenElse(
+                    signed >= 0,
+                    tirx.SeqStmt(
+                        [
+                            tirx.Bind(unsigned, tirx.Cast("uint32", signed)),
+                            _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+                        ]
+                    ),
+                    _evaluate(0),
+                ),
+            ]
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
