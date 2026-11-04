@@ -103,6 +103,67 @@ def test_cpu_parallel_codegen_nested_parallel_keeps_pragma():
     assert source.count("#pragma omp parallel for") == 2
 
 
+def test_cpu_parallel_loop_bound_temporaries_precede_pragma():
+    @T.prim_func
+    def main(n: T.int32):
+        A = T.alloc_buffer((128 * 128,), T.float32, scope="local")
+        for i in T.parallel(T.min(n, 128)):
+            for j in T.parallel(T.max(n, 1)):
+                A[i * 128 + j] = T.float32(i * 128 + j)
+
+    from tilelang.cpu.codegen import build_c
+
+    mod = tvm.IRModule.from_expr(main)
+    mod = tirx.transform.BindTarget(Target("c"))(mod)
+    source = build_c(mod, Target("c")).inspect_source()
+    lines = source.splitlines()
+    pragma_line = next(i for i, line in enumerate(lines) if "#pragma omp parallel for collapse(2)" in line)
+    following = [line.strip() for line in lines[pragma_line + 1 :] if line.strip()]
+    assert following[0].startswith("for (")
+    assert following[1].startswith("for (")
+
+
+def test_cpu_parallel_sequential_chains_keep_bound_vars_alive():
+    @T.prim_func
+    def main(n: T.int32):
+        A = T.alloc_buffer((128,), T.float32, scope="local")
+        for i in T.parallel(T.min(n, 128)):
+            A[i] = T.float32(1)
+        for j in T.parallel(T.max(n, 1)):
+            A[j] = T.float32(2)
+        for k in T.parallel(T.min(n, 64)):
+            A[k] = T.float32(3)
+
+    from tilelang.cpu.codegen import build_c
+
+    mod = tvm.IRModule.from_expr(main)
+    mod = tirx.transform.BindTarget(Target("c"))(mod)
+    source = build_c(mod, Target("c")).inspect_source()
+    assert source.count("#pragma omp parallel for") == 3
+
+
+def test_cpu_parallel_inner_bound_depends_on_outer_var():
+    @T.prim_func
+    def main():
+        A = T.alloc_buffer((256,), T.float32, scope="local")
+        for i in T.parallel(16):
+            for j in T.parallel(i + 1):
+                A[i * 16 + j] = T.float32(i * 16 + j)
+
+    from tilelang.cpu.codegen import build_c
+
+    mod = tvm.IRModule.from_expr(main)
+    mod = tirx.transform.BindTarget(Target("c"))(mod)
+    source = build_c(mod, Target("c")).inspect_source()
+    lines = source.splitlines()
+    pragma_lines = [i for i, line in enumerate(lines) if "#pragma omp parallel for" in line]
+    assert len(pragma_lines) == 1
+    assert "collapse(" not in lines[pragma_lines[0]]
+    following = [line.strip() for line in lines[pragma_lines[0] + 1 :] if line.strip()]
+    assert following[0].startswith("for (")
+    assert following[1].startswith("for (")
+
+
 @pytest.mark.parametrize("mode", ["parallel", "default_off", "min_trip"])
 def test_cpu_parallel_two_sequential_kernels(mode):
     TILE = 128
