@@ -227,15 +227,6 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
     }
     return false;
   }
-  // A TensorMap descriptor is built on the host from compile-time tile
-  // extents.  A symbolic extent cannot be encoded there, and the later
-  // ComputeBulkCopyTile() cannot lower it; fall back to the elementwise path
-  // instead of selecting a bulk copy that will fail or truncate at runtime.
-  for (const Range &range : op.src_range) {
-    if (as_const_int(range->extent) == nullptr) {
-      return false;
-    }
-  }
   return CheckGlobalStrides(op.src, analyzer, emit_diagnostics);
 }
 
@@ -274,12 +265,37 @@ bool CheckBulkStore(const CopyNode &op, Target target,
     }
     return false;
   }
-  for (const Range &range : op.dst_range) {
+  return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
+}
+
+bool HasConstantExtents(const Array<Range> &ranges) {
+  for (const Range &range : ranges) {
     if (as_const_int(range->extent) == nullptr) {
       return false;
     }
   }
-  return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
+  return true;
+}
+
+// A TensorMap descriptor is built on the host from compile-time tile extents.
+// A symbolic extent cannot be encoded there, and ComputeBulkCopyTile() cannot
+// lower it; fall back to the elementwise path instead of selecting a bulk copy
+// that fails or truncates at runtime.  The 1-D bulk path is checked separately
+// because it passes a byte count directly and can handle dynamic sizes.
+bool CheckDescriptorBulkLoad(const CopyNode &op, Target target,
+                             arith::Analyzer *analyzer, bool check_last_dim,
+                             bool emit_diagnostics) {
+  return CheckBulkLoad(op, target, analyzer, check_last_dim,
+                       emit_diagnostics) &&
+         HasConstantExtents(op.src_range);
+}
+
+bool CheckDescriptorBulkStore(const CopyNode &op, Target target,
+                              arith::Analyzer *analyzer, bool check_last_dim,
+                              bool emit_diagnostics) {
+  return CheckBulkStore(op, target, analyzer, check_last_dim,
+                        emit_diagnostics) &&
+         HasConstantExtents(op.dst_range);
 }
 
 bool IsSemanticallyLinearLayout(const Layout &layout,
@@ -687,29 +703,29 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
     facts.can_bulk_load =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
     facts.can_bulk_load_ignore_last_dim =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_load =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckDescriptorBulkStore(op, ctx.target, analyzer,
+                                 /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
-    facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/false, ctx.emit_diagnostics);
+    facts.can_bulk_store_ignore_last_dim = CheckDescriptorBulkStore(
+        op, ctx.target, analyzer,
+        /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckDescriptorBulkStore(op, ctx.target, analyzer,
+                                 /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);
