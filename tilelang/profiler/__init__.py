@@ -151,19 +151,21 @@ class Profiler:
         lib_outs = self.func(*ins)
         _synchronize_tensor_devices(ins, lib_outs)
 
-        if isinstance(lib_outs, torch.Tensor):
-            lib_outs = [lib_outs]
-        elif isinstance(lib_outs, tuple):
-            lib_outs = list(lib_outs)
-        elif lib_outs is None:
-            lib_outs = []
-
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
         elif isinstance(ref_outs, tuple):
             ref_outs = list(ref_outs)
         elif ref_outs is None:
             ref_outs = []
+
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        elif isinstance(lib_outs, tuple):
+            lib_outs = list(lib_outs)
+        elif lib_outs is None:
+            for output_idx, rhs in enumerate(ref_outs):
+                assert rhs is None, f"Kernel output {output_idx} is None for a non-None reference output"
+            lib_outs = []
 
         # only compare outputs
         assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"

@@ -167,7 +167,7 @@ def test_assert_allclose_rejects_missing_kernel_output(container, missing_index)
     actual[missing_index] = None
     instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: container(actual))
 
-    with pytest.raises(AssertionError, match="output.*None"):
+    with pytest.raises(AssertionError, match=f"Kernel output {missing_index} is None"):
         instance.assert_allclose(lambda: container(expected), input_tensors=[])
 
 
@@ -176,3 +176,11 @@ def test_assert_allclose_still_skips_optional_reference_output(kernel_output):
     instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: [torch.tensor([1.0]), kernel_output])
 
     instance.assert_allclose(lambda: [torch.tensor([1.0]), None], input_tensors=[])
+
+
+@pytest.mark.parametrize("reference_output, missing_index", [(torch.tensor([1.0]), 0), ([None, torch.tensor([1.0])], 1)])
+def test_assert_allclose_reports_absent_kernel_result(reference_output, missing_index):
+    instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: None)
+
+    with pytest.raises(AssertionError, match=f"Kernel output {missing_index} is None"):
+        instance.assert_allclose(lambda: reference_output, input_tensors=[])
