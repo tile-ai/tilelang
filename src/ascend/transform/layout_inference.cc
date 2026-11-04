@@ -28,6 +28,7 @@
 #include "ascend/layout/pto_parallel_layout.h"
 #include "ascend/op/utils.h"
 #include "ascend/target_utils.h"
+#include "ascend/transform/parallel_to_pto_utils.h"
 #include "ascend/transform/vf_regions.h"
 #include "backend/common/target_utils.h"
 #include "config.h"
@@ -1048,7 +1049,7 @@ private:
             }
           });
 
-      if (InsidePtoSimdVF()) {
+      if (InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body)) {
         // PTO lane layouts are built from the original nest and stay outside
         // the generic layout worklist. Only the outermost Parallel root of a
         // unit is recorded; nested Parallel layers are part of this unit.
@@ -1059,6 +1060,8 @@ private:
         return;
       }
 
+      // Explicit SIMD block loops keep the generic layout path used before
+      // PTO lane inference, including mixed explicit/scalar loop bodies.
       auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
@@ -1084,7 +1087,7 @@ private:
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
-      bool in_pto_simd = InsidePtoSimdVF();
+      bool in_pto_simd = InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body);
       in_pto_simd_vf_vec_.push_back(in_pto_simd);
       pto_lane_bounds_.push_back(in_pto_simd ? CurrentPtoLaneBounds()
                                              : Range());
