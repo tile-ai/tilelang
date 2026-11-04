@@ -979,6 +979,33 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       return false;
     }
 
+    // Only a predicate whose every variable is a thread id may take this
+    // shortcut. A value reached through a `T.bind`/let depends on the lane but
+    // stays a single free variable, so it would read as shared on both sides of
+    // the agreement query and be accepted trivially; a kernel parameter is
+    // block-uniform only in a sense this proof does not check. Bail out and
+    // leave those to the general path above.
+    if (const auto *let_node = condition.as<LetNode>()) {
+      (void)let_node;
+      return false;
+    }
+    {
+      std::unordered_set<const VarNode *> thread_vars;
+      for (const auto &iv : env_threads_)
+        thread_vars.insert(iv->var.get());
+      bool unknown_var = false;
+      PostOrderVisit(condition, [&](const ObjectRef &node) {
+        if (const auto *var = node.as<VarNode>()) {
+          if (thread_vars.count(var) == 0) {
+            unknown_var = true;
+          }
+        }
+      });
+      if (unknown_var) {
+        return false;
+      }
+    }
+
     Var warp_index("warp_index<T>", index_dtype);
     Var lane1("lane1<T>", index_dtype);
     Var lane2("lane2<T>", index_dtype);
