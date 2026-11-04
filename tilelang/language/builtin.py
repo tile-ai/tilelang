@@ -1031,12 +1031,19 @@ def shfl_sync(
 def _validate_predicate(predicate: int | PrimExpr, intrinsic: str) -> PrimExpr:
     """Normalize an intrinsic predicate and reject lossy float-to-int coercion."""
     predicate = tirx.convert(predicate)
-    if DataType(predicate.dtype).type_code not in (
+    dtype = DataType(predicate.dtype)
+    if dtype.type_code not in (
         DataTypeCode.INT,
         DataTypeCode.UINT,
         DataTypeCode.BOOL,
     ):
         raise TypeError(f"T.{intrinsic} requires an integer or boolean predicate, but got {predicate.dtype}.")
+    if dtype.bits > 32:
+        # CUDA's vote/sync builtins take a 32-bit int predicate.  Passing a
+        # 64-bit value narrows it implicitly, so a nonzero value whose low 32
+        # bits are zero (e.g. 1 << 32) would test as false.  Test the full
+        # value here and hand the builtin a boolean.
+        return tirx.NE(predicate, tirx.const(0, dtype))
     return predicate
 
 
