@@ -934,6 +934,9 @@ def make_im2col_kernel(channels=1, binding="none"):
                 elif binding == "stateful":
                     nhw_step = T.cast(weight_shared[0], T.int32)
                     T.im2col(data, data_shared, nhw_step, 0, 3, 1, 1, 1)
+                elif binding == "global":
+                    nhw_step = T.cast(weights[step], T.int32)
+                    T.im2col(data, data_shared, nhw_step, 0, 3, 1, 1, 1)
                 else:
                     T.im2col(data, data_shared, step % 2, 0, 3, 1, 1, 1)
                 for i in T.Parallel(128):
@@ -1244,10 +1247,10 @@ def check_consumer_accesses(func, buffer_name, destination, overwrite=False):
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-@pytest.mark.parametrize("channels,binding", [(1, "none"), (32, "none"), (32, "pure"), (32, "stateful")])
+@pytest.mark.parametrize("channels,binding", [(1, "none"), (32, "none"), (32, "pure"), (32, "stateful"), (32, "global")])
 def test_tiled_ws_simt_im2col(channels, binding):
     before, after = lower_producer_consumer_scenario(make_im2col_kernel(channels, binding))
-    if binding == "stateful":
+    if binding in ("stateful", "global"):
         check_fallback(before, after)
         return
     check_consumer_accesses(after, "data_shared", "simt")

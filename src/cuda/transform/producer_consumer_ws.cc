@@ -1457,6 +1457,24 @@ private:
       compute_cursor = wait_pos;
     }
 
+    VarSet prefix_binding_vars;
+    for (const auto &prefix : producer_loop_prefix_stmts) {
+      for (const auto &stmt : prefix) {
+        if (const auto *bind = stmt.as<BindNode>()) {
+          prefix_binding_vars.insert(bind->var);
+        }
+      }
+    }
+    // Async producers are issued before the first loop prefix.
+    LocalLiveSet hoisted_binding_live;
+    for (size_t i = 0; i < flat_stmts.size(); ++i) {
+      if (kinds[i] == TileStmtKind::kSimtProducer ||
+          kinds[i] == TileStmtKind::kCpAsyncProducer ||
+          kinds[i] == TileStmtKind::kCpAsyncRaw) {
+        hoisted_binding_live.AddUses(LocalAccessCollector::Collect(
+            flat_stmts[i], buffer_data_to_buffer_));
+      }
+    }
     LocalLiveSet producer_binding_live = producer_body_live;
     VarSet producer_binding_vars;
     std::vector<Stmt> producer_bindings;
@@ -1464,15 +1482,23 @@ private:
          --ci) {
       const Stmt &stmt = consumer_compute_stmts[ci];
       const auto *bind = stmt.as<BindNode>();
-      if (bind && producer_binding_live.vars.count(bind->var)) {
+      if (!bind || !producer_binding_live.vars.count(bind->var)) {
+        continue;
+      }
+      producer_binding_live.AddUses(consumer_compute_summaries[ci]);
+      if (SideEffect(bind->value) > CallEffectKind::kPure) {
         // Hoisting a stateful value could cross its original synchronization.
-        if (SideEffect(bind->value) > CallEffectKind::kPure) {
+        // A loop prefix keeps it in order unless an async producer or a
+        // hoisted binding needs it first.
+        if (!prefix_binding_vars.count(bind->var) ||
+            hoisted_binding_live.vars.count(bind->var)) {
           return StmtExprMutator::VisitStmt_(orig_realize);
         }
-        producer_binding_vars.insert(bind->var);
-        producer_bindings.push_back(stmt);
-        producer_binding_live.AddUses(consumer_compute_summaries[ci]);
+        continue;
       }
+      producer_binding_vars.insert(bind->var);
+      producer_bindings.push_back(stmt);
+      hoisted_binding_live.AddUses(consumer_compute_summaries[ci]);
     }
     Array<Stmt> producer_scalar_bindings(producer_bindings.rbegin(),
                                          producer_bindings.rend());
