@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 
 import torch
 
@@ -20,44 +21,24 @@ class suppress_stdout_stderr:
     """
 
     def __enter__(self):
-        # Open null device files
-        self.outnull_file = open(os.devnull, "w")
-        self.errnull_file = open(os.devnull, "w")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        with ExitStack() as stack:
+            null_stream = stack.enter_context(open(os.devnull, "w"))
+            # Native libraries write to descriptors 1 and 2 even when Python's
+            # streams are redirected or do not expose fileno(), as in notebooks.
+            for descriptor in (1, 2):
+                saved_descriptor = os.dup(descriptor)
+                stack.callback(os.close, saved_descriptor)
+                stack.callback(os.dup2, saved_descriptor, descriptor)
+                os.dup2(null_stream.fileno(), descriptor)
+            stack.enter_context(redirect_stdout(null_stream))
+            stack.enter_context(redirect_stderr(null_stream))
+            self._stack = stack.pop_all()
+            return self
 
-        # Save original file descriptors
-        self.old_stdout_fileno_undup = sys.stdout.fileno()
-        self.old_stderr_fileno_undup = sys.stderr.fileno()
-        self.old_stdout_fileno = os.dup(sys.stdout.fileno())
-        self.old_stderr_fileno = os.dup(sys.stderr.fileno())
-
-        # Save original stdout/stderr objects
-        self.old_stdout = sys.stdout
-        self.old_stderr = sys.stderr
-
-        # Redirect file descriptors and streams to null device
-        os.dup2(self.outnull_file.fileno(), self.old_stdout_fileno_undup)
-        os.dup2(self.errnull_file.fileno(), self.old_stderr_fileno_undup)
-        sys.stdout = self.outnull_file
-        sys.stderr = self.errnull_file
-
-        return self
-
-    def __exit__(self, *_):
-        # Restore original stdout/stderr objects
-        sys.stdout = self.old_stdout
-        sys.stderr = self.old_stderr
-
-        # Restore original file descriptors
-        os.dup2(self.old_stdout_fileno, self.old_stdout_fileno_undup)
-        os.dup2(self.old_stderr_fileno, self.old_stderr_fileno_undup)
-
-        # Close duplicated file descriptors
-        os.close(self.old_stdout_fileno)
-        os.close(self.old_stderr_fileno)
-
-        # Close null device files
-        self.outnull_file.close()
-        self.errnull_file.close()
+    def __exit__(self, *exc_info):
+        return self._stack.__exit__(*exc_info)
 
 
 def bench_with_cuda_events(
