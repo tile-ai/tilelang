@@ -1149,6 +1149,7 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
+    lower_args.block_num_threads = block_num_threads_;
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
@@ -1172,16 +1173,24 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    PrimExpr previous_block_num_threads = block_num_threads_;
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
+      if (iv->thread_tag == "threadIdx.x" || iv->thread_tag == "threadIdx.y" ||
+          iv->thread_tag == "threadIdx.z") {
+        block_num_threads_ = analyzer_->Simplify(
+            block_num_threads_ * cast(DataType::Int(64), op->value));
+      }
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    block_num_threads_ = previous_block_num_threads;
+    return stmt;
   }
 
   /**
@@ -1437,6 +1446,7 @@ private:
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
   size_t thread_block_size_ = 0;
+  PrimExpr block_num_threads_ = IntImm(DataType::Int(64), 1);
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children
