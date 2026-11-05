@@ -250,7 +250,7 @@ void CodeGenCHost::PrintGetFuncFromBackend(
   this->stream << "}\n";
 }
 
-void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
+std::string CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   using namespace tvm::tirx;
   const StringImmNode *func_name = op->args[0].as<StringImmNode>();
   ICHECK(func_name != nullptr)
@@ -324,6 +324,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
     this->PrintLine("});");
     this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
   }
+  return result;
 }
 
 std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
@@ -388,10 +389,18 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
       this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
     }
     os << stack_name;
-  } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
-    this->PrintCallPacked(op);
-  } else if (op->op.same_as(builtin::tvm_call_cpacked_lowered())) {
-    this->PrintCallPacked(op);
+  } else if (op->op.same_as(builtin::tvm_call_packed_lowered()) ||
+             op->op.same_as(builtin::tvm_call_cpacked_lowered())) {
+    // Runtime queries (for example, mapped host addresses) use the returned
+    // scalar or opaque pointer, unlike kernel launches with ignored results.
+    std::string result = this->PrintCallPacked(op);
+    os << "((";
+    PrintType(op->dtype, os);
+    os << ")" << result
+       << (op->dtype.is_handle()  ? ".v_ptr"
+           : op->dtype.is_float() ? ".v_float64"
+                                  : ".v_int64")
+       << ")";
   } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
