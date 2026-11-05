@@ -1149,6 +1149,8 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
+    lower_args.block_thread_extent =
+        thread_binding_.defined() ? thread_binding_->dom->extent : Integer(1);
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
