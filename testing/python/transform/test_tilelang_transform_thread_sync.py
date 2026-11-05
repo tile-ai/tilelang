@@ -2101,5 +2101,105 @@ def test_full_sync_after_possibly_empty_thread_loop():
     _assert_stmt_order(lowered, shared_write, _sync_stmt(lowered, syncs[0]), output_write)
 
 
+def _wave_diag_target(warp_size: int):
+    return tvm.target.Target(
+        {"kind": "cuda", "max_num_threads": 1024, "thread_warp_size": warp_size, "arch": "sm_89"},
+        host="llvm",
+    )
+
+
+def _run_passes_with_warp_size(func, warp_size: int):
+    """run_passes, but with an explicit wave width instead of the target default."""
+    mod = tvm.IRModule.from_expr(func)
+    target = _wave_diag_target(warp_size)
+    mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": target}))(mod)
+    mod = tvm.tirx.transform.AnnotateDeviceRegions()(mod)
+    mod = tvm.tirx.transform.SplitHostDevice()(mod)
+    return tilelang.transform.ThreadSync("shared")(mod)
+
+
+def _split_wave_guard_func():
+    """A guard whose bound cuts one wave in half: 96 of 128 threads, 64-wide wave."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 96:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    return func
+
+
+def test_warp_uniform_rejection_names_the_split_wave():
+    """The rejection reports which wave is cut and what bound keeps it whole.
+
+    The bare "not warp-uniform" verdict cannot be acted on: the fix can be a
+    bound rounded to the wave size, a narrower guard, or a T.assume. Calling
+    out the wave and its width makes the required change obvious, which matters
+    most where the wave is wider than 32 (CDNA) and the default examples do not
+    apply.
+    """
+    import pytest
+
+    with pytest.raises(Exception) as excinfo:
+        _run_passes_with_warp_size(_split_wave_guard_func(), 64)
+
+    message = str(excinfo.value)
+    assert "not warp-uniform" in message
+    assert "wave 1" in message, message
+    assert "64 thread(s)" in message, message
+    assert "multiple of 64" in message, message
+    assert "T.assume" in message, message
+
+
+def test_warp_uniform_split_reports_the_aligned_bounds():
+    """The two wave-aligned bounds offered are the ones that put the wave whole."""
+
+    import pytest
+
+    with pytest.raises(Exception) as excinfo:
+        _run_passes_with_warp_size(_split_wave_guard_func(), 64)
+
+    message = str(excinfo.value)
+    assert "64 (wave 1 out" in message, message
+    assert "128 (wave 1 in)" in message, message
+
+
+def test_warp_uniform_guard_within_one_wave_still_lowers():
+    """Control: the same fixture with a wave-aligned bound is untouched."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 64:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    lowered = _device_func(_run_passes_with_warp_size(func, 64))
+    syncs = _storage_syncs(lowered, arg_count=3)
+    _assert_partial_sync_params(syncs, 64)
+
+
+def test_warp_uniform_rejection_keeps_the_original_wording():
+    """Existing callers match on "not warp-uniform"; keep that prefix stable."""
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform"):
+        _run_passes_with_warp_size(_split_wave_guard_func(), 64)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
