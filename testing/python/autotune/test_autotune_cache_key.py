@@ -76,17 +76,19 @@ def test_cache_key_ignores_target_dict_insertion_order(target_config):
 
 
 def test_public_compile_args_ignore_target_dict_insertion_order(target_config):
-    target_field, config, _, _ = target_config
+    target_field, config, key, value = target_config
     arguments = {"target": {"kind": "cuda", "arch": "sm_80"}, "execution_backend": "tvm_ffi"}
     first = AutoTuner(_kernel, configs=[{"block_size": 128}]).set_compile_args(**{**arguments, target_field: config})
     second = AutoTuner(_kernel, configs=[{"block_size": 128}]).set_compile_args(
         **{**arguments, target_field: dict(reversed(config.items()))}
     )
+    changed = AutoTuner(_kernel, configs=[{"block_size": 128}]).set_compile_args(**{**arguments, target_field: {**config, key: value}})
     parameters = inspect.signature(_kernel).parameters
     first_key = first.generate_cache_key(parameters, {})
 
     assert first_key is not None
     assert first_key == second.generate_cache_key(parameters, {})
+    assert first_key != changed.generate_cache_key(parameters, {})
 
 
 def test_cache_key_distinguishes_target_dict_values(target_config):
