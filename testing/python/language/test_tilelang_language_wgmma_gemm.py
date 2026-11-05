@@ -346,8 +346,8 @@ def _wgmma_ir_helpers():
     def issue(desc):
         return T.evaluate(T.call_intrin("handle", op("tl.ptx_wgmma_ss"), desc.data))
 
-    def wait():
-        return T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), 0))
+    def wait(count=0):
+        return T.evaluate(T.call_intrin("handle", op("tl.wait_wgmma"), count))
 
     return T, init, issue, wait
 
@@ -732,6 +732,114 @@ def _ir_descriptor_rebound_in_next_loop():
     return func, 4096
 
 
+def _ir_partial_wait_keeps_operand():
+    # wait_wgmma(1) may leave a group in flight, so only the full wait retires the MMA.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        init(desc, B0)
+        issue(desc)
+        commit()
+        wait(1)
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_wait_in_loop_that_may_not_run():
+    # The loop's extent is unknown, so it may run no iteration and leave B0 in flight after it.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        init(desc, B0)
+        issue(desc)
+        commit()
+        for _k in T.serial(tx):
+            wait()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_descriptor_issued_after_loop():
+    # The break keeps the binding carried across the loop's back edge, which must end with the
+    # loop: the issue after it reads B0 without any loop around it.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, loop_break, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        for k in T.serial(4):
+            if k == 1:
+                loop_break()
+            init(desc, B0)
+            issue(desc)
+            commit()
+            wait()
+        issue(desc)
+        commit()
+        Tmp[tx] = T.uint8(1)
+        wait()
+
+    return func, 2 * 4096
+
+
+def _ir_wait_with_uncommitted_path():
+    # Only one path commits its WGMMA, and a wait does not cover the uncommitted one.
+    T, init, issue, wait = _wgmma_ir_helpers()
+    _, _, commit, _, _ = _wgmma_ir_control_helpers()
+
+    @T.prim_func(private=True)
+    def func():
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        B0 = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        Tmp = T.alloc_buffer((4096,), "uint8", scope="shared.dyn")
+        desc = T.alloc_buffer((1,), "uint64", scope="local.descriptor.wgmma")
+        if tx < 64:
+            init(desc, B0)
+            issue(desc)
+            commit()
+        else:
+            init(desc, B0)
+            issue(desc)
+        wait()
+        Tmp[tx] = T.uint8(1)
+        commit()
+        wait()
+
+    return func, 2 * 4096
+
+
 @pytest.mark.parametrize(
     "build,aggressive",
     [
@@ -748,6 +856,10 @@ def _ir_descriptor_rebound_in_next_loop():
         pytest.param(_ir_descriptor_issued_in_next_iteration, False, id="issued_in_next_iteration"),
         pytest.param(_ir_break_keeps_earlier_reuse, False, id="break_keeps_reuse"),
         pytest.param(_ir_descriptor_rebound_in_next_loop, False, id="rebound_in_next_loop"),
+        pytest.param(_ir_partial_wait_keeps_operand, False, id="partial_wait"),
+        pytest.param(_ir_wait_in_loop_that_may_not_run, False, id="loop_may_not_run"),
+        pytest.param(_ir_descriptor_issued_after_loop, False, id="issued_after_loop"),
+        pytest.param(_ir_wait_with_uncommitted_path, False, id="uncommitted_path"),
     ],
 )
 def test_wgmma_operands_stay_live_until_full_wait(build, aggressive):
