@@ -137,21 +137,32 @@ def test_guarded_cast_store_vector_width(memory_guard):
     assert store_widths == [8 if memory_guard else 16]
 
 
-def _conditional_store_with_int64_guard(kind, in_dtype, group_size):
+def _conditional_store_with_int64_guard(kind, in_dtype, group_size, bind_condition=False):
     tir = tvm.tirx
     a = tir.decl_buffer((32,), in_dtype, name="A")
     out = tir.decl_buffer((32,), "bfloat16", name="Out")
     local = tir.decl_buffer((32,), in_dtype, name="local", scope="local")
     n = tir.Var("n", "int64")
     i = tir.Var("i", "int32")
-    condition = tir.Cast("int64", i) < n
+    idx_expr = tir.Cast("int64", i)
+    cond_expr = idx_expr < n
+    store_idx = i
+    binds = []
+    if bind_condition:
+        idx_var = tir.Var("idx", "int64")
+        cond_var = tir.Var("cond", "bool")
+        binds = [tir.Bind(idx_var, idx_expr), tir.Bind(cond_var, idx_var < n)]
+        cond_expr = cond_var
+        store_idx = idx_var
     value = tir.Cast("bfloat16", local[i]) if in_dtype != "bfloat16" else local[i]
     other = -value
     if kind == "if":
-        body = tir.IfThenElse(condition, tir.BufferStore(out, value, [i]), tir.BufferStore(out, other, [i]))
+        body = tir.IfThenElse(cond_expr, tir.BufferStore(out, value, [store_idx]), tir.BufferStore(out, other, [store_idx]))
     else:
         select = tir.if_then_else if kind == "if_then_else" else tir.Select
-        body = tir.BufferStore(out, select(condition, value, other), [i])
+        body = tir.BufferStore(out, select(cond_expr, value, other), [store_idx])
+    if binds:
+        body = tir.SeqStmt([*binds, body])
     copy_i = tir.Var("copy_i", "int32")
     copy = tir.For(copy_i, 0, 32, tir.ForKind.SERIAL, tir.BufferStore(local, a[copy_i], [copy_i]))
     loop = tir.For(i, 0, 32, tir.ForKind.VECTORIZED, body)
@@ -159,12 +170,16 @@ def _conditional_store_with_int64_guard(kind, in_dtype, group_size):
     return tir.PrimFunc([a, out, n], body)
 
 
+@pytest.mark.parametrize("bind_condition", [False, True])
 @pytest.mark.parametrize("kind", ["if", "if_then_else", "select"])
 @pytest.mark.parametrize("in_dtype,group_size,width", [("bfloat16", 16, 16), ("bfloat16", 8, 8), ("float32", 16, 8)])
-def test_uniform_int64_guard_preserves_data_vector_width(kind, in_dtype, group_size, width):
-    func = _conditional_store_with_int64_guard(kind, in_dtype, group_size)
+def test_uniform_int64_guard_preserves_data_vector_width(kind, in_dtype, group_size, width, bind_condition):
+    func = _conditional_store_with_int64_guard(kind, in_dtype, group_size, bind_condition=bind_condition)
     with tvm.target.Target({"kind": "cuda", "arch": "sm_100"}):
-        mod = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+        mod = tvm.IRModule.from_expr(func)
+        if in_dtype == "bfloat16":
+            mod = tl.transform.DecoupleTypeCast()(mod)
+        mod = tl.transform.LegalizeVectorizedLoop()(mod)
     widths = []
     tvm.tirx.stmt_functor.post_order_visit(
         mod["main"].body,
