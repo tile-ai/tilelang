@@ -237,7 +237,13 @@ Requirements:
 
 Either or both input buffers may be annotated; an unannotated operand keeps its default inferred layout. Linear layouts do not guarantee better performance.
 
-Execution has been validated with `num_stages=0`. A compile-only regression also checks that requesting `num_stages=2` produces the same device code: the current gfx1200 planner disables software pipelining. This does not validate staged shared storage or pipelined execution.
+The annotation controls the physical storage of A/B; producers such as `T.copy` and `T.Parallel` still use logical indices. A shared operand may be reused by multiple supported NN GEMMs, including calls that accumulate into the same initialized FP32 fragment. Each call must satisfy the storage and dtype requirements above.
+
+C retains its inferred WMMA fragment layout. Subsequent elementwise operations and reductions also use logical indices; no manual lane or register remapping is required. Regression coverage composes parallel shared-memory producers, operand reuse, accumulation, a bias/ReLU epilogue and row reduction for all four A/B layout combinations in both precisions. This does not imply support for arbitrary explicit C layouts or shared-memory accumulators.
+
+This support reuses the existing WMMA loads and scheduling. Selecting linear storage does not enable a new fragment mapping or automatic tuning; compare performance for the complete kernel, including its producers and consumers.
+
+Execution has been validated with `num_stages=0`. A compile-only regression also checks that requesting `num_stages=2` preserves the single-stage shared-memory footprint and valid WMMA operand loads: the current gfx1200 planner disables software pipelining. This does not validate staged shared storage or pipelined execution.
 
 ## Comparison with Other DSLs
 

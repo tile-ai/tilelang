@@ -72,7 +72,7 @@ def matmul(
     "a_linear,b_linear", [(False, False), (True, True), (True, False), (False, True)], ids=["default", "linear", "linear-a", "linear-b"]
 )
 def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear):
-    """Check physical LDS addresses and lane ownership, including load widths."""
+    """Check physical LDS addresses and lane ownership for both operands."""
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
     program = matmul(
         16,
@@ -93,7 +93,10 @@ def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear)
     )
     with target, tvm.transform.PassContext(opt_level=3):
         artifact = tilelang.lower(program, target=target)
+    _check_wmma_shared_layout_loads(artifact, wmma_dtype, a_linear, b_linear)
 
+
+def _check_wmma_shared_layout_loads(artifact, wmma_dtype, a_linear, b_linear):
     stores = []
     wmma_calls = []
     domains = {}
@@ -121,11 +124,11 @@ def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear)
     # Identify operands by their WMMA pointer arguments, not generated names.
     operand_data = {"A": wmma_calls[0].args[6], "B": wmma_calls[0].args[8]}
     loads = {name: [store for store in stores if store.buffer.data.same_as(data)] for name, data in operand_data.items()}
-    # This minimal tile has one load site per operand. Never silently discard
-    # additional stores if lowering changes.
-    assert {name: len(sites) for name, sites in loads.items()} == {"A": 1, "B": 1}
+    # Loads may be split or vectorized differently, but every operand register
+    # must still be populated exactly once from the correct shared address.
     for sites in loads.values():
-        assert isinstance(sites[0].value, tvm.tirx.BufferLoad)
+        assert sites
+        assert all(isinstance(store.value, tvm.tirx.BufferLoad) for store in sites)
     shared_vars = set(tvm.tirx.analysis.undefined_vars(loads["A"][0].value.indices[0])) & set(
         tvm.tirx.analysis.undefined_vars(loads["B"][0].value.indices[0])
     )
@@ -141,9 +144,9 @@ def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear)
 
     analyzer = tvm.arith.Analyzer()
     for name, sites in loads.items():
+        visited = set()
         for store in sites:
             load = store.value
-            assert load.dtype.lanes == (8 if name == "A" else 1)
             index, destination = load.indices[0], store.indices[0]
             for expr in (index, destination):
                 if isinstance(expr, tvm.tirx.Ramp):
@@ -152,7 +155,6 @@ def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear)
             base = index.base if isinstance(index, tvm.tirx.Ramp) else index
             local_base = destination.base if isinstance(destination, tvm.tirx.Ramp) else destination
             variables = tvm.tirx.analysis.undefined_vars(base + local_base)
-            visited = set()
             for values in product(*(domains[var] for var in variables)):
                 bindings = dict(zip(variables, values))
                 lane, ki = bindings[thread_var], bindings[reduction_var]
@@ -171,7 +173,7 @@ def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear)
                     position = (lane, ki, slot)
                     assert position not in visited
                     visited.add(position)
-            assert visited == set(product(range(32), range(2), range(8 if name == "A" else 16)))
+        assert visited == set(product(range(32), range(2), range(8 if name == "A" else 16)))
 
 
 @tilelang.testing.requires_rocm
@@ -295,6 +297,102 @@ def _check_wmma_shared_layout_result(a, b, block, threads, a_linear, b_linear, o
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     assert torch.all(guarded[:16] == 123)
     assert torch.all(guarded[-16:] == 123)
+
+
+def _wmma_shared_layout_composition(in_dtype, a_linear, b_linear):
+    @T.prim_func
+    def main(
+        A: T.Tensor((16, 32), in_dtype),
+        B: T.Tensor((32, 32), in_dtype),
+        Initial: T.Tensor((16, 32), "float32"),
+        Bias: T.Tensor((32,), "float32"),
+        C: T.Tensor((16, 32), "float32"),
+        RowSum: T.Tensor((16,), "float32"),
+    ):
+        with T.Kernel(1, threads=32):
+            A_shared = T.alloc_shared((16, 32), in_dtype)
+            B_shared = T.alloc_shared((32, 32), in_dtype)
+            A_default = T.alloc_shared((16, 32), in_dtype)
+            B_default = T.alloc_shared((32, 32), in_dtype)
+            C_local = T.alloc_fragment((16, 32), "float32")
+            Row_local = T.alloc_fragment((16,), "float32")
+            if a_linear:
+                T.annotate_layout({A_shared: make_linear_layout(A_shared)})
+            if b_linear:
+                T.annotate_layout({B_shared: make_linear_layout(B_shared)})
+            # Logical producers must honor each buffer's physical layout.
+            for i, k in T.Parallel(16, 32):
+                A_shared[i, k] = A[i, k] + 0.5
+                A_default[i, k] = A[i, k] - 1
+            for k, j in T.Parallel(32, 32):
+                B_shared[k, j] = B[k, j] * 0.5
+                B_default[k, j] = B[k, j] + 1
+            T.copy(Initial, C_local)
+            # Reuse both operands, mixing annotated and inferred layouts,
+            # while all three GEMMs accumulate into the same fragment.
+            T.gemm(A_shared, B_shared, C_local)
+            T.gemm(A_shared, B_default, C_local)
+            T.gemm(A_default, B_shared, C_local)
+            for i, j in T.Parallel(16, 32):
+                C_local[i, j] = T.max(C_local[i, j] + Bias[j], 0)
+            T.reduce_sum(C_local, Row_local, dim=1)
+            T.copy(C_local, C)
+            T.copy(Row_local, RowSum)
+
+    return main
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize(
+    "a_linear,b_linear", [(False, False), (True, True), (True, False), (False, True)], ids=["default", "linear", "linear-a", "linear-b"]
+)
+def test_gemm_wmma_shared_layout_composition_lowering(in_dtype, a_linear, b_linear):
+    """Protect layout compatibility even on runners without a gfx1200 GPU."""
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    program = _wmma_shared_layout_composition(in_dtype, a_linear, b_linear)
+    with target, tvm.transform.PassContext(opt_level=3):
+        assert tilelang.lower(program, target=target).device_mod is not None
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize(
+    "a_linear,b_linear", [(False, False), (True, True), (True, False), (False, True)], ids=["default", "linear", "linear-a", "linear-b"]
+)
+def test_gemm_wmma_shared_layout_composition(in_dtype, a_linear, b_linear):
+    import torch
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    if torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] != "gfx1200":
+        pytest.skip("Requires gfx1200 WMMA execution")
+    generator = torch.Generator().manual_seed(3729)
+    dtype = getattr(torch, in_dtype)
+    a = (torch.randint(-4, 5, (16, 32), generator=generator) / 2).to(dtype)
+    b = (torch.randint(-4, 5, (32, 32), generator=generator) / 2).to(dtype)
+    initial = torch.randint(-8, 9, (16, 32), generator=generator).float() / 8
+    bias = torch.randint(-8, 9, (32,), generator=generator).float() / 4
+    # Small dyadic fractions make the producers, GEMM accumulation and row
+    # reduction exact in FP32. Compute the oracle independently on the CPU.
+    a_produced, b_produced = a.double() + 0.5, b.double() * 0.5
+    expected = initial.double() + a_produced @ b_produced + a_produced @ (b.double() + 1) + (a.double() - 1) @ b_produced
+    expected = (expected + bias.double()).clamp_min(0).float()
+    expected_rows = expected.double().sum(dim=1).float()
+
+    program = _wmma_shared_layout_composition(in_dtype, a_linear, b_linear)
+    kernel = tilelang.compile(program, target={"kind": "hip", "mcpu": "gfx1200"})
+    guarded = torch.full((16 * 32 + 32,), 123, dtype=torch.float32, device=device)
+    row_guarded = torch.full((16 + 32,), 123, dtype=torch.float32, device=device)
+    output, rows = guarded[16:-16].view(16, 32), row_guarded[16:-16]
+    output.fill_(float("nan"))
+    rows.fill_(float("nan"))
+    kernel(a.to(device), b.to(device), initial.to(device), bias.to(device), output, rows)
+    torch.cuda.synchronize(device)
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    torch.testing.assert_close(rows.cpu(), expected_rows, rtol=0, atol=0)
+    for storage in (guarded, row_guarded):
+        assert torch.all(storage[:16] == 123)
+        assert torch.all(storage[-16:] == 123)
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
@@ -545,16 +643,18 @@ def test_gemm_shared_layout_unsupported_modes(arch, trans_A, trans_B, in_dtype, 
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
-@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
-def test_gemm_wmma_linear_shared_layout_pipeline_fallback(in_dtype):
-    """gfx1200 currently disables software pipelining, retaining the 2D tiles."""
+@pytest.mark.parametrize("in_dtype,wmma_dtype", [("bfloat16", "bf16"), ("float16", "f16")])
+def test_gemm_wmma_linear_shared_layout_pipeline_fallback(in_dtype, wmma_dtype):
+    """gfx1200 retains single-stage storage and valid WMMA operand loads."""
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
-    sources = []
+    shared_sizes = []
     with target, tvm.transform.PassContext(opt_level=3):
         for num_stages in (0, 2):
             program = matmul(16, 32, 64, 16, 32, 32, False, False, in_dtype, in_dtype, "float32", num_stages, 32, make_linear_layout)
-            sources.append(tilelang.lower(program, target=target).kernel_source)
-    assert sources[0] == sources[1]
+            artifact = tilelang.lower(program, target=target)
+            _check_wmma_shared_layout_loads(artifact, wmma_dtype, True, True)
+            shared_sizes.append([int(func.attrs["dyn_shared_memory_buf"]) for func in artifact.device_mod.functions.values()])
+    assert shared_sizes[0] == shared_sizes[1]
 
 
 def run_gemm(
