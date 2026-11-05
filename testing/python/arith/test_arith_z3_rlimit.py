@@ -1,10 +1,15 @@
 """A larger Z3 budget makes the reduction projection from #3698 provable."""
 
+import pytest
+
 import tilelang.testing
 from tilelang import tvm
 
 
 def test_z3_rlimit_proves_reduction_projection():
+    if tvm.arith.Analyzer().get_smtlib2() == "; Z3 Prover is disabled.":
+        pytest.skip("Z3 support is disabled")
+
     def index(x):
         return x % 32 // 16 * 16 + x % 16 // 8 * 2
 
