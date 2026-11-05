@@ -53,9 +53,9 @@ class BinaryCache:
         return f"{public}_{local}" if local else public
 
     @classmethod
-    def _get_namespace_root(cls) -> str:
+    def _get_namespace_root(cls, root: str | None = None) -> str:
         version = cls._format_version_namespace(__version__)
-        return os.path.join(env.TILELANG_CACHE_DIR, version)
+        return os.path.join(env.get_cache_write_dir() if root is None else root, version)
 
     @classmethod
     def _get_cache_root(cls) -> str:
@@ -125,7 +125,15 @@ class BinaryCache:
     def load(cls, key: str, compile_format: str) -> bytes | None:
         if not env.is_cache_enabled():
             return None
-        path = cls.get_path(key, compile_format)
+        for root in env.get_cache_read_dirs():
+            path = os.path.join(cls._get_namespace_root(root), cls.cache_root_dir, key, f"kernel.{compile_format}")
+            data = cls._load_path(path)
+            if data is not None:
+                return data
+        return None
+
+    @classmethod
+    def _load_path(cls, path: str) -> bytes | None:
         try:
             with open(path, "rb") as f:
                 data = f.read()

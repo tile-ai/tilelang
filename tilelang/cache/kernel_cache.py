@@ -193,7 +193,7 @@ class KernelCache:
 
     @staticmethod
     def _create_dirs():
-        os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
+        os.makedirs(env.get_cache_write_dir(), exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
@@ -205,8 +205,8 @@ class KernelCache:
                 KernelCache._last_cleaned_staging_root = staging_root
 
     @staticmethod
-    def _get_namespace_root() -> str:
-        return os.path.join(env.TILELANG_CACHE_DIR, KernelCache._get_cache_namespace())
+    def _get_namespace_root(root: str | None = None) -> str:
+        return os.path.join(env.get_cache_write_dir() if root is None else root, KernelCache._get_cache_namespace())
 
     @staticmethod
     def _get_cache_root() -> str:
@@ -662,7 +662,36 @@ class KernelCache:
         Returns:
             JITKernel: The loaded kernel if found, None otherwise.
         """
-        cache_path = self._get_cache_path(key)
+        for index, root in enumerate(env.get_cache_read_dirs()):
+            cache_path = os.path.join(self._get_namespace_root(root), self.cache_root_dir, key)
+            kernel = self._load_kernel_from_path(
+                key,
+                cache_path,
+                backend_context,
+                out_idx,
+                pass_configs,
+                compile_flags,
+                func,
+                verbose,
+                read_only=index > 0,
+            )
+            if kernel is not None:
+                return kernel
+        return None
+
+    def _load_kernel_from_path(
+        self,
+        key: str,
+        cache_path: str,
+        backend_context: BackendContext,
+        out_idx: list[int] | None,
+        pass_configs: dict | None,
+        compile_flags: list[str] | str | None,
+        func: Callable | None,
+        verbose: bool,
+        *,
+        read_only: bool,
+    ) -> JITKernel | None:
         device_kernel_path = os.path.join(cache_path, self.device_kernel_path)
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
@@ -680,10 +709,11 @@ class KernelCache:
             # launch (CUDA_ERROR_INVALID_IMAGE), where nothing repairs the
             # entry. Catch it here and self-heal by recompiling.
             self.logger.warning(
-                "Disk cache entry at %s failed integrity verification (corrupted or partially written); removing it and recompiling.",
+                "Disk cache entry at %s failed integrity verification (corrupted or partially written); treating it as a cache miss.",
                 cache_path,
             )
-            shutil.rmtree(cache_path, ignore_errors=True)
+            if not read_only:
+                shutil.rmtree(cache_path, ignore_errors=True)
             return None
 
         # Load kernel parameters
@@ -715,7 +745,8 @@ class KernelCache:
                 err,
                 exc_info=verbose,
             )
-            shutil.rmtree(cache_path, ignore_errors=True)
+            if not read_only:
+                shutil.rmtree(cache_path, ignore_errors=True)
             return None
         if kernel is not None:
             # Restore parsed kernel-resource-usage if a previous compile

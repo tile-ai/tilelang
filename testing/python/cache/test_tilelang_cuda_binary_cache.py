@@ -413,3 +413,29 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
 
     assert loaded is None
     assert not cache_path.exists()
+
+
+@pytest.mark.parametrize("cache_type", ["cuda", "ascend"])
+def test_binary_cache_multiple_roots(monkeypatch, tmp_path, cache_type):
+    from tilelang.cache.ascend_binary_cache import AscendBinaryCache
+
+    cache = CUDABinaryCache if cache_type == "cuda" else AscendBinaryCache
+    roots = [tmp_path / name for name in ("local", "shared", "other")]
+    monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
+    tilelang.enable_cache()
+    for root, payload in zip(roots, (b"local", b"shared", b"other")):
+        monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
+        cache.save("key", "cubin", payload)
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
+    assert cache.load("key", "cubin") == b"local"
+    Path(cache.get_path("key", "cubin")).write_bytes(b"corrupt")
+    assert cache.load("key", "cubin") == b"shared"
+    shared_path = roots[1] / Path(cache.get_path("key", "cubin")).relative_to(roots[0])
+    shared_path.write_bytes(b"corrupt")
+    assert cache.load("key", "cubin") == b"other"
+    assert shared_path.read_bytes() == b"corrupt"
+    cache.save("new", "cubin", b"new")
+    relative = Path(cache.get_path("new", "cubin")).relative_to(roots[0])
+    assert (roots[0] / relative).read_bytes() == b"new"
+    assert not (roots[1] / relative).exists()
+    assert not (roots[2] / relative).exists()

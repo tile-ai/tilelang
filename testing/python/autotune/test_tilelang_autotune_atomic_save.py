@@ -149,3 +149,54 @@ def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path)
 
     assert (path / KERNEL_PY_PATH).exists()
     assert not (path / "legacy.txt").exists()
+
+
+@pytest.mark.parametrize("invalid", ["absent", "missing_metadata", "corrupt_metadata", "missing_binary", "load_failure"])
+def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
+    import os
+    from pathlib import Path
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
+
+    roots = [tmp_path / name for name in ("local", "shared", "other")]
+    tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    result = _make_result(tmp_path)
+    paths = []
+    for index, root in enumerate(roots):
+        monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
+        result = replace(result, config={"threads": 128 * (index + 1)})
+        tuner._save_result_to_disk("key", result)
+        paths.append(tuner.cache_dir / "key")
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
+    fail_load = False
+
+    def from_database(cls, **kwargs):
+        if fail_load and not Path(kwargs["kernel_lib_path"]).is_relative_to(roots[2]):
+            raise RuntimeError("unloadable kernel")
+        return SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// device kernel")
+
+    monkeypatch.setattr(autotune_param.JITKernel, "from_database", classmethod(from_database))
+    assert tuner._load_result_from_disk("key").config == {"threads": 128}
+    for path in paths[:2]:
+        if invalid == "absent":
+            path.rename(path.with_name("unused"))
+        elif invalid == "missing_metadata":
+            (path / BEST_CONFIG_PATH).unlink()
+        elif invalid == "corrupt_metadata":
+            (path / BEST_CONFIG_PATH).write_text("invalid json")
+        elif invalid == "missing_binary":
+            (path / KERNEL_LIB_PATH).unlink()
+        else:
+            fail_load = True
+    # Snapshot secondary roots after injecting failures: lookup must not mutate them.
+    before = {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
+    assert tuner._load_result_from_disk("key").config == {"threads": 384}
+    assert tuner._load_result_from_disk("missing") is None
+    assert before == {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
+    tuner._save_result_to_disk("new", result)
+    assert (tuner.cache_dir / "new" / BEST_CONFIG_PATH).is_file()
+    assert not (paths[1].parent / "new").exists()
+    assert not (paths[2].parent / "new").exists()

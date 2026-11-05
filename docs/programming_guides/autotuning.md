@@ -251,7 +251,7 @@ Notes
 ## Caching
 
 The autotuner caches best artifacts both in‑memory (per process) and on disk under
-`$TILELANG_CACHE_DIR/autotuner`. The cache key includes:
+`<first-cache-root>/<version>/<host-platform>/autotuner`. The cache key includes:
 - TileLang version, function source, closure free‑vars
 - Config list, compile args, profile args
 
@@ -262,6 +262,13 @@ Disk cache contents (per key)
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
+  accepts an ordered path list, for example
+  `TILELANG_CACHE_DIR=/local/cache:/shared/cache/A:/shared/cache/B`.
+  Kernel, device-binary, and autotuning caches search all roots from left to right, using
+  the first valid entry. Writes and cleanup use only the first root; secondary
+  entries are never repaired or deleted. Generated Python sources use only the
+  first root. Use `;` as the separator
+  on Windows. Empty path components are rejected.
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
 

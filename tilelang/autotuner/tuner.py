@@ -158,10 +158,10 @@ class AutoTuner:
         self.jit_elaborate = None
 
     @classmethod
-    def _get_cache_dir(cls) -> Path:
+    def _get_cache_dir(cls, root: str | None = None) -> Path:
         from tilelang.cache.kernel_cache import KernelCache
 
-        return Path(KernelCache._get_namespace_root()) / "autotuner"
+        return Path(KernelCache._get_namespace_root(root)) / "autotuner"
 
     @property
     def cache_dir(self) -> Path:
@@ -392,9 +392,22 @@ class AutoTuner:
     def _save_result_to_disk(self, key, result: AutotuneResult):
         result.save_to_disk(self.cache_dir / key, self.compile_args.verbose)
 
-    def _load_result_from_disk(self, key) -> AutotuneResult:
-        result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)
-        return result
+    def _load_result_from_disk(self, key) -> AutotuneResult | None:
+        for root in env.get_cache_read_dirs():
+            path = self._get_cache_dir(root) / key
+            try:
+                result = AutotuneResult.load_from_disk(path, self.compile_args)
+            except Exception as err:
+                logger.warning(
+                    "Failed to load autotune result from disk cache at %s; treating it as a cache miss: %s",
+                    path,
+                    err,
+                    exc_info=self.compile_args.verbose,
+                )
+                continue
+            if result is not None:
+                return result
+        return None
 
     # Compile-related helpers
     def _merge_pass_configs_into_compile_args(

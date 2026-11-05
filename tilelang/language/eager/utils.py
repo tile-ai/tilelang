@@ -11,7 +11,7 @@ import linecache
 
 
 def disk_compile(source, name):
-    cache_dir = env.TILELANG_CACHE_DIR
+    cache_dir = env.get_cache_write_dir()
     if cache_dir is not None:
         import os
 

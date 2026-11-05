@@ -161,5 +161,60 @@ def test_legacy_entry_without_manifest_misses_and_save_repairs(cache_dirs, tmp_p
     assert _load_expecting_hit(cache, key, monkeypatch)
 
 
+@pytest.mark.parametrize("invalid", ["missing", "corrupt", "load_failure"])
+def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
+    import os
+    from types import SimpleNamespace
+    from tilelang.autotuner.tuner import AutoTuner
+
+    roots = [tmp_path / name for name in ("local", "shared", "other")]
+    cache = KernelCache()
+    kernel = _make_fake_kernel(tmp_path)
+    for root in roots:
+        monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
+        cache._save_kernel_to_disk("key", kernel)
+    relative = Path(cache._get_cache_path("key")).relative_to(roots[-1])
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
+    assert AutoTuner._get_cache_dir().is_relative_to(roots[0])
+
+    def build(cls, **kwargs):
+        path = Path(kwargs["kernel_lib_path"])
+        if invalid == "load_failure" and not path.is_relative_to(roots[2]):
+            raise RuntimeError("unloadable entry")
+        return SimpleNamespace(loaded_path=path)
+
+    monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(build))
+    context = create_backend_context("cuda", execution_backend="tvm_ffi")
+    if invalid != "load_failure":
+        assert cache._load_kernel_from_disk("key", context).loaded_path.is_relative_to(roots[0])
+        for root in roots[:2]:
+            binary = root / relative / cache.kernel_lib_path
+            if invalid == "missing":
+                binary.unlink()
+            else:
+                binary.write_bytes(b"corrupt")
+    loaded = cache._load_kernel_from_disk("key", context)
+    assert loaded.loaded_path.is_relative_to(roots[2])
+    assert (roots[1] / relative).is_dir()
+    cache._save_kernel_to_disk("new", kernel)
+    new_relative = Path(cache._get_cache_path("new")).relative_to(roots[0])
+    assert (roots[0] / new_relative).is_dir()
+    assert not (roots[1] / new_relative).exists()
+    cache.clear_cache()
+    assert not (roots[0] / relative).exists()
+    assert (roots[1] / relative).is_dir()
+    assert (roots[2] / relative).is_dir()
+
+
+def test_cutedsl_cached_module_import_does_not_write_bytecode(tmp_path):
+    from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
+
+    path = tmp_path / "kernel.py"
+    path.write_text("value = 42\n")
+    module = CuTeDSLLibraryGenerator.import_from_file("cached_kernel", str(path))
+    assert module.value == 42
+    assert list(tmp_path.iterdir()) == [path]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
