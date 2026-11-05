@@ -168,5 +168,59 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=512, block_M=128)
 
 
+def tilelang_transpose_staged(M, N, dtype, src_offset=0, stages=2):
+    """Transpose one stage of a multi-buffered source, as T.Pipelined produces:
+    the source region has a leading extent-1 axis that the destination lacks."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, src_offset + N), dtype),
+        B: T.Tensor((N, M), dtype),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            tile = T.alloc_shared((stages, M, src_offset + N), dtype)
+            tile_T = T.alloc_shared((N, M), dtype)
+            T.copy(A, tile[stages - 1, :, :])
+            T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+            T.copy(tile_T, B)
+
+    return main
+
+
+def _bits(x):
+    return x.view({1: torch.uint8, 2: torch.int16, 4: torch.int32}[x.element_size()])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tilelang_transpose_matrix_instructions():
+    # (dtype, M, N, src_offset, uses ldmatrix/stmatrix)
+    cases = [
+        (T.float16, 40, 72, 0, True),
+        (T.bfloat16, 64, 128, 0, True),
+        (T.float8_e4m3fn, 64, 512, 0, True),
+        (T.int8, 48, 80, 0, True),
+        # rows that do not start on a 16-byte boundary keep the SIMT loop
+        (T.float16, 16, 16, 4, False),
+        (T.float8_e4m3fn, 16, 16, 8, False),
+        (T.float32, 32, 64, 0, False),
+    ]
+    for dtype, M, N, src_offset, matrix in cases:
+        kernel = tilelang.compile(
+            tilelang_transpose_staged(M, N, dtype, src_offset),
+            out_idx=[1],
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+        )
+        assert ("ptx_stmatrix" in kernel.get_kernel_source()) == matrix, (dtype, M, N, src_offset)
+        torch_dtype = getattr(torch, dtype)
+        a = (
+            torch.randint(0, 256, (M, src_offset + N), dtype=torch.uint8, device="cuda").view(torch_dtype)
+            if torch_dtype.itemsize == 1
+            else torch.randn(M, src_offset + N, device="cuda").to(torch_dtype)
+        )
+        b = kernel(a)
+        torch.testing.assert_close(_bits(b), _bits(a[:, src_offset:].t().contiguous()), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
