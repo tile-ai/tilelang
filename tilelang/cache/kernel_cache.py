@@ -666,7 +666,6 @@ class KernelCache:
         for index, root in enumerate(env.get_cache_read_dirs()):
             cache_path = os.path.join(self._get_namespace_root(root), self.cache_root_dir, key)
             kernel = self._load_kernel_from_path(
-                key,
                 cache_path,
                 backend_context,
                 out_idx,
@@ -677,12 +676,12 @@ class KernelCache:
                 allow_cleanup=index == 0,
             )
             if kernel is not None:
+                self._tag_kernel_cache_entry(kernel, key, cache_path)
                 return kernel
         return None
 
     def _load_kernel_from_path(
         self,
-        key: str,
         cache_path: str,
         backend_context: BackendContext,
         out_idx: list[int] | None,
@@ -759,7 +758,6 @@ class KernelCache:
                 except Exception:
                     self.logger.exception("Error loading kernel resource_usage from disk")
 
-            self._tag_kernel_cache_entry(kernel, key, cache_path)
         return kernel
 
     def _clear_disk_cache(self):

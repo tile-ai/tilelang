@@ -195,6 +195,8 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
                 binary.write_bytes(b"corrupt")
     loaded = cache._load_kernel_from_disk("key", context)
     assert loaded.loaded_path.is_relative_to(roots[2])
+    assert loaded._tilelang_cache_key == "key"
+    assert Path(loaded._tilelang_cache_path) == roots[2] / relative
     assert (roots[1] / relative).is_dir()
     cache._save_kernel_to_disk("new", kernel)
     new_relative = Path(cache._get_write_cache_path("new")).relative_to(roots[0])
