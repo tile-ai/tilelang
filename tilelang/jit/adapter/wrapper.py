@@ -15,10 +15,11 @@ from .utils import (
     is_hip_target,
     is_cpu_target,
     pythonic_expr,
+    dynamic_symbolic_vars,
+    name_host_arguments,
     parse_function_call_args,
     parse_tma_descriptor_args,
 )
-import re
 import logging
 import textwrap
 from tvm.tirx.stmt_functor import post_order_visit
@@ -275,7 +276,7 @@ class TLCUDASourceWrapper:
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         # This wrapper generates C/CUDA source. C/C++ integer division uses '/',
         # and '//' is not a valid operator in C/C++.
-        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
+        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/", var_name_map=self._argument_names)
 
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
@@ -288,7 +289,7 @@ class TLCUDASourceWrapper:
 
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+        dynamic_symbolic_set = dynamic_symbolic_vars(self.prim_func)
 
         function_args = []
 
@@ -301,17 +302,19 @@ class TLCUDASourceWrapper:
                 function_args.append(
                     {
                         "name": buffer.data.name,
+                        "var": param,
+                        "data": buffer.data,
                         "type": self._lookup_type(buffer.dtype) + "* __restrict__",
                     }
                 )
             elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype), "var": param})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+        for dyn_sym in dynamic_symbolic_set:
+            function_args.append({"name": dyn_sym.name, "type": self._lookup_type(dyn_sym.dtype), "var": dyn_sym})
+        host_names = name_host_arguments(function_args)
 
         function_args.append(self.get_stream_type())
 
@@ -334,6 +337,14 @@ class TLCUDASourceWrapper:
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
+            self._argument_names = dict(host_names)
+            self._argument_names.update(
+                {
+                    var: f"({pythonic_expr(value, self._TYPE_MAP, var_name_map=host_names)})"
+                    for var, value in zip(self.device_mod[function_name].params, function_params, strict=True)
+                    if var.dtype != "handle"
+                }
+            )
 
             # Find the location of the global kernel function in the code
             index = match_declare_kernel(code, function_name + "(")
@@ -355,10 +366,13 @@ class TLCUDASourceWrapper:
             kernel_launch_code += init_l2_persistent_map
 
             if self.use_cooperative_groups[function_name]:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
+                args_list = parse_function_call_args(
+                    declaration, function_args, function_params, desc_name_map, desc_name_var_map, var_name_map=host_names
+                )
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
+                assert all(arg.isidentifier() for arg in args_list), "Cooperative launch arguments must be host variables"
                 args_array = [f"(void*)&{arg}" for arg in args_list]
                 call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
                 kernel_launch_code += call_args
@@ -368,7 +382,9 @@ class TLCUDASourceWrapper:
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
             else:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
+                args_list = parse_function_call_args(
+                    declaration, function_args, function_params, desc_name_map, desc_name_var_map, var_name_map=host_names
+                )
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -384,6 +400,7 @@ class TLCUDASourceWrapper:
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
+        self._argument_names = host_names
         init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
         kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
 
@@ -801,7 +818,7 @@ class TLCPUSourceWrapper:
 
     def create_call_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+        dynamic_symbolic_set = dynamic_symbolic_vars(self.prim_func)
 
         function_args = []
         # Collect function arguments based on primary function's parameters and buffer mappings
@@ -811,28 +828,21 @@ class TLCPUSourceWrapper:
                 function_args.append(
                     {
                         "name": buffer.name,
+                        "var": param,
+                        "data": buffer.data,
                         "type": self._lookup_type(buffer.dtype) + "*",
                     }
                 )
             elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype), "var": param})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+        for dyn_sym in dynamic_symbolic_set:
+            function_args.append({"name": dyn_sym.name, "type": self._lookup_type(dyn_sym.dtype), "var": dyn_sym})
+        self._argument_names = name_host_arguments(function_args)
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
-
-        def func_call_args(s, function_args):
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
 
         _call_str = """"""
 
@@ -846,7 +856,20 @@ class TLCPUSourceWrapper:
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
 
-            call_args = ", ".join(func_call_args(declaration, function_args))
+            function_params = None
+
+            def visitor(node, fn=function_name):
+                nonlocal function_params
+                if not isinstance(node, tvm.tirx.Call):
+                    return
+                if isinstance(node.op, tvm.ir.GlobalVar) and node.op.name_hint == fn:
+                    function_params = node.args
+                elif isinstance(node.op, tvm.ir.Op) and node.op.name in ("tirx.call_extern", "tirx.tvm_call_packed") and node.args[0] == fn:
+                    function_params = node.args[1 : 1 + len(self.device_mod[fn].params)]
+
+            post_order_visit(next(iter(self.host_mod.functions.values())).body, visitor)
+            assert function_params is not None, "Missing CPU host call"
+            call_args = ", ".join(parse_function_call_args(declaration, function_args, function_params, var_name_map=self._argument_names))
             _call_str += f"{function_name}({call_args})"
 
         # Wrap the kernel dispatch logic in an external C function
@@ -872,7 +895,7 @@ class TLCPUSourceWrapper:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tirx.Var) and (dim.name not in dynamic_symbolic_set):
+                    if isinstance(dim, tvm.tirx.Var) and dim not in prim_func.params and (dim.name not in dynamic_symbolic_set):
                         dynamic_symbolic_set[dim.name] = str(dim.dtype)
         return list(dynamic_symbolic_set.items())
 
@@ -965,7 +988,7 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
         Ascend uses ``<<<grid, smem, stream>>>`` (three arguments, no block
         dim) and ACL error checking instead of CUDA equivalents.
         """
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
+        dynamic_symbolic_set = dynamic_symbolic_vars(self.prim_func)
 
         function_args = []
         for param in self.prim_func.params:
@@ -974,16 +997,18 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
                 function_args.append(
                     {
                         "name": buffer.data.name,
+                        "var": param,
+                        "data": buffer.data,
                         "type": self._lookup_type(buffer.dtype) + "* __restrict__",
                     }
                 )
             elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype), "var": param})
             else:
                 raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
-        for dyn_sym, dyn_sym_dtype in dynamic_symbolic_set:
-            if dyn_sym not in [arg["name"] for arg in function_args]:
-                function_args.append({"name": dyn_sym, "type": self._lookup_type(dyn_sym_dtype)})
+        for dyn_sym in dynamic_symbolic_set:
+            function_args.append({"name": dyn_sym.name, "type": self._lookup_type(dyn_sym.dtype), "var": dyn_sym})
+        host_names = name_host_arguments(function_args)
 
         stream_type = self.get_stream_type()
         if stream_type is not None:
@@ -996,6 +1021,14 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
+            self._argument_names = dict(host_names)
+            self._argument_names.update(
+                {
+                    var: f"({pythonic_expr(value, self._TYPE_MAP, var_name_map=host_names)})"
+                    for var, value in zip(self.device_mod[function_name].params, function_params, strict=True)
+                    if var.dtype != "handle"
+                }
+            )
 
             # Ascend kernel signature: __global__ __vector__ <ret> name(...)
             # match_declare_kernel expects __global__ void, so find by name directly.
@@ -1005,7 +1038,7 @@ class TLAscendSourceWrapper(TLCUDASourceWrapper):
 
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
 
-            args_list = parse_function_call_args(declaration, function_args, function_params, {}, {})
+            args_list = parse_function_call_args(declaration, function_args, function_params, {}, {}, var_name_map=host_names)
             assert len(function_params) == len(args_list), (
                 f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
             )

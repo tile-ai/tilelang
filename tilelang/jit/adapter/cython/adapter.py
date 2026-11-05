@@ -14,10 +14,12 @@ from tvm import tirx
 from tvm.relax import TensorType
 
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import (
     get_output_scalar_dim_map,
+    dynamic_symbolic_vars,
     is_ascend_target,
     is_cpu_target,
     is_cuda_target,
@@ -84,8 +86,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     lib: ctypes.CDLL | None = None  # Compiled library handle
     # Maps symbolic variables to (kind, buffer_index, dimension, stride_scale)
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
-    # Maps symbolic variable names to ALL buffers that carry them, for cascaded None resolution
-    dynamic_symbolic_sources: dict[str, list[tuple[int, int, int, int]]] | None = None
+    # Maps symbolic Vars to ALL buffers that carry them, for cascaded None resolution
+    dynamic_symbolic_sources: dict[tirx.Var, list[tuple[int, int, int, int]]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
     ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
@@ -172,6 +174,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.cython_wrapper.set_output_shape_resolver(OutputShapeResolver(self.prim_func, self.result_idx))
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(self.prim_func, self.result_idx))
@@ -237,6 +240,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers())
+        adapter.cython_wrapper.set_output_shape_resolver(OutputShapeResolver(adapter.prim_func, adapter.result_idx))
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(adapter.prim_func, adapter.result_idx))
@@ -285,9 +289,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
-        return dynamic_symbolic_map
+        return {var: dynamic_symbolic_map[var] for var in dynamic_symbolic_vars(func)}
 
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int, int]]]:
+    def _process_dynamic_symbolic_sources(self) -> dict[tirx.Var, list[tuple[int, int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
 
         For each dynamic symbol, maps to ALL buffers that carry it as (kind, buffer_idx, dim_idx, stride_scale).
@@ -297,7 +301,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int, int]]] = {}
+        sources: dict[tirx.Var, list[tuple[int, int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
@@ -305,13 +309,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 stride_scale = 8 // element_bits if element_bits < 8 else 1
                 for j, dim in enumerate(buffer.shape):
                     if isinstance(dim, tirx.Var) and dim not in params:
-                        key = str(dim)
+                        key = dim
                         if key not in sources:
                             sources[key] = []
                         sources[key].append((0, i, j, 1))
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and stride not in params:
-                        key = str(stride)
+                        key = stride
                         if key not in sources:
                             sources[key] = []
                         sources[key].append((1, i, j, stride_scale))
