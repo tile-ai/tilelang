@@ -1548,7 +1548,7 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1646,7 +1646,7 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1791,6 +1791,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  if (cast_round == "rn" && from_ty.is_float() && from_ty.bits() == 32 &&
+      target_ty.is_tfloat32()) {
+    ICHECK(!cast_rbits.defined())
+        << "rbits is only supported with stochastic rounding, not round='rn'";
+    std::string cast_func = std::string("tl::__tl_cvt_f32_to_tf32_rn<") +
+                            (cast_sat ? "true>" : "false>");
+    if (from_ty.is_scalar()) {
+      os << cast_func << "(" << PrintExpr(op->value) << ")";
+      return;
+    }
+    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string sret = name_supply_->FreshName("_");
+    PrintIndent();
+    PrintType(target_ty, stream);
+    stream << ' ' << sret << ";\n";
+    for (int i = 0; i < from_ty.lanes(); ++i) {
+      std::ostringstream val;
+      val << cast_func << "(";
+      PrintVecElemLoad(src, from_ty, i, val);
+      val << ")";
+      PrintVecElemStore(sret, target_ty, i, val.str());
+    }
+    os << sret;
+    return;
+  }
+
   // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
   // through fp32.
   if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_float16() &&
@@ -1902,13 +1928,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
            tl::IsCudaVectorizableFP8(target_ty) || target_ty.is_float4_e2m1fn();
   };
   if (!round_is_supported()) {
-    LOG(FATAL) << "round '" << cast_round
-               << "' is not supported for a cast from " << from_ty << " to "
-               << target_ty
-               << ". Supported combinations: round='rs' with an rbits operand, "
-                  "from float32 to float16, bfloat16, float8_e4m3*, "
-                  "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
-                  "round annotation.";
+    LOG(FATAL)
+        << "round '" << cast_round << "' is not supported for a cast from "
+        << from_ty << " to " << target_ty
+        << ". Supported combinations: round='rn' from float32 to tfloat32; "
+           "round='rs' with an rbits operand, "
+           "from float32 to float16, bfloat16, float8_e4m3*, "
+           "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
+           "round annotation.";
   }
 
   // Handle conversion from float16 to float32
