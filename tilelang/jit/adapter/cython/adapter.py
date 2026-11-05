@@ -14,6 +14,7 @@ from tvm import tirx
 from tvm.relax import TensorType
 
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.shape import OutputShapeResolver
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import (
@@ -172,6 +173,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.cython_wrapper.set_output_shape_resolver(OutputShapeResolver(self.prim_func, self.result_idx, require_unique_names=True))
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(self.prim_func, self.result_idx))
@@ -237,6 +239,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers())
+        adapter.cython_wrapper.set_output_shape_resolver(
+            OutputShapeResolver(adapter.prim_func, adapter.result_idx, require_unique_names=True)
+        )
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(adapter.prim_func, adapter.result_idx))

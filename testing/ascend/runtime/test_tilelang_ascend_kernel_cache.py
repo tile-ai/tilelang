@@ -42,7 +42,7 @@ def test_ascend_env_defaults_can_select_pto(monkeypatch):
 
 @tilelang.testing.requires_ascend
 def test_cython_scalar_output_shape_disk_cache(tmp_path, monkeypatch):
-    """Cached explicit scalar dimensions work without a second compilation."""
+    """Cached scalar and expression dimensions work without a second compilation."""
     from tilelang.env import CacheState, env
     from tilelang.jit.kernel import JITKernel
 
@@ -54,15 +54,16 @@ def test_cython_scalar_output_shape_disk_cache(tmp_path, monkeypatch):
 
     @T.prim_func
     def main(out: T.handle, rows: T.int64, source: T.Tensor((1,), T.int32)):
-        output = T.match_buffer(out, (rows,), T.int32)
+        output = T.match_buffer(out, (rows, rows * 2), T.int32)
         with T.Kernel(1), T.SimtVF(threads=64):
             for i in T.Parallel(64):
                 if i < rows:
-                    output[i] = source[0] + i
+                    for j in T.serial(rows * 2):
+                        output[i, j] = source[0] + i + j
 
     source = torch.tensor([7], dtype=torch.int32, device="npu")
     fresh = tilelang.compile(main, target="ascend", execution_backend="cython", out_idx=[0])
-    torch.testing.assert_close(fresh(3, source).cpu(), torch.arange(7, 10, dtype=torch.int32))
+    torch.testing.assert_close(fresh(3, source).cpu(), 7 + torch.arange(3, dtype=torch.int32)[:, None] + torch.arange(6, dtype=torch.int32))
     cache._memory_cache.clear()
 
     def fail_compile(*args, **kwargs):
@@ -72,4 +73,6 @@ def test_cython_scalar_output_shape_disk_cache(tmp_path, monkeypatch):
     restored = tilelang.compile(tvm.ir.load_json(tvm.ir.save_json(main)), target="ascend", execution_backend="cython", out_idx=[0])
     assert restored is not fresh
     for rows in (0, 3, 5):
-        torch.testing.assert_close(restored(rows, source).cpu(), torch.arange(7, 7 + rows, dtype=torch.int32))
+        torch.testing.assert_close(
+            restored(rows, source).cpu(), 7 + torch.arange(rows, dtype=torch.int32)[:, None] + torch.arange(rows * 2, dtype=torch.int32)
+        )
