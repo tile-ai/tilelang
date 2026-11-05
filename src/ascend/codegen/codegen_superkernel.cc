@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <tvm/ir/transform.h>
 #include <tvm/tirx/builtin.h>
@@ -32,13 +33,13 @@ SuperKernelConfig ReadConfig() {
       ctx->GetConfig<Bool>(tl::kEnableSuperKernel, Bool(false)).value();
   bool configured = ctx->config.count(tl::kSuperKernelNumVariants) ||
                     ctx->config.count(tl::kSuperKernelDisableDcci);
-  ICHECK(enabled || !configured)
+  TVM_FFI_CHECK(enabled || !configured, ValueError)
       << "SuperKernel options require tl.ascend_enable_superkernel=True";
   int64_t variants =
       ctx->GetConfig<Integer>(tl::kSuperKernelNumVariants, Integer(1))
           .value()
           ->value;
-  ICHECK(variants >= 1 && variants <= 4)
+  TVM_FFI_CHECK(variants >= 1 && variants <= 4, ValueError)
       << "tl.ascend_superkernel_num_variants must be in [1, 4]";
   uint64_t cap =
       ctx->GetConfig<Bool>(tl::kSuperKernelDisableDcci, Bool(false)).value()
@@ -49,13 +50,18 @@ SuperKernelConfig ReadConfig() {
 
 void ValidateSymbols(const IRModule &mod) {
   std::unordered_set<std::string> symbols;
+  std::vector<std::string> sk_sources;
   for (const auto &kv : mod->functions) {
     auto f = Downcast<PrimFunc>(kv.second);
     if (auto name = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol)) {
       symbols.insert(name.value());
+      if (f->GetAttr<Integer>(tvm::attr::kCallingConv) ==
+          CallingConv::kDeviceKernelLaunch) {
+        sk_sources.push_back(name.value());
+      }
     }
   }
-  for (const auto &name : symbols) {
+  for (const auto &name : sk_sources) {
     ICHECK(!symbols.count(name + "_sk") && !symbols.count(name + "_sk_args"))
         << "SuperKernel generated symbol collides with an existing global: "
         << name;

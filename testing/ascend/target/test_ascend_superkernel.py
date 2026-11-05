@@ -114,7 +114,7 @@ def test_variant_count_and_cap(count, disable_dcci):
 
 @pytest.mark.parametrize("count", [-1, 0, 5])
 def test_invalid_variant_count(count):
-    with pytest.raises(tvm.error.InternalError, match=r"num_variants must be in \[1, 4\]"):
+    with pytest.raises(ValueError, match=r"num_variants must be in \[1, 4\]"):
         _source(_kernel(), num_variants=count)
 
 
@@ -122,7 +122,7 @@ def test_options_require_enable():
     with (
         tvm.transform.PassContext(config={PREFIX + "disable_dcci": False}),
         pytest.raises(
-            tvm.error.InternalError,
+            ValueError,
             match="require tl.ascend_enable_superkernel",
         ),
     ):
@@ -215,11 +215,12 @@ def test_multiple_kernels_and_symbol_collision():
 
 
 @pytest.mark.parametrize("kind", ["vector", "cube", "mix"])
+@pytest.mark.parametrize("num_variants", [1, 4])
 @pytest.mark.parametrize("disable_dcci", [False, True])
-def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, tmp_path):
-    if shutil.which("bisheng") is None or shutil.which("readelf") is None:
-        pytest.skip("CANN bisheng and readelf are required")
-    source = _source(_kernel(kind), disable_dcci=disable_dcci)
+def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, num_variants, tmp_path):
+    if any(shutil.which(tool) is None for tool in ("bisheng", "readelf", "c++filt")):
+        pytest.skip("CANN bisheng, readelf, and c++filt are required")
+    source = _source(_kernel(kind), num_variants=num_variants, disable_dcci=disable_dcci)
     binary = bisheng.compile_ascend(
         source,
         target_format="aibin",
@@ -231,8 +232,10 @@ def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, tmp_path):
     assert ".ascend.meta" in sections
     symbols = subprocess.check_output(["readelf", "-Ws", str(path)], text=True)
     symbols = subprocess.check_output(["c++filt"], input=symbols, text=True)
-    for i in range(4):
+    # Every bound variant must survive into the SDK binary.
+    for i in range(num_variants):
         assert f"main_kernel_sk<{i}u>" in symbols
+    assert f"main_kernel_sk<{num_variants}u>" not in symbols
     assert "main_kernel" in symbols
     # Check the linked addresses, not only the existence of a metadata section.
     dump = subprocess.check_output(["readelf", "-x", ".ascend.meta", str(path)], text=True)
@@ -245,6 +248,7 @@ def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, tmp_path):
             functions[int(fields[1], 16)] = fields[7]
     offset = 0
     records = 0
+    ordinary_names = []
     while offset + 4 <= len(data):
         kind_id, size = struct.unpack_from("<HH", data, offset)
         if kind_id == 5:  # SDK B_TYPE_SK_INFO; BaseTlv + reserved uint32_t.
@@ -252,7 +256,9 @@ def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, tmp_path):
             assert cap == (4 if disable_dcci else 0)
             name = functions[ordinary]
             assert name in {"main_kernel", "main_kernel_mix_aic", "main_kernel_mix_aiv"}
-            for i, address in enumerate(entries):
+            ordinary_names.append(name)
+            # Only the bound entries are meaningful.
+            for i, address in enumerate(entries[:num_variants]):
                 assert f"main_kernel_sk<{i}u>" in functions[address]
                 if name.endswith("_mix_aic"):
                     assert "[clone .cube]" in functions[address]
@@ -261,3 +267,7 @@ def test_sdk_binary_keeps_sk_binding(kind, disable_dcci, tmp_path):
             records += 1
         offset += 4 + size
     assert records > 0
+    if kind == "mix":
+        # A mix kernel has one ordinary entry per subcore and one SK_INFO record
+        # for each of them, each binding the corresponding cloned SK entries.
+        assert set(ordinary_names) == {"main_kernel_mix_aic", "main_kernel_mix_aiv"}
