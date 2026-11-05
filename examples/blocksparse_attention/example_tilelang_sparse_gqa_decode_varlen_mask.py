@@ -1,5 +1,8 @@
 import torch
 import torch.nn.functional as F
+import os
+import sys
+
 import tilelang
 import tilelang.language as T
 from einops import rearrange, einsum
@@ -7,6 +10,9 @@ import argparse
 import time
 import math
 from heuristic import num_splits_heuristic
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
+from varlen_utils import flash_attn_varlen_supported
 from tilelang.profiler import do_bench
 
 
@@ -356,17 +362,18 @@ def main(batch=8, heads=32, heads_kv=8, max_cache_seqlen=8192, dim=128, dim_v=12
     out = model(Q, K, V, block_mask, cache_seqlens)
     assert_close("output", ref, out, atol=1e-3, rtol=1e-3)
 
-    import flash_attn  # noqa: F401
-
     ## latency reference
-    for _ in range(10):
-        ref = ref_program_fa(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size)
-    torch.cuda.synchronize()
-    start = time.time()
-    for _ in range(100):
-        ref = ref_program_fa(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size)
-    torch.cuda.synchronize()
-    print("dense time: ", (time.time() - start) / 100 * 1000)
+    if flash_attn_varlen_supported(Q.device):
+        for _ in range(10):
+            ref = ref_program_fa(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size)
+        torch.cuda.synchronize()
+        start = time.time()
+        for _ in range(100):
+            ref = ref_program_fa(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size)
+        torch.cuda.synchronize()
+        print("dense time: ", (time.time() - start) / 100 * 1000)
+    else:
+        print("flash-attn has no kernels for this device; skipping the dense timing reference")
 
     for _ in range(10):
         # out = sparse_gqa_decode_varlen_mask(Q, K, V, block_mask, cache_seqlens, block_size)

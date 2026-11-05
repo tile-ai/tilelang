@@ -17,6 +17,9 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+/// Reject sub-byte numeric accumulators; bool reductions remain supported.
+void CheckReductionDType(DataType dtype, const char *op);
+
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
   kSum,    ///< Sum reduction

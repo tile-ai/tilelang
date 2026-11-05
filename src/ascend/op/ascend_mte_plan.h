@@ -20,6 +20,7 @@
 
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tvm {
@@ -119,8 +120,8 @@ struct StridedLayout {
       }
     }
 
-    // Compute base offset = sum(range[i]->min * strides[i])
-    PrimExpr offset = I(0);
+    // Offsets are relative to buf->data, including any buffer view offset.
+    PrimExpr offset = buf->elem_offset;
     for (int i = 0; i < ndim; ++i) {
       offset = offset + range[i]->min * strides[i];
     }
@@ -291,6 +292,47 @@ NormalizeTrailingMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
       << "buffer axis. Buffer " << buf->name << " has shape " << buf->shape
       << " and ranges " << range << ".";
   return layout;
+}
+
+/// Normalize [..., batch, row, inner] for one batched GM->L1 instruction.
+/// Leading axes select a plane (e.g. an L1 pipeline stage) and retain their
+/// contribution to the base offset.
+inline std::optional<StridedLayout>
+TryNormalizeBatchedMTELayout(const Buffer &buf, const ffi::Array<Range> &range,
+                             arith::Analyzer *analyzer) {
+  if (range.size() < 3 || range.size() != buf->shape.size())
+    return std::nullopt;
+
+  auto layout = StridedLayout::FromBufferRange(buf, range, buf->dtype.bits());
+  if (!analyzer->CanProveEqual(layout.modes[0].stride, 1))
+    return std::nullopt;
+  for (size_t i = 3; i < layout.modes.size(); ++i) {
+    if (!analyzer->CanProveEqual(layout.modes[i].size, 1))
+      return std::nullopt;
+  }
+  layout.modes.resize(3);
+  return layout;
+}
+
+inline std::pair<StridedLayout, StridedLayout>
+NormalizeGMToL1Copy(const Buffer &src, const ffi::Array<Range> &src_range,
+                    const Buffer &dst, const ffi::Array<Range> &dst_range,
+                    arith::Analyzer *analyzer) {
+  auto src_matrix = TryNormalizeMTE2DLayout(src, src_range, analyzer);
+  auto dst_matrix = TryNormalizeMTE2DLayout(dst, dst_range, analyzer);
+  int dst_ndim = static_cast<int>(dst_range.size());
+  if (src_matrix && dst_matrix && dst_matrix->modes[0].axis == dst_ndim - 1 &&
+      dst_matrix->modes[1].axis == dst_ndim - 2)
+    return {*src_matrix, *dst_matrix};
+
+  auto src_batch = TryNormalizeBatchedMTELayout(src, src_range, analyzer);
+  auto dst_batch = TryNormalizeBatchedMTELayout(dst, dst_range, analyzer);
+  ICHECK(src_batch && dst_batch)
+      << "Ascend GM->L1 copy cannot represent the source and destination as a "
+         "single matrix or a batch of matrices: "
+      << src->name << src_range << " -> " << dst->name << dst_range
+      << ". Outer-loop lowering is not yet implemented.";
+  return {*src_batch, *dst_batch};
 }
 
 // ---------------------------------------------------------------------------

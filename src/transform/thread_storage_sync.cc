@@ -30,9 +30,14 @@
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include <algorithm>
+#include <array>
+#include <map>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
+#include <tvm/ffi/container/variant.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -259,6 +264,44 @@ PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
   return linear_thread_id;
 }
 
+using SyncConstraintMap = std::unordered_map<Call, std::vector<ConstrSet>,
+                                             ObjectPtrHash, ObjectPtrEqual>;
+
+class SyncConstraintCollector : public ConstrVisitor {
+public:
+  static SyncConstraintMap Collect(const Stmt &stmt) {
+    SyncConstraintCollector collector;
+    collector(stmt);
+    return std::move(collector.constraints_);
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::tvm_storage_sync()) && op->args.size() == 1) {
+      // A shared Call node can occur under different predicates. Keep every
+      // occurrence so that proving one context cannot authorize another.
+      constraints_[GetRef<Call>(op)].push_back(GetConstrSet());
+    }
+    ConstrVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const SBlockNode *op) final {
+    size_t old_size = constr_stack_.size();
+    for (const IterVar &iv : op->iter_vars) {
+      constr_stack_.emplace_back(iv->var, iv->dom);
+    }
+    ConstrVisitor::VisitStmt_(op);
+    constr_stack_.resize(old_size);
+  }
+
+  void VisitStmt_(const SBlockRealizeNode *op) final {
+    auto guard = MakeGuard(op->predicate);
+    ConstrVisitor::VisitStmt_(op);
+  }
+
+  SyncConstraintMap constraints_;
+};
+
 } // namespace
 
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
@@ -266,10 +309,27 @@ public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    rewriter.sync_constraints_ = SyncConstraintCollector::Collect(stmt);
+    // Reserve ids from earlier ThreadSync invocations and explicit partial
+    // syncs. Reusing one for a disjoint thread range would let the two groups
+    // complete each other's barrier phases.
+    PostOrderVisit(stmt, [&rewriter](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (call && call->op.same_as(builtin::tvm_storage_sync()) &&
+          call->args.size() == 3) {
+        if (const auto *id = call->args[1].as<IntImmNode>()) {
+          rewriter.used_barrier_ids_.insert(static_cast<size_t>(id->value));
+        }
+      }
+    });
     return rewriter(std::move(stmt));
   }
 
 private:
+  // Thread bounds, participant count, and scope identify a barrier. Proven
+  // dense groups use an empty scope to allow reuse across storage scopes.
+  using BarrierKey = std::tuple<std::array<int64_t, 6>, size_t, std::string>;
+
   explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size)
       : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
 
@@ -288,37 +348,39 @@ private:
           return IRMutatorWithAnalyzer::VisitStmt_(op);
         }
 
-        return ProcessSharedSync(call, scope);
+        return ProcessSharedSync_(GetRef<Call>(call), scope);
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
+  Stmt ProcessSharedSync_(const Call &call, const std::string &scope) {
+    // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
-    auto extent_tx = CalculateThreadExtent(tx_, &bound_tx);
-    auto extent_ty = CalculateThreadExtent(ty_, &bound_ty);
-    auto extent_tz = CalculateThreadExtent(tz_, &bound_tz);
-    if (extent_tx == 0 || extent_ty == 0 || extent_tz == 0) {
-      return Evaluate(0);
-    }
 
+    // Check if all threads are participating (full extent)
     if (IsFullThreadExtent(tx_, bound_tx) &&
         IsFullThreadExtent(ty_, bound_ty) &&
         IsFullThreadExtent(tz_, bound_tz)) {
-      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
+      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(call.get()));
     }
 
-    // Create or get barrier info
-    ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
-                       bound_ty->min_value, bound_ty->max_value,
-                       bound_tz->min_value, bound_tz->max_value};
-
-    auto [barrier_id, thread_count] =
-        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
-    ICHECK_LT(barrier_id, 16U) << "[ThreadSync] Too many partial-sync barriers";
+    // Prove that every thread in the bounding box participates before sharing
+    // an ID across scopes. A successful proof also avoids enumeration.
+    auto dense_count =
+        TryGetDenseThreadCount_(call, {bound_tx, bound_ty, bound_tz});
+    size_t thread_count = dense_count
+                              ? *dense_count
+                              : CalculateThreadExtent(tx_, bound_tx) *
+                                    CalculateThreadExtent(ty_, bound_ty) *
+                                    CalculateThreadExtent(tz_, bound_tz);
+    BarrierKey key{{bound_tx->min_value, bound_tx->max_value,
+                    bound_ty->min_value, bound_ty->max_value,
+                    bound_tz->min_value, bound_tz->max_value},
+                   thread_count,
+                   dense_count ? "" : scope};
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -333,68 +395,150 @@ private:
     }
 
     // Create new sync call with barrier info
+    size_t barrier_id = GetOrCreateBarrierId_(key);
     Array<PrimExpr> new_args = {StringImm(scope),
                                 IntImm(DataType::Int(32), barrier_id),
                                 IntImm(DataType::Int(32), thread_count)};
-    return Evaluate(Call(op->dtype, op->op, new_args));
+    return Evaluate(Call(call->dtype, call->op, new_args));
   }
 
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
-                                               size_t extent_tx,
-                                               size_t extent_ty,
-                                               size_t extent_tz) {
-    if (barrier_id_map_.count(key)) {
-      return {barrier_id_map_[key], thread_count_map_[key]};
+  size_t GetOrCreateBarrierId_(const BarrierKey &key) {
+    if (auto it = barrier_ids_.find(key); it != barrier_ids_.end()) {
+      return it->second;
     }
 
     size_t barrier_id =
-        barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
-
-    barrier_id_map_[key] = barrier_id;
-    thread_count_map_[key] = thread_count;
-
-    return {barrier_id, thread_count};
+    while (used_barrier_ids_.count(barrier_id)) {
+      ++barrier_id;
+    }
+    used_barrier_ids_.insert(barrier_id);
+    barrier_ids_[key] = barrier_id;
+    return barrier_id;
   }
 
-  // Certify a contiguous interval, including when ConstIntBound is loose.
-  size_t CalculateThreadExtent(const IterVar &iv, arith::ConstIntBound *bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      *bound = arith::ConstIntBound(0, 0);
-      return 1;
+  std::optional<size_t> TryGetDenseThreadCount_(
+      const Call &call,
+      const std::array<arith::ConstIntBound, 3> &bounds) const {
+    auto it = sync_constraints_.find(call);
+    if (it == sync_constraints_.end()) {
+      return std::nullopt;
     }
-    int64_t lower = (*bound)->min_value;
-    int64_t upper = (*bound)->max_value;
-    if (lower > upper) {
-      return 0;
+    std::array<IterVar, 3> thread_vars{tx_, ty_, tz_};
+    size_t thread_count = 1;
+    Array<Range> ranges;
+    for (size_t i = 0; i < thread_vars.size(); ++i) {
+      int64_t min = 0, extent = 1;
+      if (analyzer_->const_int_bound.IsBound(thread_vars[i]->var)) {
+        const auto &bound = bounds[i];
+        if (bound->min_value == arith::ConstIntBound::kNegInf ||
+            bound->max_value == arith::ConstIntBound::kPosInf ||
+            bound->min_value > bound->max_value) {
+          return std::nullopt;
+        }
+        min = bound->min_value;
+        extent = bound->max_value - min + 1;
+      }
+      DataType dtype = thread_vars[i]->var.dtype();
+      ranges.push_back(Range::FromMinExtent(make_const(dtype, min),
+                                            make_const(dtype, extent)));
+      thread_count *= extent;
     }
-    int64_t width = upper - lower + 1;
-    int64_t count = analyzer_->z3_prover.CountSatisfyingValues(iv->var, width);
-    if (count == 0 && analyzer_->z3_prover.CanProve(Bool(false))) {
-      return 0;
-    }
-    ICHECK_GT(count, 0) << "[ThreadSync] Cannot prove a thread rectangle";
-    if (count == width) {
-      return count;
-    }
-    upper -= count - 1;
-    while (lower < upper) {
-      int64_t mid = lower + (upper - lower + 1) / 2;
-      if (analyzer_->z3_prover.CanProve(iv->var >=
-                                        make_const(iv->var.dtype(), mid))) {
-        lower = mid;
-      } else {
-        upper = mid - 1;
+
+    for (const ConstrSet &context : it->second) {
+      // The current analyzer already assumes the branch predicates. Proving
+      // them there would be circular; start with only the bounding box.
+      arith::Analyzer proof;
+      std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> varying_vars;
+      for (size_t i = 0; i < thread_vars.size(); ++i) {
+        proof.Bind(thread_vars[i]->var, ranges[i]);
+        varying_vars.insert(thread_vars[i]->var);
+      }
+      auto is_uniform = [&](const PrimExpr &expr) {
+        bool uniform = true;
+        PostOrderVisit(expr, [&](const ObjectRef &node) {
+          if (const auto *var = node.as<VarNode>()) {
+            uniform &= !var->dtype.is_handle() &&
+                       !varying_vars.count(GetRef<Var>(var));
+          } else if (const auto *call = node.as<CallNode>()) {
+            // Pure calls can still read implicit thread state, e.g.
+            // get_warp_idx(). Only look through the identity hint likely().
+            uniform &= call->op.same_as(builtin::likely());
+          }
+        });
+        return uniform;
+      };
+      Array<PrimExpr> predicates;
+      for (const Constr &c : context.constrs_) {
+        if (c.kind == Constr::kConstr) {
+          if (!c.value.dtype().is_scalar() ||
+              SideEffect(c.value) > CallEffectKind::kPure) {
+            return std::nullopt;
+          }
+          predicates.push_back(c.value);
+        } else if (c.kind == Constr::kBindValue) {
+          if (!c.value.dtype().is_scalar() ||
+              SideEffect(c.value) > CallEffectKind::kPure) {
+            // A captured memory read is not a block-uniform parameter.
+            varying_vars.insert(c.var);
+            continue;
+          }
+          if (!is_uniform(c.value)) {
+            varying_vars.insert(c.var);
+          }
+          proof.Bind(c.var, c.value);
+        } else if (!c.var.same_as(tx_->var) && !c.var.same_as(ty_->var) &&
+                   !c.var.same_as(tz_->var)) {
+          // Conservatively keep loop/block iterators in the proof obligation.
+          varying_vars.insert(c.var);
+          c.Populate(proof);
+        }
+      }
+      // Scalar arithmetic on uniform parameters is uniform across the group.
+      // Thread-dependent predicates remain conclusions, never assumptions.
+      for (const PrimExpr &predicate : predicates) {
+        if (is_uniform(predicate)) {
+          proof.EnterConstraint(predicate);
+        }
+      }
+      for (const PrimExpr &predicate : predicates) {
+        if (!proof.CanProve(predicate)) {
+          return std::nullopt;
+        }
       }
     }
-    upper = lower + count - 1;
-    // Count may stop early; containment certifies that these are all values.
-    ICHECK(analyzer_->z3_prover.CanProve(iv->var <=
-                                         make_const(iv->var.dtype(), upper)))
-        << "[ThreadSync] Cannot prove a thread rectangle";
-    *bound = arith::ConstIntBound(lower, upper);
-    return count;
+    return thread_count;
+  }
+
+  /*!
+   * \brief Calculate the number of threads that satisfy current constraints.
+   *
+   * This method uses Z3's model enumeration (AllSAT) to precisely count
+   * how many thread IDs satisfy all current constraints. This is essential
+   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
+   * gives us the range [0, 127] but the actual number of satisfying threads
+   * is 32 (i.e., 0, 4, 8, ..., 124).
+   *
+   * Falls back to range-based calculation if Z3 enumeration fails or returns
+   * an invalid result.
+   */
+  size_t CalculateThreadExtent(const IterVar &iv,
+                               const arith::ConstIntBound &bound) {
+    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
+      return 1;
+    }
+    auto extent = *as_const_int(iv->dom->extent);
+    // Always use Z3 enumeration to count satisfying values.
+    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
+    // detect. Z3 enumeration will return the exact count of satisfying values.
+    int64_t z3_count =
+        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
+    if (z3_count > 0) {
+      return static_cast<size_t>(z3_count);
+    }
+
+    // Fallback to range-based calculation if Z3 enumeration failed
+    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -413,12 +557,22 @@ private:
 
   bool IsFullThreadExtent(const IterVar &iv,
                           const arith::ConstIntBound &bound) {
-    auto range = iter_vars_.Get(iv->var);
-    return !range ||
-           (bound->min_value == 0 &&
-            analyzer_->CanProveEqual(range.value()->extent,
-                                     make_const(range.value()->extent.dtype(),
-                                                bound->max_value + 1)));
+    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
+      return true;
+    }
+
+    if (!iv->dom.defined()) {
+      return true;
+    }
+
+    const auto *min_node = iv->dom->min.as<IntImmNode>();
+    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
+
+    int64_t min = min_node->value;
+    int64_t extent = extent_node->value;
+    int64_t max = min + extent - 1;
+
+    return min == bound->min_value && max == bound->max_value;
   }
 
   // Member variables
@@ -428,8 +582,11 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
-  std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
-  std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  std::map<BarrierKey, size_t> barrier_ids_;
+  SyncConstraintMap sync_constraints_;
+  // Named-barrier ids already taken in this function, including those assigned
+  // by an earlier ThreadSync run for another storage scope.
+  std::unordered_set<size_t> used_barrier_ids_;
   int warp_size_;
 };
 
@@ -1234,8 +1391,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
           e.scope = scope;
+          // address_of does not specify how its consumer uses the pointer, so
+          // conservatively record both reads and writes. Keeping the read is
+          // necessary to preserve loop-carried barriers: a write-only summary
+          // can hoist the sync needed by the next iteration's opaque read.
+          e.type = kRead;
+          curr_stmt_.access.emplace_back(e);
+          e.type = kWrite;
           curr_stmt_.access.emplace_back(e);
         }
         ConstrVisitor::VisitExpr_(load);
@@ -2044,16 +2207,12 @@ private:
   }
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
-  StorageScope sync_scope = StorageScope::Create(storage_scope);
-  if (sync_scope.rank == StorageRank::kGlobal) {
+PrimFunc TileLangThreadSync(PrimFunc func,
+                            const std::vector<StorageScope> &sync_scopes) {
+  if (sync_scopes.empty()) {
     return func;
   }
-  auto *n = func.CopyOnWrite();
-  auto stmt = n->body;
-  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
-    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
-  }
+  Stmt stmt = func->body;
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
   if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
@@ -2062,14 +2221,23 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
                     .value()
                     .IntValue();
   }
-  TileLangThreadSyncPlanner planner(sync_scope, warp_size);
-  for (const auto &[_, buffer] : func->buffer_map) {
-    planner.SetBufferDataToBuffer(buffer->data, buffer);
+  for (const StorageScope &sync_scope : sync_scopes) {
+    if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
+      stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
+    }
+    TileLangThreadSyncPlanner planner(sync_scope, warp_size);
+    for (const auto &[_, buffer] : func->buffer_map) {
+      planner.SetBufferDataToBuffer(buffer->data, buffer);
+    }
+    planner(stmt);
+    stmt = ThreadSyncInserter(sync_scope,
+                              planner.syncs_inserted_)(std::move(stmt));
   }
-  planner(stmt);
-  stmt =
-      ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
+  // Assign partial-sync ids only after all scopes have been planned. The same
+  // thread group can then reuse an id across scopes, while disjoint groups and
+  // explicitly numbered barriers remain isolated.
+  func.CopyOnWrite()->body =
+      ThreadPartialSyncRewriter::Rewrite(std::move(stmt), warp_size);
   return func;
 }
 
@@ -2077,18 +2245,31 @@ using namespace tirx::transform;
 
 namespace transform {
 
-tvm::transform::Pass ThreadSync(const String &storage_scope) {
-  auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
-                                   const PassContext &ctx) {
-    auto *n = f.CopyOnWrite();
+tvm::transform::Pass
+ThreadSync(const ffi::Variant<String, Array<String>> &storage_scope) {
+  Array<String> storage_scopes;
+  if (auto scope = storage_scope.as<String>()) {
+    storage_scopes.push_back(scope.value());
+  } else {
+    storage_scopes = storage_scope.get<Array<String>>();
+  }
+
+  std::vector<StorageScope> sync_scopes;
+  for (const String &scope : storage_scopes) {
+    StorageScope sync_scope = StorageScope::Create(scope);
+    if (sync_scope.rank != StorageRank::kGlobal) {
+      sync_scopes.push_back(std::move(sync_scope));
+    }
+  }
+  auto pass_func = [sync_scopes = std::move(sync_scopes)](
+                       PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if thread storage sync is disabled
     bool disable_syncthreads =
         ctx->GetConfig(kDisableThreadStorageSync, Bool(false)).value()->value;
     if (disable_syncthreads) {
       return f;
     }
-    return tl::TileLangThreadSync(std::move(f), storage_scope);
-    ;
+    return tl::TileLangThreadSync(std::move(f), sync_scopes);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }

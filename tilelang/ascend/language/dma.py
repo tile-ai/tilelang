@@ -61,16 +61,26 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
 
 
-def ascend_nd2nz_post_copy(dst, src, rows, cols, full_rows, dst_dtype: str) -> None:
-    """Ascend ND->NZ post-copy from UB scratch to L1 with NZ pointer correction."""
+def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype: str) -> None:
+    """Copy a prepacked NZ region from UB to L1 using explicit storage pitches.
+
+    ``rows`` and ``cols`` describe this transfer. Pitches are the distance
+    between C0-group starts in 32-byte blocks, independent of the region size.
+    Both pointers must include the region origin and be 32-byte aligned.
+    This operation does not initialize gaps or convert element types.
+    """
     from tvm.tirx import BufferLoad
     from tilelang.language.builtin import access_ptr
 
+    names = {"float16": "half", "bfloat16": "bfloat16_t", "float32": "float"}
+    dtype = names.get(dtype, dtype)
+    if dtype not in names.values():
+        raise ValueError("NZ post-copy dtype must be float16, bfloat16, or float32")
     if isinstance(dst, BufferLoad):
         dst = access_ptr(dst, "w")
     if isinstance(src, BufferLoad):
         src = access_ptr(src, "r")
-    args = [dst, src, _to_int32(rows), _to_int32(cols), _to_int32(full_rows), dst_dtype]
+    args = [dst, src, _to_int32(rows), _to_int32(cols), _to_int32(src_pitch), _to_int32(dst_pitch), dtype]
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_nd2nz_post_copy"), *args)
 
 

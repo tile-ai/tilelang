@@ -314,7 +314,9 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
 
     Args:
         shape (tuple): Logical shape of the reduction result.
-        dtype (str): Element data type (e.g., 'float32', 'int32').
+        dtype (str): Accumulator data type (e.g., 'float32', 'int32'). Sub-byte
+            numeric dtypes (such as FP4/int4) are unsupported; use float16/float32
+            or an integer dtype of at least 8 bits. Boolean reductions are allowed.
         op (str): Combine op: "sum", "max", "min", "bitand", "bitor" or
             "bitxor" (the bitwise ops require an integer dtype).
         replication (str | None): Deprecated legacy (v1) knob. Passing "all"

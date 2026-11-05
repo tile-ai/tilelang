@@ -3,7 +3,7 @@
 import math
 
 import pytest
-from tilelang import tvm
+from tilelang import tvm, transform as tl_transform
 from tilelang.ascend import language as T, transform
 from tilelang.layout import (
     make_ascend_nz_layout,
@@ -52,7 +52,7 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings
         mod = tvm.IRModule({"main": func})
         if normalize:
             mod = transform.NormalizeAscendFractalStorage()(mod)
-        return transform.AscendLowerTileOp()(mod)
+        return tl_transform.LowerAccessPtr()(transform.AscendLowerTileOp()(mod))
 
 
 def _equal(actual, expected):
@@ -108,6 +108,48 @@ def test_dma_bursts_follow_both_physical_row_boundaries(src_shape, dst_shape, sr
     _equal([copy.args[i] for i in indices], expected)
 
 
+@pytest.mark.parametrize("case", ["whole-buffer", "strided-slice", "symbolic-strided-slice"])
+@pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
+def test_dma_copy_preserves_buffer_element_offsets(case, store):
+    whole_buffer = case == "whole-buffer"
+    src_offset = tirx.Var("src_offset", "int64") if case == "symbolic-strided-slice" else 256
+    dst_offset = tirx.Var("dst_offset", "int64") if case == "symbolic-strided-slice" else 512
+    shape = (256,) if whole_buffer else (4, 64)
+    dtype = "uint8" if whole_buffer else "int32"
+    src = tirx.decl_buffer(
+        shape,
+        dtype,
+        name="src",
+        scope="shared.dyn" if store else "global",
+        strides=None if whole_buffer else (80, 1),
+        elem_offset=src_offset,
+    )
+    dst = tirx.decl_buffer(
+        shape,
+        dtype,
+        name="dst",
+        scope="global" if store else "shared.dyn",
+        strides=None if whole_buffer else (96, 1),
+        elem_offset=dst_offset,
+    )
+    after = _lower(
+        src,
+        dst,
+        None if whole_buffer else _region(src, [2, 16], [1, 8]),
+        None if whole_buffer else _region(dst, [2, 16], [2, 16]),
+    )
+    (copy,) = calls(after, "tl.ascend_copy_ubuf_to_gm" if store else "tl.ascend_copy_gm_to_ubuf")
+    dst_ptr, src_ptr = copy.args[:2]
+    assert src_ptr.args[1].same_as(src.data)
+    assert dst_ptr.args[1].same_as(dst.data)
+    _equal(
+        [src_ptr.args[2], dst_ptr.args[2]],
+        [src_offset, dst_offset] if whole_buffer else [src_offset + 88, dst_offset + 208],
+    )
+    indices = (3, 4, 7, 6) if store else (3, 4, 9, 10)
+    _equal([copy.args[i] for i in indices], [1, 256, 256, 256] if whole_buffer else [2, 64, 320, 384])
+
+
 @pytest.mark.parametrize("store", [False, True], ids=["gm-to-ub", "ub-to-gm"])
 @pytest.mark.parametrize("cols", [3, 4], ids=["partial-byte", "whole-byte"])
 def test_packed_fp4_rows_require_whole_bytes(store, cols):
@@ -157,6 +199,50 @@ def test_fix_uses_destination_extent_and_preserves_source_pitch(case):
     after = _lower(src, dst, dst_region=region, layouts={src: make_ascend_l0c_layout(src)})
     (copy,) = calls(after, "tl.ascend_copy_matrix_cc_to_gm")
     _equal(copy.args[3:7], [12, 8, 40, 16] if case == "grouped" else [16, 72, 16, 128])
+
+
+@pytest.mark.parametrize("dual,src_shape", [(0, (32, 64)), (1, (64, 64)), (2, (32, 128))], ids=["single", "split-m", "split-n"])
+def test_fix_nz_uses_physical_panel_pitch_and_slice_origin(dual, src_shape):
+    src = tirx.decl_buffer(src_shape, "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((2, 64, 96), "float32", name="dst", scope="shared")
+    after = _lower(
+        src,
+        dst,
+        dst_region=_region(dst, [1, 32, 64], [1, 16, 16]),
+        layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)},
+        annotations={"dual_dst_ctl": dual},
+        unit_flag_ctrl=3,
+    )
+    (copy,) = calls(after, "tl.ascend_copy_matrix_cc_to_ub")
+    _equal(copy.args[3:8], [src_shape[1], src_shape[0], 64 * 16, src_shape[0], dual])
+    _equal([copy.args[0].args[2], copy.args[10], copy.args[14]], [64 * 96 + 64 * 16 + 16 * 16, 3, 0])
+
+
+@pytest.mark.parametrize("column,width", [(8, 32), (0, 24)])
+def test_fix_nz_rejects_partial_column_panels(column, width):
+    src = tirx.decl_buffer((32, width), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared")
+    with pytest.raises(ValueError, match="aligned to 16 elements"):
+        _lower(
+            src,
+            dst,
+            dst_region=_region(dst, [32, width], [0, column]),
+            layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)},
+        )
+
+
+def test_fix_nz_rejects_l1_float32_panel_width():
+    src = tirx.decl_buffer((32, 64), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared")
+    with pytest.raises(ValueError, match="use make_ascend_l0c_layout"):
+        _lower(src, dst, layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_major_k_layout(dst)})
+
+
+def test_fix_nz_rejects_noncompact_logical_strides():
+    src = tirx.decl_buffer((32, 64), "float32", name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), "float32", name="dst", scope="shared", strides=(80, 1))
+    with pytest.raises(ValueError, match="requires dense logical strides"):
+        _lower(src, dst, layouts={src: make_ascend_l0c_layout(src), dst: make_ascend_l0c_layout(dst)})
 
 
 @pytest.mark.parametrize("scope", ["shared.l1", "shared.dyn"])
@@ -297,7 +383,7 @@ def test_explicit_l0_pitch_controls_offsets_and_keeps_plane_capacity(v_layout, o
             with pytest.raises(ValueError, match="l0_pitch"):
                 transform.AscendLowerTileOp()(mod)
             return
-        after = transform.AscendLowerTileOp()(mod)
+        after = tl_transform.LowerAccessPtr()(transform.AscendLowerTileOp()(mod))
     loads = calls(after, "tl.ascend_load_cbuf_to_cb" if v_layout else "tl.ascend_load_cbuf_to_ca")
     _equal([load.args[7] for load in loads], [pitch, pitch])
     _equal([load.args[0].args[2] for load in loads], [4096, 4096 + 2 * pitch * 256])
@@ -564,6 +650,96 @@ def test_dynamic_sf_copy_requires_proven_data_capacity(axis, lower_bound, upper_
     (load,) = calls(lower(), "tl.ascend_load_ca_sf")
     if lower_bound <= upper_bound:
         _equal(load.args[4:6], [tirx.floordiv(n + 15, 16), 1] if axis == "mn" else [1, n])
+
+
+@pytest.mark.parametrize("major_mn,pitch,offset", [(False, 4, 8704), (True, 8, 12288)], ids=["qk", "pv"])
+def test_address_backed_l0_view_remaps_partial_copy_origin(major_mn, pitch, offset):
+    """A view has no alloc_buffer entry, but its DMA origin still uses NZ."""
+    import re
+    import tilelang
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            src = T.alloc_l1((32, 128), "bfloat16")
+            storage = T.alloc_l0b((16384,), "bfloat16")
+            dst = T.make_tensor_from_addr(
+                T.access_ptr(storage[0], "rw", extent=16384), (2, 64, 128), "bfloat16", storage_scope="shared.l0b"
+            )
+            T.annotate_layout(
+                {
+                    src: make_ascend_major_k_layout(src),
+                    dst: make_ascend_major_mn_layout(dst) if major_mn else make_ascend_major_k_layout(dst),
+                }
+            )
+            with T.Cube():
+                T.copy(src, dst[1, 32:, :], l0_pitch=pitch)
+
+    with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}):
+        lowered = tilelang.lower(main, target="ascend")
+    source = lowered.kernel_source
+    instruction = "asc_copy_l12l0b_transpose" if major_mn else "asc_copy_l12l0b"
+    assert re.search(rf"{instruction}\(.*dst \+ {offset}\)", source), source
+    # The remapped data variable must still be defined by the pointer binding.
+    assert re.search(r"__cb__ bfloat16_t \*dst =", source), source
+
+
+@pytest.mark.parametrize(
+    "storage_dtype,view_dtype,view_cols",
+    [("float32", "bfloat16", 256), ("bfloat16", "float32", 64), ("float32", "float32", 64)],
+    ids=["narrow", "widen", "same-width-reshape"],
+)
+@pytest.mark.parametrize("prefix", [0, 64])
+@pytest.mark.parametrize("row,col", [(0, 0), (1, 16)])
+@pytest.mark.parametrize("annotate_view", [False, True], ids=["ordinary-view", "explicit-view"])
+def test_dma_reinterpreted_view_prefix_uses_pointer_element_units(storage_dtype, view_dtype, view_cols, prefix, row, col, annotate_view):
+    """Both DMA directions must agree with the view's byte address."""
+    import tilelang
+
+    storage_bytes = tvm.DataType(storage_dtype).bits // 8
+    view_bytes = tvm.DataType(view_dtype).bits // 8
+    view_rows = 512 * storage_bytes // (view_cols * view_bytes)
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 32), view_dtype), O: T.Tensor((2, 32), view_dtype)):
+        with T.Kernel(1):
+            storage = T.alloc_shared((4, 128), storage_dtype)
+            view = T.view(storage, shape=(view_rows, view_cols), dtype=view_dtype)
+            T.annotate_layout({storage: tilelang.layout.Layout((4, 128), lambda r, c: r * 128 + c + prefix)})
+            if annotate_view:
+                T.annotate_layout(
+                    {
+                        view: tilelang.layout.Layout(
+                            (view_rows, view_cols), lambda r, c: r * view_cols + c + prefix * storage_bytes // view_bytes
+                        )
+                    }
+                )
+            with T.Vector():
+                T.copy(A, view[row : row + 2, col : col + 32])
+                T.copy(view[row : row + 2, col : col + 32], O)
+
+    captured = []
+
+    @tvm.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendLowerTileOp":
+                captured.append(mod)
+
+    with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}, instruments=[Capture()]):
+        tilelang.lower(main, target="ascend")
+
+    assert len(captured) == 1
+    lowered = tl_transform.LowerAccessPtr()(captured[0])
+    (load,) = calls(lowered, "tl.ascend_copy_gm_to_ubuf")
+    (store,) = calls(lowered, "tl.ascend_copy_ubuf_to_gm")
+    # Only the view's own annotation selects the prefix. The owner's layout
+    # changes its allocation size, but never the view's addressing.
+    expected_bytes = (prefix * storage_bytes if annotate_view else 0) + (row * view_cols + col) * view_bytes
+    for ptr in (load.args[0], store.args[1]):
+        assert ptr.op.name == "tirx.tvm_access_ptr"
+        assert ptr.args[0].dtype == view_dtype
+        _equal([ptr.args[2] * view_bytes], [expected_bytes])
 
 
 @pytest.mark.parametrize("normalize", [False, True])

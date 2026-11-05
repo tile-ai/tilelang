@@ -14,6 +14,12 @@ def _input(shape, seed):
     return torch.randint(-2, 3, shape, generator=torch.Generator().manual_seed(seed)).float()
 
 
+def _packed_scales(rows, k):
+    exponent = (torch.arange(k // 32)[:, None] + torch.arange(rows)[None, :]) % 5 - 2
+    packed = ((127 + exponent[::2]) | ((127 + exponent[1::2]) << 8)).to(torch.int16)
+    return packed.npu(), (2.0**exponent.T).repeat_interleave(32, dim=1)
+
+
 @tilelang.testing.requires_ascend
 def test_bf16_dense_alpha_accumulation():
     a, b = _input((17, 64), 0), _input((32, 64), 1)
@@ -36,6 +42,67 @@ def test_fp8_batched_scales():
         epilogue=api.epilogue.Alpha(0.5),
     )
     torch.testing.assert_close(d.cpu(), (a @ b.transpose(-2, -1)) * 0.0625, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "k,mn_a,mn_b,direct",
+    [
+        pytest.param(1152, False, False, True, id="k-major-tail"),
+        pytest.param(2304, True, False, False, id="mn-a-wrap"),
+        pytest.param(2304, False, True, False, id="mn-b-wrap"),
+        pytest.param(2304, True, True, False, id="mn-ab-wrap"),
+        pytest.param(2304, True, True, True, id="mn-direct-wrap"),
+    ],
+)
+def test_fp4_write_counter_refresh(k, mn_a, mn_b, direct):
+    if mn_a and os.environ.get("TILELANG_DEFAULT_TARGET") == "pto":
+        pytest.skip("PTO host wrapper cannot resolve shape_m_packed yet")
+
+    from .config import GemmConfig, Major
+    from .kernels.fp8_gemm import build_fp8_gemm
+
+    # Force several SF generations and ring wrap, including a partial final
+    # chunk, M/N tails, and several output tiles on the same persistent core.
+    # FP4 MN transposes use 64-row MAD tiles; keep two MAD tiles per block.
+    m, n = (192, 256) if mn_a and mn_b and direct else (130, 194)
+    config = GemmConfig(
+        block_m=128,
+        block_n=128,
+        block_k=256,
+        mad_m=64,
+        mad_n=64,
+        mad_k=128,
+        num_l1_stages=2,
+        num_l0_stages=2,
+        num_epilogue_stages=1,
+        num_l1_sf_stages=2,
+        sf_k_blocks=4,
+        l2_ctrl_a=0,
+        l2_ctrl_b=0,
+        l2_ctrl_store_cd=0,
+        num_blocks=1,
+        direct_store=direct,
+    )
+    a, ref_a = _fp4_input((k, m) if mn_a else (m, k), 11)
+    b, ref_b = _fp4_input((k, n) if mn_b else (n, k), 12)
+    sfa, fa = _packed_scales(m, k)
+    sfb, fb = _packed_scales(n, k)
+    d = torch.empty((m, n), dtype=torch.float32, device="npu")
+    kernel = build_fp8_gemm(
+        None,
+        n,
+        k,
+        Major.MN if mn_a else Major.K,
+        Major.MN if mn_b else Major.K,
+        "float32",
+        False,
+        config,
+        operand_dtype="float4_e2m1fn",
+    )
+    kernel(a, b, sfa, sfb, d, 1.0)
+    ref_a, ref_b = ref_a.T if mn_a else ref_a, ref_b.T if mn_b else ref_b
+    torch.testing.assert_close(d.cpu(), (ref_a * fa) @ (ref_b * fb).T, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend
@@ -219,3 +286,61 @@ def test_transform_sf_passthrough_and_empty():
         output = api._transform_sf_into_required_layout(scale, mn, k, (1, 1, 32), is_sfa=True)
         assert output.shape == (mn, (k + 63) // 64)
         assert output.dtype == torch.int16
+
+
+def _fp4_input(shape, seed):
+    codes = torch.randint(0, 16, shape, dtype=torch.uint8, generator=torch.Generator().manual_seed(seed))
+    table = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6])
+    packed = (codes[..., ::2] | (codes[..., 1::2] << 4)).view(torch.int8)
+    return packed.npu(), table[codes.long()]
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("mn_major,k", [(False, 130), (True, 65)])
+def test_fp4_dense_alpha_accumulation(mn_major, k):
+    if mn_major and os.environ.get("TILELANG_DEFAULT_TARGET") == "pto":
+        pytest.skip("PTO host wrapper cannot resolve shape_m_packed yet")
+    m, n = 18, 80
+    a, ref_a = _fp4_input((k, m) if mn_major else (m, k), 0)
+    b, ref_b = _fp4_input((k, n) if mn_major else (n, k), 1)
+    if mn_major:
+        a, b, ref_a, ref_b = a.T, b.T, ref_a.T, ref_b.T
+    sfa = torch.full((m, (k + 31) // 32), 0.5, device="npu")
+    sfb = torch.full((n, (k + 31) // 32), 0.25, device="npu")
+    c = _input((m, n), 2)
+    d = c.npu()
+    api.fp8_fp4_gemm_nt((a, sfa), (b, sfb), d, c=d, alpha=0.5)
+    torch.testing.assert_close(d.cpu(), (ref_a @ ref_b.T) * 0.0625 + c, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
+def test_fp4_m_grouped_padding():
+    a, ref_a = _fp4_input((512, 130), 0)
+    b, ref_b = _fp4_input((2, 80, 130), 1)
+    a[17:256] = ref_a[17:256] = 0
+    a[289:] = ref_a[289:] = 0
+    sfa = torch.ones((512, 5), device="npu")
+    sfb = torch.ones((2, 80, 5), device="npu")
+    layout = torch.tensor([17, 289], dtype=torch.int32, device="npu")
+    d = torch.empty((512, 80), dtype=torch.bfloat16, device="npu")
+    api.m_grouped_fp8_fp4_gemm_nt_contiguous((a, sfa), (b, sfb), d, layout)
+    expected = torch.cat((ref_a[:256] @ ref_b[0].T, ref_a[256:] @ ref_b[1].T))
+    torch.testing.assert_close(d.cpu(), expected.bfloat16(), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_fp4_k_grouped_scale_tail():
+    a, ref_a = _fp4_input((385, 16), 0)
+    b, ref_b = _fp4_input((385, 32), 1)
+    sfa = torch.ones((13, 16), device="npu")
+    sfb = torch.ones((13, 32), device="npu")
+    c = _input((2, 16, 32), 2)
+    d = torch.empty_like(c, device="npu")
+    layout = torch.tensor([65, 385], dtype=torch.int32, device="npu")
+    api.k_grouped_fp8_gemm_tn_contiguous((a, sfa), (b, sfb), d, [65, 129], layout, c=c.npu())
+    expected = torch.stack((ref_a[:65].T @ ref_b[:65], ref_a[256:].T @ ref_b[256:])) + c
+    torch.testing.assert_close(d.cpu(), expected, rtol=0, atol=0)

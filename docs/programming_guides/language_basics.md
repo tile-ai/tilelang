@@ -272,6 +272,56 @@ T.print(A_s, msg="A tile:")
 T.print(C[0], msg="C[0] = ")
 ```
 
+### Configuring the Z3 proof budget
+
+Use `pass_configs` to change the Z3 resource budget for one kernel compilation.
+The default is `100_000`; a larger budget can prove more difficult expressions
+but may increase compilation time. The budget counts Z3 resource units, not
+milliseconds or an exact number of search iterations.
+
+Both styles of `@tilelang.jit` accept the same option. In the lazy style, the
+decorated factory returns a `PrimFunc`:
+
+```python
+@tilelang.jit(pass_configs={"arith.z3_rlimit": 100_000})
+def get_kernel(N):
+    @T.prim_func
+    def kernel(A: T.Tensor((N,), T.float32)):
+        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+            for i in T.Parallel(128):
+                if bx * 128 + i < N:
+                    A[bx * 128 + i] += 1
+
+    return kernel
+```
+
+In the eager style, the decorated function contains the kernel body directly:
+
+```python
+@tilelang.jit(pass_configs={"arith.z3_rlimit": 100_000})
+def increment(A):
+    A: T.Tensor((128,), T.float32)
+    with T.Kernel(1, threads=128):
+        for i in T.Parallel(128):
+            A[i] += 1
+```
+
+Direct compilation also accepts the option:
+
+```python
+compiled = tilelang.compile(program, pass_configs={"arith.z3_rlimit": 100_000})
+```
+
+The equivalent enum key is `tilelang.PassConfigKey.ARITH_Z3_RLIMIT`.
+Values must be integers from `0` through `2**32 - 1`; `0` disables the resource
+limit. For `tilelang.lower` or direct analyzer use, set the option in
+`tvm.transform.PassContext(config={"arith.z3_rlimit": 100_000})`.
+
+Each analyzer captures the active setting when it is constructed. Z3 contexts
+and solvers are still created lazily, and clones retain their source analyzer's
+setting. An explicit `analyzer.set_z3_rlimit(...)` overrides that captured value.
+The setting applies to solver checks, not to a total budget across the kernel.
+
 ## 9. Where to Go Next
 
 - Control flow details: see Programming Guides → Control Flow

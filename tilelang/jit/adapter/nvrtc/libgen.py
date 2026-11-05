@@ -17,7 +17,6 @@ Key responsibilities:
 from __future__ import annotations
 import importlib
 import logging
-import os.path as osp
 import tempfile
 from types import ModuleType
 
@@ -27,13 +26,12 @@ from tilelang import tvm as tvm
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, NVRTC_UNAVAILABLE_MESSAGE
-from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
 
 logger = logging.getLogger(__name__)
 
 if is_nvrtc_available:
     import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda, get_nvrtc_version
+    from tilelang.contrib.nvrtc import compile_cuda, default_compile_options
 else:
     raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
@@ -166,52 +164,10 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
-            from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
-
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             libpath = src.name.replace(".cu", ".cubin")
 
-            project_root = osp.join(osp.dirname(__file__), "..", "..")
-            if CUTLASS_INCLUDE_DIR is None:
-                cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
-            else:
-                cutlass_path = CUTLASS_INCLUDE_DIR
-
-            if TILELANG_TEMPLATE_PATH is None:
-                tl_template_path = osp.abspath(osp.join(project_root, "src"))
-            else:
-                tl_template_path = TILELANG_TEMPLATE_PATH
-
-            cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
-
-            cuda_include_paths = discover_cuda_include_paths(cuda_home)
-
-            __CUDACC_VER_MAJOR__ = get_nvrtc_version()[0]
-            options = [
-                f"-I{tl_template_path}",
-                f"-I{cutlass_path}",
-                *(f"-I{include_path}" for include_path in cuda_include_paths),
-                f"-D__CUDACC_VER_MAJOR__={__CUDACC_VER_MAJOR__}",
-            ]
-
-            # CUDA <13 keeps cuda::std at the legacy ``cuda/std`` path. CUDA 13
-            # moved it under CCCL (``cccl/cuda/std``) which is already reachable
-            # via the ``-I {arch_include}/cccl`` entry above as ``<cuda/std/*>``.
-            # Adding ``-I .../cccl/cuda/std`` would also expose CCCL's private
-            # ``__tuple_dir/structured_bindings.h`` at the include root, which
-            # collides ODR-style with cutlass's own ``tuple_size``/``tuple_element``
-            # forward declarations in ``cute/container/tuple.hpp`` under NVRTC
-            # (cute uses variadic packs, cccl uses a single ``_Tp``).
-            if __CUDACC_VER_MAJOR__ < 13:
-                options += [
-                    f"-I{include_path}/cuda/std"
-                    for include_path in cuda_include_paths
-                    if not include_path.endswith(osp.join("include", "cccl"))
-                ]
-
-            if self.compile_flags:
-                options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
-
+            options = default_compile_options(self.compile_flags)
             cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)

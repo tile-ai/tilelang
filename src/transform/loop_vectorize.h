@@ -51,15 +51,21 @@ ffi::Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr);
 int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
                            const Target &target);
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
+// After DecoupleTypeCast, set defer_cast_constraints=false so any remaining
+// casts constrain the vector width of their source and destination types.
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {},
+                     bool defer_cast_constraints = true);
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map = {});
+// The supplied context is read-only. Planning adds local bindings only to its
+// own clone; callers must not supply bindings from before a loop rewrite.
+int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
+                     const LayoutMap &layout_map = {},
+                     bool defer_cast_constraints = true);
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);
 
-For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
                   const LayoutMap &layout_map = {}, int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change

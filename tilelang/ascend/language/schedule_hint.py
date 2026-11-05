@@ -122,10 +122,12 @@ def Stage(stage: int):
     ``T.Stage`` annotation, AutoSchedule treats that child list as manual. One
     scope may contain several consecutive statements; every scheduler task
     materialized from those statements receives the same stage. Unannotated
-    siblings default to stage 0. Within each hardware pipe, source order is the
-    manual issue order; tasks on different pipes remain freely reorderable, so
-    no separate order annotation is required. Nested child lists select
-    automatic or manual scheduling independently.
+    siblings default to stage 0. On each shared core and hardware pipe, source
+    order is the manual issue order. The scheduler separates issue phases when
+    a stage tie-break would reverse this order. Data and register dependencies
+    remain in force; an incompatible manual order fails scheduling. Tasks on
+    different pipes remain freely reorderable subject to those dependencies.
+    Nested child lists select automatic or manual scheduling independently.
 
     ``T.Stage`` must wrap complete scheduler tasks. It must not appear inside
     ``T.Task``, ``T.SimtVF``, ``T.SimdVF``, an SBlock, or a parallel loop. In
@@ -144,6 +146,17 @@ def Stage(stage: int):
     Non-zero stages require an enclosing loop with ``enable_offset=True``.
     ``T.Pipelined(..., num_stages=...)`` controls the automatic buffer-version
     search bound; it does not limit the values accepted by ``T.Stage``.
+
+    Hardware configuration registers (HF32, MMAD direction, padding, and atomic
+    mode) each share one physical value across stages. Their setters overwrite
+    that value; readers retain the reaching setter in logical stage order and
+    must precede the next physical overwrite, at most one pipeline round away.
+    Loop-entry readers must also consume the incoming value before a setter
+    overwrites it during pipeline startup.
+    Independent set/use groups can therefore use nonadjacent stages.
+    Conditional setters and opaque effects retain conservative dependencies.
+    Scalar buffers, copied scalar snapshots, and control/pipe fences keep their
+    existing logical dependency rules.
 
     Example
     -------

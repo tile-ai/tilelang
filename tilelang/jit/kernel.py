@@ -119,6 +119,11 @@ class JITKernel(Generic[_P, _T]):
         self.execution_backend_spec = backend_context.execution_backend
         self.execution_backend = self.execution_backend_spec.name
 
+        if func is not None:
+            from tilelang.engine.host_mapped import validate_host_mapped_params
+
+            validate_host_mapped_params(func, self.target, self.execution_backend, out_idx)
+
         if self.execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
 

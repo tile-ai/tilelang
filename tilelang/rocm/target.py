@@ -60,7 +60,8 @@ def _detect_rocm_arch() -> str | None:
         import torch
 
         if torch.cuda.is_available():
-            return normalize_rocm_arch(getattr(torch.cuda.get_device_properties(0), "gcnArchName", None))
+            device = torch.cuda.current_device()
+            return normalize_rocm_arch(getattr(torch.cuda.get_device_properties(device), "gcnArchName", None))
     except Exception:
         pass
     return None

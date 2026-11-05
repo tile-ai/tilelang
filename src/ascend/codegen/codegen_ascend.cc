@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "ascend/op/nd2nz.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,19 @@ bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   if (auto call_op = op->op.as<Op>()) {
     const std::string &name = call_op.value()->name;
     if (name.rfind(kSimdOpPrefix, 0) == 0) {
+      if (op_name != nullptr) {
+        *op_name = name;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsVmiOp(const CallNode *op, std::string *op_name = nullptr) {
+  if (auto opt_call_op = op->op.as<Op>()) {
+    const std::string &name = opt_call_op.value()->name;
+    if (name.rfind("tl.vmi.", 0) == 0) {
       if (op_name != nullptr) {
         *op_name = name;
       }
@@ -1447,15 +1461,20 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
-  ICHECK_EQ(op->args.size(), 12)
-      << "tl.ascend_copy_gm_to_cbuf expects exactly 12 arguments";
+  ICHECK(op->args.size() == 12 || op->args.size() == 14)
+      << "tl.ascend_copy_gm_to_cbuf expects 12 or 14 arguments";
 
   const bool use_dn2nz =
       GetIntImmArg(op, 9, "tl.ascend_copy_gm_to_cbuf", "transpose") != 0;
   const std::string nz_c0_stride = PrintExpr(op->args[10]);
+  const std::string num_batches =
+      op->args.size() == 14 ? PrintExpr(op->args[12]) : "1";
+  const std::string batch_stride =
+      op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << "asc_set_gm2l1_nz_para(1, 1, static_cast<uint16_t>(" << nz_c0_stride
-         << "), 0);\n";
+  stream << "asc_set_gm2l1_nz_para(" << num_batches
+         << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
+         << batch_stride << ");\n";
 
   std::string destination_prefix;
   std::string source_prefix;
@@ -1622,44 +1641,40 @@ void CodeGenTileLangAscend::EmitUbufToL1Copy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitNd2NzScatter_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_scatter";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const std::string dst_dtype = GetStringImmArg(op, 4, kIntrinsic, "dst_dtype");
-  const std::string src_dtype = GetStringImmArg(op, 5, kIntrinsic, "src_dtype");
+  auto geometry = tl::ParseNd2NzGeometry(op, true);
+  if (geometry.Empty())
+    return;
+  int64_t rows = geometry.rows, cols = geometry.cols;
+  const std::string src_dtype =
+      GetStringImmArg(op, 5, "tl.ascend_nd2nz_scatter", "src_dtype");
+  const std::string dst_dtype =
+      GetStringImmArg(op, 6, "tl.ascend_nd2nz_scatter", "dst_dtype");
 
   std::ostringstream function_name;
   function_name << (IsInsideSimdVF() ? "ascend_nd2nz_scatter_callee"
                                      : "ascend_nd2nz_scatter")
-                << "<" << rows << ", " << cols << ", " << src_dtype << ", "
-                << dst_dtype << ">";
+                << "<" << rows << ", " << cols << ", " << geometry.dst_pitch
+                << ", " << src_dtype << ", " << dst_dtype << ">";
   EmitCApiCall_(function_name.str(),
                 {{op->args[0], "(__ubuf__ " + src_dtype + "*)(", ")"},
                  {op->args[1], "(__ubuf__ " + dst_dtype + "*)(", ")"}});
 }
 
 void CodeGenTileLangAscend::EmitNd2NzPostCopy_(const CallNode *op) {
-  constexpr const char *kIntrinsic = "tl.ascend_nd2nz_post_copy";
-  ICHECK_EQ(op->args.size(), 6) << kIntrinsic << " expects exactly 6 arguments";
-  const int64_t rows = GetIntImmArg(op, 2, kIntrinsic, "rows");
-  const int64_t cols = GetIntImmArg(op, 3, kIntrinsic, "cols");
-  const int64_t full_rows = GetIntImmArg(op, 4, kIntrinsic, "full_rows");
-  const std::string dst_dtype = GetStringImmArg(op, 5, kIntrinsic, "dst_dtype");
-
-  const int64_t element_bytes = dst_dtype == "float" ? 4 : 2;
-  const int64_t elements_per_c0 = 32 / element_bytes;
-  const int64_t burst_num = cols / elements_per_c0;
-  const int64_t burst_len = rows;
-  constexpr int64_t kSourceGap = 1;
-  const int64_t destination_gap = full_rows - rows;
+  auto geometry = tl::ParseNd2NzGeometry(op, false);
+  if (geometry.Empty())
+    return;
+  const int64_t burst_num = geometry.Bursts();
+  const int64_t burst_len = geometry.rows;
+  const int64_t source_gap = geometry.src_pitch - geometry.rows;
+  const int64_t destination_gap = geometry.dst_pitch - geometry.rows;
   const std::string destination = PrintExpr(op->args[0]);
   const std::string source = PrintExpr(op->args[1]);
 
   PrintIndent();
   stream << "asc_copy_ub2l1((__cbuf__ void*)(" << destination
          << "), (__ubuf__ void*)(" << source << "), " << burst_num << ", "
-         << burst_len << ", " << kSourceGap << ", " << destination_gap
+         << burst_len << ", " << source_gap << ", " << destination_gap
          << ");\n";
 }
 
@@ -2593,6 +2608,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Unsupported RNG distribution on Ascend: " << dist;
     os << "tl::philox_rand_" << dist << "(&" << ascend_rng_state_var_ << ")";
   } else {
+    std::string op_name;
+    // Evaluate statements print their value through this CallNode visitor, so
+    // statement-form VMI calls such as vstore are rejected here as well.
+    if (IsVmiOp(op, &op_name)) {
+      LOG(FATAL) << "Ascend CCE codegen does not support " << op_name
+                 << "; use target='pto' for T.vmi.*";
+    }
     CodeGenC::VisitExpr_(op, os);
   }
 }
