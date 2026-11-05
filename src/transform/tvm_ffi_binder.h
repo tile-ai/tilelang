@@ -101,12 +101,13 @@ public:
    * \param func_name The function name.
    * \param used_param_buffers The used param buffers.
    */
-  void
-  BindDLTensors(const std::vector<std::pair<Var, Buffer>> &buffer_def,
-                const PrimExpr &device_type, const PrimExpr &device_id,
-                const std::string &func_name,
-                const std::unordered_set<const VarNode *> &used_param_buffers,
-                const std::unordered_set<const VarNode *> &used_shape_vars);
+  void BindDLTensors(
+      const std::vector<std::pair<Var, Buffer>> &buffer_def,
+      const PrimExpr &device_type, const PrimExpr &device_id,
+      const std::string &func_name,
+      const std::unordered_set<const VarNode *> &used_param_buffers,
+      const std::unordered_set<const VarNode *> &used_shape_vars,
+      const std::unordered_set<const VarNode *> &host_mapped_buffers = {});
 
   /*! \return The defs generated in binding. */
   const std::vector<Var> &Defs() const { return defs_; }
