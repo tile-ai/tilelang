@@ -3,4 +3,4 @@
 	url = https://github.com/NVIDIA/cutlass
 [submodule "3rdparty/tvm"]
 	path = 3rdparty/tvm
-	url = https://github.com/TileLang/tvm
+	url = https://github.com/peanutchan/tvm
