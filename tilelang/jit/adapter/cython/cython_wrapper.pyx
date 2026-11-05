@@ -176,6 +176,41 @@ cdef class CythonKernelWrapper:
                 return tensor.device
         return self.get_current_device()
 
+    cdef object _resolve_dynamic_symbol(self, object var, list tensor_list):
+        ref_id, buffer_idx, shape_idx, stride_scale = self.dynamic_symbolic_map[var]
+        var_key = str(var)
+        sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
+        value = None
+        for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
+            if src_ref_id != 0:
+                continue
+            tensor = tensor_list[src_buf_idx]
+            if tensor is None:
+                continue
+            source_value = tensor.shape[src_dim_idx]
+            if value is None:
+                value = source_value
+            elif source_value != value:
+                raise ValueError(
+                    f"Dynamic symbol '{var_key}' has inconsistent values: "
+                    f"{value} from the first source and {source_value} from parameter {src_buf_idx}"
+                )
+        for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
+            if src_ref_id != 1:
+                continue
+            tensor = tensor_list[src_buf_idx]
+            if tensor is None:
+                continue
+            source_value = tensor.stride(src_dim_idx) * src_stride_scale
+            if value is None:
+                value = source_value
+            elif value != 0 and tensor.shape[src_dim_idx] != 1 and source_value != value:
+                raise ValueError(
+                    f"Dynamic symbol '{var_key}' has inconsistent values: "
+                    f"{value} from the first source and {source_value} from parameter {src_buf_idx}"
+                )
+        return 0 if value is None else value
+
     cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution
         cdef int total_params = len(self.params)
@@ -235,11 +270,8 @@ cdef class CythonKernelWrapper:
                     if isinstance(s, tirx.Var):
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):
-                                ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]
-                                if ref_id == 0:
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
-                                else:
-                                    shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * stride_scale)
+                                shape.append(self._resolve_dynamic_symbol(key, tensor_list))
+                                break
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
 
@@ -306,20 +338,8 @@ cdef class CythonKernelWrapper:
             self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
-        for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
-            # Cascaded resolution across all carrier buffers to handle None
-            var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
-            value = 0
-            for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
-                tensor = tensor_list[src_buf_idx]
-                if tensor is not None:
-                    if src_ref_id == 0:
-                        value = tensor.shape[src_dim_idx]
-                    else:
-                        value = tensor.stride(src_dim_idx) * src_stride_scale
-                    break
-            call_args.append(ctypes.c_int64(value))
+        for var in self.dynamic_symbolic_map:
+            call_args.append(ctypes.c_int64(self._resolve_dynamic_symbol(var, tensor_list)))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
