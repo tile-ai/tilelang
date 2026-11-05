@@ -184,7 +184,7 @@ struct GemmImpl {
 
   // Validate the actual operand layout before suppressing an inferred layout.
   bool (*reuse_existing_shared_layout)(String gemm_inst, const Gemm &op,
-                                       const Buffer &buffer,
+                                       const tirx::Buffer &buffer,
                                        const Layout &layout,
                                        const Target &target);
 };
