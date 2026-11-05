@@ -64,6 +64,8 @@
   _(cuGetErrorName)                                                            \
   _(cuGetErrorString)                                                          \
   _(cuCtxGetDevice)                                                            \
+  _(cuMemHostGetFlags)                                                         \
+  _(cuMemHostGetDevicePointer)                                                 \
   _(cuCtxGetLimit)                                                             \
   _(cuCtxSetLimit)                                                             \
   _(cuCtxResetPersistingL2Cache)                                               \
@@ -164,6 +166,10 @@ TILELANG_CUDA_STUB_API CUresult cuGetErrorName(CUresult error,
 TILELANG_CUDA_STUB_API CUresult cuGetErrorString(CUresult error,
                                                  const char **pStr);
 TILELANG_CUDA_STUB_API CUresult cuCtxGetDevice(CUdevice *device);
+TILELANG_CUDA_STUB_API CUresult cuMemHostGetFlags(unsigned int *flags,
+                                                  void *ptr);
+TILELANG_CUDA_STUB_API CUresult cuMemHostGetDevicePointer_v2(
+    CUdeviceptr *device_ptr, void *host_ptr, unsigned int flags);
 TILELANG_CUDA_STUB_API CUresult cuCtxGetLimit(size_t *pvalue, CUlimit limit);
 TILELANG_CUDA_STUB_API CUresult cuCtxSetLimit(CUlimit limit, size_t value);
 TILELANG_CUDA_STUB_API CUresult cuCtxResetPersistingL2Cache(void);
