@@ -160,8 +160,9 @@ struct Gemm {
     if (gemm_inst != kROCmWMMA || !TargetIsGfx1200(target) || op->transA_ ||
         op->transB_ || op->kPack_ != 1 ||
         (!buffer.same_as(op->a_) && !buffer.same_as(op->b_)) ||
-        op->a_->dtype != DataType::BFloat(16) ||
-        op->b_->dtype != DataType::BFloat(16) ||
+        op->a_->dtype != op->b_->dtype ||
+        (op->a_->dtype != DataType::BFloat(16) &&
+         op->a_->dtype != DataType::Float(16)) ||
         op->c_->dtype != DataType::Float(32) || op->m_ % 16 != 0 ||
         op->n_ % 16 != 0 || op->k_ % 16 != 0 ||
         !IsFullSharedTile(op->aRegion_, op->m_, op->k_) ||
@@ -170,7 +171,7 @@ struct Gemm {
       return false;
     }
     // Limit reuse to gfx1200, where these operand loads have been validated.
-    // gfx1200 loads eight BF16 values per lane. With NN row-major storage,
+    // gfx1200 loads eight FP16/BF16 values per lane. With NN row-major storage,
     // A's K slice is contiguous and 16-byte aligned, while B's K slice is
     // strided and the existing emitter scalarizes its loads. Require the
     // complete physical mapping, not just matching logical tile dimensions.

@@ -25,6 +25,7 @@ def matmul(
     *,
     a_layout=None,
     b_layout=None,
+    b_dtype=None,
     gemm=T.gemm,
 ):
     A_shape = (K, M) if trans_A else (M, K)
@@ -33,16 +34,17 @@ def matmul(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
     a_layout = shared_layout if a_layout is None else a_layout
     b_layout = shared_layout if b_layout is None else b_layout
+    b_dtype = in_dtype if b_dtype is None else b_dtype
 
     @T.prim_func
     def main(
         A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
+        B: T.Tensor(B_shape, b_dtype),
         C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, b_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             if a_layout is not None:
                 T.annotate_layout({A_shared: a_layout(A_shared)})
@@ -65,10 +67,11 @@ def matmul(
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype,wmma_dtype", [("bfloat16", "bf16"), ("float16", "f16")])
 @pytest.mark.parametrize(
     "a_linear,b_linear", [(False, False), (True, True), (True, False), (False, True)], ids=["default", "linear", "linear-a", "linear-b"]
 )
-def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
+def test_gemm_wmma_shared_layout_loads(in_dtype, wmma_dtype, a_linear, b_linear):
     """Check physical LDS addresses and lane ownership, including load widths."""
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
     program = matmul(
@@ -80,8 +83,8 @@ def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
         32,
         False,
         False,
-        "bfloat16",
-        "bfloat16",
+        in_dtype,
+        in_dtype,
         "float32",
         0,
         32,
@@ -111,7 +114,8 @@ def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
     for func in artifact.device_mod.functions.values():
         tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
     assert len(wmma_calls) == len(thread_vars) == 1
-    assert wmma_calls[0].args[0].value == "f32_16x16x16_bf16_w32"
+    assert wmma_calls[0].args[0].value == f"f32_16x16x16_{wmma_dtype}_w32"
+    assert f"__builtin_amdgcn_wmma_f32_16x16x16_{wmma_dtype}_w32_gfx12" in artifact.kernel_source
     thread_var = thread_vars[0]
     assert len(domains[thread_var]) == 32
     # Identify operands by their WMMA pointer arguments, not generated names.
@@ -131,7 +135,7 @@ def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
     assert list(domains[reduction_var]) == [0, 1]
 
     def physical(row, col, linear):
-        # The default 32-column BF16 tile swaps column bits 3/4 by row bits
+        # The default 32-column 16-bit tile swaps column bits 3/4 by row bits
         # 1/2. Linear annotations must instead retain the row-major address.
         return row * 32 + (col if linear else col ^ ((row & 6) << 2))
 
@@ -171,6 +175,7 @@ def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
 
 
 @tilelang.testing.requires_rocm
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
 @pytest.mark.parametrize(
     "shape,block,threads,a_linear,b_linear",
     [
@@ -182,15 +187,89 @@ def test_gemm_wmma_shared_layout_loads(a_linear, b_linear):
         pytest.param((128, 128, 32), (128, 128, 32), 128, True, True, id="multiple-wavefronts-linear"),
         pytest.param((16, 32, 32), (16, 32, 32), 32, True, False, id="single-tile-linear-a"),
         pytest.param((16, 32, 32), (16, 32, 32), 32, False, True, id="single-tile-linear-b"),
+        # Four wavefronts, multiple tiles, three K iterations and MNK tails.
+        pytest.param((129, 135, 65), (128, 128, 32), 128, False, False, id="multi-wavefront-tail-default"),
+        pytest.param((129, 135, 65), (128, 128, 32), 128, True, True, id="multi-wavefront-tail-linear"),
+        pytest.param((129, 135, 65), (128, 128, 32), 128, True, False, id="multi-wavefront-tail-linear-a"),
+        pytest.param((129, 135, 65), (128, 128, 32), 128, False, True, id="multi-wavefront-tail-linear-b"),
     ],
 )
-def test_gemm_wmma_shared_layout_correctness(shape, block, threads, a_linear, b_linear):
+def test_gemm_wmma_shared_layout_correctness(shape, block, threads, a_linear, b_linear, in_dtype):
+    import torch
+
+    M, N, K = shape
+    generator = torch.Generator().manual_seed(0)
+    dtype = getattr(torch, in_dtype)
+    # Small integers make the FP32 reduction exact, so this checks operand
+    # mapping without relying on a loose GEMM numerical tolerance.
+    a = torch.randint(-2, 3, (M, K), generator=generator).to(dtype)
+    b = torch.randint(-2, 3, (K, N), generator=generator).to(dtype)
+    _check_wmma_shared_layout_result(a, b, block, threads, a_linear, b_linear, in_dtype)
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(
+    "in_dtype,out_dtype",
+    [("bfloat16", "bfloat16"), ("bfloat16", "float32"), ("float16", "float16"), ("float16", "float32")],
+)
+@pytest.mark.parametrize(
+    "a_linear,b_linear", [(False, False), (True, True), (True, False), (False, True)], ids=["default", "linear", "linear-a", "linear-b"]
+)
+def test_gemm_wmma_shared_layout_fractional(in_dtype, out_dtype, a_linear, b_linear):
+    import torch
+
+    generator = torch.Generator().manual_seed(3729)
+    # Both distributions are exactly representable in their input dtype.
+    # Every FP32 partial sum is exact: numerator <= 65 * bound * 7 < 2**24.
+    # Exercise tails, three K iterations, and same-type/FP32 output conversion.
+    bound, scale = (513, 512) if in_dtype == "float16" else (127, 128)
+    dtype = getattr(torch, in_dtype)
+    a = (torch.randint(-bound, bound + 1, (17, 65), generator=generator) / scale).to(dtype)
+    b = (torch.randint(-7, 8, (65, 35), generator=generator) / 16).to(dtype)
+    if in_dtype == "float16":
+        # Retain coverage of FP16 mantissas that BF16 cannot represent.
+        assert torch.any(a.float() != a.bfloat16().float())
+    _check_wmma_shared_layout_result(a, b, (16, 32, 32), 32, a_linear, b_linear, out_dtype)
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("extreme_operand", ["a", "b"])
+@pytest.mark.parametrize("linear", [False, True], ids=["default", "linear"])
+def test_gemm_wmma_shared_layout_normal_range(in_dtype, extreme_operand, linear):
+    import torch
+
+    dtype = getattr(torch, in_dtype)
+    if in_dtype == "bfloat16":
+        extremes = torch.tensor([2.0**32, -(2.0**32), 2.0**-32, -(2.0**-32)], dtype=dtype)
+        # Neither end of this BF16 range survives an unintended FP16 conversion.
+        assert torch.isinf(extremes.half()).any()
+        assert (extremes.half() == 0).any()
+    else:
+        limits = torch.finfo(dtype)
+        extremes = torch.tensor([limits.max, -limits.max, limits.tiny, -limits.tiny], dtype=dtype)
+    coefficients = torch.tensor([2.0**-10, -(2.0**-10), 2.0**-8, -(2.0**-8)], dtype=dtype)
+    a_values, b_values = (extremes, coefficients) if extreme_operand == "a" else (coefficients, extremes)
+    a = a_values[torch.arange(16) % 4, None].expand(16, 32).contiguous()
+    b = b_values[None, torch.arange(32) % 4].expand(32, 32).contiguous()
+    for operand in (a, b):
+        assert torch.isfinite(operand).all()
+        assert (operand.abs() >= torch.finfo(dtype).tiny).all()
+    # Each dot product repeats the same product 32 times. Power-of-two scaling
+    # preserves the input significand, and every partial sum is exact in FP32.
+    # All products/results are normal in FP32, avoiding denormal/overflow policy.
+    _check_wmma_shared_layout_result(a, b, (16, 32, 32), 32, linear, linear, "float32")
+
+
+def _check_wmma_shared_layout_result(a, b, block, threads, a_linear, b_linear, out_dtype):
     import torch
 
     device = torch.device("cuda", torch.cuda.current_device())
     if torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] != "gfx1200":
         pytest.skip("Requires gfx1200 WMMA execution")
-    M, N, K = shape
+    M, K = a.shape
+    N = b.shape[1]
+    in_dtype = str(a.dtype).removeprefix("torch.")
     program = matmul(
         M,
         N,
@@ -198,8 +277,8 @@ def test_gemm_wmma_shared_layout_correctness(shape, block, threads, a_linear, b_
         *block,
         False,
         False,
-        "bfloat16",
-        "bfloat16",
+        in_dtype,
+        out_dtype,
         "float32",
         0,
         threads,
@@ -207,13 +286,9 @@ def test_gemm_wmma_shared_layout_correctness(shape, block, threads, a_linear, b_
         b_layout=make_linear_layout if b_linear else None,
     )
     kernel = tilelang.compile(program, target={"kind": "hip", "mcpu": "gfx1200"})
-    generator = torch.Generator().manual_seed(0)
-    # Small integers make the FP32 reduction exact, so this checks operand
-    # mapping without relying on a loose GEMM numerical tolerance.
-    a = torch.randint(-2, 3, (M, K), generator=generator).to(torch.bfloat16)
-    b = torch.randint(-2, 3, (K, N), generator=generator).to(torch.bfloat16)
-    expected = (a.float() @ b.float()).to(torch.bfloat16)
-    guarded = torch.full((M * N + 32,), 123, dtype=torch.bfloat16, device=device)
+    dtype = getattr(torch, out_dtype)
+    expected = (a.double() @ b.double()).to(dtype)
+    guarded = torch.full((M * N + 32,), 123, dtype=dtype, device=device)
     output = guarded[16:-16].view(M, N)
     kernel(a.to(device), b.to(device), output)
     torch.cuda.synchronize(device)
@@ -223,11 +298,12 @@ def test_gemm_wmma_shared_layout_correctness(shape, block, threads, a_linear, b_
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
 @pytest.mark.parametrize(
     "layout_kind,error",
     [("overlapping", "forward map must be injective"), ("column-major", "Get different layout")],
 )
-def test_gemm_wmma_rejects_incompatible_shared_layout(layout_kind, error):
+def test_gemm_wmma_rejects_incompatible_shared_layout(layout_kind, error, in_dtype):
     def incompatible(buffer):
         if layout_kind == "overlapping":
             return Layout(buffer.shape, lambda i, j: j)
@@ -236,17 +312,17 @@ def test_gemm_wmma_rejects_incompatible_shared_layout(layout_kind, error):
         return Layout(buffer.shape, lambda i, j: j * buffer.shape[0] + i)
 
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
-    program = matmul(16, 32, 32, 16, 32, 32, False, False, "bfloat16", "bfloat16", "float32", 0, 32, incompatible)
+    program = matmul(16, 32, 32, 16, 32, 32, False, False, in_dtype, in_dtype, "float32", 0, 32, incompatible)
     with target, tvm.transform.PassContext(opt_level=3), pytest.raises(Exception, match=error):
         tilelang.lower(program, target=target)
 
 
-def _check_wmma_shared_accumulator_layout():
+def _check_wmma_shared_accumulator_layout(in_dtype):
     @T.prim_func
     def main(C: T.Tensor((16, 32), "float32")):
         with T.Kernel(1, threads=32):
-            A_shared = T.alloc_shared((16, 32), "bfloat16")
-            B_shared = T.alloc_shared((32, 32), "bfloat16")
+            A_shared = T.alloc_shared((16, 32), in_dtype)
+            B_shared = T.alloc_shared((32, 32), in_dtype)
             C_shared = T.alloc_shared((16, 32), "float32")
             T.annotate_layout({C_shared: make_linear_layout(C_shared)})
             T.clear(A_shared)
@@ -261,7 +337,8 @@ def _check_wmma_shared_accumulator_layout():
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
-def test_gemm_wmma_shared_layout_rejects_accumulator():
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+def test_gemm_wmma_shared_layout_rejects_accumulator(in_dtype):
     import subprocess
     import sys
 
@@ -272,8 +349,9 @@ def test_gemm_wmma_shared_layout_rejects_accumulator():
             sys.executable,
             "-O",
             "-c",
-            "import runpy, sys; runpy.run_path(sys.argv[1])['_check_wmma_shared_accumulator_layout']()",
+            "import runpy, sys; runpy.run_path(sys.argv[1])['_check_wmma_shared_accumulator_layout'](sys.argv[2])",
             __file__,
+            in_dtype,
         ],
         capture_output=True,
         text=True,
@@ -283,48 +361,59 @@ def test_gemm_wmma_shared_layout_rejects_accumulator():
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
 @pytest.mark.parametrize(
-    "storage",
+    "operand,storage",
     [
-        "aligned",
-        "weak-alignment-a",
-        "weak-alignment-b",
-        "nonmultiple-alignment",
-        "strides",
-        "element-offset",
-        "partial-region",
-        "region-offset",
-        "stage-axis",
+        pytest.param(None, "aligned", id="aligned"),
+        *[
+            pytest.param(operand, storage, id=f"{operand}-{storage}")
+            for operand, storage in product(
+                ("a", "b"),
+                ("weak-alignment", "nonmultiple-alignment", "strides", "element-offset", "partial-region", "region-offset", "stage-axis"),
+            )
+        ],
     ],
 )
-def test_gemm_wmma_shared_layout_storage(storage):
+def test_gemm_wmma_shared_layout_storage(operand, storage, in_dtype):
     """Require full, contiguous storage with alignment suitable for WMMA loads."""
     from tvm.script import tirx as I
 
-    a_shape = (1, 16, 32) if storage == "stage-axis" else (32, 32) if storage in ("partial-region", "region-offset") else (16, 32)
-    a_alignment = 8 if storage == "weak-alignment-a" else 24 if storage == "nonmultiple-alignment" else 16
-    b_alignment = 8 if storage == "weak-alignment-b" else 16
-    a_strides = (32, 1) if storage == "strides" else None
-    a_offset = 1 if storage == "element-offset" else 0
+    a_shape, b_shape = (16, 32), (32, 32)
+    if storage == "stage-axis":
+        a_shape = (1, 16, 32) if operand == "a" else a_shape
+        b_shape = (1, 32, 32) if operand == "b" else b_shape
+    elif storage in ("partial-region", "region-offset"):
+        a_shape = (32, 32) if operand == "a" else a_shape
+        b_shape = (64, 32) if operand == "b" else b_shape
+    alignment = 8 if storage == "weak-alignment" else 24 if storage == "nonmultiple-alignment" else 16
+    a_alignment = alignment if operand == "a" else 16
+    b_alignment = alignment if operand == "b" else 16
+    a_strides = (32, 1) if operand == "a" and storage == "strides" else None
+    b_strides = (32, 1) if operand == "b" and storage == "strides" else None
+    a_offset = 1 if operand == "a" and storage == "element-offset" else 0
+    b_offset = 1 if operand == "b" and storage == "element-offset" else 0
+    a_row = 16 if operand == "a" and storage == "region-offset" else 0
+    b_row = 32 if operand == "b" and storage == "region-offset" else 0
 
     @T.prim_func
     def main():
         with T.Kernel(1, threads=32):
-            A_shared = I.sblock_alloc_buffer(
-                a_shape, "bfloat16", scope="shared", align=a_alignment, strides=a_strides, elem_offset=a_offset
-            )
-            B_shared = I.sblock_alloc_buffer((32, 32), "bfloat16", scope="shared", align=b_alignment)
+            A_shared = I.sblock_alloc_buffer(a_shape, in_dtype, scope="shared", align=a_alignment, strides=a_strides, elem_offset=a_offset)
+            B_shared = I.sblock_alloc_buffer(b_shape, in_dtype, scope="shared", align=b_alignment, strides=b_strides, elem_offset=b_offset)
             C_local = T.alloc_fragment((16, 32), "float32")
             T.annotate_layout({A_shared: make_linear_layout(A_shared), B_shared: make_linear_layout(B_shared)})
             T.clear(A_shared)
             T.clear(B_shared)
             T.clear(C_local)
-            if storage == "stage-axis":
+            if storage == "stage-axis" and operand == "a":
                 T.gemm(A_shared[0, 0:16, 0:32], B_shared, C_local)
-            elif storage == "partial-region":
-                T.gemm(A_shared[0:16, 0:32], B_shared, C_local)
-            elif storage == "region-offset":
-                T.gemm(A_shared[16:32, 0:32], B_shared, C_local)
+            elif storage == "stage-axis" and operand == "b":
+                T.gemm(A_shared, B_shared[0, 0:32, 0:32], C_local)
+            elif storage in ("partial-region", "region-offset") and operand == "a":
+                T.gemm(A_shared[a_row : a_row + 16, 0:32], B_shared, C_local)
+            elif storage in ("partial-region", "region-offset") and operand == "b":
+                T.gemm(A_shared, B_shared[b_row : b_row + 32, 0:32], C_local)
             else:
                 T.gemm(A_shared, B_shared, C_local)
 
@@ -338,16 +427,107 @@ def test_gemm_wmma_shared_layout_storage(storage):
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("a_dtype,b_dtype", [("float16", "bfloat16"), ("bfloat16", "float16")])
+@pytest.mark.parametrize("linear", [False, True], ids=["default", "linear"])
+def test_gemm_wmma_shared_layout_rejects_mixed_dtypes(a_dtype, b_dtype, linear):
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    # Check the dtype diagnostic with and without annotations. Same-dtype
+    # positive controls are covered by the address/load tests for both layouts.
+    with target, tvm.transform.PassContext(opt_level=3), pytest.raises(Exception, match=f"Mixed-dtype GEMM.*got A={a_dtype}, B={b_dtype}"):
+        program = matmul(
+            16,
+            32,
+            32,
+            16,
+            32,
+            32,
+            False,
+            False,
+            a_dtype,
+            "float32",
+            "float32",
+            0,
+            32,
+            shared_layout=make_linear_layout if linear else None,
+            b_dtype=b_dtype,
+        )
+        tilelang.lower(program, target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("shared_operand", ["a", "b"], ids=["sr", "rs"])
+def test_gemm_wmma_shared_layout_rejects_mixed_scopes(in_dtype, shared_operand):
+    def program(linear):
+        @T.prim_func
+        def main(C: T.Tensor((16, 32), "float32")):
+            with T.Kernel(1, threads=32):
+                if shared_operand == "a":
+                    A = T.alloc_shared((16, 32), in_dtype)
+                    B = T.alloc_fragment((32, 32), in_dtype)
+                else:
+                    A = T.alloc_fragment((16, 32), in_dtype)
+                    B = T.alloc_shared((32, 32), in_dtype)
+                C_local = T.alloc_fragment((16, 32), "float32")
+                if linear:
+                    if shared_operand == "a":
+                        T.annotate_layout({A: make_linear_layout(A)})
+                    else:
+                        T.annotate_layout({B: make_linear_layout(B)})
+                T.clear(A)
+                T.clear(B)
+                T.clear(C_local)
+                T.gemm(A, B, C_local)
+                T.copy(C_local, C)
+
+        return main
+
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    with target, tvm.transform.PassContext(opt_level=3):
+        # SR/RS remain supported with their default inferred layouts.
+        assert tilelang.lower(program(False), target=target).device_mod is not None
+        with pytest.raises(Exception, match="Get different layout"):
+            tilelang.lower(program(True), target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("linear", [False, True], ids=["default", "linear"])
+def test_gemm_wmma_shared_layout_rejects_non_fp32_accum(in_dtype, linear):
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
+    # Protect the public FP32-accumulation contract through the existing emitter
+    # diagnostic. FP32 positive controls are in the address/load test family.
+    with target, tvm.transform.PassContext(opt_level=3), pytest.raises(Exception, match=f"Unsupported accum_dtype: {in_dtype}"):
+        program = matmul(
+            16,
+            32,
+            32,
+            16,
+            32,
+            32,
+            False,
+            False,
+            in_dtype,
+            "float32",
+            in_dtype,
+            0,
+            32,
+            shared_layout=make_linear_layout if linear else None,
+        )
+        tilelang.lower(program, target=target)
+
+
+@tilelang.testing.requires_rocm(support_required="compile-only")
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
 @pytest.mark.parametrize(
-    "arch,trans_A,trans_B,in_dtype,k_pack",
+    "arch,trans_A,trans_B,k_pack",
     [
-        pytest.param("gfx942", False, False, "bfloat16", 1, id="gfx942-False-False"),
-        pytest.param("gfx1100", False, False, "bfloat16", 1, id="gfx1100-False-False"),
-        pytest.param("gfx1201", False, False, "bfloat16", 1, id="gfx1201-False-False"),
-        pytest.param("gfx1200", True, False, "bfloat16", 1, id="gfx1200-True-False"),
-        pytest.param("gfx1200", False, True, "bfloat16", 1, id="gfx1200-False-True"),
-        pytest.param("gfx1200", False, False, "float16", 1, id="fp16-inputs"),
-        pytest.param("gfx1200", False, False, "bfloat16", 2, id="k-pack-2"),
+        pytest.param("gfx942", False, False, 1, id="gfx942-False-False"),
+        pytest.param("gfx1100", False, False, 1, id="gfx1100-False-False"),
+        pytest.param("gfx1201", False, False, 1, id="gfx1201-False-False"),
+        pytest.param("gfx1200", True, False, 1, id="gfx1200-True-False"),
+        pytest.param("gfx1200", False, True, 1, id="gfx1200-False-True"),
+        pytest.param("gfx1200", False, False, 2, id="k-pack-2"),
     ],
 )
 def test_gemm_shared_layout_unsupported_modes(arch, trans_A, trans_B, in_dtype, k_pack):
@@ -365,13 +545,14 @@ def test_gemm_shared_layout_unsupported_modes(arch, trans_A, trans_B, in_dtype, 
 
 
 @tilelang.testing.requires_rocm(support_required="compile-only")
-def test_gemm_wmma_linear_shared_layout_pipeline_fallback():
+@pytest.mark.parametrize("in_dtype", ["bfloat16", "float16"])
+def test_gemm_wmma_linear_shared_layout_pipeline_fallback(in_dtype):
     """gfx1200 currently disables software pipelining, retaining the 2D tiles."""
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx1200"})
     sources = []
     with target, tvm.transform.PassContext(opt_level=3):
         for num_stages in (0, 2):
-            program = matmul(16, 32, 64, 16, 32, 32, False, False, "bfloat16", "bfloat16", "float32", num_stages, 32, make_linear_layout)
+            program = matmul(16, 32, 64, 16, 32, 32, False, False, in_dtype, in_dtype, "float32", num_stages, 32, make_linear_layout)
             sources.append(tilelang.lower(program, target=target).kernel_source)
     assert sources[0] == sources[1]
 

@@ -231,7 +231,7 @@ with T.Kernel(1, threads=32):
 
 Requirements:
 
-- Use BF16 shared-memory operands, FP32 accumulation, no transposes, and `k_pack=1` (the default). Tile M, N and K must be constant multiples of 16; global matrix dimensions may have tails when copies handle their bounds.
+- Use FP16 or BF16 shared-memory operands with the same dtype for A and B, FP32 accumulation, no transposes, and `k_pack=1` (the default). Tile M, N and K must be constant multiples of 16; global matrix dimensions may have tails when copies handle their bounds.
 - Each operand must cover its entire contiguous 2D buffer, with zero region and element offsets, no explicit strides, and alignment of at least 16 bytes and divisible by 16. Ordinary `T.alloc_shared` allocations provide this alignment.
 - Use the exact input shape and mapping returned by `make_linear_layout`; custom mappings are not supported.
 
