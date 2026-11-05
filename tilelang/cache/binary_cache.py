@@ -119,7 +119,7 @@ class BinaryCache:
         return sha256(key_string.encode()).hexdigest()
 
     @classmethod
-    def get_path(cls, key: str, compile_format: str) -> str:
+    def get_write_path(cls, key: str, compile_format: str) -> str:
         return os.path.join(cls._get_write_cache_root(), key, f"kernel.{compile_format}")
 
     @classmethod
@@ -164,7 +164,7 @@ class BinaryCache:
 
         cache_root = cls._get_write_cache_root()
         os.makedirs(cache_root, exist_ok=True)
-        path = cls.get_path(key, compile_format)
+        path = cls.get_write_path(key, compile_format)
         cache_path = os.path.dirname(path)
         # Published directories are immutable, even if a load found corruption.
         # The caller can use its fresh compilation; repairing shared entries

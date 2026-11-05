@@ -86,7 +86,7 @@ def test_save_writes_manifest_covering_all_files(cache_dirs, tmp_path):
     key = "manifest-on-save"
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
 
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     manifest = json.loads((cache_path / cache.manifest_path).read_text())
 
     expected_files = {
@@ -105,7 +105,7 @@ def test_load_removes_entry_with_truncated_kernel_lib(cache_dirs, tmp_path, monk
     cache = KernelCache()
     key = "truncated-lib"
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
 
     lib_file = cache_path / cache.kernel_lib_path
     lib_file.write_bytes(lib_file.read_bytes()[: len(b"fake-so-contents") // 2])
@@ -118,7 +118,7 @@ def test_load_removes_entry_with_same_size_corruption(cache_dirs, tmp_path, monk
     cache = KernelCache()
     key = "bitflipped-lib"
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
 
     lib_file = cache_path / cache.kernel_lib_path
     original = lib_file.read_bytes()
@@ -135,7 +135,7 @@ def test_source_files_are_size_checked_but_not_hashed(cache_dirs, tmp_path, monk
     cache = KernelCache()
     key = "source-not-hashed"
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
 
     device_file = cache_path / cache.device_kernel_path
     device_file.write_text("X" * len(device_file.read_text()))
@@ -146,7 +146,7 @@ def test_source_files_are_size_checked_but_not_hashed(cache_dirs, tmp_path, monk
 def test_legacy_entry_without_manifest_misses_and_save_repairs(cache_dirs, tmp_path, monkeypatch):
     cache = KernelCache()
     key = "legacy-no-manifest"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")
@@ -173,7 +173,7 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
     for root in roots:
         monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
         cache._save_kernel_to_disk("key", kernel)
-    relative = Path(cache._get_cache_path("key")).relative_to(roots[-1])
+    relative = Path(cache._get_write_cache_path("key")).relative_to(roots[-1])
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
     assert AutoTuner._get_cache_dir(env.get_cache_write_dir()).is_relative_to(roots[0])
 
@@ -197,7 +197,7 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
     assert loaded.loaded_path.is_relative_to(roots[2])
     assert (roots[1] / relative).is_dir()
     cache._save_kernel_to_disk("new", kernel)
-    new_relative = Path(cache._get_cache_path("new")).relative_to(roots[0])
+    new_relative = Path(cache._get_write_cache_path("new")).relative_to(roots[0])
     assert (roots[0] / new_relative).is_dir()
     assert not (roots[1] / new_relative).exists()
     cache.clear_cache()
@@ -206,12 +206,18 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
     assert (roots[2] / relative).is_dir()
 
 
-def test_cutedsl_cached_module_import_does_not_write_bytecode(tmp_path):
+@pytest.mark.parametrize("backend", ["cutedsl", "nvrtc"])
+def test_cached_module_import_does_not_write_bytecode(tmp_path, monkeypatch, backend):
+    import sys
     from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
+    from tilelang.jit.adapter.nvrtc.libgen import NVRTCLibraryGenerator
+
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    generator = CuTeDSLLibraryGenerator if backend == "cutedsl" else NVRTCLibraryGenerator
 
     path = tmp_path / "kernel.py"
     path.write_text("value = 42\n")
-    module = CuTeDSLLibraryGenerator.import_from_file("cached_kernel", str(path))
+    module = generator.import_from_file("cached_kernel", str(path))
     assert module.value == 42
     assert list(tmp_path.iterdir()) == [path]
 

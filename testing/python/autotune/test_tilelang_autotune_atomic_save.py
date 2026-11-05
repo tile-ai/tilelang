@@ -169,7 +169,7 @@ def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
         monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
         result = replace(result, config={"threads": 128 * (index + 1)})
         tuner._save_result_to_disk("key", result)
-        paths.append(tuner.cache_dir / "key")
+        paths.append(tuner.write_cache_dir / "key")
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
     fail_load = False
 
@@ -198,7 +198,7 @@ def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
     assert tuner._load_result_from_disk("missing") is None
     assert before == {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
     tuner._save_result_to_disk("new", result)
-    assert (tuner.cache_dir / "new" / BEST_CONFIG_PATH).is_file()
+    assert (tuner.write_cache_dir / "new" / BEST_CONFIG_PATH).is_file()
     assert not (paths[1].parent / "new").exists()
     assert not (paths[2].parent / "new").exists()
 
@@ -213,7 +213,7 @@ def test_autotune_cache_repairs_failed_entry(cache_dirs, tmp_path, monkeypatch, 
     tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
     result = _make_result(tmp_path)
     tuner._save_result_to_disk("key", result)
-    path = tuner.cache_dir / "key"
+    path = tuner.write_cache_dir / "key"
     fail_load = invalid == "load_failure"
 
     def from_database(cls, **kwargs):
@@ -230,3 +230,23 @@ def test_autotune_cache_repairs_failed_entry(cache_dirs, tmp_path, monkeypatch, 
     tuner._save_result_to_disk("key", result)
     assert tuner._load_result_from_disk("key").config == result.config
     assert path.is_dir()
+
+
+def test_autotune_cache_miss_preserves_concurrent_publication(cache_dirs, tmp_path, monkeypatch):
+    from tilelang.autotuner import AutoTuner
+
+    tuner = AutoTuner(_fake_func, configs=[])
+    result = _make_result(tmp_path)
+    path = tuner.write_cache_dir / "key"
+    original_load = AutotuneResult.load_from_disk
+
+    def load_then_publish(cls, path, compile_args):
+        loaded = original_load(path, compile_args)
+        assert loaded is None
+        # Another writer publishes after this reader observes the missing entry.
+        result.save_to_disk(path)
+        return loaded
+
+    monkeypatch.setattr(AutotuneResult, "load_from_disk", classmethod(load_then_publish))
+    assert tuner._load_result_from_disk("key") is None
+    assert AutotuneResult._is_complete_result_dir(path, result.kernel.execution_backend)

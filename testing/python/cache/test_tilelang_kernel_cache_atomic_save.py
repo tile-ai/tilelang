@@ -59,7 +59,7 @@ def _write_complete_kernel_cache_entry(
     device_source: str = "// device kernel",
     host_source: str = "// host kernel",
 ) -> Path:
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
@@ -199,7 +199,7 @@ def test_lazy_jit_closure_specialization_re_elaborates_before_kernel_cache(cache
 def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monkeypatch):
     cache = KernelCache()
     key = "missing-source-entry"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
     (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
@@ -268,7 +268,7 @@ def test_tvm_ffi_source_fallback_handles_missing_runtime_module():
 def test_kernel_cache_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
     cache = KernelCache()
     key = "atomic-repair"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / "stale.txt").write_text("partial")
 
@@ -285,7 +285,7 @@ def test_kernel_cache_logs_write_oserror_instead_of_treating_it_as_race(cache_di
     cache = KernelCache()
     key = "atomic-write-error"
     logged = []
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     staging_root = Path(cache._get_staging_root())
 
     def raise_write_error(*args, **kwargs):
@@ -310,7 +310,7 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     kernel = _make_fake_kernel(tmp_path)
     kernel.kernel_source = None
     logged = []
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     staging_root = Path(cache._get_staging_root())
 
     def record_exception(message, *args, **kwargs):
@@ -328,7 +328,7 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
 def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
     cache = NVRTCKernelCache()
     key = "nvrtc-atomic-repair"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")

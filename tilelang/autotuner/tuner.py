@@ -158,14 +158,14 @@ class AutoTuner:
         self.jit_compile = None
         self.jit_elaborate = None
 
-    @classmethod
-    def _get_cache_dir(cls, root: str) -> Path:
+    @staticmethod
+    def _get_cache_dir(root: str) -> Path:
         from tilelang.cache.kernel_cache import KernelCache
 
         return Path(KernelCache._get_namespace_root(root)) / "autotuner"
 
     @property
-    def cache_dir(self) -> Path:
+    def write_cache_dir(self) -> Path:
         return self._get_cache_dir(env.get_cache_write_dir())
 
     @classmethod
@@ -391,7 +391,7 @@ class AutoTuner:
         return hashlib.sha256(key_string.encode()).hexdigest()
 
     def _save_result_to_disk(self, key, result: AutotuneResult):
-        result.save_to_disk(self.cache_dir / key, self.compile_args.verbose)
+        result.save_to_disk(self.write_cache_dir / key, self.compile_args.verbose)
 
     def _load_result_from_disk(self, key) -> AutotuneResult | None:
         for index, root in enumerate(env.get_cache_read_dirs()):
@@ -405,12 +405,12 @@ class AutoTuner:
                     err,
                     exc_info=self.compile_args.verbose,
                 )
-                result = None
+                if index == 0:
+                    # Failed writable entries must not block publication after retuning.
+                    shutil.rmtree(path, ignore_errors=True)
+                continue
             if result is not None:
                 return result
-            if index == 0:
-                # Failed writable entries must not block publication after retuning.
-                shutil.rmtree(path, ignore_errors=True)
         return None
 
     # Compile-related helpers

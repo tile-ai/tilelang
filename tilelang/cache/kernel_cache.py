@@ -195,7 +195,7 @@ class KernelCache:
     def _create_dirs():
         os.makedirs(env.get_cache_write_dir(), exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(env.get_cache_write_dir()), exist_ok=True)
-        os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_write_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
 
         staging_root = KernelCache._get_staging_root()
@@ -210,7 +210,7 @@ class KernelCache:
         return os.path.join(root, KernelCache._get_cache_namespace())
 
     @staticmethod
-    def _get_cache_root() -> str:
+    def _get_write_cache_root() -> str:
         return os.path.join(KernelCache._get_namespace_root(env.get_cache_write_dir()), KernelCache.cache_root_dir)
 
     @staticmethod
@@ -423,7 +423,7 @@ class KernelCache:
             target_host=str(target_host) if target_host is not None else None,
             backend=execution_backend,
             cache_key=key,
-            cache_path=self._get_cache_path(key),
+            cache_path=self._get_write_cache_path(key),
         ):
             kernel = JITKernel(
                 func,
@@ -439,13 +439,13 @@ class KernelCache:
         # Save outside the lock: staging+rename is atomic and idempotent (like the
         # disk load above). Holding the lock here serialized every worker's save.
         if env.is_cache_enabled():
-            cache_path = self._get_cache_path(key)
+            cache_path = self._get_write_cache_path(key)
             self._save_kernel_to_disk(key, kernel, func, verbose)
             # Set cache path on adapter so it can save cubin after first execution
             self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
-        self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
+        self._tag_kernel_cache_entry(kernel, key, self._get_write_cache_path(key))
         with self._lock:
             existing = self._memory_cache.get(key)
             if existing is not None:
@@ -461,9 +461,9 @@ class KernelCache:
             self._memory_cache.clear()  # Clear in-memory cache
             self._clear_disk_cache()  # Clear disk cache
 
-    def _get_cache_path(self, key: str) -> str:
+    def _get_write_cache_path(self, key: str) -> str:
         """
-        Gets the filesystem path for a cached kernel.
+        Gets the writable filesystem path for a cached kernel.
 
         Args:
             key (str): The hash key identifying the kernel.
@@ -471,7 +471,7 @@ class KernelCache:
         Returns:
             str: Absolute path to the cache directory for this kernel.
         """
-        return os.path.join(self._get_cache_root(), key)
+        return os.path.join(self._get_write_cache_root(), key)
 
     @staticmethod
     def _tag_kernel_cache_entry(kernel: JITKernel, key: str, cache_path: str) -> None:
@@ -569,7 +569,7 @@ class KernelCache:
         # namespace-specific directories lazily here so direct save helpers keep working
         # even when the singleton instance is reused.
         KernelCache._create_dirs()
-        cache_path = self._get_cache_path(key)
+        cache_path = self._get_write_cache_path(key)
 
         # Another process already wrote a complete entry — nothing to do.
         if self._is_complete_cache_dir(cache_path):
@@ -634,7 +634,7 @@ class KernelCache:
                 # Another process won the race with a complete cache entry.
                 shutil.rmtree(staging_path, ignore_errors=True)
             else:
-                KernelCache._fsync_dir(self._get_cache_root())
+                KernelCache._fsync_dir(self._get_write_cache_root())
         except Exception:
             shutil.rmtree(staging_path, ignore_errors=True)
             self.logger.exception("Error during atomic cache save")
@@ -674,7 +674,7 @@ class KernelCache:
                 compile_flags,
                 func,
                 verbose,
-                read_only=index > 0,
+                allow_cleanup=index == 0,
             )
             if kernel is not None:
                 return kernel
@@ -691,7 +691,7 @@ class KernelCache:
         func: Callable | None,
         verbose: bool,
         *,
-        read_only: bool,
+        allow_cleanup: bool,
     ) -> JITKernel | None:
         device_kernel_path = os.path.join(cache_path, self.device_kernel_path)
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
@@ -713,7 +713,7 @@ class KernelCache:
                 "Disk cache entry at %s failed integrity verification (corrupted or partially written); treating it as a cache miss.",
                 cache_path,
             )
-            if not read_only:
+            if allow_cleanup:
                 shutil.rmtree(cache_path, ignore_errors=True)
             return None
 
@@ -746,7 +746,7 @@ class KernelCache:
                 err,
                 exc_info=verbose,
             )
-            if not read_only:
+            if allow_cleanup:
                 shutil.rmtree(cache_path, ignore_errors=True)
             return None
         if kernel is not None:
@@ -771,7 +771,7 @@ class KernelCache:
             Use with caution as this operation cannot be undone.
         """
         try:
-            shutil.rmtree(self._get_cache_root(), ignore_errors=True)
+            shutil.rmtree(self._get_write_cache_root(), ignore_errors=True)
             shutil.rmtree(self._get_staging_root(), ignore_errors=True)
 
             KernelCache._create_dirs()

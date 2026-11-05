@@ -79,7 +79,7 @@ def test_kernel_cache_stores_params_as_json(tmp_path, monkeypatch):
 
     cache._save_kernel_to_disk("json-params", _FakeKernel(str(lib_path), params))
 
-    cache_path = Path(cache._get_cache_path("json-params"))
+    cache_path = Path(cache._get_write_cache_path("json-params"))
     params_file = cache_path / cache.params_path
     assert params_file.suffix == ".json"
     assert not (cache_path / "params.pkl").exists()

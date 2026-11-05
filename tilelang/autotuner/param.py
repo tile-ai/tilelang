@@ -500,8 +500,8 @@ class AutotuneResult:
             logger.exception("Error during atomic autotune result save")
 
     @classmethod
-    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:
-        """Load a complete autotune result and its compiled kernel from disk."""
+    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult | None:
+        """Load a result, returning None for an absent entry and raising for an invalid one."""
         if not os.path.exists(path):
             return None
 
@@ -552,7 +552,7 @@ class AutotuneResult:
             func,
         )
         if kernel is None:
-            return None
+            raise ValueError(f"Cannot load kernel from autotune cache entry: {path}")
         kernel.update_tuner_result(
             config=config,
             latency=latency,

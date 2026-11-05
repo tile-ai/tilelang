@@ -155,7 +155,7 @@ def test_cuda_binary_cache_rejects_bad_metadata(monkeypatch, tmp_path, failure):
 
     key = "bad-metadata-key"
     CUDABinaryCache.save(key, "cubin", b"valid-cubin")
-    path = Path(CUDABinaryCache.get_path(key, "cubin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "cubin"))
     metadata_path = path.parent / "metadata.json"
     metadata_path.unlink()
     if failure == "unreadable":
@@ -192,7 +192,7 @@ def test_cuda_binary_cache_rejects_invalid_metadata_fields(monkeypatch, tmp_path
 
     key = "invalid-metadata-key"
     CUDABinaryCache.save(key, "cubin", b"valid-cubin")
-    path = Path(CUDABinaryCache.get_path(key, "cubin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "cubin"))
     metadata_path = path.parent / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     if value is None:
@@ -211,7 +211,7 @@ def test_cuda_binary_cache_rejects_empty_entry(monkeypatch, tmp_path):
 
     key = "empty-key"
     CUDABinaryCache.save(key, "fatbin", b"valid-fatbin")
-    path = Path(CUDABinaryCache.get_path(key, "fatbin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "fatbin"))
     path.write_bytes(b"")
     metadata_path = path.parent / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
@@ -228,7 +228,7 @@ def test_cuda_binary_cache_empty_read_is_miss(monkeypatch, tmp_path, missing_met
 
     key = "empty-read-key"
     CUDABinaryCache.save(key, "fatbin", b"valid-fatbin")
-    path = Path(CUDABinaryCache.get_path(key, "fatbin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "fatbin"))
     metadata_path = path.parent / "metadata.json"
 
     def empty_read(file, *args, **kwargs):
@@ -251,7 +251,7 @@ def test_cuda_binary_cache_hash_mismatch_does_not_delete_entry(monkeypatch, tmp_
 
     key = "mismatched-key"
     CUDABinaryCache.save(key, "cubin", b"valid-cubin")
-    path = Path(CUDABinaryCache.get_path(key, "cubin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "cubin"))
     corrupted = b"other-cubin"
     assert len(corrupted) == path.stat().st_size
     path.write_bytes(corrupted)
@@ -266,7 +266,7 @@ def test_cuda_binary_cache_rejects_truncated_binary(monkeypatch, tmp_path):
 
     key = "truncated-binary-key"
     CUDABinaryCache.save(key, "cubin", b"valid-cubin")
-    path = Path(CUDABinaryCache.get_path(key, "cubin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "cubin"))
     path.write_bytes(path.read_bytes()[:-1])
 
     assert CUDABinaryCache.load(key, "cubin") is None
@@ -278,7 +278,7 @@ def test_cuda_binary_cache_first_valid_writer_wins(monkeypatch, tmp_path, compil
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "first-writer-key"
-    path = Path(CUDABinaryCache.get_path(key, compile_format))
+    path = Path(CUDABinaryCache.get_write_path(key, compile_format))
     CUDABinaryCache.save(key, compile_format, b"first-binary")
     first_inode = path.stat().st_ino
     with path.open("rb") as reader:
@@ -294,7 +294,7 @@ def test_cuda_binary_cache_directory_publication_is_atomic(monkeypatch, tmp_path
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "atomic-key"
-    path = Path(CUDABinaryCache.get_path(key, "fatbin"))
+    path = Path(CUDABinaryCache.get_write_path(key, "fatbin"))
     synced_inodes = set()
     real_fsync = os.fsync
     real_rename = os.rename
@@ -373,7 +373,7 @@ def test_cuda_binary_cache_failed_publish_cleans_only_own_staging(monkeypatch, t
         CUDABinaryCache.save("failed-publish-key", "cubin", b"valid-cubin")
 
     assert CUDABinaryCache.load("failed-publish-key", "cubin") is None
-    assert not Path(CUDABinaryCache.get_path("failed-publish-key", "cubin")).parent.exists()
+    assert not Path(CUDABinaryCache.get_write_path("failed-publish-key", "cubin")).parent.exists()
     assert list(staging_root.iterdir()) == [other_writer]
     assert (other_writer / "kernel.cubin").read_bytes() == b"other-cubin"
 
@@ -428,14 +428,14 @@ def test_binary_cache_multiple_roots(monkeypatch, tmp_path, cache_type):
         cache.save("key", "cubin", payload)
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
     assert cache.load("key", "cubin") == b"local"
-    Path(cache.get_path("key", "cubin")).write_bytes(b"corrupt")
+    Path(cache.get_write_path("key", "cubin")).write_bytes(b"corrupt")
     assert cache.load("key", "cubin") == b"shared"
-    shared_path = roots[1] / Path(cache.get_path("key", "cubin")).relative_to(roots[0])
+    shared_path = roots[1] / Path(cache.get_write_path("key", "cubin")).relative_to(roots[0])
     shared_path.write_bytes(b"corrupt")
     assert cache.load("key", "cubin") == b"other"
     assert shared_path.read_bytes() == b"corrupt"
     cache.save("new", "cubin", b"new")
-    relative = Path(cache.get_path("new", "cubin")).relative_to(roots[0])
+    relative = Path(cache.get_write_path("new", "cubin")).relative_to(roots[0])
     assert (roots[0] / relative).read_bytes() == b"new"
     assert not (roots[1] / relative).exists()
     assert not (roots[2] / relative).exists()

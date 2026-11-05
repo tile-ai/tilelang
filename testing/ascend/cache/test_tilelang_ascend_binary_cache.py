@@ -169,7 +169,7 @@ def test_ascend_binary_cache_rejects_foreign_format_tag(monkeypatch, tmp_path, f
 
     key = "foreign-format-key"
     AscendBinaryCache.save(key, AIBIN, b"valid-aibin")
-    path = Path(AscendBinaryCache.get_path(key, AIBIN))
+    path = Path(AscendBinaryCache.get_write_path(key, AIBIN))
     metadata_path = path.parent / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["format"] = foreign_format
@@ -184,7 +184,7 @@ def test_ascend_binary_cache_first_valid_writer_wins(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "first-writer-key"
-    path = Path(AscendBinaryCache.get_path(key, AIBIN))
+    path = Path(AscendBinaryCache.get_write_path(key, AIBIN))
     AscendBinaryCache.save(key, AIBIN, b"first-binary")
     first_inode = path.stat().st_ino
     with path.open("rb") as reader:
