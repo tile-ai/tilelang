@@ -189,7 +189,8 @@ def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst
             if swizzle:
                 T.annotate_layout({tile: make_swizzled_layout(tile), tile_T: make_swizzled_layout(tile_T)})
             T.copy(A, tile[stages - 1, :, :])
-            T.fill(tile_T, 0)
+            if dst_col:
+                T.fill(tile_T, 0)
             if consumer:
                 if T.get_thread_binding() >= 128:
                     T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
@@ -224,7 +225,6 @@ def test_tilelang_transpose_matrix_instructions():
     for dtype, M, N, kwargs, matrix in cases:
         kernel = tilelang.compile(
             tilelang_transpose_matrix_case(M, N, dtype, **kwargs),
-            out_idx=[1],
             target="cuda",
             pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
         )
@@ -238,7 +238,9 @@ def test_tilelang_transpose_matrix_instructions():
         )
         expected = torch.zeros(N, M, dtype=torch_dtype, device="cuda")
         expected[:, dst_col:] = a[: M - dst_col, src_offset:].t()
-        torch.testing.assert_close(_bits(kernel(a)), _bits(expected), rtol=0, atol=0)
+        b = torch.empty(N, M, dtype=torch_dtype, device="cuda")
+        kernel(a, b)
+        torch.testing.assert_close(_bits(b), _bits(expected), rtol=0, atol=0)
 
 
 if __name__ == "__main__":
