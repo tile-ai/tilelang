@@ -194,7 +194,7 @@ class KernelCache:
     @staticmethod
     def _create_dirs():
         os.makedirs(env.get_cache_write_dir(), exist_ok=True)
-        os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
+        os.makedirs(KernelCache._get_namespace_root(env.get_cache_write_dir()), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
 
@@ -205,16 +205,17 @@ class KernelCache:
                 KernelCache._last_cleaned_staging_root = staging_root
 
     @staticmethod
-    def _get_namespace_root(root: str | None = None) -> str:
-        return os.path.join(env.get_cache_write_dir() if root is None else root, KernelCache._get_cache_namespace())
+    def _get_namespace_root(root: str) -> str:
+        """Append the version and host-platform namespace to a cache root."""
+        return os.path.join(root, KernelCache._get_cache_namespace())
 
     @staticmethod
     def _get_cache_root() -> str:
-        return os.path.join(KernelCache._get_namespace_root(), KernelCache.cache_root_dir)
+        return os.path.join(KernelCache._get_namespace_root(env.get_cache_write_dir()), KernelCache.cache_root_dir)
 
     @staticmethod
     def _get_staging_root() -> str:
-        return os.path.join(KernelCache._get_namespace_root(), KernelCache.staging_root_dir)
+        return os.path.join(KernelCache._get_namespace_root(env.get_cache_write_dir()), KernelCache.staging_root_dir)
 
     @staticmethod
     def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):

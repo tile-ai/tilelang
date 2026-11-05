@@ -53,17 +53,18 @@ class BinaryCache:
         return f"{public}_{local}" if local else public
 
     @classmethod
-    def _get_namespace_root(cls, root: str | None = None) -> str:
+    def _get_namespace_root(cls, root: str) -> str:
+        """Append the version namespace to a cache root."""
         version = cls._format_version_namespace(__version__)
-        return os.path.join(env.get_cache_write_dir() if root is None else root, version)
+        return os.path.join(root, version)
 
     @classmethod
     def _get_cache_root(cls) -> str:
-        return os.path.join(cls._get_namespace_root(), cls.cache_root_dir)
+        return os.path.join(cls._get_namespace_root(env.get_cache_write_dir()), cls.cache_root_dir)
 
     @classmethod
     def _get_staging_root(cls) -> str:
-        return os.path.join(cls._get_namespace_root(), ".staging", cls.cache_root_dir)
+        return os.path.join(cls._get_namespace_root(env.get_cache_write_dir()), ".staging", cls.cache_root_dir)
 
     @staticmethod
     @functools.cache

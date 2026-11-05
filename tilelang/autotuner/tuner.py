@@ -158,14 +158,14 @@ class AutoTuner:
         self.jit_elaborate = None
 
     @classmethod
-    def _get_cache_dir(cls, root: str | None = None) -> Path:
+    def _get_cache_dir(cls, root: str) -> Path:
         from tilelang.cache.kernel_cache import KernelCache
 
         return Path(KernelCache._get_namespace_root(root)) / "autotuner"
 
     @property
     def cache_dir(self) -> Path:
-        return self._get_cache_dir()
+        return self._get_cache_dir(env.get_cache_write_dir())
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):

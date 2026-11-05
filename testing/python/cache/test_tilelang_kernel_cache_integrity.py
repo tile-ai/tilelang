@@ -175,7 +175,7 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
         cache._save_kernel_to_disk("key", kernel)
     relative = Path(cache._get_cache_path("key")).relative_to(roots[-1])
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
-    assert AutoTuner._get_cache_dir().is_relative_to(roots[0])
+    assert AutoTuner._get_cache_dir(env.get_cache_write_dir()).is_relative_to(roots[0])
 
     def build(cls, **kwargs):
         path = Path(kwargs["kernel_lib_path"])
