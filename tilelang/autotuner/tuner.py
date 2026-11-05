@@ -20,6 +20,7 @@ from typing import Generic, Literal, Any, ParamSpec, TypeVar
 from collections.abc import Callable
 from tqdm.auto import tqdm
 import logging
+import shutil
 import concurrent.futures
 import queue
 import torch
@@ -393,7 +394,7 @@ class AutoTuner:
         result.save_to_disk(self.cache_dir / key, self.compile_args.verbose)
 
     def _load_result_from_disk(self, key) -> AutotuneResult | None:
-        for root in env.get_cache_read_dirs():
+        for index, root in enumerate(env.get_cache_read_dirs()):
             path = self._get_cache_dir(root) / key
             try:
                 result = AutotuneResult.load_from_disk(path, self.compile_args)
@@ -404,9 +405,12 @@ class AutoTuner:
                     err,
                     exc_info=self.compile_args.verbose,
                 )
-                continue
+                result = None
             if result is not None:
                 return result
+            if index == 0:
+                # Failed writable entries must not block publication after retuning.
+                shutil.rmtree(path, ignore_errors=True)
         return None
 
     # Compile-related helpers

@@ -194,9 +194,39 @@ def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
     # Snapshot secondary roots after injecting failures: lookup must not mutate them.
     before = {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
     assert tuner._load_result_from_disk("key").config == {"threads": 384}
+    assert not paths[0].exists()
     assert tuner._load_result_from_disk("missing") is None
     assert before == {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
     tuner._save_result_to_disk("new", result)
     assert (tuner.cache_dir / "new" / BEST_CONFIG_PATH).is_file()
     assert not (paths[1].parent / "new").exists()
     assert not (paths[2].parent / "new").exists()
+
+
+@pytest.mark.parametrize("invalid", ["metadata", "params", "load_failure"])
+def test_autotune_cache_repairs_failed_entry(cache_dirs, tmp_path, monkeypatch, invalid):
+    from types import SimpleNamespace
+    from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
+
+    tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    result = _make_result(tmp_path)
+    tuner._save_result_to_disk("key", result)
+    path = tuner.cache_dir / "key"
+    fail_load = invalid == "load_failure"
+
+    def from_database(cls, **kwargs):
+        if fail_load:
+            raise RuntimeError("unloadable kernel")
+        return SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// device kernel")
+
+    monkeypatch.setattr(autotune_param.JITKernel, "from_database", classmethod(from_database))
+    if invalid != "load_failure":
+        (path / (BEST_CONFIG_PATH if invalid == "metadata" else PARAMS_PATH)).write_text("invalid json")
+    assert tuner._load_result_from_disk("key") is None
+    assert not path.exists()
+    fail_load = False
+    tuner._save_result_to_disk("key", result)
+    assert tuner._load_result_from_disk("key").config == result.config
+    assert path.is_dir()
