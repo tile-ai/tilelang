@@ -131,7 +131,7 @@ def test_cuda_binary_cache_directory_coexists_with_legacy_sidecar_entry(monkeypa
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "legacy-key"
-    cache_root = CUDABinaryCache._get_cache_root()
+    cache_root = CUDABinaryCache._get_write_cache_root()
     legacy_path = os.path.join(cache_root, f"{key}.cubin")
     os.makedirs(cache_root, exist_ok=True)
     with open(legacy_path, "wb") as f:
@@ -351,7 +351,7 @@ def test_cuda_binary_cache_concurrent_publishers_do_not_replace_winner(monkeypat
     assert len(winners) == 1
     assert winners[0] in payloads
     assert CUDABinaryCache.load("concurrent-key", "cubin") == winners[0]
-    cache_entries = os.listdir(CUDABinaryCache._get_cache_root())
+    cache_entries = os.listdir(CUDABinaryCache._get_write_cache_root())
     assert cache_entries == ["concurrent-key"]
     assert not list(Path(CUDABinaryCache._get_staging_root()).iterdir())
 

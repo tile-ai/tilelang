@@ -59,7 +59,7 @@ class BinaryCache:
         return os.path.join(root, version)
 
     @classmethod
-    def _get_cache_root(cls) -> str:
+    def _get_write_cache_root(cls) -> str:
         return os.path.join(cls._get_namespace_root(env.get_cache_write_dir()), cls.cache_root_dir)
 
     @classmethod
@@ -120,7 +120,7 @@ class BinaryCache:
 
     @classmethod
     def get_path(cls, key: str, compile_format: str) -> str:
-        return os.path.join(cls._get_cache_root(), key, f"kernel.{compile_format}")
+        return os.path.join(cls._get_write_cache_root(), key, f"kernel.{compile_format}")
 
     @classmethod
     def load(cls, key: str, compile_format: str) -> bytes | None:
@@ -162,7 +162,7 @@ class BinaryCache:
         if not env.is_cache_enabled():
             return
 
-        cache_root = cls._get_cache_root()
+        cache_root = cls._get_write_cache_root()
         os.makedirs(cache_root, exist_ok=True)
         path = cls.get_path(key, compile_format)
         cache_path = os.path.dirname(path)
