@@ -70,7 +70,7 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
     )
 
 
-def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
+def test_autotune_save_preserves_incomplete_cache_dir(cache_dirs, tmp_path):
     result = _make_result(tmp_path)
     path = cache_dirs / "test-namespace" / "autotuner" / "autotune-entry"
     path.mkdir(parents=True)
@@ -78,17 +78,8 @@ def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
 
     result.save_to_disk(path)
 
-    for filename in (
-        BEST_CONFIG_PATH,
-        FUNCTION_PATH,
-        LATENCY_PATH,
-        DEVICE_KERNEL_PATH,
-        HOST_KERNEL_PATH,
-        KERNEL_LIB_PATH,
-        PARAMS_PATH,
-    ):
-        assert (path / filename).exists()
-    assert not (path / "stale.txt").exists()
+    assert [p.name for p in path.iterdir()] == ["stale.txt"]
+    assert (path / "stale.txt").read_text() == "partial"
 
 
 def test_autotune_save_logs_write_oserror_instead_of_treating_it_as_race(cache_dirs, tmp_path, monkeypatch):
@@ -132,7 +123,7 @@ def test_autotune_save_does_not_publish_incomplete_dir_when_device_source_is_mis
     assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
-def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path):
+def test_autotune_save_preserves_nvrtc_dir_missing_launcher(cache_dirs, tmp_path):
     result = _make_result(tmp_path, execution_backend="nvrtc")
     path = cache_dirs / "test-namespace" / "autotuner" / "autotune-nvrtc-entry"
     path.mkdir(parents=True)
@@ -147,8 +138,8 @@ def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path)
 
     result.save_to_disk(path)
 
-    assert (path / KERNEL_PY_PATH).exists()
-    assert not (path / "legacy.txt").exists()
+    assert not (path / KERNEL_PY_PATH).exists()
+    assert (path / "legacy.txt").exists()
 
 
 @pytest.mark.parametrize("invalid", ["absent", "missing_metadata", "corrupt_metadata", "missing_binary", "load_failure"])
@@ -193,8 +184,17 @@ def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
             fail_load = True
     # Snapshot secondary roots after injecting failures: lookup must not mutate them.
     before = {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
-    assert tuner._load_result_from_disk("key").config == {"threads": 384}
-    assert not paths[0].exists()
+    if invalid == "absent":
+        assert tuner._load_result_from_disk("key").config == {"threads": 384}
+    else:
+        with pytest.raises((OSError, ValueError, RuntimeError)):
+            tuner._load_result_from_disk("key")
+        assert paths[0].exists()
+        import shutil
+
+        shutil.rmtree(paths[0])
+        with pytest.raises((OSError, ValueError, RuntimeError)):
+            tuner._load_result_from_disk("key")
     assert tuner._load_result_from_disk("missing") is None
     assert before == {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
     tuner._save_result_to_disk("new", result)
@@ -204,7 +204,7 @@ def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
 
 
 @pytest.mark.parametrize("invalid", ["metadata", "params", "load_failure"])
-def test_autotune_cache_repairs_failed_entry(cache_dirs, tmp_path, monkeypatch, invalid):
+def test_autotune_cache_requires_whole_entry_removal(cache_dirs, tmp_path, monkeypatch, invalid):
     from types import SimpleNamespace
     from tilelang.autotuner import AutoTuner
     from tilelang.autotuner.param import CompileArgs
@@ -224,29 +224,58 @@ def test_autotune_cache_repairs_failed_entry(cache_dirs, tmp_path, monkeypatch, 
     monkeypatch.setattr(autotune_param.JITKernel, "from_database", classmethod(from_database))
     if invalid != "load_failure":
         (path / (BEST_CONFIG_PATH if invalid == "metadata" else PARAMS_PATH)).write_text("invalid json")
-    assert tuner._load_result_from_disk("key") is None
-    assert not path.exists()
+    with pytest.raises((ValueError, RuntimeError)):
+        tuner._load_result_from_disk("key")
+    assert path.is_dir()
+    import shutil
+
+    shutil.rmtree(path)
     fail_load = False
     tuner._save_result_to_disk("key", result)
     assert tuner._load_result_from_disk("key").config == result.config
     assert path.is_dir()
 
 
-def test_autotune_cache_miss_preserves_concurrent_publication(cache_dirs, tmp_path, monkeypatch):
+@pytest.mark.parametrize("invalid", [False, True])
+def test_autotune_cache_read_preserves_concurrent_publication(cache_dirs, tmp_path, monkeypatch, invalid):
+    from types import SimpleNamespace
     from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
 
     tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    monkeypatch.setattr(
+        autotune_param.JITKernel,
+        "from_database",
+        classmethod(
+            lambda cls, **kwargs: SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// kernel")
+        ),
+    )
     result = _make_result(tmp_path)
     path = tuner.write_cache_dir / "key"
     original_load = AutotuneResult.load_from_disk
+    if invalid:
+        result.save_to_disk(path)
+        (path / BEST_CONFIG_PATH).write_text("invalid json")
 
     def load_then_publish(cls, path, compile_args):
-        loaded = original_load(path, compile_args)
+        import shutil
+
+        try:
+            loaded = original_load(path, compile_args)
+        except ValueError:
+            # Another process replaces the entry after this reader's load fails.
+            shutil.rmtree(path)
+            result.save_to_disk(path)
+            raise
         assert loaded is None
-        # Another writer publishes after this reader observes the missing entry.
         result.save_to_disk(path)
         return loaded
 
     monkeypatch.setattr(AutotuneResult, "load_from_disk", classmethod(load_then_publish))
-    assert tuner._load_result_from_disk("key") is None
-    assert AutotuneResult._is_complete_result_dir(path, result.kernel.execution_backend)
+    if invalid:
+        with pytest.raises(ValueError):
+            tuner._load_result_from_disk("key")
+    else:
+        assert tuner._load_result_from_disk("key") is None
+    assert original_load(path, tuner.compile_args).config == result.config

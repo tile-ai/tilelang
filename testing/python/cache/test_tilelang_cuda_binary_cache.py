@@ -87,7 +87,7 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
-def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+def test_cuda_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.cuda import backend as cuda_backend
 
@@ -115,14 +115,9 @@ def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     metadata_path = cache_file.parent / "metadata.json"
     original_metadata = metadata_path.read_bytes()
 
-    recompiled = cuda_backend.tilelang_callback_cuda_compile(source, target)
-    assert bytes(recompiled) == b"fake-cubin"
-    assert len(compile_calls) == 2
-
-    # Shared entries stay immutable even after a miss. Recompilation is usable
-    # for this call, but repairing the on-disk entry needs offline cleanup.
-    assert bytes(cuda_backend.tilelang_callback_cuda_compile(source, target)) == b"fake-cubin"
-    assert len(compile_calls) == 3
+    with pytest.raises(ValueError, match="checksum"):
+        cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert len(compile_calls) == 1
     assert cache_file.read_bytes() == corrupted
     assert metadata_path.read_bytes() == original_metadata
 
@@ -164,13 +159,15 @@ def test_cuda_binary_cache_rejects_bad_metadata(monkeypatch, tmp_path, failure):
         contents = {"empty": b"", "malformed": b"{", "invalid-encoding": b"\xff", "wrong-type": b"[]"}
         metadata_path.write_bytes(contents[failure])
 
-    assert CUDABinaryCache.load(key, "cubin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "cubin")
     assert path.read_bytes() == b"valid-cubin"
 
     # A later writer must leave even an invalid published directory alone.
     CUDABinaryCache.save(key, "cubin", b"new-cubin")
     assert path.read_bytes() == b"valid-cubin"
-    assert CUDABinaryCache.load(key, "cubin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "cubin")
 
 
 @pytest.mark.parametrize(
@@ -201,7 +198,8 @@ def test_cuda_binary_cache_rejects_invalid_metadata_fields(monkeypatch, tmp_path
         metadata[field] = value
     metadata_path.write_text(json.dumps(metadata))
 
-    assert CUDABinaryCache.load(key, "cubin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "cubin")
     assert path.exists()
     assert json.loads(metadata_path.read_text()) == metadata
 
@@ -218,12 +216,13 @@ def test_cuda_binary_cache_rejects_empty_entry(monkeypatch, tmp_path):
     metadata.update(size=0, sha256=sha256(b"").hexdigest())
     metadata_path.write_text(json.dumps(metadata))
 
-    assert CUDABinaryCache.load(key, "fatbin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "fatbin")
     assert path.exists()
 
 
 @pytest.mark.parametrize("missing_metadata", [False, True])
-def test_cuda_binary_cache_empty_read_is_miss(monkeypatch, tmp_path, missing_metadata):
+def test_cuda_binary_cache_empty_read_raises(monkeypatch, tmp_path, missing_metadata):
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "empty-read-key"
@@ -241,7 +240,8 @@ def test_cuda_binary_cache_empty_read_is_miss(monkeypatch, tmp_path, missing_met
 
     monkeypatch.setattr(binary_cache_mod, "open", empty_read, raising=False)
 
-    assert CUDABinaryCache.load(key, "fatbin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "fatbin")
     assert path.read_bytes() == b"valid-fatbin"
     assert metadata_path.exists()
 
@@ -256,7 +256,8 @@ def test_cuda_binary_cache_hash_mismatch_does_not_delete_entry(monkeypatch, tmp_
     assert len(corrupted) == path.stat().st_size
     path.write_bytes(corrupted)
 
-    assert CUDABinaryCache.load(key, "cubin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "cubin")
     assert path.read_bytes() == corrupted
     assert (path.parent / "metadata.json").exists()
 
@@ -269,7 +270,8 @@ def test_cuda_binary_cache_rejects_truncated_binary(monkeypatch, tmp_path):
     path = Path(CUDABinaryCache.get_write_path(key, "cubin"))
     path.write_bytes(path.read_bytes()[:-1])
 
-    assert CUDABinaryCache.load(key, "cubin") is None
+    with pytest.raises((OSError, ValueError)):
+        CUDABinaryCache.load(key, "cubin")
     assert path.exists()
 
 
@@ -385,7 +387,7 @@ def test_cuda_binary_cache_rejects_empty_save(monkeypatch, tmp_path):
         CUDABinaryCache.save("empty-save-key", "fatbin", b"")
 
 
-def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
+def test_disk_cache_load_failure_propagates(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     cache = KernelCache()
     key = "bad-host-executable"
@@ -402,17 +404,16 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
 
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fail_from_database))
 
-    loaded = cache._load_kernel_from_disk(
-        key,
-        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
-        out_idx=[0],
-        pass_configs=None,
-        compile_flags=None,
-        func=None,
-    )
-
-    assert loaded is None
-    assert not cache_path.exists()
+    with pytest.raises(RuntimeError, match="bad host executable"):
+        cache._load_kernel_from_disk(
+            key,
+            backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
+            out_idx=[0],
+            pass_configs=None,
+            compile_flags=None,
+            func=None,
+        )
+    assert cache_path.exists()
 
 
 @pytest.mark.parametrize("cache_type", ["cuda", "ascend"])
@@ -429,11 +430,19 @@ def test_binary_cache_multiple_roots(monkeypatch, tmp_path, cache_type):
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
     assert cache.load("key", "cubin") == b"local"
     Path(cache.get_write_path("key", "cubin")).write_bytes(b"corrupt")
+    with pytest.raises(ValueError):
+        cache.load("key", "cubin")
+    import shutil
+
+    shutil.rmtree(Path(cache.get_write_path("key", "cubin")).parent)
     assert cache.load("key", "cubin") == b"shared"
     shared_path = roots[1] / Path(cache.get_write_path("key", "cubin")).relative_to(roots[0])
     shared_path.write_bytes(b"corrupt")
-    assert cache.load("key", "cubin") == b"other"
+    with pytest.raises(ValueError):
+        cache.load("key", "cubin")
     assert shared_path.read_bytes() == b"corrupt"
+    shutil.rmtree(shared_path.parent)
+    assert cache.load("key", "cubin") == b"other"
     cache.save("new", "cubin", b"new")
     relative = Path(cache.get_write_path("new", "cubin")).relative_to(roots[0])
     assert (roots[0] / relative).read_bytes() == b"new"

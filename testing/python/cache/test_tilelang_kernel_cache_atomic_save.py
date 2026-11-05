@@ -209,16 +209,15 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
 
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fail_from_database))
 
-    loaded = cache._load_kernel_from_disk(
-        key,
-        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
-        out_idx=[0],
-        pass_configs=None,
-        compile_flags=None,
-        func=None,
-    )
-
-    assert loaded is None
+    with pytest.raises(ValueError, match="Incomplete kernel cache entry"):
+        cache._load_kernel_from_disk(
+            key,
+            backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
+            out_idx=[0],
+            pass_configs=None,
+            compile_flags=None,
+            func=None,
+        )
 
 
 def test_nvrtc_adapter_host_source_lazy_loads(tmp_path):
@@ -265,7 +264,7 @@ def test_tvm_ffi_source_fallback_handles_missing_runtime_module():
     assert adapter.get_kernel_source(kernel_only=False) == ""
 
 
-def test_kernel_cache_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
+def test_kernel_cache_preserves_incomplete_cache_dir(cache_dirs, tmp_path):
     cache = KernelCache()
     key = "atomic-repair"
     cache_path = Path(cache._get_write_cache_path(key))
@@ -274,11 +273,8 @@ def test_kernel_cache_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
 
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
 
-    assert (cache_path / cache.device_kernel_path).exists()
-    assert (cache_path / cache.host_kernel_path).exists()
-    assert (cache_path / cache.kernel_lib_path).exists()
-    assert (cache_path / cache.params_path).exists()
-    assert not (cache_path / "stale.txt").exists()
+    assert [p.name for p in cache_path.iterdir()] == ["stale.txt"]
+    assert (cache_path / "stale.txt").read_text() == "partial"
 
 
 def test_kernel_cache_logs_write_oserror_instead_of_treating_it_as_race(cache_dirs, tmp_path, monkeypatch):
@@ -325,7 +321,7 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
-def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
+def test_nvrtc_kernel_cache_preserves_dir_missing_launcher(cache_dirs, tmp_path):
     cache = NVRTCKernelCache()
     key = "nvrtc-atomic-repair"
     cache_path = Path(cache._get_write_cache_path(key))
@@ -338,8 +334,8 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
 
     cache._save_kernel_to_disk(key, _make_fake_nvrtc_kernel(tmp_path))
 
-    assert (cache_path / cache.kernel_py_path).exists()
-    assert not (cache_path / "legacy.txt").exists()
+    assert not (cache_path / cache.kernel_py_path).exists()
+    assert (cache_path / "legacy.txt").exists()
 
 
 def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):

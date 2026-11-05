@@ -571,8 +571,8 @@ class KernelCache:
         KernelCache._create_dirs()
         cache_path = self._get_write_cache_path(key)
 
-        # Another process already wrote a complete entry — nothing to do.
-        if self._is_complete_cache_dir(cache_path):
+        # Published entries are never repaired or overwritten automatically.
+        if os.path.lexists(cache_path):
             return
 
         # Staging dir lives under CACHE_DIR/<namespace>/.staging (same filesystem) so
@@ -605,7 +605,7 @@ class KernelCache:
                 dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
 
             # Record every staged file's size and content hash so loads can
-            # detect corrupted entries and treat them as cache misses.
+            # detect corrupted entries before loading their artifacts.
             self._write_manifest(staging_path)
 
             missing_files = self._get_missing_complete_cache_files(staging_path)
@@ -621,9 +621,6 @@ class KernelCache:
                 if entry.is_file(follow_symlinks=False):
                     KernelCache._fsync_file_contents(entry.path)
             KernelCache._fsync_dir(staging_path)
-
-            # Repair stale/incomplete entries before making the new directory visible.
-            self._remove_incomplete_cache_dir(cache_path)
 
             # Atomic rename — makes the complete directory visible in one step.
             try:
@@ -663,7 +660,7 @@ class KernelCache:
         Returns:
             JITKernel: The loaded kernel if found, None otherwise.
         """
-        for index, root in enumerate(env.get_cache_read_dirs()):
+        for root in env.get_cache_read_dirs():
             cache_path = os.path.join(self._get_namespace_root(root), self.cache_root_dir, key)
             kernel = self._load_kernel_from_path(
                 cache_path,
@@ -673,7 +670,6 @@ class KernelCache:
                 compile_flags,
                 func,
                 verbose,
-                allow_cleanup=index == 0,
             )
             if kernel is not None:
                 self._tag_kernel_cache_entry(kernel, key, cache_path)
@@ -689,9 +685,9 @@ class KernelCache:
         compile_flags: list[str] | str | None,
         func: Callable | None,
         verbose: bool,
-        *,
-        allow_cleanup: bool,
     ) -> JITKernel | None:
+        if not os.path.lexists(cache_path):
+            return None
         device_kernel_path = os.path.join(cache_path, self.device_kernel_path)
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
@@ -699,65 +695,31 @@ class KernelCache:
 
         missing_files = self._get_missing_complete_cache_files(cache_path)
         if missing_files:
-            if verbose:
-                self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
-            return None
-
+            raise ValueError(f"Incomplete kernel cache entry at {cache_path}; missing files: {missing_files}")
         if not self._verify_cache_dir_integrity(cache_path):
-            # A crashed writer (or crashed filesystem client) can publish a
-            # truncated kernel_lib.so that dlopens fine but fails only at first
-            # launch (CUDA_ERROR_INVALID_IMAGE), where nothing repairs the
-            # entry. Catch it here and self-heal by recompiling.
-            self.logger.warning(
-                "Disk cache entry at %s failed integrity verification (corrupted or partially written); treating it as a cache miss.",
-                cache_path,
-            )
-            if allow_cleanup:
-                shutil.rmtree(cache_path, ignore_errors=True)
-            return None
+            raise ValueError(f"Kernel cache entry at {cache_path} failed integrity verification")
 
-        # Load kernel parameters
-        kernel_params: list[KernelParam] | None = None
-        try:
-            if verbose:
-                self.logger.debug(f"Loading kernel parameters from file: {params_path}")
-            with open(params_path) as f:
-                kernel_params = load_kernel_params(f.read())
-        except Exception:
-            self.logger.exception("Error loading kernel parameters from disk")
-
-        try:
-            kernel = self._build_kernel(
-                func=func,
-                host_kernel_source=CachedTextSource(path=host_kernel_path),
-                device_kernel_source=CachedTextSource(path=device_kernel_path),
-                kernel_lib_path=kernel_lib_path,
-                kernel_params=kernel_params,
-                backend_context=backend_context,
-                out_idx=out_idx,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
-        except Exception as err:
-            self.logger.warning(
-                "Failed to load kernel from disk cache at %s; treating it as a cache miss: %s",
-                cache_path,
-                err,
-                exc_info=verbose,
-            )
-            if allow_cleanup:
-                shutil.rmtree(cache_path, ignore_errors=True)
-            return None
-        if kernel is not None:
-            # Restore parsed kernel-resource-usage if a previous compile
-            # persisted it; absent file is fine (older caches, non-HIP).
-            ru_path = os.path.join(cache_path, self.resource_usage_path)
-            if os.path.exists(ru_path):
-                try:
-                    kernel._resource_usage = load_from_file(ru_path)
-                except Exception:
-                    self.logger.exception("Error loading kernel resource_usage from disk")
-
+        if verbose:
+            self.logger.debug(f"Loading kernel parameters from file: {params_path}")
+        with open(params_path) as f:
+            kernel_params = load_kernel_params(f.read())
+        kernel = self._build_kernel(
+            func=func,
+            host_kernel_source=CachedTextSource(path=host_kernel_path),
+            device_kernel_source=CachedTextSource(path=device_kernel_path),
+            kernel_lib_path=kernel_lib_path,
+            kernel_params=kernel_params,
+            backend_context=backend_context,
+            out_idx=out_idx,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
+        if kernel is None:
+            raise ValueError(f"Cannot load kernel from cache entry: {cache_path}")
+        # Optional resource usage is absent in older and non-HIP entries.
+        ru_path = os.path.join(cache_path, self.resource_usage_path)
+        if os.path.exists(ru_path):
+            kernel._resource_usage = load_from_file(ru_path)
         return kernel
 
     def _clear_disk_cache(self):
@@ -862,15 +824,6 @@ class KernelCache:
                     return False
             except (OSError, KeyError, TypeError):
                 return False
-        return True
-
-    def _is_complete_cache_dir(self, cache_path: str) -> bool:
-        return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)
-
-    def _remove_incomplete_cache_dir(self, cache_path: str) -> bool:
-        if not os.path.isdir(cache_path) or self._is_complete_cache_dir(cache_path):
-            return False
-        shutil.rmtree(cache_path)
         return True
 
     @staticmethod

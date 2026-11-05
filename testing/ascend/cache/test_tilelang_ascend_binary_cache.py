@@ -109,7 +109,7 @@ def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
     assert len(cache_files) == 2
 
 
-def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+def test_ascend_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.ascend import backend as ascend_backend
 
@@ -132,14 +132,9 @@ def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     metadata_path = cache_file.parent / "metadata.json"
     original_metadata = metadata_path.read_bytes()
 
-    recompiled = ascend_backend.tilelang_callback_ascend_compile(source, target)
-    assert bytes(recompiled) == b"fake-aibin"
-    assert len(compile_calls) == 2
-
-    # Shared entries stay immutable even after a miss. Recompilation is usable
-    # for this call, but repairing the on-disk entry needs offline cleanup.
-    assert bytes(ascend_backend.tilelang_callback_ascend_compile(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 3
+    with pytest.raises(ValueError, match="checksum"):
+        ascend_backend.tilelang_callback_ascend_compile(source, target)
+    assert len(compile_calls) == 1
     assert cache_file.read_bytes() == corrupted
     assert metadata_path.read_bytes() == original_metadata
 
@@ -175,7 +170,8 @@ def test_ascend_binary_cache_rejects_foreign_format_tag(monkeypatch, tmp_path, f
     metadata["format"] = foreign_format
     metadata_path.write_text(json.dumps(metadata))
 
-    assert AscendBinaryCache.load(key, AIBIN) is None
+    with pytest.raises(ValueError, match="metadata"):
+        AscendBinaryCache.load(key, AIBIN)
     assert path.read_bytes() == b"valid-aibin"
     assert json.loads(metadata_path.read_text()) == metadata
 
